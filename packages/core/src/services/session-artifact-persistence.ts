@@ -128,6 +128,7 @@ export interface SessionArtifactSnapshotRecordPayload {
   artifacts: PersistedSessionArtifact[];
   tombstonedIds?: string[];
   stickyEphemeralIds?: string[];
+  markerArtifacts?: PersistedSessionArtifact[];
 }
 
 export interface RebuiltSessionArtifactSnapshot {
@@ -137,6 +138,7 @@ export interface RebuiltSessionArtifactSnapshot {
   artifacts: PersistedSessionArtifact[];
   tombstonedIds: string[];
   stickyEphemeralIds: string[];
+  markerArtifacts?: PersistedSessionArtifact[];
   warnings: string[];
 }
 
@@ -191,6 +193,7 @@ export function rebuildSessionArtifactSnapshot(
   const artifacts = new Map<string, PersistedSessionArtifact>();
   const tombstonedIds = new Set<string>();
   const stickyEphemeralIds = new Set<string>();
+  const markerArtifacts = new Map<string, PersistedSessionArtifact>();
   const warnings: string[] = [];
   let sequence = 0;
   let lastSnapshotSequence = 0;
@@ -209,13 +212,21 @@ export function rebuildSessionArtifactSnapshot(
       artifacts.clear();
       tombstonedIds.clear();
       stickyEphemeralIds.clear();
+      markerArtifacts.clear();
       for (const id of payload.tombstonedIds ?? []) tombstonedIds.add(id);
       for (const id of payload.stickyEphemeralIds ?? []) {
         stickyEphemeralIds.add(id);
       }
+      const markerIds = new Set([...tombstonedIds, ...stickyEphemeralIds]);
+      for (const artifact of payload.markerArtifacts ?? []) {
+        if (markerIds.has(artifact.id)) {
+          markerArtifacts.set(artifact.id, artifact);
+        }
+      }
       for (const artifact of payload.artifacts) {
         if (artifact.retention === 'ephemeral') continue;
         artifacts.set(artifact.id, artifact);
+        markerArtifacts.delete(artifact.id);
       }
       continue;
     }
@@ -237,12 +248,19 @@ export function rebuildSessionArtifactSnapshot(
         if (change.reason === 'explicit') {
           tombstonedIds.add(change.artifactId);
           stickyEphemeralIds.delete(change.artifactId);
+          if (change.artifact) {
+            markerArtifacts.set(change.artifactId, change.artifact);
+          }
         }
         if (change.reason === 'eviction') {
           stickyEphemeralIds.delete(change.artifactId);
+          markerArtifacts.delete(change.artifactId);
         }
         if (change.reason === 'unpin_to_ephemeral') {
           stickyEphemeralIds.add(change.artifactId);
+          if (change.artifact) {
+            markerArtifacts.set(change.artifactId, change.artifact);
+          }
         }
         continue;
       }
@@ -252,6 +270,7 @@ export function rebuildSessionArtifactSnapshot(
       artifacts.set(change.artifact.id, change.artifact);
       tombstonedIds.delete(change.artifact.id);
       stickyEphemeralIds.delete(change.artifact.id);
+      markerArtifacts.delete(change.artifact.id);
     }
   }
 
@@ -266,6 +285,9 @@ export function rebuildSessionArtifactSnapshot(
     artifacts: Array.from(artifacts.values()),
     tombstonedIds: Array.from(tombstonedIds),
     stickyEphemeralIds: Array.from(stickyEphemeralIds),
+    ...(markerArtifacts.size > 0
+      ? { markerArtifacts: Array.from(markerArtifacts.values()) }
+      : {}),
     warnings,
   };
 }
@@ -287,10 +309,26 @@ export function remapSessionArtifactPayloadForFork(
       remappedArtifactIds.set(artifact.id, remapped.id);
       return remapped;
     });
+    const markerIds = new Set([
+      ...(snapshot.tombstonedIds ?? []),
+      ...(snapshot.stickyEphemeralIds ?? []),
+    ]);
+    const markerArtifacts = (snapshot.markerArtifacts ?? [])
+      .filter((artifact) => markerIds.has(artifact.id))
+      .map((artifact) => {
+        const remapped = remapSessionArtifactForFork(
+          artifact,
+          sourceSessionId,
+          newSessionId,
+        );
+        remappedArtifactIds.set(artifact.id, remapped.id);
+        return remapped;
+      });
     return {
       ...snapshot,
       sessionId: newSessionId,
       artifacts,
+      ...(markerArtifacts.length > 0 ? { markerArtifacts } : {}),
       tombstonedIds: (snapshot.tombstonedIds ?? []).map((artifactId) =>
         remapArtifactIdForFork(
           artifactId,
@@ -423,7 +461,19 @@ export function normalizeSnapshotPayload(
       `snapshot artifact list truncated to ${MAX_PERSISTED_ARTIFACTS}`,
     );
   }
+  const rawMarkerArtifacts = Array.isArray(value['markerArtifacts'])
+    ? value['markerArtifacts']
+    : [];
+  if (rawMarkerArtifacts.length > MAX_PERSISTED_ARTIFACTS) {
+    warnings.push(
+      `snapshot marker artifact list truncated to ${MAX_PERSISTED_ARTIFACTS}`,
+    );
+  }
   const artifacts = rawArtifacts
+    .slice(0, MAX_PERSISTED_ARTIFACTS)
+    .map((artifact) => normalizePersistedArtifact(artifact, warnings))
+    .filter((artifact) => artifact !== undefined);
+  const markerArtifacts = rawMarkerArtifacts
     .slice(0, MAX_PERSISTED_ARTIFACTS)
     .map((artifact) => normalizePersistedArtifact(artifact, warnings))
     .filter((artifact) => artifact !== undefined);
@@ -435,6 +485,7 @@ export function normalizeSnapshotPayload(
       getString(value, 'recordedAt', MAX_PERSISTED_TIMESTAMP_CHARS) ??
       new Date(0).toISOString(),
     artifacts,
+    ...(markerArtifacts.length > 0 ? { markerArtifacts } : {}),
     tombstonedIds: getStringArray(value, 'tombstonedIds', MAX_PERSISTED_IDS),
     stickyEphemeralIds: getStringArray(
       value,

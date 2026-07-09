@@ -2988,6 +2988,12 @@ describe('SessionArtifactStore', () => {
     expect(
       snapshots[0]?.artifacts.some((artifact) => artifact.id === deletedId),
     ).toBe(false);
+    expect(snapshots[0]?.markerArtifacts).toEqual([
+      expect.objectContaining({
+        id: deletedId,
+        url: 'https://example.com/deleted',
+      }),
+    ]);
 
     const rerun = await store.upsertMany([
       { title: 'Deleted', url: 'https://example.com/deleted' },
@@ -3215,12 +3221,11 @@ describe('SessionArtifactStore', () => {
     expect(snapshots).toHaveLength(0);
   });
 
-  it('keeps restored sticky markers for non-restored ephemeral artifacts in snapshots', async () => {
+  it('keeps restored sticky marker metadata in snapshots', async () => {
     const sessionId = 's11-sticky-non-restored-snapshot';
-    const stickyId = stableSessionArtifactId(
-      sessionId,
-      'url:https://example.com/sticky-ephemeral',
-    );
+    const url = 'https://example.com/sticky-ephemeral';
+    const stickyId = stableSessionArtifactId(sessionId, `url:${url}`);
+    const now = '2026-07-04T00:00:00.000Z';
     const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
     const store = new SessionArtifactStore({
       sessionId,
@@ -3240,6 +3245,21 @@ describe('SessionArtifactStore', () => {
       artifacts: [],
       tombstonedIds: [],
       stickyEphemeralIds: [stickyId],
+      markerArtifacts: [
+        {
+          id: stickyId,
+          kind: 'link',
+          storage: 'external_url',
+          source: 'client',
+          status: 'available',
+          title: 'Sticky',
+          url,
+          retention: 'restorable',
+          clientRetained: true,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
       warnings: [],
     });
     for (let index = 0; index < 50; index++) {
@@ -3256,6 +3276,9 @@ describe('SessionArtifactStore', () => {
 
     expect(snapshots).toHaveLength(1);
     expect(snapshots[0]?.stickyEphemeralIds).toContain(stickyId);
+    expect(snapshots[0]?.markerArtifacts).toEqual([
+      expect.objectContaining({ id: stickyId, url }),
+    ]);
   });
 
   it('keeps restored sticky markers after live eviction removes an artifact', async () => {

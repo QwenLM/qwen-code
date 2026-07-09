@@ -253,6 +253,10 @@ export class SessionArtifactStore {
   private readonly tombstonedIds = new Set<string>();
   private readonly tombstonedClientIds = new Map<string, string | undefined>();
   private readonly stickyEphemeralIds = new Set<string>();
+  private readonly markerArtifacts = new Map<
+    string,
+    PersistedSessionArtifact
+  >();
   private lastRestoreWarnings: string[] = [];
   private lastRestoreWarningDetails: SessionArtifactWarningDetail[] = [];
 
@@ -642,6 +646,7 @@ export class SessionArtifactStore {
       this.tombstonedIds.clear();
       this.tombstonedClientIds.clear();
       this.stickyEphemeralIds.clear();
+      this.markerArtifacts.clear();
       if (snapshot) {
         this.insertSeq = 0;
         this.persistenceSeq = snapshot.sequence;
@@ -654,6 +659,15 @@ export class SessionArtifactStore {
           -MAX_STICKY_EPHEMERAL_IDS,
         )) {
           this.stickyEphemeralIds.add(id);
+        }
+        const markerIds = new Set([
+          ...this.tombstonedIds,
+          ...this.stickyEphemeralIds,
+        ]);
+        for (const artifact of snapshot.markerArtifacts ?? []) {
+          if (markerIds.has(artifact.id)) {
+            this.markerArtifacts.set(artifact.id, artifact);
+          }
         }
       }
       for (const artifact of snapshot?.artifacts ?? []) {
@@ -820,6 +834,7 @@ export class SessionArtifactStore {
     tombstonedIds: Set<string>;
     tombstonedClientIds: Map<string, string | undefined>;
     stickyEphemeralIds: Set<string>;
+    markerArtifacts: Map<string, PersistedSessionArtifact>;
     lastRestoreWarnings: string[];
     lastRestoreWarningDetails: SessionArtifactWarningDetail[];
   } {
@@ -838,6 +853,7 @@ export class SessionArtifactStore {
       tombstonedIds: new Set(this.tombstonedIds),
       tombstonedClientIds: new Map(this.tombstonedClientIds),
       stickyEphemeralIds: new Set(this.stickyEphemeralIds),
+      markerArtifacts: new Map(this.markerArtifacts),
       lastRestoreWarnings: [...this.lastRestoreWarnings],
       lastRestoreWarningDetails: [...this.lastRestoreWarningDetails],
     };
@@ -853,6 +869,7 @@ export class SessionArtifactStore {
     tombstonedIds: Set<string>;
     tombstonedClientIds: Map<string, string | undefined>;
     stickyEphemeralIds: Set<string>;
+    markerArtifacts: Map<string, PersistedSessionArtifact>;
     lastRestoreWarnings: string[];
     lastRestoreWarningDetails: SessionArtifactWarningDetail[];
   }): void {
@@ -876,6 +893,10 @@ export class SessionArtifactStore {
     this.stickyEphemeralIds.clear();
     for (const id of state.stickyEphemeralIds) {
       this.stickyEphemeralIds.add(id);
+    }
+    this.markerArtifacts.clear();
+    for (const [id, artifact] of state.markerArtifacts) {
+      this.markerArtifacts.set(id, artifact);
     }
     this.setLastRestoreWarnings(state.lastRestoreWarnings);
     this.lastRestoreWarningDetails = [...state.lastRestoreWarningDetails];
@@ -997,6 +1018,7 @@ export class SessionArtifactStore {
       .sort((a, b) => a.insertSeq - b.insertSeq)
       .map((artifact) => toPersistedArtifact(artifact, recordedAt));
     const stickyEphemeralIds = Array.from(this.stickyEphemeralIds);
+    const markerArtifacts = this.buildMarkerArtifacts(recordedAt);
     return {
       v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
       sessionId: this.sessionId,
@@ -1005,7 +1027,28 @@ export class SessionArtifactStore {
       artifacts,
       tombstonedIds: Array.from(this.tombstonedIds),
       stickyEphemeralIds,
+      ...(markerArtifacts.length > 0 ? { markerArtifacts } : {}),
     };
+  }
+
+  private buildMarkerArtifacts(recordedAt: string): PersistedSessionArtifact[] {
+    const markerIds = [...this.tombstonedIds, ...this.stickyEphemeralIds];
+    const artifacts: PersistedSessionArtifact[] = [];
+    const seen = new Set<string>();
+    for (const id of markerIds) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const live = this.artifacts.get(id);
+      if (live) {
+        artifacts.push(toPersistedArtifact(toPublicArtifact(live), recordedAt));
+        continue;
+      }
+      const markerArtifact = this.markerArtifacts.get(id);
+      if (markerArtifact) {
+        artifacts.push(markerArtifact);
+      }
+    }
+    return artifacts;
   }
 
   private downgradeDurableChanges(changes: SessionArtifactChange[]): string[] {
@@ -1050,8 +1093,9 @@ export class SessionArtifactStore {
           this.stickyEphemeralIds.delete(change.artifactId);
         } else if (change.reason === 'eviction') {
           this.stickyEphemeralIds.delete(change.artifactId);
+          this.markerArtifacts.delete(change.artifactId);
         } else if (change.reason === 'unpin_to_ephemeral') {
-          this.rememberStickyEphemeral(change.artifactId);
+          this.rememberStickyEphemeral(change);
         }
         continue;
       }
@@ -1059,17 +1103,26 @@ export class SessionArtifactStore {
         this.tombstonedIds.delete(change.artifactId);
         this.tombstonedClientIds.delete(change.artifactId);
         this.stickyEphemeralIds.delete(change.artifactId);
+        this.markerArtifacts.delete(change.artifactId);
       }
     }
   }
 
-  private rememberStickyEphemeral(artifactId: string): void {
+  private rememberStickyEphemeral(change: SessionArtifactChange): void {
+    const artifactId = change.artifactId;
     this.stickyEphemeralIds.delete(artifactId);
     this.stickyEphemeralIds.add(artifactId);
+    if (change.artifact) {
+      this.markerArtifacts.set(
+        artifactId,
+        toPersistedArtifact(change.artifact, change.artifact.updatedAt),
+      );
+    }
     while (this.stickyEphemeralIds.size > MAX_STICKY_EPHEMERAL_IDS) {
       const oldest = this.stickyEphemeralIds.values().next().value;
       if (oldest === undefined) break;
       this.stickyEphemeralIds.delete(oldest);
+      this.markerArtifacts.delete(oldest);
     }
   }
 
@@ -1077,6 +1130,12 @@ export class SessionArtifactStore {
     this.tombstonedIds.delete(change.artifactId);
     this.tombstonedIds.add(change.artifactId);
     this.tombstonedClientIds.set(change.artifactId, change.artifact?.clientId);
+    if (change.artifact) {
+      this.markerArtifacts.set(
+        change.artifactId,
+        toPersistedArtifact(change.artifact, change.artifact.updatedAt),
+      );
+    }
     while (this.tombstonedIds.size > MAX_TOMBSTONED_IDS) {
       const oldest = this.tombstonedIds.values().next().value;
       if (oldest === undefined) break;
@@ -1087,6 +1146,7 @@ export class SessionArtifactStore {
       );
       this.tombstonedIds.delete(oldest);
       this.tombstonedClientIds.delete(oldest);
+      this.markerArtifacts.delete(oldest);
     }
   }
 

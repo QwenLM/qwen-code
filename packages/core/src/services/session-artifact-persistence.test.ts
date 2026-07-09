@@ -710,6 +710,14 @@ describe('session artifact persistence records', () => {
       },
       expiresAt: '2026-08-01T00:00:00.000Z',
     });
+    const deleted = artifact(
+      'source-session',
+      'https://example.com/deleted-in-source',
+    );
+    const sticky = artifact(
+      'source-session',
+      'https://example.com/ephemeral-in-source',
+    );
 
     const remapped = remapSessionArtifactPayloadForFork(
       {
@@ -718,8 +726,9 @@ describe('session artifact persistence records', () => {
         sequence: 7,
         recordedAt: '2026-07-04T00:00:00.000Z',
         artifacts: [source],
-        tombstonedIds: [source.id, 'deleted-in-source'],
-        stickyEphemeralIds: [source.id, 'ephemeral-in-source'],
+        tombstonedIds: [source.id, deleted.id],
+        stickyEphemeralIds: [source.id, sticky.id],
+        markerArtifacts: [deleted, sticky],
       },
       'source-session',
       'forked-session',
@@ -728,21 +737,24 @@ describe('session artifact persistence records', () => {
       'forked-session',
       'url:https://example.com/snapshot',
     );
+    const forkedDeletedId = stableSessionArtifactId(
+      'forked-session',
+      'url:https://example.com/deleted-in-source',
+    );
+    const forkedStickyId = stableSessionArtifactId(
+      'forked-session',
+      'url:https://example.com/ephemeral-in-source',
+    );
 
     expect(remapped.sessionId).toBe('forked-session');
-    expect(remapped.tombstonedIds).toEqual([
-      forkedSourceId,
-      stableSessionArtifactId(
-        'forked-session',
-        'fork:source-session:deleted-in-source',
-      ),
-    ]);
+    expect(remapped.tombstonedIds).toEqual([forkedSourceId, forkedDeletedId]);
     expect(remapped.stickyEphemeralIds).toEqual([
       forkedSourceId,
-      stableSessionArtifactId(
-        'forked-session',
-        'fork:source-session:ephemeral-in-source',
-      ),
+      forkedStickyId,
+    ]);
+    expect(remapped.markerArtifacts).toEqual([
+      expect.objectContaining({ id: forkedDeletedId }),
+      expect.objectContaining({ id: forkedStickyId }),
     ]);
     expect(remapped.artifacts[0]).toMatchObject({
       id: forkedSourceId,
@@ -752,6 +764,36 @@ describe('session artifact persistence records', () => {
     expect(remapped.artifacts[0]).not.toHaveProperty('expiresAt');
     expect(remapped.artifacts[0]).not.toHaveProperty('restoreState');
     expect(remapped.artifacts[0]).not.toHaveProperty('persistenceWarning');
+  });
+
+  it('falls back for snapshot marker ids without identity metadata', () => {
+    const remapped = remapSessionArtifactPayloadForFork(
+      {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 'source-session',
+        sequence: 7,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        artifacts: [],
+        tombstonedIds: ['deleted-in-source'],
+        stickyEphemeralIds: ['ephemeral-in-source'],
+      },
+      'source-session',
+      'forked-session',
+    ) as SessionArtifactSnapshotRecordPayload;
+
+    expect(remapped.tombstonedIds).toEqual([
+      stableSessionArtifactId(
+        'forked-session',
+        'fork:source-session:deleted-in-source',
+      ),
+    ]);
+    expect(remapped.stickyEphemeralIds).toEqual([
+      stableSessionArtifactId(
+        'forked-session',
+        'fork:source-session:ephemeral-in-source',
+      ),
+    ]);
+    expect(remapped.markerArtifacts).toBeUndefined();
   });
 
   it('normalizes inbound snapshot payloads with bounded artifacts and sticky ids', () => {
@@ -766,6 +808,7 @@ describe('session artifact persistence records', () => {
         sequence: 1,
         recordedAt: '2026-07-04T00:00:00.000Z',
         artifacts,
+        markerArtifacts: artifacts,
         stickyEphemeralIds: Array.from(
           { length: 501 },
           (_, index) => `sticky-${index}`,
@@ -775,9 +818,13 @@ describe('session artifact persistence records', () => {
     );
 
     expect(snapshot?.artifacts).toHaveLength(500);
+    expect(snapshot?.markerArtifacts).toHaveLength(500);
     expect(snapshot?.stickyEphemeralIds).toHaveLength(500);
     expect(snapshot?.stickyEphemeralIds?.[0]).toBe('sticky-1');
     expect(warnings).toContain('snapshot artifact list truncated to 500');
+    expect(warnings).toContain(
+      'snapshot marker artifact list truncated to 500',
+    );
   });
 
   it('normalizes inbound event payloads with bounded changes', () => {
