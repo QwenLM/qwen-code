@@ -18,6 +18,12 @@ import {
   validateSettingValue,
 } from '../../utils/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
+import {
+  requireTrustedWorkspaceRuntime,
+  resolveWorkspaceRuntimeFromParam,
+} from '../workspace-route-runtime.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 const TUI_ONLY_SETTINGS = new Set([
   'general.vimMode',
@@ -290,6 +296,151 @@ export function registerWorkspaceSettingsRoutes(
         );
       }
 
+      res.status(200).json({
+        key,
+        scope,
+        value,
+        requiresRestart: def.requiresRestart,
+      });
+    },
+  );
+}
+
+export function registerWorkspaceQualifiedSettingsRoutes(
+  app: Application,
+  deps: Pick<
+    WorkspaceSettingsRouteDeps,
+    'mutate' | 'safeBody' | 'persistSetting'
+  > & {
+    workspaceRegistry: WorkspaceRegistry;
+    invalidateServeFeaturesCache: () => void;
+  },
+): void {
+  const allowedKeys = getAllowedKeys();
+
+  app.get('/workspaces/:workspace/settings', (req: Request, res: Response) => {
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
+    if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+    try {
+      const response = buildSettingsResponse(runtime.workspaceCwd, allowedKeys);
+      res.status(200).json(response);
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: GET /workspaces/:workspace/settings error: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      res.status(500).json({
+        error: 'Failed to load settings',
+        code: 'internal_error',
+      });
+    }
+  });
+
+  app.post(
+    '/workspaces/:workspace/settings',
+    deps.mutate({ strict: true }),
+    async (req: Request, res: Response) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const body = deps.safeBody(req);
+      const scope = body['scope'];
+      const key = body['key'];
+      const value = body['value'];
+
+      if (typeof scope !== 'string' || !VALID_WRITE_SCOPES.has(scope)) {
+        res.status(400).json({
+          error: `scope must be one of: ${[...VALID_WRITE_SCOPES].join(', ')}`,
+          code: 'invalid_scope',
+        });
+        return;
+      }
+      if (typeof key !== 'string' || !key) {
+        res.status(400).json({
+          error: 'key is required and must be a string',
+          code: 'invalid_key',
+        });
+        return;
+      }
+      if (!allowedKeys.has(key)) {
+        res.status(400).json({
+          error: `Setting "${key}" is not modifiable via this API`,
+          code: 'disallowed_key',
+        });
+        return;
+      }
+      if (value === undefined || value === null) {
+        res.status(400).json({
+          error: 'value is required',
+          code: 'missing_value',
+        });
+        return;
+      }
+      const def = getSettingDefinition(key);
+      if (!def) {
+        res.status(400).json({
+          error: `Unknown setting: ${key}`,
+          code: 'unknown_key',
+        });
+        return;
+      }
+      const validationError = validateSettingValue(def, value);
+      if (validationError) {
+        res.status(400).json({
+          error: validationError,
+          code: 'invalid_value',
+        });
+        return;
+      }
+      const clientId = parseAndValidateWorkspaceClientId(
+        req,
+        res,
+        runtime.bridge,
+      );
+      if (clientId === null) return;
+
+      const settingScope = SCOPE_MAP[scope];
+      if (!settingScope) {
+        res.status(400).json({
+          error: `scope must be one of: ${[...VALID_WRITE_SCOPES].join(', ')}`,
+          code: 'invalid_scope',
+        });
+        return;
+      }
+      try {
+        await deps.persistSetting(
+          runtime.workspaceCwd,
+          settingScope,
+          key,
+          value,
+        );
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: POST /workspaces/:workspace/settings persist error (key=${key}, scope=${scope}, workspace=${runtime.workspaceCwd}): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to persist setting',
+          code: 'persist_error',
+        });
+        return;
+      }
+
+      deps.invalidateServeFeaturesCache();
+      runtime.bridge.publishWorkspaceEvent({
+        type: 'settings_changed',
+        data: { key, value, scope },
+        ...(clientId ? { originatorClientId: clientId } : {}),
+      });
       res.status(200).json({
         key,
         scope,

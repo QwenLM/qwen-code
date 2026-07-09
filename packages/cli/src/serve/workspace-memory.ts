@@ -24,6 +24,11 @@ import {
   type ServeWorkspaceMemoryFile,
   type ServeWorkspaceMemoryStatus,
 } from '@qwen-code/acp-bridge/status';
+import {
+  requireTrustedWorkspaceRuntime,
+  resolveWorkspaceRuntimeFromParam,
+} from './workspace-route-runtime.js';
+import type { WorkspaceRegistry } from './workspace-registry.js';
 
 /**
  * Issue #4175 PR 16: workspace memory CRUD routes.
@@ -299,6 +304,138 @@ export function mountWorkspaceMemoryRoutes(
                 errorMessage: err instanceof Error ? err.message : String(err),
               }
             : {}),
+        });
+      }
+    },
+  );
+}
+
+export function mountWorkspaceQualifiedMemoryRoutes(
+  app: Application,
+  deps: Omit<WorkspaceMemoryRouteDeps, 'bridge' | 'boundWorkspace'> & {
+    workspaceRegistry: WorkspaceRegistry;
+  },
+): void {
+  app.get('/workspaces/:workspace/memory', async (req, res) => {
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
+    if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+    try {
+      const collectStatus = deps.collectStatus ?? collectWorkspaceMemoryStatus;
+      res.status(200).json(await collectStatus(runtime.workspaceCwd));
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: GET /workspaces/:workspace/memory failed: ${
+          err instanceof Error ? (err.stack ?? err.message) : String(err)
+        }`,
+      );
+      res.status(500).json({
+        error: 'Failed to discover workspace memory',
+        code: 'memory_discovery_failed',
+      });
+    }
+  });
+
+  app.post(
+    '/workspaces/:workspace/memory',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const body = deps.safeBody(req);
+      if (body['scope'] !== 'workspace') {
+        res.status(400).json({
+          error:
+            'workspace-qualified memory routes only support "workspace" scope',
+          code: 'global_scope_not_supported_for_workspace_route',
+        });
+        return;
+      }
+      const modeRaw = body['mode'];
+      if (
+        modeRaw !== undefined &&
+        modeRaw !== 'append' &&
+        modeRaw !== 'replace'
+      ) {
+        res.status(400).json({
+          error: '`mode` must be "append", "replace", or omitted',
+          code: 'invalid_mode',
+        });
+        return;
+      }
+      const mode: 'append' | 'replace' =
+        modeRaw === 'replace' ? 'replace' : 'append';
+      const content = body['content'];
+      if (typeof content !== 'string') {
+        res.status(400).json({
+          error: '`content` must be a string',
+          code: 'invalid_content',
+        });
+        return;
+      }
+      if (Buffer.byteLength(content, 'utf8') > MAX_MEMORY_CONTENT_BYTES) {
+        res.status(400).json({
+          error: `\`content\` exceeds the ${MAX_MEMORY_CONTENT_BYTES}-byte limit`,
+          code: 'content_too_large',
+        });
+        return;
+      }
+      const clientId = deps.parseClientId(req, res);
+      if (clientId === null) return;
+      let originatorClientId: string | undefined;
+      if (clientId !== undefined) {
+        if (!runtime.bridge.knownClientIds().has(clientId)) {
+          res.status(400).json({
+            error: `Client id "${clientId}" is not registered for this workspace`,
+            code: 'invalid_client_id',
+            clientId,
+          });
+          return;
+        }
+        originatorClientId = clientId;
+      }
+      try {
+        const result = await writeWorkspaceContextFile({
+          scope: 'workspace',
+          mode,
+          content,
+          projectRoot: runtime.workspaceCwd,
+        });
+        if (result.changed) {
+          runtime.bridge.publishWorkspaceEvent({
+            type: 'memory_changed',
+            data: {
+              scope: 'workspace',
+              filePath: result.filePath,
+              mode,
+              bytesWritten: result.bytesWritten,
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        }
+        res.status(200).json({
+          ok: true,
+          filePath: result.filePath,
+          bytesWritten: result.bytesWritten,
+          mode,
+          changed: result.changed,
+        });
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: POST /workspaces/:workspace/memory failed (mode=${mode}): ${
+            err instanceof Error ? (err.stack ?? err.message) : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to write workspace memory',
+          code: 'file_error',
         });
       }
     },

@@ -272,6 +272,29 @@ export function registerSessionRoutes(
     );
   };
 
+  const requireTrustedRuntimeForWorkspaceRoute = (
+    req: Request,
+    res: Response,
+    route: string,
+  ): WorkspaceRuntime | null => {
+    const runtime = resolveRuntimeFromWorkspaceParam(req, res, 'workspace');
+    if (runtime === null) return null;
+    if (!runtime.primary && !runtime.trusted) {
+      logSessionRoutingFailure(route, 'untrusted_workspace', {
+        workspaceId: runtime.workspaceId,
+        workspaceCwd: runtime.workspaceCwd,
+      });
+      res.status(403).json({
+        error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
+        code: 'untrusted_workspace',
+        workspaceCwd: runtime.workspaceCwd,
+        workspaceId: runtime.workspaceId,
+      });
+      return null;
+    }
+    return runtime;
+  };
+
   const sendAmbiguousSessionOwner = (
     res: Response,
     route: string,
@@ -1507,6 +1530,98 @@ export function registerSessionRoutes(
     }
   });
 
+  app.post(
+    '/workspaces/:workspace/sessions/delete',
+    mutate(),
+    async (req, res) => {
+      const route = 'POST /workspaces/:workspace/sessions/delete';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      const uniqueIds = parseSessionIdsBody(req, res);
+      if (uniqueIds === undefined) return;
+      try {
+        const service = new SessionService(runtime.workspaceCwd);
+        const result = await deleteDaemonSessions({
+          sessionIds: uniqueIds,
+          service,
+          bridge: runtime.bridge,
+          coordinator: archiveCoordinator,
+          onError: ({ phase, sessionId, error }) => {
+            writeStderrLine(
+              `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
+            );
+          },
+        });
+        res.status(200).json(result);
+      } catch (err) {
+        sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
+  app.post(
+    '/workspaces/:workspace/sessions/archive',
+    mutate(),
+    async (req, res) => {
+      const route = 'POST /workspaces/:workspace/sessions/archive';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      const uniqueIds = parseSessionIdsBody(req, res);
+      if (uniqueIds === undefined) return;
+      const service = new SessionService(runtime.workspaceCwd, {
+        onWarning: logSessionArchiveWarning,
+      });
+      try {
+        const result = await archiveDaemonSessions({
+          sessionIds: uniqueIds,
+          service,
+          bridge: runtime.bridge,
+          coordinator: archiveCoordinator,
+        });
+        res.status(200).json({
+          archived: result.archived,
+          alreadyArchived: result.alreadyArchived,
+          notFound: result.notFound,
+          errors: serializeSessionErrors(result.errors),
+        });
+      } catch (err) {
+        sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
+  app.post(
+    '/workspaces/:workspace/sessions/unarchive',
+    mutate(),
+    async (req, res) => {
+      const route = 'POST /workspaces/:workspace/sessions/unarchive';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      const uniqueIds = parseSessionIdsBody(req, res);
+      if (uniqueIds === undefined) return;
+      const service = new SessionService(runtime.workspaceCwd, {
+        onWarning: logSessionArchiveWarning,
+      });
+      try {
+        const result = await unarchiveDaemonSessions({
+          sessionIds: uniqueIds,
+          service,
+          coordinator: archiveCoordinator,
+        });
+        res.status(200).json({
+          unarchived: result.unarchived,
+          alreadyActive: result.alreadyActive,
+          notFound: result.notFound,
+          errors: serializeSessionErrors(result.errors),
+        });
+      } catch (err) {
+        sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
   app.patch(
     '/session/:id/metadata',
     mutate({ strict: true }),
@@ -1701,6 +1816,95 @@ export function registerSessionRoutes(
         sendBridgeError(res, err, {
           route: 'DELETE /workspace/:id/session-groups/:groupId',
         });
+      }
+    },
+  );
+
+  app.get('/workspaces/:workspace/session-groups', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/session-groups';
+    const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+    if (!runtime) return;
+    try {
+      res
+        .status(200)
+        .json(
+          await createSessionOrganizationService(
+            runtime.workspaceCwd,
+          ).listGroups(),
+        );
+    } catch (err) {
+      sendBridgeError(res, err, { route });
+    }
+  });
+
+  app.post(
+    '/workspaces/:workspace/session-groups',
+    mutate(),
+    async (req, res) => {
+      const route = 'POST /workspaces/:workspace/session-groups';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      const body = safeBody(req);
+      try {
+        const group = await createSessionOrganizationService(
+          runtime.workspaceCwd,
+        ).createGroup({
+          name: body['name'] as string,
+          color: body['color'] as SessionGroupColor,
+        });
+        res.status(201).json({ group });
+      } catch (err) {
+        if (sendSessionOrganizationError(res, err)) return;
+        sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
+  app.patch(
+    '/workspaces/:workspace/session-groups/:groupId',
+    mutate(),
+    async (req, res) => {
+      const route = 'PATCH /workspaces/:workspace/session-groups/:groupId';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      const body = safeBody(req);
+      try {
+        const group = await createSessionOrganizationService(
+          runtime.workspaceCwd,
+        ).updateGroup(req.params['groupId'] ?? '', {
+          ...(Object.prototype.hasOwnProperty.call(body, 'name')
+            ? { name: body['name'] as string }
+            : {}),
+          ...(Object.prototype.hasOwnProperty.call(body, 'color')
+            ? { color: body['color'] as SessionGroupColor }
+            : {}),
+          ...(Object.prototype.hasOwnProperty.call(body, 'order')
+            ? { order: body['order'] as number }
+            : {}),
+        });
+        res.status(200).json({ group });
+      } catch (err) {
+        if (sendSessionOrganizationError(res, err)) return;
+        sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
+  app.delete(
+    '/workspaces/:workspace/session-groups/:groupId',
+    mutate(),
+    async (req, res) => {
+      const route = 'DELETE /workspaces/:workspace/session-groups/:groupId';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      try {
+        const deleted = await createSessionOrganizationService(
+          runtime.workspaceCwd,
+        ).deleteGroup(req.params['groupId'] ?? '');
+        res.status(200).json({ deleted });
+      } catch (err) {
+        if (sendSessionOrganizationError(res, err)) return;
+        sendBridgeError(res, err, { route });
       }
     },
   );
