@@ -29,6 +29,7 @@ import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from './workspace-registry.js';
+import { createSessionOrganizationService } from './session-organization-helpers.js';
 
 const PRIMARY_CWD = path.resolve(path.sep, 'work', 'primary');
 const SECONDARY_CWD = path.resolve(path.sep, 'work', 'secondary');
@@ -826,30 +827,108 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
-  it('rejects unsupported non-primary persisted session list views', async () => {
+  it('rejects a group filter without the organized view for non-primary workspaces', async () => {
     const { app } = makeHarness();
-
-    const archived = await request(app)
-      .get('/workspace/secondary-id/sessions?archiveState=archived')
-      .set('Host', host());
-    expect(archived.status).toBe(400);
-    expect(archived.body.code).toBe(
-      'non_primary_session_list_option_not_supported',
-    );
-
-    const organized = await request(app)
-      .get('/workspace/secondary-id/sessions?view=organized')
-      .set('Host', host());
-    expect(organized.status).toBe(400);
-    expect(organized.body.code).toBe(
-      'non_primary_session_list_option_not_supported',
-    );
 
     const group = await request(app)
       .get('/workspace/secondary-id/sessions?group=pinned')
       .set('Host', host());
     expect(group.status).toBe(400);
     expect(group.body.code).toBe('invalid_session_group_filter');
+  });
+
+  it('lists archived non-primary workspace sessions for trusted workspaces', async () => {
+    await withRuntimeDir(async () => {
+      const archivedId = '550e8400-e29b-41d4-a716-446655440130';
+      await writeStoredSession({
+        sessionId: archivedId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:20:00.000Z',
+        prompt: 'secondary archived target',
+        mtime: new Date('2026-07-08T00:20:00.000Z'),
+      });
+      const { app } = makeHarness({ secondarySummaries: [] });
+
+      await request(app)
+        .post('/workspaces/secondary-id/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [archivedId] })
+        .expect(200);
+
+      const active = await request(app)
+        .get('/workspaces/secondary-id/sessions')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        active.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).not.toContain(archivedId);
+
+      const archived = await request(app)
+        .get('/workspaces/secondary-id/sessions?archiveState=archived')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        archived.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual([archivedId]);
+      expect(archived.body.sessions[0]).toMatchObject({
+        sessionId: archivedId,
+        workspaceCwd: SECONDARY_CWD,
+        isArchived: true,
+      });
+    });
+  });
+
+  it('lists organized non-primary workspace sessions with pinned first for trusted workspaces', async () => {
+    await withRuntimeDir(async () => {
+      const pinnedOlderId = '550e8400-e29b-41d4-a716-446655440131';
+      const plainNewerId = '550e8400-e29b-41d4-a716-446655440132';
+      await writeStoredSession({
+        sessionId: pinnedOlderId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'secondary older pinned',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: plainNewerId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T01:00:00.000Z',
+        prompt: 'secondary newer unpinned',
+        mtime: new Date('2026-07-08T01:00:00.000Z'),
+      });
+      await createSessionOrganizationService(
+        SECONDARY_CWD,
+      ).updateSessionOrganization(pinnedOlderId, { isPinned: true });
+      const { app } = makeHarness({ secondarySummaries: [] });
+
+      const organized = await request(app)
+        .get('/workspaces/secondary-id/sessions?view=organized&group=all')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        organized.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual([pinnedOlderId, plainNewerId]);
+      expect(organized.body.sessions[0]).toMatchObject({
+        sessionId: pinnedOlderId,
+        isPinned: true,
+      });
+    });
+  });
+
+  it('rejects archived and organized non-primary session lists for untrusted workspaces', async () => {
+    const { app } = makeHarness({ secondaryTrusted: false });
+
+    const archived = await request(app)
+      .get('/workspaces/secondary-id/sessions?archiveState=archived')
+      .set('Host', host());
+    expect(archived.status).toBe(403);
+    expect(archived.body.code).toBe('untrusted_workspace');
+
+    const organized = await request(app)
+      .get('/workspaces/secondary-id/sessions?view=organized')
+      .set('Host', host());
+    expect(organized.status).toBe(403);
+    expect(organized.body.code).toBe('untrusted_workspace');
   });
 
   it('returns workspace_mismatch for unknown absolute workspace session lists', async () => {

@@ -2007,14 +2007,6 @@ export function registerSessionRoutes(
           }
           archiveState = rawArchiveState;
         }
-        if (!runtime.primary && (archiveState === 'archived' || view)) {
-          res.status(400).json({
-            error:
-              'Non-primary workspace session listing only supports active recent view in this phase.',
-            code: 'non_primary_session_list_option_not_supported',
-          });
-          return;
-        }
         const options = {
           ...(cursor !== undefined ? { cursor } : {}),
           ...(size !== undefined ? { size } : {}),
@@ -2022,8 +2014,13 @@ export function registerSessionRoutes(
           ...(view !== undefined ? { view } : {}),
           ...(group !== undefined ? { group } : {}),
         };
+        // Organized/archived views always need the persisted store: organized
+        // cursors are opaque (non-numeric) and archived-only workspaces have no
+        // active persisted sessions, so the live-only fallback would drop them.
         const usePersisted =
           runtime.primary ||
+          view === 'organized' ||
+          archiveState === 'archived' ||
           (cursor !== undefined && cursor !== ''
             ? isNumericSessionCursor(cursor)
             : await hasActivePersistedSessions(key));
