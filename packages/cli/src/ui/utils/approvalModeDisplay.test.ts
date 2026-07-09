@@ -10,6 +10,7 @@ import {
   formatApprovalModeDescription,
   formatApprovalModeName,
 } from './approvalModeDisplay.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 describe('approval mode display', () => {
   describe('formatApprovalModeName', () => {
@@ -18,9 +19,26 @@ describe('approval mode display', () => {
       expect(formatApprovalModeName(ApprovalMode.DEFAULT)).toBe(
         'Ask permissions',
       );
-      expect(formatApprovalModeName(ApprovalMode.AUTO_EDIT)).toBe('Auto Edit');
+      expect(formatApprovalModeName(ApprovalMode.AUTO_EDIT)).toBe(
+        'auto-accept edits',
+      );
       expect(formatApprovalModeName(ApprovalMode.AUTO)).toBe('Auto mode');
-      expect(formatApprovalModeName(ApprovalMode.YOLO)).toBe('YOLO');
+      expect(formatApprovalModeName(ApprovalMode.YOLO)).toBe('YOLO mode');
+    });
+
+    it('formats mode names with the active locale', async () => {
+      await setLanguageAsync('zh');
+      try {
+        expect(formatApprovalModeName(ApprovalMode.PLAN)).toBe('规划模式');
+        expect(formatApprovalModeName(ApprovalMode.DEFAULT)).toBe('请求授权');
+        expect(formatApprovalModeName(ApprovalMode.AUTO_EDIT)).toBe(
+          '自动接受编辑',
+        );
+        expect(formatApprovalModeName(ApprovalMode.AUTO)).toBe('自动模式');
+        expect(formatApprovalModeName(ApprovalMode.YOLO)).toBe('YOLO 模式');
+      } finally {
+        await setLanguageAsync('en');
+      }
     });
   });
 

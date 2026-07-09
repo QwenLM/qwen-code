@@ -25,6 +25,8 @@ export default {
   'Shell mode': 'Режим терминала',
   'YOLO mode': 'Режим YOLO',
   'Auto mode': 'Автоматический режим',
+  'Auto mode enabled.\n   An LLM classifier evaluates each tool call — safe actions auto-approve,\n   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.':
+    'Автоматический режим включен.\n   LLM-классификатор оценивает каждый вызов инструмента — безопасные действия утверждаются автоматически,\n   рискованные блокируются. Выход: Shift+Tab или /approval-mode default.',
   'plan mode': 'Режим планирования',
   'auto-accept edits': 'Режим принятия правок',
   'Accepting edits': 'Принятие правок',

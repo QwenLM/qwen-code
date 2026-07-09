@@ -16,10 +16,10 @@ import { MessageType } from '../types.js';
 import { type LoadedSettings, SettingScope } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 
-const getAutoModeFirstTimeMessage = () =>
-  t(
-    'Auto mode enabled.\n   An LLM classifier evaluates each tool call - safe actions auto-approve,\n   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.',
-  );
+const AUTO_MODE_FIRST_TIME_MESSAGE_KEY =
+  'Auto mode enabled.\n   An LLM classifier evaluates each tool call — safe actions auto-approve,\n   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.';
+
+const getAutoModeFirstTimeMessage = () => t(AUTO_MODE_FIRST_TIME_MESSAGE_KEY);
 
 export interface UseAutoAcceptIndicatorArgs {
   config: Config;

@@ -14,11 +14,11 @@ export function formatApprovalModeName(mode: ApprovalMode): string {
     case ApprovalMode.DEFAULT:
       return t('Ask permissions');
     case ApprovalMode.AUTO_EDIT:
-      return t('Auto Edit');
+      return t('auto-accept edits');
     case ApprovalMode.AUTO:
       return t('Auto mode');
     case ApprovalMode.YOLO:
-      return t('YOLO');
+      return t('YOLO mode');
     default:
       return mode;
   }

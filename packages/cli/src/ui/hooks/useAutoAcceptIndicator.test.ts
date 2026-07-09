@@ -24,6 +24,7 @@ import type { Config as ActualConfigType } from '@qwen-code/qwen-code-core';
 import type { Key } from './useKeypress.js';
 import { useKeypress } from './useKeypress.js';
 import { MessageType } from '../types.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 vi.mock('./useKeypress.js');
 
@@ -510,11 +511,36 @@ describe('useAutoAcceptIndicator', () => {
         type: MessageType.INFO,
         text:
           'Auto mode enabled.\n' +
-          '   An LLM classifier evaluates each tool call - safe actions auto-approve,\n' +
+          '   An LLM classifier evaluates each tool call — safe actions auto-approve,\n' +
           '   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.',
       },
       expect.any(Number),
     );
+  });
+
+  it('should emit the AUTO mode entry notice with the active locale', async () => {
+    await setLanguageAsync('zh');
+    try {
+      const mockAddItem = vi.fn();
+
+      emitAutoModeEntryNotices({
+        config: mockConfigInstance as unknown as ActualConfigType,
+        addItem: mockAddItem,
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text:
+            '已启用自动模式。\n' +
+            '   LLM 分类器会评估每次工具调用 — 安全操作将自动批准，\n' +
+            '   有风险的操作将被阻止。退出：Shift+Tab 或 /approval-mode default。',
+        },
+        expect.any(Number),
+      );
+    } finally {
+      await setLanguageAsync('en');
+    }
   });
 
   it('should not cycle approval mode on Windows when shouldBlockTab returns true', () => {
