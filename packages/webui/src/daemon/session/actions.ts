@@ -1092,10 +1092,12 @@ export function createDaemonSessionActions({
     },
 
     async loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope> {
-      const session = sessionRef.current;
-      if (!session) {
-        throw new Error('Daemon session is not connected');
-      }
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Load artifacts failed',
+        'load_artifacts',
+      );
       try {
         return await withActionTimeout(
           session.artifacts(),

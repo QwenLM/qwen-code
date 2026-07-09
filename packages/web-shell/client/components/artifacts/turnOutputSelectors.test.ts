@@ -79,7 +79,56 @@ describe('turnOutputSelectors', () => {
       additions: 2,
       deletions: 0,
     });
-    expect(changes?.[0]?.diffs).toHaveLength(2);
+    expect(changes?.[0]?.diffs).toEqual([
+      {
+        oldText: 'one\n',
+        newText: 'one\ntwo\nthree\n',
+        fullContent: true,
+      },
+    ]);
+  });
+
+  it('uses final full-content diff stats for repeated edits', () => {
+    const messages = [
+      userMessage('u1', 'edit file twice'),
+      toolGroup('tg1', [
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          rawOutput: {
+            originalContent: 'one\n',
+            newContent: 'one\ntwo\n',
+            diffStat: { model_added_lines: 1, model_removed_lines: 0 },
+          },
+        },
+        {
+          callId: 'edit-2',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          rawOutput: {
+            originalContent: 'one\ntwo\n',
+            newContent: 'one\n',
+            diffStat: { model_added_lines: 0, model_removed_lines: 1 },
+          },
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change).toMatchObject({
+      additions: 0,
+      deletions: 0,
+    });
+    expect(change?.diffs).toEqual([
+      {
+        oldText: 'one\n',
+        newText: 'one\n',
+        fullContent: true,
+      },
+    ]);
   });
 
   it('does not match two different relative paths by suffix', () => {
@@ -108,6 +157,38 @@ describe('turnOutputSelectors', () => {
       'u1',
     )?.[0];
     expect(change?.isArtifact).toBe(false);
+  });
+
+  it('extracts write_file changes from args content', () => {
+    const messages = [
+      userMessage('u1', 'write file'),
+      toolGroup('tg1', [
+        {
+          callId: 'write-1',
+          toolName: 'write_file',
+          status: 'completed',
+          args: {
+            file_path: 'src/generated.ts',
+            content: 'export const value = 1;\nconsole.log(value);\n',
+          },
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change).toMatchObject({
+      path: 'src/generated.ts',
+      status: 'created',
+      additions: 2,
+      deletions: 0,
+    });
+    expect(change?.diffs).toEqual([
+      {
+        oldText: '',
+        newText: 'export const value = 1;\nconsole.log(value);\n',
+        fullContent: true,
+      },
+    ]);
   });
 
   it('extracts completed cron_create tasks', () => {

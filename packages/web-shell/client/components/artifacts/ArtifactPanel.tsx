@@ -3,13 +3,13 @@ import {
   useWorkspaceActions,
   type DaemonScheduledTask,
 } from '@qwen-code/webui/daemon-react-sdk';
-import { basicSetup, EditorView } from 'codemirror';
-import { MergeView, unifiedMergeView } from '@codemirror/merge';
 import { EditorState } from '@codemirror/state';
+import { basicSetup, EditorView } from 'codemirror';
 import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -30,6 +30,7 @@ import {
   artifactKindLabel,
   formatArtifactSize,
   getArtifactLocation,
+  normalizePath,
 } from './artifactUtils';
 import {
   displayPath,
@@ -803,8 +804,13 @@ function ReviewChanges({
   const [isReviewStacked, setIsReviewStacked] = useState(false);
   const [reviewListWidth, setReviewListWidth] = useState(520);
   const reviewContentRef = useRef<HTMLDivElement | null>(null);
+  const reviewResizeCleanupRef = useRef<(() => void) | null>(null);
   const [expandedPath, setExpandedPath] = useState<string | null>(null);
   const showTree = isTreeOpen;
+  const fileTree = useMemo(
+    () => buildFileTree(changes, workspaceCwd),
+    [changes, workspaceCwd],
+  );
 
   useEffect(() => {
     setExpandedPath(selectedPath);
@@ -821,6 +827,8 @@ function ReviewChanges({
     observer.observe(container);
     return () => observer.disconnect();
   }, [isFileListOpen]);
+
+  useEffect(() => () => reviewResizeCleanupRef.current?.(), []);
 
   const handleReviewSplitResizeStart = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -855,12 +863,14 @@ function ReviewChanges({
           animationFrame = window.requestAnimationFrame(flushWidth);
         }
       };
-      const handlePointerUp = () => {
+      let handlePointerUp: () => void = () => {};
+      const cleanupResize = (commitWidth: boolean) => {
+        reviewResizeCleanupRef.current = null;
         if (animationFrame !== null) {
           window.cancelAnimationFrame(animationFrame);
           animationFrame = null;
         }
-        setReviewListWidth(pendingWidth);
+        if (commitWidth) setReviewListWidth(pendingWidth);
         if (resizeHandle.hasPointerCapture(event.pointerId)) {
           resizeHandle.releasePointerCapture(event.pointerId);
         }
@@ -870,6 +880,8 @@ function ReviewChanges({
         window.removeEventListener('pointerup', handlePointerUp);
         window.removeEventListener('pointercancel', handlePointerUp);
       };
+      handlePointerUp = () => cleanupResize(true);
+      reviewResizeCleanupRef.current = () => cleanupResize(false);
       window.addEventListener('pointermove', handlePointerMove);
       window.addEventListener('pointerup', handlePointerUp);
       window.addEventListener('pointercancel', handlePointerUp);
@@ -1023,7 +1035,7 @@ function ReviewChanges({
           )}
           {showTree && (
             <div className={styles.tree}>
-              {buildFileTree(changes, workspaceCwd).children.map((child) => (
+              {fileTree.children.map((child) => (
                 <TreeNode
                   key={child.path}
                   node={child}
@@ -1043,25 +1055,28 @@ function DiffPreview({ change }: { change: TurnOutputFileChange }) {
   if (change.diffs.length === 0) {
     return <div className={styles.diffEmpty}>No diff available.</div>;
   }
-  const diff = getDisplayDiff(change.diffs);
+  const diffs = getDisplayDiffs(change.diffs);
   return (
     <div className={styles.diffPreview}>
-      <CodeMirrorDiff oldText={diff.oldText} newText={diff.newText} />
+      {diffs.map((diff, index) => (
+        <CodeMirrorDiff
+          key={index}
+          oldText={diff.oldText}
+          newText={diff.newText}
+        />
+      ))}
     </div>
   );
 }
 
-function getDisplayDiff(
+function getDisplayDiffs(
   diffs: readonly TurnOutputFileDiff[],
-): TurnOutputFileDiff {
+): readonly TurnOutputFileDiff[] {
   for (let index = diffs.length - 1; index >= 0; index--) {
     const diff = diffs[index];
-    if (diff?.fullContent) return diff;
+    if (diff?.fullContent) return [diff];
   }
-  return {
-    oldText: diffs.map((diff) => diff.oldText).join('\n'),
-    newText: diffs.map((diff) => diff.newText).join('\n'),
-  };
+  return diffs;
 }
 
 function CodeMirrorDiff({
@@ -1072,7 +1087,7 @@ function CodeMirrorDiff({
   newText: string;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
-  const [isWide, setIsWide] = useState(true);
+  const [isWide, setIsWide] = useState<boolean | null>(null);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -1086,8 +1101,10 @@ function CodeMirrorDiff({
 
   useEffect(() => {
     const host = hostRef.current;
-    if (!host) return;
+    if (!host || isWide === null) return;
     host.replaceChildren();
+    let cancelled = false;
+    let view: { destroy(): void } | null = null;
 
     const extensions = [
       basicSetup,
@@ -1098,37 +1115,43 @@ function CodeMirrorDiff({
     const diffConfig = { scanLimit: 1_000, timeout: 500 };
     const collapseUnchanged = { margin: 3, minSize: 8 };
 
-    if (isWide) {
-      const view = new MergeView({
-        a: { doc: oldText, extensions },
-        b: { doc: newText, extensions },
-        parent: host,
-        highlightChanges: true,
-        gutter: true,
-        revertControls: undefined,
-        collapseUnchanged,
-        diffConfig,
-      });
-      return () => view.destroy();
-    }
-
-    const view = new EditorView({
-      doc: newText,
-      extensions: [
-        ...extensions,
-        unifiedMergeView({
-          original: oldText,
+    void import('@codemirror/merge').then(({ MergeView, unifiedMergeView }) => {
+      if (cancelled) return;
+      if (isWide) {
+        view = new MergeView({
+          a: { doc: oldText, extensions },
+          b: { doc: newText, extensions },
+          parent: host,
           highlightChanges: true,
           gutter: true,
-          mergeControls: false,
-          allowInlineDiffs: true,
+          revertControls: undefined,
           collapseUnchanged,
           diffConfig,
-        }),
-      ],
-      parent: host,
+        });
+        return;
+      }
+
+      view = new EditorView({
+        doc: newText,
+        extensions: [
+          ...extensions,
+          unifiedMergeView({
+            original: oldText,
+            highlightChanges: true,
+            gutter: true,
+            mergeControls: false,
+            allowInlineDiffs: true,
+            collapseUnchanged,
+            diffConfig,
+          }),
+        ],
+        parent: host,
+      });
     });
-    return () => view.destroy();
+    return () => {
+      cancelled = true;
+      view?.destroy();
+    };
   }, [isWide, newText, oldText]);
 
   return <div ref={hostRef} className={styles.codeMirrorDiff} />;
@@ -1158,6 +1181,13 @@ function TreeNode({
   ]
     .filter(Boolean)
     .join(' ');
+  const rowStyle = {
+    paddingLeft: 10 + depth * 18,
+    '--tree-row-line-left': `${19 + Math.max(0, depth - 1) * 18}px`,
+  } as CSSProperties;
+  const childrenStyle = {
+    '--tree-children-line-left': `${19 + depth * 18}px`,
+  } as CSSProperties;
   const rowContent = (
     <>
       <span className={styles.treeTwisty}>
@@ -1189,12 +1219,13 @@ function TreeNode({
   );
 
   return (
-    <div>
+    <div className={styles.treeNode}>
       {isFile ? (
         <div
           className={rowClassName}
           data-selected={node.file?.path === selectedPath || undefined}
-          style={{ paddingLeft: 10 + depth * 18 }}
+          data-depth={depth}
+          style={rowStyle}
           title={node.path}
         >
           {rowContent}
@@ -1203,7 +1234,8 @@ function TreeNode({
         <button
           type="button"
           className={rowClassName}
-          style={{ paddingLeft: 10 + depth * 18 }}
+          data-depth={depth}
+          style={rowStyle}
           title={node.path}
           aria-expanded={isOpen}
           onClick={() => setIsOpen((value) => !value)}
@@ -1211,16 +1243,18 @@ function TreeNode({
           {rowContent}
         </button>
       )}
-      {!isFile &&
-        isOpen &&
-        node.children.map((child) => (
-          <TreeNode
-            key={child.path}
-            node={child}
-            depth={depth + 1}
-            selectedPath={selectedPath}
-          />
-        ))}
+      {!isFile && isOpen && node.children.length > 0 && (
+        <div className={styles.treeChildren} style={childrenStyle}>
+          {node.children.map((child) => (
+            <TreeNode
+              key={child.path}
+              node={child}
+              depth={depth + 1}
+              selectedPath={selectedPath}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1436,10 +1470,6 @@ function sortTree(node: FileTreeNode) {
   for (const child of node.children) sortTree(child);
 }
 
-function normalizePath(value: string) {
-  return value.replaceAll('\\', '/').replace(/^\.\//, '');
-}
-
 function fileName(value: string) {
   const parts = normalizePath(value).split('/').filter(Boolean);
   return parts.at(-1) ?? value;
@@ -1613,13 +1643,22 @@ function HtmlArtifactPreview({
         <iframe
           className={styles.htmlPreview}
           sandbox=""
-          srcDoc={html}
+          srcDoc={withArtifactPreviewCsp(html)}
           title={`Preview ${workspacePath}`}
         />
       )}
       {error && <div className={styles.previewError}>{error}</div>}
     </div>
   );
+}
+
+function withArtifactPreviewCsp(html: string) {
+  const csp =
+    '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data: blob:;">';
+  if (/<head[\s>]/i.test(html)) {
+    return html.replace(/<head([^>]*)>/i, `<head$1>${csp}`);
+  }
+  return `${csp}${html}`;
 }
 
 function FileArtifactPreview({ workspacePath }: { workspacePath: string }) {

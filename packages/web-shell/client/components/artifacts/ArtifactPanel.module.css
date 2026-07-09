@@ -585,6 +585,24 @@
   padding: 8px 0;
 }
 
+.treeNode {
+  position: relative;
+}
+
+.treeChildren {
+  position: relative;
+}
+
+.treeChildren::before {
+  content: '';
+  position: absolute;
+  top: -2px;
+  bottom: 8px;
+  left: var(--tree-children-line-left);
+  border-left: 1px dashed var(--border);
+  pointer-events: none;
+}
+
 .treeRow {
   appearance: none;
   border: 0;
@@ -600,11 +618,22 @@
   align-items: center;
   padding-right: 10px;
   color: var(--foreground);
+  position: relative;
 }
 
 .treeRow:hover {
   background: var(--accent);
   color: var(--foreground);
+}
+
+.treeRow[data-depth]:not([data-depth='0'])::before {
+  content: '';
+  position: absolute;
+  left: var(--tree-row-line-left);
+  top: 50%;
+  width: 9px;
+  border-top: 1px dashed var(--border);
+  pointer-events: none;
 }
 
 .treeFolder {

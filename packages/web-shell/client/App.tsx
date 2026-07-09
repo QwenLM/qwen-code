@@ -1147,6 +1147,7 @@ export function App({
   const [artifactPanelWidth, setArtifactPanelWidth] = useState(
     DEFAULT_REVIEW_PANEL_WIDTH,
   );
+  const artifactPanelResizeCleanupRef = useRef<(() => void) | null>(null);
   const artifactPanelSessionStateRef = useRef<ArtifactPanelSessionState | null>(
     null,
   );
@@ -1425,12 +1426,14 @@ export function App({
           animationFrame = window.requestAnimationFrame(flushWidth);
         }
       };
-      const handlePointerUp = () => {
+      let handlePointerUp: () => void = () => {};
+      const cleanupResize = (commitWidth: boolean) => {
+        artifactPanelResizeCleanupRef.current = null;
         if (animationFrame !== null) {
           window.cancelAnimationFrame(animationFrame);
           animationFrame = null;
         }
-        setArtifactPanelWidth(pendingWidth);
+        if (commitWidth) setArtifactPanelWidth(pendingWidth);
         if (resizeHandle.hasPointerCapture(event.pointerId)) {
           resizeHandle.releasePointerCapture(event.pointerId);
         }
@@ -1440,12 +1443,15 @@ export function App({
         window.removeEventListener('pointerup', handlePointerUp);
         window.removeEventListener('pointercancel', handlePointerUp);
       };
+      handlePointerUp = () => cleanupResize(true);
+      artifactPanelResizeCleanupRef.current = () => cleanupResize(false);
       window.addEventListener('pointermove', handlePointerMove);
       window.addEventListener('pointerup', handlePointerUp);
       window.addEventListener('pointercancel', handlePointerUp);
     },
     [artifactPanelWidth, getMaxArtifactPanelWidth],
   );
+  useEffect(() => () => artifactPanelResizeCleanupRef.current?.(), []);
   const messageBlocks = useAnimationFrameValue(blocks);
   const rawPendingApproval = useMemo(
     () => extractPendingPermission(messageBlocks),

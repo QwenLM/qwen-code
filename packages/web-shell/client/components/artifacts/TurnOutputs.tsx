@@ -2,7 +2,12 @@ import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { useState } from 'react';
 import { useI18n } from '../../i18n';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
-import { artifactKindLabel, formatArtifactSize } from './artifactUtils';
+import {
+  artifactKindLabel,
+  formatArtifactSize,
+  isSamePath,
+  stripWorkspacePath,
+} from './artifactUtils';
 import styles from './TurnOutputs.module.css';
 
 export interface TurnOutputFileChange {
@@ -454,9 +459,8 @@ function getArtifactPreviewContent(
   changes: readonly TurnOutputFileChange[],
 ) {
   if (artifact.kind !== 'html' || !artifact.workspacePath) return undefined;
-  const normalizedArtifactPath = normalizePath(artifact.workspacePath);
   const change = changes.find((item) =>
-    isSamePath(normalizePath(item.path), normalizedArtifactPath),
+    isSamePath(item.path, artifact.workspacePath),
   );
   if (!change) return undefined;
   for (let index = change.diffs.length - 1; index >= 0; index--) {
@@ -467,28 +471,5 @@ function getArtifactPreviewContent(
 }
 
 export function displayPath(path: string, workspaceCwd?: string) {
-  const normalizedPath = normalizePath(path);
-  const normalizedCwd = normalizePath(workspaceCwd ?? '');
-  if (!normalizedCwd) return normalizedPath;
-  if (normalizedPath === normalizedCwd)
-    return normalizedPath.split('/').pop() ?? normalizedPath;
-  const prefix = `${normalizedCwd}/`;
-  return normalizedPath.startsWith(prefix)
-    ? normalizedPath.slice(prefix.length)
-    : normalizedPath;
-}
-
-function normalizePath(value: string) {
-  return value.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '');
-}
-
-function isSamePath(left: string, right: string) {
-  if (left === right) return true;
-  if (left.startsWith('/') && !right.startsWith('/')) {
-    return left.endsWith(`/${right}`);
-  }
-  if (right.startsWith('/') && !left.startsWith('/')) {
-    return right.endsWith(`/${left}`);
-  }
-  return false;
+  return stripWorkspacePath(path, workspaceCwd);
 }

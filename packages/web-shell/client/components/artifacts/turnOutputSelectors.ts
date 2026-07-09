@@ -4,6 +4,7 @@ import type {
   TurnOutputFileChange,
   TurnOutputScheduledTask,
 } from './TurnOutputs';
+import { isSamePath, normalizePath } from './artifactUtils';
 
 function getToolCallIds(tool: ACPToolCall): string[] {
   const ids = new Set<string>();
@@ -83,11 +84,7 @@ function recordArtifactToolMatches(
     if (
       workspacePath &&
       artifact.workspacePath &&
-      isSameWorkspacePath(
-        normalizeWorkspacePath(workspacePath) ?? workspacePath,
-        normalizeWorkspacePath(artifact.workspacePath) ??
-          artifact.workspacePath,
-      )
+      isSameWorkspacePath(workspacePath, artifact.workspacePath)
     ) {
       return true;
     }
@@ -115,7 +112,7 @@ export function getFileChangesByTurn(
     if (message.role !== 'tool_group' || !currentTurnId) continue;
     const artifactPaths = new Set(
       (artifactsByTurn.get(currentTurnId) ?? [])
-        .map((artifact) => normalizeWorkspacePath(artifact.workspacePath))
+        .map((artifact) => normalizePath(artifact.workspacePath))
         .filter((path): path is string => Boolean(path)),
     );
     for (const tool of message.tools) {
@@ -214,7 +211,7 @@ function getFileChange(
   if (toolName !== 'write_file' && toolName !== 'edit') return null;
   const filePath = getToolFilePath(tool);
   if (!filePath) return null;
-  const normalizedPath = normalizeWorkspacePath(filePath);
+  const normalizedPath = normalizePath(filePath);
   const status = inferFileChangeStatus(tool);
   const lineStats = getFileChangeLineStats(tool);
   const diffs = getFileChangeDiffs(tool);
@@ -257,6 +254,7 @@ function getStringField(
 function inferFileChangeStatus(
   tool: ACPToolCall,
 ): TurnOutputFileChange['status'] {
+  if (tool.toolName.toLowerCase() === 'write_file') return 'created';
   const output = collectText(tool.rawOutput).toLowerCase();
   if (
     output.includes('created new file') ||
@@ -365,7 +363,7 @@ function getFirstLine(text: string) {
 
 function getCronTaskId(text: string) {
   return text.match(
-    /\bScheduled\s+(?:recurring job|one-shot task|)(?:\s+)?([a-z0-9_-]+)\b/i,
+    /\bScheduled\s+(?:(?:recurring job|one-shot task)\s+)?([a-z0-9_-]+)\b/i,
   )?.[1];
 }
 
@@ -379,12 +377,23 @@ function countLines(text: string | undefined) {
   return text.replace(/\r?\n$/, '').split(/\r\n|\r|\n/).length;
 }
 
-function collectText(value: unknown): string {
+function collectText(
+  value: unknown,
+  seen = new WeakSet<object>(),
+  depth = 0,
+): string {
+  if (depth > 100) return '';
   if (typeof value === 'string') return value;
-  if (Array.isArray(value)) return value.map(collectText).join('\n');
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return '';
+    seen.add(value);
+    return value.map((item) => collectText(item, seen, depth + 1)).join('\n');
+  }
   if (!value || typeof value !== 'object') return '';
+  if (seen.has(value)) return '';
+  seen.add(value);
   return Object.values(value as Record<string, unknown>)
-    .map(collectText)
+    .map((item) => collectText(item, seen, depth + 1))
     .join('\n');
 }
 
@@ -393,15 +402,21 @@ function upsertFileChange(
   change: TurnOutputFileChange,
 ) {
   const index = list.findIndex(
-    (existing) =>
-      normalizeWorkspacePath(existing.path) ===
-      normalizeWorkspacePath(change.path),
+    (existing) => normalizePath(existing.path) === normalizePath(change.path),
   );
   if (index < 0) {
     list.push(change);
     return;
   }
   const existing = list[index]!;
+  const diffs = mergeFileDiffs(existing.diffs, change.diffs);
+  const finalFullDiff = getFinalFullContentDiff(diffs);
+  const lineStats = finalFullDiff
+    ? countChangedLines(finalFullDiff.oldText, finalFullDiff.newText)
+    : {
+        additions: existing.additions + change.additions,
+        deletions: existing.deletions + change.deletions,
+      };
   list[index] = {
     ...existing,
     status:
@@ -409,23 +424,71 @@ function upsertFileChange(
         ? 'created'
         : 'modified',
     isArtifact: existing.isArtifact || change.isArtifact,
-    additions: existing.additions + change.additions,
-    deletions: existing.deletions + change.deletions,
-    diffs: [...existing.diffs, ...change.diffs],
+    additions: lineStats.additions,
+    deletions: lineStats.deletions,
+    diffs,
   };
 }
 
-function normalizeWorkspacePath(filePath: string | undefined) {
-  return filePath?.replaceAll('\\', '/').replace(/^\.\//, '');
+function mergeFileDiffs(
+  existingDiffs: TurnOutputFileChange['diffs'],
+  nextDiffs: TurnOutputFileChange['diffs'],
+): TurnOutputFileChange['diffs'] {
+  const diffs = [...existingDiffs, ...nextDiffs];
+  const firstFullDiff = diffs.find((diff) => diff.fullContent);
+  if (!firstFullDiff) return diffs;
+  let lastFullDiff = firstFullDiff;
+  for (let index = diffs.length - 1; index >= 0; index--) {
+    const diff = diffs[index];
+    if (diff?.fullContent) {
+      lastFullDiff = diff;
+      break;
+    }
+  }
+  return [
+    {
+      oldText: firstFullDiff.oldText,
+      newText: lastFullDiff.newText,
+      fullContent: true,
+    },
+  ];
+}
+
+function getFinalFullContentDiff(diffs: TurnOutputFileChange['diffs']) {
+  return diffs.length === 1 && diffs[0]?.fullContent ? diffs[0] : undefined;
+}
+
+function countChangedLines(oldText: string, newText: string) {
+  const oldLines = splitDiffLines(oldText);
+  const newLines = splitDiffLines(newText);
+  const commonLines = countLongestCommonSubsequence(oldLines, newLines);
+  return {
+    additions: newLines.length - commonLines,
+    deletions: oldLines.length - commonLines,
+  };
+}
+
+function splitDiffLines(text: string) {
+  if (!text) return [];
+  return text.replace(/\r?\n$/, '').split(/\r\n|\r|\n/);
+}
+
+function countLongestCommonSubsequence(left: string[], right: string[]) {
+  const previous = new Array(right.length + 1).fill(0);
+  const current = new Array(right.length + 1).fill(0);
+  for (const leftLine of left) {
+    for (let index = 0; index < right.length; index++) {
+      current[index + 1] =
+        leftLine === right[index]
+          ? previous[index] + 1
+          : Math.max(previous[index + 1], current[index]);
+    }
+    previous.splice(0, previous.length, ...current);
+    current.fill(0);
+  }
+  return previous[right.length] ?? 0;
 }
 
 function isSameWorkspacePath(left: string, right: string) {
-  if (left === right) return true;
-  if (left.startsWith('/') && !right.startsWith('/')) {
-    return left.endsWith(`/${right}`);
-  }
-  if (right.startsWith('/') && !left.startsWith('/')) {
-    return right.endsWith(`/${left}`);
-  }
-  return false;
+  return isSamePath(left, right);
 }
