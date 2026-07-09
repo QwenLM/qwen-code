@@ -54,6 +54,15 @@ const { mockRunManagedAutoMemoryDream, mockRunManagedRememberByAgent } =
     mockRunManagedRememberByAgent: vi.fn(),
   }));
 
+const { mockDebugLogger } = vi.hoisted(() => ({
+  mockDebugLogger: {
+    debug: vi.fn(),
+    error: vi.fn(),
+    warn: vi.fn(),
+    info: vi.fn(),
+  },
+}));
+
 vi.mock('@agentclientprotocol/sdk', () => ({
   AgentSideConnection: vi.fn().mockImplementation(() => ({
     get closed() {
@@ -119,12 +128,7 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', () => ({
-  createDebugLogger: () => ({
-    debug: vi.fn(),
-    error: vi.fn(),
-    warn: vi.fn(),
-    info: vi.fn(),
-  }),
+  createDebugLogger: () => mockDebugLogger,
   registerAcpEventLoopLagGauge: vi.fn(),
   startEventLoopLagMonitor: vi.fn(() => ({
     snapshot: vi.fn(() => ({
@@ -468,7 +472,8 @@ const { mockHistoryReplay } = vi.hoisted(() => ({
 }));
 vi.mock('./session/HistoryReplayer.js', () => ({
   HistoryReplayer: vi.fn().mockImplementation((context: unknown) => ({
-    replay: (messages: unknown) => mockHistoryReplay(context, messages),
+    replay: (messages: unknown, gaps: unknown) =>
+      mockHistoryReplay(context, messages, gaps),
   })),
 }));
 
@@ -3430,6 +3435,354 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('rejects workspace memory remember when the bridge reports managed memory unavailable', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockRejectedValue({
+      data: {
+        errorKind: 'managed_memory_unavailable',
+        details: 'memory service stopped',
+      },
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    let rejection: unknown;
+    try {
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember me.',
+      });
+    } catch (err) {
+      rejection = err;
+    }
+
+    expect(rejection).toMatchObject({
+      code: -32009,
+      message: 'Managed memory is unavailable for this daemon workspace',
+      data: { errorKind: 'managed_memory_unavailable' },
+    });
+    expect(
+      (rejection as { data: Record<string, unknown> }).data,
+    ).not.toHaveProperty('details');
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory remember failed:',
+      expect.objectContaining({
+        code: 'managed_memory_unavailable',
+        details: 'memory service stopped',
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('includes details for workspace memory remember failures', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockRejectedValue(
+      new Error('remember agent stopped early'),
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember me.',
+      }),
+    ).rejects.toMatchObject({
+      code: -32099,
+      message: 'Workspace memory remember failed',
+      data: {
+        errorKind: 'remember_failed',
+        details: 'remember agent stopped early',
+      },
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('logs sanitized details for workspace memory failures', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockRejectedValue(
+      new Error('Authorization: Bearer secret-token-value'),
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember me.',
+      }),
+    ).rejects.toMatchObject({
+      code: -32099,
+      message: 'Workspace memory remember failed',
+      data: {
+        errorKind: 'remember_failed',
+        details: 'Authorization: <redacted>',
+      },
+    });
+
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory remember failed:',
+      expect.objectContaining({
+        code: 'remember_failed',
+        details: 'Authorization: <redacted>',
+        stack: expect.stringContaining('Authorization: <redacted>'),
+      }),
+    );
+    expect(JSON.stringify(mockDebugLogger.error.mock.calls)).not.toContain(
+      'secret-token-value',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('falls back when workspace memory error code extraction throws', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    const err = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('code getter failed');
+        },
+      },
+    );
+    mockRunManagedRememberByAgent.mockRejectedValue(err);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const error = await agent
+      .extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember me.',
+      })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: -32099,
+      message: 'Workspace memory remember failed',
+      data: { errorKind: 'remember_failed' },
+    });
+    expect(
+      (error as { data?: Record<string, unknown> }).data,
+    ).not.toHaveProperty('details');
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      'Failed to extract workspace memory error code:',
+      { extractionError: 'code getter failed' },
+    );
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory remember failed:',
+      expect.objectContaining({
+        code: 'remember_failed',
+        details: '<details unavailable>',
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('uses remember-specific error codes for workspace memory remember timeouts', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockRejectedValue(new Error('late abort'));
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    const controller = new AbortController();
+    controller.abort();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(controller.signal);
+
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+          content: 'Remember me.',
+        }),
+      ).rejects.toMatchObject({
+        code: -32099,
+        message: 'Workspace memory remember timed out',
+        data: { errorKind: 'remember_timeout', details: 'late abort' },
+      });
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        'Workspace memory remember timed out:',
+        expect.objectContaining({
+          code: 'remember_timeout',
+          details: 'late abort',
+          stack: expect.stringContaining('late abort'),
+        }),
+      );
+    } finally {
+      timeoutSpy.mockRestore();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('preserves timeout codes for timed out workspace memory remember unavailable errors', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockRejectedValue({
+      data: {
+        errorKind: 'managed_memory_unavailable',
+        details: 'memory service stopped',
+      },
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    const controller = new AbortController();
+    controller.abort();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(controller.signal);
+
+    try {
+      const error = await agent
+        .extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+          content: 'Remember me.',
+        })
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: -32099,
+        message: 'Workspace memory remember timed out',
+        data: {
+          errorKind: 'remember_timeout',
+          details: 'memory service stopped',
+        },
+      });
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        'Workspace memory remember timed out:',
+        expect.objectContaining({
+          code: 'remember_timeout',
+          details: 'memory service stopped',
+        }),
+      );
+    } finally {
+      timeoutSpy.mockRestore();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('omits details for workspace memory failures without a detail source', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockRejectedValue({
+      code: 'remember_failed',
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const error = await agent
+      .extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember me.',
+      })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: -32099,
+      data: { errorKind: 'remember_failed' },
+    });
+    expect(
+      (error as { data?: Record<string, unknown> }).data,
+    ).not.toHaveProperty('details');
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory remember failed:',
+      expect.objectContaining({ details: '<details unavailable>' }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('runs workspace memory forget without requiring a session', async () => {
     const forget = vi.fn().mockResolvedValue({
       systemMessage: 'Forgot 1 entry.',
@@ -3441,6 +3794,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       ],
       touchedTopics: ['project'],
+      touchedScopes: ['project'],
     });
     Object.assign(mockConfig, {
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
@@ -3478,6 +3832,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       ],
       touchedTopics: ['project'],
+      touchedScopes: ['project'],
     });
     expect(forget).toHaveBeenCalledWith('/workspace', 'old preference', {
       config: expect.objectContaining({
@@ -3553,8 +3908,71 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ).rejects.toMatchObject({
       code: -32099,
       message: 'Workspace memory forget failed',
-      data: { errorKind: 'forget_failed' },
+      data: { errorKind: 'forget_failed', details: 'boom' },
     });
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory forget failed:',
+      expect.objectContaining({
+        code: 'forget_failed',
+        details: 'boom',
+        stack: expect.stringContaining('boom'),
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects workspace memory forget when the bridge reports managed memory unavailable', async () => {
+    const forget = vi.fn().mockRejectedValue({
+      data: {
+        errorKind: 'managed_memory_unavailable',
+        details: 'memory service stopped',
+      },
+    });
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getMemoryManager: vi.fn().mockReturnValue({ forget }),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordUiTelemetryEvent: vi.fn(),
+      }),
+      getTranscriptPath: vi.fn().mockReturnValue('/tmp/transcript.jsonl'),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const error = await agent
+      .extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget, {
+        query: 'old preference',
+      })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: -32009,
+      message: 'Managed memory is unavailable for this daemon workspace',
+      data: { errorKind: 'managed_memory_unavailable' },
+    });
+    expect(
+      (error as { data?: Record<string, unknown> }).data,
+    ).not.toHaveProperty('details');
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory forget failed:',
+      expect.objectContaining({
+        code: 'managed_memory_unavailable',
+        details: 'memory service stopped',
+      }),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -3597,8 +4015,79 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ).rejects.toMatchObject({
         code: -32099,
         message: 'Workspace memory forget timed out',
-        data: { errorKind: 'forget_timeout' },
+        data: { errorKind: 'forget_timeout', details: 'late abort' },
       });
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        'Workspace memory forget timed out:',
+        expect.objectContaining({
+          code: 'forget_timeout',
+          details: 'late abort',
+          stack: expect.stringContaining('late abort'),
+        }),
+      );
+    } finally {
+      timeoutSpy.mockRestore();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('preserves timeout codes for timed out workspace memory forget unavailable errors', async () => {
+    const forget = vi.fn().mockRejectedValue({
+      data: {
+        errorKind: 'managed_memory_unavailable',
+        details: 'memory service stopped',
+      },
+    });
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getMemoryManager: vi.fn().mockReturnValue({ forget }),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordUiTelemetryEvent: vi.fn(),
+      }),
+      getTranscriptPath: vi.fn().mockReturnValue('/tmp/transcript.jsonl'),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    const controller = new AbortController();
+    controller.abort();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(controller.signal);
+
+    try {
+      const error = await agent
+        .extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget, {
+          query: 'old preference',
+        })
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: -32099,
+        message: 'Workspace memory forget timed out',
+        data: {
+          errorKind: 'forget_timeout',
+          details: 'memory service stopped',
+        },
+      });
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        'Workspace memory forget timed out:',
+        expect.objectContaining({
+          code: 'forget_timeout',
+          details: 'memory service stopped',
+        }),
+      );
     } finally {
       timeoutSpy.mockRestore();
       mockConnectionState.resolve();
@@ -3687,8 +4176,68 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ).rejects.toMatchObject({
       code: -32099,
       message: 'Workspace memory dream failed',
-      data: { errorKind: 'dream_failed' },
+      data: { errorKind: 'dream_failed', details: 'boom' },
     });
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory dream failed:',
+      expect.objectContaining({
+        code: 'dream_failed',
+        details: 'boom',
+        stack: expect.stringContaining('boom'),
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects workspace memory dream when the bridge reports managed memory unavailable', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordUiTelemetryEvent: vi.fn(),
+      }),
+      getTranscriptPath: vi.fn().mockReturnValue('/tmp/transcript.jsonl'),
+    });
+    mockRunManagedAutoMemoryDream.mockRejectedValue({
+      data: {
+        errorKind: 'managed_memory_unavailable',
+        details: 'memory service stopped',
+      },
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const error = await agent
+      .extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream, {})
+      .catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: -32009,
+      message: 'Managed memory is unavailable for this daemon workspace',
+      data: { errorKind: 'managed_memory_unavailable' },
+    });
+    expect(
+      (error as { data?: Record<string, unknown> }).data,
+    ).not.toHaveProperty('details');
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory dream failed:',
+      expect.objectContaining({
+        code: 'managed_memory_unavailable',
+        details: 'memory service stopped',
+      }),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -3728,8 +4277,76 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ).rejects.toMatchObject({
         code: -32099,
         message: 'Workspace memory dream timed out',
-        data: { errorKind: 'dream_timeout' },
+        data: { errorKind: 'dream_timeout', details: 'late abort' },
       });
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        'Workspace memory dream timed out:',
+        expect.objectContaining({
+          code: 'dream_timeout',
+          details: 'late abort',
+          stack: expect.stringContaining('late abort'),
+        }),
+      );
+    } finally {
+      timeoutSpy.mockRestore();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('preserves timeout codes for timed out workspace memory dream unavailable errors', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordUiTelemetryEvent: vi.fn(),
+      }),
+      getTranscriptPath: vi.fn().mockReturnValue('/tmp/transcript.jsonl'),
+    });
+    mockRunManagedAutoMemoryDream.mockRejectedValue({
+      data: {
+        errorKind: 'managed_memory_unavailable',
+        details: 'memory service stopped',
+      },
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    const controller = new AbortController();
+    controller.abort();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(controller.signal);
+
+    try {
+      const error = await agent
+        .extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream, {})
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: -32099,
+        message: 'Workspace memory dream timed out',
+        data: {
+          errorKind: 'dream_timeout',
+          details: 'memory service stopped',
+        },
+      });
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        'Workspace memory dream timed out:',
+        expect.objectContaining({
+          code: 'dream_timeout',
+          details: 'memory service stopped',
+        }),
+      );
     } finally {
       timeoutSpy.mockRestore();
       mockConnectionState.resolve();
@@ -5242,6 +5859,36 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(result.updates).toHaveLength(1);
     expect(result.updates[0]!.timestamp).toBe(4242);
     expect(result).not.toHaveProperty('partial');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/session/loadUpdates threads detected historyGaps to the replayer', async () => {
+    const settings = makeCoreSettings();
+    const gaps = [{ childUuid: 'c', missingParentUuid: 'gone' }];
+    mockSessionServiceLoad({
+      conversation: {
+        messages: [{ role: 'user' }],
+        startTime: 'start',
+        lastUpdated: 'end',
+      },
+      historyGaps: gaps,
+    });
+    mockHistoryReplay.mockResolvedValue(undefined);
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod('qwen/session/loadUpdates', {
+      sessionId: VALID_SESSION_ID,
+    });
+    // 3rd arg to the replayer is the historyGaps threaded through
+    // collectHistoryReplayUpdates — without it this ACP surface renders a
+    // broken chain as contiguous, with no gap divider.
+    expect(mockHistoryReplay).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      gaps,
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -7866,8 +8513,12 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       configOptions: expect.anything(),
     });
     // load semantic: history MUST be replayed so SSE subscribers see
-    // the persisted turns.
-    expect(lastSessionMock?.replayHistory).toHaveBeenCalledWith(messages);
+    // the persisted turns. Second arg is the detected history gaps
+    // (undefined here — this fixture session has an intact chain).
+    expect(lastSessionMock?.replayHistory).toHaveBeenCalledWith(
+      messages,
+      undefined,
+    );
 
     const recording = lastSessionMock?.getConfig().getChatRecordingService();
     expect(recording?.rebuildTurnBoundaries).toHaveBeenCalledWith(messages);

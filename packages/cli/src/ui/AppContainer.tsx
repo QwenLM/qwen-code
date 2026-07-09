@@ -87,7 +87,11 @@ import {
   profileCheckpoint,
   finalizeStartupProfile,
 } from '../utils/startupProfiler.js';
-import { appEvents } from '../utils/events.js';
+import {
+  AppEvent,
+  appEvents,
+  type StartupIdeConnectionStatus,
+} from '../utils/events.js';
 import process from 'node:process';
 
 /**
@@ -162,6 +166,7 @@ import {
 } from './utils/workflow-keyword.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
+import { ExtensionRefreshState } from '../config/extension-refresh-state.js';
 import { useFocus } from './hooks/useFocus.js';
 import { useAwaySummary } from './hooks/useAwaySummary.js';
 import { useBracketedPaste } from './hooks/useBracketedPaste.js';
@@ -388,12 +393,39 @@ export function mergeStartupWarnings(
   return [...new Set([...currentWarnings, ...nextWarnings])];
 }
 
+/**
+ * Whether the skill-review dialog should auto-open. Exported for tests.
+ *
+ * Auto-open requires an undismissed pending batch while the app is idle, the
+ * auto-skill feature enabled (live flag — the dialog's turn-off must keep the
+ * batch from re-popping, while re-enabling from /memory lets it resurface),
+ * and /memory itself closed (the review dialog must not pop over the dialog
+ * where the flag is being toggled).
+ */
+export function shouldAutoOpenSkillReview(args: {
+  pending: UIState['skillReviewPending'];
+  streamingState: StreamingState;
+  isMemoryDialogOpen: boolean;
+  autoSkillEnabled: boolean;
+  dismissedTaskIds: ReadonlySet<string>;
+}): boolean {
+  return (
+    args.pending !== null &&
+    args.pending.skills.length > 0 &&
+    args.streamingState === StreamingState.Idle &&
+    !args.isMemoryDialogOpen &&
+    args.autoSkillEnabled &&
+    !args.dismissedTaskIds.has(args.pending.taskId)
+  );
+}
+
 interface AppContainerProps {
   config: Config;
   settings: LoadedSettings;
   startupWarnings?: string[];
   version: string;
   initializationResult: InitializationResult;
+  extensionRefreshState?: ExtensionRefreshState;
 }
 
 /**
@@ -410,6 +442,10 @@ const SHELL_HEIGHT_PADDING = 10;
 
 export const AppContainer = (props: AppContainerProps) => {
   const { settings, config, initializationResult } = props;
+  const extensionRefreshState = useMemo(
+    () => props.extensionRefreshState ?? new ExtensionRefreshState(),
+    [props.extensionRefreshState],
+  );
   const historyManager = useHistory();
   // `useHistory()` returns a fresh memoized object whenever `history` changes,
   // so depending on `historyManager` directly inside event-handler callbacks
@@ -1347,6 +1383,7 @@ export const AppContainer = (props: AppContainerProps) => {
       const pendingSkills = withPending.metadata!['pendingSkills'] as Array<{
         name: string;
         description: string;
+        stagedManifestPath: string;
       }>;
       const sig = `${withPending.id}|${pendingSkills
         .map((p) => p.name)
@@ -1358,6 +1395,7 @@ export const AppContainer = (props: AppContainerProps) => {
         skills: pendingSkills.map((p) => ({
           name: p.name,
           description: p.description,
+          stagedManifestPath: p.stagedManifestPath,
         })),
       });
     };
@@ -1473,6 +1511,7 @@ export const AppContainer = (props: AppContainerProps) => {
     logger,
     historyManager.updateItem,
     setSessionName,
+    extensionRefreshState,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
@@ -1737,16 +1776,28 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [streamingState]);
 
   // Auto-open the skill-review dialog when idle and there are pending skills.
+  // Gated on the live auto-skill flag: after the dialog's turn-off option
+  // (which disables the feature and closes WITHOUT dismissing), the batch must
+  // not re-pop — but re-enabling auto-skill from /memory flips the flag back,
+  // and the batch can then reopen. The flag lives on the stable `config`
+  // object (mutated imperatively), so no dependency changes when it flips;
+  // `isMemoryDialogOpen` is a dependency precisely so that closing /memory —
+  // the only in-session place the flag can be re-enabled — re-runs this check
+  // even when the app is already idle. It doubles as a gate so the review
+  // dialog never pops over the open /memory dialog.
   useEffect(() => {
     if (
-      skillReviewPending &&
-      skillReviewPending.skills.length > 0 &&
-      streamingState === StreamingState.Idle &&
-      !skillReviewDismissedTaskIdsRef.current.has(skillReviewPending.taskId)
+      shouldAutoOpenSkillReview({
+        pending: skillReviewPending,
+        streamingState,
+        isMemoryDialogOpen,
+        autoSkillEnabled: config.getAutoSkillEnabled(),
+        dismissedTaskIds: skillReviewDismissedTaskIdsRef.current,
+      })
     ) {
       setIsSkillReviewDialogOpen(true);
     }
-  }, [skillReviewPending, streamingState]);
+  }, [skillReviewPending, streamingState, isMemoryDialogOpen, config]);
 
   // Contextual tips — show tips based on context usage after model responses
   // Defer TipHistory loading when tips are disabled to avoid side effects
@@ -2581,6 +2632,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const [idePromptAnswered, setIdePromptAnswered] = useState(false);
   const [currentIDE, setCurrentIDE] = useState<IdeInfo | null>(null);
+  const [startupIdeConnectionStatus, setStartupIdeConnectionStatus] =
+    useState<StartupIdeConnectionStatus>({ state: 'idle' });
 
   useEffect(() => {
     const getIde = async () => {
@@ -2830,6 +2883,16 @@ export const AppContainer = (props: AppContainerProps) => {
     const unsubscribe = ideContextStore.subscribe(setIdeContextState);
     setIdeContextState(ideContextStore.get());
     return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const listener = (status: StartupIdeConnectionStatus) => {
+      setStartupIdeConnectionStatus(status);
+    };
+    appEvents.on(AppEvent.StartupIdeConnectionStatusChanged, listener);
+    return () => {
+      appEvents.off(AppEvent.StartupIdeConnectionStatusChanged, listener);
+    };
   }, []);
 
   const handleEscapePromptChange = useCallback((showPrompt: boolean) => {
@@ -3825,6 +3888,7 @@ export const AppContainer = (props: AppContainerProps) => {
       terminalHeight,
       mainControlsRef,
       currentIDE,
+      startupIdeConnectionStatus,
       updateInfo,
       showIdeRestartPrompt,
       ideTrustRestartReason,
@@ -3965,6 +4029,7 @@ export const AppContainer = (props: AppContainerProps) => {
       terminalHeight,
       mainControlsRef,
       currentIDE,
+      startupIdeConnectionStatus,
       updateInfo,
       showIdeRestartPrompt,
       ideTrustRestartReason,

@@ -23,11 +23,25 @@ import styles from './SplitView.module.css';
 const MAX_PANES = MAX_SPLIT_PANES;
 
 export interface SplitViewProps {
-  /** Sessions to open initially (e.g. the selection from the overview). */
-  initialSessionIds?: string[];
+  /** Sessions to show in the split view. */
+  sessionIds?: string[];
+  /**
+   * Report the live pane set (after every add / remove) up to the parent so it
+   * survives this view unmounting. Switching away from the split and back must
+   * restore exactly the panes the user had, not reseed from a stale selection.
+   * Must be referentially stable (e.g. a `useState` setter) — a fresh callback
+   * each render would re-fire the reporting effect and loop.
+   */
+  onPanesChange?: (sessionIds: string[]) => void;
   /** Leave the split view (back to the single-session chat). */
   onExit: () => void;
   onError?: (error: unknown, fallback: string) => void;
+  /**
+   * Bumped by the parent whenever the session list changes elsewhere (create /
+   * delete / rename). The "add pane" picker reloads on a change so it never
+   * offers a session that has since been removed or misses one just created.
+   */
+  sessionListReloadToken?: number;
 }
 
 /**
@@ -38,18 +52,19 @@ export interface SplitViewProps {
  * fight over which session an approval or Enter belongs to.
  */
 export function SplitView({
-  initialSessionIds,
+  sessionIds,
+  onPanesChange,
   onExit,
   onError,
+  sessionListReloadToken,
 }: SplitViewProps) {
   const { t } = useI18n();
   const connection = useConnection();
   const currentSessionId = connection.sessionId;
   const organizationEnabled =
-    connection.capabilities?.features?.includes(
-      SESSION_ORGANIZATION_FEATURE,
-    ) ?? false;
-  const { sessions } = useSessions({
+    connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE) ??
+    false;
+  const { sessions, reload } = useSessions({
     autoLoad: true,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
@@ -57,10 +72,18 @@ export function SplitView({
       ? { view: 'organized' as const, group: 'all' }
       : {}),
   });
+  const sessionIdsControlled = sessionIds !== undefined;
+  const normalizedSessionIds = useMemo(
+    () =>
+      Array.from(new Set((sessionIds ?? []).filter(Boolean))).slice(
+        0,
+        MAX_PANES,
+      ),
+    [sessionIds],
+  );
 
   const [paneIds, setPaneIds] = useState<string[]>(() => {
-    const seed = Array.from(new Set((initialSessionIds ?? []).filter(Boolean)));
-    if (seed.length > 0) return seed.slice(0, MAX_PANES);
+    if (normalizedSessionIds.length > 0) return normalizedSessionIds;
     return currentSessionId ? [currentSessionId] : [];
   });
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -73,6 +96,18 @@ export function SplitView({
       ? crypto.randomUUID()
       : Math.random().toString(36).slice(2),
   );
+
+  useEffect(() => {
+    if (!sessionIdsControlled) return;
+    setPaneIds((prev) =>
+      prev.length === normalizedSessionIds.length &&
+      prev.every((id, index) => id === normalizedSessionIds[index])
+        ? prev
+        : normalizedSessionIds,
+    );
+  }, [normalizedSessionIds, sessionIdsControlled]);
+  const paneIdsRef = useRef(paneIds);
+  paneIdsRef.current = paneIds;
 
   // Dismiss the "add session" picker on Escape or a click outside it.
   useEffect(() => {
@@ -93,6 +128,36 @@ export function SplitView({
     };
   }, [pickerOpen]);
 
+  // Refresh the list the moment the picker opens — `useSessions` only fetches on
+  // mount, so without this the picker would offer whatever was current when the
+  // split was first entered, missing sessions created since.
+  useEffect(() => {
+    if (pickerOpen) void reload();
+  }, [pickerOpen, reload]);
+
+  // Also refresh when the parent signals the list changed elsewhere (a session
+  // created / deleted / renamed in the sidebar or another tab), so an open
+  // picker — or the next open — reflects it without re-entering the split.
+  // Reload on every distinct token bump. `useDaemonResource` serializes
+  // responses via its sequence counter (last write wins), so overlapping reloads
+  // are safe; and the token is bumped only on discrete session-change events
+  // (App fires an immediate bump plus one delayed follow-up per change), not as a
+  // high-frequency stream. Deliberately *not* skipping while a reload is in
+  // flight: doing so would drop a bump that lands mid-reload — the effect has
+  // already run for that value and clearing an in-flight flag wouldn't re-run it,
+  // so the picker could stay stale after a burst. An occasional redundant fetch
+  // is far cheaper than a lost refresh, and the split has no polling fallback.
+  const prevReloadTokenRef = useRef(sessionListReloadToken);
+  useEffect(() => {
+    if (
+      sessionListReloadToken !== undefined &&
+      sessionListReloadToken !== prevReloadTokenRef.current
+    ) {
+      prevReloadTokenRef.current = sessionListReloadToken;
+      void reload();
+    }
+  }, [sessionListReloadToken, reload]);
+
   const titleById = useMemo(() => {
     const map = new Map<string, string>();
     for (const session of sessions) {
@@ -104,14 +169,26 @@ export function SplitView({
     return map;
   }, [sessions]);
 
-  const addPane = useCallback((sessionId: string) => {
-    setPaneIds((prev) =>
-      prev.includes(sessionId) || prev.length >= MAX_PANES
-        ? prev
-        : [...prev, sessionId],
-    );
-    setPickerOpen(false);
-  }, []);
+  const addPane = useCallback(
+    (sessionId: string) => {
+      const currentPaneIds = paneIdsRef.current;
+      if (
+        currentPaneIds.includes(sessionId) ||
+        currentPaneIds.length >= MAX_PANES
+      ) {
+        setPickerOpen(false);
+        return;
+      }
+      const next = [...currentPaneIds, sessionId];
+      if (sessionIdsControlled) {
+        onPanesChange?.(next);
+      } else {
+        setPaneIds(next);
+      }
+      setPickerOpen(false);
+    },
+    [onPanesChange, sessionIdsControlled],
+  );
 
   // Closing the last pane is a natural "I'm done" gesture — return to the
   // overview instead of stranding the user on an empty split. Guarded so an
@@ -125,9 +202,26 @@ export function SplitView({
     }
   }, [paneIds, onExit]);
 
-  const removePane = useCallback((sessionId: string) => {
-    setPaneIds((prev) => prev.filter((id) => id !== sessionId));
-  }, []);
+  // Mirror the live pane set up to the parent so it outlives this component
+  // unmounting when the user switches views. On re-entry the parent reseeds
+  // `sessionIds` from it, restoring the exact panes instead of clearing.
+  useEffect(() => {
+    if (!sessionIdsControlled) onPanesChange?.(paneIds);
+  }, [paneIds, onPanesChange, sessionIdsControlled]);
+
+  const removePane = useCallback(
+    (sessionId: string) => {
+      const currentPaneIds = paneIdsRef.current;
+      if (!currentPaneIds.includes(sessionId)) return;
+      const next = currentPaneIds.filter((id) => id !== sessionId);
+      if (sessionIdsControlled) {
+        onPanesChange?.(next);
+      } else {
+        setPaneIds(next);
+      }
+    },
+    [onPanesChange, sessionIdsControlled],
+  );
 
   const available = useMemo(
     () => sessions.filter((session) => !paneIds.includes(session.sessionId)),
@@ -229,7 +323,6 @@ export function SplitView({
                 >
                   <ChatPane
                     title={titleById.get(sessionId)}
-                    isCurrent={sessionId === currentSessionId}
                     onClose={() => removePane(sessionId)}
                     onError={onError}
                   />

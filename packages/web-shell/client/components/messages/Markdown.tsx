@@ -230,7 +230,9 @@ function MermaidBlock({ code }: { code: string }) {
     return (
       <div className={styles.codeBlock}>
         <div className={styles.codeBlockHeader}>
-          <span className={styles.codeBlockLang}>mermaid (error)</span>
+          <span className={styles.codeBlockLang}>
+            {t('mermaid.errorLabel')}
+          </span>
         </div>
         <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
           <code>{code}</code>
@@ -242,7 +244,7 @@ function MermaidBlock({ code }: { code: string }) {
   return (
     <div className={styles.codeBlock}>
       <div className={styles.codeBlockHeader}>
-        <span className={styles.codeBlockLang}>mermaid</span>
+        <span className={styles.codeBlockLang}>{t('mermaid.label')}</span>
         <span className={styles.mermaidActions}>
           <button
             className={styles.codeBlockCopy}

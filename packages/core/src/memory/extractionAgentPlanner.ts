@@ -271,7 +271,7 @@ export async function runAutoMemoryExtractionByAgent(
     ),
     systemPrompt: EXTRACTION_AGENT_SYSTEM_PROMPT,
     maxTurns: 5,
-    maxTimeMinutes: 2,
+    maxTimeMinutes: config.getMemoryAgentTimeoutMinutes() ?? 2,
     tools: [
       ToolNames.READ_FILE,
       ToolNames.GREP,

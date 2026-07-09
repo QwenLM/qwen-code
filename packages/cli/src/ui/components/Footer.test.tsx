@@ -8,6 +8,7 @@ import { render } from 'ink-testing-library';
 import { act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Footer } from './Footer.js';
+import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import * as useTerminalSize from '../hooks/useTerminalSize.js';
 import * as useStatusLineModule from '../hooks/useStatusLine.js';
 import { type UIState, UIStateContext } from '../contexts/UIStateContext.js';
@@ -82,6 +83,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     contextFileNames: [],
     showToolDescriptions: false,
     ideContextState: undefined,
+    startupIdeConnectionStatus: { state: 'idle' },
     isConfigInitialized: true,
     ...overrides,
   }) as UIState;
@@ -147,6 +149,48 @@ describe('<Footer />', () => {
     expect(lastFrame()).not.toContain('workflow active');
   });
 
+  it('shows deferred IDE connection progress', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        startupIdeConnectionStatus: { state: 'connecting' },
+      }),
+    );
+
+    expect(lastFrame()).toContain(
+      'IDE connecting... context may be unavailable',
+    );
+  });
+
+  it('shows deferred IDE connection failures', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        startupIdeConnectionStatus: {
+          state: 'failed',
+          message: 'ide_connect timed out after 10000ms',
+        },
+      }),
+    );
+
+    expect(lastFrame()).toContain(
+      'IDE connection unavailable: ide_connect timed out after 10000ms',
+    );
+  });
+
+  it('hides the deferred IDE status after connection succeeds', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        startupIdeConnectionStatus: { state: 'connected' },
+      }),
+    );
+
+    expect(lastFrame()).not.toContain('IDE connecting');
+    expect(lastFrame()).not.toContain('IDE connection unavailable');
+    expect(lastFrame()).toContain('? for shortcuts');
+  });
+
   it('shows the active scheduled task count', () => {
     const { lastFrame } = renderWithWidth(120, createMockUIState(), {
       isCronEnabled: vi.fn(() => true),
@@ -188,6 +232,19 @@ describe('<Footer />', () => {
       unmount?.();
       vi.useRealTimers();
     }
+  });
+
+  it('shows the default approval mode badge when in DEFAULT mode', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        showAutoAcceptIndicator: ApprovalMode.DEFAULT,
+      }),
+    );
+    const frame = lastFrame()!;
+    expect(frame).toContain('⏸');
+    expect(frame).toContain('Ask permissions');
+    expect(frame).not.toContain('? for shortcuts');
   });
 
   it('does not display the working directory or branch name', () => {

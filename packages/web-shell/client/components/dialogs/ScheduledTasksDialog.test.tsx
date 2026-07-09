@@ -405,9 +405,9 @@ describe('ScheduledTasksDialog view-history (bound session)', () => {
       ],
       { onOpenSession },
     );
-    // A bound task shows a "View history" control (with a run count) that opens
-    // its session transcript — not the inline expand toggle.
-    const btn = findButton('View history (1)');
+    // A bound task shows a "View conversation" control (with a run count) that
+    // opens its session transcript — not the inline expand toggle.
+    const btn = findButton('View conversation (1)');
     expect(btn).toBeDefined();
     expect(document.querySelector('button[aria-expanded]')).toBeNull();
     click(btn);
@@ -420,7 +420,7 @@ describe('ScheduledTasksDialog view-history (bound session)', () => {
       onOpenSession,
     });
     // Discoverable even with zero runs — the original "can't find history" pain.
-    const btn = findButton('View history');
+    const btn = findButton('View conversation');
     expect(btn).toBeDefined();
     click(btn);
     expect(onOpenSession).toHaveBeenCalledWith('sess-42');
@@ -432,7 +432,7 @@ describe('ScheduledTasksDialog view-history (bound session)', () => {
     await mount([
       baseTask({ sessionId: 'sess-42', runs: [{ at: 1_700_000_100_000 }] }),
     ]);
-    expect(findButton('View history (1)')).toBeUndefined();
+    expect(findButton('View conversation (1)')).toBeUndefined();
     expect(document.querySelector('button[aria-expanded]')).not.toBeNull();
   });
 });
