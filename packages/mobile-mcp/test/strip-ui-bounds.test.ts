@@ -22,3 +22,14 @@ test("leaves XML without bounds untouched", () => {
 	const xml = `<node text="hi" class="android.widget.TextView"/>`;
 	expect(stripUiBounds(xml)).toBe(xml);
 });
+
+test("preserves malformed bounds-like strings verbatim", () => {
+	// Only well-formed `[x,y][x,y]` integer pairs are stripped; anything else
+	// (extra coordinates, decimals, non-numeric) must pass through untouched.
+	const threeCoords = `<node bounds="[0,0,0][10,10,10]"/>`;
+	const decimal = `<node bounds="[0.5,0][10,10]"/>`;
+	const nonNumeric = `<node bounds="abc"/>`;
+	expect(stripUiBounds(threeCoords)).toBe(threeCoords);
+	expect(stripUiBounds(decimal)).toBe(decimal);
+	expect(stripUiBounds(nonNumeric)).toBe(nonNumeric);
+});
