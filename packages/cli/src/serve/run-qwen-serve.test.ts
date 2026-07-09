@@ -1516,10 +1516,13 @@ describe('runQwenServe runtime startup failures', () => {
 
   it('does not enable browser automation MCP on bearer-protected endpoints', () => {
     expect(
-      isBrowserAutomationMcpAvailable({
-        cdpTunnelOverWs: true,
-        token: 'secret-token',
-      }),
+      isBrowserAutomationMcpAvailable(
+        {
+          cdpTunnelOverWs: true,
+          token: 'secret-token',
+        },
+        process.env,
+      ),
     ).toBe(false);
   });
 
