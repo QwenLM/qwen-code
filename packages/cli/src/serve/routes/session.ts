@@ -223,13 +223,14 @@ export function registerSessionRoutes(
   const resolveRuntimeFromWorkspaceParam = (
     req: Request,
     res: Response,
+    paramName = 'id',
   ): WorkspaceRuntime | null => {
-    const workspaceParam = req.params['id'] ?? '';
+    const workspaceParam = req.params[paramName] ?? '';
     const byId = workspaceRegistry.getByWorkspaceId(workspaceParam);
     if (byId) return byId;
     if (!path.isAbsolute(workspaceParam)) {
       res.status(400).json({
-        error: '`:id` must decode to a workspace id or absolute path',
+        error: `\`:${paramName}\` must decode to a workspace id or absolute path`,
       });
       return null;
     }
@@ -248,35 +249,164 @@ export function registerSessionRoutes(
     return runtime;
   };
 
-  const resolvePrimaryOnlyWorkspaceCwd = (
-    cwd: string,
+  const sendAmbiguousSessionOwner = (
     res: Response,
     route: string,
-  ): string | undefined => {
+    sessionId: string,
+    runtimes: readonly WorkspaceRuntime[],
+  ): void => {
+    const workspaceIds = runtimes.map((runtime) => runtime.workspaceId);
+    logSessionRoutingFailure(route, 'ambiguous', {
+      sessionId,
+      workspaceIds,
+    });
+    res.status(500).json({
+      error: `Session owner is ambiguous for "${sessionId}"`,
+      code: 'ambiguous_session_owner',
+      sessionId,
+      route,
+      workspaceIds,
+    });
+  };
+  const inFlightRestoreOwners = new Map<
+    string,
+    { workspaceCwd: string; count: number }
+  >();
+
+  const sendSessionWorkspaceConflict = (
+    res: Response,
+    route: string,
+    sessionId: string,
+    runtime: WorkspaceRuntime,
+    liveRuntime: WorkspaceRuntime,
+  ): void => {
+    logSessionRoutingFailure(route, 'workspace_conflict', {
+      sessionId,
+      workspaceId: runtime.workspaceId,
+      workspaceCwd: runtime.workspaceCwd,
+      liveWorkspaceId: liveRuntime.workspaceId,
+      liveWorkspaceCwd: liveRuntime.workspaceCwd,
+    });
+    res.status(409).json({
+      error: `Session "${sessionId}" is already live or restoring in another workspace runtime.`,
+      code: 'session_workspace_conflict',
+      sessionId,
+      workspaceCwd: runtime.workspaceCwd,
+      workspaceId: runtime.workspaceId,
+      liveWorkspaceCwd: liveRuntime.workspaceCwd,
+      liveWorkspaceId: liveRuntime.workspaceId,
+    });
+  };
+
+  const enterRestoreOwner = (
+    res: Response,
+    route: string,
+    sessionId: string,
+    runtime: WorkspaceRuntime,
+  ): (() => void) | undefined => {
+    const existing = inFlightRestoreOwners.get(sessionId);
+    if (existing && existing.workspaceCwd !== runtime.workspaceCwd) {
+      const existingRuntime =
+        workspaceRegistry.getByWorkspaceCwd(existing.workspaceCwd) ??
+        workspaceRegistry.primary;
+      sendSessionWorkspaceConflict(
+        res,
+        route,
+        sessionId,
+        runtime,
+        existingRuntime,
+      );
+      return undefined;
+    }
+
+    if (existing) {
+      existing.count += 1;
+    } else {
+      inFlightRestoreOwners.set(sessionId, {
+        workspaceCwd: runtime.workspaceCwd,
+        count: 1,
+      });
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const current = inFlightRestoreOwners.get(sessionId);
+      if (!current || current.workspaceCwd !== runtime.workspaceCwd) return;
+      current.count -= 1;
+      if (current.count <= 0) {
+        inFlightRestoreOwners.delete(sessionId);
+      }
+    };
+  };
+
+  const resolveRuntimeForSessionRestore = (
+    body: Record<string, unknown>,
+    res: Response,
+    route: string,
+    sessionId: string,
+  ): { runtime: WorkspaceRuntime; workspaceCwd: string } | undefined => {
+    const cwd = parseOptionalWorkspaceCwd(body, boundWorkspace, res);
+    if (cwd === undefined) return undefined;
     let key: string;
     try {
       key = canonicalizeWorkspace(cwd);
     } catch (err) {
-      sendBridgeError(res, err, { route });
-      return undefined;
-    }
-    if (key !== boundWorkspace) {
-      const runtime = workspaceRegistry.getByWorkspaceCwd(key);
-      if (runtime && !runtime.primary) {
-        res.status(400).json({
-          error:
-            'Non-primary persisted session load/resume is not supported in Phase 2a.',
-          code: 'secondary_workspace_load_not_supported',
-          workspaceCwd: runtime.workspaceCwd,
-          workspaceId: runtime.workspaceId,
-          route,
+      if ('cwd' in body) {
+        logSessionRoutingFailure(route, 'workspace_mismatch', {
+          requestedWorkspace: cwd,
         });
+        sendWorkspaceMismatch(res, cwd);
         return undefined;
       }
+      sendBridgeError(res, err, { route, sessionId });
+      return undefined;
+    }
+
+    const runtime = workspaceRegistry.resolveWorkspaceCwd(
+      'cwd' in body ? key : undefined,
+    );
+    if (!runtime) {
+      logSessionRoutingFailure(route, 'workspace_mismatch', {
+        requestedWorkspace: key,
+      });
       sendWorkspaceMismatch(res, key);
       return undefined;
     }
-    return key;
+    if (!runtime.primary && !runtime.trusted) {
+      logSessionRoutingFailure(route, 'untrusted_workspace', {
+        workspaceId: runtime.workspaceId,
+        workspaceCwd: runtime.workspaceCwd,
+      });
+      res.status(403).json({
+        error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
+        code: 'untrusted_workspace',
+        workspaceCwd: runtime.workspaceCwd,
+        workspaceId: runtime.workspaceId,
+      });
+      return undefined;
+    }
+
+    const liveOwner = workspaceRegistry.resolveLiveSessionOwner(sessionId);
+    if (liveOwner.kind === 'ambiguous') {
+      sendAmbiguousSessionOwner(res, route, sessionId, liveOwner.runtimes);
+      return undefined;
+    }
+    if (
+      liveOwner.kind === 'found' &&
+      liveOwner.runtime.workspaceCwd !== runtime.workspaceCwd
+    ) {
+      sendSessionWorkspaceConflict(
+        res,
+        route,
+        sessionId,
+        runtime,
+        liveOwner.runtime,
+      );
+      return undefined;
+    }
+
+    return { runtime, workspaceCwd: runtime.workspaceCwd };
   };
 
   const resolveLiveSessionRuntime = (
@@ -321,12 +451,34 @@ export function registerSessionRoutes(
     async (req, res) => {
       const sessionId = requireSessionId(req, res);
       if (sessionId === null) return;
-      const runtime = resolveLiveSessionRuntime(sessionId, res, route);
-      if (!runtime) return;
       try {
+        const runtime = resolveLiveSessionRuntime(sessionId, res, route);
+        if (!runtime) return;
         await archiveCoordinator.runSharedMany([sessionId], async () => {
           await handler(req, res, sessionId, runtime);
         });
+      } catch (err) {
+        sendBridgeError(res, err, { route, sessionId });
+      }
+    };
+
+  const withOwnerReadSession =
+    (
+      route: string,
+      handler: (
+        req: Request,
+        res: Response,
+        sessionId: string,
+        runtime: WorkspaceRuntime,
+      ) => Promise<void> | void,
+    ): RequestHandler =>
+    async (req, res) => {
+      const sessionId = requireSessionId(req, res);
+      if (sessionId === null) return;
+      try {
+        const runtime = resolveLiveSessionRuntime(sessionId, res, route);
+        if (!runtime) return;
+        await handler(req, res, sessionId, runtime);
       } catch (err) {
         sendBridgeError(res, err, { route, sessionId });
       }
@@ -523,31 +675,50 @@ export function registerSessionRoutes(
       const sessionId = requireSessionId(req, res);
       if (!sessionId) return;
       const body = safeBody(req);
-      const cwd = parseOptionalWorkspaceCwd(body, boundWorkspace, res);
-      if (cwd === undefined) return;
-      const primaryCwd = resolvePrimaryOnlyWorkspaceCwd(
-        cwd,
+      const route = `POST /session/:id/${action}`;
+      let resolvedRuntime:
+        | { runtime: WorkspaceRuntime; workspaceCwd: string }
+        | undefined;
+      try {
+        resolvedRuntime = resolveRuntimeForSessionRestore(
+          body,
+          res,
+          route,
+          sessionId,
+        );
+      } catch (err) {
+        sendBridgeError(res, err, { route, sessionId });
+        return;
+      }
+      if (resolvedRuntime === undefined) return;
+      const { runtime, workspaceCwd } = resolvedRuntime;
+      const releaseRestoreOwner = enterRestoreOwner(
         res,
-        `POST /session/:id/${action}`,
+        route,
+        sessionId,
+        runtime,
       );
-      if (primaryCwd === undefined) return;
+      if (!releaseRestoreOwner) return;
       const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
+      if (clientId === null) {
+        releaseRestoreOwner();
+        return;
+      }
       try {
         const session = await archiveCoordinator.runSharedMany(
           [sessionId],
           async () => {
-            await assertSessionLoadable(primaryCwd, sessionId);
+            await assertSessionLoadable(workspaceCwd, sessionId);
             return action === 'load'
-              ? await bridge.loadSession({
+              ? await runtime.bridge.loadSession({
                   sessionId,
-                  workspaceCwd: primaryCwd,
+                  workspaceCwd,
                   historyReplay: 'response',
                   ...(clientId !== undefined ? { clientId } : {}),
                 })
-              : await bridge.resumeSession({
+              : await runtime.bridge.resumeSession({
                   sessionId,
-                  workspaceCwd: primaryCwd,
+                  workspaceCwd,
                   ...(clientId !== undefined ? { clientId } : {}),
                 });
           },
@@ -568,13 +739,13 @@ export function registerSessionRoutes(
         // restored session in `byId` with no client holding its id.
         if (!res.writable) {
           if (!session.attached) {
-            bridge
+            runtime.bridge
               .killSession(session.sessionId, { requireZeroAttaches: true })
               .catch(() => {
                 // Best-effort cleanup; channel.exited will eventually reap.
               });
           } else {
-            bridge
+            runtime.bridge
               .detachClient(session.sessionId, session.clientId)
               .catch(() => {
                 // Best-effort cleanup; channel.exited will eventually reap.
@@ -585,9 +756,11 @@ export function registerSessionRoutes(
         res.status(200).json(session);
       } catch (err) {
         sendBridgeError(res, err, {
-          route: `POST /session/:id/${action}`,
+          route,
           sessionId,
         });
+      } finally {
+        releaseRestoreOwner();
       }
     };
 
@@ -753,113 +926,106 @@ export function registerSessionRoutes(
     }
   });
 
-  app.get('/session/:id/context', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    try {
-      res.status(200).json(await bridge.getSessionContextStatus(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/context',
-        sessionId,
-      });
-    }
-  });
+  app.get(
+    '/session/:id/context',
+    withOwnerReadSession(
+      'GET /session/:id/context',
+      async (_req, res, sessionId, runtime) => {
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionContextStatus(sessionId));
+      },
+    ),
+  );
 
-  app.get('/session/:id/context-usage', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    try {
-      res.status(200).json(
-        await bridge.getSessionContextUsageStatus(sessionId, {
-          detail: req.query['detail'] === 'true',
-        }),
-      );
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/context-usage',
-        sessionId,
-      });
-    }
-  });
+  app.get(
+    '/session/:id/context-usage',
+    withOwnerReadSession(
+      'GET /session/:id/context-usage',
+      async (req, res, sessionId, runtime) => {
+        res.status(200).json(
+          await runtime.bridge.getSessionContextUsageStatus(sessionId, {
+            detail: req.query['detail'] === 'true',
+          }),
+        );
+      },
+    ),
+  );
 
-  app.get('/session/:id/stats', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    try {
-      res.status(200).json(await bridge.getSessionStatsStatus(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/stats',
-        sessionId,
-      });
-    }
-  });
+  app.get(
+    '/session/:id/stats',
+    withOwnerReadSession(
+      'GET /session/:id/stats',
+      async (_req, res, sessionId, runtime) => {
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionStatsStatus(sessionId));
+      },
+    ),
+  );
 
-  app.get('/session/:id/supported-commands', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    try {
-      res
-        .status(200)
-        .json(await bridge.getSessionSupportedCommandsStatus(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/supported-commands',
-        sessionId,
-      });
-    }
-  });
+  app.get(
+    '/session/:id/supported-commands',
+    withOwnerReadSession(
+      'GET /session/:id/supported-commands',
+      async (_req, res, sessionId, runtime) => {
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.getSessionSupportedCommandsStatus(sessionId),
+          );
+      },
+    ),
+  );
 
-  app.get('/session/:id/tasks', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    try {
-      res.status(200).json(await bridge.getSessionTasksStatus(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/tasks',
-        sessionId,
-      });
-    }
-  });
+  app.get(
+    '/session/:id/tasks',
+    withOwnerReadSession(
+      'GET /session/:id/tasks',
+      async (_req, res, sessionId, runtime) => {
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionTasksStatus(sessionId));
+      },
+    ),
+  );
 
-  app.get('/session/:id/lsp', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    try {
-      res.status(200).json(await bridge.getSessionLspStatus(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/lsp',
-        sessionId,
-      });
-    }
-  });
+  app.get(
+    '/session/:id/lsp',
+    withOwnerReadSession(
+      'GET /session/:id/lsp',
+      async (_req, res, sessionId, runtime) => {
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionLspStatus(sessionId));
+      },
+    ),
+  );
 
   // GET /session/:id/hooks — read-only session-scoped hook status.
-  app.get('/session/:id/hooks', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    try {
-      res.status(200).json(await bridge.getSessionHooksStatus(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, { route: 'GET /session/:id/hooks', sessionId });
-    }
-  });
+  app.get(
+    '/session/:id/hooks',
+    withOwnerReadSession(
+      'GET /session/:id/hooks',
+      async (_req, res, sessionId, runtime) => {
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionHooksStatus(sessionId));
+      },
+    ),
+  );
 
-  app.get('/session/:id/artifacts', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    try {
-      res.status(200).json(await bridge.getSessionArtifacts(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/artifacts',
-        sessionId,
-      });
-    }
-  });
+  app.get(
+    '/session/:id/artifacts',
+    withOwnerReadSession(
+      'GET /session/:id/artifacts',
+      async (_req, res, sessionId, runtime) => {
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionArtifacts(sessionId));
+      },
+    ),
+  );
 
   app.post(
     '/session/:id/artifacts',
@@ -1516,99 +1682,128 @@ export function registerSessionRoutes(
     },
   );
 
-  app.get('/workspace/:id/sessions', async (req, res) => {
-    // Express decodes URL-encoded path params automatically; clients pass
-    // the absolute workspace cwd encoded (e.g.
-    // GET /workspace/%2Fwork%2Fa/sessions).
-    const runtime = resolveRuntimeFromWorkspaceParam(req, res);
-    if (runtime === null) return;
-    const key = runtime.workspaceCwd;
-    try {
-      const cursor =
-        typeof req.query['cursor'] === 'string'
-          ? req.query['cursor']
-          : undefined;
-      const size = parseSessionPageSizeQuery(req.query['size']);
-      const rawView = req.query['view'];
-      let view: 'organized' | undefined;
-      if (rawView !== undefined) {
-        if (rawView !== 'organized') {
+  const listWorkspaceSessionsHandler =
+    (paramName: string): RequestHandler =>
+    async (req, res) => {
+      const route =
+        paramName === 'workspace'
+          ? 'GET /workspaces/:workspace/sessions'
+          : 'GET /workspace/:id/sessions';
+      // Express decodes URL-encoded path params automatically; clients pass
+      // the absolute workspace cwd encoded (e.g.
+      // GET /workspace/%2Fwork%2Fa/sessions).
+      const runtime = resolveRuntimeFromWorkspaceParam(req, res, paramName);
+      if (runtime === null) return;
+      if (!runtime.primary && !runtime.trusted) {
+        logSessionRoutingFailure(route, 'untrusted_workspace', {
+          workspaceId: runtime.workspaceId,
+          workspaceCwd: runtime.workspaceCwd,
+        });
+        res.status(403).json({
+          error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
+          code: 'untrusted_workspace',
+          workspaceCwd: runtime.workspaceCwd,
+          workspaceId: runtime.workspaceId,
+        });
+        return;
+      }
+      const key = runtime.workspaceCwd;
+      try {
+        const cursor =
+          typeof req.query['cursor'] === 'string'
+            ? req.query['cursor']
+            : undefined;
+        const size = parseSessionPageSizeQuery(req.query['size']);
+        const rawView = req.query['view'];
+        let view: 'organized' | undefined;
+        if (rawView !== undefined) {
+          if (rawView !== 'organized') {
+            res.status(400).json({
+              error: '`view` must be "organized"',
+              code: 'invalid_session_view',
+            });
+            return;
+          }
+          view = 'organized';
+        }
+        const group =
+          typeof req.query['group'] === 'string'
+            ? req.query['group']
+            : undefined;
+        if (group !== undefined && view !== 'organized') {
           res.status(400).json({
-            error: '`view` must be "organized"',
-            code: 'invalid_session_view',
+            error: '`group` requires `view=organized`',
+            code: 'invalid_session_group_filter',
           });
           return;
         }
-        view = 'organized';
-      }
-      const group =
-        typeof req.query['group'] === 'string' ? req.query['group'] : undefined;
-      if (group !== undefined && view !== 'organized') {
-        res.status(400).json({
-          error: '`group` requires `view=organized`',
-          code: 'invalid_session_group_filter',
-        });
-        return;
-      }
-      const rawArchiveState = req.query['archiveState'];
-      let archiveState: SessionArchiveState | undefined;
-      if (rawArchiveState !== undefined) {
-        if (
-          typeof rawArchiveState !== 'string' ||
-          (rawArchiveState !== 'active' && rawArchiveState !== 'archived')
-        ) {
+        const rawArchiveState = req.query['archiveState'];
+        let archiveState: SessionArchiveState | undefined;
+        if (rawArchiveState !== undefined) {
+          if (
+            typeof rawArchiveState !== 'string' ||
+            (rawArchiveState !== 'active' && rawArchiveState !== 'archived')
+          ) {
+            res.status(400).json({
+              error: '`archiveState` must be "active" or "archived"',
+              code: 'invalid_archive_state',
+            });
+            return;
+          }
+          archiveState = rawArchiveState;
+        }
+        if (!runtime.primary && (archiveState === 'archived' || view)) {
           res.status(400).json({
-            error: '`archiveState` must be "active" or "archived"',
-            code: 'invalid_archive_state',
+            error:
+              'Non-primary workspace session listing is live-only in Phase 2a.',
+            code: 'non_primary_live_sessions_only',
           });
           return;
         }
-        archiveState = rawArchiveState;
-      }
-      if (!runtime.primary && (archiveState === 'archived' || view)) {
-        res.status(400).json({
-          error:
-            'Non-primary workspace session listing is live-only in Phase 2a.',
-          code: 'non_primary_live_sessions_only',
+        const options = {
+          ...(cursor !== undefined ? { cursor } : {}),
+          ...(size !== undefined ? { size } : {}),
+          ...(archiveState !== undefined ? { archiveState } : {}),
+          ...(view !== undefined ? { view } : {}),
+          ...(group !== undefined ? { group } : {}),
+        };
+        const result = runtime.primary
+          ? await listWorkspaceSessionsForResponse(runtime.bridge, key, options)
+          : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
+        res.status(200).json({
+          sessions: result.sessions,
+          ...(result.nextCursor != null
+            ? { nextCursor: result.nextCursor }
+            : {}),
+          ...(result.liveMergeFailed ? { liveMergeFailed: true } : {}),
+          ...(result.truncated ? { truncated: true } : {}),
         });
-        return;
-      }
-      const options = {
-        ...(cursor !== undefined ? { cursor } : {}),
-        ...(size !== undefined ? { size } : {}),
-        ...(archiveState !== undefined ? { archiveState } : {}),
-        ...(view !== undefined ? { view } : {}),
-        ...(group !== undefined ? { group } : {}),
-      };
-      const result = runtime.primary
-        ? await listWorkspaceSessionsForResponse(runtime.bridge, key, options)
-        : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
-      res.status(200).json({
-        sessions: result.sessions,
-        ...(result.nextCursor != null ? { nextCursor: result.nextCursor } : {}),
-        ...(result.liveMergeFailed ? { liveMergeFailed: true } : {}),
-        ...(result.truncated ? { truncated: true } : {}),
-      });
-    } catch (err) {
-      if (err instanceof InvalidCursorError) {
-        res.status(400).json({
-          error: err.message,
-          code: 'invalid_cursor',
+      } catch (err) {
+        if (err instanceof InvalidCursorError) {
+          res.status(400).json({
+            error: err.message,
+            code: 'invalid_cursor',
+          });
+          return;
+        }
+        if (sendSessionOrganizationError(res, err)) return;
+        writeStderrLine(
+          `qwen serve: failed to list sessions for workspace ${safeLogValue(
+            key,
+          )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
+        );
+        res.status(500).json({
+          error: 'Failed to list sessions',
+          code: 'session_list_failed',
         });
-        return;
       }
-      if (sendSessionOrganizationError(res, err)) return;
-      writeStderrLine(
-        `qwen serve: failed to list sessions for workspace ${safeLogValue(
-          key,
-        )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
-      );
-      res.status(500).json({
-        error: 'Failed to list sessions',
-        code: 'session_list_failed',
-      });
-    }
-  });
+    };
+
+  app.get('/workspace/:id/sessions', listWorkspaceSessionsHandler('id'));
+  app.get(
+    '/workspaces/:workspace/sessions',
+    listWorkspaceSessionsHandler('workspace'),
+  );
 
   app.post(
     '/session/:id/model',

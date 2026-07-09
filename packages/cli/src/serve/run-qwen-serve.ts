@@ -107,6 +107,7 @@ import {
 } from '../utils/startupProfiler.js';
 import type { ServiceInfo } from '../commands/channel/pidfile.js';
 import { findCliEntryPath } from '../commands/channel/cli-entry-path.js';
+import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 
 // Reverse MCP channel; enabled only by explicit option or env opt-in.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
@@ -799,6 +800,8 @@ async function loadServeRuntimeModules() {
     createTotalSessionAdmissionController:
       totalSessionAdmissionModule.createTotalSessionAdmissionController,
     createWorkspaceRegistry: workspaceRegistryModule.createWorkspaceRegistry,
+    createWorkspaceSessionOwnerIndex:
+      workspaceRegistryModule.createWorkspaceSessionOwnerIndex,
   };
 }
 
@@ -851,6 +854,7 @@ function currentServeFeaturesForRunQwenServe(
     // so the bootstrap `/capabilities` window doesn't briefly under-report them.
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
+    browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts),
   });
 }
 
@@ -2456,6 +2460,7 @@ export async function runQwenServe(
               : [],
       },
     );
+    const sessionOwnerIndex = runtime.createWorkspaceSessionOwnerIndex();
     const persistDisabledToolsFn = (
       workspace: string,
       toolName: string,
@@ -2536,6 +2541,7 @@ export async function runQwenServe(
         clientMcpSender: clientMcpSenderRegistry.lookup,
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
+        sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
         ...(opts.maxPendingPromptsPerSession !== undefined
           ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
           : {}),
@@ -2803,6 +2809,7 @@ export async function runQwenServe(
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
+        sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
         ...(opts.maxPendingPromptsPerSession !== undefined
           ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
           : {}),
@@ -2933,7 +2940,9 @@ export async function runQwenServe(
     }
 
     const workspaceRegistry: WorkspaceRegistry =
-      runtime.createWorkspaceRegistry(workspaceRuntimes);
+      runtime.createWorkspaceRegistry(workspaceRuntimes, {
+        sessionOwnerIndex,
+      });
 
     core.registerDaemonGaugeCallbacks({
       sessionCount: () =>
