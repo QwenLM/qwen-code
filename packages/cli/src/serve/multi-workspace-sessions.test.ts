@@ -5,8 +5,11 @@
  */
 
 import * as path from 'node:path';
+import { promises as fsp } from 'node:fs';
+import * as os from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import { Storage } from '@qwen-code/qwen-code-core';
 import {
   SessionNotFoundError,
   type AcpSessionBridge,
@@ -81,6 +84,47 @@ function makeSummary(
     hasActivePrompt: false,
     ...overrides,
   };
+}
+
+async function writeStoredSession(input: {
+  sessionId: string;
+  cwd: string;
+  timestamp: string;
+  prompt: string;
+  mtime: Date;
+}): Promise<void> {
+  const chatsDir = path.join(new Storage(input.cwd).getProjectDir(), 'chats');
+  await fsp.mkdir(chatsDir, { recursive: true });
+  const filePath = path.join(chatsDir, `${input.sessionId}.jsonl`);
+  const record = {
+    uuid: `${input.sessionId}-user-1`,
+    parentUuid: null,
+    sessionId: input.sessionId,
+    timestamp: input.timestamp,
+    type: 'user',
+    message: { role: 'user', parts: [{ text: input.prompt }] },
+    cwd: input.cwd,
+  };
+  await fsp.writeFile(filePath, `${JSON.stringify(record)}\n`, 'utf8');
+  await fsp.utimes(filePath, input.mtime, input.mtime);
+}
+
+async function withRuntimeDir<T>(fn: () => Promise<T>): Promise<T> {
+  const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+  const runtimeDir = await fsp.mkdtemp(
+    path.join(os.tmpdir(), 'qwen-multi-workspace-sessions-'),
+  );
+  process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+  try {
+    return await fn();
+  } finally {
+    if (previousRuntimeDir === undefined) {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    } else {
+      process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+    }
+    await fsp.rm(runtimeDir, { recursive: true, force: true });
+  }
 }
 
 function makeBridge(
@@ -715,26 +759,87 @@ describe('multi-workspace session dispatch', () => {
     expect(secondaryBridge.restoreCalls).toEqual([]);
   });
 
-  it('lists non-primary workspace sessions live-only by workspace id', async () => {
+  it('lists active persisted and live non-primary workspace sessions by workspace id', async () => {
+    await withRuntimeDir(async () => {
+      const storedOnlyId = '550e8400-e29b-41d4-a716-446655440101';
+      const liveAndStoredId = '550e8400-e29b-41d4-a716-446655440102';
+      await writeStoredSession({
+        sessionId: storedOnlyId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'secondary stored only prompt',
+        mtime: new Date('2026-07-08T00:04:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: liveAndStoredId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:01:00.000Z',
+        prompt: 'secondary stored live prompt',
+        mtime: new Date('2026-07-08T00:05:00.000Z'),
+      });
+      const { app } = makeHarness({
+        secondarySummaries: [
+          makeSummary(liveAndStoredId, SECONDARY_CWD, {
+            displayName: 'secondary live title',
+          }),
+        ],
+      });
+
+      const res = await request(app)
+        .get('/workspace/secondary-id/sessions')
+        .set('Host', host());
+
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toHaveLength(2);
+      expect(res.body.sessions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionId: liveAndStoredId,
+            workspaceCwd: SECONDARY_CWD,
+            displayName: 'secondary live title',
+            clientCount: 1,
+            hasActivePrompt: false,
+          }),
+          expect.objectContaining({
+            sessionId: storedOnlyId,
+            workspaceCwd: SECONDARY_CWD,
+            displayName: 'secondary stored only prompt',
+            clientCount: 0,
+            hasActivePrompt: false,
+          }),
+        ]),
+      );
+    });
+  });
+
+  it('rejects unsupported non-primary persisted session list views', async () => {
     const { app } = makeHarness();
-
-    const res = await request(app)
-      .get('/workspace/secondary-id/sessions')
-      .set('Host', host());
-
-    expect(res.status).toBe(200);
-    expect(res.body.sessions).toEqual([
-      expect.objectContaining({
-        sessionId: 'secondary-session',
-        workspaceCwd: SECONDARY_CWD,
-      }),
-    ]);
 
     const archived = await request(app)
       .get('/workspace/secondary-id/sessions?archiveState=archived')
       .set('Host', host());
     expect(archived.status).toBe(400);
-    expect(archived.body.code).toBe('non_primary_live_sessions_only');
+    expect(archived.body.code).toBe(
+      'non_primary_session_list_option_not_supported',
+    );
+
+    const organized = await request(app)
+      .get('/workspace/secondary-id/sessions?view=organized')
+      .set('Host', host());
+    expect(organized.status).toBe(400);
+    expect(organized.body.code).toBe(
+      'non_primary_session_list_option_not_supported',
+    );
+
+    const group = await request(app)
+      .get('/workspace/secondary-id/sessions?group=pinned')
+      .set('Host', host());
+    expect(group.status).toBe(400);
+    expect(group.body.code).toBe('invalid_session_group_filter');
+  });
+
+  it('returns workspace_mismatch for unknown absolute workspace session lists', async () => {
+    const { app } = makeHarness();
 
     const unknown = await request(app)
       .get(`/workspace/${encodeURIComponent(UNKNOWN_CWD)}/sessions`)
@@ -742,6 +847,120 @@ describe('multi-workspace session dispatch', () => {
     expect(unknown.status).toBe(400);
     expect(unknown.body.code).toBe('workspace_mismatch');
     expect(unknown.body.workspaceCount).toBe(2);
+  });
+
+  it('lists active persisted non-primary sessions by encoded workspace cwd', async () => {
+    await withRuntimeDir(async () => {
+      const storedId = '550e8400-e29b-41d4-a716-446655440103';
+      await writeStoredSession({
+        sessionId: storedId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'secondary stored by cwd',
+        mtime: new Date('2026-07-08T00:04:00.000Z'),
+      });
+      const { app } = makeHarness({ secondarySummaries: [] });
+
+      const res = await request(app)
+        .get(`/workspaces/${encodeURIComponent(SECONDARY_CWD)}/sessions`)
+        .set('Host', host());
+
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toEqual([
+        expect.objectContaining({
+          sessionId: storedId,
+          workspaceCwd: SECONDARY_CWD,
+          displayName: 'secondary stored by cwd',
+        }),
+      ]);
+    });
+  });
+
+  it('pages active persisted non-primary workspace sessions with numeric cursors', async () => {
+    await withRuntimeDir(async () => {
+      const newestId = '550e8400-e29b-41d4-a716-446655440104';
+      const middleId = '550e8400-e29b-41d4-a716-446655440105';
+      const oldestId = '550e8400-e29b-41d4-a716-446655440106';
+      await writeStoredSession({
+        sessionId: newestId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:03:00.000Z',
+        prompt: 'secondary newest',
+        mtime: new Date('2026-07-08T00:03:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: middleId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:02:00.000Z',
+        prompt: 'secondary middle',
+        mtime: new Date('2026-07-08T00:02:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: oldestId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:01:00.000Z',
+        prompt: 'secondary oldest',
+        mtime: new Date('2026-07-08T00:01:00.000Z'),
+      });
+      const { app } = makeHarness({ secondarySummaries: [] });
+
+      const first = await request(app)
+        .get('/workspace/secondary-id/sessions?size=2')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        first.body.sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        ),
+      ).toEqual([newestId, middleId]);
+      expect(first.body.nextCursor).toEqual(expect.any(String));
+
+      const second = await request(app)
+        .get(
+          `/workspace/secondary-id/sessions?size=2&cursor=${encodeURIComponent(
+            first.body.nextCursor as string,
+          )}`,
+        )
+        .set('Host', host())
+        .expect(200);
+      expect(
+        second.body.sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        ),
+      ).toEqual([oldestId]);
+      expect(second.body.nextCursor).toBeUndefined();
+    });
+  });
+
+  it('falls back to live-only listing when persisted probing fails', async () => {
+    await withRuntimeDir(async () => {
+      const chatsDir = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+      );
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.chmod(chatsDir, 0o000);
+      try {
+        const { app } = makeHarness({
+          secondarySummaries: [
+            makeSummary('secondary-live-fallback', SECONDARY_CWD),
+          ],
+        });
+
+        const res = await request(app)
+          .get('/workspace/secondary-id/sessions')
+          .set('Host', host())
+          .expect(200);
+        expect(res.body.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: 'secondary-live-fallback',
+            workspaceCwd: SECONDARY_CWD,
+          }),
+        ]);
+      } finally {
+        await fsp.chmod(chatsDir, 0o700);
+      }
+    });
   });
 
   it('preserves the legacy invalid workspace selector message', async () => {
@@ -822,5 +1041,57 @@ describe('multi-workspace session dispatch', () => {
       ),
     ).toEqual(['secondary-c']);
     expect(second.body.nextCursor).toBeUndefined();
+  });
+
+  it('keeps live cursor pagination stable when persisted sessions appear mid-page', async () => {
+    await withRuntimeDir(async () => {
+      const { app } = makeHarness({
+        secondarySummaries: [
+          makeSummary('secondary-b', SECONDARY_CWD, {
+            updatedAt: '2026-07-08T00:03:00.000Z',
+          }),
+          makeSummary('secondary-a', SECONDARY_CWD, {
+            updatedAt: '2026-07-08T00:03:00.000Z',
+          }),
+          makeSummary('secondary-c', SECONDARY_CWD, {
+            updatedAt: '2026-07-08T00:02:00.000Z',
+          }),
+        ],
+      });
+
+      const first = await request(app)
+        .get('/workspace/secondary-id/sessions?size=2')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        first.body.sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        ),
+      ).toEqual(['secondary-a', 'secondary-b']);
+      expect(first.body.nextCursor).toEqual(expect.any(String));
+
+      await writeStoredSession({
+        sessionId: '550e8400-e29b-41d4-a716-446655440107',
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:04:00.000Z',
+        prompt: 'secondary persisted appeared mid-page',
+        mtime: new Date('2026-07-08T00:04:00.000Z'),
+      });
+
+      const second = await request(app)
+        .get(
+          `/workspace/secondary-id/sessions?size=2&cursor=${encodeURIComponent(
+            first.body.nextCursor as string,
+          )}`,
+        )
+        .set('Host', host())
+        .expect(200);
+      expect(
+        second.body.sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        ),
+      ).toEqual(['secondary-c']);
+      expect(second.body.nextCursor).toBeUndefined();
+    });
   });
 });

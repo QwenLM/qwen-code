@@ -278,6 +278,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // frames. Advertised when explicitly enabled or when the daemon is serving a
   // Chrome extension origin.
   cdp_tunnel_over_ws: { since: 'v1' },
+  // Browser automation MCP tools are available only when the CDP tunnel is on
+  // and the operator has configured an external stdio adapter via
+  // QWEN_CDP_MCP_COMMAND. This is separate from `cdp_tunnel_over_ws`: a daemon
+  // may expose the tunnel while intentionally not bundling/registering a
+  // chrome-devtools MCP adapter.
+  browser_automation_mcp: { since: 'v1' },
   // Daemon hosts the `/voice/stream` WebSocket: the browser captures audio and
   // streams raw PCM, the daemon transcribes server-side via the configured
   // `voiceModel` (credentials never reach the client). Advertised
@@ -318,6 +324,11 @@ export interface AdvertiseFeatureToggles {
    * (`cdp_tunnel_over_ws`, issue #5626).
    */
   cdpTunnelOverWsEnabled?: boolean;
+  /**
+   * Whether the daemon can register browser automation MCP tools for the CDP
+   * tunnel (`browser_automation_mcp`, issue #5626).
+   */
+  browserAutomationMcpAvailable?: boolean;
   voiceWsAvailable?: boolean;
   multiWorkspaceSessionsEnabled?: boolean;
 }
@@ -392,6 +403,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   ['client_mcp_over_ws', (toggles) => toggles.clientMcpOverWsEnabled === true],
   ['cdp_tunnel_over_ws', (toggles) => toggles.cdpTunnelOverWsEnabled === true],
+  [
+    'browser_automation_mcp',
+    (toggles) => toggles.browserAutomationMcpAvailable === true,
+  ],
   [
     // Advertised whenever the `/voice/stream` WS endpoint exists. A configured
     // token (or `--require-auth`) no longer suppresses it: browsers can't set
