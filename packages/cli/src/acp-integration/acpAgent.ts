@@ -87,6 +87,7 @@ import type {
   DiscoveredMCPPrompt,
   WorkspaceRememberContextMode,
   ChatRecord,
+  HistoryGap,
 } from '@qwen-code/qwen-code-core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
@@ -339,11 +340,13 @@ async function collectHistoryReplayUpdates({
   sessionId,
   config,
   records,
+  gaps,
   cumulativeUsage,
 }: {
   sessionId: string;
   config: Config;
   records: ChatRecord[];
+  gaps?: HistoryGap[];
   cumulativeUsage: CumulativeUsage;
 }): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
   const updates: SessionUpdate[] = [];
@@ -357,7 +360,7 @@ async function collectHistoryReplayUpdates({
   };
 
   try {
-    await new HistoryReplayer(replayContext).replay(records);
+    await new HistoryReplayer(replayContext).replay(records, gaps);
   } catch (error) {
     const replayError = error instanceof Error ? error.message : String(error);
     debugLogger.warn(
@@ -3145,6 +3148,7 @@ class QwenAgent implements Agent {
             sessionId: params.sessionId,
             config,
             records,
+            gaps: sessionData?.historyGaps,
             cumulativeUsage: replayUsage,
           });
           replayUpdates = liftSessionUpdateTimestamps(replay.updates);
@@ -7451,6 +7455,7 @@ class QwenAgent implements Agent {
           sessionId,
           config: this.config,
           records: sessionData.conversation.messages,
+          gaps: sessionData.historyGaps,
           cumulativeUsage: createReplayCumulativeUsage(),
         });
 
@@ -8294,7 +8299,10 @@ class QwenAgent implements Agent {
     }
 
     if (options.replayHistory !== false && sessionData?.conversation.messages) {
-      await session.replayHistory(sessionData.conversation.messages);
+      await session.replayHistory(
+        sessionData.conversation.messages,
+        sessionData.historyGaps,
+      );
     }
 
     if (options.startPostReplayServices !== false) {

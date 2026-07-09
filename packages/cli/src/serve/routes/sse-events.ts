@@ -21,6 +21,8 @@ import {
   parseLastEventId,
   parseMaxQueuedQuery,
 } from '../server/request-helpers.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
+import { requireSessionRuntime } from './session-runtime.js';
 
 let activeSseCount = 0;
 
@@ -30,6 +32,7 @@ export function getActiveSseCount(): number {
 
 interface RegisterSseEventsRoutesDeps {
   bridge: AcpSessionBridge;
+  workspaceRegistry: WorkspaceRegistry;
   daemonLog?: DaemonLogger;
   writerIdleTimeoutMs?: number;
   sendBridgeError: SendBridgeError;
@@ -76,7 +79,8 @@ export function registerSseEventsRoutes(
   app: Application,
   deps: RegisterSseEventsRoutesDeps,
 ): void {
-  const { bridge, daemonLog, sendBridgeError, writerIdleTimeoutMs } = deps;
+  const { workspaceRegistry, daemonLog, sendBridgeError, writerIdleTimeoutMs } =
+    deps;
 
   app.get('/session/:id/events', (req, res) => {
     const sessionId = req.params['id'];
@@ -91,8 +95,16 @@ export function registerSseEventsRoutes(
     let iter: AsyncIterator<BridgeEvent> | undefined;
     const abort = new AbortController();
     try {
+      const runtime = requireSessionRuntime({
+        sessionId,
+        route: 'GET /session/:id/events',
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+      if (!runtime) return;
       const snapshot = req.query['snapshot'] === '1';
-      const iterable = bridge.subscribeEvents(sessionId, {
+      const iterable = runtime.bridge.subscribeEvents(sessionId, {
         signal: abort.signal,
         lastEventId,
         ...(maxQueued !== undefined ? { maxQueued } : {}),

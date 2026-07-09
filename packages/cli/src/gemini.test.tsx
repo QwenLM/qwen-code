@@ -201,6 +201,14 @@ vi.mock('./config/lsp-config-watcher.js', () => ({
   },
 }));
 
+vi.mock('./config/extension-file-watcher.js', () => ({
+  ExtensionFileWatcher: class {
+    startWatching() {}
+    restartWatching() {}
+    stopWatching() {}
+  },
+}));
+
 function withLspDisabledConfig<T extends object>(
   config: T,
 ): T & {

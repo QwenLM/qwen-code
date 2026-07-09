@@ -18,6 +18,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolResult,
   ChatRecord,
+  HistoryGap,
   AgentEventEmitter,
   StopHookOutput,
   HookExecutionRequest,
@@ -1085,9 +1086,12 @@ export class Session implements SessionContext {
     );
   }
 
-  async replayHistory(records: ChatRecord[]): Promise<void> {
+  async replayHistory(
+    records: ChatRecord[],
+    gaps?: HistoryGap[],
+  ): Promise<void> {
     this.primeTurnFromHistory(records);
-    await this.historyReplayer.replay(records);
+    await this.historyReplayer.replay(records, gaps);
   }
 
   rewindToTurn(

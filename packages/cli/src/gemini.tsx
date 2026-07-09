@@ -42,6 +42,8 @@ import {
 import { SettingsWatcher } from './config/settingsWatcher.js';
 import { registerMcpHotReload } from './config/hot-reload.js';
 import { LspConfigWatcher } from './config/lsp-config-watcher.js';
+import { ExtensionFileWatcher } from './config/extension-file-watcher.js';
+import { ExtensionRefreshState } from './config/extension-refresh-state.js';
 import { initializeI18n, resolveLanguageSetting } from './i18n/index.js';
 import {
   setupStartupWorktree,
@@ -77,6 +79,25 @@ import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js'
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
 
 const debugLogger = createDebugLogger('STARTUP');
+
+interface RuntimeLspReinitializeResult {
+  reconcile: {
+    added: string[];
+    removed: string[];
+    restarted: string[];
+    unchanged: string[];
+    failed: string[];
+  };
+  skipped: Array<{ name: string }>;
+}
+
+interface RuntimeLspClient {
+  reinitialize?: () => Promise<RuntimeLspReinitializeResult>;
+}
+
+interface RuntimeLspConfig {
+  reinitializeLsp?: () => Promise<RuntimeLspReinitializeResult | undefined>;
+}
 
 function clearCorruptionEnvVars(): void {
   delete process.env[ENV_CORRUPTED_PATH];
@@ -615,6 +636,28 @@ export async function main() {
 
     registerLspHotReload(config, registerCleanup);
 
+    const extensionRefreshState = new ExtensionRefreshState();
+    const extensionFileWatcher =
+      isBareMode(argv.bare) || config.isSafeMode()
+        ? undefined
+        : new ExtensionFileWatcher(config, undefined, extensionRefreshState);
+    extensionFileWatcher?.startWatching();
+    if (extensionFileWatcher) {
+      const restartExtensionWatcher = () =>
+        extensionFileWatcher.restartWatching();
+      extensionRefreshState.on(
+        AppEvent.ExtensionsReloaded,
+        restartExtensionWatcher,
+      );
+      registerCleanup(() => {
+        extensionRefreshState.off(
+          AppEvent.ExtensionsReloaded,
+          restartExtensionWatcher,
+        );
+        extensionFileWatcher.stopWatching();
+      });
+    }
+
     // Phase D-1: persist the WorktreeSession sidecar so Phase C's restore
     // machinery on a subsequent `--resume` picks the worktree back up, and
     // capture any override of a previously-resumed session's worktree so
@@ -850,6 +893,7 @@ export async function main() {
         initializationResult!,
         {
           postRenderConnectIde: deferIdeConnection,
+          extensionRefreshState,
         },
       );
       // Clean up corruption env vars so subsequent relaunch children
@@ -1047,9 +1091,15 @@ export function registerLspHotReload(
   config: Config,
   registerCleanup: (fn: () => void | Promise<void>) => void,
 ): void {
+  const lspClient = config.getLspClient?.() as
+    | (ReturnType<Config['getLspClient']> & RuntimeLspClient)
+    | undefined;
+  const runtimeConfig = config as Config & RuntimeLspConfig;
+  const reinitializeLsp = runtimeConfig.reinitializeLsp;
   if (
     config.isLspEnabled?.() !== true ||
-    !config.getLspClient?.()?.reinitialize
+    !lspClient?.reinitialize ||
+    !reinitializeLsp
   ) {
     return;
   }
@@ -1068,7 +1118,7 @@ export function registerLspHotReload(
     );
     let errorReported = false;
     try {
-      const result = await config.reinitializeLsp();
+      const result = await reinitializeLsp();
       if (result) {
         const failedServers = getRuntimeReloadFailedNames(result.reconcile);
         debugLogger.info(
