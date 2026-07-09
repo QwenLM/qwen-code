@@ -398,8 +398,11 @@ function charsIn(prefix: number[], s: number, e: number): number {
  * `events.test.ts` as a single 1535-line hunk), so "hunks are atomic" alone
  * would hand one agent a 50 000-char territory — both the attention dilution
  * chunking exists to avoid, and past `read_file`'s 25 000-char per-read cap.
- * Segments still tile `[unit.start, unit.end]` exactly; when no safe point
- * exists the remainder stays whole and is flagged `oversized`.
+ * Segments still tile `[unit.start, unit.end]` exactly. When the budget window
+ * holds no safe boundary the splitter reaches past it for the next one rather
+ * than abandoning the remainder, so a single distant boundary cannot collapse a
+ * whole file into one chunk. Only when no boundary exists at all does the
+ * remainder stay whole, flagged `oversized`.
  */
 function splitUnit(
   unit: Unit,
@@ -437,7 +440,21 @@ function splitUnit(
       cut = n; // scanning down, the first hit is the largest valid cut
       break;
     }
-    if (cut < 0) break; // no safe boundary — keep the rest intact
+    // Nothing inside the budget window. Do not give up on the whole remainder:
+    // a 1400-line React component whose first top-level boundary sits 460 lines
+    // in (PR #6591) would otherwise collapse into one 45 000-char chunk, past
+    // what a single `read_file` returns — even though 27 later boundaries
+    // exist. Take the next safe point beyond the window instead. One segment
+    // runs over budget; the rest stay within it.
+    if (cut < 0) {
+      for (let n = upper + 1; n <= unit.end; n++) {
+        if (isSafeSplitPoint(lines, n) && bigEnough(segStart, n - 1)) {
+          cut = n;
+          break;
+        }
+      }
+    }
+    if (cut < 0) break; // genuinely no safe boundary left — keep the rest intact
     out.push({ ...unit, start: segStart, end: cut - 1 });
     segStart = cut;
   }

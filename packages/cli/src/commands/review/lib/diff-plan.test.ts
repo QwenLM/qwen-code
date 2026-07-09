@@ -281,6 +281,50 @@ describe('planChunks', () => {
     }
   });
 
+  it('reaches past the budget window for the next safe boundary', () => {
+    // PR #6591: a 1431-line React component whose first top-level boundary sits
+    // 460 lines in. Giving up when the 400-line window holds no candidate
+    // collapsed the whole remainder into one 45 000-char chunk — past what a
+    // single `read_file` returns — even though 27 later boundaries existed.
+    const wall = (n: number) =>
+      Array.from({ length: n }, (_, k) => `+  const deep${k} = ${k};`);
+    const body = [
+      '+function first() {',
+      ...wall(600), // no top-level boundary anywhere in the first window
+      '+}',
+      '+',
+      '+function second() {',
+      ...wall(300),
+      '+}',
+      '+',
+      '+function third() {',
+      ...wall(300),
+      '+}',
+    ];
+    const diff = [
+      'diff --git a/src/big.tsx b/src/big.tsx',
+      'new file mode 100644',
+      '--- /dev/null',
+      '+++ b/src/big.tsx',
+      `@@ -0,0 +1,${body.length} @@`,
+      ...body,
+    ].join('\n');
+
+    const plan = buildDiffPlan(diff, 400);
+    expect(chunksCoverDiff(plan.chunks, plan.diffLines)).toBe(true);
+    // It must not collapse into one chunk just because the first 400 lines
+    // offered nowhere to cut.
+    expect(plan.chunks.length).toBeGreaterThan(1);
+    const lines = diff.split('\n');
+    for (const c of plan.chunks.slice(1)) {
+      expect(lines[c.startLine - 1]).toMatch(
+        /^\+function (second|third)\(\) \{$/,
+      );
+    }
+    // The one over-budget segment is the unavoidable wall; the rest are bounded.
+    expect(plan.chunks.filter((c) => c.lines > 400)).toHaveLength(1);
+  });
+
   it('never starts a chunk on a deleted line', () => {
     // A `-` line exists only on the old side. Starting a territory there gives
     // the agent a boundary that has no counterpart in the post-change file it

@@ -100,6 +100,16 @@ interface FetchPrResult {
 interface FileMetric {
   path: string;
   kind: PathKind;
+  /**
+   * New-side line ranges this file's hunks occupy, 1-based inclusive.
+   *
+   * Step 7 anchors an inline comment at `(path, line)`, and GitHub rejects the
+   * whole review with a 422 if any line falls outside every hunk. Shipping the
+   * ranges here makes that check a lookup. Without it the model has been seen
+   * probing GitHub instead — posting throwaway reviews to discover which
+   * anchors stick, which leaves junk comments on the PR.
+   */
+  hunks: Array<{ newStart: number; newEnd: number }>;
   addedLines: number;
   removedLines: number;
   changedLines: number;
@@ -198,6 +208,7 @@ function fileMetrics(plan: DiffPlan, headSha: string): FileMetric[] {
     return {
       path: f.path,
       kind: f.kind,
+      hunks: f.hunks.map((h) => ({ newStart: h.newStart, newEnd: h.newEnd })),
       addedLines: f.addedLines,
       removedLines: f.removedLines,
       changedLines,
