@@ -20,6 +20,7 @@ export type {
   UserMessageContentRenderer,
   UserMessageContentRenderInfo,
   ComposerToolbarStartRenderer,
+  ComposerHeaderRenderer,
   ComposerToolbarRightRenderer,
   WelcomeFooterRenderer,
   WebShellComposerApi,

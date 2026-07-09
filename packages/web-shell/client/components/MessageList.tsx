@@ -45,6 +45,7 @@ interface MessageListProps {
    */
   isResponding?: boolean;
   welcomeHeader?: ReactNode;
+  centerWelcomeHeader?: boolean;
   workspaceCwd?: string;
   tailContent?: ReactNode;
   tailKey?: string;
@@ -1821,6 +1822,7 @@ export const MessageList = memo(
       isResponding = false,
       activeTurnStartedAt,
       welcomeHeader,
+      centerWelcomeHeader = false,
       workspaceCwd,
       tailContent,
       tailKey = 'tail',
@@ -2851,7 +2853,12 @@ export const MessageList = memo(
     return (
       <div
         ref={containerRef}
-        className={styles.list}
+        className={joinClassNames(
+          styles.list,
+          hasHeader && centerWelcomeHeader
+            ? styles.listWithWelcomeHeader
+            : undefined,
+        )}
         data-web-shell-message-list
         onClickCapture={handleDisclosureClickCapture}
       >
