@@ -48,6 +48,7 @@ export function AskUserQuestion({
   useEffect(() => {
     const firstQuestion = questions[0];
     submittedRef.current = false;
+    setCollapsed(false);
     setCurrentIdx(0);
     setSelectedIdx(firstQuestion?.options.length ? 0 : null);
     setAnswers(
@@ -248,6 +249,7 @@ export function AskUserQuestion({
             type="button"
             className={styles.collapseButton}
             onClick={() => setCollapsed((c) => !c)}
+            aria-expanded={!collapsed}
             aria-label={collapsed ? t('common.expand') : t('common.collapse')}
             title={collapsed ? t('common.expand') : t('common.collapse')}
           >

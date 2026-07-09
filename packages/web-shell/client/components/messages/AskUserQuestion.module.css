@@ -134,7 +134,6 @@
 
 .text {
   margin: 0;
-  padding-right: 72px;
   color: var(--foreground);
   font-size: 14px;
   font-weight: 500;
