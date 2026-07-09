@@ -906,6 +906,7 @@ export function App({
   }, []);
   const customization = useMemo(
     () => ({
+      composerTagIcons,
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
@@ -921,6 +922,7 @@ export function App({
       loadingPhrases,
     }),
     [
+      composerTagIcons,
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,

@@ -31,6 +31,12 @@ describe('splitComposerTagContent', () => {
   it('returns text for empty content and bare @', () => {
     expect(splitComposerTagContent('')).toEqual([{ type: 'text', text: '' }]);
     expect(splitComposerTagContent('@')).toEqual([{ type: 'text', text: '@' }]);
+    expect(splitComposerTagContent('hello @ world')).toEqual([
+      { type: 'text', text: 'hello @ world' },
+    ]);
+    expect(splitComposerTagContent('end @')).toEqual([
+      { type: 'text', text: 'end @' },
+    ]);
   });
 
   it('splits file references into text and reference segments', () => {
