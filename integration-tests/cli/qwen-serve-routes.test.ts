@@ -544,7 +544,7 @@ describe('qwen serve — GET /goals', () => {
   it('returns an empty, versioned list when no session has a goal', async () => {
     const { status, body } = await getGoals();
     expect(status).toBe(200);
-    expect(body).toEqual({ v: 1, goals: [] });
+    expect(body).toEqual({ v: 1, goals: [], droppedCount: 0 });
   });
 
   it('probes each live session over the bridge without reporting a goal', async () => {
@@ -558,7 +558,10 @@ describe('qwen serve — GET /goals', () => {
     try {
       const { status, body } = await getGoals();
       expect(status).toBe(200);
-      expect(body).toEqual({ v: 1, goals: [] });
+      // `droppedCount: 0` is the load-bearing half: it proves the ext-method
+      // probe actually reached the child. A dropped probe would also yield an
+      // empty `goals`, so that alone cannot tell success from a silent failure.
+      expect(body).toEqual({ v: 1, goals: [], droppedCount: 0 });
     } finally {
       await client.closeSession(session.sessionId);
     }
