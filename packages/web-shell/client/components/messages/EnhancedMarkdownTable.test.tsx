@@ -120,6 +120,36 @@ function click(el: Element): void {
   });
 }
 
+function rightClick(el: Element): void {
+  act(() => {
+    el.dispatchEvent(
+      new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        button: 2,
+        clientX: 120,
+        clientY: 80,
+      }),
+    );
+  });
+}
+
+function openColumnMenu(container: HTMLElement, columnLabel: string): void {
+  const header = [...container.querySelectorAll<HTMLTableCellElement>('th')]
+    .slice(1)
+    .find((cell) => cell.textContent?.includes(columnLabel));
+  expect(header).not.toBeNull();
+  rightClick(header!);
+}
+
+function freezeFirstColumn(
+  container: HTMLElement,
+  firstColumnLabel = 'Team',
+): void {
+  openColumnMenu(container, firstColumnLabel);
+  click(textButton(container, 'Freeze first column'));
+}
+
 function inputValue(input: HTMLInputElement, value: string): void {
   const setter = Object.getOwnPropertyDescriptor(
     HTMLInputElement.prototype,
@@ -1175,9 +1205,16 @@ describe('EnhancedMarkdownTable', () => {
   it('toggles sticky classes for the action column and first visible column', () => {
     const container = renderWideTable();
 
+    expect(container.textContent).not.toContain('Freeze first column');
+    openColumnMenu(container, 'Score');
+    expect(container.textContent).not.toContain('Freeze first column');
+    openColumnMenu(container, 'Team');
     click(textButton(container, 'Freeze first column'));
 
-    expect(textButton(container, 'Unfreeze first column')).toBeDefined();
+    expect(container.querySelector('div')?.className).toContain(
+      'hasFrozenColumn',
+    );
+    expect(container.textContent).not.toContain('Unfreeze first column');
     expect(container.querySelector('thead th')?.className).toContain(
       'stickyActionHeaderCell',
     );
@@ -1199,17 +1236,151 @@ describe('EnhancedMarkdownTable', () => {
       button(container, 'Sort by Score').closest('th')?.className,
     ).toContain('frozenHeaderCell');
 
+    openColumnMenu(container, 'Score');
     click(textButton(container, 'Unfreeze first column'));
-    expect(container.textContent).toContain('Freeze first column');
+    expect(container.textContent).not.toContain('Unfreeze first column');
+    expect(container.querySelector('div')?.className).not.toContain(
+      'hasFrozenColumn',
+    );
     expect(
       button(container, 'Sort by Score').closest('th')?.className,
     ).not.toContain('frozenHeaderCell');
   });
 
+  it('collapses long cells with a tooltip and expands them from the toolbar', () => {
+    const longText =
+      'This is a long operational note with enough content to exceed the table preview threshold and prove that the full value remains available.';
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Note</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>{longText}</td>
+        </tr>
+      </tbody>,
+    ]);
+    const cell = dataCell(container, 0, 0);
+
+    expect(cell.textContent).not.toContain('Expand text');
+    expect(textButton(container, 'Expand text')).toBeDefined();
+    expect(cell.querySelector<HTMLElement>('[title]')?.title).toBe(longText);
+
+    click(textButton(container, 'Expand text'));
+
+    expect(textButton(container, 'Collapse text')).toBeDefined();
+    expect(container.textContent).not.toContain('1 cell selected');
+    expect(cell.querySelector<HTMLElement>('[title]')).toBeNull();
+
+    click(textButton(container, 'Collapse text'));
+    expect(textButton(container, 'Expand text')).toBeDefined();
+    expect(cell.querySelector<HTMLElement>('[title]')?.title).toBe(longText);
+  });
+
+  it('treats one-line long values as expandable text', () => {
+    const longText =
+      'A single line note can still be visually long enough to need the collapsed table preview.';
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Note</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>{longText}</td>
+        </tr>
+      </tbody>,
+    ]);
+    const cell = dataCell(container, 0, 0);
+
+    expect(textButton(container, 'Expand text')).toBeDefined();
+    expect(cell.querySelector<HTMLElement>('[title]')?.title).toBe(longText);
+
+    click(textButton(container, 'Expand text'));
+
+    expect(textButton(container, 'Collapse text')).toBeDefined();
+    expect(cell.querySelector<HTMLElement>('[title]')).toBeNull();
+  });
+
+  it('copies the full long cell value instead of the expanded preview text', () => {
+    const writeText = mockClipboard();
+    const longText =
+      'A long cell value that should be copied in full even though the visual table shows an expand affordance for readability.';
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Note</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>{longText}</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
+    click(textButton(container, 'Copy TSV'));
+
+    expect(writeText).toHaveBeenCalledWith(longText);
+  });
+
+  it('cycles display density from the toolbar', () => {
+    const container = renderTable();
+    const shell = container.querySelector('div');
+    const teamHeader = button(container, 'Sort by Team').closest('th');
+    expect(shell?.className).toContain('densityStandard');
+    expect(textButton(container, 'Density: Standard')).toBeDefined();
+    expect(teamHeader?.style.width).toBe('160px');
+
+    click(textButton(container, 'Density: Standard'));
+    expect(shell?.className).toContain('densityCompact');
+    expect(textButton(container, 'Density: Compact')).toBeDefined();
+    expect(teamHeader?.style.width).toBe('auto');
+    expect(teamHeader?.style.minWidth).toBe('72px');
+    expect(teamHeader?.style.maxWidth).toBe('240px');
+
+    click(textButton(container, 'Density: Compact'));
+    expect(shell?.className).toContain('densityComfortable');
+    expect(textButton(container, 'Density: Comfortable')).toBeDefined();
+    expect(teamHeader?.style.width).toBe('160px');
+  });
+
+  it('renders compact row details with blank values and globally expandable long values', () => {
+    const longText =
+      'First line\nSecond line\nThird line\nFourth line for the detail panel preview.';
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Summary</th>
+          <th>Owner</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>{longText}</td>
+          <td></td>
+        </tr>
+      </tbody>,
+    ]);
+
+    click(button(container, 'View details for row 1'));
+
+    expect(container.textContent).toContain('Row details');
+    expect(container.textContent).toContain('(blank)');
+    expect(textButton(container, 'Expand text')).toBeDefined();
+
+    click(textButton(container, 'Expand text'));
+    expect(textButton(container, 'Collapse text')).toBeDefined();
+  });
+
   it('keeps selected cell classes visible on a frozen column', () => {
     const container = renderWideTable();
 
-    click(textButton(container, 'Freeze first column'));
+    freezeFirstColumn(container);
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
 
     expect(container.textContent).toContain('4 cells selected');
@@ -1239,7 +1410,7 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderWideTable();
 
     dragColumn(container, 'Move Score', 'Move Team');
-    click(textButton(container, 'Freeze first column'));
+    freezeFirstColumn(container, 'Score');
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
     click(textButton(container, 'Copy TSV'));
 
@@ -1961,8 +2132,9 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderTable('zh-CN');
 
     expect(container.textContent).toContain('快捷复制');
-    expect(container.textContent).toContain('冻结首列');
     expect(container.textContent).toContain('详情');
+    openColumnMenu(container, 'Team');
+    expect(container.textContent).toContain('冻结首列');
     click(button(container, '筛选 Team'));
     expect(container.textContent).toContain('隐藏列');
   });
