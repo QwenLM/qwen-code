@@ -63,6 +63,7 @@ const CURRENT_MESSAGE_MARKER = '[Current message - respond to this]';
 const GROUP_HISTORY_ENTRY_TEXT_LIMIT = 1000;
 const GROUP_HISTORY_ENTRY_METADATA_LIMIT = 256;
 const LOOP_CANCEL_GRACE_MS = 5000;
+const CHANNEL_MEMORY_PROMPT_CHAR_LIMIT = 12_000;
 const CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE = 0.7;
 const CHANNEL_MEMORY_CLASSIFIER_TRIGGER_RE =
   /(记住|记得|记一下|记忆|忘掉|忘记|清空|清除|删除|保存|remember|memory|forget)/iu;
@@ -96,6 +97,20 @@ const SENSITIVE_PAYLOAD_KEY_PATTERN = new RegExp(
   ].join('|'),
   'i',
 );
+
+function formatChannelMemoryPrompt(memoryText: string): string | undefined {
+  const sanitized = sanitizePromptText(memoryText).trim();
+  if (!sanitized) {
+    return undefined;
+  }
+  if (sanitized.length <= CHANNEL_MEMORY_PROMPT_CHAR_LIMIT) {
+    return `Channel memory for this chat:\n${sanitized}`;
+  }
+  const truncated = sanitized
+    .slice(0, CHANNEL_MEMORY_PROMPT_CHAR_LIMIT)
+    .trimEnd();
+  return `Channel memory for this chat (truncated):\n${truncated}\n[Channel memory truncated]`;
+}
 
 export interface ChannelBaseOptions {
   router?: SessionRouter;
@@ -696,10 +711,9 @@ export abstract class ChannelBase {
                 threadId: job.target.threadId,
               })
             ).trim();
-            if (memoryText) {
-              context.push(
-                `Channel memory for this chat:\n${sanitizePromptText(memoryText)}`,
-              );
+            const memoryPrompt = formatChannelMemoryPrompt(memoryText);
+            if (memoryPrompt) {
+              context.push(memoryPrompt);
             }
           } catch (error) {
             process.stderr.write(
@@ -3447,10 +3461,11 @@ export abstract class ChannelBase {
             this.instructedSessions.delete(sessionId);
           }
         }
-        if (memoryText) {
-          sessionContext.push(
-            `Channel memory for this chat:\n${sanitizePromptText(memoryText)}`,
-          );
+        const memoryPrompt = memoryText
+          ? formatChannelMemoryPrompt(memoryText)
+          : undefined;
+        if (memoryPrompt) {
+          sessionContext.push(memoryPrompt);
         }
         if (this.config.instructions) {
           sessionContext.push(this.config.instructions);

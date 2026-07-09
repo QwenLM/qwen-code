@@ -5792,6 +5792,26 @@ describe('ChannelBase', () => {
       expect(promptText).not.toContain('\u202E');
     });
 
+    it('truncates long channel memory before injecting it into the prompt', async () => {
+      const channelMemory = {
+        readChannelMemory: vi
+          .fn()
+          .mockResolvedValue(`${'a'.repeat(13_000)}TAIL`),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: 'ship it', senderId: 'alice' }));
+
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toContain('Channel memory for this chat (truncated):');
+      expect(promptText).toContain('[Channel memory truncated]');
+      expect(promptText).not.toContain('TAIL');
+      expect(promptText.length).toBeLessThan(12_500);
+    });
+
     it('does not read or inject memory again in the same session', async () => {
       let reads = 0;
       const channelMemory = {
