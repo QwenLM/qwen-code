@@ -50,23 +50,16 @@ const debugLogger = createDebugLogger('COMPRESSION');
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
 
 /**
- * Default proportional auto-compaction threshold: compact when the prompt
- * crosses 85% of the window. For typical windows (≤ ~220K) the proportional
- * branch dominates the ladder, so this is the effective default trigger;
- * on larger windows the absolute branch (window − ~33K) takes over. Also
- * acts as the small-window safety net inside computeThresholds — when the
- * window is so small that the absolute branch becomes degenerate, the
- * proportional branch keeps the trigger usable.
+ * Default proportional auto-compaction threshold. Under the ceiling semantics
+ * of computeThresholds it is the *preferred* trigger and an upper bound on how
+ * high the trigger can sit: on large windows (> ~220K) it governs, so
+ * compaction fires at ~85% of the window and never crowds the ceiling. On
+ * smaller windows the absolute "room to compress" ceiling (effectiveWindow −
+ * AUTOCOMPACT_BUFFER) is lower and takes over. It also stays the small-window
+ * safety net — when the window is so small the ceiling degenerates (≤ 0), the
+ * proportional value keeps the trigger usable.
  */
 export const DEFAULT_PCT = 0.85;
-
-/**
- * Offset from DEFAULT_PCT used to position the warn tier proportionally
- * (warn-pct = 0.85 - 0.1 = 0.75). Three-tier ladder makes warn fire
- * meaningfully before auto on small windows where the absolute formula
- * would otherwise compress warn flush against auto.
- */
-export const WARN_PCT_OFFSET = 0.1;
 
 /**
  * Token budget reserved from the window for compression output. Matches
@@ -151,15 +144,25 @@ export interface CompactionThresholds {
 /**
  * Compute the three-tier threshold ladder for a given context window.
  *
- * Each tier is `max(proportional, absolute)`:
- *   auto = max(pct * window,                               effectiveWindow - AUTOCOMPACT_BUFFER)
- *   warn = max(0, max((pct - WARN_PCT_OFFSET) * window,    auto - WARN_BUFFER))
- *   hard = min(window, max(effectiveWindow - HARD_BUFFER,  auto + HARD_BUFFER))
+ * The absolute term (effectiveWindow - AUTOCOMPACT_BUFFER) is a *ceiling* —
+ * "compact by here, or the summarization side-query has no room to run" — so
+ * it is combined with the proportional preference via `min`, not `max`:
+ *   auto = absoluteCeiling > 0 ? min(pct * window, absoluteCeiling) : pct * window
+ *   warn = max(0, auto - WARN_BUFFER)
+ *   hard = min(window, max(effectiveWindow - HARD_BUFFER, auto + HARD_BUFFER))
  *
- * `pct` defaults to DEFAULT_PCT when not provided. Small windows (where
- * the absolute branch goes negative) automatically fall back to the
- * proportional branch. Large windows are dominated by the absolute branch,
- * capping wasted reservation to ~33K instead of 15% of the window.
+ * Consequences:
+ *   - Large windows (> ~220K): the proportional term is the lower of the two,
+ *     so auto sits at ~pct of the window — generous headroom, never crowding
+ *     the ceiling (a 1M window compacts at ~85%, not ~97%).
+ *   - Small/mid windows (≤ ~220K): the ceiling is lower and governs, leaving
+ *     room for the summary. This matches claude-code (autoCompact.ts), whose
+ *     default trigger is the absolute ceiling and whose percentage override is
+ *     likewise combined via Math.min.
+ *   - Degenerate windows (≤ SUMMARY_RESERVE + AUTOCOMPACT_BUFFER, ceiling ≤ 0):
+ *     the proportional value is the floor so the trigger stays usable.
+ *
+ * `pct` defaults to DEFAULT_PCT when not provided.
  *
  * Pure function — no I/O, no shared state — safe to call repeatedly.
  */
@@ -172,27 +175,31 @@ export function computeThresholds(
     Math.max(0, pct !== undefined && Number.isFinite(pct) ? pct : DEFAULT_PCT),
   );
   // Clamp to 0 for tiny windows (window < SUMMARY_RESERVE) so the surfaced
-  // value in `/context` stays meaningful. The Math.max guards on auto/warn/hard
-  // below absorb the floor — clamping does not shift those outputs because
-  // each is `max(proportional, absolute)` and the proportional branch
-  // dominates whenever the absolute branch goes negative.
+  // value in `/context` stays meaningful.
   const effectiveWindow = Math.max(0, window - SUMMARY_RESERVE);
 
-  const absAuto = effectiveWindow - AUTOCOMPACT_BUFFER;
-  const auto = Math.max(effectivePct * window, absAuto);
+  // The absolute term is a ceiling: compact before the prompt leaves too little
+  // room for the summarization side-query (which needs up to SUMMARY_RESERVE of
+  // output). Combine it with the proportional preference via `min`. When the
+  // window is so small the ceiling is non-positive, fall back to the
+  // proportional value as a floor so the trigger stays usable.
+  const proportional = effectivePct * window;
+  const absoluteCeiling = effectiveWindow - AUTOCOMPACT_BUFFER;
+  const auto =
+    absoluteCeiling > 0
+      ? Math.min(proportional, absoluteCeiling)
+      : proportional;
 
-  const absWarn = auto - WARN_BUFFER;
-  const warn = Math.max(
-    0,
-    Math.max((effectivePct - WARN_PCT_OFFSET) * window, absWarn),
-  );
+  // Warn fires WARN_BUFFER below auto (claude-code positions its warning tier
+  // the same way, relative to the auto threshold).
+  const warn = Math.max(0, auto - WARN_BUFFER);
 
   const rawHard = effectiveWindow - HARD_BUFFER;
   // Guarantee hard >= auto so compaction doesn't wait until the last moment.
-  // When pct=1, auto equals the full window and hard collapses to auto
-  // (degenerate case: both thresholds trigger simultaneously).
-  // For tiny/zero windows where auto is already at the proportional floor,
-  // clamp hard to the window itself so it never exceeds the actual limit.
+  // The `auto + HARD_BUFFER` branch keeps hard above auto on degenerate small
+  // windows, where auto falls back to the proportional floor and can exceed
+  // effectiveWindow - HARD_BUFFER. Clamp to the window so hard never exceeds
+  // the actual limit.
   const hard = Math.min(window, Math.max(rawHard, auto + HARD_BUFFER));
 
   return { warn, auto, hard, effectiveWindow };

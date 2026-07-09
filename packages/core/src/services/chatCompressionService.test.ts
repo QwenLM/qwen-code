@@ -172,7 +172,7 @@ describe('ChatCompressionService', () => {
     ]);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(600);
     vi.mocked(tokenLimit).mockReturnValue(1000);
-    // Threshold is 0.7 * 1000 = 700. 600 < 700, so NOOP.
+    // Default 0.85; window 1000 is degenerate → auto = 0.85 * 1000 = 850. 600 < 850, so NOOP.
 
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
@@ -2069,54 +2069,63 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
 });
 
 describe('computeThresholds', () => {
-  it('32K window — proportional fallback for all tiers, hard = auto + HARD_BUFFER', () => {
+  it('32K window — degenerate ceiling, proportional floor governs auto', () => {
+    // effectiveWindow 12K, ceiling = 12K - 13K = -1K (≤ 0) → auto falls back to
+    // the proportional floor (0.85 * 32K).
     const t = computeThresholds(32_000);
-    expect(t.warn).toBe(24_000); // 0.75 * 32K
-    expect(t.auto).toBe(27_200); // 0.85 * 32K
+    expect(t.warn).toBe(7_200); // auto - WARN_BUFFER = 27.2K - 20K
+    expect(t.auto).toBe(27_200); // proportional floor: 0.85 * 32K
     expect(t.hard).toBe(30_200); // auto + HARD_BUFFER = 27.2K + 3K
     expect(t.effectiveWindow).toBe(12_000);
   });
 
-  it('60K window — hard no longer equals auto (issue #4945)', () => {
+  it('60K window — ceiling governs auto; hard stays above auto (issue #4945)', () => {
+    // ceiling = ew(40K) - 13K = 27K < proportional(51K) → auto = ceiling.
     const t = computeThresholds(60_000);
-    expect(t.warn).toBe(45_000); // 0.75 * 60K
-    expect(t.auto).toBe(51_000); // 0.85 * 60K (pct wins: 51K vs ew-13K=27K)
-    expect(t.hard).toBe(54_000); // auto + HARD_BUFFER = 51K + 3K
+    expect(t.warn).toBe(7_000); // auto - WARN_BUFFER = 27K - 20K
+    expect(t.auto).toBe(27_000); // min(0.85*60K=51K, ew-13K=27K)
+    expect(t.hard).toBe(37_000); // ew - HARD_BUFFER = 40K - 3K
     expect(t.hard).toBeGreaterThan(t.auto);
     expect(t.effectiveWindow).toBe(40_000);
   });
 
-  it('128K window — proportional dominates at 0.85', () => {
+  it('128K window — ceiling governs auto (leaves room to compress)', () => {
+    // ceiling = ew(108K) - 13K = 95K < proportional(108.8K) → auto = ceiling.
+    // auto + SUMMARY_RESERVE = 95K + 20K = 115K ≤ 128K, so the summary fits.
     const t = computeThresholds(128_000);
-    expect(t.warn).toBe(96_000); // 0.75 * 128K (pct wins: 96K vs auto-20K=88.8K)
-    expect(t.auto).toBe(108_800); // 0.85 * 128K (pct wins: 108.8K vs ew-13K=95K)
-    expect(t.hard).toBe(111_800); // auto + HARD_BUFFER (wins over ew-3K=105K)
+    expect(t.warn).toBe(75_000); // auto - WARN_BUFFER = 95K - 20K
+    expect(t.auto).toBe(95_000); // min(0.85*128K=108.8K, ew-13K=95K)
+    expect(t.hard).toBe(105_000); // ew - HARD_BUFFER = 108K - 3K
     expect(t.effectiveWindow).toBe(108_000);
   });
 
-  it('200K window — proportional auto (170K), absolute hard', () => {
+  it('200K window — ceiling governs auto (167K), just below proportional', () => {
+    // ceiling = ew(180K) - 13K = 167K < proportional(170K) → auto = 167K.
     const t = computeThresholds(200_000);
-    expect(t.warn).toBe(150_000); // 0.75 * 200K (ties abs: auto-20K=150K)
-    expect(t.auto).toBe(170_000); // 0.85 * 200K (pct wins: 170K vs ew-13K=167K)
-    expect(t.hard).toBe(177_000); // abs: effectiveWindow-3K = 180-3 = 177K
+    expect(t.warn).toBe(147_000); // auto - WARN_BUFFER = 167K - 20K
+    expect(t.auto).toBe(167_000); // min(0.85*200K=170K, ew-13K=167K)
+    expect(t.hard).toBe(177_000); // ew - HARD_BUFFER = 180K - 3K
   });
 
-  it('1M window — fully absolute', () => {
+  it('1M window — proportional governs auto (85%), never crowds the ceiling', () => {
+    // proportional(850K) < ceiling(967K) → auto = 850K, not ~97% of the window.
     const t = computeThresholds(1_000_000);
-    expect(t.warn).toBe(947_000);
-    expect(t.auto).toBe(967_000);
-    expect(t.hard).toBe(977_000);
+    expect(t.warn).toBe(830_000); // auto - WARN_BUFFER = 850K - 20K
+    expect(t.auto).toBe(850_000); // min(0.85*1M=850K, ew-13K=967K)
+    expect(t.hard).toBe(977_000); // ew - HARD_BUFFER = 980K - 3K
   });
 
   it('extreme small window (10K) does not crash; returns sane values', () => {
     const t = computeThresholds(10_000);
-    expect(t.warn).toBeGreaterThan(0);
     expect(t.auto).toBeGreaterThan(0);
+    expect(t.warn).toBeGreaterThanOrEqual(0);
     expect(t.warn).toBeLessThanOrEqual(t.auto);
     expect(t.auto).toBeLessThanOrEqual(t.hard);
-    // window < SUMMARY_RESERVE: effectiveWindow is clamped to 0, not negative.
-    // auto/warn/hard remain positive because each is `Math.max(proportional, absolute)`
-    // and the proportional branch dominates whenever the absolute branch goes ≤ 0.
+    // window < SUMMARY_RESERVE: effectiveWindow clamps to 0 and the ceiling is
+    // negative, so auto falls back to the proportional floor (0.85 * 10K = 8.5K);
+    // warn = max(0, 8.5K - 20K) = 0.
+    expect(t.auto).toBe(8_500);
+    expect(t.warn).toBe(0);
     expect(t.effectiveWindow).toBe(0);
   });
 
@@ -2145,24 +2154,27 @@ describe('computeThresholds', () => {
       expect(explicitDefault).toEqual(defaultResult);
     });
 
-    it('custom pct=0.5 lowers proportional auto threshold for small windows', () => {
+    it('custom pct=0.5 lowers the proportional floor on a degenerate window', () => {
+      // 32K: ceiling ≤ 0 → auto = proportional floor = 0.5 * 32K.
       const t = computeThresholds(32_000, 0.5);
       expect(t.auto).toBe(16_000); // 0.5 * 32K
-      expect(t.warn).toBe(12_800); // (0.5 - 0.1) * 32K
+      expect(t.warn).toBe(0); // max(0, 16K - 20K)
     });
 
-    it('custom pct=0.9 raises proportional auto threshold for small windows', () => {
+    it('custom pct=0.9 raises the proportional floor on a degenerate window', () => {
       const t = computeThresholds(32_000, 0.9);
       expect(t.auto).toBe(28_800); // 0.9 * 32K
-      expect(t.warn).toBe(25_600); // (0.9 - 0.1) * 32K
+      expect(t.warn).toBe(8_800); // 28.8K - 20K
     });
 
-    it('custom pct does not affect absolute-branch-dominated large windows', () => {
+    it('custom pct DOES pull auto earlier on large windows (ceiling semantics)', () => {
+      // Under min-semantics the proportional term governs large windows, so a
+      // lower pct compacts earlier — matching claude-code's Math.min override.
       const defaultResult = computeThresholds(1_000_000);
       const customPct = computeThresholds(1_000_000, 0.5);
-      // For 1M window, absolute branch dominates regardless of pct
-      expect(customPct.auto).toBe(defaultResult.auto);
-      expect(customPct.hard).toBe(defaultResult.hard);
+      expect(defaultResult.auto).toBe(850_000); // 0.85 * 1M
+      expect(customPct.auto).toBe(500_000); // 0.5 * 1M < ceiling(967K)
+      expect(customPct.auto).toBeLessThan(defaultResult.auto);
     });
 
     it('custom pct preserves warn <= auto < hard invariant', () => {
@@ -2175,11 +2187,11 @@ describe('computeThresholds', () => {
       }
     });
 
-    it('pct=0 produces auto=0 for small windows (proportional branch is 0)', () => {
+    it('pct=0 produces auto=0 for small windows (proportional floor is 0)', () => {
       const t = computeThresholds(32_000, 0);
-      // 0 * 32000 = 0, absolute branch is negative → auto = 0
+      // 0 * 32000 = 0; ceiling is negative → auto = proportional floor = 0.
       expect(t.auto).toBe(0);
-      // warn = max((0 - 0.1) * 32000, absWarn) = -3200
+      // warn = max(0, 0 - WARN_BUFFER) = 0
       expect(t.warn).toBeLessThanOrEqual(t.auto);
       // hard is clamped to max(rawHard, auto + HARD_BUFFER)
       expect(t.hard).toBeGreaterThan(t.auto);
@@ -2193,10 +2205,12 @@ describe('computeThresholds', () => {
       expect(t.hard).toBeLessThanOrEqual(t.auto);
     });
 
-    it('pct=1 with large window: auto and hard both equal window', () => {
+    it('pct=1 on a large window: ceiling still caps auto below the window', () => {
+      // Even at pct=1 the absolute ceiling governs, so auto never reaches the
+      // full window — the key protection of the min-semantics.
       const t = computeThresholds(200_000, 1);
-      expect(t.auto).toBe(200_000);
-      expect(t.hard).toBe(200_000);
+      expect(t.auto).toBe(167_000); // min(200K, ew-13K=167K)
+      expect(t.hard).toBe(177_000); // ew - 3K
       expect(t.warn).toBeLessThanOrEqual(t.auto);
     });
 
@@ -2382,7 +2396,7 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
   });
 
-  it('on a 200K window with originalTokenCount=171K, falls through cheap-gate (above auto=170K)', async () => {
+  it('on a 200K window with originalTokenCount=171K, falls through cheap-gate (above auto=167K)', async () => {
     const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
       text: '<state_snapshot>summary</state_snapshot>',
       usage: {
@@ -2401,7 +2415,7 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
       originalTokenCount: 171_000,
     });
 
-    // 171K > 170K (computeThresholds(200K).auto = 0.85 × 200K), cheap-gate lets through
+    // 171K > 167K (computeThresholds(200K).auto = min(0.85 × 200K, ew − 13K)), cheap-gate lets through
     expect(spy).toHaveBeenCalled();
     expect(result.info.compressionStatus).not.toBe(CompressionStatus.NOOP);
   });
@@ -2414,7 +2428,8 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     const config = makeFakeConfig({ contextWindowSize: 32_000 });
     vi.mocked(config.getAutoCompactThreshold).mockReturnValue(0.5);
 
-    // computeThresholds(32000, 0.5).auto = max(0.5*32000, 12000-13000) = 16000
+    // computeThresholds(32000, 0.5).auto = 16000 (degenerate window: ceiling
+    // ≤ 0, so auto falls back to the proportional floor 0.5 × 32K)
     // 20K > 16K → falls through cheap-gate
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
@@ -2435,9 +2450,9 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
       .mockResolvedValue({ text: 's', usage: {} } as never);
 
     const config = makeFakeConfig({ contextWindowSize: 32_000 });
-    // getAutoCompactThreshold returns undefined → default 0.7
-    // computeThresholds(32000).auto = max(0.7*32000, 12000-13000) = 22400
-    // 20K < 22.4K → NOOP
+    // getAutoCompactThreshold returns undefined → default 0.85
+    // computeThresholds(32000).auto = 27200 (degenerate → 0.85 × 32K)
+    // 20K < 27.2K → NOOP
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
@@ -2489,7 +2504,7 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
     } as unknown as Config;
   }
 
-  it('131K window NOOPs at 90K (auto = 0.85 × 131072 ≈ 111K)', async () => {
+  it('131K window NOOPs at 90K (auto = min(0.85 × 131072, ew − 13K) ≈ 98K)', async () => {
     const spy = vi
       .spyOn(sideQueryModule, 'runSideQuery')
       .mockResolvedValue({ text: 's', usage: {} } as never);
@@ -2510,7 +2525,7 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
   it('does NOT fire early at 60K on a 131K window (no output reservation subtracted)', async () => {
     // Under the retired #5957 reservation, 64K was subtracted from the
     // window and 60K would have triggered (auto ≈ 47K). With full-window
-    // gating, auto ≈ 111K and 60K stays NOOP.
+    // gating, auto ≈ 98K and 60K stays NOOP.
     const spy = vi
       .spyOn(sideQueryModule, 'runSideQuery')
       .mockResolvedValue({ text: 's', usage: {} } as never);
@@ -2528,7 +2543,7 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
     expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
   });
 
-  it('200K window NOOPs at 160K (auto = 0.85 × 200K = 170K)', async () => {
+  it('200K window NOOPs at 160K (auto = min(0.85 × 200K, ew − 13K) = 167K)', async () => {
     const spy = vi
       .spyOn(sideQueryModule, 'runSideQuery')
       .mockResolvedValue({ text: 's', usage: {} } as never);
@@ -2547,7 +2562,7 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
   });
 
   it('triggers above the full-window threshold (120K on a 131K window)', async () => {
-    // auto = max(0.85 × 131072 ≈ 111.4K, 131072 − 33K ≈ 98K) = 111.4K;
+    // auto = min(0.85 × 131072 ≈ 111.4K, 131072 − 33K ≈ 98K) = 98K;
     // 120K crosses it.
     const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
       text: '<state_snapshot>summary</state_snapshot>',
