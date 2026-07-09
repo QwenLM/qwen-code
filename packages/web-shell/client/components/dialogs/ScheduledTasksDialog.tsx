@@ -98,6 +98,8 @@ const MAX_SET_TIMEOUT_MS = 2_147_483_647;
 const PAST_DUE_FAST_RELOADS = 3;
 const OVERDUE_RELOAD_INTERVAL_MS = 30_000;
 const AT_REFERENCE_UNSAFE_CHARS = /[^\p{L}\p{N}_./-]/gu;
+const PROMPT_REFERENCE_TOKEN =
+  /(^|[\s])(@(?:ext|mcp):(?:\\.|[^\s])+|\/[^\s/]+)/gu;
 const REFERENCE_PICKER_THEME_VARS = [
   '--background',
   '--foreground',
@@ -127,6 +129,44 @@ interface ReferencePickerPosition {
 
 function escapeAtReferenceText(ref: string): string {
   return ref.replace(AT_REFERENCE_UNSAFE_CHARS, '\\$&');
+}
+
+function unescapeReferenceText(ref: string): string {
+  return ref.replace(/\\(.)/g, '$1');
+}
+
+function promptReferenceItemFromToken(
+  token: string,
+): PromptReferenceItem | null {
+  if (token.startsWith('@ext:')) {
+    const label = unescapeReferenceText(token.slice('@ext:'.length));
+    return {
+      id: `extension:${label}`,
+      kind: 'extension',
+      label,
+      insertText: token,
+    };
+  }
+  if (token.startsWith('@mcp:')) {
+    const label = unescapeReferenceText(token.slice('@mcp:'.length));
+    return {
+      id: `mcp:${label}`,
+      kind: 'mcp',
+      label,
+      insertText: token,
+    };
+  }
+  if (token.startsWith('/')) {
+    const label = token.slice(1);
+    if (!label) return null;
+    return {
+      id: `skill:${label}`,
+      kind: 'skill',
+      label,
+      insertText: token,
+    };
+  }
+  return null;
 }
 
 function extensionDescription(extension: DaemonExtensionEntry) {
@@ -173,13 +213,17 @@ function clearPromptEditor(root: HTMLElement) {
   while (root.firstChild) root.removeChild(root.firstChild);
 }
 
+function appendPromptText(root: HTMLElement, text: string) {
+  if (text) root.appendChild(document.createTextNode(text));
+}
+
 function setPromptEditorText(root: HTMLElement, text: string) {
   clearPromptEditor(root);
   if (!text) return;
   const lines = text.split('\n');
   lines.forEach((line, index) => {
     if (index > 0) root.appendChild(document.createElement('br'));
-    root.appendChild(document.createTextNode(line));
+    appendPromptLine(root, line);
   });
 }
 
@@ -203,6 +247,22 @@ function makePromptTagElement(item: PromptReferenceItem): HTMLElement {
   value.textContent = item.label;
   tag.appendChild(value);
   return tag;
+}
+
+function appendPromptLine(root: HTMLElement, line: string) {
+  let cursor = 0;
+  PROMPT_REFERENCE_TOKEN.lastIndex = 0;
+  for (const match of line.matchAll(PROMPT_REFERENCE_TOKEN)) {
+    const [matched, prefix, token] = match;
+    const index = match.index ?? 0;
+    const item = promptReferenceItemFromToken(token);
+    if (!item) continue;
+    appendPromptText(root, line.slice(cursor, index));
+    appendPromptText(root, prefix);
+    root.appendChild(makePromptTagElement(item));
+    cursor = index + matched.length;
+  }
+  appendPromptText(root, line.slice(cursor));
 }
 
 function insertPromptTagElement(root: HTMLElement, item: PromptReferenceItem) {

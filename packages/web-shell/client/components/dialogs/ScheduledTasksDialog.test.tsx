@@ -189,6 +189,37 @@ describe('ScheduledTasksDialog editing', () => {
     expect(actions.createScheduledTask).not.toHaveBeenCalled();
   });
 
+  it('renders saved prompt references as inline tags when editing', async () => {
+    const promptText = '@mcp:amap-maps3 /agent-reproduce-align @ext:clickhouse';
+    await mount([baseTask({ prompt: promptText })]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+
+    const tags = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-prompt-tag-serialized]'),
+    );
+    expect(tags.map((tag) => tag.dataset.promptTagSerialized)).toEqual([
+      '@mcp:amap-maps3',
+      '/agent-reproduce-align',
+      '@ext:clickhouse',
+    ]);
+    expect(tags.map((tag) => tag.textContent)).toEqual([
+      'amap-maps3',
+      'agent-reproduce-align',
+      'clickhouse',
+    ]);
+
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({
+        prompt: promptText,
+      }),
+    );
+  });
+
   it('inserts extension, skill, and MCP references into the created prompt', async () => {
     actions.createScheduledTask.mockResolvedValue(baseTask({}));
 
