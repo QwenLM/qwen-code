@@ -1081,6 +1081,8 @@ export abstract class ChannelBase {
         done,
         resolve: doneResolve,
         chatId: target.chatId,
+        threadId: target.threadId,
+        isGroup: target.isGroup,
         messageId: taskId,
         senderId: target.senderId,
         senderName: target.senderId,

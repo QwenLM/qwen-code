@@ -548,6 +548,7 @@ export function createServeApp(
       sessionShellCommandEnabled,
       multiWorkspaceSessionsEnabled:
         (injectedWorkspaceRegistry?.list().length ?? 1) > 1,
+      ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
     });
   const statusProvider =
     deps.statusProvider ??

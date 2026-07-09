@@ -10299,6 +10299,69 @@ describe('ChannelBase', () => {
         ]);
       });
 
+      it('routes webhook permission requests to the configured thread target', async () => {
+        let resolvePrompt: (value: string) => void = () => {};
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+          (sessionId: string) => {
+            (bridge as unknown as EventEmitter).emit('permissionRequest', {
+              requestId: 'req-webhook',
+              sessionId,
+              request: {
+                toolCall: {
+                  toolCallId: 'tool-webhook',
+                  kind: 'shell',
+                  title: 'Run deploy',
+                },
+                options: [
+                  {
+                    optionId: 'proceed_once',
+                    kind: 'allow_once',
+                    name: 'Allow once',
+                  },
+                ],
+              },
+            });
+            return new Promise<string>((resolve) => {
+              resolvePrompt = resolve;
+            });
+          },
+        );
+        const threadedWebhooks: ChannelWebhookConfig = {
+          sources: {
+            'github-ci': {
+              targets: {
+                default: {
+                  chatId: 'group-1',
+                  senderId: 'webhook:github-ci',
+                  threadId: 'topic-1',
+                  isGroup: true,
+                },
+              },
+            },
+          },
+        };
+        const ch = createChannel({
+          approvalMode: 'yolo',
+          sessionScope: 'thread',
+          webhooks: threadedWebhooks,
+        });
+        ch.proactiveSupported = true;
+        ch.proactiveTargetSupported = true;
+
+        const run = ch.runWebhookTask(webhookTask);
+        await vi.waitFor(() => {
+          expect(ch.proactiveTargets.at(-1)).toMatchObject({
+            chatId: 'group-1',
+            senderId: 'webhook:github-ci',
+            threadId: 'topic-1',
+            isGroup: true,
+          });
+        });
+
+        resolvePrompt('webhook response');
+        await run;
+      });
+
       it('runs a later same-session webhook task after a rejected one', async () => {
         (bridge.prompt as ReturnType<typeof vi.fn>)
           .mockRejectedValueOnce(new Error('agent failed'))

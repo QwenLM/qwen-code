@@ -9,7 +9,10 @@ import { SUPPORTED_LANGUAGES } from '../../i18n/index.js';
 import { hasConfiguredBatchVoiceTranscriptionModel } from '../../services/voice-service.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getAdvertisedServeFeatures } from '../capabilities.js';
-import { isBrowserAutomationMcpAvailable } from '../cdp-mcp-command.js';
+import {
+  isBrowserAutomationMcpAvailable,
+  QWEN_SERVE_ACP_HTTP_ENV,
+} from '../cdp-mcp-command.js';
 import type { ServeOptions } from '../types.js';
 
 // Keep in sync with acp-bridge bridge.ts and SDK DaemonClient.ts.
@@ -44,6 +47,7 @@ interface CreateServeFeaturesDeps {
   reloadAvailable: boolean;
   sessionShellCommandEnabled: boolean;
   multiWorkspaceSessionsEnabled: boolean;
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 export interface ServeFeaturesRuntime {
@@ -63,6 +67,7 @@ export function createServeFeatures(
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
   } = deps;
+  const env = deps.env ?? process.env;
   let cachedVoiceTranscriptionAvailable: boolean | undefined;
   const invalidateServeFeaturesCache = () => {
     cachedVoiceTranscriptionAvailable = undefined;
@@ -95,13 +100,16 @@ export function createServeFeatures(
         multiWorkspaceSessionsEnabled,
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
-        browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts),
+        browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
+          opts,
+          env,
+        ),
         voiceTranscriptionAvailable: getCachedVoiceTranscriptionAvailable(),
         // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
         // on). A configured token no longer suppresses it — the browser carries
         // the bearer token via the WS subprotocol, which the upgrade listener
         // verifies (acp-http/index.ts).
-        voiceWsAvailable: process.env['QWEN_SERVE_ACP_HTTP'] !== '0',
+        voiceWsAvailable: env[QWEN_SERVE_ACP_HTTP_ENV] !== '0',
       }),
   };
 }

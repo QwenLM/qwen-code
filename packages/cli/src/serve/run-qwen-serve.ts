@@ -868,6 +868,7 @@ function sessionIdleTimeoutMs(value: number | undefined): number {
 function currentServeFeaturesForRunQwenServe(
   opts: ServeOptions,
   sessionShellCommandEnabled: boolean,
+  env: Readonly<Record<string, string | undefined>>,
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
     requireAuth: opts.requireAuth === true,
@@ -888,7 +889,7 @@ function currentServeFeaturesForRunQwenServe(
     // so the bootstrap `/capabilities` window doesn't briefly under-report them.
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
-    browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts),
+    browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts, env),
   });
 }
 
@@ -898,6 +899,7 @@ function createBootstrapCapabilities(input: {
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
   permissionPolicy: PermissionPolicy | undefined;
+  env: Readonly<Record<string, string | undefined>>;
 }): CapabilitiesEnvelope {
   return {
     v: CAPABILITIES_SCHEMA_VERSION,
@@ -909,6 +911,7 @@ function createBootstrapCapabilities(input: {
     features: currentServeFeaturesForRunQwenServe(
       input.opts,
       input.sessionShellCommandEnabled,
+      input.env,
     ),
     modelServices: [],
     workspaceCwd: input.boundWorkspace,
@@ -1166,6 +1169,7 @@ function createBootstrapServeApp(input: {
         qwenCodeVersion,
         sessionShellCommandEnabled,
         permissionPolicy,
+        env: process.env,
       }),
     );
   });
@@ -1246,6 +1250,7 @@ function createBootstrapServeApp(input: {
         features: currentServeFeaturesForRunQwenServe(
           opts,
           sessionShellCommandEnabled,
+          process.env,
         ),
       },
       runtime: {
