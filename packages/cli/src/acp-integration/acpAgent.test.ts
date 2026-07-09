@@ -650,6 +650,7 @@ import {
   SERVE_STATUS_EXT_METHODS,
   SERVE_CONTROL_EXT_METHODS,
 } from '@qwen-code/acp-bridge/status';
+import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import {
   updateOutputLanguageFile,
   writeOutputLanguageAndRegisterPath,
@@ -1864,10 +1865,31 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         body: 'disabled secret body',
         filePath: '/disabled/SKILL.md',
       },
+      {
+        name: 'gsd-audit-uat',
+        description: 'Cross-phase audit',
+        level: 'extension',
+        extensionName: 'gsd-core',
+        disableModelInvocation: false,
+        body: 'extension secret body',
+        filePath: '/ext/gsd-core/skills/gsd-audit-uat/SKILL.md',
+      },
+      {
+        name: 'gsd-display-stale',
+        description: 'Display-name stale extension skill',
+        level: 'extension',
+        extensionName: 'GSD Core',
+        disableModelInvocation: false,
+        body: 'display stale body',
+        filePath: '/ext/gsd-core/skills/gsd-display-stale/SKILL.md',
+      },
     ]);
     mockConfig = {
       ...mockConfig,
       getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getExtensionManager: vi.fn().mockReturnValue({
+        refreshCache: vi.fn().mockResolvedValue(undefined),
+      }),
       getMcpServers: vi.fn().mockReturnValue({
         docs: {
           command: 'node',
@@ -1896,7 +1918,48 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getDisabledSkillNames: vi
         .fn()
         .mockReturnValue(new Set(['disabled-skill'])),
-      getSkillManager: vi.fn().mockReturnValue({ listSkills }),
+      getSkillManager: vi.fn().mockReturnValue({
+        refreshCache: vi.fn().mockResolvedValue(undefined),
+        listSkills,
+      }),
+      getExtensions: vi.fn().mockReturnValue([
+        {
+          id: 'gsd-core',
+          name: 'gsd-core',
+          displayName: 'GSD Core',
+          version: '1.0.0',
+          isActive: false,
+          path: '/ext/gsd-core',
+          config: { name: 'gsd-core', version: '1.0.0' },
+          contextFiles: [],
+          skills: [
+            {
+              name: 'gsd-audit-uat',
+              description: 'Cross-phase audit',
+              level: 'extension',
+              disableModelInvocation: false,
+              body: 'extension secret body',
+              filePath: '/ext/gsd-core/skills/gsd-audit-uat/SKILL.md',
+            },
+            {
+              name: 'gsd-display-stale',
+              description: 'Display-name stale extension skill',
+              level: 'extension',
+              disableModelInvocation: false,
+              body: 'display stale body',
+              filePath: '/ext/gsd-core/skills/gsd-display-stale/SKILL.md',
+            },
+            {
+              name: 'gsd-config-only',
+              description: 'Config-only extension skill',
+              level: 'extension',
+              disableModelInvocation: false,
+              body: 'config only body',
+              filePath: '/ext/gsd-core/skills/gsd-config-only/SKILL.md',
+            },
+          ],
+        },
+      ]),
       getAuthType: vi.fn().mockReturnValue('qwen'),
       getAllConfiguredModels: vi.fn().mockReturnValue([
         {
@@ -1959,10 +2022,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       SERVE_STATUS_EXT_METHODS.workspaceMcpResources,
       { serverName: 'not-configured' },
     );
-    const skills = await agent.extMethod(
+    const skills = (await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.workspaceSkills,
       {},
-    );
+    )) as unknown as ServeWorkspaceSkillsStatus;
     const providers = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.workspaceProviders,
       {},
@@ -2059,8 +2122,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       v: 1,
       workspaceCwd: '/work/status',
       initialized: true,
-      skills: [
-        {
+      skills: expect.arrayContaining([
+        expect.objectContaining({
           kind: 'skill',
           status: 'ok',
           name: 'review',
@@ -2068,8 +2131,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           level: 'project',
           argumentHint: '[path]',
           modelInvocable: true,
-        },
-        {
+        }),
+        expect.objectContaining({
           kind: 'skill',
           status: 'ok',
           name: 'manual-only',
@@ -2077,20 +2140,59 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           level: 'project',
           argumentHint: '[topic]',
           modelInvocable: false,
-        },
-        {
+        }),
+        expect.objectContaining({
           kind: 'skill',
           status: 'disabled',
           name: 'disabled-skill',
           description: 'Disabled by settings',
           level: 'project',
           modelInvocable: true,
-        },
-      ],
+        }),
+        expect.objectContaining({
+          kind: 'skill',
+          status: 'disabled',
+          name: 'gsd-audit-uat',
+          description: 'Cross-phase audit',
+          level: 'extension',
+          extensionName: 'gsd-core',
+          modelInvocable: true,
+        }),
+        expect.objectContaining({
+          kind: 'skill',
+          status: 'disabled',
+          name: 'gsd-display-stale',
+          description: 'Display-name stale extension skill',
+          level: 'extension',
+          extensionName: 'GSD Core',
+          modelInvocable: true,
+        }),
+        expect.objectContaining({
+          kind: 'skill',
+          status: 'disabled',
+          name: 'gsd-config-only',
+          description: 'Config-only extension skill',
+          level: 'extension',
+          extensionName: 'GSD Core',
+          modelInvocable: true,
+        }),
+      ]),
     });
+    expect(
+      skills.skills.filter((skill) => skill.name === 'gsd-audit-uat'),
+    ).toHaveLength(1);
+    expect(
+      skills.skills.filter((skill) => skill.name === 'gsd-display-stale'),
+    ).toHaveLength(1);
+    expect(
+      skills.skills.filter((skill) => skill.name === 'gsd-config-only'),
+    ).toHaveLength(1);
     expect(JSON.stringify(skills)).not.toContain('secret skill body');
     expect(JSON.stringify(skills)).not.toContain('manual secret body');
     expect(JSON.stringify(skills)).not.toContain('disabled secret body');
+    expect(JSON.stringify(skills)).not.toContain('extension secret body');
+    expect(JSON.stringify(skills)).not.toContain('display stale body');
+    expect(JSON.stringify(skills)).not.toContain('config only body');
     expect(JSON.stringify(skills)).not.toContain('/secret');
     expect(JSON.stringify(skills)).not.toContain('secret-hook');
 
@@ -9594,9 +9696,13 @@ describe('sessionLanguage multi-session propagation', () => {
       refreshCache: vi.fn().mockResolvedValue(undefined),
       refreshTools: vi.fn().mockResolvedValue(undefined),
     };
+    const skillManager = {
+      refreshCache: vi.fn().mockResolvedValue(undefined),
+    };
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-ext'),
       getExtensionManager: vi.fn().mockReturnValue(extensionManager),
+      getSkillManager: vi.fn().mockReturnValue(skillManager),
     });
     const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
 
@@ -9638,6 +9744,7 @@ describe('sessionLanguage multi-session propagation', () => {
     ).resolves.toEqual({ ok: true });
 
     expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
+    expect(skillManager.refreshCache).toHaveBeenCalledOnce();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
     expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
 
@@ -9650,9 +9757,13 @@ describe('sessionLanguage multi-session propagation', () => {
       refreshCache: vi.fn().mockResolvedValue(undefined),
       refreshTools: vi.fn().mockRejectedValue(new Error('bad tool schema')),
     };
+    const skillManager = {
+      refreshCache: vi.fn().mockResolvedValue(undefined),
+    };
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-ext'),
       getExtensionManager: vi.fn().mockReturnValue(extensionManager),
+      getSkillManager: vi.fn().mockReturnValue(skillManager),
     });
     const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
 
@@ -9694,6 +9805,7 @@ describe('sessionLanguage multi-session propagation', () => {
     ).resolves.toEqual({ ok: true });
 
     expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
+    expect(skillManager.refreshCache).toHaveBeenCalledOnce();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
     expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
 
