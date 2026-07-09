@@ -2772,6 +2772,57 @@ describe('Session', () => {
       }
     });
 
+    it('keeps the user prompt as the final part after referenced file content', async () => {
+      // Regression: JetBrains ACP attaches the active editor as a file
+      // reference. Appending its content AFTER the prompt buried the actual
+      // instruction, and recency-biased local models (Ollama qwen) answered as
+      // if the file were the task. The prompt must remain the last, prominent
+      // part. See #resolvePrompt.
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts:
+            '\n--- Content from referenced files ---\nContent from @editor.ts:\nexport const answer = 42;\n--- End of content ---',
+          files: [],
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'Reverse the string "hello"' },
+            {
+              type: 'resource_link',
+              name: 'editor.ts',
+              uri: 'file://editor.ts',
+            },
+          ],
+        });
+
+        const sent = firstSentMessage();
+        const texts = textParts(sent);
+
+        // The user's instruction is the FINAL text part.
+        expect(texts.at(-1)).toContain('Reverse the string "hello"');
+
+        // File content precedes the instruction (prompt is not buried before
+        // the appended reference content).
+        const fileIndex = texts.findIndex((t) =>
+          t.includes('--- Content from referenced files ---'),
+        );
+        const promptIndex = texts.findIndex((t) =>
+          t.includes('Reverse the string "hello"'),
+        );
+        expect(fileIndex).toBeGreaterThanOrEqual(0);
+        expect(promptIndex).toBeGreaterThan(fileIndex);
+      } finally {
+        readManyFilesSpy.mockRestore();
+      }
+    });
+
     describe('conversation_finished telemetry (#4602 review)', () => {
       it('emits conversation_finished once when a turn completes normally', async () => {
         const finishedSpy = vi
