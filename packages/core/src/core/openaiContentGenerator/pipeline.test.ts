@@ -2973,10 +2973,11 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
-    it('should pass arbitrary samplingParams keys through verbatim (e.g. max_completion_tokens for GPT-5)', async () => {
+    it('should pass arbitrary samplingParams keys through verbatim when the window has room (e.g. max_completion_tokens for GPT-5)', async () => {
       // Arrange: user sets a GPT-5 / o-series shape in samplingParams.
       // None of these are typed fields; all must appear on the wire because
-      // samplingParams is the source of truth.
+      // samplingParams is the source of truth. maxOutputTokens (32000) leaves
+      // room above max_completion_tokens (4096), so the value is not clamped.
       mockContentGeneratorConfig.samplingParams = {
         max_completion_tokens: 4096,
         reasoning_effort: 'medium',
@@ -2987,7 +2988,7 @@ describe('ContentGenerationPipeline', () => {
       const request: GenerateContentParameters = {
         model: 'test-model',
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
-        config: { maxOutputTokens: 999 },
+        config: { maxOutputTokens: 32000 },
       };
       (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
       (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
@@ -3001,14 +3002,54 @@ describe('ContentGenerationPipeline', () => {
       // Act
       await pipeline.execute(request, 'prompt-id');
 
-      // Assert: the exact samplingParams keys reach the wire; max_tokens is NOT
-      // synthesized from request.config.maxOutputTokens.
+      // Assert: the exact samplingParams keys reach the wire unchanged; a
+      // separate max_tokens is NOT synthesized (that would double-specify the
+      // budget and o-series rejects the pair).
       const call = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
       expect(call).toMatchObject({
         max_completion_tokens: 4096,
         reasoning_effort: 'medium',
         verbosity: 'low',
+      });
+      expect(call).not.toHaveProperty('max_tokens');
+    });
+
+    it('should clamp a provider output-budget key to the window without injecting max_tokens', async () => {
+      // Arrange: max_completion_tokens (200000) exceeds the window's remaining
+      // room (maxOutputTokens 50000). The value must be clamped in place so
+      // `prompt + output ≤ window` holds — but NO max_tokens is injected
+      // (o-series rejects both keys together).
+      mockContentGeneratorConfig.samplingParams = {
+        max_completion_tokens: 200000,
+        reasoning_effort: 'high',
+      } as ContentGeneratorConfig['samplingParams'];
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { maxOutputTokens: 50000 },
+      };
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'r' } }],
+      });
+
+      // Act
+      await pipeline.execute(request, 'prompt-id');
+
+      // Assert: provider key clamped to the window; other keys verbatim; no
+      // max_tokens added.
+      const call = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(call).toMatchObject({
+        max_completion_tokens: 50000,
+        reasoning_effort: 'high',
       });
       expect(call).not.toHaveProperty('max_tokens');
     });
