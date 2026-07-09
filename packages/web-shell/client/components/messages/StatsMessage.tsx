@@ -130,18 +130,20 @@ function PivotRow({
 }: {
   metric: string;
   values: React.ReactNode[];
-  variant?: 'normal' | 'section' | 'sub';
+  variant?: 'normal' | 'section' | 'sub' | 'nested';
 }) {
   const cellClass =
     variant === 'section'
       ? styles.metricCellSection
       : variant === 'sub'
         ? styles.metricCellSub
-        : styles.metricCell;
+        : variant === 'nested'
+          ? styles.metricCellNested
+          : styles.metricCell;
   return (
     <div className={styles.pivotRow}>
       <span className={cellClass}>
-        {variant === 'sub' ? `↳ ${metric}` : metric}
+        {variant === 'sub' || variant === 'nested' ? `↳ ${metric}` : metric}
       </span>
       {values.map((v, i) => (
         <span key={i} className={styles.modelCell}>
@@ -247,11 +249,13 @@ function StatsOverview({ status }: { status: DaemonSessionStatsStatus }) {
           <div className={styles.spacer} />
 
           {/* Header */}
-          <div className={styles.tableRow}>
+          <div className={`${styles.tableRow} ${styles.modelUsageRow}`}>
             <span className={styles.tableNameCol}>{t('stats.modelUsage')}</span>
-            <span className={styles.tableNumCol}>{t('stats.reqs')}</span>
-            <span className={styles.tableNumCol}>{t('stats.inputTokens')}</span>
-            <span className={styles.tableNumCol}>
+            <span className={styles.tableValueCol}>{t('stats.reqs')}</span>
+            <span className={styles.tableValueCol}>
+              {t('stats.inputTokens')}
+            </span>
+            <span className={styles.tableValueCol}>
               {t('stats.outputTokens')}
             </span>
           </div>
@@ -259,15 +263,18 @@ function StatsOverview({ status }: { status: DaemonSessionStatsStatus }) {
 
           {/* Rows */}
           {entries.map((e) => (
-            <div key={e.key} className={styles.tableRow}>
+            <div
+              key={e.key}
+              className={`${styles.tableRow} ${styles.modelUsageRow}`}
+            >
               <span className={styles.tableNameCol}>{e.label}</span>
-              <span className={styles.tableNumCol}>
+              <span className={styles.tableValueCol}>
                 {e.metrics.api.totalRequests}
               </span>
-              <span className={`${styles.tableNumCol} ${styles.warning}`}>
+              <span className={`${styles.tableValueCol} ${styles.warning}`}>
                 {e.metrics.tokens.prompt.toLocaleString()}
               </span>
-              <span className={`${styles.tableNumCol} ${styles.warning}`}>
+              <span className={`${styles.tableValueCol} ${styles.warning}`}>
                 {e.metrics.tokens.candidates.toLocaleString()}
               </span>
             </div>
@@ -382,18 +389,18 @@ function ModelStatsCard({ status }: { status: DaemonSessionStatsStatus }) {
           variant="sub"
         />
       )}
-      {hasThoughts && (
-        <PivotRow
-          metric={t('stats.thoughts')}
-          values={vals((m) => m.tokens.thoughts.toLocaleString())}
-          variant="sub"
-        />
-      )}
       <PivotRow
         metric={t('stats.output')}
         values={vals((m) => m.tokens.candidates.toLocaleString())}
         variant="sub"
       />
+      {hasThoughts && (
+        <PivotRow
+          metric={t('stats.thoughts')}
+          values={vals((m) => m.tokens.thoughts.toLocaleString())}
+          variant="nested"
+        />
+      )}
     </div>
   );
 }

@@ -61,6 +61,14 @@
   white-space: nowrap;
 }
 
+.metricCellNested {
+  flex: 0 0 24ch;
+  min-width: 24ch;
+  padding-left: 4ch;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+
 .modelCell {
   flex: 1 1 20ch;
   min-width: 16ch;
@@ -118,6 +126,14 @@
   min-height: 20px;
 }
 
+.modelUsageRow {
+  display: grid;
+  grid-template-columns:
+    minmax(14ch, 1.4fr)
+    repeat(3, minmax(9ch, 1fr));
+  column-gap: 16px;
+}
+
 .tableNameCol {
   color: var(--foreground);
   font-weight: 700;
@@ -139,6 +155,13 @@
   min-width: 10ch;
   color: var(--foreground);
   text-align: right;
+  white-space: nowrap;
+}
+
+.tableValueCol {
+  min-width: 10ch;
+  color: var(--foreground);
+  text-align: left;
   white-space: nowrap;
 }
 
