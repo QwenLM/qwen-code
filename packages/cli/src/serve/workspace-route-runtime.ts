@@ -31,18 +31,7 @@ export function resolveWorkspaceRuntimeFromParam(
   res: Response,
   paramName = 'workspace',
 ): WorkspaceRuntime | null {
-  const rawSelector = req.params[paramName] ?? '';
-  let selector: string;
-  try {
-    selector = decodeURIComponent(rawSelector);
-  } catch {
-    res.status(400).json({
-      error: `\`:${paramName}\` must be valid URL encoding`,
-      code: 'workspace_mismatch',
-      requestedWorkspace: rawSelector,
-    });
-    return null;
-  }
+  const selector = req.params[paramName] ?? '';
   const byId = registry.getByWorkspaceId(selector);
   if (byId) return byId;
 

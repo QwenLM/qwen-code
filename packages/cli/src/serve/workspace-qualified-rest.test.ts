@@ -114,13 +114,16 @@ function makeWorkspaceService(label: string): DaemonWorkspaceService {
 
 async function makeHarness(opts?: {
   secondaryTrusted?: boolean;
+  secondaryDirName?: string;
   token?: string;
 }) {
   const scratch = await fsp.mkdtemp(
     path.join(os.tmpdir(), 'qwen-workspace-qualified-rest-'),
   );
   const primaryCwd = canonicalizeWorkspace(path.join(scratch, 'primary'));
-  const secondaryCwd = canonicalizeWorkspace(path.join(scratch, 'secondary'));
+  const secondaryCwd = canonicalizeWorkspace(
+    path.join(scratch, opts?.secondaryDirName ?? 'secondary'),
+  );
   await fsp.mkdir(primaryCwd, { recursive: true });
   await fsp.mkdir(secondaryCwd, { recursive: true });
   await fsp.writeFile(path.join(primaryCwd, 'target.txt'), 'primary');
@@ -217,6 +220,20 @@ describe('workspace-qualified core REST', () => {
 
   it('routes file reads to the workspace selected by encoded cwd', async () => {
     const h = await makeHarness();
+    try {
+      const res = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.secondaryCwd)}/file`)
+        .query({ path: 'target.txt' })
+        .set('Host', host());
+      expect(res.status).toBe(200);
+      expect(res.body.content).toBe('secondary');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves literal percent-encoded text in cwd selectors', async () => {
+    const h = await makeHarness({ secondaryDirName: 'secondary%2Fencoded' });
     try {
       const res = await request(h.app)
         .get(`/workspaces/${encodeURIComponent(h.secondaryCwd)}/file`)
