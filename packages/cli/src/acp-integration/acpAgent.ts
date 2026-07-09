@@ -7582,15 +7582,12 @@ class QwenAgent implements Agent {
               return sessionService.loadSession(sessionId);
             },
           );
-          artifactSnapshot = sessionData?.artifactSnapshot ?? {
-            v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-            sessionId,
-            sequence: 0,
-            artifacts: [],
-            tombstonedIds: [],
-            stickyEphemeralIds: [],
-            warnings: [],
-          };
+          if (sessionData?.artifactSnapshot) {
+            artifactSnapshot = sessionData.artifactSnapshot;
+          } else {
+            artifactSnapshotUnavailable =
+              'session data unavailable after rewind';
+          }
         } catch (err) {
           artifactSnapshotUnavailable =
             err instanceof Error ? err.message : String(err);

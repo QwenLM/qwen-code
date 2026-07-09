@@ -740,6 +740,7 @@ describe('SessionArtifactStore', () => {
       action: 'removed',
       reason: 'explicit',
     });
+    expect(upgraded.changes[0]).not.toHaveProperty('durableTombstoneRequired');
     expect(upgraded.changes[1]).toMatchObject({
       action: 'updated',
       artifactId: publishedId,
@@ -962,6 +963,11 @@ describe('SessionArtifactStore', () => {
         reason: 'eviction',
       }),
     );
+    expect(
+      overflow.changes.find(
+        (change) => change.artifactId === first.changes[0]?.artifactId,
+      ),
+    ).not.toHaveProperty('durableTombstoneRequired');
     expect(
       (await store.list()).artifacts.map((artifact) => artifact.id),
     ).toEqual([second.changes[0]?.artifactId, overflow.changes[0]?.artifactId]);
@@ -3125,6 +3131,20 @@ describe('SessionArtifactStore', () => {
         warnings: [],
       }),
     ).resolves.toEqual([]);
+
+    await expect(restored.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: artifact.id,
+          retention: 'ephemeral',
+          persistenceWarning: 'sticky_override_active',
+        },
+      ],
+    });
+
+    await restored.upsertMany([
+      { title: 'Sticky', url: 'https://example.com/sticky-restore' },
+    ]);
 
     await expect(restored.list()).resolves.toMatchObject({
       artifacts: [

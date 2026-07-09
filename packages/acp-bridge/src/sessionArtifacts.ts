@@ -401,6 +401,7 @@ export class SessionArtifactStore {
         warnings.push(
           ...(await this.persistChanges(changes, persistenceStrict)),
         );
+        stripDurableTombstoneMarkers(changes);
       } catch (error) {
         if (
           validationStrict ||
@@ -511,7 +512,7 @@ export class SessionArtifactStore {
       };
       const changes: SessionArtifactChange[] = [removeChange];
       const warnings = await this.persistChanges(changes, false);
-      delete removeChange.durableTombstoneRequired;
+      stripDurableTombstoneMarkers(changes);
       return {
         v: 1,
         sessionId: this.sessionId,
@@ -1184,6 +1185,7 @@ export class SessionArtifactStore {
     return {
       ...artifact,
       retention: 'ephemeral',
+      retentionExplicit: true,
       persistenceWarning: 'sticky_override_active',
     };
   }
@@ -1873,6 +1875,12 @@ function isDurablePersistenceChange(change: SessionArtifactChange): boolean {
     change.artifact.retention !== 'ephemeral' ||
     (change.action === 'removed' && change.durableTombstoneRequired === true)
   );
+}
+
+function stripDurableTombstoneMarkers(changes: SessionArtifactChange[]): void {
+  for (const change of changes) {
+    delete change.durableTombstoneRequired;
+  }
 }
 
 function cloneStoredArtifact(artifact: StoredArtifact): StoredArtifact {
