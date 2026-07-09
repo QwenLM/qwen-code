@@ -26,6 +26,7 @@ export type FakeOpenAIToolCall = {
 
 export type FakeOpenAIResponse = {
   content?: string;
+  contentChunks?: string[];
   toolCalls?: FakeOpenAIToolCall[];
   finishReason?: 'stop' | 'tool_calls' | 'length';
   usage?: {
@@ -217,7 +218,7 @@ function writeNonStreamed(
           index: 0,
           message: {
             role: 'assistant',
-            content: message.content ?? null,
+            content: message.content ?? message.contentChunks?.join('') ?? null,
             ...(message.toolCalls ? { tool_calls: message.toolCalls } : {}),
           },
           finish_reason: finishReason(message),
@@ -258,7 +259,10 @@ function writeStreamed(
   };
 
   send(chunk({ role: 'assistant' }));
-  if (message.content) {
+  for (const content of message.contentChunks ?? []) {
+    send(chunk({ content }));
+  }
+  if (!message.contentChunks && message.content) {
     send(chunk({ content: message.content }));
   }
   for (const [index, toolCall] of (message.toolCalls ?? []).entries()) {

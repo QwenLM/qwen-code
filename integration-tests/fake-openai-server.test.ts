@@ -168,6 +168,37 @@ describe('fake OpenAI server', () => {
     ]);
   });
 
+  it('streams content chunks separately when requested', async () => {
+    server = await startFakeOpenAIServer(() => ({
+      contentChunks: ['<analysis>scratch', '</analysis><summary>visible'],
+    }));
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        stream: true,
+        messages: [{ role: 'user', content: 'write' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const contentDeltas = (await response.text())
+      .split('\n\n')
+      .filter((line) => line.startsWith('data: ') && line !== 'data: [DONE]')
+      .map((line) => JSON.parse(line.slice('data: '.length)) as StreamChunk)
+      .map((chunk) => chunk.choices[0]?.delta)
+      .filter((delta): delta is { content: string } =>
+        Object.hasOwn(delta, 'content'),
+      );
+
+    expect(contentDeltas).toEqual([
+      { content: '<analysis>scratch' },
+      { content: '</analysis><summary>visible' },
+    ]);
+  });
+
   it('returns 404 for wrong methods or paths', async () => {
     server = await startFakeOpenAIServer(() => ({ content: 'unused' }));
 
