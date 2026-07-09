@@ -408,10 +408,6 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'multi_workspace_sessions',
     (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
   ],
-  [
-    'workspace_qualified_rest_core',
-    (toggles) => toggles.persistSettingAvailable === true,
-  ],
   ['client_mcp_over_ws', (toggles) => toggles.clientMcpOverWsEnabled === true],
   ['cdp_tunnel_over_ws', (toggles) => toggles.cdpTunnelOverWsEnabled === true],
   [

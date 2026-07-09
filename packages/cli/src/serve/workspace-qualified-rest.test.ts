@@ -171,6 +171,7 @@ async function makeHarness(opts?: {
   secondaryTrusted?: boolean;
   secondaryDirName?: string;
   token?: string;
+  persistSetting?: boolean;
 }) {
   const scratch = await fsp.mkdtemp(
     path.join(os.tmpdir(), 'qwen-workspace-qualified-rest-'),
@@ -232,7 +233,7 @@ async function makeHarness(opts?: {
     undefined,
     {
       workspaceRegistry: createWorkspaceRegistry([primary, secondary]),
-      persistSetting,
+      ...(opts?.persistSetting === false ? {} : { persistSetting }),
     },
   );
 
@@ -327,11 +328,52 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
+  it('advertises core workspace-qualified REST without settings persistence', async () => {
+    const h = await makeHarness({ persistSetting: false });
+    try {
+      const res = await request(h.app).get('/capabilities').set('Host', host());
+      expect(res.status).toBe(200);
+      expect(res.body.features).toContain('workspace_qualified_rest_core');
+      expect(res.body.features).not.toContain('workspace_settings');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('routes file reads to the workspace selected by encoded cwd', async () => {
     const h = await makeHarness();
     try {
       const res = await request(h.app)
         .get(`/workspaces/${encodeURIComponent(h.secondaryCwd)}/file`)
+        .query({ path: 'target.txt' })
+        .set('Host', host());
+      expect(res.status).toBe(200);
+      expect(res.body.content).toBe('secondary');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('routes cwd selectors through local canonical symlink equivalence', async () => {
+    const h = await makeHarness();
+    try {
+      const link = path.join(path.dirname(h.secondaryCwd), 'secondary-link');
+      try {
+        await fsp.symlink(h.secondaryCwd, link, 'dir');
+      } catch (err) {
+        if (
+          err &&
+          typeof err === 'object' &&
+          'code' in err &&
+          ((err as { code?: unknown }).code === 'EPERM' ||
+            (err as { code?: unknown }).code === 'EACCES')
+        ) {
+          return;
+        }
+        throw err;
+      }
+      const res = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(link)}/file`)
         .query({ path: 'target.txt' })
         .set('Host', host());
       expect(res.status).toBe(200);

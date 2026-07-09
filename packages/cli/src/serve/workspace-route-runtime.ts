@@ -6,6 +6,7 @@
 
 import path from 'node:path';
 import type { Request, Response } from 'express';
+import { canonicalizeWorkspace } from './acp-session-bridge.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -24,6 +25,10 @@ export function isPortableAbsolutePath(value: string): boolean {
   );
 }
 
+function isUncPath(value: string): boolean {
+  return /^\\\\[^\\]+\\[^\\]+/.test(value);
+}
+
 function normalizePortableAbsolutePath(value: string): string {
   if (/^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value)) {
     return path.win32.normalize(value).toLowerCase();
@@ -37,6 +42,22 @@ export function resolveRegisteredWorkspaceRuntimeByPathSelector(
 ): WorkspaceRuntime | undefined {
   const exact = registry.getByWorkspaceCwd(selector);
   if (exact) return exact;
+
+  if (path.isAbsolute(selector) && !isUncPath(selector)) {
+    try {
+      const canonicalSelector = canonicalizeWorkspace(selector);
+      const canonicalMatch = registry.getByWorkspaceCwd(canonicalSelector);
+      if (canonicalMatch) return canonicalMatch;
+      for (const runtime of registry.list()) {
+        if (canonicalizeWorkspace(runtime.workspaceCwd) === canonicalSelector) {
+          return runtime;
+        }
+      }
+    } catch {
+      // Fall through to lexical matching; unresolved selectors still return
+      // workspace_mismatch without probing UNC/network paths.
+    }
+  }
 
   const normalizedSelector = normalizePortableAbsolutePath(selector);
   return registry
