@@ -44,7 +44,9 @@ interface CreateServeFeaturesDeps {
   opts: ServeOptions;
   boundWorkspace: string;
   persistSettingAvailable: boolean;
+  sessionArtifactsPersistenceAvailable: boolean;
   reloadAvailable: boolean;
+  channelReloadAvailable: boolean;
   sessionShellCommandEnabled: boolean;
   multiWorkspaceSessionsEnabled: boolean;
   env?: Readonly<Record<string, string | undefined>>;
@@ -63,7 +65,9 @@ export function createServeFeatures(
     opts,
     boundWorkspace,
     persistSettingAvailable,
+    sessionArtifactsPersistenceAvailable,
     reloadAvailable,
+    channelReloadAvailable,
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
   } = deps;
@@ -95,8 +99,10 @@ export function createServeFeatures(
           : {}),
         persistSettingAvailable,
         sessionShellCommandEnabled,
+        sessionArtifactsPersistenceAvailable,
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
+        channelReloadAvailable,
         multiWorkspaceSessionsEnabled,
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,

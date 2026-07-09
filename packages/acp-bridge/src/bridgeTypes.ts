@@ -62,6 +62,7 @@ export interface RewindResponse {
   targetTurnIndex: number;
   filesChanged: string[];
   filesFailed: string[];
+  warnings?: string[];
 }
 
 export interface BridgeSpawnRequest {
@@ -108,7 +109,7 @@ export interface BridgeRestoreSessionRequest {
   workspaceCwd: string;
   /** Optional echo of a daemon-issued client id for this session. */
   clientId?: string;
-  /** Internal replay transport for `session/load`; defaults to ACP streaming. */
+  /** Internal replay transport for `session/load`; defaults to bulk response. */
   historyReplay?: 'stream' | 'response';
   approvalMode?: ApprovalMode;
 }
@@ -125,11 +126,19 @@ export interface BridgeLoadReplayEnvelope {
   replayError?: string;
 }
 
-export type BridgeSessionState = LoadSessionResponse | ResumeSessionResponse;
+export type BridgeSessionState = (
+  | LoadSessionResponse
+  | ResumeSessionResponse
+) & {
+  artifactSnapshot?: unknown;
+  artifactSnapshotUnavailable?: unknown;
+};
 
 export interface BridgeRestoredSession extends BridgeSession {
   /** ACP state returned by `session/load` / `session/resume`. */
   state: BridgeSessionState;
+  /** Artifact restore warnings surfaced during session load/resume. */
+  artifactWarnings?: string[];
   /** True when response-mode history replay aborted after emitting a prefix. */
   partial?: true;
   /** Agent-provided replay failure detail when `partial` is true. */
@@ -573,7 +582,10 @@ export interface AcpSessionBridge {
    * List the structured artifacts registered for a live session. Throws
    * `SessionNotFoundError` when the id is unknown.
    */
-  getSessionArtifacts(sessionId: string): Promise<SessionArtifactsEnvelope>;
+  getSessionArtifacts(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionArtifactsEnvelope>;
 
   /**
    * Register a client-supplied artifact for the session. Client artifacts use

@@ -17,11 +17,16 @@ import type {
   SetSessionModelResponse,
   SessionUpdate,
 } from '@agentclientprotocol/sdk';
-import type { ApprovalMode } from '@qwen-code/qwen-code-core';
+import type {
+  ApprovalMode,
+  RebuiltSessionArtifactSnapshot,
+} from '@qwen-code/qwen-code-core';
 import {
   DAEMON_TRACEPARENT_META_KEY,
   DAEMON_TRACESTATE_META_KEY,
+  SESSION_ARTIFACT_PERSISTENCE_VERSION,
   TrustGateError,
+  normalizeSnapshotPayload,
   ShellExecutionService,
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
@@ -123,6 +128,9 @@ import {
 import { PermissionForbiddenError } from './bridgeErrors.js';
 import {
   SessionArtifactStore,
+  isArtifactRestoreFailureWarning,
+  publicArtifactsEqual,
+  type DaemonSessionArtifact,
   type SessionArtifactChange,
   type SessionArtifactInput,
   type SessionArtifactMutationResult,
@@ -2890,7 +2898,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       channel: ci.channel,
       connection: ci.connection,
       events,
-      artifacts: new SessionArtifactStore({ sessionId, workspaceCwd }),
+      artifacts: new SessionArtifactStore({
+        sessionId,
+        workspaceCwd,
+        persistence: createSessionArtifactPersistence(ci.connection, sessionId),
+      }),
       promptQueue: Promise.resolve(),
       pendingPromptCount: 0,
       pendingPromptList: [],
@@ -2940,6 +2952,46 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   };
 
+  const artifactReseedChanges = (
+    before: readonly DaemonSessionArtifact[],
+    after: readonly DaemonSessionArtifact[],
+  ): SessionArtifactChange[] => {
+    const beforeById = new Map(
+      before.map((artifact) => [artifact.id, artifact]),
+    );
+    const afterById = new Map(after.map((artifact) => [artifact.id, artifact]));
+    const changes: SessionArtifactChange[] = [];
+    for (const artifact of before) {
+      if (!afterById.has(artifact.id)) {
+        changes.push({
+          action: 'removed',
+          artifactId: artifact.id,
+          artifact,
+          reason: 'eviction',
+        });
+      }
+    }
+    for (const artifact of after) {
+      const previous = beforeById.get(artifact.id);
+      if (!previous) {
+        changes.push({
+          action: 'created',
+          artifactId: artifact.id,
+          artifact,
+        });
+        continue;
+      }
+      if (!publicArtifactsEqual(previous, artifact)) {
+        changes.push({
+          action: 'updated',
+          artifactId: artifact.id,
+          artifact,
+        });
+      }
+    }
+    return changes;
+  };
+
   const makeClientArtifactInput = (
     artifact: SessionArtifactInput,
     clientId: string | undefined,
@@ -2955,6 +3007,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       mimeType: artifact.mimeType,
       sizeBytes: artifact.sizeBytes,
       metadata: artifact.metadata,
+      retention: artifact.retention,
+      clientRetained: artifact.clientRetained,
       source: 'client',
     };
     if (clientId) {
@@ -2962,6 +3016,34 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
     return input;
   };
+
+  function createSessionArtifactPersistence(
+    connection: ClientSideConnection,
+    sessionId: string,
+  ) {
+    return {
+      recordEvent: async (payload: unknown): Promise<void> => {
+        await connection.extMethod(
+          SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist,
+          {
+            sessionId,
+            kind: 'event',
+            payload,
+          },
+        );
+      },
+      recordSnapshot: async (payload: unknown): Promise<void> => {
+        await connection.extMethod(
+          SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist,
+          {
+            sessionId,
+            kind: 'snapshot',
+            payload,
+          },
+        );
+      },
+    };
+  }
 
   // A5: seed the snapshot caches from the agent's session-create response
   // (`newSession` / `loadSession` / `resumeSession` all return `models` +
@@ -3066,6 +3148,54 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       };
     }
     return { lastEventId: snapshot.lastEventId, ...replayStatus };
+  };
+
+  const restoredArtifactSnapshotFromState = (
+    state: BridgeSessionState,
+  ): RebuiltSessionArtifactSnapshot | undefined => {
+    const candidate = state.artifactSnapshot;
+    const warnings: string[] = [];
+    const snapshot = normalizeSnapshotPayload(candidate, warnings);
+    if (!snapshot) return undefined;
+    const snapshotWarnings =
+      isRecord(candidate) && Array.isArray(candidate['warnings'])
+        ? candidate['warnings']
+            .filter(
+              (warning): warning is string =>
+                typeof warning === 'string' && warning.length <= 1000,
+            )
+            .slice(-500)
+        : [];
+    return {
+      v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+      sessionId: snapshot.sessionId,
+      sequence: snapshot.sequence,
+      artifacts: snapshot.artifacts,
+      ...(snapshot.markerArtifacts
+        ? { markerArtifacts: snapshot.markerArtifacts }
+        : {}),
+      tombstonedIds: snapshot.tombstonedIds ?? [],
+      stickyEphemeralIds: snapshot.stickyEphemeralIds ?? [],
+      warnings: [...warnings, ...snapshotWarnings],
+    };
+  };
+
+  const artifactSnapshotUnavailableReason = (
+    state: BridgeSessionState,
+  ): string | undefined => {
+    const reason = state.artifactSnapshotUnavailable;
+    return typeof reason === 'string' && reason ? reason : undefined;
+  };
+
+  const publicRestoreState = (
+    state: BridgeSessionState,
+  ): BridgeSessionState => {
+    const {
+      artifactSnapshot: _artifactSnapshot,
+      artifactSnapshotUnavailable: _artifactSnapshotUnavailable,
+      ...publicState
+    } = state;
+    return publicState;
   };
 
   async function restoreSession(
@@ -3353,16 +3483,34 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         },
       );
       releaseAdmissionOnce();
-      entry.restoreState = state;
+      const restoredArtifactSnapshot = restoredArtifactSnapshotFromState(state);
+      const publicState = publicRestoreState(state);
+      entry.restoreState = publicState;
       if (replayPartial === true) {
         entry.restoreReplayPartial = true;
       }
       if (replayError !== undefined) {
         entry.restoreReplayError = replayError;
       }
-      seedSnapshotCaches(entry, state);
+      seedSnapshotCaches(entry, publicState);
+      const artifactRestoreWarnings = await entry.artifacts.restore(
+        restoredArtifactSnapshot,
+      );
+      for (const warning of artifactRestoreWarnings) {
+        writeStderrLine(
+          `[artifacts] session=${entry.sessionId} action=restore_warning warning=${JSON.stringify(
+            warning,
+          )}`,
+        );
+      }
+      const artifactRestoreFailed = artifactRestoreWarnings.some((warning) =>
+        isArtifactRestoreFailureWarning(warning),
+      );
       if (replayUpdates.length > 0) {
-        await ci.client.seedSessionUpdates(entry, replayUpdates);
+        await ci.client.seedSessionUpdates(entry, replayUpdates, {
+          ingestArtifacts:
+            restoredArtifactSnapshot === undefined || artifactRestoreFailed,
+        });
         ci.client.drainEarlyEvents(entry.sessionId, entry);
       }
       const clientId = registerClient(entry, req.clientId);
@@ -3390,7 +3538,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         attached: false,
         clientId,
         createdAt: entry.createdAt,
-        state,
+        state: publicState,
+        ...(artifactRestoreWarnings.length > 0
+          ? { artifactWarnings: artifactRestoreWarnings }
+          : {}),
         hasActivePrompt: entry.promptActive,
         ...replayFieldsFor(entry, action),
       };
@@ -4869,9 +5020,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return { displayName: entry.displayName };
     },
 
-    async getSessionArtifacts(sessionId) {
+    async getSessionArtifacts(sessionId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
       return entry.artifacts.list();
     },
 
@@ -4881,9 +5033,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const clientId = resolveTrustedClientId(entry, context?.clientId);
       const input = makeClientArtifactInput(artifact, clientId);
       const result: SessionArtifactMutationResult =
-        await entry.artifacts.upsertMany([input], { strict: true });
+        await entry.artifacts.upsertMany([input], {
+          validationStrict: true,
+          persistenceStrict: false,
+        });
       publishArtifactChanges(entry, result.changes, clientId);
-      return result;
+      const warnings = [...(result.warnings ?? [])];
+      return warnings.length > 0 ? { ...result, warnings } : result;
     },
 
     async removeSessionArtifact(sessionId, artifactId, context) {
@@ -4892,7 +5048,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const clientId = resolveTrustedClientId(entry, context?.clientId);
       const result = await entry.artifacts.remove(artifactId, { clientId });
       publishArtifactChanges(entry, result.changes, clientId);
-      return result;
+      const warnings = [...(result.warnings ?? [])];
+      return warnings.length > 0 ? { ...result, warnings } : result;
     },
 
     listWorkspaceSessions(workspaceCwd) {
@@ -6089,7 +6246,58 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
       const filesChanged = (response['filesChanged'] as string[]) ?? [];
       const filesFailed = (response['filesFailed'] as string[]) ?? [];
-
+      const artifactSnapshot = restoredArtifactSnapshotFromState(
+        response as BridgeSessionState,
+      );
+      const artifactSnapshotUnavailable = artifactSnapshotUnavailableReason(
+        response as BridgeSessionState,
+      );
+      const beforeArtifacts = (await entry.artifacts.list()).artifacts;
+      const shouldRestoreArtifactSnapshot =
+        artifactSnapshot !== undefined &&
+        artifactSnapshotUnavailable === undefined;
+      const artifactRestoreWarnings =
+        artifactSnapshotUnavailable !== undefined
+          ? [
+              `artifact snapshot rebuild unavailable during rewind: ${artifactSnapshotUnavailable}`,
+            ]
+          : shouldRestoreArtifactSnapshot
+            ? await entry.artifacts.restore(artifactSnapshot, {
+                preserveLiveEphemeral: true,
+              })
+            : [];
+      const artifactRestoreFailed = artifactRestoreWarnings.some(
+        isArtifactRestoreFailureWarning,
+      );
+      const shouldRecordArtifactSnapshot =
+        shouldRestoreArtifactSnapshot && !artifactRestoreFailed;
+      const artifactSnapshotWarnings = shouldRecordArtifactSnapshot
+        ? await entry.artifacts.recordSnapshot()
+        : [];
+      const artifactWarnings = [
+        ...artifactRestoreWarnings,
+        ...artifactSnapshotWarnings,
+      ];
+      for (const warning of artifactRestoreWarnings) {
+        writeStderrLine(
+          `[artifacts] session=${entry.sessionId} action=rewind_restore_warning warning=${JSON.stringify(
+            warning,
+          )}`,
+        );
+      }
+      for (const warning of artifactSnapshotWarnings) {
+        writeStderrLine(
+          `[artifacts] session=${entry.sessionId} action=rewind_snapshot_warning warning=${JSON.stringify(
+            warning,
+          )}`,
+        );
+      }
+      const afterArtifacts = (await entry.artifacts.list()).artifacts;
+      publishArtifactChanges(
+        entry,
+        artifactReseedChanges(beforeArtifacts, afterArtifacts),
+        originatorClientId,
+      );
       try {
         entry.events.publish({
           type: 'session_rewound',
@@ -6099,6 +6307,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             targetTurnIndex,
             filesChanged,
             filesFailed,
+            ...(artifactWarnings.length > 0
+              ? { warnings: artifactWarnings }
+              : {}),
           },
           ...(originatorClientId ? { originatorClientId } : {}),
         });
@@ -6111,6 +6322,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         targetTurnIndex,
         filesChanged,
         filesFailed,
+        ...(artifactWarnings.length > 0 ? { warnings: artifactWarnings } : {}),
       };
     },
 

@@ -79,6 +79,12 @@ export interface ChannelWorkerSnapshot {
 export interface ChannelWorkerSupervisor {
   start(): Promise<void>;
   stop(): Promise<void>;
+  /**
+   * Stop the current worker (if any) and relaunch it. The relaunched worker
+   * re-reads settings.json, so this is how settings changes are applied
+   * without restarting the whole daemon. Rejects if the relaunch fails.
+   */
+  restart(): Promise<ChannelWorkerSnapshot>;
   killAllSync(): void;
   snapshot(): ChannelWorkerSnapshot;
   enqueueWebhookTask(task: ChannelWebhookTask): Promise<ChannelWebhookAccepted>;
@@ -469,6 +475,8 @@ export function createChannelWorkerSupervisor(
       timer: NodeJS.Timeout;
     }
   >();
+  let restarting: Promise<ChannelWorkerSnapshot> | undefined;
+  let disposed = false;
 
   const snapshotCopy = (): ChannelWorkerSnapshot => ({
     ...snapshot,
@@ -885,9 +893,12 @@ export function createChannelWorkerSupervisor(
     });
   };
 
-  return {
+  const supervisor: ChannelWorkerSupervisor = {
     async start() {
-      if (child) return;
+      // `disposed` is latched only by killAllSync() (hard shutdown), so the
+      // supported stop()/start() reuse lifecycle is preserved; this guard just
+      // prevents a relaunch into a daemon that is being force-torn-down.
+      if (disposed || child) return;
       stopping = false;
       clearRestartTimer();
       restartAttemptTimes = [];
@@ -932,7 +943,29 @@ export function createChannelWorkerSupervisor(
       stopping = false;
       snapshot = { ...snapshot, state: 'stopped' };
     },
+    async restart() {
+      // A hard shutdown (killAllSync) latches `disposed`; a reload racing that
+      // must not relaunch a worker into a tearing-down daemon.
+      if (disposed) return snapshotCopy();
+      // Coalesce concurrent reloads onto one stop+relaunch so a burst of
+      // reload requests cannot fork multiple workers.
+      restarting ??= (async () => {
+        try {
+          await supervisor.stop();
+          // start() bails if a child is still attached (stop cleared it) or if
+          // killAllSync latched `disposed` mid-reload — avoiding an orphaned
+          // fork. It also resets the restart budget, so a worker previously
+          // parked in `failed` recovers on an explicit reload.
+          await supervisor.start();
+          return snapshotCopy();
+        } finally {
+          restarting = undefined;
+        }
+      })();
+      return restarting;
+    },
     killAllSync() {
+      disposed = true;
       rejectPendingWebhookTasks(
         'channel_worker_unavailable',
         'Channel worker stopped.',
@@ -1008,4 +1041,5 @@ export function createChannelWorkerSupervisor(
       });
     },
   };
+  return supervisor;
 }

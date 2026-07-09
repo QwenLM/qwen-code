@@ -2294,4 +2294,195 @@ describe('createChannelWorkerSupervisor', () => {
 
     await expect(accepted).rejects.toThrow('Channel worker stopped.');
   });
+
+  describe('restart()', () => {
+    const waitForCalls = async (getCount: () => number, count: number) => {
+      for (let i = 0; i < 100 && getCount() < count; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    };
+
+    it('stops the running worker and relaunches it so settings are re-read', async () => {
+      const child1 = new FakeChild();
+      const child2 = new FakeChild();
+      const queue = [child1, child2];
+      const spawnWorker = vi.fn(() => queue.shift()!);
+      const supervisor = createChannelWorkerSupervisor({
+        cliEntryPath: '/repo/dist/index.js',
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        spawnWorker,
+      });
+
+      const started = supervisor.start();
+      child1.emit('message', {
+        type: 'ready',
+        pid: 111,
+        channels: ['telegram'],
+      });
+      await started;
+      expect(supervisor.snapshot()).toMatchObject({
+        state: 'running',
+        pid: 111,
+      });
+
+      const restarted = supervisor.restart();
+      await waitForCalls(() => spawnWorker.mock.calls.length, 2);
+      child2.emit('message', {
+        type: 'ready',
+        pid: 222,
+        channels: ['telegram'],
+      });
+      const snapshot = await restarted;
+
+      expect(child1.kill).toHaveBeenCalled();
+      expect(spawnWorker).toHaveBeenCalledTimes(2);
+      expect(snapshot).toMatchObject({ state: 'running', pid: 222 });
+      expect(supervisor.snapshot()).toMatchObject({
+        state: 'running',
+        pid: 222,
+      });
+    });
+
+    it('coalesces concurrent restarts onto a single relaunch', async () => {
+      const child1 = new FakeChild();
+      const child2 = new FakeChild();
+      const queue = [child1, child2];
+      const spawnWorker = vi.fn(() => queue.shift()!);
+      const supervisor = createChannelWorkerSupervisor({
+        cliEntryPath: '/repo/dist/index.js',
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        spawnWorker,
+      });
+
+      const started = supervisor.start();
+      child1.emit('message', {
+        type: 'ready',
+        pid: 111,
+        channels: ['telegram'],
+      });
+      await started;
+
+      const first = supervisor.restart();
+      const second = supervisor.restart();
+      await waitForCalls(() => spawnWorker.mock.calls.length, 2);
+      child2.emit('message', {
+        type: 'ready',
+        pid: 222,
+        channels: ['telegram'],
+      });
+      const [a, b] = await Promise.all([first, second]);
+
+      // Initial start + exactly one relaunch: concurrent restarts share the
+      // same in-flight promise and never fork a second worker.
+      expect(spawnWorker).toHaveBeenCalledTimes(2);
+      expect(a).toMatchObject({ state: 'running', pid: 222 });
+      expect(b).toMatchObject({ state: 'running', pid: 222 });
+    });
+
+    it('rejects on relaunch failure, then recovers on a later restart', async () => {
+      const child1 = new FakeChild();
+      const child2 = new FakeChild();
+      let call = 0;
+      const spawnWorker = vi.fn(() => {
+        call += 1;
+        if (call === 2) {
+          throw new Error('fork failed');
+        }
+        return call === 1 ? child1 : child2;
+      });
+      const supervisor = createChannelWorkerSupervisor({
+        cliEntryPath: '/repo/dist/index.js',
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        spawnWorker,
+      });
+
+      const started = supervisor.start();
+      child1.emit('message', {
+        type: 'ready',
+        pid: 111,
+        channels: ['telegram'],
+      });
+      await started;
+
+      // Second spawn throws — the relaunch fails and the worker parks in
+      // `failed` (channels down), and restart() surfaces the error.
+      await expect(supervisor.restart()).rejects.toThrow(/fork failed/);
+      expect(supervisor.snapshot()).toMatchObject({ state: 'failed' });
+
+      // A later restart resets the budget and recovers once spawning works.
+      const recovered = supervisor.restart();
+      await waitForCalls(() => spawnWorker.mock.calls.length, 3);
+      child2.emit('message', {
+        type: 'ready',
+        pid: 333,
+        channels: ['telegram'],
+      });
+      expect(await recovered).toMatchObject({ state: 'running', pid: 333 });
+    });
+
+    it('does not relaunch after killAllSync latches disposed', async () => {
+      const child1 = new FakeChild();
+      const spawnWorker = vi.fn(() => child1);
+      const supervisor = createChannelWorkerSupervisor({
+        cliEntryPath: '/repo/dist/index.js',
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        spawnWorker,
+      });
+
+      const started = supervisor.start();
+      child1.emit('message', {
+        type: 'ready',
+        pid: 111,
+        channels: ['telegram'],
+      });
+      await started;
+
+      supervisor.killAllSync();
+      expect(spawnWorker).toHaveBeenCalledTimes(1);
+
+      // A reload after a hard shutdown must be a no-op, not a relaunch.
+      const snapshot = await supervisor.restart();
+      expect(spawnWorker).toHaveBeenCalledTimes(1);
+      expect(snapshot.state).toBe('stopped');
+    });
+
+    it('does not fork a new worker when killAllSync races an in-flight restart', async () => {
+      const child1 = new FakeChild();
+      const child2 = new FakeChild();
+      const queue = [child1, child2];
+      const spawnWorker = vi.fn(() => queue.shift()!);
+      const supervisor = createChannelWorkerSupervisor({
+        cliEntryPath: '/repo/dist/index.js',
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        spawnWorker,
+      });
+
+      const started = supervisor.start();
+      child1.emit('message', {
+        type: 'ready',
+        pid: 111,
+        channels: ['telegram'],
+      });
+      await started;
+
+      // Begin a reload, then simulate a hard daemon shutdown before the
+      // relaunch's start() runs. The disposed latch must prevent a new fork
+      // (which would otherwise orphan a worker spawned during shutdown).
+      const restarted = supervisor.restart();
+      supervisor.killAllSync();
+      await restarted;
+
+      expect(spawnWorker).toHaveBeenCalledTimes(1);
+    });
+  });
 });
