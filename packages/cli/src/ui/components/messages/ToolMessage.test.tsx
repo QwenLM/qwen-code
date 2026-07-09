@@ -735,6 +735,142 @@ describe('<ToolMessage />', () => {
       expect(output).not.toContain('git checkout HEAD~1');
     });
 
+    it('renders no context block when the only tool call is the awaiting one', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fresh-agent',
+              taskDescription: 'First action needs approval',
+              taskPrompt: 'Go',
+              status: 'running',
+              pendingConfirmation: {} as object,
+              toolCalls: [
+                {
+                  callId: 'c1',
+                  name: 'run_shell_command',
+                  status: 'awaiting_approval',
+                  description: 'rm -rf build',
+                },
+              ],
+            },
+            isFocused: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('Approval requested by');
+      // The awaiting call is never echoed as context, and with no prior
+      // calls there are no glyph rows at all.
+      expect(output).not.toContain('rm -rf build');
+      expect(output).not.toContain('✔');
+      expect(output).not.toContain('○');
+    });
+
+    it('renders an executing prior call with the ○ glyph', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fg-agent',
+              taskDescription: 'Parallel work',
+              taskPrompt: 'Go',
+              status: 'running',
+              pendingConfirmation: {} as object,
+              toolCalls: [
+                {
+                  callId: 'c1',
+                  name: 'run_shell_command',
+                  status: 'executing',
+                  description: 'npm run build',
+                },
+                {
+                  callId: 'c2',
+                  name: 'write_file',
+                  status: 'awaiting_approval',
+                  description: '/etc/hosts',
+                },
+              ],
+            },
+            isFocused: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('○');
+      expect(output).toContain('npm run build');
+    });
+
+    it('falls back to the raw tool name for tools outside the display map', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fg-agent',
+              taskDescription: 'MCP work',
+              taskPrompt: 'Go',
+              status: 'running',
+              pendingConfirmation: {} as object,
+              toolCalls: [
+                {
+                  callId: 'c1',
+                  name: 'mcp__custom__frobnicate',
+                  status: 'success',
+                  description: 'widget-7',
+                },
+                {
+                  callId: 'c2',
+                  name: 'run_shell_command',
+                  status: 'awaiting_approval',
+                  description: 'sudo frob',
+                },
+              ],
+            },
+            isFocused: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('mcp__custom__frobnicate widget-7');
+    });
+
+    it('renders the display name alone when a prior call has no description', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fg-agent',
+              taskDescription: 'Sparse metadata',
+              taskPrompt: 'Go',
+              status: 'running',
+              pendingConfirmation: {} as object,
+              toolCalls: [
+                {
+                  callId: 'c1',
+                  name: 'glob',
+                  status: 'success',
+                  description: '',
+                },
+                {
+                  callId: 'c2',
+                  name: 'run_shell_command',
+                  status: 'awaiting_approval',
+                  description: 'sudo frob',
+                },
+              ],
+            },
+            isFocused: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('✔ Glob');
+    });
+
     it('pendingConfirmation && !isFocused → renders queued marker (one-line)', () => {
       // Without this marker, a subagent waiting on another subagent's
       // approval would be invisible in the main view — the user would

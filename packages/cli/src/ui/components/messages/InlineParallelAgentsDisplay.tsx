@@ -28,16 +28,13 @@
 import type React from 'react';
 import { useContext, useEffect, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
-import {
-  type AgentResultDisplay,
-  ToolDisplayNames,
-  ToolNames,
-} from '@qwen-code/qwen-code-core';
+import { type AgentResultDisplay } from '@qwen-code/qwen-code-core';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
+import { TOOL_DISPLAY_BY_NAME } from '../../utils/tool-display-map.js';
 import { localizeToolDisplayName } from '../../../i18n/index.js';
 
 interface InlineParallelAgentsDisplayProps {
@@ -105,15 +102,6 @@ interface RowData {
   recentActivity?: { name: string; description?: string };
   tokenCount?: number;
 }
-
-// Internal tool name → display name lookup (mirrors LiveAgentPanel so
-// rows surface `Shell` instead of raw `run_shell_command`).
-const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
-  (Object.keys(ToolNames) as Array<keyof typeof ToolNames>).map((key) => [
-    ToolNames[key],
-    ToolDisplayNames[key],
-  ]),
-);
 
 function activityLabel(row: RowData): string {
   // `row.recentActivity` was snapshotted in the rows useMemo by reading

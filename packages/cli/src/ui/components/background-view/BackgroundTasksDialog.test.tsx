@@ -1171,5 +1171,42 @@ describe('BackgroundTasksDialog', () => {
       expect(frame).toContain('file-2.ts');
       expect(frame).toContain('file-11.ts');
     });
+
+    it('shows all rows when the buffer holds exactly 10 activities', () => {
+      const activities = Array.from({ length: 10 }, (_, i) => ({
+        name: 'read_file',
+        description: `file-${i}.ts`,
+        at: i,
+      }));
+      const h = setup([entry({ recentActivities: activities })]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = h.lastFrame() ?? '';
+      expect(frame).toContain('file-0.ts');
+      expect(frame).toContain('file-9.ts');
+    });
+
+    it('drops only the oldest row at 11 activities', () => {
+      const activities = Array.from({ length: 11 }, (_, i) => ({
+        name: 'read_file',
+        description: `file-${i}.ts`,
+        at: i,
+      }));
+      const h = setup([entry({ recentActivities: activities })]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = h.lastFrame() ?? '';
+      expect(frame).not.toContain('file-0.ts');
+      expect(frame).toContain('file-1.ts');
+      expect(frame).toContain('file-10.ts');
+    });
+
+    it('omits the Progress section entirely when there are no activities', () => {
+      const h = setup([entry({ recentActivities: [] })]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = h.lastFrame() ?? '';
+      expect(frame).not.toContain('Progress');
+    });
   });
 });

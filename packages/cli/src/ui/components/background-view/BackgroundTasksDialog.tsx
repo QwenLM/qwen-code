@@ -25,8 +25,7 @@ import { theme } from '../../semantic-colors.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import {
   buildBackgroundEntryLabel,
-  ToolDisplayNames,
-  ToolNames,
+  MAX_RECENT_ACTIVITIES,
   type AgentTask,
   type BackgroundApproval,
   type MonitorTask,
@@ -36,7 +35,11 @@ import {
 import { ToolConfirmationMessage } from '../messages/ToolConfirmationMessage.js';
 import { WorkflowSaveOverlay } from './workflow-save-overlay.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
-import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
+import {
+  escapeAnsiCtrlCodes,
+  sanitizeMultilineForDisplay,
+} from '../../utils/textUtils.js';
+import { TOOL_DISPLAY_BY_NAME } from '../../utils/tool-display-map.js';
 import {
   type AgentDialogEntry,
   type DialogEntry,
@@ -57,13 +60,10 @@ import {
 // `paused` state, so dialog handlers can switch on a single combined enum.
 type EntryStatus = DialogEntry['status'];
 
-// Tool-name → display-name lookup (`run_shell_command` → `Shell`).
-const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
-  (Object.keys(ToolNames) as Array<keyof typeof ToolNames>).map((key) => [
-    ToolNames[key],
-    ToolDisplayNames[key],
-  ]),
-);
+// Bounds MaxSizedBox's per-tick layout work when a live activity carries a
+// pathological description (e.g. a heredoc script). Exceeds what any
+// terminal budget can show, so it never truncates visible content.
+const MAX_LIVE_LABEL_CHARS = 4096;
 
 function formatActivityLabel(name: string, description: string | undefined) {
   const display = localizeToolDisplayName(TOOL_DISPLAY_BY_NAME[name] ?? name);
@@ -695,9 +695,11 @@ const AgentDetailBody: React.FC<{
   const hiddenChildCount = childAgents.length - visibleChildAgents.length;
 
   // Registry stores activities newest-last; keep that order so the live
-  // row sits at the bottom of the Progress block. Cap at 10 in case the
-  // registry ever raises its buffer.
-  const activities = (entry.recentActivities ?? []).slice(-10);
+  // row sits at the bottom of the Progress block. Re-cap defensively in
+  // case a resume path ever restores an oversized buffer.
+  const activities = (entry.recentActivities ?? []).slice(
+    -MAX_RECENT_ACTIVITIES,
+  );
   const blockedReason = entry.resumeBlockedReason;
   const hasError = Boolean(entry.error);
   const hasBlockedReason = Boolean(blockedReason);
@@ -796,7 +798,10 @@ const AgentDetailBody: React.FC<{
             // other rows. Unicode chevrons rendered with inconsistent width
             // broke alignment in some fonts.
             const prefix = isLast ? '> ' : '  ';
-            const fullLabel = escapeAnsiCtrlCodes(
+            // `sanitizeMultilineForDisplay` (not just `escapeAnsiCtrlCodes`)
+            // because bare C0 controls (\r, BS, BEL, DEL) pass through the
+            // ANSI-sequence escape and could still corrupt the row.
+            const fullLabel = sanitizeMultilineForDisplay(
               formatActivityLabel(a.name, a.description),
             );
             if (isLast) {
@@ -804,13 +809,9 @@ const AgentDetailBody: React.FC<{
               // inspect ("is this command stuck or still reasonable?"),
               // so it renders in full and wraps; MaxSizedBox owns the
               // overall height budget. Earlier rows stay one-line.
-              // The 4096-char cap only bounds MaxSizedBox's per-tick
-              // layout work against pathological descriptions (e.g. a
-              // heredoc script) — it exceeds what any terminal budget
-              // can show, so it never truncates visible content.
               const liveLabel =
-                fullLabel.length > 4096
-                  ? `${fullLabel.slice(0, 4096)}…`
+                fullLabel.length > MAX_LIVE_LABEL_CHARS
+                  ? `${fullLabel.slice(0, MAX_LIVE_LABEL_CHARS)}…`
                   : fullLabel;
               return (
                 <Box key={`${a.at}-${i}`}>

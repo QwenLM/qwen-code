@@ -24,11 +24,7 @@ import type {
   McpToolProgressData,
   FileDiff,
 } from '@qwen-code/qwen-code-core';
-import {
-  ToolDisplayNames,
-  ToolNames,
-  ToolNamesMigration,
-} from '@qwen-code/qwen-code-core';
+import { ToolNames, ToolNamesMigration } from '@qwen-code/qwen-code-core';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
@@ -43,8 +39,10 @@ import type { LoadedSettings } from '../../../config/settings.js';
 import {
   escapeAnsiCtrlCodes,
   getCachedStringWidth,
+  sanitizeMultilineForDisplay,
   toCodePoints,
 } from '../../utils/textUtils.js';
+import { TOOL_DISPLAY_BY_NAME } from '../../utils/tool-display-map.js';
 
 import {
   ToolStatusIndicator,
@@ -63,15 +61,10 @@ const AGENT_TOOL_NAMES: ReadonlySet<string> = new Set([
     .map(([legacy]) => legacy),
 ]);
 
-// Internal-tool-name → display-name lookup (`run_shell_command` → `Shell`).
-// Mirrors the maps in LiveAgentPanel / BackgroundTasksDialog so the approval
-// context lines use the same vocabulary as the other subagent surfaces.
-const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
-  (Object.keys(ToolNames) as Array<keyof typeof ToolNames>).map((key) => [
-    ToolNames[key],
-    ToolDisplayNames[key],
-  ]),
-);
+// How many of the subagent's prior tool calls to list above an approval
+// prompt — enough to show what led up to the request without pushing the
+// confirmation itself off-screen.
+const APPROVAL_CONTEXT_CALLS = 3;
 
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
@@ -306,7 +299,7 @@ const SubagentApprovalContext: React.FC<{
 }> = ({ data }) => {
   const priorCalls = (data.toolCalls ?? [])
     .filter((call) => call.status !== 'awaiting_approval')
-    .slice(-3);
+    .slice(-APPROVAL_CONTEXT_CALLS);
   if (priorCalls.length === 0) return null;
   return (
     <Box flexDirection="column">
@@ -325,7 +318,10 @@ const SubagentApprovalContext: React.FC<{
         return (
           <Box key={call.callId}>
             <Text color={theme.text.secondary} wrap="truncate-end">
-              {`  ${glyph} ${escapeAnsiCtrlCodes(label)}`}
+              {/* sanitizeMultilineForDisplay: bare C0 controls (\r, BS,
+                  BEL) pass through the ANSI-sequence escape and this
+                  line informs an allow/deny decision. */}
+              {`  ${glyph} ${sanitizeMultilineForDisplay(label)}`}
             </Text>
           </Box>
         );

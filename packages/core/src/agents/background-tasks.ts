@@ -38,7 +38,13 @@ import type { TaskBase, TaskRegistration, TaskStatus } from './tasks/types.js';
 const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 
 const MAX_DESCRIPTION_LENGTH = 40;
-const MAX_RECENT_ACTIVITIES = 10;
+/**
+ * Cap on each agent's rolling `recentActivities` buffer. Exported so UI
+ * consumers that render the buffer (e.g. the detail dialog's Progress
+ * section) can bound their display to the same value instead of
+ * hardcoding a coincidentally-equal number.
+ */
+export const MAX_RECENT_ACTIVITIES = 10;
 export const DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS = 10;
 export const BACKGROUND_AGENT_CONCURRENCY_ENV =
   'QWEN_CODE_MAX_BACKGROUND_AGENTS';
