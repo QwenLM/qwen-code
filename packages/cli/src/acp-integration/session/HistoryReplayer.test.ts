@@ -442,6 +442,45 @@ describe('HistoryReplayer', () => {
       });
     });
 
+    it('should expose pending function calls when replayPage throws mid-page', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-started-before-error',
+                name: 'run_shell_command',
+                args: { command: 'sleep 10' },
+              },
+            },
+            { text: 'this send fails' },
+          ],
+        },
+      };
+      sendUpdateSpy.mockImplementation(
+        async (update: Record<string, unknown>) => {
+          if (update['sessionUpdate'] === 'agent_message_chunk') {
+            throw new Error('replay failed');
+          }
+        },
+      );
+
+      await expect(
+        replayer.replayPage([record], { finalizeDangling: false }),
+      ).rejects.toThrow('replay failed');
+
+      expect(replayer.getPendingToolCalls()).toEqual([
+        {
+          callId: 'call-started-before-error',
+          toolName: 'run_shell_command',
+          recordId: record.uuid,
+          timestamp: record.timestamp,
+        },
+      ]);
+    });
+
     it('should not synthesize missing-result failures for calls without source ids', async () => {
       const records: ChatRecord[] = [
         {

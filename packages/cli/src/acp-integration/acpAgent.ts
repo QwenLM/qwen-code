@@ -456,9 +456,10 @@ async function collectHistoryReplayUpdatesPage({
     },
     cumulativeUsage,
   };
+  const replayer = new HistoryReplayer(replayContext);
 
   try {
-    const state = await new HistoryReplayer(replayContext).replayPage(records, {
+    const state = await replayer.replayPage(records, {
       pendingToolCalls,
       finalizeDangling,
       gaps,
@@ -473,7 +474,7 @@ async function collectHistoryReplayUpdatesPage({
     );
     return {
       updates,
-      pendingToolCalls,
+      pendingToolCalls: replayer.getPendingToolCalls(),
       replayError: 'Replay conversion failed for this page',
     };
   }

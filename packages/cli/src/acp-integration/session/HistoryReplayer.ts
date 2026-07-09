@@ -139,6 +139,10 @@ export class HistoryReplayer {
     return state;
   }
 
+  getPendingToolCalls(): PendingReplayToolCall[] {
+    return Array.from(this.pendingReplayToolCalls.values());
+  }
+
   /**
    * Replays a single chat record.
    */

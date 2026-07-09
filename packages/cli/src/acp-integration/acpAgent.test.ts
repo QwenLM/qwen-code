@@ -485,12 +485,22 @@ const { mockHistoryReplay } = vi.hoisted(() => ({
 const { mockHistoryReplayPage } = vi.hoisted(() => ({
   mockHistoryReplayPage: vi.fn(),
 }));
+type MockPendingToolCall = {
+  callId: string;
+  toolName: string;
+  timestamp?: string;
+  recordId: string;
+};
+const { mockHistoryPendingToolCalls } = vi.hoisted(() => ({
+  mockHistoryPendingToolCalls: vi.fn((): MockPendingToolCall[] => []),
+}));
 vi.mock('./session/HistoryReplayer.js', () => ({
   HistoryReplayer: vi.fn().mockImplementation((context: unknown) => ({
     replay: (messages: unknown, gaps: unknown) =>
       mockHistoryReplay(context, messages, gaps),
     replayPage: (messages: unknown, options: unknown) =>
       mockHistoryReplayPage(context, messages, options),
+    getPendingToolCalls: () => mockHistoryPendingToolCalls(),
   })),
 }));
 
@@ -650,6 +660,7 @@ import {
   Storage,
   SessionTranscriptReader,
   SessionTranscriptTooLargeError,
+  encodeSessionTranscriptCursor,
   unregisterGoalHook,
   startEventLoopLagMonitor,
   registerAcpEventLoopLagGauge,
@@ -1264,6 +1275,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockExtensionManagerState.refreshCache.mockResolvedValue(undefined);
     mockRunManagedAutoMemoryDream.mockReset();
     mockRunManagedRememberByAgent.mockReset();
+    mockHistoryPendingToolCalls.mockReturnValue([]);
     lastSessionMock = undefined;
     capturedAgentFactory = undefined;
 
@@ -5469,6 +5481,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         }) as unknown as InstanceType<typeof SessionTranscriptReader>,
     );
     mockHistoryReplayPage.mockRejectedValue(new Error('replay boom'));
+    mockHistoryPendingToolCalls.mockReturnValue([
+      {
+        callId: 'call-started-before-error',
+        toolName: 'Read',
+        recordId: 'u1',
+        timestamp: 'start',
+      },
+    ]);
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
 
     const result = (await agent.extMethod(
@@ -5487,6 +5507,22 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(result.nextCursor).toBeDefined();
     expect(result.partial).toBe(true);
     expect(result.replayError).toBe('Replay conversion failed for this page');
+    expect(vi.mocked(encodeSessionTranscriptCursor)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replay: {
+          pendingToolCalls: [
+            {
+              callId: 'call-started-before-error',
+              toolName: 'Read',
+              recordId: 'u1',
+              timestamp: 'start',
+            },
+          ],
+          cumulativeUsage: expect.any(Object),
+        },
+      }),
+      expect.any(String),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

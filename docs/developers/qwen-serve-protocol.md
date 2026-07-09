@@ -1360,7 +1360,7 @@ The first page freezes the current JSONL snapshot size. Later pages read only th
 
 To protect daemon memory and latency, snapshots above the transcript indexing cap fail before the daemon scans the JSONL. Clients receive `413 transcript_too_large` and should fall back to export/offline processing or ask the user to shorten/archive older history.
 
-`partial: true` and `replayError` may appear if replay conversion fails after producing some frames. Treat the page as incomplete and do not continue with the cursor.
+`partial: true` and `replayError` may appear if replay conversion fails after producing some frames. When the response also includes `nextCursor`, clients should continue paging with that cursor; it skips records remaining after the failure point on the partial page, so the assembled replay has a hole that `partial: true` marks.
 
 **Errors:**
 
