@@ -339,6 +339,11 @@ export class QQChannel extends ChannelBase {
                 entry!.timer = setTimeout(() => {
                   entry!.timer = null;
                   entry!.pendingRetry = '';
+                  // Guard: if cronBuffer entry was removed (e.g., group deleted),
+                  // bail out instead of sending to a deleted group.
+                  if (this.cronBuffer.get(sessionId) !== entry) {
+                    return;
+                  }
                   const retryTarget = this.router.getTarget(sessionId);
                   if (!retryTarget) {
                     process.stderr.write(
@@ -979,9 +984,9 @@ export class QQChannel extends ChannelBase {
     logLabel: string,
   ): void {
     this.flushingSessions.add(sessionId);
-    // sendMessage throws DeliveryError for delivery failures. Only
-    // RETRY_EXHAUSTED is definitive — RATE_LIMITED and FALLBACK_FAILED
-    // are transient and fall through to re-buffer/retry.
+    // sendMessage throws DeliveryError for delivery failures.
+    // RETRY_EXHAUSTED, ACTIVE_MSG_DISABLED, and FALLBACK_FAILED are
+    // permanent. RATE_LIMITED is transient and falls through to re-buffer/retry.
     this.sendMessage(state.chatId, buffer)
       .then(() => {
         // #3: Guard — if session died during in-flight send, touch nothing
@@ -1011,12 +1016,14 @@ export class QQChannel extends ChannelBase {
       .catch((e: unknown) => {
         if (
           e instanceof DeliveryError &&
-          (e.code === 'RETRY_EXHAUSTED' || e.code === 'ACTIVE_MSG_DISABLED')
+          (e.code === 'RETRY_EXHAUSTED' ||
+            e.code === 'ACTIVE_MSG_DISABLED' ||
+            e.code === 'FALLBACK_FAILED')
         ) {
           process.stderr.write(
             `[QQ:${this.name}] ${logLabel} delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, dropping ${buffer.length} chars\n`,
           );
-          // RETRY_EXHAUSTED / ACTIVE_MSG_DISABLED = permanent failure.
+          // RETRY_EXHAUSTED / ACTIVE_MSG_DISABLED / FALLBACK_FAILED = permanent failure.
           // Don't retry — just clean up state.
           const current = this.streamState.get(sessionId);
           if (current === state) {
@@ -2201,14 +2208,21 @@ export class QQChannel extends ChannelBase {
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
       .replace(/\[bot]/g, '');
-    if (!cleanText) return null;
-
+    const safeCleanText = cleanText
+      .replace(/\[atMention=[^\]]*]/g, '')
+      .replace(/\[botOpenId:[^\]]*]/g, '')
+      .replace(/\[bot]/g, '')
+      .trim();
     const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
 
-    // Extract bot's own OPENID from mentions (per-group)
+    // Extract bot's own OPENID from mentions (per-group) — must come
+    // BEFORE the cleanText guard so pure @-bot messages still populate
+    // the per-group OPENID cache.
     if (isAtBot && !this.botOpenIdByGroup.has(chatId)) {
       this.extractBotOpenId(event.mentions, chatId);
     }
+
+    if (!cleanText) return null;
 
     const effectiveIsAtBot = forceAtMention ?? isAtBot;
 
@@ -2231,8 +2245,8 @@ export class QQChannel extends ChannelBase {
       ? `\n机器人 OPENID: ${groupBotOpenId}`
       : '';
     const text = isSlash
-      ? sanitizePromptText(cleanText)
-      : `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderOpenId && /^[A-F0-9]+$/i.test(senderOpenId) ? `(${senderOpenId.slice(0, 8)}\u2026)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? safeContent : cleanText)}${suffixFromBotOpenId}`;
+      ? sanitizePromptText(safeCleanText)
+      : `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderOpenId && /^[A-F0-9]+$/i.test(senderOpenId) ? `(${senderOpenId.slice(0, 8)}\u2026)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? safeContent : safeCleanText)}${suffixFromBotOpenId}`;
 
     return {
       isAtBot: effectiveIsAtBot,
@@ -2275,10 +2289,15 @@ export class QQChannel extends ChannelBase {
     const senderName = event.author.username || event.author.id || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
     const cleanText = event.content.trim();
+    // Strip system-reserved tags that could be forged by users
+    const safeContent = cleanText
+      .replace(/\[atMention=[^\]]*]/g, '')
+      .replace(/\[botOpenId:[^\]]*]/g, '')
+      .replace(/\[bot]/g, '');
     const isSlash = cleanText.startsWith('/');
     const text = isSlash
-      ? sanitizePromptText(cleanText)
-      : `[atMention=true] [${safeName}]: ${sanitizePromptText(cleanText)}`;
+      ? sanitizePromptText(safeContent)
+      : `[atMention=true] [${safeName}]: ${sanitizePromptText(safeContent)}`;
     this.handleInbound({
       channelName: this.name,
       senderId: chatId,
@@ -2592,7 +2611,9 @@ export class QQChannel extends ChannelBase {
         this.pendingStreamDelete.delete(sid);
         this.flushedSessions.delete(sid);
         this.streamState.delete(sid);
-        this.onSessionDied(sid);
+        if (this.config.sessionScope !== 'single') {
+          this.onSessionDied(sid);
+        }
         cleanedStreams++;
       }
     }
