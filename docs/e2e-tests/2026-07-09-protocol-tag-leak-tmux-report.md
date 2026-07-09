@@ -49,7 +49,9 @@ PASS.
 - The tmux-readable log does not contain `internal scratchpad`.
 - The final TUI frame shows only the visible summary marker.
 - A separate retry mock shows request #1 returning HTTP 500 and request #2 streaming the tagged SSE chunks that the TUI filters after the HTTP-level retry.
+- The checked-in interactive mock server test covers multiple HTTP retries: requests #1 and #2 return HTTP 500, request #3 streams the tagged SSE chunks, and the TUI still renders only the visible summary marker.
 - Focused core unit tests verify that buffered tagged content is dropped across retry events and that tagged partial content from a failed attempt is discarded before persistence.
+- Retry caps are explicit: OpenAI-compatible HTTP retry defaults to `DEFAULT_MAX_RETRIES = 3`; Qwen stream anomaly retry caps are invalid stream `2`, transport stream `2`, invalid content `2` attempts, and rate-limit stream retry `10`.
 
 ## Screenshots
 
@@ -74,6 +76,15 @@ The retry run's final TUI frame still shows only the visible summary marker:
 ![Retry filtered TUI](https://raw.githubusercontent.com/yiliang114/img-host/main/assets/protocol-tags-retry-tui-summary-20260709-220220.png)
 
 The focused retry unit test covers the stricter in-memory/persistence behavior: tagged partial content from the failed attempt is discarded, and tagged content from the successful retry is stripped to the summary text before entering history. A separate `Turn` unit test covers the UI event layer by resetting a buffered protocol prefix on retry before the successful attempt emits content.
+
+The automated interactive regression extends this to multiple HTTP retries by returning HTTP 500 twice before the successful SSE response:
+
+```bash
+cd integration-tests
+npx vitest run interactive/protocol-tags-interactive.test.ts --test-name-pattern "retries HTTP failures" --retry 0
+```
+
+That test asserts the fake server observed at least three requests and that the final TUI output contains `VISIBLE_TMUX_RETRY_SUMMARY_DONE` without protocol tags or retry scratchpad text.
 
 ![Focused retry unit test](https://raw.githubusercontent.com/yiliang114/img-host/main/assets/protocol-tags-retry-unit-test-20260709-220220.png)
 
@@ -113,8 +124,11 @@ grep -q "RESPONSE #1 HTTP 500" tmp/protocol-tags-retry-mock-tmux-20260709-220220
 grep -q "REQUEST #2" tmp/protocol-tags-retry-mock-tmux-20260709-220220/server-trace.txt
 grep -q "VISIBLE_TMUX_SUMMARY_DONE" tmp/protocol-tags-retry-mock-tmux-20260709-220220/tmux-readable-full.log
 ! grep -E "</?analysis|</?summary|internal scratchpad" tmp/protocol-tags-retry-mock-tmux-20260709-220220/tmux-readable-full.log
+cd integration-tests
+npx vitest run fake-openai-server.test.ts --test-name-pattern "serves configured HTTP errors"
+npx vitest run interactive/protocol-tags-interactive.test.ts --test-name-pattern "retries HTTP failures" --retry 0
 (
-  cd packages/core
+  cd ../packages/core
   npx vitest run src/core/geminiChat.test.ts --test-name-pattern "discard tagged partial content"
   npx vitest run src/core/turn.test.ts --test-name-pattern "drops buffered protocol text"
 )

@@ -36,6 +36,15 @@ export type FakeOpenAIResponse = {
   };
 };
 
+export type FakeOpenAIErrorResponse = {
+  status: number;
+  error?: {
+    message?: string;
+    type?: string;
+    code?: string;
+  };
+};
+
 export type FakeOpenAIRequest = {
   body: JsonObject;
 };
@@ -53,7 +62,10 @@ export type FakeOpenAIServerOptions =
 export type FakeOpenAIHandler = (ctx: {
   body: JsonObject;
   requestIndex: number;
-}) => FakeOpenAIResponse | Promise<FakeOpenAIResponse>;
+}) =>
+  | FakeOpenAIResponse
+  | FakeOpenAIErrorResponse
+  | Promise<FakeOpenAIResponse | FakeOpenAIErrorResponse>;
 
 const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
 
@@ -103,6 +115,11 @@ export async function startFakeOpenAIServer(
       requests.push({ body });
 
       const response = await handler({ body, requestIndex });
+      if (isErrorResponse(response)) {
+        writeErrorResponse(res, response);
+        return;
+      }
+
       if (body['stream'] === true) {
         writeStreamed(res, getModel(body), response);
       } else {
@@ -199,6 +216,27 @@ function isJsonObject(value: unknown): value is JsonObject {
 
 function getModel(body: JsonObject): string {
   return typeof body['model'] === 'string' ? body['model'] : 'fake-model';
+}
+
+function isErrorResponse(
+  response: FakeOpenAIResponse | FakeOpenAIErrorResponse,
+): response is FakeOpenAIErrorResponse {
+  return 'status' in response;
+}
+
+function writeErrorResponse(
+  res: ServerResponse,
+  response: FakeOpenAIErrorResponse,
+): void {
+  res.writeHead(response.status, { 'content-type': 'application/json' });
+  res.end(
+    JSON.stringify({
+      error: response.error ?? {
+        message: `fake OpenAI error ${response.status}`,
+        type: response.status >= 500 ? 'server_error' : 'invalid_request_error',
+      },
+    }),
+  );
 }
 
 function writeNonStreamed(

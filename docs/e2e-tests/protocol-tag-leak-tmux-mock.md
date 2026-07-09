@@ -22,6 +22,7 @@ The checked-in automated coverage is:
 npm run build && npm run bundle
 cd integration-tests
 npx vitest run fake-openai-server.test.ts --test-name-pattern "streams content chunks separately"
+npx vitest run fake-openai-server.test.ts --test-name-pattern "serves configured HTTP errors"
 npx vitest run interactive/protocol-tags-interactive.test.ts --retry 0
 cd ../packages/core
 npx vitest run src/core/turn.test.ts --test-name-pattern "drops buffered protocol text"
@@ -29,7 +30,15 @@ npx vitest run src/core/turn.test.ts --test-name-pattern "drops buffered protoco
 
 The interactive test runs the built `dist/cli.js` through a PTY, points it at a fake OpenAI-compatible server, sends a real user prompt, waits for `VISIBLE_TMUX_SUMMARY_DONE`, and asserts that the rendered TUI output does not contain protocol tags or scratchpad text.
 
+The retry-focused interactive test configures the fake OpenAI server to return HTTP 500 twice, then stream the tagged response on the third request. It asserts that at least three requests were observed and that the final TUI output still contains only the visible summary marker.
+
 The focused `Turn` unit test simulates a retry event after the first attempt has buffered an `<analysis>` prefix, then verifies only the successful retry's unwrapped summary is emitted.
+
+Retry limits covered by this scenario:
+
+- OpenAI-compatible HTTP requests use the OpenAI SDK `maxRetries` setting. The default is `DEFAULT_MAX_RETRIES = 3`, meaning up to three retries after the initial request.
+- Qwen's stream anomaly retry layer has separate caps: invalid stream retry `maxRetries = 2`, transport stream retry `maxRetries = 2`, invalid content retry `maxAttempts = 2`, and stream-side rate-limit retry `maxRetries = 10`.
+- HTTP retry is handled below `Turn`, so no partial assistant text is emitted for the failed HTTP 500 responses. Stream anomaly retry emits a retry event; `Turn` resets the protocol-tag filter and `GeminiChat` drops the failed attempt's pending partial assistant turn before retrying.
 
 ## Latest Tmux Evidence
 
@@ -141,7 +150,7 @@ Expected result:
 
 ### 5. Retry variant
 
-For retry evidence, replace the server in step 2 with this variant. It returns HTTP 500 for request #1 and streams the tagged chunks for request #2, so the server log proves an HTTP-level retry occurred.
+For retry evidence, replace the server in step 2 with this variant. It returns HTTP 500 for requests #1 and #2, then streams the tagged chunks for request #3, so the server log proves multiple HTTP-level retries occurred before the successful filtered response.
 
 ```bash
 node <<'EOF' > /tmp/qwen-protocol-tags-retry-server.log 2>&1 &
@@ -158,14 +167,14 @@ const server = http.createServer((req, res) => {
   console.log(`REQUEST #${requestId}`);
   req.resume();
   req.on('end', () => {
-    if (requestId === 1) {
-      console.log('RESPONSE #1 HTTP 500');
+    if (requestId <= 2) {
+      console.log(`RESPONSE #${requestId} HTTP 500`);
       res.writeHead(500, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: { message: 'retry me' } }));
+      res.end(JSON.stringify({ error: { message: `retry me ${requestId}` } }));
       return;
     }
 
-    console.log('RESPONSE #2 HTTP 200 SSE');
+    console.log('RESPONSE #3 HTTP 200 SSE');
     res.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -204,7 +213,8 @@ Run the same tmux steps and additionally assert:
 
 ```bash
 grep -q "RESPONSE #1 HTTP 500" /tmp/qwen-protocol-tags-retry-server.log
-grep -q "REQUEST #2" /tmp/qwen-protocol-tags-retry-server.log
+grep -q "RESPONSE #2 HTTP 500" /tmp/qwen-protocol-tags-retry-server.log
+grep -q "REQUEST #3" /tmp/qwen-protocol-tags-retry-server.log
 ```
 
 ### 6. Cleanup

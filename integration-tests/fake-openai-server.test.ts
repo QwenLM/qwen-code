@@ -199,6 +199,56 @@ describe('fake OpenAI server', () => {
     ]);
   });
 
+  it('serves configured HTTP errors before later success responses', async () => {
+    server = await startFakeOpenAIServer(({ requestIndex }) =>
+      requestIndex === 0
+        ? {
+            status: 500,
+            error: {
+              message: 'retryable fake failure',
+              type: 'server_error',
+            },
+          }
+        : { content: 'recovered fake model' },
+    );
+
+    const first = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'first' }],
+      }),
+    });
+    expect(first.status).toBe(500);
+    await expect(first.json()).resolves.toMatchObject({
+      error: {
+        message: 'retryable fake failure',
+        type: 'server_error',
+      },
+    });
+
+    const second = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'second' }],
+      }),
+    });
+    expect(second.status).toBe(200);
+    await expect(second.json()).resolves.toMatchObject({
+      choices: [
+        {
+          message: {
+            content: 'recovered fake model',
+          },
+          finish_reason: 'stop',
+        },
+      ],
+    });
+  });
+
   it('returns 404 for wrong methods or paths', async () => {
     server = await startFakeOpenAIServer(() => ({ content: 'unused' }));
 
