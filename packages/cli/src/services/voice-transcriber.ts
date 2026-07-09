@@ -444,7 +444,7 @@ export function isKeytermEcho(
 
 // Qwen-ASR caps each audio file at 10 MB / 5 minutes. Our 16 kHz mono 16-bit WAV
 // is ~32 KB/s, so guard before encoding to give a clear error on overlong holds.
-const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
+export const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 const MAX_TRANSCRIPTION_ERROR_LENGTH = 200;
 
 function escapeRegExp(value: string): string {
