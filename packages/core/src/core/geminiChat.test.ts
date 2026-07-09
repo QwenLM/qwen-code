@@ -7022,7 +7022,7 @@ describe('GeminiChat', async () => {
     });
   });
 
-  it('should discard valid partial content from a failed attempt upon retry', async () => {
+  it('should discard tagged partial content from a failed attempt upon retry', async () => {
     // Mock the stream to fail on the first attempt after yielding some valid content.
     vi.mocked(mockContentGenerator.generateContentStream)
       .mockImplementationOnce(async () =>
@@ -7032,7 +7032,13 @@ describe('GeminiChat', async () => {
             candidates: [
               {
                 content: {
-                  parts: [{ text: 'This valid part should be discarded' }],
+                  parts: [
+                    {
+                      text:
+                        '<analysis>failed scratch</analysis>' +
+                        '<summary>FAILED_ATTEMPT_SHOULD_BE_DISCARDED</summary>',
+                    },
+                  ],
                 },
               },
             ],
@@ -7049,7 +7055,13 @@ describe('GeminiChat', async () => {
             candidates: [
               {
                 content: {
-                  parts: [{ text: 'Successful final response' }],
+                  parts: [
+                    {
+                      text:
+                        '<analysis>successful scratch</analysis>' +
+                        '<summary>Successful final response</summary>',
+                    },
+                  ],
                 },
                 finishReason: 'STOP',
               },
@@ -7082,8 +7094,13 @@ describe('GeminiChat', async () => {
     expect(modelTurn!.parts![0]!.text).toBe('Successful final response');
     // It should NOT contain any text from the failed attempt
     expect(modelTurn!.parts![0]!.text).not.toContain(
-      'This valid part should be discarded',
+      'FAILED_ATTEMPT_SHOULD_BE_DISCARDED',
     );
+    expect(modelTurn!.parts![0]!.text).not.toContain('<analysis>');
+    expect(modelTurn!.parts![0]!.text).not.toContain('</analysis>');
+    expect(modelTurn!.parts![0]!.text).not.toContain('<summary>');
+    expect(modelTurn!.parts![0]!.text).not.toContain('</summary>');
+    expect(modelTurn!.parts![0]!.text).not.toContain('successful scratch');
   });
 
   describe('stripThoughtsFromHistory', () => {
