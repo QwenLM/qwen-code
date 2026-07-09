@@ -48,6 +48,7 @@ class TestChannel extends ChannelBase {
   }> = [];
   responseChunks: Array<{ chatId: string; chunk: string; sessionId: string }> =
     [];
+  responseBoundaries: Array<{ chatId: string; sessionId: string }> = [];
   /** When set, onPromptEnd throws AFTER recording — to exercise the finally guard. */
   throwOnPromptEnd = false;
   responseCompleteGate?: Promise<void>;
@@ -154,6 +155,13 @@ class TestChannel extends ChannelBase {
     sessionId: string,
   ): void {
     this.responseChunks.push({ chatId, chunk, sessionId });
+  }
+
+  protected override onResponseBoundary(
+    chatId: string,
+    sessionId: string,
+  ): void {
+    this.responseBoundaries.push({ chatId, sessionId });
   }
 
   protected override async onResponseComplete(
@@ -7743,6 +7751,55 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope());
 
       expect(ch.sent.map((message) => message.text)).toEqual(['final']);
+    });
+
+    it('preserves held chunks when response boundary fires during cancel', async () => {
+      let resolvePrompt!: (v: string) => void;
+      let rejectCancel!: (e: Error) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      const pendingCancel = new Promise<void>((_resolve, reject) => {
+        rejectCancel = reject;
+      });
+
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+      for (let i = 0; i < 10 && ch.promptStarts.length === 0; i++) {
+        await Promise.resolve();
+      }
+      expect(ch.promptStarts).toHaveLength(1);
+
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        's-1',
+        'held while cancel pending',
+      );
+      (bridge as unknown as EventEmitter).emit('responseBoundary', 's-1');
+
+      rejectCancel(new Error('cancel failed'));
+      await cancel;
+
+      resolvePrompt('final response');
+      await prompt;
+
+      expect(ch.responseBoundaries).toEqual([]);
+      expect(ch.responseChunks).toContainEqual({
+        chatId: 'chat1',
+        chunk: 'held while cancel pending',
+        sessionId: 's-1',
+      });
     });
 
     it('does not emit buffered stream text after cancellation', async () => {

@@ -156,6 +156,18 @@ function onResponseComplete(
   ).onResponseComplete(chatId, fullText, sessionId);
 }
 
+function onResponseBoundary(
+  ch: QQChannelClass,
+  chatId: string,
+  sessionId: string,
+) {
+  return (
+    ch as unknown as {
+      onResponseBoundary: (c: string, s: string) => void;
+    }
+  ).onResponseBoundary(chatId, sessionId);
+}
+
 function toolCall(sessionId: string): ToolCallEvent {
   return {
     sessionId,
@@ -464,6 +476,19 @@ describe('onResponseComplete', () => {
     await onResponseComplete(ch, 'test-chat', 'nothing', 'sess-none');
     const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
     expect((body.markdown as Record<string, string>).content).toBe('nothing');
+  });
+
+  it('drops accumulated buffer at response boundary', async () => {
+    const ch = makeChannel();
+    onResponseChunk(ch, 'test-chat', 'intermediate ', 'sess-1');
+
+    onResponseBoundary(ch, 'test-chat', 'sess-1');
+    await onResponseComplete(ch, 'test-chat', 'final', 'sess-1');
+
+    expect(streamState(ch).has('sess-1')).toBe(false);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect((body.markdown as Record<string, string>).content).toBe('final');
   });
 
   it('does not send when buffer is empty (already flushed)', async () => {

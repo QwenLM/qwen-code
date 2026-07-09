@@ -691,6 +691,19 @@ export class QQChannel extends ChannelBase {
     this.flushAndTrack(event.sessionId, buffer, state, 'toolCallFlush');
   }
 
+  protected override onResponseBoundary(
+    _chatId: string,
+    sessionId: string,
+  ): void {
+    const state = this.streamState.get(sessionId);
+    if (state?.timer) {
+      clearTimeout(state.timer);
+    }
+    this.streamState.delete(sessionId);
+    this.pendingStreamDelete.delete(sessionId);
+    this.flushedSessions.delete(sessionId);
+  }
+
   protected override async onResponseComplete(
     chatId: string,
     fullText: string,

@@ -793,10 +793,15 @@ export abstract class ChannelBase {
         }
       };
       const onResponseBoundary = (sid: string) => {
-        if (sid !== sessionId || promptState.cancelled) {
+        if (
+          sid !== sessionId ||
+          promptState.cancelled ||
+          promptState.cancelPending
+        ) {
           return;
         }
         heldChunks.length = 0;
+        this.onResponseBoundary(job.target.chatId, sessionId);
       };
       const promptBridge = this.bridge;
       promptBridge.on('textChunk', onChunk);
@@ -1203,6 +1208,12 @@ export abstract class ChannelBase {
     _chunk: string,
     _sessionId: string,
   ): void {}
+
+  /**
+   * Called when the agent starts a new response segment for the same prompt.
+   * Override to clear adapter-owned streaming buffers.
+   */
+  protected onResponseBoundary(_chatId: string, _sessionId: string): void {}
 
   /**
    * Called when the agent's full response is ready.
@@ -3556,10 +3567,15 @@ export abstract class ChannelBase {
         }
       };
       const onResponseBoundary = (sid: string) => {
-        if (sid !== sessionId || promptState.cancelled) {
+        if (
+          sid !== sessionId ||
+          promptState.cancelled ||
+          promptState.cancelPending
+        ) {
           return;
         }
         heldChunks.length = 0;
+        this.onResponseBoundary(envelope.chatId, sessionId);
         streamer?.stop();
       };
       const promptBridge = this.bridge;
