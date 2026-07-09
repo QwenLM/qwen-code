@@ -256,6 +256,7 @@ const MAX_TOASTS = 4;
 const DEFAULT_REVIEW_PANEL_WIDTH = 760;
 const MIN_ARTIFACT_PANEL_WIDTH = 320;
 const MIN_CHAT_PANE_WIDTH_WITH_ARTIFACT_PANEL = 500;
+const MAX_ARTIFACT_PANEL_SESSION_STATES = 20;
 const TURN_OUTPUT_KINDS: readonly TurnOutputKind[] = [
   'file',
   'artifact',
@@ -267,6 +268,7 @@ interface ArtifactPanelSessionState {
   activeTabId: string | null;
   reviewChanges: readonly TurnOutputFileChange[];
   selectedReviewPath: string | null;
+  extraArtifacts: DaemonSessionArtifact[];
   width: number;
 }
 // Cap on how long a manual "run now" waits for its bound session to become
@@ -1161,6 +1163,7 @@ export function App({
     activeTabId: activeArtifactPanelTabId,
     reviewChanges,
     selectedReviewPath,
+    extraArtifacts: artifactPanelExtraArtifacts,
     width: artifactPanelWidth,
   };
   useEffect(() => {
@@ -1172,6 +1175,17 @@ export function App({
           previousSessionId,
           currentState,
         );
+        if (
+          artifactPanelStateBySessionRef.current.size >
+          MAX_ARTIFACT_PANEL_SESSION_STATES
+        ) {
+          const oldestSessionId = artifactPanelStateBySessionRef.current
+            .keys()
+            .next().value;
+          if (oldestSessionId) {
+            artifactPanelStateBySessionRef.current.delete(oldestSessionId);
+          }
+        }
       }
     }
 
@@ -1186,6 +1200,7 @@ export function App({
       setActiveArtifactPanelTabId(null);
       setReviewChanges([]);
       setSelectedReviewPath(null);
+      setArtifactPanelExtraArtifacts([]);
       setArtifactPanelWidth(DEFAULT_REVIEW_PANEL_WIDTH);
       return;
     }
@@ -1195,6 +1210,7 @@ export function App({
     setActiveArtifactPanelTabId(savedState.activeTabId);
     setReviewChanges(savedState.reviewChanges);
     setSelectedReviewPath(savedState.selectedReviewPath);
+    setArtifactPanelExtraArtifacts(savedState.extraArtifacts);
     setArtifactPanelWidth(savedState.width);
   }, [connection.sessionId]);
   const getMaxArtifactPanelWidth = useCallback(() => {

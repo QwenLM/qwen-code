@@ -183,7 +183,7 @@ export function ArtifactPanel({
             error={error}
           />
         ) : (
-          <ScheduledTaskDetail task={activeTab.task} />
+          <ScheduledTaskDetail key={activeTab.id} task={activeTab.task} />
         )}
       </div>
     </aside>
@@ -1088,6 +1088,7 @@ function CodeMirrorDiff({
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [isWide, setIsWide] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -1103,6 +1104,7 @@ function CodeMirrorDiff({
     const host = hostRef.current;
     if (!host || isWide === null) return;
     host.replaceChildren();
+    setError(null);
     let cancelled = false;
     let view: { destroy(): void } | null = null;
 
@@ -1115,46 +1117,63 @@ function CodeMirrorDiff({
     const diffConfig = { scanLimit: 1_000, timeout: 500 };
     const collapseUnchanged = { margin: 3, minSize: 8 };
 
-    void import('@codemirror/merge').then(({ MergeView, unifiedMergeView }) => {
-      if (cancelled) return;
-      if (isWide) {
-        view = new MergeView({
-          a: { doc: oldText, extensions },
-          b: { doc: newText, extensions },
-          parent: host,
-          highlightChanges: true,
-          gutter: true,
-          revertControls: undefined,
-          collapseUnchanged,
-          diffConfig,
-        });
-        return;
-      }
+    void import('@codemirror/merge')
+      .then(({ MergeView, unifiedMergeView }) => {
+        if (cancelled) return;
+        try {
+          if (isWide) {
+            view = new MergeView({
+              a: { doc: oldText, extensions },
+              b: { doc: newText, extensions },
+              parent: host,
+              highlightChanges: true,
+              gutter: true,
+              revertControls: undefined,
+              collapseUnchanged,
+              diffConfig,
+            });
+            return;
+          }
 
-      view = new EditorView({
-        doc: newText,
-        extensions: [
-          ...extensions,
-          unifiedMergeView({
-            original: oldText,
-            highlightChanges: true,
-            gutter: true,
-            mergeControls: false,
-            allowInlineDiffs: true,
-            collapseUnchanged,
-            diffConfig,
-          }),
-        ],
-        parent: host,
+          view = new EditorView({
+            doc: newText,
+            extensions: [
+              ...extensions,
+              unifiedMergeView({
+                original: oldText,
+                highlightChanges: true,
+                gutter: true,
+                mergeControls: false,
+                allowInlineDiffs: true,
+                collapseUnchanged,
+                diffConfig,
+              }),
+            ],
+            parent: host,
+          });
+        } catch (err) {
+          if (!cancelled) {
+            setError(err instanceof Error ? err.message : String(err));
+          }
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
       });
-    });
     return () => {
       cancelled = true;
       view?.destroy();
     };
   }, [isWide, newText, oldText]);
 
-  return <div ref={hostRef} className={styles.codeMirrorDiff} />;
+  return (
+    <div className={styles.codeMirrorDiffWrap}>
+      <div ref={hostRef} className={styles.codeMirrorDiff} />
+      {error && <div className={styles.diffError}>Diff unavailable.</div>}
+    </div>
+  );
 }
 
 interface FileTreeNode {

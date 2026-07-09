@@ -7,6 +7,8 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 
+const SESSION_ARTIFACTS_FEATURE = 'session_artifacts';
+
 export interface SessionArtifactsState {
   artifacts: DaemonSessionArtifact[];
   artifactById: ReadonlyMap<string, DaemonSessionArtifact>;
@@ -22,6 +24,9 @@ export function useSessionArtifacts(): SessionArtifactsState {
   const workspaceEventSignals = useWorkspaceEventSignals();
   const artifactsVersion = workspaceEventSignals?.artifactsVersion;
   const isConnected = connection.status === 'connected';
+  const supportsArtifacts =
+    connection.capabilities?.features?.includes(SESSION_ARTIFACTS_FEATURE) ??
+    false;
   const sessionId = connection.sessionId;
   const [artifacts, setArtifacts] = useState<DaemonSessionArtifact[]>([]);
   const [loading, setLoading] = useState(false);
@@ -37,6 +42,11 @@ export function useSessionArtifacts(): SessionArtifactsState {
       return;
     }
     if (!isConnected) {
+      setError(null);
+      return;
+    }
+    if (!supportsArtifacts) {
+      setArtifacts([]);
       setError(null);
       return;
     }
@@ -60,7 +70,7 @@ export function useSessionArtifacts(): SessionArtifactsState {
         setLoading(false);
       }
     }
-  }, [actions, isConnected, sessionId]);
+  }, [actions, isConnected, sessionId, supportsArtifacts]);
 
   useEffect(() => {
     void refresh();

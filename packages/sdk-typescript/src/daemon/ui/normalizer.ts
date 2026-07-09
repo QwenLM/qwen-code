@@ -1138,6 +1138,15 @@ function normalizeArtifactChanged(
   if (!sessionId || !isRecord(change)) {
     return fallbackDebug(event, base, 'malformed artifact_changed payload');
   }
+  const action = getString(change, 'action');
+  const artifactId = getString(change, 'artifactId');
+  if (!action || !artifactId) {
+    return fallbackDebug(
+      event,
+      base,
+      'artifact_changed: missing action or artifactId',
+    );
+  }
   return [
     {
       ...base,

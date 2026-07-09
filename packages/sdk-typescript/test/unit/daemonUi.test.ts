@@ -6697,6 +6697,23 @@ describe('daemon UI normalizer — artifact events', () => {
       }),
     ]);
   });
+
+  it('falls back to debug when artifact_changed change misses required fields', () => {
+    const events = normalizeDaemonEvent({
+      type: 'artifact_changed',
+      data: {
+        sessionId: 'session-1',
+        change: {},
+      },
+    } as never);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        text: 'artifact_changed: artifact_changed: missing action or artifactId',
+      }),
+    ]);
+  });
 });
 
 describe('parallel subAgent text interleaving fix', () => {
