@@ -623,6 +623,7 @@ export class DaemonChannelBridge
     }
     const requestId = data['requestId'];
     this.requestToSession.set(requestId, sessionId);
+    this.emitResponseBoundary(sessionId);
     this.emit('permissionRequest', {
       requestId,
       sessionId,
