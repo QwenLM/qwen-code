@@ -33,7 +33,7 @@ jobs:
               'COLLABORATOR',
             ]);
             const highRiskExtension =
-              /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|sh|bat|ps1|node|dylib|so)(?:$|[\s)"'\]>?#])/i;
+              /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|sh|bat|ps1|node|dylib|so)(?:$|[\s)"'\]>?#/])/i;
             const linkPattern =
               /https?:\/\/[^\s)"'<>\]]+|\[[^\]]+\]\([^)]+\)/gi;
 
@@ -62,31 +62,43 @@ jobs:
             }
 
             const { owner, repo } = context.repo;
-            if (eventName === 'issue_comment') {
-              await github.rest.issues.deleteComment({
-                owner,
-                repo,
-                comment_id: comment.id,
-              });
-            } else if (eventName === 'pull_request_review_comment') {
-              await github.rest.pulls.deleteReviewComment({
-                owner,
-                repo,
-                comment_id: comment.id,
-              });
+            try {
+              if (eventName === 'issue_comment') {
+                await github.rest.issues.deleteComment({
+                  owner,
+                  repo,
+                  comment_id: comment.id,
+                });
+              } else if (eventName === 'pull_request_review_comment') {
+                await github.rest.pulls.deleteReviewComment({
+                  owner,
+                  repo,
+                  comment_id: comment.id,
+                });
+              }
+            } catch (error) {
+              core.warning(
+                `Failed to delete suspicious comment ${comment.id}: ${error}`,
+              );
             }
 
-            await core.summary
-              .addHeading('Suspicious attachment comment removed')
-              .addTable([
-                [
-                  { data: 'Field', header: true },
-                  { data: 'Value', header: true },
-                ],
-                ['Event', eventName],
-                ['Author', comment.user.login],
-                ['Association', association || 'none'],
-                ['Comment ID', String(comment.id)],
-                ['Reason', reasons.join(', ')],
-              ])
-              .write();
+            try {
+              await core.summary
+                .addHeading('Suspicious attachment comment removed')
+                .addTable([
+                  [
+                    { data: 'Field', header: true },
+                    { data: 'Value', header: true },
+                  ],
+                  ['Event', eventName],
+                  ['Author', comment.user.login],
+                  ['Association', association || 'none'],
+                  ['Comment ID', String(comment.id)],
+                  ['Reason', reasons.join(', ')],
+                ])
+                .write();
+            } catch (error) {
+              core.warning(
+                `Failed to write suspicious comment summary: ${error}`,
+              );
+            }
