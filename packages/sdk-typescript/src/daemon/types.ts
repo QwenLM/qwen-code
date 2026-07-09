@@ -745,6 +745,7 @@ export interface DaemonSessionArtifactsEnvelope {
     maxArtifacts: number;
   };
   warnings?: string[];
+  warningDetails?: DaemonSessionArtifactWarningDetail[];
 }
 
 export interface DaemonSessionArtifactMutationResult {
@@ -752,6 +753,16 @@ export interface DaemonSessionArtifactMutationResult {
   sessionId: string;
   changes: DaemonSessionArtifactChange[];
   warnings?: string[];
+  warningDetails?: DaemonSessionArtifactWarningDetail[];
+}
+
+export interface DaemonSessionArtifactWarningDetail {
+  code: string;
+  operation: 'upsert' | 'remove' | 'restore' | (string & {});
+  artifactIds?: string[];
+  durability?: 'durable' | 'live_only' | 'unavailable' | (string & {});
+  retryable?: boolean;
+  message: string;
 }
 
 export type DaemonStatus =

@@ -86,7 +86,7 @@ describe('SessionArtifactStore', () => {
     });
   });
 
-  it('keeps live removal when durable tombstone persistence fails', async () => {
+  it('keeps live artifact when durable tombstone persistence fails', async () => {
     let failWrites = false;
     const store = new SessionArtifactStore({
       sessionId: 's1-remove-live-first',
@@ -108,10 +108,22 @@ describe('SessionArtifactStore', () => {
 
     failWrites = true;
     await expect(store.remove(artifactId)).resolves.toMatchObject({
-      changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
-      warnings: ['artifact removal not persisted; live removal kept'],
+      changes: [],
+      warnings: ['artifact removal not persisted; live artifact kept'],
+      warningDetails: [
+        {
+          code: 'ARTIFACT_PERSISTENCE_WRITE_FAILED',
+          operation: 'remove',
+          artifactIds: [artifactId],
+          durability: 'unavailable',
+          retryable: true,
+          message: 'artifact removal not persisted; live artifact kept',
+        },
+      ],
     });
-    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ id: artifactId }],
+    });
   });
 
   it('gets artifacts and refreshes stale workspace status', async () => {
@@ -3282,6 +3294,17 @@ describe('SessionArtifactStore', () => {
     expect(result.warnings).toEqual([
       'artifact persistence unavailable; durable artifacts kept ephemeral',
     ]);
+    expect(result.warningDetails).toEqual([
+      {
+        code: 'ARTIFACT_PERSISTENCE_UNAVAILABLE',
+        operation: 'upsert',
+        artifactIds: [result.changes[0]!.artifactId],
+        durability: 'live_only',
+        retryable: false,
+        message:
+          'artifact persistence unavailable; durable artifacts kept ephemeral',
+      },
+    ]);
     expect(result.changes[0]?.artifact).toMatchObject({
       retention: 'ephemeral',
       persistenceWarning: 'persistence_unavailable',
@@ -3340,16 +3363,75 @@ describe('SessionArtifactStore', () => {
     await expect(
       store.remove(created.changes[0]!.artifactId),
     ).resolves.toMatchObject({
-      changes: [
+      changes: [],
+      warnings: ['artifact removal not persisted; live artifact kept'],
+      warningDetails: [
         {
-          action: 'removed',
-          artifactId: created.changes[0]?.artifactId,
-          reason: 'explicit',
+          code: 'ARTIFACT_PERSISTENCE_WRITE_FAILED',
+          operation: 'remove',
+          artifactIds: [created.changes[0]?.artifactId],
+          durability: 'unavailable',
+          retryable: true,
+          message: 'artifact removal not persisted; live artifact kept',
         },
       ],
-      warnings: ['artifact removal not persisted; live removal kept'],
     });
-    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ id: created.changes[0]?.artifactId }],
+    });
+  });
+
+  it('keeps explicit removal live when persistence is unavailable', async () => {
+    const sessionId = 's11-remove-durable-unavailable';
+    const url = 'https://example.com/remove-durable-unavailable';
+    const artifactId = stableSessionArtifactId(sessionId, `url:${url}`);
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+
+    await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [
+        {
+          id: artifactId,
+          kind: 'link',
+          storage: 'external_url',
+          source: 'client',
+          status: 'available',
+          title: 'Previously durable',
+          url,
+          retention: 'restorable',
+          clientRetained: true,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+          persistedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+
+    await expect(store.remove(artifactId)).resolves.toMatchObject({
+      changes: [],
+      warnings: ['artifact removal not persisted; live artifact kept'],
+      warningDetails: [
+        {
+          code: 'ARTIFACT_PERSISTENCE_UNAVAILABLE',
+          operation: 'remove',
+          artifactIds: [artifactId],
+          durability: 'unavailable',
+          retryable: false,
+          message: 'artifact removal not persisted; live artifact kept',
+        },
+      ],
+    });
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ id: artifactId }],
+    });
   });
 
   it('writes a tombstone when deleting a downgraded durable artifact', async () => {

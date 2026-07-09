@@ -2022,27 +2022,53 @@ function includeActiveSideArtifactRecords(
     firstActiveUuid === undefined
       ? -1
       : records.findIndex((record) => record.uuid === firstActiveUuid);
+  const nextConversationUuidByIndex = new Map<number, string>();
+  let nextConversationUuid: string | undefined;
+  for (let index = records.length - 1; index >= 0; index--) {
+    if (nextConversationUuid !== undefined) {
+      nextConversationUuidByIndex.set(index, nextConversationUuid);
+    }
+    if (!isSessionArtifactRecord(records[index]!)) {
+      nextConversationUuid = records[index]!.uuid;
+    }
+  }
   const selected: ChatRecord[] = [];
   const includedSideArtifactUuids = new Set<string>();
+  let previousConversationUuid: string | undefined;
   for (let index = 0; index < records.length; index++) {
     const record = records[index]!;
     const activeRecord = activeByUuid.get(record.uuid);
     if (activeRecord) {
       selected.push(activeRecord);
       activeByUuid.delete(record.uuid);
+      previousConversationUuid = record.uuid;
       continue;
     }
     if (!isSessionArtifactRecord(record)) {
+      previousConversationUuid = record.uuid;
       continue;
     }
+    const nextUuid = nextConversationUuidByIndex.get(index);
+    const isInActiveSegment =
+      nextUuid !== undefined
+        ? activeUuids.has(nextUuid)
+        : previousConversationUuid !== undefined &&
+          activeUuids.has(previousConversationUuid);
     if (
       record.parentUuid !== null &&
       (activeUuids.has(record.parentUuid) ||
+        includedSideArtifactUuids.has(record.parentUuid)) &&
+      isInActiveSegment &&
+      (record.parentUuid === previousConversationUuid ||
         includedSideArtifactUuids.has(record.parentUuid))
     ) {
       selected.push(record);
       includedSideArtifactUuids.add(record.uuid);
-    } else if (record.parentUuid === null && index < firstActiveIndex) {
+    } else if (
+      record.parentUuid === null &&
+      index < firstActiveIndex &&
+      isInActiveSegment
+    ) {
       selected.push(record);
       includedSideArtifactUuids.add(record.uuid);
     }

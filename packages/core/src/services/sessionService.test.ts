@@ -616,6 +616,70 @@ describe('SessionService', () => {
       expect(loaded?.artifactSnapshot?.tombstonedIds).toContain(artifactId);
     });
 
+    it('does not load artifact side records from abandoned branches', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      const artifactId = stableSessionArtifactId(
+        sessionIdB,
+        'url:https://example.com/abandoned-report',
+      );
+      const artifactRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'artifact-abandoned',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: sessionIdB,
+          sequence: 1,
+          recordedAt: '2026-07-06T00:00:00.000Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId,
+              artifact: {
+                id: artifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Abandoned report',
+                url: 'https://example.com/abandoned-report',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-06T00:00:00.000Z',
+                updatedAt: '2026-07-06T00:00:00.000Z',
+                persistedAt: '2026-07-06T00:00:00.000Z',
+              },
+            },
+          ],
+        },
+      };
+      const abandonedChild: ChatRecord = {
+        ...recordB2,
+        uuid: 'abandoned-child',
+        parentUuid: 'b1',
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        artifactRecord,
+        abandonedChild,
+        recordB2,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['b1', 'b2']);
+      expect(loaded?.artifactSnapshot).toBeUndefined();
+    });
+
     it('does not treat trailing artifact side records as the conversation leaf', async () => {
       const now = Date.now();
       statSyncSpy.mockReturnValue({
@@ -2800,6 +2864,80 @@ describe('SessionService', () => {
           title: 'Forked artifact',
         }),
       ]);
+    });
+
+    it('does not copy artifact side records from abandoned branches', async () => {
+      const oldId = '74747474-7474-7474-7474-747474747474';
+      const newId = '84848484-8484-8484-8484-848484848484';
+      const { file, lines } = seedSession(oldId);
+      const oldArtifactId = stableSessionArtifactId(
+        oldId,
+        'url:https://example.com/abandoned-forked',
+      );
+      const artifactRecord = {
+        uuid: 'artifact-abandoned',
+        parentUuid: 'u1',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:00.500Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 1,
+          recordedAt: '2026-04-22T00:00:00.500Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId: oldArtifactId,
+              artifact: {
+                id: oldArtifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Abandoned forked artifact',
+                url: 'https://example.com/abandoned-forked',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-04-22T00:00:00.500Z',
+                updatedAt: '2026-04-22T00:00:00.500Z',
+                persistedAt: '2026-04-22T00:00:00.500Z',
+              },
+            },
+          ],
+        },
+      };
+      const abandonedChild = {
+        ...lines[1],
+        uuid: 'abandoned-child',
+        parentUuid: 'u1',
+      };
+      fs.writeFileSync(
+        file,
+        [lines[0], artifactRecord, abandonedChild, lines[1]]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const loaded = await service.loadSession(newId);
+      const forkedLines = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(result.copiedCount).toBe(2);
+      expect(
+        forkedLines.some((record) => record.uuid === 'artifact-abandoned'),
+      ).toBe(false);
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['u1', 'u2']);
+      expect(loaded?.artifactSnapshot).toBeUndefined();
     });
 
     it('does not treat trailing artifact side records as the fork leaf', async () => {

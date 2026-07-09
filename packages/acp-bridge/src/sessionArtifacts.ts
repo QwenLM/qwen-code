@@ -154,6 +154,7 @@ export interface SessionArtifactsEnvelope {
     maxArtifacts: number;
   };
   warnings?: string[];
+  warningDetails?: SessionArtifactWarningDetail[];
 }
 
 export interface SessionArtifactMutationResult {
@@ -161,6 +162,16 @@ export interface SessionArtifactMutationResult {
   sessionId: string;
   changes: SessionArtifactChange[];
   warnings?: string[];
+  warningDetails?: SessionArtifactWarningDetail[];
+}
+
+export interface SessionArtifactWarningDetail {
+  code: string;
+  operation: 'upsert' | 'remove' | 'restore';
+  artifactIds?: string[];
+  durability?: 'durable' | 'live_only' | 'unavailable';
+  retryable?: boolean;
+  message: string;
 }
 
 export interface SessionArtifactRestoreOptions {
@@ -243,6 +254,7 @@ export class SessionArtifactStore {
   private readonly tombstonedClientIds = new Map<string, string | undefined>();
   private readonly stickyEphemeralIds = new Set<string>();
   private lastRestoreWarnings: string[] = [];
+  private lastRestoreWarningDetails: SessionArtifactWarningDetail[] = [];
 
   constructor(options: SessionArtifactStoreOptions) {
     this.sessionId = options.sessionId;
@@ -268,6 +280,9 @@ export class SessionArtifactStore {
         limits: { maxArtifacts: this.maxArtifacts },
         ...(this.lastRestoreWarnings.length > 0
           ? { warnings: [...this.lastRestoreWarnings] }
+          : {}),
+        ...(this.lastRestoreWarningDetails.length > 0
+          ? { warningDetails: [...this.lastRestoreWarningDetails] }
           : {}),
       };
     });
@@ -302,6 +317,7 @@ export class SessionArtifactStore {
       const before = this.cloneState();
       const normalizedResults: NormalizedArtifact[] = [];
       const warnings: string[] = [];
+      const warningDetails: SessionArtifactWarningDetail[] = [];
       for (const input of inputs) {
         try {
           normalizedResults.push(
@@ -398,8 +414,17 @@ export class SessionArtifactStore {
           ...(await this.evictOverflow(createdIds, changes, persistenceStrict)),
         );
 
-        warnings.push(
-          ...(await this.persistChanges(changes, persistenceStrict)),
+        const persistenceWarnings = await this.persistChanges(
+          changes,
+          persistenceStrict,
+        );
+        warnings.push(...persistenceWarnings);
+        warningDetails.push(
+          ...detailsForPersistenceWarnings(
+            persistenceWarnings,
+            changes,
+            'upsert',
+          ),
         );
         stripDurableTombstoneMarkers(changes);
       } catch (error) {
@@ -418,6 +443,7 @@ export class SessionArtifactStore {
         sessionId: this.sessionId,
         changes,
         ...(warnings.length > 0 ? { warnings } : {}),
+        ...(warningDetails.length > 0 ? { warningDetails } : {}),
       };
     });
   }
@@ -496,7 +522,6 @@ export class SessionArtifactStore {
       // Tool/hook artifacts are session-scoped outputs and may be removed by
       // any caller that already passed session mutation auth.
       this.denyCrossClientMutation('remove', artifactId, existing, options);
-      this.artifacts.delete(artifactId);
       const removeChange: SessionArtifactChange & {
         durableTombstoneRequired?: boolean;
       } = {
@@ -511,13 +536,45 @@ export class SessionArtifactStore {
             : undefined,
       };
       const changes: SessionArtifactChange[] = [removeChange];
-      const warnings = await this.persistChanges(changes, false);
+      const needsDurableTombstone =
+        removeChange.durableTombstoneRequired === true;
+      if (needsDurableTombstone) {
+        try {
+          await this.persistChanges(changes, true);
+        } catch (error) {
+          const warning = 'artifact removal not persisted; live artifact kept';
+          return {
+            v: 1,
+            sessionId: this.sessionId,
+            changes: [],
+            warnings: [warning],
+            warningDetails: [
+              persistenceFailureDetail({
+                message: warning,
+                operation: 'remove',
+                artifactIds: [artifactId],
+                error,
+              }),
+            ],
+          };
+        }
+      }
+      this.artifacts.delete(artifactId);
+      const warnings = needsDurableTombstone
+        ? []
+        : await this.persistChanges(changes, false);
       stripDurableTombstoneMarkers(changes);
+      const warningDetails = detailsForPersistenceWarnings(
+        warnings,
+        changes,
+        'remove',
+      );
       return {
         v: 1,
         sessionId: this.sessionId,
         changes,
         ...(warnings.length > 0 ? { warnings } : {}),
+        ...(warningDetails.length > 0 ? { warningDetails } : {}),
       };
     });
   }
@@ -712,6 +769,7 @@ export class SessionArtifactStore {
     tombstonedClientIds: Map<string, string | undefined>;
     stickyEphemeralIds: Set<string>;
     lastRestoreWarnings: string[];
+    lastRestoreWarningDetails: SessionArtifactWarningDetail[];
   } {
     return {
       artifacts: new Map(
@@ -729,6 +787,7 @@ export class SessionArtifactStore {
       tombstonedClientIds: new Map(this.tombstonedClientIds),
       stickyEphemeralIds: new Set(this.stickyEphemeralIds),
       lastRestoreWarnings: [...this.lastRestoreWarnings],
+      lastRestoreWarningDetails: [...this.lastRestoreWarningDetails],
     };
   }
 
@@ -743,6 +802,7 @@ export class SessionArtifactStore {
     tombstonedClientIds: Map<string, string | undefined>;
     stickyEphemeralIds: Set<string>;
     lastRestoreWarnings: string[];
+    lastRestoreWarningDetails: SessionArtifactWarningDetail[];
   }): void {
     this.artifacts.clear();
     for (const [id, artifact] of state.artifacts) {
@@ -766,6 +826,7 @@ export class SessionArtifactStore {
       this.stickyEphemeralIds.add(id);
     }
     this.setLastRestoreWarnings(state.lastRestoreWarnings);
+    this.lastRestoreWarningDetails = [...state.lastRestoreWarningDetails];
   }
 
   private async persistChanges(
@@ -1887,10 +1948,13 @@ function isFileArtifactUrl(raw: unknown): boolean {
 }
 
 function isDurablePersistenceChange(change: SessionArtifactChange): boolean {
+  if (change.action === 'removed' && change.durableTombstoneRequired === true) {
+    return true;
+  }
   if (!change.artifact) return false;
   return (
     change.artifact.retention !== 'ephemeral' ||
-    (change.action === 'removed' && change.durableTombstoneRequired === true)
+    change.artifact.persistenceWarning === 'persistence_unavailable'
   );
 }
 
@@ -1898,6 +1962,69 @@ function stripDurableTombstoneMarkers(changes: SessionArtifactChange[]): void {
   for (const change of changes) {
     delete change.durableTombstoneRequired;
   }
+}
+
+function detailsForPersistenceWarnings(
+  warnings: readonly string[],
+  changes: readonly SessionArtifactChange[],
+  operation: SessionArtifactWarningDetail['operation'],
+): SessionArtifactWarningDetail[] {
+  if (warnings.length === 0) return [];
+  const artifactIds = changes
+    .filter(isDurablePersistenceChange)
+    .map((change) => change.artifactId);
+  return warnings.map((warning) => {
+    if (
+      warning ===
+      'artifact persistence unavailable; durable artifacts kept ephemeral'
+    ) {
+      return {
+        code: 'ARTIFACT_PERSISTENCE_UNAVAILABLE',
+        operation,
+        artifactIds,
+        durability: 'live_only',
+        retryable: false,
+        message: warning,
+      };
+    }
+    if (warning === 'artifact removal not persisted; live removal kept') {
+      return {
+        code: 'ARTIFACT_REMOVAL_NOT_PERSISTED',
+        operation,
+        artifactIds,
+        durability: 'live_only',
+        retryable: true,
+        message: warning,
+      };
+    }
+    return {
+      code: 'ARTIFACT_WARNING',
+      operation,
+      artifactIds,
+      message: warning,
+    };
+  });
+}
+
+function persistenceFailureDetail(options: {
+  message: string;
+  operation: SessionArtifactWarningDetail['operation'];
+  artifactIds: string[];
+  error: unknown;
+}): SessionArtifactWarningDetail {
+  const unavailable =
+    options.error instanceof SessionArtifactValidationError &&
+    options.error.message === 'artifact persistence is unavailable';
+  return {
+    code: unavailable
+      ? 'ARTIFACT_PERSISTENCE_UNAVAILABLE'
+      : 'ARTIFACT_PERSISTENCE_WRITE_FAILED',
+    operation: options.operation,
+    artifactIds: options.artifactIds,
+    durability: 'unavailable',
+    retryable: !unavailable,
+    message: options.message,
+  };
 }
 
 function cloneStoredArtifact(artifact: StoredArtifact): StoredArtifact {
