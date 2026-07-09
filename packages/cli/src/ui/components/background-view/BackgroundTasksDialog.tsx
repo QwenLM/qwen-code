@@ -809,16 +809,16 @@ const AgentDetailBody: React.FC<{
               // inspect ("is this command stuck or still reasonable?"),
               // so it renders in full and wraps; MaxSizedBox owns the
               // overall height budget. Earlier rows stay one-line.
+              // Prefix and label must be ONE string child: MaxSizedBox's
+              // wrap layout drops the prefix's trailing space when they
+              // arrive as separate segments (`> Shell` → `>Shell`).
               const liveLabel =
                 fullLabel.length > MAX_LIVE_LABEL_CHARS
                   ? `${fullLabel.slice(0, MAX_LIVE_LABEL_CHARS)}…`
                   : fullLabel;
               return (
                 <Box key={`${a.at}-${i}`}>
-                  <Text color={theme.text.primary} wrap="truncate">
-                    {prefix}
-                  </Text>
-                  <Text color={theme.text.primary}>{liveLabel}</Text>
+                  <Text color={theme.text.primary}>{prefix + liveLabel}</Text>
                 </Box>
               );
             }
