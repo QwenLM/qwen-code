@@ -6,6 +6,7 @@
 
 import path from 'node:path';
 import type { Request, Response } from 'express';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { canonicalizeWorkspace } from './acp-session-bridge.js';
 import type {
   WorkspaceRegistry,
@@ -47,7 +48,12 @@ export function resolveWorkspaceRuntimeFromParam(
   let key: string;
   try {
     key = canonicalizeWorkspace(selector);
-  } catch {
+  } catch (err) {
+    writeStderrLine(
+      `qwen serve: canonicalizeWorkspace(${JSON.stringify(selector)}) failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
     sendWorkspaceMismatch(res, registry, selector);
     return null;
   }

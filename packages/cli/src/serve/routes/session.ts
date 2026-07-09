@@ -63,6 +63,7 @@ import {
 } from '../server/session-export.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import { requireSessionRuntime } from './session-runtime.js';
+import { resolveWorkspaceRuntimeFromParam } from '../workspace-route-runtime.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -277,7 +278,12 @@ export function registerSessionRoutes(
     res: Response,
     route: string,
   ): WorkspaceRuntime | null => {
-    const runtime = resolveRuntimeFromWorkspaceParam(req, res, 'workspace');
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      workspaceRegistry,
+      req,
+      res,
+      'workspace',
+    );
     if (runtime === null) return null;
     if (!runtime.trusted) {
       logSessionRoutingFailure(route, 'untrusted_workspace', {
@@ -1919,7 +1925,15 @@ export function registerSessionRoutes(
       // Express decodes URL-encoded path params automatically; clients pass
       // the absolute workspace cwd encoded (e.g.
       // GET /workspace/%2Fwork%2Fa/sessions).
-      const runtime = resolveRuntimeFromWorkspaceParam(req, res, paramName);
+      const runtime =
+        paramName === 'workspace'
+          ? resolveWorkspaceRuntimeFromParam(
+              workspaceRegistry,
+              req,
+              res,
+              'workspace',
+            )
+          : resolveRuntimeFromWorkspaceParam(req, res, paramName);
       if (runtime === null) return;
       if (
         paramName === 'workspace'

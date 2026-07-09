@@ -188,6 +188,55 @@ async function makeHarness(opts?: {
   };
 }
 
+async function makeWindowsSelectorHarness() {
+  const scratch = await fsp.mkdtemp(
+    path.join(os.tmpdir(), 'qwen-workspace-qualified-rest-win-'),
+  );
+  const primaryCwd = canonicalizeWorkspace(path.join(scratch, 'primary'));
+  await fsp.mkdir(primaryCwd, { recursive: true });
+  const windowsCwd = 'C:\\repo';
+  const primaryFsFactory = createWorkspaceFileSystemFactory({
+    boundWorkspaces: [primaryCwd],
+    trusted: true,
+    emit: () => {},
+  });
+  const windowsFsFactory = createWorkspaceFileSystemFactory({
+    boundWorkspaces: [windowsCwd],
+    trusted: true,
+    emit: () => {},
+  });
+  const primary: WorkspaceRuntime = {
+    workspaceId: 'primary-id',
+    workspaceCwd: primaryCwd,
+    primary: true,
+    trusted: true,
+    env: { mode: 'parent-process', overlayKeys: [] },
+    bridge: makeBridge(),
+    workspaceService: makeWorkspaceService('primary'),
+    routeFileSystemFactory: primaryFsFactory,
+    clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+  };
+  const windowsRuntime: WorkspaceRuntime = {
+    workspaceId: 'windows-id',
+    workspaceCwd: windowsCwd,
+    primary: false,
+    trusted: true,
+    env: { mode: 'parent-process', overlayKeys: [] },
+    bridge: makeBridge(),
+    workspaceService: makeWorkspaceService('windows'),
+    routeFileSystemFactory: windowsFsFactory,
+    clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+  };
+  const app = createServeApp(
+    { ...baseOpts, workspace: primaryCwd },
+    undefined,
+    {
+      workspaceRegistry: createWorkspaceRegistry([primary, windowsRuntime]),
+    },
+  );
+  return { app, scratch, windowsCwd };
+}
+
 describe('workspace-qualified core REST', () => {
   it('routes file reads to the workspace selected by id', async () => {
     const h = await makeHarness();
@@ -271,6 +320,54 @@ describe('workspace-qualified core REST', () => {
         .set('Host', host());
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('workspace_mismatch');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('logs canonicalization failures for absolute cwd selectors', async () => {
+    const h = await makeHarness();
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const loop = path.join(h.scratch, 'loop');
+      try {
+        await fsp.symlink(loop, loop);
+      } catch (err) {
+        if (
+          err &&
+          typeof err === 'object' &&
+          'code' in err &&
+          (err as { code?: unknown }).code === 'EPERM'
+        ) {
+          return;
+        }
+        throw err;
+      }
+      const res = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(loop)}/file`)
+        .query({ path: 'target.txt' })
+        .set('Host', host());
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('workspace_mismatch');
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('canonicalizeWorkspace'),
+      );
+    } finally {
+      stderrSpy.mockRestore();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('uses portable cwd selector resolution for workspace session routes', async () => {
+    const h = await makeWindowsSelectorHarness();
+    try {
+      const res = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.windowsCwd)}/sessions`)
+        .set('Host', host());
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toEqual([]);
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
