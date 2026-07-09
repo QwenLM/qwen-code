@@ -110,6 +110,12 @@ interface WebShellSidebarProps {
   onError: (error: unknown, fallback: string) => void;
   mobileOpen?: boolean;
   sessionListReloadToken?: number;
+  /**
+   * Phase 4: workspace cwd picked for the next new session (undefined =
+   * primary). Only meaningful on multi-workspace daemons.
+   */
+  selectedWorkspaceCwd?: string;
+  onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
 }
 
 function cx(...classes: Array<string | false | undefined>): string {
@@ -506,6 +512,8 @@ export function WebShellSidebar({
   onError,
   mobileOpen,
   sessionListReloadToken,
+  selectedWorkspaceCwd,
+  onSelectWorkspace,
 }: WebShellSidebarProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -514,6 +522,9 @@ export function WebShellSidebar({
   const organizationEnabled = Boolean(
     connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE),
   );
+  // Phase 4: registered workspaces on a multi-workspace daemon (absent or a
+  // single entry otherwise). Drives the new-session workspace picker.
+  const workspaces = connection.capabilities?.workspaces ?? [];
   const {
     sessions,
     loading,
@@ -2432,6 +2443,38 @@ export function WebShellSidebar({
           {!collapsed && <span>{t('sidebar.newChat')}</span>}
         </button>
       </div>
+      {!collapsed && workspaces.length > 1 && (
+        <div className={styles.workspacePicker}>
+          <label
+            className={styles.workspacePickerLabel}
+            htmlFor="web-shell-workspace-picker"
+          >
+            {t('sidebar.workspaceSelectLabel')}
+          </label>
+          <select
+            id="web-shell-workspace-picker"
+            className={styles.workspacePickerSelect}
+            value={selectedWorkspaceCwd ?? ''}
+            onChange={(event) =>
+              onSelectWorkspace?.(
+                event.target.value === '' ? undefined : event.target.value,
+              )
+            }
+          >
+            {workspaces.map((ws) => (
+              <option
+                key={ws.id}
+                value={ws.primary ? '' : ws.cwd}
+                disabled={!ws.trusted}
+              >
+                {getWorkspaceName(ws.cwd)}
+                {ws.primary ? ` (${t('sidebar.workspacePrimary')})` : ''}
+                {!ws.trusted ? ` — ${t('sidebar.workspaceUntrusted')}` : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       <div className={styles.body}>
         {!collapsed && (

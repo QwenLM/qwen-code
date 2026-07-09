@@ -178,6 +178,33 @@
   flex: 0 0 auto;
 }
 
+.workspacePicker {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 8px 0;
+}
+
+.workspacePickerLabel {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.workspacePickerSelect {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--sidebar-accent);
+  background: transparent;
+  color: var(--sidebar-foreground);
+  font-size: 13px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
 .body {
   flex: 1 1 auto;
   min-height: 0;

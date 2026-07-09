@@ -36,7 +36,16 @@ const {
       sessionId: null as string | null,
       workspaceCwd: '/tmp/project',
       capabilities: { qwenCodeVersion: '1.2.3', features: [] as string[] } as
-        | { qwenCodeVersion?: string; features?: string[] }
+        | {
+            qwenCodeVersion?: string;
+            features?: string[];
+            workspaces?: Array<{
+              id: string;
+              cwd: string;
+              primary: boolean;
+              trusted: boolean;
+            }>;
+          }
         | undefined,
     },
     mockUseSessions,
@@ -130,6 +139,8 @@ function renderSidebar(
     onLoadSession: (sessionId: string) => Promise<void> | void;
     onError: (error: unknown, message: string) => void;
     sessionListReloadToken: number;
+    selectedWorkspaceCwd: string;
+    onSelectWorkspace: (workspaceCwd: string | undefined) => void;
   }> = {},
 ): { container: HTMLElement; rerender: (props: typeof overrides) => void } {
   const container = document.createElement('div');
@@ -204,6 +215,82 @@ afterEach(() => {
   }
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe('WebShellSidebar — workspace picker', () => {
+  const multiWorkspaceCaps = {
+    qwenCodeVersion: '1.2.3',
+    features: ['multi_workspace_sessions'],
+    workspaces: [
+      { id: 'ws-primary', cwd: '/tmp/project', primary: true, trusted: true },
+      { id: 'ws-second', cwd: '/tmp/other', primary: false, trusted: true },
+      {
+        id: 'ws-untrusted',
+        cwd: '/tmp/danger',
+        primary: false,
+        trusted: false,
+      },
+    ],
+  };
+
+  it('renders the picker when multiple workspaces are registered', () => {
+    mockConnection.capabilities = multiWorkspaceCaps;
+    const { container } = renderSidebar(false);
+    const select = container.querySelector<HTMLSelectElement>(
+      '#web-shell-workspace-picker',
+    );
+    expect(select).not.toBeNull();
+    expect(select?.querySelectorAll('option').length).toBe(3);
+  });
+
+  it('disables untrusted workspace options and enables trusted ones', () => {
+    mockConnection.capabilities = multiWorkspaceCaps;
+    const { container } = renderSidebar(false);
+    const options = Array.from(
+      container.querySelectorAll<HTMLOptionElement>(
+        '#web-shell-workspace-picker option',
+      ),
+    );
+    const untrusted = options.find((o) => o.textContent?.includes('danger'));
+    const trusted = options.find((o) => o.textContent?.includes('other'));
+    expect(untrusted?.disabled).toBe(true);
+    expect(trusted?.disabled).toBe(false);
+  });
+
+  it('calls onSelectWorkspace with the chosen cwd', () => {
+    mockConnection.capabilities = multiWorkspaceCaps;
+    const onSelectWorkspace = vi.fn();
+    const { container } = renderSidebar(false, { onSelectWorkspace });
+    const select = container.querySelector<HTMLSelectElement>(
+      '#web-shell-workspace-picker',
+    );
+    expect(select).not.toBeNull();
+    act(() => {
+      if (select) {
+        select.value = '/tmp/other';
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    });
+    expect(onSelectWorkspace).toHaveBeenCalledWith('/tmp/other');
+  });
+
+  it('does not render the picker with a single workspace', () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['multi_workspace_sessions'],
+      workspaces: [
+        { id: 'ws-primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    };
+    const { container } = renderSidebar(false);
+    expect(container.querySelector('#web-shell-workspace-picker')).toBeNull();
+  });
+
+  it('does not render the picker when collapsed', () => {
+    mockConnection.capabilities = multiWorkspaceCaps;
+    const { container } = renderSidebar(true);
+    expect(container.querySelector('#web-shell-workspace-picker')).toBeNull();
+  });
 });
 
 describe('WebShellSidebar — version footer', () => {
