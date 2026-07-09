@@ -3843,6 +3843,7 @@ describe('runQwenServe channel worker supervisor', () => {
     return {
       start: vi.fn().mockResolvedValue(undefined),
       stop: vi.fn().mockResolvedValue(undefined),
+      restart: vi.fn().mockResolvedValue(snapshot),
       killAllSync: vi.fn(),
       snapshot: vi.fn(() => snapshot),
     };

@@ -225,9 +225,10 @@ describe('qwen serve — capabilities envelope', () => {
     //
     // Conditional tags absent under this suite's spawn flags (no
     // `--require-auth` / `--allow-origin` / deadline env vars /
-    // rate-limit opt-in, no configured batch ASR model): `require_auth`,
-    // `allow_origin`, `cdp_tunnel_over_ws`, `prompt_absolute_deadline`,
-    // `writer_idle_timeout`, `workspace_voice_transcription`, `rate_limit`.
+    // rate-limit opt-in, no `--channel`, no configured batch ASR model):
+    // `require_auth`, `allow_origin`, `cdp_tunnel_over_ws`,
+    // `prompt_absolute_deadline`, `writer_idle_timeout`,
+    // `workspace_voice_transcription`, `rate_limit`, `channel_reload`.
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
     // `workspace_settings`, `workspace_permissions`, `workspace_voice`,

@@ -258,6 +258,13 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_branch: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
+  // Daemon supports reloading its daemon-managed channel worker via
+  // `POST /workspace/channel/reload`. The worker is stopped and relaunched;
+  // on relaunch it re-reads settings.json (channels / proxy / per-channel
+  // model), so channel settings changes apply without a full daemon restart.
+  // Advertised CONDITIONALLY — only when the daemon was started with
+  // `--channel` (i.e. a channel worker exists to reload).
+  channel_reload: { since: 'v1' },
   // Multi-workspace sessions closed loop (issue #6378 Phase 2a). Advertised
   // only when one daemon hosts more than one registered workspace runtime.
   multi_workspace_sessions: { since: 'v1' },
@@ -313,6 +320,12 @@ export interface AdvertiseFeatureToggles {
   sessionShellCommandEnabled?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
+  /**
+   * Whether the daemon exposes the channel worker reload route
+   * (`channel_reload`). Set only when the daemon was started with
+   * `--channel`, so a channel worker exists to reload.
+   */
+  channelReloadAvailable?: boolean;
   /**
    * Whether the daemon will accept client-hosted MCP servers over the WS
    * (`client_mcp_over_ws`, issue #5626).
@@ -396,6 +409,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
+  ['channel_reload', (toggles) => toggles.channelReloadAvailable === true],
   [
     'multi_workspace_sessions',
     (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
