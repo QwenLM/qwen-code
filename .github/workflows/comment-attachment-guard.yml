@@ -62,6 +62,7 @@ jobs:
             }
 
             const { owner, repo } = context.repo;
+            let deleted = false;
             try {
               if (eventName === 'issue_comment') {
                 await github.rest.issues.deleteComment({
@@ -69,17 +70,23 @@ jobs:
                   repo,
                   comment_id: comment.id,
                 });
+                deleted = true;
               } else if (eventName === 'pull_request_review_comment') {
                 await github.rest.pulls.deleteReviewComment({
                   owner,
                   repo,
                   comment_id: comment.id,
                 });
+                deleted = true;
               }
             } catch (error) {
               core.warning(
                 `Failed to delete suspicious comment ${comment.id}: ${error}`,
               );
+            }
+
+            if (!deleted) {
+              return;
             }
 
             try {

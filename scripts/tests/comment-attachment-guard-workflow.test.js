@@ -30,4 +30,9 @@ describe('comment attachment guard workflow', () => {
     );
     expect(workflow).toContain('Failed to write suspicious comment summary');
   });
+
+  it('only reports a removed suspicious comment after deletion succeeds', () => {
+    expect(workflow).toContain('let deleted = false;');
+    expect(workflow).toContain('if (!deleted) {');
+  });
 });
