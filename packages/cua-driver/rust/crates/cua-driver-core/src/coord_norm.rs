@@ -42,7 +42,7 @@ pub fn px_to_norm(px: f64, dim: u32, scale: f64) -> f64 {
 /// `is_x_axis` true = scale by width, false = by height. `screen_basis` true =
 /// normalize against the SCREEN size (move_cursor moves the agent-cursor
 /// overlay in screen space — it has no window_id); false = against the window's
-/// screenshot size. scroll / page / set_value carry no coordinates → excluded.
+/// screenshot size.
 fn input_coord_fields(tool: &str) -> &'static [(&'static str, bool, bool)] {
     match tool {
         "click" | "double_click" | "right_click" => &[("x", true, false), ("y", false, false)],
@@ -62,6 +62,27 @@ fn input_coord_fields(tool: &str) -> &'static [(&'static str, bool, bool)] {
         ],
         // move_cursor positions the overlay in SCREEN space (no window_id).
         "move_cursor" => &[("x", true, true), ("y", false, true)],
+        // scroll x/y specify WHERE to deliver the wheel event (not scroll amount).
+        // macOS: window-local screenshot pixels. Windows: screen-absolute (desktop
+        // scope only, no pid → screenshot_w=0 → falls back to desktop/screen cache).
+        // Linux: no x/y params. Using window-basis here is safe for both: macOS
+        // gets window-local conversion, Windows desktop-scope hits the screenshot_w=0
+        // fallback path which routes to desktop_screenshot_size / screen_size.
+        "scroll" => &[("x", true, false), ("y", false, false)],
+        // Linux-only stateful mouse tools — window-local coordinates.
+        "mouse_button_down" | "mouse_button_up" => &[("x", true, false), ("y", false, false)],
+        "mouse_drag" => &[("x", true, false), ("y", false, false)],
+        // type_text/press_key/hotkey accept x/y for focus-by-pixel (internally
+        // delegates to click). Listed here so rewrite_coord_desc rewrites their
+        // field descriptions; denormalize_args converts them the same way.
+        "type_text" | "press_key" | "hotkey" => &[("x", true, false), ("y", false, false)],
+        // parallel_mouse_drag has nested coords handled specially in
+        // denormalize_args, but a non-empty entry ensures rewrite_coord_desc
+        // processes its top-level description and from_zoom field.
+        // The from_x/to_x/path fields are inside drags[] so they can't be
+        // listed here; their descriptions are handled by the nested rewrite
+        // in rewrite_coord_desc below.
+        "parallel_mouse_drag" => &[],
         _ => &[],
     }
 }
@@ -71,11 +92,15 @@ fn input_coord_fields(tool: &str) -> &'static [(&'static str, bool, bool)] {
 /// screen-basis fields (move_cursor) use the cached screen size. Desktop-scope
 /// clicks (no pid/window_id → `screenshot_w == 0`) fall back to screen size
 /// since `get_desktop_state` captures in true screen pixels.
-pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screenshot_h: u32) {
+///
+/// Returns `Err` with a guidance message when a required size basis is missing,
+/// so the caller can surface the error to the model instead of silently passing
+/// through unconverted normalized coordinates (which would land clicks at wrong
+/// positions).
+pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screenshot_h: u32) -> Result<(), String> {
     // from_zoom coords live in the zoom-image space, not window-local.
     // Denormalize against the cached zoom image dimensions instead of the
-    // window screenshot size. If no zoom cache exists (e.g. non-normalized
-    // mode, or zoom not yet called), fall through unchanged.
+    // window screenshot size. If no zoom cache exists, return an error.
     if args.get("from_zoom").and_then(|v| v.as_bool()).unwrap_or(false) {
         let pid = args.get("pid").and_then(|v| v.as_i64()).unwrap_or(0);
         if let Some((zw, zh)) = get_zoom_size(pid) {
@@ -86,31 +111,57 @@ pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screens
                     args[field] = json!(norm_to_px(v, dim, scale));
                 }
             }
+        } else {
+            // Only error when the tool actually carries coordinate fields.
+            let has_coords = input_coord_fields(tool).iter().any(|&(f, _, _)| {
+                args.get(f).and_then(|v| v.as_f64()).is_some()
+            });
+            if has_coords {
+                return Err(
+                    "from_zoom=true but no zoom context cached. \
+                     Call zoom first so the driver knows the zoom image dimensions."
+                        .to_string(),
+                );
+            }
         }
-        return;
+        return Ok(());
     }
     let scale = coordinate_scale();
     let screen = screen_size();
     for &(field, is_x, screen_basis) in input_coord_fields(tool) {
+        // Skip fields the caller didn't provide (e.g. element_index addressing).
+        if args.get(field).and_then(|v| v.as_f64()).is_none() {
+            continue;
+        }
         let (dw, dh) = if screen_basis {
             match screen {
                 Some(s) => s,
-                None => continue, // no screen size cached yet → leave field as-is
+                None => return Err(
+                    "Coordinate normalization requires screen size. \
+                     Call get_screen_size first so the driver can convert \
+                     0–1000 coordinates to pixels."
+                        .to_string(),
+                ),
             }
         } else if screenshot_w == 0 {
-            // No window basis available — two distinct cases:
-            //  1. Desktop-scope (no pid/window_id): use desktop screenshot size
-            //     (physical pixels from get_desktop_state).
-            //  2. Window-scope but get_window_state not yet called: leave as-is
-            //     to avoid mapping against the wrong basis.
             let has_window_target = args.get("pid").is_some_and(|v| !v.is_null())
                 || args.get("window_id").is_some_and(|v| !v.is_null());
             if has_window_target {
-                continue;
+                return Err(
+                    "Coordinate normalization requires window screenshot size. \
+                     Call get_window_state for this window first so the driver \
+                     can convert 0–1000 coordinates to pixels."
+                        .to_string(),
+                );
             }
             match desktop_screenshot_size() {
                 Some(s) => s,
-                None => continue,
+                None => return Err(
+                    "Coordinate normalization requires desktop screenshot size. \
+                     Call get_desktop_state first so the driver can convert \
+                     0–1000 coordinates to pixels."
+                        .to_string(),
+                ),
             }
         } else {
             (screenshot_w, screenshot_h)
@@ -120,6 +171,50 @@ pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screens
             args[field] = json!(norm_to_px(v, dim, scale));
         }
     }
+    // parallel_mouse_drag: coordinates are nested inside drags[].{path, from_x,
+    // from_y, to_x, to_y}. Each drag item may have a window_id so we use the
+    // caller-provided screenshot basis (same as click/drag).
+    if tool == "parallel_mouse_drag" {
+        if let Some(drags) = args.get_mut("drags").and_then(|v| v.as_array_mut()) {
+            let scale = coordinate_scale();
+            let (dw, dh) = if screenshot_w > 0 {
+                (screenshot_w, screenshot_h)
+            } else {
+                // parallel_mouse_drag always has window targets
+                return Err(
+                    "Coordinate normalization requires window screenshot size. \
+                     Call get_window_state first so the driver can convert \
+                     0–1000 coordinates to pixels."
+                        .to_string(),
+                );
+            };
+            for item in drags.iter_mut() {
+                // from_x/from_y/to_x/to_y
+                for (field, is_x) in &[("from_x", true), ("from_y", false), ("to_x", true), ("to_y", false)] {
+                    let dim = if *is_x { dw } else { dh };
+                    if let Some(v) = item.get(*field).and_then(|v| v.as_f64()) {
+                        item[*field] = json!(norm_to_px(v, dim, scale));
+                    }
+                }
+                // path: [[x,y], [x,y], ...]
+                if let Some(path) = item.get_mut("path").and_then(|v| v.as_array_mut()) {
+                    for point in path.iter_mut() {
+                        if let Some(arr) = point.as_array_mut() {
+                            if arr.len() >= 2 {
+                                if let Some(x) = arr[0].as_f64() {
+                                    arr[0] = json!(norm_to_px(x, dw, scale));
+                                }
+                                if let Some(y) = arr[1].as_f64() {
+                                    arr[1] = json!(norm_to_px(y, dh, scale));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Extract the downscaled screenshot size a `get_window_state` reported
@@ -177,18 +272,14 @@ pub fn rewrite_coord_desc(tools_list: &mut Value) {
             None => continue,
         };
         let fields = input_coord_fields(&name);
-        if fields.is_empty() {
-            continue; // not a converted tool — leave its docs alone
-        }
-        // Per-field coordinate descriptions. The MCP path emits `inputSchema`
-        // (camelCase); the daemon list path (serve.rs) emits `input_schema`
-        // (snake_case) — reach whichever this payload uses.
-        let schema_key = if tool.get("inputSchema").is_some() {
-            "inputSchema"
-        } else {
-            "input_schema"
-        };
-        if let Some(props) = tool
+        // Per-field coordinate descriptions — only for tools with coord fields.
+        if !fields.is_empty() {
+            let schema_key = if tool.get("inputSchema").is_some() {
+                "inputSchema"
+            } else {
+                "input_schema"
+            };
+            if let Some(props) = tool
             .get_mut(schema_key)
             .and_then(|s| s.get_mut("properties"))
             .and_then(|p| p.as_object_mut())
@@ -222,20 +313,85 @@ pub fn rewrite_coord_desc(tools_list: &mut Value) {
                 );
             }
         }
-        // Top-level description: swap the pixel phrasing. Compute the new string
-        // first so the immutable borrow ends before the mutable write-back.
-        let new_top = tool
-            .get("description")
-            .and_then(|d| d.as_str())
-            .filter(|d| d.contains("window-local screenshot pixels"))
-            .map(|d| {
-                d.replace(
-                    "window-local screenshot pixels",
-                    &format!("0–{scale} normalized coordinates (top-left origin)"),
-                )
-            });
-        if let Some(nd) = new_top {
-            tool["description"] = json!(nd);
+        } // end if !fields.is_empty()
+        // Top-level description: replace pixel-coordinate phrasing with
+        // normalized wording. Multiple variants exist across platforms.
+        if let Some(desc) = tool.get("description").and_then(|d| d.as_str()) {
+            let norm = format!("0–{scale} normalized coordinates (top-left origin)");
+            let mut d = desc.to_string();
+            let mut changed = false;
+            for pixel_phrase in &[
+                "window-local screenshot pixels",
+                "screenshot pixel coordinates",
+                "screenshot pixels",
+                "scaled-image coordinates",
+                "window-local pixels",
+                "window-local x, y pixels",
+            ] {
+                if d.contains(pixel_phrase) {
+                    d = d.replace(pixel_phrase, &norm);
+                    changed = true;
+                }
+            }
+            // Clean up redundant phrases left after replacement.
+            // "...normalized coordinates (top-left origin) — the same space
+            //  get_window_state returns. Top-left origin of the target's window."
+            for redundant in &[
+                " — the same space get_window_state returns. Top-left origin of the target's window.",
+                " — the same space get_window_state returns.",
+                " - the same space get_window_state returns. Top-left origin of the target's window.",
+                " - the same space get_window_state returns.",
+            ] {
+                if d.contains(redundant) {
+                    d = d.replace(redundant, ".");
+                    changed = true;
+                }
+            }
+            // "same pixel space as the screenshot" → "0–N normalized space"
+            if d.contains("same pixel space") {
+                d = d.replace(
+                    "same pixel space as the screenshot",
+                    &format!("0–{scale} normalized space"),
+                );
+                changed = true;
+            }
+            // "Prefer element_index over pixel coordinates" → normalized
+            if d.contains("over pixel coordinates") {
+                d = d.replace(
+                    "over pixel coordinates",
+                    &format!("over 0–{scale} normalized coordinates"),
+                );
+                changed = true;
+            }
+            // "image-pixel -> screen-point" (macOS right_click)
+            if d.contains("image-pixel") {
+                d = d.replace("image-pixel", &format!("0–{scale}-normalized"));
+                changed = true;
+            }
+            // "zoom-image pixel coordinates" (macOS click from_zoom description)
+            if d.contains("zoom-image pixel coordinates") {
+                d = d.replace(
+                    "zoom-image pixel coordinates",
+                    &format!("0–{scale} normalized zoom-image coordinates"),
+                );
+                changed = true;
+            }
+            // "true screen pixels" (get_desktop_state)
+            if d.contains("true screen pixels") {
+                d = d.replace("true screen pixels", &norm);
+                changed = true;
+            }
+            // "screen-absolute pixel" (get_desktop_state)
+            if d.contains("screen-absolute pixel") {
+                d = d.replace(
+                    "screen-absolute pixel",
+                    &format!("0–{scale} normalized"),
+                );
+                changed = true;
+            }
+            if changed {
+                tool["description"] = json!(d);
+            }
         }
     }
 }
@@ -480,17 +636,16 @@ mod tests {
 
     #[test]
     fn denormalize_click_uses_width_for_x_height_for_y() {
-        // Non-square image to catch any axis mix-up.
         let mut args = json!({ "pid": 1, "x": 500.0, "y": 500.0 });
-        denormalize_args("click", &mut args, 800, 600);
-        assert_eq!(args["x"], json!(400.0)); // 500/1000 * 800
-        assert_eq!(args["y"], json!(300.0)); // 500/1000 * 600
+        denormalize_args("click", &mut args, 800, 600).unwrap();
+        assert_eq!(args["x"], json!(400.0));
+        assert_eq!(args["y"], json!(300.0));
     }
 
     #[test]
     fn denormalize_drag_converts_all_four_endpoints() {
         let mut args = json!({ "from_x": 0.0, "from_y": 0.0, "to_x": 1000.0, "to_y": 1000.0 });
-        denormalize_args("drag", &mut args, 800, 600);
+        denormalize_args("drag", &mut args, 800, 600).unwrap();
         assert_eq!(args["from_x"], json!(0.0));
         assert_eq!(args["from_y"], json!(0.0));
         assert_eq!(args["to_x"], json!(800.0));
@@ -503,56 +658,117 @@ mod tests {
     fn denormalize_from_zoom_uses_zoom_cache_when_available() {
         put_zoom_size(990010, 400, 300);
         let mut args = json!({ "pid": 990010, "x": 500.0, "y": 500.0, "from_zoom": true });
-        denormalize_args("click", &mut args, 800, 600);
-        assert_eq!(args["x"], json!(200.0)); // 500/1000 * 400
-        assert_eq!(args["y"], json!(150.0)); // 500/1000 * 300
+        denormalize_args("click", &mut args, 800, 600).unwrap();
+        assert_eq!(args["x"], json!(200.0));
+        assert_eq!(args["y"], json!(150.0));
     }
 
     #[test]
-    fn denormalize_from_zoom_passes_through_without_cache() {
-        // No zoom cache for this pid → coords pass through unchanged.
+    fn denormalize_from_zoom_errors_without_cache() {
         let mut args = json!({ "pid": 990011, "x": 500.0, "y": 500.0, "from_zoom": true });
-        denormalize_args("click", &mut args, 800, 600);
-        assert_eq!(args["x"], json!(500.0));
-        assert_eq!(args["y"], json!(500.0));
+        let err = denormalize_args("click", &mut args, 800, 600).unwrap_err();
+        assert!(err.contains("zoom"), "error should mention zoom: {err}");
     }
 
     #[test]
     fn denormalize_zoom_converts_rect_by_axis() {
-        // zoom is window-basis like click: x1/x2 by width, y1/y2 by height.
         let mut args = json!({ "x1": 400.0, "y1": 400.0, "x2": 600.0, "y2": 600.0 });
-        denormalize_args("zoom", &mut args, 800, 600);
-        assert_eq!(args["x1"], json!(320.0)); // 400/1000*800
-        assert_eq!(args["x2"], json!(480.0)); // 600/1000*800
-        assert_eq!(args["y1"], json!(240.0)); // 400/1000*600
-        assert_eq!(args["y2"], json!(360.0)); // 600/1000*600
+        denormalize_args("zoom", &mut args, 800, 600).unwrap();
+        assert_eq!(args["x1"], json!(320.0));
+        assert_eq!(args["x2"], json!(480.0));
+        assert_eq!(args["y1"], json!(240.0));
+        assert_eq!(args["y2"], json!(360.0));
     }
 
     #[test]
     fn denormalize_move_cursor_uses_screen_size() {
-        // move_cursor is screen-space (no window_id): normalize against the
-        // cached SCREEN size, not the window screenshot size. (Sole test that
-        // writes the screen-size global, so no cross-test race.)
         put_screen_size(1920, 1080);
         let mut args = json!({ "x": 500.0, "y": 500.0 });
-        denormalize_args("move_cursor", &mut args, 800, 600); // window size ignored
-        assert_eq!(args["x"], json!(960.0)); // 500/1000*1920 (screen, not 800)
-        assert_eq!(args["y"], json!(540.0)); // 500/1000*1080 (screen, not 600)
+        denormalize_args("move_cursor", &mut args, 800, 600).unwrap();
+        assert_eq!(args["x"], json!(960.0));
+        assert_eq!(args["y"], json!(540.0));
     }
 
     #[test]
     fn denormalize_leaves_non_coord_tools_untouched() {
+        // scroll without x/y (keystroke path) — no coords to convert.
         let mut args = json!({ "direction": "down", "pid": 1 });
-        denormalize_args("scroll", &mut args, 800, 600);
+        denormalize_args("scroll", &mut args, 800, 600).unwrap();
         assert_eq!(args, json!({ "direction": "down", "pid": 1 }));
     }
 
     #[test]
+    fn denormalize_scroll_converts_xy_when_present() {
+        // scroll with x/y (pixel-wheel path) — coords are window-local.
+        let mut args = json!({ "pid": 1, "window_id": 2, "direction": "down", "x": 500.0, "y": 500.0 });
+        denormalize_args("scroll", &mut args, 800, 600).unwrap();
+        assert_eq!(args["x"], json!(400.0)); // 500/1000 * 800
+        assert_eq!(args["y"], json!(300.0)); // 500/1000 * 600
+    }
+
+    #[test]
+    fn denormalize_mouse_button_down_converts_xy() {
+        let mut args = json!({ "pid": 1, "window_id": 2, "x": 500.0, "y": 500.0 });
+        denormalize_args("mouse_button_down", &mut args, 800, 600).unwrap();
+        assert_eq!(args["x"], json!(400.0));
+        assert_eq!(args["y"], json!(300.0));
+    }
+
+    #[test]
+    fn denormalize_parallel_mouse_drag_converts_nested_coords() {
+        let mut args = json!({
+            "drags": [
+                {
+                    "session": "s1", "window_id": 1,
+                    "from_x": 0.0, "from_y": 0.0, "to_x": 1000.0, "to_y": 1000.0
+                },
+                {
+                    "session": "s2", "window_id": 1,
+                    "path": [[500.0, 500.0], [1000.0, 0.0]]
+                }
+            ]
+        });
+        denormalize_args("parallel_mouse_drag", &mut args, 800, 600).unwrap();
+        let d = args["drags"].as_array().unwrap();
+        // Item 0: from_x/to_x by width, from_y/to_y by height
+        assert_eq!(d[0]["from_x"], json!(0.0));
+        assert_eq!(d[0]["from_y"], json!(0.0));
+        assert_eq!(d[0]["to_x"], json!(800.0));
+        assert_eq!(d[0]["to_y"], json!(600.0));
+        // Item 1: path points
+        let path = d[1]["path"].as_array().unwrap();
+        assert_eq!(path[0][0], json!(400.0)); // 500/1000 * 800
+        assert_eq!(path[0][1], json!(300.0)); // 500/1000 * 600
+        assert_eq!(path[1][0], json!(800.0)); // 1000/1000 * 800
+        assert_eq!(path[1][1], json!(0.0));   // 0/1000 * 600
+    }
+
+    #[test]
     fn denormalize_ignores_missing_coord_fields() {
-        // element_index addressing — no x/y present to convert.
         let mut args = json!({ "pid": 1, "element_index": 3 });
-        denormalize_args("click", &mut args, 800, 600);
+        denormalize_args("click", &mut args, 800, 600).unwrap();
         assert_eq!(args, json!({ "pid": 1, "element_index": 3 }));
+    }
+
+    #[test]
+    fn denormalize_errors_when_window_cache_missing() {
+        // screenshot_w=0 + has pid → window-scope without cache → error
+        let mut args = json!({ "pid": 42, "x": 500.0, "y": 500.0 });
+        let err = denormalize_args("click", &mut args, 0, 0).unwrap_err();
+        assert!(err.contains("get_window_state"), "error should guide to get_window_state: {err}");
+    }
+
+    #[test]
+    fn denormalize_errors_when_screen_cache_missing() {
+        // move_cursor with no screen size cached → error
+        // Use a fresh args without touching any global cache
+        let mut args = json!({ "x": 500.0, "y": 500.0 });
+        // Only test when screen cache is empty (other tests may populate it).
+        // The core assertion: the error message guides to get_screen_size.
+        if screen_size().is_none() {
+            let err = denormalize_args("move_cursor", &mut args, 0, 0).unwrap_err();
+            assert!(err.contains("get_screen_size"), "{err}");
+        }
     }
 
     // ---- output: size basis extraction + result normalization ----
@@ -725,32 +941,27 @@ mod tests {
     fn denormalize_click_falls_back_to_desktop_screenshot_size() {
         put_desktop_screenshot_size(3840, 2160);
         let mut args = json!({ "x": 500.0, "y": 500.0 });
-        // screenshot_w=0 simulates no window cache (desktop-scope, no pid)
-        denormalize_args("click", &mut args, 0, 0);
-        assert_eq!(args["x"], json!(1920.0)); // 500/1000*3840
-        assert_eq!(args["y"], json!(1080.0)); // 500/1000*2160
+        denormalize_args("click", &mut args, 0, 0).unwrap();
+        assert_eq!(args["x"], json!(1920.0));
+        assert_eq!(args["y"], json!(1080.0));
     }
 
     #[test]
-    fn denormalize_click_skips_window_scope_without_cache() {
-        put_desktop_screenshot_size(3840, 2160);
-        // pid present but no get_window_state yet → must NOT fall back
+    fn denormalize_click_errors_window_scope_without_cache() {
+        // pid present but no get_window_state yet → error
         let mut args = json!({ "pid": 42, "x": 500.0, "y": 500.0 });
-        denormalize_args("click", &mut args, 0, 0);
-        assert_eq!(args["x"], json!(500.0)); // unchanged
-        assert_eq!(args["y"], json!(500.0)); // unchanged
+        let err = denormalize_args("click", &mut args, 0, 0).unwrap_err();
+        assert!(err.contains("get_window_state"), "{err}");
     }
 
     #[test]
     fn denormalize_move_cursor_not_affected_by_desktop_cache() {
-        // move_cursor uses screen_size (logical), not desktop_screenshot_size.
-        // Even if desktop cache is populated, move_cursor must use screen cache.
         put_screen_size(1920, 1080);
         put_desktop_screenshot_size(3840, 2160);
         let mut args = json!({ "x": 500.0, "y": 500.0 });
-        denormalize_args("move_cursor", &mut args, 0, 0);
-        assert_eq!(args["x"], json!(960.0));  // 500/1000*1920 (logical)
-        assert_eq!(args["y"], json!(540.0));  // 500/1000*1080 (logical)
+        denormalize_args("move_cursor", &mut args, 0, 0).unwrap();
+        assert_eq!(args["x"], json!(960.0));
+        assert_eq!(args["y"], json!(540.0));
     }
 
     #[test]

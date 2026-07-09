@@ -423,7 +423,9 @@ impl ToolRegistry {
             let pid = args.opt_i64("pid").unwrap_or(0);
             let window_id = args.opt_u64("window_id").unwrap_or(0);
             let (w, h) = crate::coord_norm::get_size(pid, window_id).unwrap_or((0, 0));
-            crate::coord_norm::denormalize_args(resolved_name, &mut args, w, h);
+            if let Err(msg) = crate::coord_norm::denormalize_args(resolved_name, &mut args, w, h) {
+                return ToolResult::error(msg);
+            }
         }
 
         let mut result = match self.tools.get(resolved_name) {
