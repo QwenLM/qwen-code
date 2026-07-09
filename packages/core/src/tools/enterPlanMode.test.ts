@@ -124,16 +124,20 @@ describe('EnterPlanModeTool', () => {
       expect(savedPrePlanMode).toBe(ApprovalMode.AUTO);
     });
 
-    it('should switch from YOLO to PLAN', async () => {
+    it('should not switch from YOLO to PLAN (model-initiated entry is a no-op)', async () => {
+      // Regression: #5970. A YOLO user opted into low-friction execution;
+      // silently switching to read-only Plan mode surprised them and then
+      // blocked reads/writes they expected to proceed. A model-initiated
+      // enter_plan_mode from YOLO must keep the current mode instead.
       approvalMode = ApprovalMode.YOLO;
       const invocation = tool.build({});
-      await invocation.execute(new AbortController().signal);
+      const result = await invocation.execute(new AbortController().signal);
 
-      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
-        ApprovalMode.PLAN,
-        { enteredByModel: true },
-      );
-      expect(savedPrePlanMode).toBe(ApprovalMode.YOLO);
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.YOLO);
+      expect(savedPrePlanMode).toBeUndefined();
+      expect(result.llmContent).toContain('YOLO');
+      expect(result.llmContent).not.toContain('Plan mode is now active');
     });
 
     it('should be idempotent: already in PLAN does not call setApprovalMode', async () => {

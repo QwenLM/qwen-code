@@ -76,6 +76,21 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
       );
     }
 
+    // A model-initiated entry from YOLO is a no-op. The user explicitly chose
+    // YOLO for low-friction execution; silently switching to the read-only Plan
+    // mode surprises them and then blocks the reads/writes they expected to
+    // proceed (#5970). Genuine user-driven plan-mode entries (Shift+Tab, /plan)
+    // call config.setApprovalMode directly and never route through this tool, so
+    // gating here only affects the model deciding to plan on its own. Keep the
+    // current mode and tell the model to continue planning without switching.
+    if (this.config.getApprovalMode() === ApprovalMode.YOLO) {
+      return {
+        llmContent:
+          'Plan mode was not entered: the session is in YOLO mode, which the user explicitly chose for low-friction execution. Continue investigating and presenting your plan in the current mode without switching. Only switch to plan mode if the user explicitly asks for it.',
+        returnDisplay: 'Stayed in YOLO mode (plan mode not entered).',
+      };
+    }
+
     // In headless (non-interactive) mode without ACP support, the gate
     // exit paths require user interaction that cannot be fulfilled.
     const isAcpMode =
