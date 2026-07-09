@@ -72,9 +72,21 @@ fn input_coord_fields(tool: &str) -> &'static [(&'static str, bool, bool)] {
 /// clicks (no pid/window_id → `screenshot_w == 0`) fall back to screen size
 /// since `get_desktop_state` captures in true screen pixels.
 pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screenshot_h: u32) {
-    // from_zoom coords live in the zoom-image space, not window-local; core has
-    // no crop basis to convert them, so leave the whole call untouched.
+    // from_zoom coords live in the zoom-image space, not window-local.
+    // Denormalize against the cached zoom image dimensions instead of the
+    // window screenshot size. If no zoom cache exists (e.g. non-normalized
+    // mode, or zoom not yet called), fall through unchanged.
     if args.get("from_zoom").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let pid = args.get("pid").and_then(|v| v.as_i64()).unwrap_or(0);
+        if let Some((zw, zh)) = get_zoom_size(pid) {
+            let scale = coordinate_scale();
+            for &(field, is_x, _) in input_coord_fields(tool) {
+                let dim = if is_x { zw } else { zh };
+                if let Some(v) = args.get(field).and_then(|v| v.as_f64()) {
+                    args[field] = json!(norm_to_px(v, dim, scale));
+                }
+            }
+        }
         return;
     }
     let scale = coordinate_scale();
@@ -196,6 +208,18 @@ pub fn rewrite_coord_desc(tools_list: &mut Value) {
                     };
                     fobj.insert("description".to_string(), json!(desc));
                 }
+            }
+            // from_zoom: rewrite to say "normalized" instead of "pixel"
+            // so the model sends 0–scale coords for zoom-image clicks too.
+            if let Some(fobj) = props.get_mut("from_zoom").and_then(|f| f.as_object_mut()) {
+                fobj.insert(
+                    "description".to_string(),
+                    json!(format!(
+                        "When true, x and y are 0–{scale} normalized coordinates \
+                         in the last zoom image for this pid. The driver maps them \
+                         back to window coords."
+                    )),
+                );
             }
         }
         // Top-level description: swap the pixel phrasing. Compute the new string
@@ -369,6 +393,43 @@ pub fn ingest_screen_size(tool: &str, result: &ToolResult) {
     }
 }
 
+// ── Zoom-image size cache (for from_zoom click denormalization) ─────────────
+
+/// Per-pid zoom-image size cache. Keyed on pid alone (matching the platform
+/// `ZoomRegistry`). Written by `ingest_zoom_size` after a `zoom` call,
+/// read by `denormalize_args` when `from_zoom=true`.
+static ZOOM_SIZE_CACHE: OnceLock<Mutex<HashMap<i64, (u32, u32)>>> = OnceLock::new();
+
+fn zoom_size_cache() -> &'static Mutex<HashMap<i64, (u32, u32)>> {
+    ZOOM_SIZE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn put_zoom_size(pid: i64, w: u32, h: u32) {
+    if let Ok(mut cache) = zoom_size_cache().lock() {
+        cache.insert(pid, (w, h));
+    }
+}
+
+pub fn get_zoom_size(pid: i64) -> Option<(u32, u32)> {
+    zoom_size_cache().lock().ok()?.get(&pid).copied()
+}
+
+/// Ingest the zoom image size from a `zoom` result into the cache so that
+/// subsequent `from_zoom=true` clicks can denormalize against it.
+pub fn ingest_zoom_size(tool: &str, args: &Value, result: &ToolResult) {
+    if tool != "zoom" {
+        return;
+    }
+    let pid = args.get("pid").and_then(|v| v.as_i64()).unwrap_or(0);
+    if let Some(sc) = result.structured_content.as_ref() {
+        let w = sc.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let h = sc.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        if w > 0 && h > 0 {
+            put_zoom_size(pid, w, h);
+        }
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -439,10 +500,18 @@ mod tests {
     // ---- exclusions / passthrough ----
 
     #[test]
-    fn denormalize_skips_when_from_zoom_set() {
-        // from_zoom coords are in the zoom-image space; core has no crop basis
-        // to convert them, so they must pass through untouched.
-        let mut args = json!({ "x": 500.0, "y": 500.0, "from_zoom": true });
+    fn denormalize_from_zoom_uses_zoom_cache_when_available() {
+        put_zoom_size(990010, 400, 300);
+        let mut args = json!({ "pid": 990010, "x": 500.0, "y": 500.0, "from_zoom": true });
+        denormalize_args("click", &mut args, 800, 600);
+        assert_eq!(args["x"], json!(200.0)); // 500/1000 * 400
+        assert_eq!(args["y"], json!(150.0)); // 500/1000 * 300
+    }
+
+    #[test]
+    fn denormalize_from_zoom_passes_through_without_cache() {
+        // No zoom cache for this pid → coords pass through unchanged.
+        let mut args = json!({ "pid": 990011, "x": 500.0, "y": 500.0, "from_zoom": true });
         denormalize_args("click", &mut args, 800, 600);
         assert_eq!(args["x"], json!(500.0));
         assert_eq!(args["y"], json!(500.0));
@@ -633,6 +702,24 @@ mod tests {
     }
 
     // ---- desktop-scope ----
+
+    #[test]
+    fn ingest_zoom_size_caches_from_zoom_result() {
+        let args = json!({ "pid": 990020 });
+        let r = ToolResult::text("ok")
+            .with_structured(json!({ "width": 400, "height": 300, "format": "jpeg" }));
+        ingest_zoom_size("zoom", &args, &r);
+        assert_eq!(get_zoom_size(990020), Some((400, 300)));
+    }
+
+    #[test]
+    fn ingest_zoom_size_ignores_non_zoom() {
+        let args = json!({ "pid": 990021 });
+        let r = ToolResult::text("ok")
+            .with_structured(json!({ "width": 400, "height": 300 }));
+        ingest_zoom_size("click", &args, &r);
+        assert_eq!(get_zoom_size(990021), None);
+    }
 
     #[test]
     fn denormalize_click_falls_back_to_desktop_screenshot_size() {

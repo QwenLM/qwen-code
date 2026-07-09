@@ -436,6 +436,7 @@ impl ToolRegistry {
         if self.normalized {
             crate::coord_norm::ingest_window_size(resolved_name, &args, &result);
             crate::coord_norm::ingest_screen_size(resolved_name, &result);
+            crate::coord_norm::ingest_zoom_size(resolved_name, &args, &result);
             crate::coord_norm::normalize_result(resolved_name, &mut result);
         }
 
