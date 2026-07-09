@@ -9254,26 +9254,83 @@ describe('Session', () => {
           expect(spawner).not.toHaveBeenCalled();
         });
 
-        it('judges a missed conditional fire too, then keeps it in-session', async () => {
-          // `missed` keeps the in-session confirm-first path, but the guard
-          // still decides: a late fire must not run unconditionally.
+        it('never evaluates a condition on a missed fire', async () => {
+          // A `missed` job is the scheduler's SYNTHETIC carrier: one batched
+          // notification covering every one-shot missed in this load, built
+          // from a spread of the first task. Its prompt is not that task's
+          // command, and the scheduler has already deleted the whole batch from
+          // disk — so gating the notice on one task's precondition could
+          // silently lose the others. It runs in-session, unjudged.
           const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
-          await fireGuarded(spawner, assistantTurn({ text: 'DECISION: YES' }), {
+          await fireGuarded(spawner, assistantTurn({ text: 'DECISION: NO' }), {
             missed: true,
           });
 
-          // Turn 1 = user, turn 2 = precondition, turn 3 = the fire itself.
+          // Turn 1 = the user's own; turn 2 = the carrier itself. No check turn.
           await vi.waitFor(() =>
-            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3),
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
           );
           expect(spawner).not.toHaveBeenCalled();
-          const fireCall = (
-            mockChat.sendMessageStream as ReturnType<typeof vi.fn>
-          ).mock.calls[2];
-          const text = (fireCall![1].message as Array<{ text?: string }>)
-            .map((part) => part.text ?? '')
-            .join('');
-          expect(text).toContain('nightly report');
+          expect(cronTurnText()).toContain('nightly report');
+          expect(cronTurnText()).not.toContain('PRECONDITION');
+        });
+
+        it('withholds the fire when a tool loop truncates the turn after a YES', async () => {
+          // The one truncation that leaves a COMPLETE verdict behind: the model
+          // emits "DECISION: YES" as text in the same streaming round as a tool
+          // call, then the tool loop is cut short. Neither the abort signal nor
+          // the error flag is set, so only a dedicated 'incomplete' outcome can
+          // tell this apart from a clean finish — otherwise the fire is released
+          // on a verdict the model never got to revise.
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          // Any tool call at all now trips the per-turn loop detector.
+          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(0);
+          mockToolRegistry.getTool.mockReturnValue({
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/git.log' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Read file'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute: vi.fn().mockResolvedValue({
+                llmContent: 'ok',
+                returnDisplay: 'ok',
+              }),
+            }),
+          });
+
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          await fireGuarded(spawner, () =>
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'Looks good.\nDECISION: YES\n' }],
+                      },
+                    },
+                  ],
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/git.log' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+          );
+          expect(spawner).not.toHaveBeenCalled();
         });
 
         it('never evaluates a condition on a shared task', async () => {
@@ -9325,6 +9382,32 @@ describe('Session', () => {
         // The verdict must be followed by a word boundary, so text running
         // straight on from it is not a verdict either.
         expect(isCronConditionMet('DECISION: YESand then some')).toBe(false);
+      });
+
+      it('rejects a hedged verdict — the line must be ONLY the verdict', () => {
+        // The prompt asks for a final line that is exactly one of the two. A
+        // model that qualifies its answer has not given one, and a precondition
+        // must fail closed on an answer it cannot trust.
+        expect(
+          isCronConditionMet('DECISION: YES, but I could not verify it'),
+        ).toBe(false);
+        expect(isCronConditionMet('DECISION: YES (probably)')).toBe(false);
+        expect(isCronConditionMet('DECISION: YES — see caveat below')).toBe(
+          false,
+        );
+        // Closing markdown and terminal punctuation are still just noise.
+        expect(isCronConditionMet('**DECISION: YES**')).toBe(true);
+        expect(isCronConditionMet('DECISION: YES.')).toBe(true);
+        expect(isCronConditionMet('DECISION: YES  ')).toBe(true);
+        // A hedged NO is not a NO either — but the fail-closed default means the
+        // fire is withheld regardless, which is the safe direction.
+        expect(isCronConditionMet('DECISION: NO, unless you disagree')).toBe(
+          false,
+        );
+        // A clean verdict line followed by prose on LATER lines still counts.
+        expect(isCronConditionMet('DECISION: YES\n\nI will proceed.')).toBe(
+          true,
+        );
       });
 
       it('asks for a verdict without leaking the command into the check', () => {

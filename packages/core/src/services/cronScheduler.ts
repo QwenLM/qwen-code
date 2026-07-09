@@ -935,8 +935,21 @@ export class CronScheduler {
         // "defer to the owning session" path).
         for (const id of skipped) this.pendingRemoval.delete(id);
         if (runnable.length > 0) {
+          // The carrier is SYNTHETIC: its prompt is a notification about every
+          // task in `runnable`, not the command of any one of them. Per-task
+          // guard state must therefore not ride along from `runnable[0]` — a
+          // `condition` here would gate the whole batch's notification behind
+          // one task's precondition, and `removeMissedFromDisk` below has
+          // already deleted them all, so a withheld notice loses them silently.
+          // `runMode` is dropped for the same reason: a notification is never
+          // dispatched into a sub-session.
+          const {
+            condition: _c,
+            runMode: _r,
+            ...carrier
+          } = durableTaskToJob(runnable[0]!, this.recurringMaxAgeMs);
           onFire({
-            ...durableTaskToJob(runnable[0]!, this.recurringMaxAgeMs),
+            ...carrier,
             prompt: buildMissedCronNotification(runnable),
             missed: true,
           });

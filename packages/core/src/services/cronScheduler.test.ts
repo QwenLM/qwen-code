@@ -1524,6 +1524,53 @@ describe('CronScheduler', () => {
       });
     });
 
+    it('deliverPending missed branch: the batched carrier never inherits the first task’s guard state', async () => {
+      // The carrier is synthetic — one notification covering EVERY missed
+      // one-shot, spread from `runnable[0]`. If that task's `condition` /
+      // `runMode` rode along, the consumer would gate the whole batch's notice
+      // behind one task's precondition, and `removeMissedFromDisk` has already
+      // deleted the batch: a withheld notice loses the siblings forever.
+      //
+      // The guarded task is bound to THIS session (that is the only shape the
+      // REST route creates) and this session owns the lock, so the unbound
+      // sibling joins the same batch — the mix that makes the leak reachable.
+      const past = Date.now() - 10 * 60_000;
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'guarded',
+          cron: '* * * * *',
+          prompt: 'guarded one-shot',
+          recurring: false,
+          createdAt: past,
+          lastFiredAt: null,
+          sessionId: 'session-1',
+          runMode: 'isolated',
+          condition: 'only when the flag is set',
+        },
+        {
+          id: 'sibling',
+          cron: '* * * * *',
+          prompt: 'unguarded sibling',
+          recurring: false,
+          createdAt: past,
+          lastFiredAt: null,
+        },
+      ]);
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      await scheduler.enableDurable('session-1');
+
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.missed).toBe(true);
+      // One notice covering both tasks…
+      expect(fired[0]!.prompt).toContain('guarded one-shot');
+      expect(fired[0]!.prompt).toContain('unguarded sibling');
+      // …and it carries no per-task guard state.
+      expect(fired[0]!.condition).toBeUndefined();
+      expect(fired[0]!.runMode).toBeUndefined();
+    });
+
     it('deliverPending missed branch: an ALL-sentinel batch fires nothing and leaves every task on disk', async () => {
       // All-filtered companion to the mixed-batch lock above. When a headless
       // load misses ONLY <<loop.md>> sentinels it can't run, the

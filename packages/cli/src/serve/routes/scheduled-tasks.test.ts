@@ -218,6 +218,36 @@ describe('scheduled-tasks routes', () => {
     expect(h.bridge.spawned).toHaveLength(0);
   });
 
+  it('rejects a condition when no bridge can bind the task a session', async () => {
+    // A minimal embedding has no session bridge, so POST creates the task
+    // UNBOUND and it fires through the shared durable owner. The check would
+    // then run in an unrelated session. Refuse rather than relocate it.
+    const app = express();
+    app.use(express.json());
+    registerScheduledTasksRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody,
+      // no bridge
+    });
+    const res = await request(app).post('/scheduled-tasks').send({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      runMode: 'isolated',
+      condition: 'anything new?',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('condition_requires_bound_session');
+
+    // An isolated task without a condition is still allowed (pre-existing
+    // behaviour: it dispatches from whichever session fires it).
+    const ok = await request(app)
+      .post('/scheduled-tasks')
+      .send({ cron: '0 9 * * *', prompt: 'p', runMode: 'isolated' });
+    expect(ok.status).toBe(201);
+    expect(ok.body.sessionId).toBeNull();
+  });
+
   it('rejects an over-long condition on create', async () => {
     const res = await create({
       cron: '0 9 * * *',
@@ -498,6 +528,41 @@ describe('scheduled-tasks routes', () => {
       .send({ condition: 'anything new?' });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('condition_requires_isolated');
+  });
+
+  it('rejects a condition on an UNBOUND task via PATCH', async () => {
+    // `cron_create` mints unbound tasks; they fire through the shared
+    // per-project durable owner, so their check would land in whichever session
+    // holds that lock — someone else's conversation, not a decision log. PATCH
+    // is the only way such a task could acquire a condition.
+    const file = getCronFilePath(h.workspace);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(
+      file,
+      JSON.stringify([
+        {
+          id: 'unbound',
+          cron: '0 9 * * *',
+          prompt: 'p',
+          recurring: true,
+          createdAt: 1_700_000_000_000,
+          lastFiredAt: null,
+        },
+      ]),
+      'utf8',
+    );
+
+    const res = await request(h.app)
+      .patch('/scheduled-tasks/unbound')
+      .send({ runMode: 'isolated', condition: 'anything new?' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('condition_requires_bound_session');
+
+    // Nothing was written: the task keeps its unbound, unguarded shape.
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].sessionId).toBeNull();
+    expect(list.body.tasks[0].condition).toBeNull();
+    expect(list.body.tasks[0].runMode).toBe('shared');
   });
 
   it('still edits a hand-stranded task when the patch touches neither field', async () => {

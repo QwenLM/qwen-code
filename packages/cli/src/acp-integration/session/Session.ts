@@ -604,13 +604,22 @@ interface BackgroundNotificationQueueItem {
   toolUseId?: string;
 }
 
-/** How a cron turn ended, as seen by {@link CronQueueItem.onComplete}. Mirrors
- * the `withInteractionSpan` outcome the same turn reports. */
-type CronTurnOutcome = 'ok' | 'error' | 'cancelled';
+/**
+ * How a cron turn ended, as seen by {@link CronQueueItem.onComplete}.
+ *
+ * `'incomplete'` is NOT a `withInteractionSpan` outcome: it marks a turn that
+ * was cut short mid-tool-loop (a permission cancel or a detected tool loop),
+ * which neither aborts the turn's signal nor records an error, and so would
+ * otherwise be indistinguishable from a clean finish. A consumer that reads the
+ * turn's text — the precondition check — must not treat a truncated turn's
+ * last words as its answer.
+ */
+type CronTurnOutcome = 'ok' | 'error' | 'cancelled' | 'incomplete';
 
 /** The slice of `CronJob` a fire delivers to this session. Structural, not the
  * imported type, so core stays a type-only dependency of the fire path. */
 interface CronFire {
+  id?: string;
   prompt: string;
   cronExpr?: string;
   missed?: boolean;
@@ -634,12 +643,23 @@ interface CronQueueItem {
 }
 
 /**
- * The single line an isolated task's precondition turn must end on. Anchored to
- * the start of a line (tolerating markdown bullet/emphasis/quote noise the model
- * may wrap it in) so a `DECISION: YES` quoted from a file the check happened to
- * read cannot masquerade as the verdict.
+ * The single line an isolated task's precondition turn must end on. The verdict
+ * must be the WHOLE line:
+ *
+ *  - anchored at the start, tolerating markdown bullet/emphasis/quote noise, so
+ *    a `DECISION: YES` quoted out of a file the check happened to read cannot
+ *    masquerade as the verdict;
+ *  - anchored at the end, tolerating only closing markdown and terminal
+ *    punctuation, so a hedged `DECISION: YES, but I could not verify it` is not
+ *    a verdict at all and fails closed. The prompt asks for a line that is
+ *    exactly one of the two; anything else is an answer we cannot trust to be a
+ *    decision.
+ *
+ * The trailing class deliberately excludes newlines: `\s` there would let the
+ * match run past the end of its own line.
  */
-const CRON_CONDITION_VERDICT_RE = /^[\s>*_#-]*DECISION:\s*(YES|NO)\b/gim;
+const CRON_CONDITION_VERDICT_RE =
+  /^[\s>*_#-]*DECISION:\s*(YES|NO)[ \t*_.!]*$/gim;
 
 /**
  * Wraps a task's precondition into the turn the bound session actually runs.
@@ -3004,15 +3024,56 @@ export class Session implements SessionContext {
       // session of an isolated task is otherwise idle, so its transcript becomes
       // the task's decision log — the record of why a fire did or did not
       // happen — and no session is minted for a run that never occurs.
-      if (job.condition && job.runMode === 'isolated') {
+      // A `missed` fire is NEVER judged. Its prompt is not the task's command:
+      // the scheduler batches every one-shot missed in this load into ONE
+      // synthetic carrier job whose prompt is a notification ("these tasks were
+      // missed … ask the user before running them"), built from a spread of the
+      // FIRST task. Gating that notification on one task's precondition would
+      // let a `NO` silently suppress the notice for unrelated tasks the
+      // scheduler has already deleted from disk. The scheduler also strips the
+      // guard state from the carrier; this guard is the second half of that
+      // contract.
+      if (job.condition && job.runMode === 'isolated' && !job.missed) {
         this.cronQueue.push({
           prompt: wrapCronConditionPrompt(job.condition),
           source: 'cron',
           onComplete: (outcome, finalText) => {
             // The turn we just ran may itself have torn the session down or
             // tripped the token breaker (which already emptied cronQueue).
-            if (this.disposed || this.cronDisabledByTokenLimit) return;
-            if (outcome !== 'ok' || !isCronConditionMet(finalText)) return;
+            if (this.disposed || this.cronDisabledByTokenLimit) {
+              debugLogger.debug(
+                `Precondition skipped (session gone) [task ${job.id ?? '?'}]`,
+              );
+              return;
+            }
+            if (outcome !== 'ok') {
+              // The scheduler has already booked this as a run, and the
+              // transcript of a turn that never finished may hold no verdict to
+              // read — so this must leave a trace somewhere the operator will
+              // actually look. `debugLogger` writes nothing unless a debug log
+              // session is active; the daemon forwards child stderr.
+              writeStderrLine(
+                `qwen serve: scheduled task precondition did not complete ` +
+                  `(${outcome}) — the fire was withheld [session ${this.sessionId}]`,
+              );
+              debugLogger.warn(
+                `Precondition turn ended '${outcome}' — fire withheld ` +
+                  `[session ${this.sessionId}]`,
+              );
+              return;
+            }
+            if (!isCronConditionMet(finalText)) {
+              // The ordinary case. The bound session's transcript IS the record
+              // of why, so this stays a debug-level line.
+              debugLogger.info(
+                `Precondition verdict is not YES — fire withheld ` +
+                  `[session ${this.sessionId}]`,
+              );
+              return;
+            }
+            debugLogger.info(
+              `Precondition met — dispatching fire [session ${this.sessionId}]`,
+            );
             this.#deliverCronFire(job);
           },
         });
@@ -3187,6 +3248,13 @@ export class Session implements SessionContext {
           this.config.getSessionId() + '########cron' + Date.now();
 
         let cronHadError = false;
+        // Set before the two mid-tool-loop early returns below. Neither aborts
+        // `ac` nor sets `cronHadError`, so without this a turn that stopped on a
+        // permission cancel or a detected tool loop reaches `onComplete` as
+        // `'ok'` — and a model that emitted "DECISION: YES" as text in the SAME
+        // streaming round as its tool call would release the fire on a verdict
+        // it never got to revise.
+        let cronTurnIncomplete = false;
         // Assistant text of the turn's FINAL model round — reset on every round
         // so tool-loop intermediates ("let me check the log first…") don't reach
         // `onComplete`. Only the last round is the turn's answer.
@@ -3437,6 +3505,7 @@ export class Session implements SessionContext {
                     toolLoopState,
                   );
                   if (toolRun.stopAfterPermissionCancel) {
+                    cronTurnIncomplete = true;
                     await this.#preserveStoppedToolRun(toolRun, ac.signal);
                     return;
                   }
@@ -3445,6 +3514,7 @@ export class Session implements SessionContext {
                     ac.signal,
                   );
                   if (toolRun.loopDetected) {
+                    cronTurnIncomplete = true;
                     await this.#preserveStoppedToolRun(toolRun, ac.signal);
                     return;
                   }
@@ -3475,17 +3545,20 @@ export class Session implements SessionContext {
               );
               if (item.onComplete) {
                 // Every `return` inside the try lands here — an aborted turn, a
-                // token-limit bail, a permission-cancelled tool run, a stream
-                // that never opened. Each leaves `finalRoundText` empty or
-                // partial, which the precondition parser reads as "no verdict"
-                // and skips the fire. Never let a callback throw out of the
-                // finally: that would replace the turn's own outcome and kill
-                // the drain loop.
+                // token-limit bail, a stream that never opened, a tool loop cut
+                // short. The last of those is why `cronTurnIncomplete` exists:
+                // it is the only truncation that leaves `finalRoundText` holding
+                // a COMPLETE final line, so it cannot be distinguished from a
+                // clean finish by the text alone. Never let a callback throw out
+                // of the finally: that would replace the turn's own outcome and
+                // kill the drain loop.
                 const outcome: CronTurnOutcome = ac.signal.aborted
                   ? 'cancelled'
                   : cronHadError
                     ? 'error'
-                    : 'ok';
+                    : cronTurnIncomplete
+                      ? 'incomplete'
+                      : 'ok';
                 try {
                   item.onComplete(outcome, finalRoundText);
                 } catch (err) {

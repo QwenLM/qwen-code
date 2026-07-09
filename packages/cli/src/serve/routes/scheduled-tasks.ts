@@ -343,6 +343,18 @@ export function registerScheduledTasksRoutes(
       res.status(400).json(CONDITION_REQUIRES_ISOLATED);
       return;
     }
+    // A precondition is evaluated in the task's OWN session, and that is the
+    // whole contract: the check turn lands in a transcript nobody else writes
+    // to, and it is that transcript which records why a fire was withheld.
+    // Without a bridge there is no session to bind, so the check would instead
+    // be injected into whichever session happens to hold the shared durable
+    // lock — someone's live conversation. Refuse rather than silently relocate
+    // it. (`bridge` absent is a minimal embedding, not a user error, so the
+    // message says what is missing.)
+    if (condition !== undefined && !bridge) {
+      res.status(400).json(CONDITION_REQUIRES_BOUND_SESSION);
+      return;
+    }
 
     // Mint the task's dedicated session up front. The task is BOUND to it and
     // fires only inside it — its transcript becomes the task's run history, and
@@ -589,6 +601,7 @@ export function registerScheduledTasksRoutes(
     let updated: DurableCronTask | undefined;
     let blockedByArchive = false;
     let conditionModeConflict = false;
+    let conditionNeedsBoundSession = false;
     try {
       await updateCronTasks(boundWorkspace, (tasks) => {
         const idx = tasks.findIndex((t) => t.id === id);
@@ -631,6 +644,17 @@ export function registerScheduledTasksRoutes(
           next.runMode !== 'isolated'
         ) {
           conditionModeConflict = true;
+          return tasks; // no write
+        }
+        // Same invariant as create: a condition-bearing task must own the
+        // session its check runs in. `cron_create` mints unbound tasks, and a
+        // PATCH is the only way one of those could acquire a condition.
+        if (
+          touchesGuard &&
+          next.condition !== undefined &&
+          !(typeof next.sessionId === 'string' && next.sessionId.length > 0)
+        ) {
+          conditionNeedsBoundSession = true;
           return tasks; // no write
         }
         // Re-seat the task's schedule anchor to "now" whenever an edit would
@@ -701,6 +725,10 @@ export function registerScheduledTasksRoutes(
     }
     if (conditionModeConflict) {
       res.status(400).json(CONDITION_REQUIRES_ISOLATED);
+      return;
+    }
+    if (conditionNeedsBoundSession) {
+      res.status(400).json(CONDITION_REQUIRES_BOUND_SESSION);
       return;
     }
     if (!found || !updated) {
@@ -917,4 +945,15 @@ function parseConditionField(raw: unknown): { value?: string; error?: string } {
 const CONDITION_REQUIRES_ISOLATED = {
   error: "`condition` is only supported when `runMode` is 'isolated'",
   code: 'condition_requires_isolated',
+} as const;
+
+/** A precondition is evaluated in the task's own bound session. A task with no
+ * `sessionId` (tool-created via `cron_create`, or created while no session
+ * bridge was available) fires through the shared per-project durable owner, so
+ * its check would run inside an unrelated session. Rejected on both create and
+ * update rather than quietly relocating the check. */
+const CONDITION_REQUIRES_BOUND_SESSION = {
+  error:
+    '`condition` requires a task bound to its own session; this task has none',
+  code: 'condition_requires_bound_session',
 } as const;
