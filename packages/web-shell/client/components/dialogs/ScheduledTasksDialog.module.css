@@ -118,6 +118,203 @@
   line-height: 1.5;
 }
 
+.promptEditorWrap {
+  min-width: 0;
+}
+
+.promptEditor {
+  position: relative;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--background);
+}
+
+.promptEditor:focus-within {
+  outline: 2px solid var(--primary);
+  outline-offset: -1px;
+}
+
+.promptEditorInput {
+  min-width: 220px;
+  flex: 1 1 220px;
+}
+
+.promptEditorInput :global(.cm-editor) {
+  min-height: 120px;
+}
+
+.promptEditorInput :global(.cm-scroller) {
+  min-height: 120px;
+}
+
+.promptEditorInput :global(.cm-content) {
+  padding: 0;
+}
+
+.promptEditorContent {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  align-items: flex-start;
+  gap: 8px;
+  min-height: 160px;
+  padding: 12px;
+  cursor: text;
+}
+
+.promptTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  max-width: 100%;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--muted) 78%, white 22%);
+  color: var(--foreground);
+}
+
+.promptTagIcon {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  background: currentColor;
+  mask: var(--composer-tag-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--composer-tag-icon-url) center / contain no-repeat;
+}
+
+.promptTagLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.promptTagRemove {
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.promptEditorToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.promptEditorAction {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.promptEditorAction:hover,
+.promptEditorAction:focus-visible,
+.promptEditorActionActive {
+  background: color-mix(in srgb, var(--muted) 72%, white 28%);
+  color: var(--foreground);
+  border-color: color-mix(in srgb, var(--border) 78%, var(--foreground) 22%);
+  outline: none;
+}
+
+.promptEditorActionIcon {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  background: currentColor;
+  mask: var(--composer-tag-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--composer-tag-icon-url) center / contain no-repeat;
+}
+
+.promptEditorActionLabel {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.promptPicker {
+  position: absolute;
+  left: 0;
+  bottom: 48px;
+  z-index: 3020;
+  width: min(360px, calc(100vw - 80px));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--background);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+  overflow: hidden;
+}
+
+.promptPickerCols {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  height: min(220px, calc(100vh - 260px));
+}
+
+.promptPickerCol {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.promptPickerCol:first-child {
+  border-right: 1px solid var(--border);
+}
+
+.promptPickerItem {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 10px 12px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  color: var(--foreground);
+  cursor: pointer;
+}
+
+.promptPickerItem:hover {
+  background: var(--muted);
+}
+
+.promptPickerLabel {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.promptPickerDesc {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--muted-foreground);
+}
+
 .input:focus,
 .textarea:focus,
 .select:focus {

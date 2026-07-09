@@ -51,10 +51,19 @@ export interface CronTaskRun {
  * `lastFiredAt`, so appending a capped run adds no extra write, only bytes). */
 export const MAX_TASK_RUNS = 20;
 
+export interface CronTaskMention {
+  kind: 'skill' | 'mcp' | 'extension' | 'file';
+  id: string;
+  label?: string;
+  value?: string;
+  serialized: string;
+}
+
 export interface DurableCronTask {
   id: string;
   cron: string;
   prompt: string;
+  mentions?: CronTaskMention[];
   recurring: boolean;
   createdAt: number;
   lastFiredAt: number | null;
@@ -371,6 +380,28 @@ function isValidRuns(value: unknown): value is CronTaskRun[] {
   });
 }
 
+function isValidMentions(value: unknown): value is CronTaskMention[] {
+  if (!Array.isArray(value)) return false;
+  return value.every((entry) => {
+    if (typeof entry !== 'object' || entry === null) return false;
+    const mention = entry as Record<string, unknown>;
+    return (
+      (mention['kind'] === 'skill' ||
+        mention['kind'] === 'mcp' ||
+        mention['kind'] === 'extension' ||
+        mention['kind'] === 'file') &&
+      typeof mention['id'] === 'string' &&
+      mention['id'].length > 0 &&
+      (mention['label'] === undefined ||
+        typeof mention['label'] === 'string') &&
+      (mention['value'] === undefined ||
+        typeof mention['value'] === 'string') &&
+      typeof mention['serialized'] === 'string' &&
+      mention['serialized'].length > 0
+    );
+  });
+}
+
 function isValidTask(value: unknown): value is DurableCronTask {
   if (typeof value !== 'object' || value === null) return false;
   const obj = value as Record<string, unknown>;
@@ -378,6 +409,7 @@ function isValidTask(value: unknown): value is DurableCronTask {
     typeof obj['id'] === 'string' &&
     typeof obj['cron'] === 'string' &&
     typeof obj['prompt'] === 'string' &&
+    (obj['mentions'] === undefined || isValidMentions(obj['mentions'])) &&
     typeof obj['recurring'] === 'boolean' &&
     isFiniteTimestamp(obj['createdAt']) &&
     (obj['lastFiredAt'] === null || isFiniteTimestamp(obj['lastFiredAt'])) &&

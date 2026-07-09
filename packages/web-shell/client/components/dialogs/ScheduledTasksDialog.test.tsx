@@ -20,6 +20,13 @@ interface MockTask {
   name: string | null;
   cron: string;
   prompt: string;
+  mentions?: Array<{
+    kind: 'skill' | 'mcp' | 'extension' | 'file';
+    id: string;
+    label?: string;
+    value?: string;
+    serialized: string;
+  }>;
   recurring: boolean;
   enabled: boolean;
   createdAt: number;
@@ -41,6 +48,7 @@ const { actions } = vi.hoisted(() => ({
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useWorkspaceActions: () => actions,
+  useOptionalWorkspace: () => ({ actions }),
 }));
 
 const { ScheduledTasksDialog } = await import('./ScheduledTasksDialog');
@@ -70,6 +78,7 @@ async function mount(
     root!.render(
       <I18nProvider language="en">
         <ScheduledTasksDialog
+          skills={[]}
           onRunPrompt={opts.onRunPrompt ?? vi.fn()}
           onCreateViaChat={vi.fn()}
           onOpenSession={opts.onOpenSession}
@@ -137,11 +146,10 @@ describe('ScheduledTasksDialog editing', () => {
     // The cron reverses onto the structured pickers (weekdays @ 12:30) and the
     // name/prompt are prefilled — not left blank as they would be for create.
     const name = document.querySelector<HTMLInputElement>('input[type="text"]');
-    const prompt = document.querySelector<HTMLTextAreaElement>('textarea');
     const frequency = document.querySelector<HTMLSelectElement>('select');
     const time = document.querySelector<HTMLInputElement>('input[type="time"]');
     expect(name?.value).toBe('Digest');
-    expect(prompt?.value).toBe('summarize the day');
+    expect(document.body.textContent).toContain('summarize the day');
     expect(frequency?.value).toBe('weekdays');
     expect(time?.value).toBe('12:30');
 
@@ -153,6 +161,7 @@ describe('ScheduledTasksDialog editing', () => {
     expect(actions.updateScheduledTask).toHaveBeenCalledWith('t1', {
       cron: '30 12 * * 1-5',
       prompt: 'summarize the day',
+      mentions: [],
       name: 'Digest',
     });
     expect(actions.createScheduledTask).not.toHaveBeenCalled();
@@ -171,6 +180,41 @@ describe('ScheduledTasksDialog editing', () => {
     expect(actions.updateScheduledTask).toHaveBeenCalledWith(
       't1',
       expect.objectContaining({ cron: '0 9 * * 1,3,5' }),
+    );
+  });
+
+  it('round-trips stored mentions metadata on save', async () => {
+    await mount([
+      baseTask({
+        prompt: '/loop summarize the day',
+        mentions: [
+          {
+            kind: 'skill',
+            id: 'skill:loop',
+            label: 'loop',
+            serialized: '/loop',
+          },
+        ],
+      }),
+    ]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({
+        prompt: '/loop\n\nsummarize the day',
+        mentions: [
+          {
+            kind: 'skill',
+            id: 'skill:loop',
+            label: 'loop',
+            serialized: '/loop',
+          },
+        ],
+      }),
     );
   });
 });

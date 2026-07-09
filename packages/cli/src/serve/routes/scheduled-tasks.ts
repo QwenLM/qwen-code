@@ -35,6 +35,7 @@ import {
   stripTerminalControlSequences,
   MAX_JOBS,
   type DurableCronTask,
+  type CronTaskMention,
   type CronTaskRun,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -119,6 +120,7 @@ interface ScheduledTaskView {
   name: string | null;
   cron: string;
   prompt: string;
+  mentions?: CronTaskMention[];
   recurring: boolean;
   enabled: boolean;
   createdAt: number;
@@ -148,6 +150,7 @@ function toView(task: DurableCronTask): ScheduledTaskView {
       typeof task.name === 'string' && task.name.length > 0 ? task.name : null,
     cron: task.cron,
     prompt: task.prompt,
+    ...(Array.isArray(task.mentions) ? { mentions: task.mentions } : {}),
     recurring: task.recurring,
     // Absent enabled defaults to enabled — tool-created tasks never write it.
     enabled: task.enabled !== false,
@@ -178,6 +181,58 @@ function validateCron(cron: string): string | null {
   } catch (err) {
     return err instanceof Error ? err.message : String(err);
   }
+}
+
+function parseMentionsField(value: unknown): {
+  value?: CronTaskMention[];
+  error?: string;
+} {
+  if (value === undefined) return {};
+  if (!Array.isArray(value)) {
+    return { error: '`mentions` must be an array' };
+  }
+  const mentions: CronTaskMention[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) {
+      return { error: '`mentions` entries must be objects' };
+    }
+    const mention = entry as Record<string, unknown>;
+    const kind = mention['kind'];
+    if (
+      kind !== 'skill' &&
+      kind !== 'mcp' &&
+      kind !== 'extension' &&
+      kind !== 'file'
+    ) {
+      return {
+        error: '`mentions.kind` must be one of skill, mcp, extension, file',
+      };
+    }
+    const id = mention['id'];
+    const serialized = mention['serialized'];
+    if (typeof id !== 'string' || id.trim().length === 0) {
+      return { error: '`mentions.id` must be a non-empty string' };
+    }
+    if (typeof serialized !== 'string' || serialized.trim().length === 0) {
+      return { error: '`mentions.serialized` must be a non-empty string' };
+    }
+    const label = mention['label'];
+    if (label !== undefined && typeof label !== 'string') {
+      return { error: '`mentions.label` must be a string' };
+    }
+    const valueField = mention['value'];
+    if (valueField !== undefined && typeof valueField !== 'string') {
+      return { error: '`mentions.value` must be a string' };
+    }
+    mentions.push({
+      kind,
+      id: id.trim(),
+      serialized: serialized.trim(),
+      ...(typeof label === 'string' ? { label: label.trim() } : {}),
+      ...(typeof valueField === 'string' ? { value: valueField.trim() } : {}),
+    });
+  }
+  return { value: mentions };
 }
 
 /**
@@ -280,6 +335,14 @@ export function registerScheduledTasksRoutes(
       return;
     }
 
+    const mentionsResult = parseMentionsField(body['mentions']);
+    if (mentionsResult.error) {
+      res
+        .status(400)
+        .json({ error: mentionsResult.error, code: 'invalid_mentions' });
+      return;
+    }
+
     if (
       body['recurring'] !== undefined &&
       typeof body['recurring'] !== 'boolean'
@@ -364,6 +427,9 @@ export function registerScheduledTasksRoutes(
       id: generateCronTaskId(),
       cron,
       prompt,
+      ...(mentionsResult.value !== undefined
+        ? { mentions: mentionsResult.value }
+        : {}),
       recurring,
       createdAt: now,
       // Pin to the creation minute so the scheduler can't fire during the
@@ -479,6 +545,16 @@ export function registerScheduledTasksRoutes(
       } else {
         patch.name = nameResult.value;
       }
+    }
+    if ('mentions' in body) {
+      const mentionsResult = parseMentionsField(body['mentions']);
+      if (mentionsResult.error) {
+        res
+          .status(400)
+          .json({ error: mentionsResult.error, code: 'invalid_mentions' });
+        return;
+      }
+      patch.mentions = mentionsResult.value ?? [];
     }
     if ('recurring' in body) {
       if (typeof body['recurring'] !== 'boolean') {

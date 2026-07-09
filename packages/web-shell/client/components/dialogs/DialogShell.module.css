@@ -41,13 +41,13 @@
   --font-sans:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --radius: 6px;
-  --dialog-overlay: rgba(10, 10, 11, 0.32);
+  --dialog-overlay: rgba(10, 10, 11, 0.52);
 }
 
 .backdrop {
   position: fixed;
   inset: 0;
-  z-index: var(--web-shell-dialog-backdrop-z-index, 1000);
+  z-index: var(--web-shell-dialog-backdrop-z-index, 3000);
   display: flex;
   align-items: center;
   justify-content: center;

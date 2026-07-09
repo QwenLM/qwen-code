@@ -207,7 +207,11 @@ export {
 } from './services/chatCompressionService.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
-export type { DurableCronTask, CronTaskRun } from './services/cronTasksFile.js';
+export type {
+  DurableCronTask,
+  CronTaskMention,
+  CronTaskRun,
+} from './services/cronTasksFile.js';
 export {
   readCronTasks,
   updateCronTasks,

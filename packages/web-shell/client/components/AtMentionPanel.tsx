@@ -24,6 +24,7 @@ const AT_PANEL_THEME_VARS = [
   '--muted-foreground',
   '--chat-editor-border-color',
   '--font-sans',
+  '--web-shell-popover-z-index',
 ];
 
 export function AtMentionPanel({
@@ -34,6 +35,8 @@ export function AtMentionPanel({
   onAccept,
   onBack,
   onSearch,
+  placement = 'above',
+  portal = true,
 }: {
   menu: AtMentionMenuState;
   anchorRef: RefObject<HTMLElement | null>;
@@ -42,13 +45,16 @@ export function AtMentionPanel({
   onAccept: (index?: number) => boolean;
   onBack: () => boolean;
   onSearch: (query: string) => boolean;
+  placement?: 'above' | 'below';
+  portal?: boolean;
 }) {
   const { t } = useI18n();
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [anchorRect, setAnchorRect] = useState<{
     left: number;
-    bottom: number;
+    bottom: number | null;
+    top: number | null;
     width: number;
   } | null>(null);
   const [themeVars, setThemeVars] = useState<CSSProperties>({});
@@ -104,7 +110,9 @@ export function AtMentionPanel({
           12,
           Math.min(rect.left + 16, window.innerWidth - panelWidth - 12),
         ),
-        bottom: window.innerHeight - rect.top + 8,
+        bottom:
+          placement === 'above' ? window.innerHeight - rect.top + 8 : null,
+        top: placement === 'below' ? rect.bottom + 8 : null,
         width: rect.width,
       };
       setAnchorRect((prev) => {
@@ -112,6 +120,7 @@ export function AtMentionPanel({
           prev &&
           prev.left === next.left &&
           prev.bottom === next.bottom &&
+          prev.top === next.top &&
           prev.width === next.width
         ) {
           return prev;
@@ -140,7 +149,7 @@ export function AtMentionPanel({
       window.removeEventListener('resize', scheduleUpdatePosition);
       window.removeEventListener('scroll', scheduleUpdatePosition, true);
     };
-  }, [anchorRef, panelRef]);
+  }, [anchorRef, panelRef, placement]);
 
   const rows =
     menu.level === 'categories'
@@ -184,8 +193,11 @@ export function AtMentionPanel({
       ? `at-mention-option-${menu.selectedIndex}`
       : undefined;
 
-  return createPortal(
-    <div className={styles.atPortalLayer} style={themeVars}>
+  const panel = (
+    <div
+      className={portal ? styles.atPortalLayer : undefined}
+      style={themeVars}
+    >
       <div
         ref={panelRef}
         className={styles.atPanel}
@@ -193,9 +205,16 @@ export function AtMentionPanel({
         style={
           {
             ...themeVars,
-            left: anchorRect.left,
-            bottom: anchorRect.bottom,
-            '--at-anchor-width': `${anchorRect.width}px`,
+            left: portal ? anchorRect.left : 0,
+            ...(portal
+              ? anchorRect.bottom !== null
+                ? { bottom: anchorRect.bottom }
+                : { top: anchorRect.top ?? 0 }
+              : placement === 'above'
+                ? { bottom: 'calc(100% + 8px)' }
+                : { top: 'calc(100% + 8px)' }),
+            ['--at-anchor-width' as string]: `${anchorRect.width}px`,
+            ...(portal ? {} : { position: 'absolute' }),
           } as CSSProperties
         }
         role="region"
@@ -332,7 +351,8 @@ export function AtMentionPanel({
           )}
         </div>
       </div>
-    </div>,
-    document.body,
+    </div>
   );
+
+  return portal ? createPortal(panel, document.body) : panel;
 }

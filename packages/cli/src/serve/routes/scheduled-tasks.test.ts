@@ -150,6 +150,55 @@ describe('scheduled-tasks routes', () => {
     expect(list.body.tasks[0].id).toBe(res.body.id);
   });
 
+  it('persists mentions metadata on create and list', async () => {
+    const mentions = [
+      {
+        kind: 'skill',
+        id: 'skill:loop',
+        label: 'loop',
+        serialized: '/loop',
+      },
+    ];
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: '/loop summarize',
+      mentions,
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.mentions).toEqual(mentions);
+
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].mentions).toEqual(mentions);
+  });
+
+  it('rejects malformed mentions', async () => {
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      mentions: [{ kind: 'skill', id: '', serialized: '/loop' }],
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_mentions');
+  });
+
+  it('updates mentions via PATCH', async () => {
+    const created = await create({ cron: '0 9 * * *', prompt: 'p' });
+    const id = created.body.id as string;
+    const mentions = [
+      {
+        kind: 'extension',
+        id: 'extension:@ext:foo',
+        value: 'foo',
+        serialized: '@ext:foo',
+      },
+    ];
+    const patch = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ mentions });
+    expect(patch.status).toBe(200);
+    expect(patch.body.mentions).toEqual(mentions);
+  });
+
   it('binds a created task to a freshly minted session', async () => {
     const res = await create({ cron: '0 9 * * *', prompt: 'p' });
     expect(res.status).toBe(201);

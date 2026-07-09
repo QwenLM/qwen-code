@@ -282,6 +282,8 @@ export type {
   DaemonGlobResult,
   /** A durable scheduled task (cron) as returned by the daemon. */
   DaemonScheduledTask,
+  /** Mention metadata attached to a scheduled task prompt. */
+  DaemonScheduledTaskMention,
   /** One recorded fire in a scheduled task's run history. */
   DaemonScheduledTaskRun,
   /** Request body for creating a scheduled task. */

@@ -88,6 +88,7 @@ export type {
   DaemonGlobOptions,
   DaemonGlobResult,
   DaemonScheduledTask,
+  DaemonScheduledTaskMention,
   DaemonScheduledTaskRun,
   DaemonCreateScheduledTaskRequest,
   DaemonUpdateScheduledTaskRequest,

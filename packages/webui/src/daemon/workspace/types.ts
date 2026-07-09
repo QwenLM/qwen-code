@@ -173,11 +173,20 @@ export interface DaemonScheduledTaskRun {
   sessionId?: string;
 }
 
+export interface DaemonScheduledTaskMention {
+  kind: 'skill' | 'mcp' | 'extension' | 'file';
+  id: string;
+  label?: string;
+  value?: string;
+  serialized: string;
+}
+
 export interface DaemonScheduledTask {
   id: string;
   name: string | null;
   cron: string;
   prompt: string;
+  mentions?: DaemonScheduledTaskMention[];
   recurring: boolean;
   enabled: boolean;
   createdAt: number;
@@ -196,6 +205,7 @@ export interface DaemonScheduledTask {
 export interface DaemonCreateScheduledTaskRequest {
   cron: string;
   prompt: string;
+  mentions?: DaemonScheduledTaskMention[];
   /** Omit or null for an unnamed task. */
   name?: string | null;
   /** Defaults to true (fire on every match until deleted/expired). */
@@ -209,6 +219,7 @@ export interface DaemonCreateScheduledTaskRequest {
 export interface DaemonUpdateScheduledTaskRequest {
   cron?: string;
   prompt?: string;
+  mentions?: DaemonScheduledTaskMention[];
   name?: string | null;
   recurring?: boolean;
   enabled?: boolean;

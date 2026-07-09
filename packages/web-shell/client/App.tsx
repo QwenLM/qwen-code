@@ -4805,6 +4805,7 @@ export function App({
                   </div>
                   <div className={styles.fullPageBody}>
                     <ScheduledTasksDialog
+                      skills={loadedSkills}
                       onRunPrompt={runTaskManually}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-

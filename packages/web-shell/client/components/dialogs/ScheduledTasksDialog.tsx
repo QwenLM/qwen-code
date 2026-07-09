@@ -9,7 +9,10 @@ import {
   useWorkspaceActions,
   type DaemonScheduledTask,
   type DaemonScheduledTaskRun,
+  type DaemonScheduledTaskMention,
 } from '@qwen-code/webui/daemon-react-sdk';
+import type { SkillInfo } from '../../completions/slashCompletion';
+import type { WebShellComposerTag } from '../../customization';
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
 import {
@@ -24,6 +27,8 @@ import {
   type TranslateFn,
 } from './scheduledTasksSchedule';
 import styles from './ScheduledTasksDialog.module.css';
+import { ScheduledTaskPromptEditor } from './ScheduledTaskPromptEditor';
+import { buildComposerPrompt } from '../../hooks/useComposerCore';
 
 /** Localized absolute timestamp, resilient to a bad epoch value. */
 function safeLocaleString(ms: number): string {
@@ -46,6 +51,7 @@ function describeRun(run: DaemonScheduledTaskRun, t: TranslateFn): string {
 }
 
 interface ScheduledTasksDialogProps {
+  skills: SkillInfo[];
   /** Manual "run now": execute the task's prompt in its bound session (so it
    * lands in the same transcript as its scheduled runs), or in the current
    * session for an unbound task. The App wiring switches to that session. */
@@ -84,7 +90,61 @@ const MAX_SET_TIMEOUT_MS = 2_147_483_647;
 const PAST_DUE_FAST_RELOADS = 3;
 const OVERDUE_RELOAD_INTERVAL_MS = 30_000;
 
+function mentionToTag(
+  mention: DaemonScheduledTaskMention,
+): WebShellComposerTag {
+  return {
+    id: mention.id,
+    kind: mention.kind,
+    label: mention.label,
+    value: mention.value,
+    serialized: mention.serialized,
+  };
+}
+
+function tagToMention(
+  mention: WebShellComposerTag,
+): DaemonScheduledTaskMention | null {
+  const kind = mention.kind;
+  if (
+    kind !== 'skill' &&
+    kind !== 'mcp' &&
+    kind !== 'extension' &&
+    kind !== 'file'
+  ) {
+    return null;
+  }
+  const serialized = mention.serialized?.trim();
+  if (!serialized) return null;
+  return {
+    kind: kind as DaemonScheduledTaskMention['kind'],
+    id: mention.id,
+    ...(mention.label ? { label: mention.label } : {}),
+    ...(mention.value ? { value: mention.value } : {}),
+    serialized,
+  };
+}
+
+function stripLeadingMentionText(
+  prompt: string,
+  mentions: DaemonScheduledTaskMention[],
+): string {
+  if (mentions.length === 0) return prompt;
+  const prefix = mentions
+    .map((mention) => mention.serialized.trim())
+    .filter((serialized) => serialized.length > 0)
+    .join(' ');
+  if (!prefix) return prompt;
+  const trimmed = prompt.trim();
+  if (trimmed === prefix) return '';
+  if (trimmed.startsWith(`${prefix} `)) {
+    return trimmed.slice(prefix.length + 1);
+  }
+  return prompt;
+}
+
 export function ScheduledTasksDialog({
+  skills,
   onRunPrompt,
   onCreateViaChat,
   onOpenSession,
@@ -107,6 +167,7 @@ export function ScheduledTasksDialog({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [mentions, setMentions] = useState<WebShellComposerTag[]>([]);
   const [builder, setBuilder] = useState<BuilderState>(DEFAULT_BUILDER);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -198,6 +259,7 @@ export function ScheduledTasksDialog({
   const resetForm = useCallback(() => {
     setName('');
     setPrompt('');
+    setMentions([]);
     setBuilder(DEFAULT_BUILDER);
     setFormError(null);
     setShowForm(false);
@@ -208,6 +270,7 @@ export function ScheduledTasksDialog({
     setEditingId(null);
     setName('');
     setPrompt('');
+    setMentions([]);
     setBuilder(DEFAULT_BUILDER);
     setFormError(null);
     setShowForm(true);
@@ -216,7 +279,9 @@ export function ScheduledTasksDialog({
   const openEdit = useCallback((task: DaemonScheduledTask) => {
     setEditingId(task.id);
     setName(task.name ?? '');
-    setPrompt(task.prompt);
+    const taskMentions = task.mentions ?? [];
+    setPrompt(stripLeadingMentionText(task.prompt, taskMentions));
+    setMentions(taskMentions.map(mentionToTag));
     // Reverse the cron back onto the pickers; an expression the pickers can't
     // represent lands in the `custom` field, never silently rewritten.
     setBuilder(parseCronToBuilder(task.cron));
@@ -230,26 +295,34 @@ export function ScheduledTasksDialog({
       setFormError(t('scheduledTasks.error.invalidSchedule'));
       return;
     }
-    if (prompt.trim().length === 0) {
+    const executablePrompt = buildComposerPrompt(prompt.trim(), mentions);
+    if (executablePrompt.trim().length === 0) {
       setFormError(t('scheduledTasks.error.emptyPrompt'));
       return;
     }
     setSubmitting(true);
     setFormError(null);
     try {
+      const scheduledMentions = mentions
+        .map(tagToMention)
+        .filter(
+          (mention): mention is DaemonScheduledTaskMention => mention !== null,
+        );
       if (editingId) {
         // Update only the editable fields; `recurring`/`enabled` are omitted so
         // the PATCH leaves them unchanged (recurring isn't in this form, and
         // enabled is driven by the card toggle). Empty name clears it.
         await actions.updateScheduledTask(editingId, {
           cron,
-          prompt: prompt.trim(),
+          prompt: executablePrompt,
+          mentions: scheduledMentions,
           name: name.trim() || null,
         });
       } else {
         await actions.createScheduledTask({
           cron,
-          prompt: prompt.trim(),
+          prompt: executablePrompt,
+          mentions: scheduledMentions,
           name: name.trim() || null,
           recurring: true,
           enabled: true,
@@ -264,7 +337,17 @@ export function ScheduledTasksDialog({
     } finally {
       if (mountedRef.current) setSubmitting(false);
     }
-  }, [actions, builder, editingId, name, prompt, reload, resetForm, t]);
+  }, [
+    actions,
+    builder,
+    editingId,
+    mentions,
+    name,
+    prompt,
+    reload,
+    resetForm,
+    t,
+  ]);
 
   const handleToggle = useCallback(
     async (task: DaemonScheduledTask) => {
@@ -423,20 +506,22 @@ export function ScheduledTasksDialog({
               />
             </label>
 
-            <label className={styles.field}>
+            <div className={styles.field}>
               <span className={styles.fieldLabel}>
                 {t('scheduledTasks.prompt')}
                 <span className={styles.required}>*</span>
               </span>
-              <textarea
-                className={styles.textarea}
-                value={prompt}
-                rows={4}
-                maxLength={100_000}
-                placeholder={t('scheduledTasks.promptPlaceholder')}
-                onChange={(e) => setPrompt(e.target.value)}
+              <ScheduledTaskPromptEditor
+                key={editingId ?? 'new'}
+                prompt={prompt}
+                mentions={mentions}
+                skills={skills}
+                onChange={({ prompt: nextPrompt, mentions: nextMentions }) => {
+                  setPrompt(nextPrompt);
+                  setMentions(nextMentions);
+                }}
               />
-            </label>
+            </div>
 
             <div className={styles.scheduleRow}>
               <label className={styles.field}>

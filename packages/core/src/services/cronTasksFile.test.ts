@@ -145,6 +145,27 @@ describe('cronTasksFile', () => {
       expect(result).toEqual([task]);
     });
 
+    it('round-trips optional mentions metadata', async () => {
+      const task = makeTask({
+        mentions: [
+          {
+            kind: 'skill',
+            id: 'skill:loop',
+            label: 'loop',
+            serialized: '/loop',
+          },
+          {
+            kind: 'mcp',
+            id: 'mcp:@server:resource',
+            value: 'resource',
+            serialized: '@server:resource',
+          },
+        ],
+      });
+      await writeCronTasks(tmpDir, [task]);
+      expect(await readCronTasks(tmpDir)).toEqual([task]);
+    });
+
     it('accepts legacy tasks with no name/enabled fields', async () => {
       // A task written before the fields existed must still read back.
       const legacy = makeTask();
@@ -166,6 +187,19 @@ describe('cronTasksFile', () => {
       await seedTasksFile(
         tmpDir,
         JSON.stringify([{ ...makeTask(), enabled: 'yes' }]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('rejects a task whose mentions are malformed', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([
+          {
+            ...makeTask(),
+            mentions: [{ kind: 'skill', id: '', serialized: '/loop' }],
+          },
+        ]),
       );
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
     });
