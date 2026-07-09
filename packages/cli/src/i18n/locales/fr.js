@@ -2107,6 +2107,54 @@ export default {
   in: 'ent.',
   out: 'sort.',
   'In/Out': 'Ent/Sort',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Vérifier les mises à jour de Qwen Code et installer si disponible',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Mise à jour de Qwen Code disponible ! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Une nouvelle version de Qwen Code est disponible ! {{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} est à jour !',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'Échec de la vérification des mises à jour. Vérifiez votre réseau ou la configuration du registre.',
+  'Unable to check for updates: {{reason}}':
+    'Impossible de vérifier les mises à jour : {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    'Mise à jour réussie ! La nouvelle version sera utilisée lors de la prochaine exécution.',
+  'Update downloaded. It will be applied after you exit this session.':
+    'Mise à jour téléchargée. Elle sera appliquée après avoir quitté cette session.',
+  'Update failed: {{error}}': 'Échec de la mise à jour : {{error}}',
+  'Downloading update...': 'Téléchargement de la mise à jour...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Mise à jour réussie ! Redémarrez Qwen Code pour utiliser la nouvelle version. Changer de fournisseur de modèle avant le redémarrage peut ne pas fonctionner correctement.',
+  'Automatic update failed. Please try updating manually.':
+    'La mise à jour automatique a échoué. Essayez de mettre à jour manuellement.',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Échec de la mise à jour automatique : {{error}}. Relancez le programme d’installation pour mettre à jour manuellement.',
+  'Running from a local git clone. Please update with "git pull".':
+    'Exécution depuis un clone Git local. Veuillez mettre à jour avec "git pull".',
+  'Running via npx, update not applicable.':
+    'Exécution via npx, mise à jour non applicable.',
+  'Running via pnpx, update not applicable.':
+    'Exécution via pnpx, mise à jour non applicable.',
+  'Running via bunx, update not applicable.':
+    'Exécution via bunx, mise à jour non applicable.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Installé via Homebrew. Veuillez mettre à jour avec "brew upgrade".',
+  "Locally installed. Please update via your project's package.json.":
+    'Installé localement. Veuillez mettre à jour via le package.json de votre projet.',
+  'Update requires sudo. Please run:':
+    'La mise à jour nécessite sudo. Veuillez exécuter :',
+  'Standalone install detected. Attempting to automatically update now...':
+    'Installation autonome détectée. Tentative de mise à jour automatique...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'Installation autonome détectée. Veuillez relancer l’installateur autonome pour mettre à jour :',
+  'Run the following to update:':
+    'Exécutez la commande suivante pour mettre à jour :',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'Impossible de mettre à jour automatiquement cette installation autonome. Veuillez réinstaller depuis :',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Mise à jour manuelle requise. Veuillez réinstaller Qwen Code.',
 
   // ============================================================================
   // reload-plugins command
