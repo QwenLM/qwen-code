@@ -12,6 +12,12 @@ import type { AcpChannelExitInfo, ChannelFactory } from './channel.js';
 import { redactLogCredentials } from './logRedaction.js';
 import { ndJsonStream, type NdJsonStreamHooks } from './ndJsonStream.js';
 import { MissingCliEntryError } from './status.js';
+import { scrubChildEnv } from '@qwen-code/qwen-code-core';
+
+// Re-export so the public `@qwen-code/acp-bridge` surface (and the
+// `spawnChannel.test.ts` canary) keep resolving now that the implementation
+// lives in core and is shared with the shell-tool subprocess path.
+export { scrubChildEnv };
 
 let cachedMemoryArgs: string[] | undefined;
 export function getAcpMemoryArgs(): string[] {
@@ -264,55 +270,22 @@ const KILL_HARD_DEADLINE_MS = 10_000;
  * `AWS_*`, `GITHUB_TOKEN`, `CI_*`, `*_API_KEY`, `*_SECRET`, …).
  * See the remote-sandbox plan for Stage 4+.
  *
+ * Two-context note: this NARROW set is intentionally NOT the same as the
+ * shell-tool subprocess scrub. The ACP child is itself a `qwen` agent and
+ * MUST inherit provider API keys (`OPENAI_API_KEY`, etc.) to call models,
+ * so only daemon-internal secrets are stripped here. The shell-tool path
+ * (`shellExecutionService.ts`) passes the BROAD set from
+ * `collectSensitiveShellEnvKeys` because that subprocess is where the
+ * model's own commands run (incl. auto-allowed `printenv`/`env`) and must
+ * never inherit the daemon's secrets. Both share the same `scrubChildEnv`
+ * primitive from `@qwen-code/qwen-code-core` — do NOT unify the sets.
+ *
  * Defined at module scope so the Set is allocated once at load.
  */
 const SCRUBBED_CHILD_ENV_KEYS: ReadonlySet<string> = new Set([
   'QWEN_SERVER_TOKEN',
   'QWEN_CODE_SIMPLE',
 ]);
-
-/**
- * Build the env passed to the `qwen --acp` child. Pure function, exported
- * for unit-test access (the surrounding `defaultSpawnChannelFactory` is
- * unit-test-hostile because it actually spawns Node). Behavior:
- *
- *   1. Start from a shallow clone of `source` (no aliasing into the
- *      daemon's `process.env`).
- *   2. Delete every key listed in `scrubbed` (the daemon-internal
- *      child-env denylist; see the rationale on the constant).
- *   3. Apply `overrides` per-handle. `undefined` value deletes the key
- *      (lets an embedded caller scrub a stale inherited var without
- *      mutating the daemon's global `process.env`). Anything else
- *      assigns. **`overrides` CANNOT re-introduce a scrubbed key** —
- *      defense-in-depth so an operator passing
- *      `{ QWEN_SERVER_TOKEN: 'x' }` in overrides can't smuggle the
- *      daemon's bearer token back into the child.
- *
- * Used by `defaultSpawnChannelFactory` above. The split mirrors the
- * "scrub" comment block's structure 1:1; behavior is byte-identical to
- * the pre-extraction inline implementation.
- */
-export function scrubChildEnv(
-  source: NodeJS.ProcessEnv,
-  scrubbed: ReadonlySet<string>,
-  overrides?: Readonly<Record<string, string | undefined>>,
-): NodeJS.ProcessEnv {
-  const childEnv: NodeJS.ProcessEnv = { ...source };
-  for (const key of scrubbed) {
-    delete childEnv[key];
-  }
-  if (overrides) {
-    for (const [key, value] of Object.entries(overrides)) {
-      if (scrubbed.has(key)) continue;
-      if (value === undefined) {
-        delete childEnv[key];
-      } else {
-        childEnv[key] = value;
-      }
-    }
-  }
-  return childEnv;
-}
 
 function killChild(child: ChildProcess): Promise<void> {
   return new Promise<void>((resolve) => {

@@ -422,6 +422,10 @@ export * from './followup/index.js';
 
 export * from './utils/atomicFileWrite.js';
 export * from './utils/browser.js';
+export {
+  collectSensitiveShellEnvKeys,
+  scrubChildEnv,
+} from './utils/child-env-scrub.js';
 export * from './utils/bundlePaths.js';
 export * from './utils/configResolver.js';
 export * from './utils/debugLogger.js';
