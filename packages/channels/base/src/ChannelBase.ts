@@ -29,6 +29,7 @@ import {
   sanitizePromptText,
   sanitizePromptPath,
   sanitizeLogText,
+  truncateCodePoints,
   PROMPT_UNSAFE_INVISIBLES,
 } from './sanitize.js';
 import type {
@@ -106,9 +107,10 @@ function formatChannelMemoryPrompt(memoryText: string): string | undefined {
   if (sanitized.length <= CHANNEL_MEMORY_PROMPT_CHAR_LIMIT) {
     return `Channel memory for this chat:\n${sanitized}`;
   }
-  const truncated = sanitized
-    .slice(0, CHANNEL_MEMORY_PROMPT_CHAR_LIMIT)
-    .trimEnd();
+  const truncated = truncateCodePoints(
+    sanitized,
+    CHANNEL_MEMORY_PROMPT_CHAR_LIMIT,
+  ).trimEnd();
   return `Channel memory for this chat (truncated):\n${truncated}\n[Channel memory truncated]`;
 }
 
