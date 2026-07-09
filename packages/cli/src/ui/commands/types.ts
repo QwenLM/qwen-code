@@ -173,6 +173,9 @@ export interface OpenDialogActionReturn {
    */
   persistScope?: 'workspace' | 'user';
 
+  /** Whether the model dialog should persist the main model as the default. */
+  persistDefault?: boolean;
+
   dialog:
     | 'help'
     | 'arena_start'

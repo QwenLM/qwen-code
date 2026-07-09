@@ -46,7 +46,7 @@ describe('modelCommand', () => {
   it('should have the correct name and description', () => {
     expect(modelCommand.name).toBe('model');
     expect(modelCommand.description).toBe(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+      'Switch the model for this session (--default to persist the main model for future sessions, --fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
     );
   });
 
@@ -152,7 +152,7 @@ describe('modelCommand', () => {
     });
   });
 
-  it('should switch the main model directly in interactive mode when args are provided', async () => {
+  it('should switch the main model directly in interactive mode without persisting', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn().mockResolvedValue(undefined);
     mockContext = createMockCommandContext({
@@ -179,14 +179,53 @@ describe('modelCommand', () => {
       'qwen-max',
       undefined,
     );
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Model: qwen-max',
+    });
+  });
+
+  it('persists the main model only with --default', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --default qwen-max',
+        name: 'model',
+        args: '--default qwen-max',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--default qwen-max',
+    );
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.QWEN_OAUTH,
+      'qwen-max',
+      undefined,
+    );
     expect(setValue).toHaveBeenCalledWith(
       expect.any(String),
       'model.name',
       'qwen-max',
     );
-    // `/model <id>` is an id-only switch, so any baseUrl disambiguator left by
-    // a previous model-picker selection must be cleared (empty-string tombstone)
-    // to avoid resolving to a different provider on next launch.
     expect(setValue).toHaveBeenCalledWith(
       expect.any(String),
       'model.baseUrl',
@@ -195,7 +234,7 @@ describe('modelCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Model: qwen-max',
+      content: 'Model: qwen-max (default)',
     });
   });
 
@@ -612,16 +651,7 @@ describe('modelCommand', () => {
       'gpt-4',
       undefined,
     );
-    expect(setValue).toHaveBeenCalledWith(
-      expect.any(String),
-      'security.auth.selectedType',
-      AuthType.USE_OPENAI,
-    );
-    expect(setValue).toHaveBeenCalledWith(
-      expect.any(String),
-      'model.name',
-      'gpt-4',
-    );
+    expect(setValue).not.toHaveBeenCalled();
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
@@ -1644,11 +1674,7 @@ describe('modelCommand', () => {
       '--fast-model',
       undefined,
     );
-    expect(setValue).toHaveBeenCalledWith(
-      expect.any(String),
-      'model.name',
-      '--fast-model',
-    );
+    expect(setValue).not.toHaveBeenCalled();
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
@@ -2040,22 +2066,44 @@ describe('modelCommand', () => {
       return mockContext;
     }
 
-    it('should include persistScope in dialog return for /model --project', async () => {
+    it('should reject /model --project without --default', async () => {
       const ctx = setupContext();
       const result = await modelCommand.action!(ctx, '--project');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('--default'),
+      });
+    });
+
+    it('should reject /model --global without --default', async () => {
+      const ctx = setupContext();
+      const result = await modelCommand.action!(ctx, '--global');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('--default'),
+      });
+    });
+
+    it('should include persistScope in dialog return for /model --default --project', async () => {
+      const ctx = setupContext();
+      const result = await modelCommand.action!(ctx, '--default --project');
       expect(result).toEqual({
         type: 'dialog',
         dialog: 'model',
+        persistDefault: true,
         persistScope: 'workspace',
       });
     });
 
-    it('should include persistScope in dialog return for /model --global', async () => {
+    it('should include persistScope in dialog return for /model --default --global', async () => {
       const ctx = setupContext();
-      const result = await modelCommand.action!(ctx, '--global');
+      const result = await modelCommand.action!(ctx, '--default --global');
       expect(result).toEqual({
         type: 'dialog',
         dialog: 'model',
+        persistDefault: true,
         persistScope: 'user',
       });
     });
@@ -2186,7 +2234,7 @@ describe('modelCommand', () => {
       expect(setValue).not.toHaveBeenCalled();
     });
 
-    it('should show scope suffix in main model confirmation', async () => {
+    it('should persist and show scope suffix for --default main model confirmation', async () => {
       const setValue = vi.fn();
       const settings = {
         ...createMockSettings(setValue),
@@ -2209,7 +2257,10 @@ describe('modelCommand', () => {
           { id: 'qwen-max', voiceOnly: false, fastOnly: false },
         ]);
       cfg.switchModel = vi.fn().mockResolvedValue(mockGenerator);
-      const result = await modelCommand.action!(ctx, '--project qwen-max');
+      const result = await modelCommand.action!(
+        ctx,
+        '--default --project qwen-max',
+      );
       expect(result).toMatchObject({
         type: 'message',
         content: expect.stringContaining('(this project)'),

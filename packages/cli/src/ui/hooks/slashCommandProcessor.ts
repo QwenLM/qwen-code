@@ -135,6 +135,7 @@ export interface SlashCommandProcessorActions {
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
     persistScope?: 'workspace' | 'user';
+    persistDefault?: boolean;
   }) => void;
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
@@ -960,7 +961,9 @@ export const useSlashCommandProcessor = (
           return {
             type: 'submit_prompt',
             content: mergedContent,
-            ...(firstModelOverride ? { modelOverride: firstModelOverride } : {}),
+            ...(firstModelOverride
+              ? { modelOverride: firstModelOverride }
+              : {}),
             ...(onCompleteCallbacks.length
               ? {
                   onComplete: async () => {
@@ -1097,6 +1100,7 @@ export const useSlashCommandProcessor = (
                     case 'model':
                       actions.openModelDialog({
                         persistScope: result.persistScope,
+                        persistDefault: result.persistDefault,
                       });
                       return { type: 'handled' };
                     case 'fast-model':

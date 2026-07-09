@@ -67,6 +67,17 @@ function parseScopeFlags(args: string): {
   return { scopeOverride, remaining, hasProject, hasGlobal };
 }
 
+function parseDefaultFlag(args: string): {
+  persistDefault: boolean;
+  remaining: string;
+} {
+  const persistDefault = /(?:^|\s)--default(?:\s|$)/.test(args);
+  const remaining = persistDefault
+    ? args.replace(/(?:^|\s)--default(?:\s|$)/, ' ').trim()
+    : args;
+  return { persistDefault, remaining };
+}
+
 function resolveScope(
   settings: LoadedSettings,
   scopeOverride: SettingScope | undefined,
@@ -104,9 +115,10 @@ function persistSetting(
 
 async function switchMainModel(
   config: Config,
-  settings: LoadedSettings,
+  settings: LoadedSettings | undefined,
   currentAuthType: AuthType,
   modelArg: string,
+  persistDefault: boolean,
   scopeOverride?: SettingScope,
 ): Promise<string> {
   const parsed = parseAcpModelOption(modelArg);
@@ -120,25 +132,32 @@ async function switchMainModel(
         ? { requireCachedCredentials: true }
         : undefined,
     );
-    persistSetting(
-      settings,
-      'security.auth.selectedType',
-      parsed.authType,
-      scopeOverride,
-    );
-    persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
-    // `/model <id>` selects by id only, so clear any baseUrl disambiguator left
-    // by a previous model-picker selection — otherwise next launch would
-    // resolve to a different provider than this switch just chose. Use an
-    // empty-string tombstone so the clear overrides a lower-scope value (an
-    // undefined write is dropped from JSON and would not override on merge).
-    persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+    if (persistDefault) {
+      if (!settings) {
+        throw new Error(t('Settings service not available.'));
+      }
+      persistSetting(
+        settings,
+        'security.auth.selectedType',
+        parsed.authType,
+        scopeOverride,
+      );
+      persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
+      // `/model --default <id>` selects by id only, so clear any baseUrl
+      // disambiguator left by a previous model-picker selection.
+      persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+    }
     return parsed.modelId;
   }
 
   await config.switchModel(currentAuthType, modelArg, undefined);
-  persistSetting(settings, 'model.name', modelArg, scopeOverride);
-  persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+  if (persistDefault) {
+    if (!settings) {
+      throw new Error(t('Settings service not available.'));
+    }
+    persistSetting(settings, 'model.name', modelArg, scopeOverride);
+    persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+  }
   return modelArg;
 }
 
@@ -315,16 +334,22 @@ export const modelCommand: SlashCommand = {
   completionPriority: 100,
   get description() {
     return t(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+      'Switch the model for this session (--default to persist the main model for future sessions, --fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
     );
   },
   argumentHint:
-    '[--fast|--voice|--vision] [--project|--global] [<model-id>] | <model-id> <prompt>',
+    '[--default] [--fast|--voice|--vision] [--project|--global] [<model-id>] | <model-id> <prompt>',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
     if (partialArg) {
       const flagCompletions = [
+        {
+          value: '--default',
+          description: t(
+            'Persist the main model as the default for future sessions',
+          ),
+        },
         {
           value: '--fast',
           description: t(
@@ -365,6 +390,7 @@ export const modelCommand: SlashCommand = {
           .replace(/(?:^|\s)--fast(?:\s|$)/, ' ')
           .replace(/(?:^|\s)--voice(?:\s|$)/, ' ')
           .replace(/(?:^|\s)--vision(?:\s|$)/, ' ')
+          .replace(/(?:^|\s)--default(?:\s|$)/, ' ')
           .replace(/(?:^|\s)--project(?:\s|$)/, ' ')
           .replace(/(?:^|\s)--global(?:\s|$)/, ' ')
           .trim();
@@ -401,10 +427,12 @@ export const modelCommand: SlashCommand = {
     const rawArgs = context.invocation?.args?.trim() || actionArgs.trim();
     const {
       scopeOverride,
-      remaining: args,
+      remaining: argsWithDefaultFlag,
       hasProject,
       hasGlobal,
     } = parseScopeFlags(rawArgs);
+    const { persistDefault, remaining: args } =
+      parseDefaultFlag(argsWithDefaultFlag);
     // Reject mutually exclusive scope flags
     if (hasProject && hasGlobal) {
       return {
@@ -434,6 +462,19 @@ export const modelCommand: SlashCommand = {
         : scopeOverride === SettingScope.User
           ? t(' (global)')
           : '';
+    const defaultSuffix = persistDefault ? scopeSuffix || t(' (default)') : '';
+    if (
+      persistDefault &&
+      /(?:^|\s)--(?:fast|voice|vision)(?:\s|$)/.test(args)
+    ) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t(
+          '--default only applies to the main model. Use --fast, --voice, or --vision without --default.',
+        ),
+      };
+    }
     const isVoiceModelCommand =
       args === '--voice' || args.startsWith('--voice ');
     if (isVoiceModelCommand) {
@@ -459,7 +500,7 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      if (!settings) {
+      if (persistDefault && !settings) {
         return {
           type: 'message',
           messageType: 'error',
@@ -711,6 +752,16 @@ export const modelCommand: SlashCommand = {
       };
     }
 
+    if (scopeOverride && !persistDefault) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t(
+          'Use --default with --project or --global when persisting the main model.',
+        ),
+      };
+    }
+
     const contentGeneratorConfig = config.getContentGeneratorConfig();
     if (!contentGeneratorConfig) {
       return {
@@ -835,12 +886,13 @@ export const modelCommand: SlashCommand = {
         settings,
         authType,
         modelName,
+        persistDefault,
         scopeOverride,
       );
       return {
         type: 'message',
         messageType: 'info',
-        content: t('Model') + ': ' + effectiveModelName + scopeSuffix,
+        content: t('Model') + ': ' + effectiveModelName + defaultSuffix,
       };
     }
 
@@ -852,7 +904,7 @@ export const modelCommand: SlashCommand = {
         type: 'message',
         messageType: 'info',
         content: t(
-          'Current model: {{model}}\nUse "/model <model-id>" to switch models, "/model --fast <model-id>" to set the fast model, "/model --project <model-id>" to persist to project settings, or "/model --global <model-id>" to persist to user settings.',
+          'Current model: {{model}}\nUse "/model <model-id>" to switch this session, "/model --default <model-id>" to persist the default model, or "/model --fast <model-id>" to set the fast model.',
           { model: currentModel },
         ),
       };
@@ -861,6 +913,7 @@ export const modelCommand: SlashCommand = {
     return {
       type: 'dialog',
       dialog: 'model',
+      ...(persistDefault ? { persistDefault } : {}),
       ...persistScopeSpread(scopeOverride),
     };
   },
