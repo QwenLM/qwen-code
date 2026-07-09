@@ -239,6 +239,29 @@ describe('AtMentionPanel', () => {
     expect(onSelectTab).toHaveBeenCalledWith('hg');
   });
 
+  it('guards image icon sources', () => {
+    const menu = itemsMenu();
+    menu.items = [
+      {
+        id: 'safe',
+        label: 'Safe image',
+        icon: 'data:image/png;base64,iVBOR',
+        iconMode: 'image',
+      },
+      {
+        id: 'unsafe',
+        label: 'Unsafe image',
+        icon: 'javascript:alert(1)',
+        iconMode: 'image',
+      },
+    ];
+    mount(menu);
+
+    const images = [...document.body.querySelectorAll('img')];
+    expect(images).toHaveLength(1);
+    expect(images[0]?.getAttribute('src')).toBe('data:image/png;base64,iVBOR');
+  });
+
   it('focuses search when explicitly requested', () => {
     vi.useFakeTimers();
     mount({ ...itemsMenu(), inputMode: 'search' });

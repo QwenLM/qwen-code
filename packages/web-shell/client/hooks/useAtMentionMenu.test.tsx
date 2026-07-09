@@ -1482,6 +1482,7 @@ describe('useAtMentionMenu', () => {
 
   it('sanitizes custom provider item display text', async () => {
     vi.useFakeTimers();
+    const dataIcon = 'data:image/png;base64,a\nb';
     mount({
       providers: [
         {
@@ -1494,7 +1495,12 @@ describe('useAtMentionMenu', () => {
               label: '\u001b[31mName\u001b[0m\u202E',
               description: 'Desc\u202E',
               detail: 'Detail\u202E',
+              icon: dataIcon,
               iconTooltip: 'Tip\u202E',
+              composerTag: {
+                id: 'tag',
+                icon: dataIcon,
+              },
             },
           ]),
         },
@@ -1509,7 +1515,12 @@ describe('useAtMentionMenu', () => {
       label: 'Name',
       description: 'Desc',
       detail: 'Detail',
+      icon: dataIcon,
       iconTooltip: 'Tip',
+      composerTag: {
+        id: 'tag',
+        icon: dataIcon,
+      },
     });
   });
 

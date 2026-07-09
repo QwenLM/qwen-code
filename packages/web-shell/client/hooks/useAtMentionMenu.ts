@@ -495,7 +495,7 @@ function sanitizeComposerTag(
     value: tag.value === undefined ? undefined : sanitizeDisplayText(tag.value),
     removable: tag.removable,
     kind,
-    icon: tag.icon === undefined ? undefined : sanitizeDisplayText(tag.icon),
+    icon: tag.icon,
     metadata: tag.metadata,
     serialized: sanitizeOptionalInsertText(tag.serialized),
   };
@@ -518,7 +518,7 @@ function sanitizeAtMentionItem(
         : sanitizeDisplayText(item.subtitle),
     detail:
       item.detail === undefined ? undefined : sanitizeDisplayText(item.detail),
-    icon: item.icon === undefined ? undefined : sanitizeDisplayText(item.icon),
+    icon: item.icon,
     iconTooltip:
       item.iconTooltip === undefined
         ? undefined

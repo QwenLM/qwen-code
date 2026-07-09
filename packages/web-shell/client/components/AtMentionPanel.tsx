@@ -16,6 +16,7 @@ import {
 } from '../hooks/useAtMentionMenu';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import styles from './ChatEditor.module.css';
+import { isSafeImageSrc } from './messages/Markdown';
 
 const AT_PANEL_THEME_VARS = [
   '--chat-editor-accent-color',
@@ -432,13 +433,15 @@ export function AtMentionPanel({
                           {'icon' in row &&
                             row.icon &&
                             (row.iconMode === 'image' ? (
-                              <img
-                                className={styles.atItemImageIcon}
-                                src={row.icon}
-                                title={row.iconTooltip}
-                                alt=""
-                                aria-hidden="true"
-                              />
+                              isSafeImageSrc(row.icon) && (
+                                <img
+                                  className={styles.atItemImageIcon}
+                                  src={row.icon}
+                                  title={row.iconTooltip}
+                                  alt=""
+                                  aria-hidden="true"
+                                />
+                              )
                             ) : (
                               <span
                                 className={`${styles.atItemIcon} ${

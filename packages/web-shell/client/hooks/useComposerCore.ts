@@ -667,11 +667,16 @@ class ComposerTagWidget extends WidgetType {
     const tagValue = getComposerTagValue(this.tag);
     const tagLabel = this.tag.kind ? '' : rawTagLabel;
     const iconUrl = this.tag.iconUrl ?? getComposerTagIconUrl(this.tag.kind);
-    const customContent = this.tag.renderContent?.({
-      tag: publicTag,
-      placement: 'composer',
-      readonly: false,
-    });
+    let customContent: ReactNode | null | undefined;
+    try {
+      customContent = this.tag.renderContent?.({
+        tag: publicTag,
+        placement: 'composer',
+        readonly: false,
+      });
+    } catch (error) {
+      console.warn('[WebShell] inline tag renderContent failed', error);
+    }
 
     if (customContent !== undefined && customContent !== null) {
       const content = document.createElement('span');
