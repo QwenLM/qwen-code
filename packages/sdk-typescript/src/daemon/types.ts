@@ -327,23 +327,7 @@ export interface DaemonStatusReport {
     channel: { live: boolean };
     // Mirrors the daemon's ChannelWorkerSnapshot. `state` and `signal` are
     // widened to string to avoid coupling the wire type to the daemon's unions.
-    channelWorker: {
-      enabled: boolean;
-      state: string;
-      channels: string[];
-      requestedChannels?: string[];
-      pid?: number;
-      startedAt?: string;
-      exitCode?: number | null;
-      signal?: string | null;
-      error?: string;
-      restartCount?: number;
-      lastExitAt?: string;
-      lastRestartAt?: string;
-      nextRestartAt?: string;
-      lastHeartbeatAt?: string;
-      staleHeartbeatAt?: string;
-    };
+    channelWorker: DaemonChannelWorkerSnapshot;
     transport: {
       restSseActive: number;
       acp: {
@@ -2148,6 +2132,38 @@ export interface DaemonReloadResponse {
   sessionsRefreshed?: string[];
   sessionsSkipped?: string[];
   childError?: string;
+}
+
+/**
+ * Mirrors the daemon's ChannelWorkerSnapshot. `state` and `signal` are
+ * widened to string to avoid coupling the wire type to the daemon's unions.
+ */
+export interface DaemonChannelWorkerSnapshot {
+  enabled: boolean;
+  state: string;
+  channels: string[];
+  requestedChannels?: string[];
+  pid?: number;
+  startedAt?: string;
+  exitCode?: number | null;
+  signal?: string | null;
+  error?: string;
+  restartCount?: number;
+  lastExitAt?: string;
+  lastRestartAt?: string;
+  nextRestartAt?: string;
+  lastHeartbeatAt?: string;
+  staleHeartbeatAt?: string;
+}
+
+/**
+ * Result of `POST /workspace/channel/reload`: the daemon stopped and
+ * relaunched its channel worker (which re-reads settings.json). `worker` is
+ * the post-reload snapshot.
+ */
+export interface DaemonChannelReloadResult {
+  reloaded: boolean;
+  worker: DaemonChannelWorkerSnapshot;
 }
 
 export type DaemonMcpRestartResult =

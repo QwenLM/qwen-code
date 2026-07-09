@@ -570,6 +570,9 @@ function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
   return {
     async start() {},
     async stop() {},
+    async restart() {
+      return { ...snapshot, channels: [] };
+    },
     killAllSync() {},
     snapshot: () => ({ ...snapshot, channels: [] }),
   };
@@ -861,6 +864,7 @@ function currentServeFeaturesForRunQwenServe(
     sessionArtifactsPersistenceAvailable,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
+    channelReloadAvailable: opts.channelSelection !== undefined,
     // Advertise the same WS feature flags as the runtime path (serve-features.ts)
     // so the bootstrap `/capabilities` window doesn't briefly under-report them.
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
@@ -2096,6 +2100,7 @@ export async function runQwenServe(
   let channelWorker: ChannelWorkerSupervisor =
     createDisabledChannelWorkerSupervisor();
   const getChannelWorkerSnapshot = () => channelWorker.snapshot();
+  const reloadChannelWorker = () => channelWorker.restart();
   const writeChannelWorkerPidfile = (
     snapshot = channelWorker.snapshot(),
     options: { clearWorkerPid?: boolean } = {},
@@ -3174,6 +3179,10 @@ export async function runQwenServe(
       primaryRuntimeEnv,
       daemonLog,
       getChannelWorkerSnapshot,
+      // Gate both the `channel_reload` capability and the reload route on the
+      // presence of this dep, so it is advertised only when a channel worker
+      // exists to reload.
+      ...(opts.channelSelection ? { reloadChannelWorker } : {}),
       getPerfSnapshot: () => ({
         eventLoop: currentDaemonEventLoopMonitor.snapshot(),
         promptQueueWait: {

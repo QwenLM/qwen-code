@@ -328,6 +328,8 @@ export type {
   DaemonMcpManageResult,
   DaemonMcpRestartResult,
   DaemonReloadResponse,
+  DaemonChannelReloadResult,
+  DaemonChannelWorkerSnapshot,
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,

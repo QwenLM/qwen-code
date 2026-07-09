@@ -20,6 +20,7 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
+import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
 import {
   resolveWebShellDir,
@@ -379,6 +380,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_branch',
   'rate_limit',
   'workspace_reload',
+  'channel_reload',
   'multi_workspace_sessions',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
@@ -2125,6 +2127,20 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               reloadAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'channel_reload') {
+          expect(predicate({ channelReloadAvailable: true })).toBe(true);
+          expect(predicate({ channelReloadAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              channelReloadAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -9648,6 +9664,149 @@ describe('createServeApp', () => {
           route: 'POST /workspace/reload',
         }),
       );
+    });
+  });
+
+  describe('POST /workspace/channel/reload', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+    const runningSnapshot: ChannelWorkerSnapshot = {
+      enabled: true,
+      state: 'running',
+      channels: ['telegram'],
+      pid: 4321,
+    };
+    const disabledSnapshot: ChannelWorkerSnapshot = {
+      enabled: false,
+      state: 'disabled',
+      channels: [],
+    };
+
+    it('requires strict mutation auth before reloading', async () => {
+      const reloadChannelWorker = vi.fn(async () => runningSnapshot);
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        reloadChannelWorker,
+      });
+
+      const res = await request(app)
+        .post('/workspace/channel/reload')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(reloadChannelWorker).not.toHaveBeenCalled();
+    });
+
+    it('reloads the channel worker and returns the post-reload snapshot', async () => {
+      const reloadedSnapshot: ChannelWorkerSnapshot = {
+        ...runningSnapshot,
+        pid: 9999,
+        restartCount: 1,
+      };
+      const reloadChannelWorker = vi.fn(async () => reloadedSnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ reloaded: true, worker: reloadedSnapshot });
+      expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns 409 when no channel worker is enabled', async () => {
+      const reloadChannelWorker = vi.fn(async () => disabledSnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => disabledSnapshot,
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('channel_worker_not_enabled');
+      expect(reloadChannelWorker).not.toHaveBeenCalled();
+    });
+
+    it('maps relaunch failures through sendBridgeError', async () => {
+      const reloadChannelWorker = vi.fn(async () => {
+        throw new Error('relaunch failed');
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: 'relaunch failed' });
+      expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
+    });
+
+    it('advertises channel_reload only when the reload dep is wired', async () => {
+      const withWorker = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        reloadChannelWorker: vi.fn(async () => runningSnapshot),
+      });
+      const withCaps = await auth(request(withWorker).get('/capabilities'));
+      expect(withCaps.body.features).toContain('channel_reload');
+
+      const withoutWorker = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+      });
+      const withoutCaps = await auth(
+        request(withoutWorker).get('/capabilities'),
+      );
+      expect(withoutCaps.body.features).not.toContain('channel_reload');
+
+      // Asymmetric deps must NOT advertise: the route needs both
+      // getChannelWorkerSnapshot and reloadChannelWorker, so the capability
+      // must not appear when only one is wired (else it would advertise while
+      // the route 404s).
+      const onlyReload = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        reloadChannelWorker: vi.fn(async () => runningSnapshot),
+      });
+      const onlyReloadCaps = await auth(
+        request(onlyReload).get('/capabilities'),
+      );
+      expect(onlyReloadCaps.body.features).not.toContain('channel_reload');
+
+      const onlySnapshot = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+      });
+      const onlySnapshotCaps = await auth(
+        request(onlySnapshot).get('/capabilities'),
+      );
+      expect(onlySnapshotCaps.body.features).not.toContain('channel_reload');
     });
   });
 
