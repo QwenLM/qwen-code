@@ -147,6 +147,8 @@ describe('Session.pendingWorktreeNotice', () => {
       getBackgroundShellRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
       }),
+      setSubSessionSpawner: vi.fn(),
+      getSubSessionSpawner: vi.fn(),
     } as unknown as Config;
 
     mockClient = {

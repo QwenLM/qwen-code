@@ -566,6 +566,7 @@ export class PermissionManager {
     'cron_list',
     'cron_delete',
     'loop_wakeup',
+    'create_sub_session',
     'monitor',
   ]);
 
