@@ -20,6 +20,7 @@ import {
   findGoalToRestore,
   findLastTerminalGoal,
   MAX_GOAL_LENGTH,
+  goalTerminalEventToHistoryItem,
   parseGoalStatusItem,
   restoreGoalFromHistory,
 } from './restoreGoal.js';
@@ -540,5 +541,49 @@ describe('restoreGoalFromHistory condition cap', () => {
       cfg,
     );
     expect(getActiveGoal('sess-1')).toBeUndefined();
+  });
+});
+
+describe('goalTerminalEventToHistoryItem', () => {
+  it('keeps lastReason when the judge produced one', () => {
+    expect(
+      goalTerminalEventToHistoryItem({
+        kind: 'achieved',
+        condition: 'ship it',
+        iterations: 2,
+        durationMs: 900,
+        lastReason: 'tests pass',
+      }),
+    ).toMatchObject({ kind: 'achieved', lastReason: 'tests pass' });
+  });
+
+  it('falls back to systemMessage when the judge never ran', () => {
+    // `aborted` events carry the cap message in systemMessage, not lastReason.
+    expect(
+      goalTerminalEventToHistoryItem({
+        kind: 'aborted',
+        condition: 'ship it',
+        iterations: 50,
+        durationMs: 900,
+        systemMessage: 'Goal max iterations reached; cleared.',
+      }),
+    ).toMatchObject({
+      kind: 'aborted',
+      lastReason: 'Goal max iterations reached; cleared.',
+    });
+  });
+
+  it('prefers lastReason over systemMessage when both are present', () => {
+    // Known lossy collapse: HistoryItemGoalStatus has no systemMessage field.
+    expect(
+      goalTerminalEventToHistoryItem({
+        kind: 'aborted',
+        condition: 'ship it',
+        iterations: 50,
+        durationMs: 900,
+        lastReason: 'two tests still fail',
+        systemMessage: 'Goal max iterations reached; cleared.',
+      }).lastReason,
+    ).toBe('two tests still fail');
   });
 });

@@ -55,8 +55,13 @@ interface GoalView {
   iterations: number;
   setAt: number;
   lastReason?: string;
-  /** True while the session is mid-turn, i.e. the goal loop is actively working. */
-  running: boolean;
+  /**
+   * The owning session is mid-turn. For a goal session that is almost always
+   * the loop working, but a manual prompt in the same session sets it too — so
+   * this reports what the daemon actually knows rather than claiming to know
+   * that the goal specifically is running.
+   */
+  hasActivePrompt: boolean;
 }
 
 export function registerGoalsRoutes(
@@ -102,7 +107,7 @@ export function registerGoalsRoutes(
           ...(goal.active.lastReason !== undefined
             ? { lastReason: goal.active.lastReason }
             : {}),
-          running: session.hasActivePrompt,
+          hasActivePrompt: session.hasActivePrompt,
         });
       }
       if (dropped.length > 0) {
@@ -114,7 +119,10 @@ export function registerGoalsRoutes(
       // Newest first, matching the scheduled-tasks page.
       goals.sort((a, b) => b.setAt - a.setAt);
 
-      res.status(200).json({ v: 1, goals });
+      // `droppedCount` lets the client tell "no goals" apart from "we could not
+      // ask". Without it a brownout looks like an empty workspace, and the user
+      // re-creates goals that are already running.
+      res.status(200).json({ v: 1, goals, droppedCount: dropped.length });
     } catch (err) {
       writeStderrLine(
         `qwen serve: GET /goals failed: ${err instanceof Error ? err.message : String(err)}`,

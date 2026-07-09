@@ -27,7 +27,8 @@ import {
 import { formatDuration } from '../utils/formatters.js';
 import { t } from '../../i18n/index.js';
 
-// Keep in sync with GOAL_CLEAR_KEYWORDS in packages/web-shell/client/App.tsx
+// Keep in sync with GOAL_CLEAR_KEYWORDS in
+// packages/web-shell/client/utils/goalCondition.ts
 const CLEAR_KEYWORDS = new Set([
   'clear',
   'stop',

@@ -230,8 +230,22 @@ export interface DaemonGoal {
   setAt: number;
   /** The judge's verdict on the most recent turn, when it has run. */
   lastReason?: string;
-  /** True while the session is mid-turn, i.e. the goal loop is working now. */
-  running: boolean;
+  /**
+   * The owning session is mid-turn. For a goal session that is almost always
+   * the loop working, but a manual prompt in the same session sets it too.
+   */
+  hasActivePrompt: boolean;
+}
+
+/** The `GET /goals` payload. */
+export interface DaemonGoalList {
+  goals: DaemonGoal[];
+  /**
+   * Sessions whose goal could not be probed (wedged or dying child). Their
+   * goals are missing from `goals`, so a non-zero count means this list is
+   * incomplete rather than empty.
+   */
+  droppedCount: number;
 }
 
 export interface DaemonWorkspaceActions {
@@ -362,7 +376,7 @@ export interface DaemonWorkspaceActions {
   deleteScheduledTask(id: string): Promise<void>;
 
   // Goals (session-scoped Stop hooks, listed workspace-wide)
-  listGoals(): Promise<DaemonGoal[]>;
+  listGoals(): Promise<DaemonGoalList>;
   /** Drop a session's goal hook. No-op when that session has no active goal. */
   clearGoal(sessionId: string): Promise<{ cleared: boolean }>;
 

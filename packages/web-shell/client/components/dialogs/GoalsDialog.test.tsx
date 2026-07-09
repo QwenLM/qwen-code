@@ -18,7 +18,7 @@ interface MockGoal {
   iterations: number;
   setAt: number;
   lastReason?: string;
-  running: boolean;
+  hasActivePrompt: boolean;
 }
 
 const { actions } = vi.hoisted(() => ({
@@ -80,9 +80,13 @@ async function mount(
     onCreateGoal?: (condition: string) => void | Promise<void>;
     onOpenSession?: (sessionId: string) => void;
     onError?: (error: unknown, message: string) => void;
+    droppedCount?: number;
   } = {},
 ) {
-  actions.listGoals.mockResolvedValue(goals);
+  actions.listGoals.mockResolvedValue({
+    goals,
+    droppedCount: opts.droppedCount ?? 0,
+  });
   actions.clearGoal.mockResolvedValue({ cleared: true });
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -107,7 +111,7 @@ const baseGoal = (over: Partial<MockGoal> = {}): MockGoal => ({
   condition: 'all tests pass',
   iterations: 0,
   setAt: Date.now() - 5000,
-  running: false,
+  hasActivePrompt: false,
   ...over,
 });
 
@@ -130,6 +134,24 @@ describe('GoalsDialog', () => {
     expect(document.body.textContent).toContain('No active goals');
   });
 
+  it('warns that the list is incomplete when sessions could not be probed', async () => {
+    // Otherwise a brownout is indistinguishable from an empty workspace, and
+    // the user re-creates goals that are already running.
+    await mount([], { droppedCount: 2 });
+
+    expect(
+      document.querySelector('[data-testid="goals-dropped"]'),
+    ).not.toBeNull();
+    expect(document.body.textContent).toContain(
+      '2 sessions could not be reached',
+    );
+  });
+
+  it('shows no degradation notice when every session was probed', async () => {
+    await mount([baseGoal()]);
+    expect(document.querySelector('[data-testid="goals-dropped"]')).toBeNull();
+  });
+
   it('renders a goal with its condition, turn count and judge verdict', async () => {
     await mount([
       baseGoal({ iterations: 3, lastReason: 'two tests still fail' }),
@@ -148,12 +170,12 @@ describe('GoalsDialog', () => {
   });
 
   it('distinguishes a working goal from a waiting one', async () => {
-    await mount([baseGoal({ running: true })]);
+    await mount([baseGoal({ hasActivePrompt: true })]);
     expect(document.body.textContent).toContain('Working');
 
     act(() => root?.unmount());
     container?.remove();
-    await mount([baseGoal({ running: false })]);
+    await mount([baseGoal({ hasActivePrompt: false })]);
     expect(document.body.textContent).toContain('Waiting');
   });
 
@@ -173,7 +195,7 @@ describe('GoalsDialog', () => {
 
   it('clears a goal after confirmation and reloads the list', async () => {
     await mount([baseGoal()]);
-    actions.listGoals.mockResolvedValue([]);
+    actions.listGoals.mockResolvedValue({ goals: [], droppedCount: 0 });
 
     click(document.querySelector('button[aria-label="Clear goal"]'));
     await flush();
@@ -267,7 +289,7 @@ describe('GoalsDialog', () => {
     actions.listGoals.mockImplementation(
       () =>
         new Promise((resolve) => {
-          release = () => resolve([]);
+          release = () => resolve({ goals: [], droppedCount: 0 });
         }),
     );
 
@@ -312,7 +334,7 @@ describe('GoalsDialog', () => {
 
   it('stops polling once unmounted', async () => {
     vi.useFakeTimers();
-    actions.listGoals.mockResolvedValue([]);
+    actions.listGoals.mockResolvedValue({ goals: [], droppedCount: 0 });
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);

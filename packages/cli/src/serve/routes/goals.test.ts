@@ -59,7 +59,7 @@ describe('GET /goals', () => {
     const res = await request(app).get('/goals');
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ v: 1, goals: [] });
+    expect(res.body).toEqual({ v: 1, goals: [], droppedCount: 0 });
   });
 
   it('projects each active goal onto its session, newest first', async () => {
@@ -89,7 +89,7 @@ describe('GET /goals', () => {
         condition: 'raise coverage',
         iterations: 0,
         setAt: 2000,
-        running: true,
+        hasActivePrompt: true,
       },
       {
         sessionId: 's1',
@@ -98,7 +98,7 @@ describe('GET /goals', () => {
         iterations: 3,
         setAt: 1000,
         lastReason: 'two tests still fail',
-        running: false,
+        hasActivePrompt: false,
       },
     ]);
   });
@@ -123,15 +123,32 @@ describe('GET /goals', () => {
         condition: 'keep going',
         iterations: 0,
         setAt: 1000,
-        running: false,
+        hasActivePrompt: false,
       },
     ]);
 
     // An empty page and a page whose probes all failed look identical to the
     // client, so the drop must not be silent.
+    expect(res.body.droppedCount).toBe(1);
     const logged = vi.mocked(writeStderrLine).mock.calls.map((c) => c[0]);
     expect(logged.join('\n')).toContain('could not probe 1 of 2 session(s)');
     expect(logged.join('\n')).toContain('dead: Session not found: dead');
+  });
+
+  it('reports a total brownout as dropped rather than as an empty workspace', async () => {
+    // Without droppedCount the client cannot tell "no goals" from "we could not
+    // ask", and users re-create goals that are already running.
+    const app = makeApp({
+      listWorkspaceSessions: () => [summary('a'), summary('b')],
+      getSessionGoal: async () => {
+        throw new Error('agent channel closed');
+      },
+    });
+
+    const res = await request(app).get('/goals');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ v: 1, goals: [], droppedCount: 2 });
   });
 
   it('does not log when every probe succeeds', async () => {

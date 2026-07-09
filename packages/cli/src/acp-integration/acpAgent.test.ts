@@ -8782,6 +8782,29 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it('loadSession does not attempt a goal restore for an empty transcript', async () => {
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages: [] },
+    });
+    allowGoalRestore(innerConfig as unknown as Record<string, unknown>);
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    // A brand-new session must not pay for a restore scan, and must not have
+    // its (absent) hook torn down by the no-goal branch either.
+    expect(registerGoalHook).not.toHaveBeenCalled();
+    expect(unregisterGoalHook).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('loadSession still completes when the goal restore throws', async () => {
     // Restoring a goal is best-effort: it must never take the session down with
     // it. `registerGoalHook` is the deepest thing #restoreGoalOnResume calls.

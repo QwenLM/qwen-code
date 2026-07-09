@@ -1288,6 +1288,8 @@ const EN: Messages = {
   'goals.clearConfirm': (v) => `Clear the goal "${v?.condition ?? ''}"?`,
   'goals.running': 'Working',
   'goals.idle': 'Waiting',
+  'goals.dropped': (v) =>
+    `${v?.count ?? 0} session${Number(v?.count) === 1 ? '' : 's'} could not be reached — any goals they are running are missing from this list.`,
   'goals.notYetEvaluated': 'not yet evaluated',
   'goals.openSessionHint': "Open this goal's session",
   'goals.error.emptyCondition': 'Enter a condition for the goal.',
@@ -2966,6 +2968,8 @@ const ZH: Messages = {
   'goals.clearConfirm': (v) => `确定清除目标“${v?.condition ?? ''}”？`,
   'goals.running': '工作中',
   'goals.idle': '等待中',
+  'goals.dropped': (v) =>
+    `有 ${v?.count ?? 0} 个会话无法访问——它们正在运行的目标未显示在此列表中。`,
   'goals.notYetEvaluated': '尚未判定',
   'goals.openSessionHint': '打开该目标所在的会话',
   'goals.error.emptyCondition': '请输入目标条件。',

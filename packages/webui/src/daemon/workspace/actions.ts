@@ -580,8 +580,17 @@ export function createDaemonWorkspaceActions({
       if (!res.ok) {
         throw new Error(await readDaemonError(res, 'GET /goals'));
       }
-      const data = (await res.json()) as { goals?: DaemonGoal[] };
-      return Array.isArray(data.goals) ? data.goals : [];
+      const data = (await res.json()) as {
+        goals?: DaemonGoal[];
+        droppedCount?: number;
+      };
+      return {
+        goals: Array.isArray(data.goals) ? data.goals : [],
+        droppedCount:
+          typeof data.droppedCount === 'number' && data.droppedCount > 0
+            ? data.droppedCount
+            : 0,
+      };
     },
 
     async clearGoal(sessionId) {

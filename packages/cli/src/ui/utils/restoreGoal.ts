@@ -5,7 +5,6 @@
  */
 
 import {
-  createDebugLogger,
   registerGoalHook,
   setGoalTerminalObserver,
   setLastGoalTerminal,
@@ -23,8 +22,7 @@ import {
   type HistoryItemGoalStatus,
   type HistoryItemWithoutId,
 } from '../types.js';
-
-const debugLogger = createDebugLogger('GOAL_RESTORE');
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 /**
  * Cap on a goal condition, enforced both when `/goal` sets one and when a
@@ -181,8 +179,10 @@ export function recordGoalStatusItem(
     // session transcript could not be appended. But swallowing it silently is
     // how a goal ends up unrecoverable on resume — the failure mode this
     // recording exists to prevent — so leave a trace.
-    debugLogger.warn(
-      `Failed to record goal_status (kind=${item.kind}): ${error}`,
+    // Not debugLogger: that no-ops unless a debug session is active, and a
+    // lost write here is invisible until the goal fails to survive a resume.
+    writeStderrLine(
+      `qwen: failed to record goal_status (kind=${item.kind}): ${error}`,
     );
   }
 }
@@ -242,8 +242,8 @@ export function restoreGoalFromHistory(
   // unbounded and then embedded verbatim in every judge call and continuation
   // prompt for the rest of the session.
   if (restorable.condition.length > MAX_GOAL_LENGTH) {
-    debugLogger.warn(
-      `Refusing to restore a goal whose condition exceeds ${MAX_GOAL_LENGTH} characters (got ${restorable.condition.length}).`,
+    writeStderrLine(
+      `qwen: refusing to restore a goal whose condition exceeds ${MAX_GOAL_LENGTH} characters (got ${restorable.condition.length}).`,
     );
     unregisterGoalHook(config, sessionId);
     return { restored: false };

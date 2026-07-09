@@ -123,6 +123,16 @@
   color: var(--error-color);
 }
 
+/* The list is incomplete because some sessions could not be probed — distinct
+ * from a hard load error, which shows no list at all. */
+.degraded {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
 .formActions {
   display: flex;
   justify-content: flex-end;

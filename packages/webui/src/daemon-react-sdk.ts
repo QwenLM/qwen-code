@@ -282,6 +282,8 @@ export type {
   DaemonGlobResult,
   /** One session's active `/goal`, as listed workspace-wide by the daemon. */
   DaemonGoal,
+  /** The `GET /goals` payload: the goals plus a count of unreachable sessions. */
+  DaemonGoalList,
   /** A durable scheduled task (cron) as returned by the daemon. */
   DaemonScheduledTask,
   /** One recorded fire in a scheduled task's run history. */

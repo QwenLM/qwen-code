@@ -15,7 +15,7 @@ import { formatRuntime } from '../../utils/formatRuntime';
 import { isGoalClearKeyword } from '../../utils/goalCondition';
 import styles from './GoalsDialog.module.css';
 
-/** Keep in sync with MAX_GOAL_LENGTH in packages/cli/src/ui/commands/goalCommand.ts */
+/** Keep in sync with MAX_GOAL_LENGTH in packages/cli/src/ui/utils/restoreGoal.ts */
 const MAX_GOAL_LENGTH = 4000;
 
 /**
@@ -47,6 +47,8 @@ export function GoalsDialog({
   const actions = useWorkspaceActions();
 
   const [goals, setGoals] = useState<DaemonGoal[] | null>(null);
+  /** Sessions the daemon could not probe; their goals are missing from `goals`. */
+  const [droppedCount, setDroppedCount] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
 
@@ -73,7 +75,8 @@ export function GoalsDialog({
     try {
       const list = await actions.listGoals();
       if (!mountedRef.current || seq !== reloadSeqRef.current) return;
-      setGoals(list);
+      setGoals(list.goals);
+      setDroppedCount(list.droppedCount);
       setLoadError(null);
     } catch (err) {
       if (!mountedRef.current || seq !== reloadSeqRef.current) return;
@@ -252,6 +255,12 @@ export function GoalsDialog({
 
       {loadError && <div className={styles.loadError}>{loadError}</div>}
 
+      {droppedCount > 0 && (
+        <div className={styles.degraded} data-testid="goals-dropped">
+          {t('goals.dropped', { count: droppedCount })}
+        </div>
+      )}
+
       {goals !== null && goals.length === 0 && !loadError && (
         <div className={styles.empty}>{t('goals.empty')}</div>
       )}
@@ -263,7 +272,7 @@ export function GoalsDialog({
             <div key={goal.sessionId} className={styles.card}>
               <div className={styles.cardHeader}>
                 <span
-                  className={`${styles.statusDot} ${goal.running ? styles.statusDotRunning : ''}`}
+                  className={`${styles.statusDot} ${goal.hasActivePrompt ? styles.statusDotRunning : ''}`}
                   aria-hidden="true"
                 />
                 <div className={styles.cardTitle} title={goal.condition}>
@@ -294,7 +303,7 @@ export function GoalsDialog({
 
               <div className={styles.cardFooter}>
                 <span className={styles.statusPill}>
-                  {t(goal.running ? 'goals.running' : 'goals.idle')}
+                  {t(goal.hasActivePrompt ? 'goals.running' : 'goals.idle')}
                 </span>
                 <span className={styles.meta}>
                   {goal.iterations > 0

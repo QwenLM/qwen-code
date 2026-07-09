@@ -273,6 +273,7 @@ import {
   collectGoalStatusItemsFromRecords,
   restoreGoalFromHistory,
 } from '../ui/utils/restoreGoal.js';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
 const QWEN_ACP_LOCAL_READ_ROOTS_ENV = 'QWEN_ACP_LOCAL_READ_ROOTS';
@@ -3313,7 +3314,12 @@ class QwenAgent implements Agent {
         );
       }
     } catch (error) {
-      debugLogger.warn(`ACP goal restore failed: ${error}`);
+      // Not debugLogger: it no-ops unless a debug session is active, and a
+      // failed restore is invisible from the outside — the transcript still
+      // shows the goal as active while no hook drives it.
+      writeStderrLine(
+        `qwen: goal restore failed for session ${config.getSessionId()}: ${error}`,
+      );
     }
   }
 
