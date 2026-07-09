@@ -55,15 +55,20 @@ const CANCELLED = Symbol('create_sub_session:cancelled');
  * `Session.ts` awaits `invocation.execute(signal)` without racing the abort
  * itself, so a tool that ignores its signal pins the caller's tool loop for as
  * long as it runs — here, up to the daemon's 5-minute `first-turn` ceiling.
+ *
+ * Takes a thunk, not a promise: an already-aborted turn must not create daemon
+ * work at all. Passing `spawner(…)` directly would evaluate it as an argument,
+ * spawning a sub-session before the abort was ever checked.
  */
 async function raceCancellation<T>(
-  spawn: Promise<T>,
+  start: () => Promise<T>,
   signal: AbortSignal,
 ): Promise<T | typeof CANCELLED> {
+  if (signal.aborted) return CANCELLED;
+  const spawn = start();
   // The losing branch's rejection still needs a handler, or Node reports an
   // unhandled rejection once the cancel branch wins.
   void spawn.catch(() => {});
-  if (signal.aborted) return CANCELLED;
   return new Promise<T | typeof CANCELLED>((resolve, reject) => {
     const onAbort = (): void => resolve(CANCELLED);
     signal.addEventListener('abort', onAbort, { once: true });
@@ -134,26 +139,33 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
     const completion = this.params.completion ?? 'first-turn';
     const prompt = this.params.prompt.trim();
 
+    // Set only once the spawn actually starts, which tells the two cancellation
+    // outcomes apart: a turn cancelled before `execute` ran leaves nothing
+    // behind, while one cancelled mid-flight may have created a sub-session.
+    let spawnStarted = false;
+
     try {
-      const res = await raceCancellation(
-        spawner({
+      const res = await raceCancellation(() => {
+        spawnStarted = true;
+        return spawner({
           prompt,
           completion,
           ...(this.params.model ? { model: this.params.model } : {}),
           ...(this.params.name ? { name: this.params.name } : {}),
-        }),
-        signal,
-      );
+        });
+      }, signal);
 
       if (res === CANCELLED) {
-        // Return the caller's turn to it immediately. The sub-session is NOT
-        // cancelled — `sendPrompt` has no abort seam — so it keeps running and
-        // keeps its concurrency slot until its own turn drains. Freeing the
-        // slot here would let the caller over-admit against a sub-session that
-        // is still consuming a bridge session and model quota.
-        const message =
-          'create_sub_session was cancelled. A sub-session may already have ' +
-          'been created; it runs independently and is not cancelled.';
+        // Return the caller's turn to it immediately. A sub-session that DID
+        // start is NOT cancelled — `sendPrompt` has no abort seam — so it keeps
+        // running and keeps its concurrency slot until its own turn drains.
+        // Freeing the slot here would let the caller over-admit against a
+        // sub-session that is still consuming a bridge session and model quota.
+        const message = spawnStarted
+          ? 'create_sub_session was cancelled. A sub-session may already have ' +
+            'been created; it runs independently and is not cancelled.'
+          : 'create_sub_session was cancelled before it started. No ' +
+            'sub-session was created.';
         return { llmContent: message, returnDisplay: 'Cancelled' };
       }
 

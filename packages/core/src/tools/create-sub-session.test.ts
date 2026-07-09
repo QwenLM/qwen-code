@@ -127,6 +127,26 @@ describe('CreateSubSessionTool', () => {
     await new Promise((r) => setTimeout(r, 0));
   });
 
+  it('never calls the spawner when the signal is already aborted', async () => {
+    // The abort must be checked BEFORE the spawn starts. Passing `spawner(…)`
+    // as an argument evaluates it first, so a pre-cancelled turn would still
+    // create a sub-session on the daemon (and consume its concurrency slot)
+    // before reporting itself cancelled.
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-should-not-exist' }));
+    const ac = new AbortController();
+    ac.abort();
+
+    const res = await new CreateSubSessionTool(makeConfig(spawner))
+      .build({ prompt: 'x' })
+      .execute(ac.signal);
+
+    expect(spawner).not.toHaveBeenCalled();
+    expect(res.returnDisplay).toBe('Cancelled');
+    // Nothing was created, so the message must not hedge.
+    expect(res.llmContent).toMatch(/no sub-session was created/i);
+    expect(res.llmContent).not.toMatch(/may already have been created/i);
+  });
+
   it('does not report cancellation when the spawn wins the race', async () => {
     const spawner = vi.fn(async () => ({ sessionId: 'sub-7', result: 'done' }));
     const ac = new AbortController();
