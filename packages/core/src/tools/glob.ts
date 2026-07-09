@@ -206,7 +206,7 @@ class GlobToolInvocation extends BaseToolInvocation<
         ignored: isTraversalIgnored,
         childrenIgnored: isTraversalIgnored,
       },
-    }) as AsyncIterable<GlobPath>;
+    }) as AsyncIterable<GlobPath> & { destroy?: () => void };
 
     const entries: GlobPath[] = [];
     let hitLimit = false;
@@ -219,6 +219,9 @@ class GlobToolInvocation extends BaseToolInvocation<
         break;
       }
       entries.push(entry);
+    }
+    if (hitLimit) {
+      stream.destroy?.();
     }
 
     return { entries, hitLimit };

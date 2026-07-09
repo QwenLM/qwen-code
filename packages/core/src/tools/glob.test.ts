@@ -831,7 +831,7 @@ describe('GlobTool', () => {
       const llmContent = partListUnionToString(result.llmContent);
 
       expect(stream.getYielded()).toBeLessThan(totalResults);
-      expect(stream.destroy).not.toHaveBeenCalled();
+      expect(stream.destroy).toHaveBeenCalled();
       expect(llmContent).toContain('Found at least');
       expect(llmContent).toContain('Narrow the pattern or path');
       expect(result.returnDisplay).toContain('(truncated)');
