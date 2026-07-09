@@ -23,8 +23,8 @@ import styles from './SplitView.module.css';
 const MAX_PANES = MAX_SPLIT_PANES;
 
 export interface SplitViewProps {
-  /** Sessions to open initially (e.g. the selection from the overview). */
-  initialSessionIds?: string[];
+  /** Sessions to show in the split view. */
+  sessionIds?: string[];
   /**
    * Report the live pane set (after every add / remove) up to the parent so it
    * survives this view unmounting. Switching away from the split and back must
@@ -52,7 +52,7 @@ export interface SplitViewProps {
  * fight over which session an approval or Enter belongs to.
  */
 export function SplitView({
-  initialSessionIds,
+  sessionIds,
   onPanesChange,
   onExit,
   onError,
@@ -62,9 +62,8 @@ export function SplitView({
   const connection = useConnection();
   const currentSessionId = connection.sessionId;
   const organizationEnabled =
-    connection.capabilities?.features?.includes(
-      SESSION_ORGANIZATION_FEATURE,
-    ) ?? false;
+    connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE) ??
+    false;
   const { sessions, reload } = useSessions({
     autoLoad: true,
     pageSize: SESSION_LIST_PAGE_SIZE,
@@ -73,10 +72,18 @@ export function SplitView({
       ? { view: 'organized' as const, group: 'all' }
       : {}),
   });
+  const sessionIdsControlled = sessionIds !== undefined;
+  const normalizedSessionIds = useMemo(
+    () =>
+      Array.from(new Set((sessionIds ?? []).filter(Boolean))).slice(
+        0,
+        MAX_PANES,
+      ),
+    [sessionIds],
+  );
 
   const [paneIds, setPaneIds] = useState<string[]>(() => {
-    const seed = Array.from(new Set((initialSessionIds ?? []).filter(Boolean)));
-    if (seed.length > 0) return seed.slice(0, MAX_PANES);
+    if (normalizedSessionIds.length > 0) return normalizedSessionIds;
     return currentSessionId ? [currentSessionId] : [];
   });
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -89,6 +96,18 @@ export function SplitView({
       ? crypto.randomUUID()
       : Math.random().toString(36).slice(2),
   );
+
+  useEffect(() => {
+    if (!sessionIdsControlled) return;
+    setPaneIds((prev) =>
+      prev.length === normalizedSessionIds.length &&
+      prev.every((id, index) => id === normalizedSessionIds[index])
+        ? prev
+        : normalizedSessionIds,
+    );
+  }, [normalizedSessionIds, sessionIdsControlled]);
+  const paneIdsRef = useRef(paneIds);
+  paneIdsRef.current = paneIds;
 
   // Dismiss the "add session" picker on Escape or a click outside it.
   useEffect(() => {
@@ -150,14 +169,26 @@ export function SplitView({
     return map;
   }, [sessions]);
 
-  const addPane = useCallback((sessionId: string) => {
-    setPaneIds((prev) =>
-      prev.includes(sessionId) || prev.length >= MAX_PANES
-        ? prev
-        : [...prev, sessionId],
-    );
-    setPickerOpen(false);
-  }, []);
+  const addPane = useCallback(
+    (sessionId: string) => {
+      const currentPaneIds = paneIdsRef.current;
+      if (
+        currentPaneIds.includes(sessionId) ||
+        currentPaneIds.length >= MAX_PANES
+      ) {
+        setPickerOpen(false);
+        return;
+      }
+      const next = [...currentPaneIds, sessionId];
+      if (sessionIdsControlled) {
+        onPanesChange?.(next);
+      } else {
+        setPaneIds(next);
+      }
+      setPickerOpen(false);
+    },
+    [onPanesChange, sessionIdsControlled],
+  );
 
   // Closing the last pane is a natural "I'm done" gesture — return to the
   // overview instead of stranding the user on an empty split. Guarded so an
@@ -173,14 +204,24 @@ export function SplitView({
 
   // Mirror the live pane set up to the parent so it outlives this component
   // unmounting when the user switches views. On re-entry the parent reseeds
-  // `initialSessionIds` from it, restoring the exact panes instead of clearing.
+  // `sessionIds` from it, restoring the exact panes instead of clearing.
   useEffect(() => {
-    onPanesChange?.(paneIds);
-  }, [paneIds, onPanesChange]);
+    if (!sessionIdsControlled) onPanesChange?.(paneIds);
+  }, [paneIds, onPanesChange, sessionIdsControlled]);
 
-  const removePane = useCallback((sessionId: string) => {
-    setPaneIds((prev) => prev.filter((id) => id !== sessionId));
-  }, []);
+  const removePane = useCallback(
+    (sessionId: string) => {
+      const currentPaneIds = paneIdsRef.current;
+      if (!currentPaneIds.includes(sessionId)) return;
+      const next = currentPaneIds.filter((id) => id !== sessionId);
+      if (sessionIdsControlled) {
+        onPanesChange?.(next);
+      } else {
+        setPaneIds(next);
+      }
+    },
+    [onPanesChange, sessionIdsControlled],
+  );
 
   const available = useMemo(
     () => sessions.filter((session) => !paneIds.includes(session.sessionId)),
@@ -282,7 +323,6 @@ export function SplitView({
                 >
                   <ChatPane
                     title={titleById.get(sessionId)}
-                    isCurrent={sessionId === currentSessionId}
                     onClose={() => removePane(sessionId)}
                     onError={onError}
                   />

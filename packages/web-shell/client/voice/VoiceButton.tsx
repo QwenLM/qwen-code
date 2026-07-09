@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useState } from 'react';
+import type React from 'react';
+import { useEffect, useState } from 'react';
 import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import { useI18n } from '../i18n';
 import { useVoiceCapture } from './useVoiceCapture';
 import styles from './VoiceButton.module.css';
 
@@ -57,6 +59,7 @@ export function VoiceButton({
   disabled,
 }: VoiceButtonProps): React.JSX.Element | null {
   const workspace = useWorkspace();
+  const { t } = useI18n();
   const features = workspace.capabilities?.features ?? [];
   // Surfaced when a recording finalizes with no transcript (e.g. silence).
   const [noticeMessage, setNoticeMessage] = useState<string | undefined>(
@@ -73,7 +76,7 @@ export function VoiceButton({
           setNoticeMessage(undefined);
           onInsert(trimmed);
         } else {
-          setNoticeMessage('No speech detected.');
+          setNoticeMessage(t('voice.noSpeech'));
         }
       },
     });
@@ -120,16 +123,16 @@ export function VoiceButton({
   const canCancel = isRecording || isConnecting;
 
   const label = isRecording
-    ? 'Stop dictation'
+    ? t('voice.stopDictation')
     : isTranscribing
-      ? 'Transcribing…'
+      ? t('voice.transcribing')
       : isConnecting
-        ? 'Starting…'
+        ? t('voice.starting')
         : isError
-          ? `Voice error — click to retry${errorMessage ? `: ${errorMessage}` : ''}`
+          ? t('voice.errorRetry', { message: errorMessage ?? '' })
           : isNotice
-            ? 'No speech detected — click to retry'
-            : 'Start voice dictation';
+            ? t('voice.noSpeechRetry')
+            : t('voice.startDictation');
 
   let control: React.JSX.Element;
   if (isRecording) {
@@ -213,7 +216,7 @@ export function VoiceButton({
           className={`${styles.interim}${isError ? ` ${styles.error}` : ''}`}
         >
           {isError
-            ? errorMessage || 'Voice error'
+            ? errorMessage || t('voice.error')
             : isNotice
               ? noticeMessage
               : interimText}

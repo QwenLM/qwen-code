@@ -21,8 +21,10 @@ import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 class TestChannel extends ChannelBase {
   sent: Array<{ chatId: string; text: string }> = [];
   proactive: Array<{ chatId: string; text: string }> = [];
+  proactiveTargets: SessionTarget[] = [];
   proactiveSupported = false;
   proactiveTargetSupported: boolean | undefined;
+  sendMessageError?: Error;
   connected = false;
   toolCalls: Array<{ chatId: string; event: unknown }> = [];
   taskEvents: ChannelTaskLifecycleEvent[] = [];
@@ -33,6 +35,17 @@ class TestChannel extends ChannelBase {
   }> = [];
   promptEnds: Array<{ chatId: string; sessionId: string; messageId?: string }> =
     [];
+  promptBuffers: Array<{
+    chatId: string;
+    sessionId: string;
+    messageId?: string;
+    bufferSize: number;
+  }> = [];
+  promptBufferDrops: Array<{
+    chatId: string;
+    sessionId: string;
+    messageIds: string[];
+  }> = [];
   responseChunks: Array<{ chatId: string; chunk: string; sessionId: string }> =
     [];
   /** When set, onPromptEnd throws AFTER recording — to exercise the finally guard. */
@@ -43,6 +56,9 @@ class TestChannel extends ChannelBase {
     this.connected = true;
   }
   async sendMessage(chatId: string, text: string) {
+    if (this.sendMessageError) {
+      throw this.sendMessageError;
+    }
     this.sent.push({ chatId, text });
   }
   disconnect() {
@@ -68,10 +84,11 @@ class TestChannel extends ChannelBase {
   }
 
   protected override async pushProactive(
-    target: { chatId: string },
+    target: SessionTarget,
     text: string,
   ): Promise<void> {
     this.proactive.push({ chatId: target.chatId, text });
+    this.proactiveTargets.push(target);
   }
 
   enableCancelCommand(): void {
@@ -80,6 +97,10 @@ class TestChannel extends ChannelBase {
 
   cancelPromptForTest(sessionId: string): Promise<boolean> {
     return this.requestActivePromptCancellation(sessionId, 'cancel_command');
+  }
+
+  debugPayloadForTest(platform: string, payload: unknown): void {
+    this.logDebugPayload(platform, payload);
   }
 
   protected override onPromptStart(
@@ -101,6 +122,32 @@ class TestChannel extends ChannelBase {
     }
   }
 
+  protected override onPromptBufferDropped(
+    chatId: string,
+    sessionId: string,
+    messageIds: string[],
+  ): void {
+    this.promptBufferDrops.push({ chatId, sessionId, messageIds });
+  }
+
+  protected override onPromptBuffered(
+    chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    const buffers = (
+      this as unknown as {
+        collectBuffers: Map<string, unknown[]>;
+      }
+    ).collectBuffers;
+    this.promptBuffers.push({
+      chatId,
+      sessionId,
+      messageId,
+      bufferSize: buffers.get(sessionId)?.length ?? 0,
+    });
+  }
+
   protected override onResponseChunk(
     chatId: string,
     chunk: string,
@@ -119,6 +166,12 @@ class TestChannel extends ChannelBase {
   }
 }
 
+class UnsafeProcessChannel extends TestChannel {
+  processWithoutPreflight(envelope: Envelope): Promise<void> {
+    return this.processInbound(envelope);
+  }
+}
+
 function createBridge(): ChannelAgentBridge {
   const emitter = new EventEmitter();
   let sessionCounter = 0;
@@ -133,6 +186,7 @@ function createBridge(): ChannelAgentBridge {
     isConnected: true,
     availableCommands: [],
     setBridge: vi.fn(),
+    respondToPermission: vi.fn().mockResolvedValue(true),
     registerChannelLoopToolHandler: vi.fn((handler: ChannelLoopToolHandler) => {
       channelLoopToolHandler = handler;
     }),
@@ -150,6 +204,7 @@ function defaultConfig(overrides: Partial<ChannelConfig> = {}): ChannelConfig {
     sessionScope: 'user',
     cwd: '/tmp',
     groupPolicy: 'disabled',
+    dmPolicy: 'open',
     groups: {},
     ...overrides,
   };
@@ -203,10 +258,293 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('logs the preflight rejection reason for group gates', async () => {
+      const ch = createChannel();
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ isGroup: true }));
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=group_disabled',
+      );
+    });
+
+    it('does not log expected mention-required group drops', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        groups: { '*': { requireMention: true } },
+      });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ isGroup: true, isMentioned: false }));
+
+      const callCount = writeSpy.mock.calls.length;
+      writeSpy.mockRestore();
+      expect(callCount).toBe(0);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('does not log debug payloads by default', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let callCount = 0;
+
+      try {
+        ch.debugPayloadForTest('Test', { token: 'secret-token' });
+      } finally {
+        callCount = writeSpy.mock.calls.length;
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(callCount).toBe(0);
+    });
+
+    it('logs sanitized debug payloads when enabled', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'test-chan';
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let logged = '';
+
+      try {
+        ch.debugPayloadForTest('Test', {
+          msgId: 'm1',
+          token: 'secret-token',
+          password: 'secret-password',
+          cookie: 'session-cookie',
+          signature: 'message-signature',
+          encrypt: 'encrypted-body',
+          response_url: 'https://example.invalid/hook?token=secret',
+          open_id: 'ou_123',
+          union_id: 'on_123',
+          userid: 'wecom-user-123',
+          user_id: { open_id: 'nested-ou' },
+          senderStaffId: 'staff-123',
+          senderId: 'sender-123',
+          senderNick: 'Alice',
+          senderName: 'Bob',
+          nested: { aeskey: 'media-key' },
+        });
+        logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      } finally {
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(logged).toContain('[Test:test-chan] debug payload');
+      expect(logged).toContain('"msgId":"m1"');
+      expect(logged).toContain('"token":"[redacted]"');
+      expect(logged).toContain('"password":"[redacted]"');
+      expect(logged).toContain('"cookie":"[redacted]"');
+      expect(logged).toContain('"signature":"[redacted]"');
+      expect(logged).toContain('"encrypt":"[redacted]"');
+      expect(logged).toContain('"response_url":"[redacted]"');
+      expect(logged).toContain('"open_id":"[redacted]"');
+      expect(logged).toContain('"union_id":"[redacted]"');
+      expect(logged).toContain('"userid":"[redacted]"');
+      expect(logged).toContain('"user_id":"[redacted]"');
+      expect(logged).toContain('"senderStaffId":"[redacted]"');
+      expect(logged).toContain('"senderId":"[redacted]"');
+      expect(logged).toContain('"senderNick":"[redacted]"');
+      expect(logged).toContain('"senderName":"[redacted]"');
+      expect(logged).toContain('"aeskey":"[redacted]"');
+      expect(logged).not.toContain('\\n');
+      expect(logged).not.toContain('secret-token');
+      expect(logged).not.toContain('secret-password');
+      expect(logged).not.toContain('session-cookie');
+      expect(logged).not.toContain('message-signature');
+      expect(logged).not.toContain('encrypted-body');
+      expect(logged).not.toContain('media-key');
+      expect(logged).not.toContain('ou_123');
+      expect(logged).not.toContain('on_123');
+      expect(logged).not.toContain('wecom-user-123');
+      expect(logged).not.toContain('Alice');
+      expect(logged).not.toContain('Bob');
+      expect(logged).not.toContain('nested-ou');
+      expect(logged).not.toContain('staff-123');
+      expect(logged).not.toContain('sender-123');
+    });
+
+    it('handles debug payload serialization failures gracefully', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'test-chan';
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let logged = '';
+
+      try {
+        const payload: Record<string, unknown> = {};
+        payload['self'] = payload;
+        ch.debugPayloadForTest('Test', payload);
+        logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      } finally {
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(logged).toContain('[Test:test-chan] debug payload');
+      expect(logged).toContain('could not be serialized');
+    });
+
+    it('logs debug payloads for global enable values', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'all';
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let logged = '';
+
+      try {
+        ch.debugPayloadForTest('Test', { msgId: 'm1' });
+        logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      } finally {
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(logged).toContain('[Test:test-chan] debug payload');
+    });
+
+    it('matches debug payload channel names exactly', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'test';
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let callCount = 0;
+
+      try {
+        ch.debugPayloadForTest('Test', { msgId: 'm1' });
+      } finally {
+        callCount = writeSpy.mock.calls.length;
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(callCount).toBe(0);
+    });
+
     it('allows DM messages through', async () => {
       const ch = createChannel();
       await ch.handleInbound(envelope());
       expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('silently drops DM messages when dmPolicy=disabled', async () => {
+      const ch = createChannel({ dmPolicy: 'disabled' });
+      await ch.handleInbound(envelope());
+      expect(ch.sent).toEqual([]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('logs the preflight rejection reason for DM gates', async () => {
+      const ch = createChannel({ dmPolicy: 'disabled' });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope());
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=dm_disabled',
+      );
+    });
+
+    it('logs the preflight rejection reason for sender gates', async () => {
+      const ch = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['user2'],
+      });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope());
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=sender_denied',
+      );
+    });
+
+    it('allows group messages through when dmPolicy=disabled', async () => {
+      const ch = createChannel({
+        dmPolicy: 'disabled',
+        groupPolicy: 'open',
+      });
+      await ch.handleInbound(envelope({ isGroup: true, isMentioned: true }));
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('rejects direct processing without preflight', async () => {
+      const ch = new UnsafeProcessChannel('test-chan', defaultConfig(), bridge);
+
+      await expect(ch.processWithoutPreflight(envelope())).rejects.toThrow(
+        'processInbound called without a successful preflightInbound check.',
+      );
+    });
+
+    it('waits for thenable preflight results', async () => {
+      class ThenablePreflightChannel extends TestChannel {
+        protected override preflightInbound(): PromiseLike<boolean> {
+          return { then: (resolve) => resolve(false) };
+        }
+      }
+      const ch = new ThenablePreflightChannel(
+        'test-chan',
+        defaultConfig(),
+        bridge,
+      );
+
+      await ch.handleInbound(envelope());
+
+      expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
     it('rejects sender with allowlist policy', async () => {
@@ -225,6 +563,666 @@ describe('ChannelBase', () => {
       });
       await ch.handleInbound(envelope());
       expect(bridge.prompt).toHaveBeenCalled();
+    });
+  });
+
+  describe('permission relay', () => {
+    function respondToPermissionMock(): ReturnType<typeof vi.fn> {
+      return (
+        bridge as unknown as {
+          respondToPermission: ReturnType<typeof vi.fn>;
+        }
+      ).respondToPermission;
+    }
+
+    function emitPermission(
+      sessionId: string,
+      requestId: string,
+      options = [
+        {
+          optionId: 'proceed_always_project',
+          kind: 'allow_always',
+          name: 'Always Allow in project',
+        },
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow once' },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Deny' },
+      ],
+    ): void {
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId,
+        sessionId,
+        request: {
+          toolCall: {
+            toolCallId: `tool-${requestId}`,
+            kind: 'shell',
+            title: `Run ${requestId}`,
+            rawInput: { command: 'echo secret-token' },
+          },
+          options,
+        },
+      });
+    }
+
+    async function startSession(
+      ch: TestChannel,
+      env: Partial<Envelope> = {},
+    ): Promise<string> {
+      await ch.handleInbound(envelope({ text: 'run tests', ...env }));
+      const results = (bridge.newSession as ReturnType<typeof vi.fn>).mock
+        .results;
+      return results[results.length - 1]!.value as string;
+    }
+
+    it('sends permission requests to the owning chat and approves with /approve', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+
+      expect(ch.sent.at(-1)?.chatId).toBe('chat1');
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Permission required to run a tool',
+      );
+      expect(ch.sent.at(-1)?.text).toContain('Command:');
+      expect(ch.sent.at(-1)?.text).toContain('Run req-1');
+      expect(ch.sent.at(-1)?.text).toContain('/approve        allow once');
+      expect(ch.sent.at(-1)?.text).toContain('/approve-always always allow');
+      expect(ch.sent.at(-1)?.text).toContain('/deny           deny');
+      expect(ch.sent.at(-1)?.text).not.toContain('Request: req-1');
+      expect(ch.sent.at(-1)?.text).not.toContain('proceed_once');
+      expect(ch.sent.at(-1)?.text).not.toContain('secret-token');
+
+      await ch.handleInbound(envelope({ text: '/approve' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+      expect(ch.sent.at(-1)?.text).toBe('Permission approved.');
+    });
+
+    it('cancels bridge permissions when the target no longer belongs to the channel', async () => {
+      const router = {
+        getTarget: vi.fn(() => ({
+          channelName: 'other-channel',
+          chatId: 'chat1',
+        })),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
+
+      await ch.dispatchPermissionRequest({
+        requestId: 'req-stale',
+        sessionId: 'session-1',
+        request: {
+          toolCall: {
+            toolCallId: 'tool-req-stale',
+            kind: 'shell',
+            title: 'Run req-stale',
+          },
+          options: [],
+        },
+      });
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-stale', {
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(ch.sent).toEqual([]);
+    });
+
+    it('requires an explicit request id when multiple permissions are pending', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      emitPermission(sessionId, 'req-2');
+
+      await ch.handleInbound(envelope({ text: '/approve' }));
+
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Multiple permission requests are pending',
+      );
+      expect(ch.sent.at(-1)?.text).toContain('req-1');
+      expect(ch.sent.at(-1)?.text).toContain('req-2');
+      expect(ch.sent.at(-1)?.text).toContain('req-1: Run req-1');
+      expect(ch.sent.at(-1)?.text).toContain('req-2: Run req-2');
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledTimes(1);
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('does not fall back to another pending request when an explicit id is wrong', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      emitPermission(sessionId, 'req-2');
+
+      await ch.handleInbound(envelope({ text: '/approve missing-request' }));
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('does not answer permission requests from another chat', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch, { chatId: 'chat2' });
+      emitPermission(sessionId, 'req-chat2');
+
+      await ch.handleInbound(
+        envelope({ chatId: 'chat1', text: '/approve req-chat2' }),
+      );
+
+      expect(ch.sent.at(-1)?.chatId).toBe('chat1');
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+    });
+
+    it('does not answer permission requests from another thread', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'thread',
+      });
+      const sessionId = await startSession(ch, {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'alice',
+        threadId: 'thread-1',
+      });
+      emitPermission(sessionId, 'req-thread-1');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'alice',
+          text: '/approve req-thread-1',
+          threadId: 'thread-2',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'alice',
+          text: '/approve req-thread-1',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-thread-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('delivers threaded permission requests through proactive targets when supported', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'thread',
+      });
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+      const sessionId = await startSession(ch, {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'alice',
+        threadId: 'thread-1',
+      });
+
+      emitPermission(sessionId, 'req-thread-1');
+
+      expect(ch.proactiveTargets.at(-1)).toMatchObject({
+        chatId: 'group1',
+        senderId: 'alice',
+        threadId: 'thread-1',
+      });
+      expect(ch.proactive.at(-1)?.text).toContain(
+        'Permission required to run a tool',
+      );
+      expect(ch.sent.at(-1)?.text).not.toContain(
+        'Permission required to run a tool',
+      );
+    });
+
+    it('routes single-scope permission requests to the active chat', async () => {
+      const ch = createChannel({ sessionScope: 'single' });
+      await startSession(ch, { senderId: 'alice', chatId: 'alice-dm' });
+
+      let resolveBob!: (value: string) => void;
+      const bobPrompt = new Promise<string>((resolve) => {
+        resolveBob = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () => bobPrompt,
+      );
+
+      const bobTurn = ch.handleInbound(
+        envelope({
+          senderId: 'bob',
+          senderName: 'Bob',
+          chatId: 'bob-dm',
+          text: 'needs permission',
+        }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1]![0] as string;
+
+      emitPermission(sessionId, 'req-bob');
+
+      await vi.waitFor(() =>
+        expect(ch.sent.at(-1)?.text).toContain(
+          'Permission required to run a tool',
+        ),
+      );
+      expect(ch.sent.at(-1)?.chatId).toBe('bob-dm');
+
+      resolveBob('agent response');
+      await bobTurn;
+    });
+
+    it('does not let another group member approve user-scoped permissions', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'user',
+      });
+      const sessionId = await startSession(ch, {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'alice',
+        threadId: 'thread-1',
+      });
+      emitPermission(sessionId, 'req-alice');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'bob',
+          text: '/approve req-alice',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'alice',
+          text: '/approve req-alice',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-alice', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('matches the current sender before reporting ambiguous permissions', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'user',
+      });
+      const group = {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        threadId: 'thread-1',
+      };
+      const aliceSessionId = await startSession(ch, {
+        ...group,
+        senderId: 'alice',
+      });
+      emitPermission(aliceSessionId, 'req-alice');
+      const bobSessionId = await startSession(ch, {
+        ...group,
+        senderId: 'bob',
+      });
+      emitPermission(bobSessionId, 'req-bob');
+
+      await ch.handleInbound(
+        envelope({
+          ...group,
+          senderId: 'alice',
+          text: '/approve',
+        }),
+      );
+
+      expect(ch.sent.at(-1)?.text).toBe('Permission approved.');
+      expect(respondToPermissionMock()).toHaveBeenCalledTimes(1);
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-alice', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('gates shared-session permission responses to authorized senders', async () => {
+      const ch = createChannel({
+        allowedUsers: ['boss'],
+        groupPolicy: 'open',
+        sessionScope: 'thread',
+      });
+      const sessionId = await startSession(ch, {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'boss',
+        threadId: 'thread-1',
+      });
+      emitPermission(sessionId, 'req-1');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'rando',
+          text: '/approve req-1',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toContain('Only authorized members');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'boss',
+          text: '/approve req-1',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('uses ACP option kinds for approval and denial', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        { optionId: 'always', kind: 'allow_always', name: 'Allow always' },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+        { optionId: 'never', kind: 'reject_always', name: 'Deny always' },
+        { optionId: 'reject', kind: 'reject_once', name: 'Deny once' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'once' },
+      });
+
+      emitPermission(sessionId, 'req-2', [
+        { optionId: 'reject', kind: 'reject_once', name: 'Deny once' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/deny req-2' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-2', {
+        outcome: { outcome: 'selected', optionId: 'reject' },
+      });
+      expect(ch.sent.at(-1)?.text).toBe('Permission denied.');
+
+      emitPermission(sessionId, 'req-3', [
+        { optionId: 'always', kind: 'allow_always', name: 'Allow always' },
+        { optionId: 'never', kind: 'reject_always', name: 'Deny always' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/deny req-3' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-2', {
+        outcome: { outcome: 'selected', optionId: 'reject' },
+      });
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-3', {
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(ch.sent.at(-1)?.text).toBe('Permission denied.');
+    });
+
+    it('reports permission requests that lack requested approval options', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        { optionId: 'reject', kind: 'reject_once', name: 'Deny once' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'This permission request has no approvable option.',
+      );
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+
+      await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'This permission request has no always-allow option.',
+      );
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+    });
+
+    it('clears pending permission requests when response dispatch fails', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      respondToPermissionMock().mockRejectedValueOnce(new Error('send failed'));
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('supports explicit approve-always for persistent permission grants', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        {
+          optionId: 'proceed_always_user',
+          kind: 'allow_always',
+          name: 'Always Allow for user',
+        },
+        {
+          optionId: 'proceed_always_project',
+          kind: 'allow_always',
+          name: 'Always Allow in project',
+        },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+      ]);
+
+      expect(ch.sent.at(-1)?.text).toContain(
+        '/approve-always always allow for this project',
+      );
+
+      await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_always_project' },
+      });
+      expect(ch.sent.at(-1)?.text).toBe('Permission approved always.');
+    });
+
+    it('falls back to user-scope approve-always when project scope is unavailable', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        {
+          optionId: 'proceed_always_user',
+          kind: 'allow_always',
+          name: 'Always Allow for user',
+        },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+      ]);
+
+      expect(ch.sent.at(-1)?.text).toContain(
+        '/approve-always always allow for this user',
+      );
+
+      await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_always_user' },
+      });
+    });
+
+    it('does not infer approve-always scope from noncanonical option ids', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        {
+          optionId: 'sandbox_bypass_project',
+          kind: 'allow_always',
+          name: 'Always allow sandbox bypass',
+        },
+        {
+          optionId: 'proceed_always_user',
+          kind: 'allow_always',
+          name: 'Always Allow for user',
+        },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+      ]);
+
+      expect(ch.sent.at(-1)?.text).toContain(
+        '/approve-always always allow for this user',
+      );
+
+      await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_always_user' },
+      });
+    });
+
+    it('allows approve-always without a request id when one request is pending', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        { optionId: 'always', kind: 'allow_always', name: 'Allow always' },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/approve-always' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'always' },
+      });
+    });
+
+    it('clears pending permission requests when the session is cleared', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+
+      await ch.handleInbound(envelope({ text: '/clear' }));
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('clears pending permission requests when the session dies', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+
+      (bridge as unknown as EventEmitter).emit('sessionDied', {
+        sessionId,
+      });
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('reports when the bridge cannot answer permission requests', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      delete (bridge as unknown as { respondToPermission?: unknown })
+        .respondToPermission;
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'Permission relay is not available for this session.',
+      );
+    });
+
+    it('cancels the permission request when the relay message cannot be sent', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      ch.sendMessageError = new Error('send failed');
+
+      emitPermission(sessionId, 'req-1');
+      await vi.waitFor(() =>
+        expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+          outcome: { outcome: 'cancelled' },
+        }),
+      );
+      ch.sendMessageError = undefined;
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('clears pending permission requests when the bridge is replaced', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      const oldRespondToPermission = respondToPermissionMock();
+      const newBridge = createBridge();
+
+      ch.setBridge(newBridge);
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+      expect(oldRespondToPermission).not.toHaveBeenCalled();
+      expect(
+        (
+          newBridge as unknown as {
+            respondToPermission: ReturnType<typeof vi.fn>;
+          }
+        ).respondToPermission,
+      ).not.toHaveBeenCalled();
     });
   });
 
@@ -767,6 +1765,7 @@ describe('ChannelBase', () => {
       expect(ch.sent).toHaveLength(1);
       expect(ch.sent[0]!.text).toContain('/help');
       expect(ch.sent[0]!.text).toContain('/clear');
+      expect(ch.sent[0]!.text).toContain('/approve-always [request-id]');
       expect(ch.sent[0]!.text).not.toContain('/cancel');
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
@@ -805,7 +1804,7 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).not.toContain('/global-only');
     });
 
-    it('/remember-channel appends memory for an allowed user', async () => {
+    it('natural remember rejects group memory writes', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue(''),
         appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
@@ -818,74 +1817,7 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(
         envelope({
-          text: '/remember-channel Use staging by default.',
-          senderId: 'alice',
-          chatId: 'chat-1',
-          threadId: 'thread-1',
-        }),
-      );
-
-      expect(channelMemory.appendChannelMemory).toHaveBeenCalledWith(
-        {
-          channelName: 'test-chan',
-          chatId: 'chat-1',
-          threadId: 'thread-1',
-        },
-        'Use staging by default.',
-      );
-      expect(ch.sent).toEqual([
-        { chatId: 'chat-1', text: 'Channel memory updated.' },
-      ]);
-      expect(bridge.prompt).not.toHaveBeenCalled();
-    });
-
-    it('/remember-channel reports append failures', async () => {
-      const channelMemory = {
-        readChannelMemory: vi.fn().mockResolvedValue(''),
-        appendChannelMemory: vi
-          .fn()
-          .mockRejectedValue(new Error('Channel memory exceeds maximum size')),
-        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
-      };
-      const ch = createChannel(
-        { allowedUsers: ['alice'], groupPolicy: 'open' },
-        { channelMemory },
-      );
-      const stderrSpy = vi
-        .spyOn(process.stderr, 'write')
-        .mockImplementation(() => true);
-
-      await ch.handleInbound(
-        envelope({ text: '/remember-channel new memory', senderId: 'alice' }),
-      );
-
-      expect(ch.sent).toEqual([
-        {
-          chatId: 'chat1',
-          text: 'Failed to save channel memory: An error occurred while accessing channel memory.',
-        },
-      ]);
-      expect(stderrSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Channel memory exceeds maximum size'),
-      );
-      stderrSpy.mockRestore();
-      expect(bridge.prompt).not.toHaveBeenCalled();
-    });
-
-    it('/remember-channel refuses to save memory in group chats', async () => {
-      const channelMemory = {
-        readChannelMemory: vi.fn().mockResolvedValue(''),
-        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
-        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
-      };
-      const ch = createChannel(
-        { allowedUsers: ['alice'], groupPolicy: 'open' },
-        { channelMemory },
-      );
-
-      await ch.handleInbound(
-        envelope({
-          text: '/remember-channel group note',
+          text: '帮我记一下，发布前跑 npm run build',
           senderId: 'alice',
           isGroup: true,
           chatId: 'group-1',
@@ -903,7 +1835,347 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('/channel-memory denies when allowedUsers is empty', async () => {
+    it('llm memory classifier can save natural remember requests', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'remember',
+          memory: '回复前必须说 1122',
+          confidence: 0.91,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '你记一下以后回复前要说 1122',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).toHaveBeenCalledWith('你记一下以后回复前要说 1122');
+      expect(channelMemory.appendChannelMemory).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          chatId: 'chat1',
+          threadId: undefined,
+        },
+        '回复前必须说 1122',
+      );
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Channel memory updated.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('regex memory intent skips the llm classifier', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'none',
+          confidence: 1,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '记住: 回复前必须说 1122',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).not.toHaveBeenCalled();
+      expect(channelMemory.appendChannelMemory).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          chatId: 'chat1',
+          threadId: undefined,
+        },
+        '回复前必须说 1122',
+      );
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Channel memory updated.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('llm memory classifier is skipped when channel memory is not configured', async () => {
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'list',
+          confidence: 0.88,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '你现在都记住了哪些东西',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('llm memory classifier can list memory for natural questions', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'list',
+          confidence: 0.88,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'], groupPolicy: 'open' },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '你现在都记住了哪些东西',
+          senderId: 'alice',
+          isGroup: true,
+          chatId: 'group-1',
+          isMentioned: true,
+        }),
+      );
+
+      expect(channelMemory.readChannelMemory).toHaveBeenCalledWith({
+        channelName: 'test-chan',
+        chatId: 'group-1',
+        threadId: undefined,
+      });
+      expect(ch.sent).toEqual([{ chatId: 'group-1', text: 'Use staging.' }]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('llm memory classifier can start clear flow for natural requests', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'clear_all',
+          confidence: 0.9,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '请删除这个聊天里的全部 memory',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).toHaveBeenCalledWith('请删除这个聊天里的全部 memory');
+      expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+        },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('llm memory classifier gate ignores platform format characters', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'list',
+          confidence: 0.88,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '看看你记\u200b忆里有什么',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).toHaveBeenCalledWith('看看你记\u200b忆里有什么');
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'Use staging.' }]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('llm memory classifier low confidence falls through to agent', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'list',
+          confidence: 0.49,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '这个 memory 设计怎么做',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(channelMemory.appendChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('llm memory classifier none intent falls through to agent', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'none',
+          confidence: 0.92,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '这个 memory 设计怎么做',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(channelMemory.appendChannelMemory).not.toHaveBeenCalled();
+      expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('llm memory classifier errors fall through to agent', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi
+          .fn()
+          .mockRejectedValue(new Error('classifier unavailable')),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(
+        envelope({
+          text: '看看你记忆里有什么',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(channelMemory.appendChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+      expect(bridge.prompt).toHaveBeenCalled();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('channel memory intent classifier failed'),
+      );
+      stderrSpy.mockRestore();
+    });
+
+    it('natural remember reports append failures', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi
+          .fn()
+          .mockRejectedValue(new Error('Channel memory exceeds maximum size')),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'], groupPolicy: 'open' },
+        { channelMemory },
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(
+        envelope({ text: '记住：new memory', senderId: 'alice' }),
+      );
+
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'Failed to save channel memory: An error occurred while accessing channel memory.',
+        },
+      ]);
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Channel memory exceeds maximum size'),
+      );
+      stderrSpy.mockRestore();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural memory management denies when allowedUsers is empty', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue('Use staging.'),
         appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
@@ -911,9 +2183,7 @@ describe('ChannelBase', () => {
       };
       const ch = createChannel({ allowedUsers: [] }, { channelMemory });
 
-      await ch.handleInbound(
-        envelope({ text: '/channel-memory', senderId: 'alice' }),
-      );
+      await ch.handleInbound(envelope({ text: '查看记忆', senderId: 'alice' }));
 
       expect(ch.sent).toEqual([
         {
@@ -924,7 +2194,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('/channel-memory shows trimmed memory for an allowed user', async () => {
+    it('natural memory list shows trimmed memory for an allowed user', async () => {
       const channelMemory = {
         readChannelMemory: vi
           .fn()
@@ -937,9 +2207,7 @@ describe('ChannelBase', () => {
         { channelMemory },
       );
 
-      await ch.handleInbound(
-        envelope({ text: '/channel-memory', senderId: 'alice' }),
-      );
+      await ch.handleInbound(envelope({ text: '查看记忆', senderId: 'alice' }));
 
       expect(ch.sent).toEqual([
         { chatId: 'chat1', text: 'Use staging by default.' },
@@ -947,7 +2215,21 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('/channel-memory refuses to show saved memory in group chats', async () => {
+    it('natural memory list sanitizes stored memory before showing it', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('safe\u202Ehidden\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: '查看记忆', senderId: 'alice' }));
+
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'safe hidden' }]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural memory list ignores platform format characters', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
         appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
@@ -960,7 +2242,7 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(
         envelope({
-          text: '/channel-memory',
+          text: '查看记忆\u200b',
           senderId: 'alice',
           isGroup: true,
           chatId: 'group-1',
@@ -968,33 +2250,11 @@ describe('ChannelBase', () => {
         }),
       );
 
-      expect(channelMemory.readChannelMemory).not.toHaveBeenCalled();
-      expect(ch.sent).toEqual([
-        {
-          chatId: 'group-1',
-          text: 'Channel memory cannot be shown in group chats.',
-        },
-      ]);
+      expect(ch.sent).toEqual([{ chatId: 'group-1', text: 'Use staging.' }]);
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('/channel-memory sanitizes stored memory before showing it', async () => {
-      const channelMemory = {
-        readChannelMemory: vi.fn().mockResolvedValue('safe\u202Ehidden\n'),
-        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
-        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
-      };
-      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
-
-      await ch.handleInbound(
-        envelope({ text: '/channel-memory', senderId: 'alice' }),
-      );
-
-      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'safe hidden' }]);
-      expect(bridge.prompt).not.toHaveBeenCalled();
-    });
-
-    it('/channel-memory reports read failures', async () => {
+    it('natural memory list reports read failures', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockRejectedValue(new Error('disk full')),
         appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
@@ -1005,9 +2265,7 @@ describe('ChannelBase', () => {
         .spyOn(process.stderr, 'write')
         .mockImplementation(() => true);
 
-      await ch.handleInbound(
-        envelope({ text: '/channel-memory', senderId: 'alice' }),
-      );
+      await ch.handleInbound(envelope({ text: '查看记忆', senderId: 'alice' }));
 
       expect(ch.sent).toEqual([
         {
@@ -1022,7 +2280,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('/forget-channel requires confirmation and then clears memory', async () => {
+    it('natural clear requires confirmation and then clears memory', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue(''),
         appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
@@ -1030,21 +2288,19 @@ describe('ChannelBase', () => {
       };
       const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
 
-      await ch.handleInbound(
-        envelope({ text: '/forget-channel', senderId: 'alice' }),
-      );
+      await ch.handleInbound(envelope({ text: '清空记忆', senderId: 'alice' }));
 
       expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
       expect(ch.sent).toEqual([
         {
           chatId: 'chat1',
-          text: 'This clears channel memory for this chat. Re-send with "confirm" (e.g. /forget-channel confirm) to proceed.',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
         },
       ]);
 
       ch.sent = [];
       await ch.handleInbound(
-        envelope({ text: '/forget-channel confirm', senderId: 'alice' }),
+        envelope({ text: '确认清空记忆', senderId: 'alice' }),
       );
 
       expect(channelMemory.clearChannelMemory).toHaveBeenCalledTimes(1);
@@ -1054,72 +2310,9 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('/forget-channel accepts mixed-case confirmation', async () => {
+    it('natural group clear requests are rejected', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue(''),
-        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
-        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
-      };
-      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
-
-      await ch.handleInbound(
-        envelope({ text: '/forget-channel Confirm', senderId: 'alice' }),
-      );
-
-      expect(channelMemory.clearChannelMemory).toHaveBeenCalledTimes(1);
-      expect(ch.sent).toEqual([
-        { chatId: 'chat1', text: 'Channel memory cleared.' },
-      ]);
-      expect(bridge.prompt).not.toHaveBeenCalled();
-    });
-
-    it('/forget-channel reports when no memory was saved', async () => {
-      const channelMemory = {
-        readChannelMemory: vi.fn().mockResolvedValue(''),
-        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
-        clearChannelMemory: vi.fn().mockResolvedValue({ changed: false }),
-      };
-      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
-
-      await ch.handleInbound(
-        envelope({ text: '/forget-channel confirm', senderId: 'alice' }),
-      );
-
-      expect(ch.sent).toEqual([
-        { chatId: 'chat1', text: 'No channel memory saved.' },
-      ]);
-      expect(bridge.prompt).not.toHaveBeenCalled();
-    });
-
-    it('/forget-channel confirm reports clear failures', async () => {
-      const channelMemory = {
-        readChannelMemory: vi.fn().mockResolvedValue(''),
-        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
-        clearChannelMemory: vi.fn().mockRejectedValue(new Error('EACCES')),
-      };
-      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
-      const stderrSpy = vi
-        .spyOn(process.stderr, 'write')
-        .mockImplementation(() => true);
-
-      await ch.handleInbound(
-        envelope({ text: '/forget-channel confirm', senderId: 'alice' }),
-      );
-
-      expect(ch.sent).toEqual([
-        {
-          chatId: 'chat1',
-          text: 'Failed to clear channel memory: An error occurred while accessing channel memory.',
-        },
-      ]);
-      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('EACCES'));
-      stderrSpy.mockRestore();
-      expect(bridge.prompt).not.toHaveBeenCalled();
-    });
-
-    it('/forget-channel refuses to clear memory in group chats', async () => {
-      const channelMemory = {
-        readChannelMemory: vi.fn().mockResolvedValue('Use staging.'),
         appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
         clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
       };
@@ -1130,7 +2323,7 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(
         envelope({
-          text: '/forget-channel confirm',
+          text: '清空记忆',
           senderId: 'alice',
           isGroup: true,
           chatId: 'group-1',
@@ -1148,12 +2341,167 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('/remember-channel reports when channel memory callbacks are missing', async () => {
-      const ch = createChannel({ allowedUsers: ['alice'] });
+    it('natural clear rejects confirm from a different sender', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice', 'bob'] },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(envelope({ text: '清空记忆', senderId: 'alice' }));
+      await ch.handleInbound(
+        envelope({ text: '确认清空记忆', senderId: 'bob' }),
+      );
+
+      expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+        },
+        {
+          chatId: 'chat1',
+          text: 'No pending clear request. Say "清空记忆" first.',
+        },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural clear rejects confirm from a different thread', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
 
       await ch.handleInbound(
-        envelope({ text: '/remember-channel x', senderId: 'alice' }),
+        envelope({
+          text: '清空记忆',
+          senderId: 'alice',
+          threadId: 'thread-a',
+        }),
       );
+      await ch.handleInbound(
+        envelope({
+          text: '确认清空记忆',
+          senderId: 'alice',
+          threadId: 'thread-b',
+        }),
+      );
+
+      expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+        },
+        {
+          chatId: 'chat1',
+          text: 'No pending clear request. Say "清空记忆" first.',
+        },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural clear confirm expires after the TTL window', async () => {
+      vi.useFakeTimers();
+      try {
+        const channelMemory = {
+          readChannelMemory: vi.fn().mockResolvedValue(''),
+          appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+          clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        };
+        const ch = createChannel(
+          { allowedUsers: ['alice'] },
+          { channelMemory },
+        );
+
+        await ch.handleInbound(
+          envelope({ text: '清空记忆', senderId: 'alice' }),
+        );
+
+        await vi.advanceTimersByTimeAsync(60_001);
+        ch.sent = [];
+        await ch.handleInbound(
+          envelope({ text: '确认清空记忆', senderId: 'alice' }),
+        );
+
+        expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+        expect(ch.sent).toEqual([
+          {
+            chatId: 'chat1',
+            text: 'No pending clear request. Say "清空记忆" first.',
+          },
+        ]);
+        expect(bridge.prompt).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('natural clear reports when no memory was saved', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: false }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: '清空记忆', senderId: 'alice' }));
+      await ch.handleInbound(
+        envelope({ text: '确认清空记忆', senderId: 'alice' }),
+      );
+
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+        },
+        { chatId: 'chat1', text: 'No channel memory saved.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural clear confirm reports clear failures', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockRejectedValue(new Error('EACCES')),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ text: '清空记忆', senderId: 'alice' }));
+      await ch.handleInbound(
+        envelope({ text: '确认清空记忆', senderId: 'alice' }),
+      );
+
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+        },
+        {
+          chatId: 'chat1',
+          text: 'Failed to clear channel memory: An error occurred while accessing channel memory.',
+        },
+      ]);
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('EACCES'));
+      stderrSpy.mockRestore();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural remember reports when channel memory callbacks are missing', async () => {
+      const ch = createChannel({ allowedUsers: ['alice'] });
+
+      await ch.handleInbound(envelope({ text: '记住：x', senderId: 'alice' }));
 
       expect(ch.sent).toEqual([
         {
@@ -1164,20 +2512,58 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('/help includes channel memory commands', async () => {
+    it('keeps legacy channel memory slash commands as hidden aliases', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(
+        envelope({ text: '/remember-channel Use staging.', senderId: 'alice' }),
+      );
+      await ch.handleInbound(
+        envelope({ text: '/channel-memory', senderId: 'alice' }),
+      );
+      await ch.handleInbound(
+        envelope({ text: '/forget-channel confirm', senderId: 'alice' }),
+      );
+
+      expect(channelMemory.appendChannelMemory).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          chatId: 'chat1',
+          threadId: undefined,
+        },
+        'Use staging.',
+      );
+      expect(channelMemory.readChannelMemory).toHaveBeenCalledWith({
+        channelName: 'test-chan',
+        chatId: 'chat1',
+        threadId: undefined,
+      });
+      expect(channelMemory.clearChannelMemory).toHaveBeenCalledWith({
+        channelName: 'test-chan',
+        chatId: 'chat1',
+        threadId: undefined,
+      });
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Channel memory updated.' },
+        { chatId: 'chat1', text: 'Use staging.' },
+        { chatId: 'chat1', text: 'Channel memory cleared.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('/help does not expose channel memory commands', async () => {
       const ch = createChannel();
 
       await ch.handleInbound(envelope({ text: '/help' }));
 
-      expect(ch.sent[0]!.text).toContain(
-        '/remember-channel <text> — Save memory for this chat',
-      );
-      expect(ch.sent[0]!.text).toContain(
-        '/channel-memory — Show memory for this chat',
-      );
-      expect(ch.sent[0]!.text).toContain(
-        '/forget-channel confirm — Clear memory for this chat',
-      );
+      expect(ch.sent[0]!.text).not.toContain('/remember-channel');
+      expect(ch.sent[0]!.text).not.toContain('/channel-memory');
+      expect(ch.sent[0]!.text).not.toContain('/forget-channel');
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
@@ -4512,7 +5898,7 @@ describe('ChannelBase', () => {
       await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
 
       await ch.handleInbound(
-        envelope({ text: '/remember-channel new memory', senderId: 'alice' }),
+        envelope({ text: '记住：new memory', senderId: 'alice' }),
       );
       await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
 
@@ -4640,7 +6026,7 @@ describe('ChannelBase', () => {
       expect(promptText).toContain('second');
     });
 
-    it('/remember-channel invalidates current session context after append', async () => {
+    it('natural remember invalidates current session context after append', async () => {
       let memory = 'old memory';
       let reads = 0;
       const channelMemory = {
@@ -4660,7 +6046,7 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(envelope({ text: 'first', senderId: 'alice' }));
       await ch.handleInbound(
-        envelope({ text: '/remember-channel new memory', senderId: 'alice' }),
+        envelope({ text: '记住：new memory', senderId: 'alice' }),
       );
       await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
 
@@ -4670,7 +6056,7 @@ describe('ChannelBase', () => {
       expect(latestPrompt).toContain('new memory');
     });
 
-    it('/forget-channel confirm invalidates current session context after clear', async () => {
+    it('natural clear confirm invalidates current session context after clear', async () => {
       let memory = 'old memory';
       let reads = 0;
       const channelMemory = {
@@ -4687,8 +6073,9 @@ describe('ChannelBase', () => {
       const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
 
       await ch.handleInbound(envelope({ text: 'first', senderId: 'alice' }));
+      await ch.handleInbound(envelope({ text: '清空记忆', senderId: 'alice' }));
       await ch.handleInbound(
-        envelope({ text: '/forget-channel confirm', senderId: 'alice' }),
+        envelope({ text: '确认清空记忆', senderId: 'alice' }),
       );
       await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
 
@@ -6011,12 +7398,18 @@ describe('ChannelBase', () => {
         collectBuffers: Map<string, unknown>;
       };
       maps.collectBuffers.set(sessionId, [
-        { text: 'buffered', envelope: envelope({ text: 'buffered' }) },
+        {
+          text: 'buffered',
+          envelope: envelope({ text: 'buffered', messageId: 'm-buffered' }),
+        },
       ]);
 
       await expect(ch.cancelPromptForTest(sessionId)).resolves.toBe(true);
 
       expect(maps.collectBuffers.has(sessionId)).toBe(false);
+      expect(ch.promptBufferDrops).toEqual([
+        { chatId: 'chat1', sessionId, messageIds: ['m-buffered'] },
+      ]);
       resolvePrompt('late');
       await prompt;
     });
@@ -6553,6 +7946,53 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('pairing code');
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
+
+    it('logs pairing-required preflight rejections', async () => {
+      const ch = createChannel({ senderPolicy: 'pairing', allowedUsers: [] });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ senderId: 'stranger' }));
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=sender_pairing_required',
+      );
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('treats pairing notification failures as preflight rejection', async () => {
+      class PairingFailureChannel extends TestChannel {
+        override async sendMessage(): Promise<void> {
+          throw new Error('send failed');
+        }
+      }
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new PairingFailureChannel(
+        'test',
+        defaultConfig({
+          senderPolicy: 'pairing',
+          allowedUsers: [],
+        }),
+        bridge,
+      );
+
+      await expect(
+        ch.handleInbound(envelope({ senderId: 'stranger' })),
+      ).resolves.toBeUndefined();
+
+      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('pairing notification failed'),
+      );
+      stderr.mockRestore();
+    });
   });
 
   describe('setBridge', () => {
@@ -6642,8 +8082,12 @@ describe('ChannelBase', () => {
       await new Promise((r) => setTimeout(r, 10));
 
       // Send two more messages while first is busy — these should buffer
-      const p2 = ch.handleInbound(envelope({ text: 'second' }));
-      const p3 = ch.handleInbound(envelope({ text: 'third' }));
+      const p2 = ch.handleInbound(
+        envelope({ text: 'second', messageId: 'msg-2' }),
+      );
+      const p3 = ch.handleInbound(
+        envelope({ text: 'third', messageId: 'msg-3' }),
+      );
 
       // p2 and p3 should resolve immediately (buffered, not queued)
       await p2;
@@ -6651,6 +8095,18 @@ describe('ChannelBase', () => {
 
       // First prompt is still running, bridge.prompt called only once
       expect(callCount).toBe(1);
+      expect(ch.promptBuffers).toEqual([
+        expect.objectContaining({
+          chatId: 'chat1',
+          messageId: 'msg-2',
+          bufferSize: 1,
+        }),
+        expect.objectContaining({
+          chatId: 'chat1',
+          messageId: 'msg-3',
+          bufferSize: 2,
+        }),
+      ]);
 
       // Resolve the first prompt
       resolveFirst('first response');
@@ -6675,6 +8131,48 @@ describe('ChannelBase', () => {
           expect.objectContaining({ text: 'coalesced response' }),
         ]),
       );
+    });
+
+    it('collect: does not preflight the coalesced followup again', async () => {
+      class CountingPreflightChannel extends TestChannel {
+        preflightTexts: string[] = [];
+
+        protected override preflightInbound(
+          message: Envelope,
+        ): boolean | Promise<boolean> {
+          this.preflightTexts.push(message.text);
+          return super.preflightInbound(message);
+        }
+      }
+
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((resolve) => {
+        resolveFirst = resolve;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        return Promise.resolve('coalesced response');
+      });
+
+      const ch = new CountingPreflightChannel(
+        'test-chan',
+        defaultConfig({ dispatchMode: 'collect' }),
+        bridge,
+      );
+
+      const first = ch.handleInbound(envelope({ text: 'first' }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      await ch.handleInbound(envelope({ text: 'second' }));
+      await ch.handleInbound(envelope({ text: 'third' }));
+
+      resolveFirst('first response');
+      await first;
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+      expect(ch.preflightTexts).toEqual(['first', 'second', 'third']);
     });
 
     it('collect: no followup if no messages buffered', async () => {
@@ -8233,7 +9731,7 @@ describe('ChannelBase', () => {
       expect(ch.promptEnds).toHaveLength(0);
     });
 
-    it('does not call hooks for buffered messages in collect mode', async () => {
+    it('does not call start or end hooks for buffered messages in collect mode', async () => {
       let resolveFirst!: (v: string) => void;
       const firstPrompt = new Promise<string>((r) => {
         resolveFirst = r;
@@ -8258,6 +9756,13 @@ describe('ChannelBase', () => {
       // Only one prompt start so far (for the first message)
       expect(ch.promptStarts).toHaveLength(1);
       expect(ch.promptStarts[0]!.messageId).toBe('msg-1');
+      expect(ch.promptBuffers).toEqual([
+        expect.objectContaining({
+          chatId: 'chat1',
+          messageId: 'msg-2',
+          bufferSize: 1,
+        }),
+      ]);
 
       resolveFirst('done');
       await p1;
@@ -9910,6 +11415,88 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('disables a stored DM job when dmPolicy=disabled', async () => {
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        { dmPolicy: 'disabled' },
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.runLoopPrompt({
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'user1',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'User 1',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        }),
+      ).rejects.toThrow('no longer authorized');
+
+      expect(disable).toHaveBeenCalledWith('job-1');
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('allows stored group job when dmPolicy=disabled', async () => {
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        { dmPolicy: 'disabled', groupPolicy: 'open' },
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'group-1',
+          isGroup: true,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+
+      expect(disable).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
     it('rejects stored threaded jobs unless the adapter supports the target', async () => {
       const ch = createChannel();
       ch.proactiveSupported = true;
@@ -9991,6 +11578,68 @@ describe('ChannelBase', () => {
         'while loop runs',
         expect.any(Object),
       );
+    });
+
+    it('does not preflight collected messages again after a loop prompt completes', async () => {
+      class CountingPreflightChannel extends TestChannel {
+        preflightTexts: string[] = [];
+
+        protected override preflightInbound(
+          message: Envelope,
+        ): boolean | Promise<boolean> {
+          this.preflightTexts.push(message.text);
+          return super.preflightInbound(message);
+        }
+      }
+
+      let resolveLoop: (value: string) => void = () => {};
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockImplementationOnce(
+          () =>
+            new Promise<string>((resolve) => {
+              resolveLoop = resolve;
+            }),
+        )
+        .mockResolvedValueOnce('follow-up response');
+      const ch = new CountingPreflightChannel(
+        'test-chan',
+        defaultConfig({ dispatchMode: 'collect' }),
+        bridge,
+      );
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await vi.waitFor(() => {
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      });
+
+      await ch.handleInbound(envelope({ text: 'while loop runs' }));
+      resolveLoop('loop response');
+      await loopRun;
+
+      await vi.waitFor(() => {
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      });
+      expect(ch.preflightTexts).toEqual(['while loop runs']);
     });
   });
 });

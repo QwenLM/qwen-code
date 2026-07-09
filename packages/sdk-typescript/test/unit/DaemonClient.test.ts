@@ -227,6 +227,38 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       await expect(client.capabilities()).resolves.toEqual(envelope);
     });
+
+    it('preserves multi-workspace capabilities metadata', async () => {
+      const envelope: DaemonCapabilities = {
+        v: 1,
+        mode: 'http-bridge',
+        features: ['health', 'capabilities', 'multi_workspace_sessions'],
+        limits: {
+          maxPendingPromptsPerSession: 5,
+          maxSessionsPerWorkspace: 20,
+          maxTotalSessions: null,
+        },
+        modelServices: [],
+        workspaceCwd: '/work/primary',
+        workspaces: [
+          {
+            id: 'primary-id',
+            cwd: '/work/primary',
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: 'secondary-id',
+            cwd: '/work/secondary',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      };
+      const { fetch } = recordingFetch(() => jsonResponse(200, envelope));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.capabilities()).resolves.toEqual(envelope);
+    });
   });
 
   describe('session artifacts', () => {
@@ -529,10 +561,22 @@ describe('DaemonClient', () => {
           },
         ],
       };
+      const preheat = {
+        ready: true,
+        channelLive: true,
+        durationMs: 12,
+      };
+      const acpStatus = { channelLive: true };
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/workspace/mcp')) return jsonResponse(200, mcp);
         if (req.url.endsWith('/workspace/skills')) {
           return jsonResponse(200, skills);
+        }
+        if (req.url.endsWith('/workspace/acp/preheat?timeoutMs=1234')) {
+          return jsonResponse(200, preheat);
+        }
+        if (req.url.endsWith('/workspace/acp/status')) {
+          return jsonResponse(200, acpStatus);
         }
         if (req.url.endsWith('/workspace/providers')) {
           return jsonResponse(200, providers);
@@ -543,12 +587,53 @@ describe('DaemonClient', () => {
 
       await expect(client.workspaceMcp()).resolves.toEqual(mcp);
       await expect(client.workspaceSkills()).resolves.toEqual(skills);
+      await expect(client.workspaceAcpPreheat(1234)).resolves.toEqual(preheat);
+      await expect(client.workspaceAcpStatus()).resolves.toEqual(acpStatus);
       await expect(client.workspaceProviders()).resolves.toEqual(providers);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/workspace/mcp'],
         ['GET', 'http://daemon/workspace/skills'],
+        ['POST', 'http://daemon/workspace/acp/preheat?timeoutMs=1234'],
+        ['GET', 'http://daemon/workspace/acp/status'],
         ['GET', 'http://daemon/workspace/providers'],
       ]);
+    });
+
+    it('lets ACP preheat wait longer than the client default timeout', async () => {
+      let resolveResponse: ((value: Response) => void) | undefined;
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveResponse = resolve;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1,
+      });
+
+      const inflight = client.workspaceAcpPreheat(50);
+      setTimeout(() => {
+        resolveResponse?.(
+          jsonResponse(200, {
+            ready: true,
+            channelLive: true,
+            durationMs: 5,
+          }),
+        );
+      }, 5);
+
+      await expect(inflight).resolves.toMatchObject({
+        ready: true,
+        channelLive: true,
+      });
     });
 
     it('GETs /workspace/preflight and returns the preflight envelope unchanged', async () => {
@@ -2932,6 +3017,52 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('reloadChannelWorker', () => {
+    it('POSTs /workspace/channel/reload with an empty body and returns the typed result', async () => {
+      const worker = {
+        enabled: true,
+        state: 'running',
+        channels: ['telegram'],
+        pid: 4321,
+        restartCount: 1,
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { reloaded: true, worker }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.reloadChannelWorker();
+      expect(result).toEqual({ reloaded: true, worker });
+      expect(calls[0]?.url).toBe('http://daemon/workspace/channel/reload');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.body).toBe('{}');
+    });
+
+    it('forwards the client id header', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          reloaded: true,
+          worker: { enabled: true, state: 'running', channels: [] },
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.reloadChannelWorker({ clientId: 'client-9' });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-9');
+    });
+
+    it('rejects on a non-2xx response (channels not enabled)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(409, {
+          error: 'no channel worker',
+          code: 'channel_worker_not_enabled',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.reloadChannelWorker()).rejects.toMatchObject({
+        status: 409,
+      });
+    });
+  });
+
   describe('restartMcpServer (#4175 Wave 4 PR 17)', () => {
     it('POSTs an empty body and returns the typed result on success', async () => {
       const { fetch, calls } = recordingFetch(() =>
@@ -3942,6 +4073,7 @@ describe('DaemonClient', () => {
           summary: 'forgot',
           removedEntries: [],
           touchedTopics: ['project' as const],
+          touchedScopes: ['project' as const],
         },
       };
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));

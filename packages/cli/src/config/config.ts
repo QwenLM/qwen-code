@@ -2055,6 +2055,12 @@ export async function loadCliConfig(
     showResponseTokensPerSecond:
       settings.ui?.showResponseTokensPerSecond === true,
     telemetry: telemetrySettings,
+    // Ordinary interactive TUI defers telemetry until after first paint. Auth
+    // events emitted before the deferred init are an accepted startup-latency
+    // tradeoff. This intentionally differs from IDE deferral: `qwen -i
+    // "prompt"` must await IDE context before auto-submit, but telemetry can
+    // still initialize after render unless an initial prompt is present.
+    deferTelemetryInitialization: interactive && !isAcpMode && !question,
     outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
@@ -2187,9 +2193,11 @@ export async function loadCliConfig(
       bareMode || safeMode
         ? false
         : (settings.memory?.autoSkillConfirm ?? true),
+    memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
     fastModel: settings.fastModel || undefined,
     visionModel: settings.visionModel || undefined,
     compactionModel: settings.compactionModel || undefined,
+    visionBridgeTimeoutMs: settings.visionBridgeTimeoutMs,
     modelFallbacks: resolveModelFallbacks(
       argv.fallbackModel,
       settings.modelFallbacks,

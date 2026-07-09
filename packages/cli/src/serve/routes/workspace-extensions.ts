@@ -131,10 +131,11 @@ export function registerWorkspaceExtensionRoutes(
     req: Request,
     res: Response,
     route: string,
+    opts: { requireClientId?: boolean } = {},
   ): boolean => {
     const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
     if (clientId === null) return false;
-    if (clientId === undefined) {
+    if (clientId === undefined && opts.requireClientId !== false) {
       res.status(400).json({
         error: 'Missing X-Qwen-Client-Id header',
         code: 'missing_client_id',
@@ -349,6 +350,7 @@ export function registerWorkspaceExtensionRoutes(
           `extension ${operation}`,
         );
         extensionsStatusCache = undefined;
+        workspace.invalidateWorkspaceSkillsStatus();
         try {
           const result = await bridge.refreshExtensionsForAllSessions(event);
           updateExtensionOperation(operationId, {
@@ -762,6 +764,7 @@ export function registerWorkspaceExtensionRoutes(
             'extension refresh',
           ),
         );
+        extensionsStatusCache = undefined;
         res.status(200).json(result);
       } catch (err) {
         if (isExtensionQueueFullError(err)) {
@@ -785,6 +788,7 @@ export function registerWorkspaceExtensionRoutes(
             req,
             res,
             'POST /workspace/extensions/:name/enable',
+            { requireClientId: false },
           )
         ) {
           return;
@@ -831,6 +835,7 @@ export function registerWorkspaceExtensionRoutes(
             req,
             res,
             'POST /workspace/extensions/:name/disable',
+            { requireClientId: false },
           )
         ) {
           return;

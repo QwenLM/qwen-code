@@ -96,9 +96,12 @@ describe('StreamingStatus loading phrases', () => {
   it('hides the phrase but keeps the dynamic status when showPhrase is false', () => {
     pinPhraseSelection();
     // A resolver that would otherwise supply a phrase must still be suppressed.
-    const container = render({ loadingPhrases: () => ['should not appear'] }, {
-      showPhrase: false,
-    });
+    const container = render(
+      { loadingPhrases: () => ['should not appear'] },
+      {
+        showPhrase: false,
+      },
+    );
     // The witty phrase (the "废话文学") is gone: no label span.
     expect(labelText(container)).toBeUndefined();
     expect(container.textContent).not.toContain('should not appear');

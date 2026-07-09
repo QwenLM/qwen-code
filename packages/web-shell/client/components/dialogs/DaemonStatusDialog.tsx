@@ -220,7 +220,7 @@ function WorkspaceSectionRow({
         <div className={styles.workspaceSummary}>
           {summaryEntries.map(([key, value]) => (
             <span key={key} className={styles.summaryChip}>
-              {key}: {value === null ? 'N/A' : String(value)}
+              {key}: {value === null ? t('common.na') : String(value)}
             </span>
           ))}
         </div>

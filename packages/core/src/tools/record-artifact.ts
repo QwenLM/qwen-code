@@ -360,14 +360,18 @@ function validateWorkspacePath(value: string): string | null {
   if (stringError) {
     return stringError;
   }
-  if (path.isAbsolute(trimmed)) {
+  if (
+    path.isAbsolute(trimmed) ||
+    path.win32.isAbsolute(trimmed) ||
+    /^[A-Za-z]:/.test(trimmed)
+  ) {
     return '"workspacePath" must be relative to the workspace';
   }
-  const normalized = path.normalize(trimmed);
+  const portableNormalized = path.posix.normalize(trimmed.replace(/\\/g, '/'));
   if (
-    normalized === '..' ||
-    normalized.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(normalized)
+    portableNormalized === '..' ||
+    portableNormalized.startsWith('../') ||
+    path.posix.isAbsolute(portableNormalized)
   ) {
     return '"workspacePath" must stay inside the workspace';
   }
