@@ -1063,8 +1063,13 @@ export class SessionArtifactStore {
       .filter((artifact) => artifact.retention !== 'ephemeral')
       .sort((a, b) => a.insertSeq - b.insertSeq)
       .map((artifact) => toPersistedArtifact(artifact, recordedAt));
-    const stickyEphemeralIds = Array.from(this.stickyEphemeralIds);
-    const markerArtifacts = this.buildMarkerArtifacts(recordedAt);
+    const stickyEphemeralIds = Array.from(this.stickyEphemeralIds).filter(
+      (id) => this.artifacts.has(id) || this.markerArtifacts.has(id),
+    );
+    const markerArtifacts = this.buildMarkerArtifacts(
+      recordedAt,
+      stickyEphemeralIds,
+    );
     return {
       v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
       sessionId: this.sessionId,
@@ -1077,8 +1082,11 @@ export class SessionArtifactStore {
     };
   }
 
-  private buildMarkerArtifacts(recordedAt: string): PersistedSessionArtifact[] {
-    const markerIds = [...this.tombstonedIds, ...this.stickyEphemeralIds];
+  private buildMarkerArtifacts(
+    recordedAt: string,
+    stickyEphemeralIds: string[],
+  ): PersistedSessionArtifact[] {
+    const markerIds = [...this.tombstonedIds, ...stickyEphemeralIds];
     const artifacts: PersistedSessionArtifact[] = [];
     const seen = new Set<string>();
     for (const id of markerIds) {

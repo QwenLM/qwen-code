@@ -3424,11 +3424,11 @@ describe('SessionArtifactStore', () => {
     }
 
     expect(snapshots).toHaveLength(1);
-    expect(snapshots[0]?.stickyEphemeralIds).toContain(stickyId);
+    expect(snapshots[0]?.stickyEphemeralIds).not.toContain(stickyId);
     expect(snapshots[0]?.markerArtifacts).toBeUndefined();
   });
 
-  it('keeps restored sticky markers after live eviction removes an artifact', async () => {
+  it('omits orphaned sticky markers after live eviction removes an artifact', async () => {
     const sourceEvents: SessionArtifactEventRecordPayload[] = [];
     const source = new SessionArtifactStore({
       sessionId: 's11-eviction-sticky',
@@ -3480,7 +3480,8 @@ describe('SessionArtifactStore', () => {
     }
 
     expect(snapshots).toHaveLength(1);
-    expect(snapshots[0]?.stickyEphemeralIds).toContain(evictedArtifact.id);
+    expect(snapshots[0]?.stickyEphemeralIds).not.toContain(evictedArtifact.id);
+    expect(snapshots[0]?.markerArtifacts).toBeUndefined();
   });
 
   it('applies sticky ephemeral markers while restoring durable artifacts', async () => {
