@@ -3035,6 +3035,104 @@ describe('createServeApp', () => {
       }
     });
 
+    it('rejects workspace ACP preheat timeouts above the route cap', async () => {
+      const bridge = fakeBridge();
+      const opts = { ...baseOpts, workspace: WS_BOUND, token: 'secret' };
+      const app = createServeApp(opts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/workspace/acp/preheat?timeoutMs=60001')
+        .set('Host', `127.0.0.1:${opts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_timeout',
+        error: '`timeoutMs` must be a positive integer no greater than 60000',
+      });
+    });
+
+    it('returns workspace ACP preheat status without a timeout override', async () => {
+      const bridge = fakeBridge();
+      const opts = { ...baseOpts, workspace: WS_BOUND, token: 'secret' };
+      const app = createServeApp(opts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/workspace/acp/preheat')
+        .set('Host', `127.0.0.1:${opts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        ready: false,
+        channelLive: false,
+      });
+      expect(typeof res.body.durationMs).toBe('number');
+    });
+
+    it('returns workspace ACP preheat status with a valid timeout override', async () => {
+      const bridge = fakeBridge();
+      const opts = { ...baseOpts, workspace: WS_BOUND, token: 'secret' };
+      const app = createServeApp(opts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/workspace/acp/preheat?timeoutMs=5000')
+        .set('Host', `127.0.0.1:${opts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        ready: false,
+        channelLive: false,
+      });
+      expect(typeof res.body.durationMs).toBe('number');
+    });
+
+    it('allows loopback mutation auth before preheating the ACP child', async () => {
+      const preheatAcpChild = vi.fn().mockResolvedValue({
+        ready: true,
+        channelLive: true,
+        durationMs: 0,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge: fakeBridge(),
+          workspace: {
+            preheatAcpChild,
+          } as unknown as DaemonWorkspaceService,
+        },
+      );
+
+      const res = await request(app)
+        .post('/workspace/acp/preheat')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        ready: true,
+        channelLive: true,
+      });
+      expect(preheatAcpChild).toHaveBeenCalledOnce();
+    });
+
+    it('returns workspace ACP channel status', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/workspace/acp/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ channelLive: false });
+    });
+
     it('returns workspace tools status from the bridge', async () => {
       const tools: ServeWorkspaceToolsStatus = {
         v: 1,
@@ -4487,6 +4585,44 @@ describe('createServeApp', () => {
         expect(
           vi.mocked(ExtensionManager.prototype.disableExtension),
         ).toHaveBeenCalledWith('test-ext', expect.anything(), WS_BOUND);
+      } finally {
+        restore();
+      }
+    });
+
+    it('queues extension enable and disable without a workspace client id', async () => {
+      const restore = mockExtensionManagerMethods();
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const enable = await request(app)
+          .post('/workspace/extensions/TEST-EXT/enable')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ scope: 'workspace' });
+        expect(enable.status).toBe(202);
+
+        const disable = await request(app)
+          .post('/workspace/extensions/TEST-EXT/disable')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ scope: 'user' });
+        expect(disable.status).toBe(202);
+
+        await vi.waitFor(() => {
+          expect(
+            vi.mocked(ExtensionManager.prototype.enableExtension),
+          ).toHaveBeenCalledWith('test-ext', expect.anything(), WS_BOUND);
+          expect(
+            vi.mocked(ExtensionManager.prototype.disableExtension),
+          ).toHaveBeenCalledWith('test-ext', expect.anything(), WS_BOUND);
+        });
       } finally {
         restore();
       }

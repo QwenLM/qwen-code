@@ -488,6 +488,8 @@ export type {
   DaemonWorkspaceMemoryTaskStatus,
   DaemonWorkspaceMemoryTopic,
   DaemonWorkspacePreflightStatus,
+  DaemonWorkspaceAcpStatusResult,
+  DaemonWorkspaceAcpPreheatResult,
   DaemonWorkspaceProviderCurrent,
   DaemonWorkspaceProviderModel,
   DaemonWorkspaceProviderStatus,

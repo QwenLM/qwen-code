@@ -109,8 +109,8 @@ Later or primary-only routes:
 
 - Keep scan misses as `404 session_not_found`; never fall back to primary.
 - Fail closed if more than one runtime reports the same live session id.
-- Keep non-primary session listing live-only unless persisted entries are
-  explicitly marked non-resumable.
+- Keep non-primary persisted session listing gated until restore ownership,
+  trust checks, and active-session discovery are implemented together.
 - Reuse PR 1 runtime-local env overlays before non-primary child spawn.
 - Reuse PR 1 `maxTotalSessions` admission at every future fresh-creation seam
   so REST and primary `/acp` cannot bypass it, while attach still bypasses
@@ -233,10 +233,24 @@ not part of the sessions-only closed loop.
 `GET /workspaces/:workspace/sessions` is a plural alias for
 `GET /workspace/:id/sessions`. Both resolve exact workspace id first and exact
 canonical cwd second. Primary workspaces keep persisted/live merge semantics.
-Non-primary workspaces stay live-only and continue rejecting archived or
+Phase 2b PR 1 kept non-primary workspaces live-only and rejecting archived or
 organized list views.
 
-Phase 2b PR 1 does not add new capability tags, does not alter the
+## Phase 2b PR 2 Persisted Session Discovery
+
+Trusted non-primary workspace session listing now includes active persisted
+sessions from that workspace's session store and merges matching live summaries
+without duplicates. This completes the discovery side of the Phase 2b restore
+flow: clients can list a trusted secondary workspace, find an active persisted
+session, and then call workspace-aware `POST /session/:id/load` or
+`POST /session/:id/resume` from Phase 2b PR 1.
+
+If a trusted non-primary workspace has no active persisted sessions, listing
+keeps the previous live-only cursor behavior. Archived, organized, and grouped
+non-primary list views remain rejected because archive/unarchive/delete and
+session organization surfaces are still primary-only/later-phase work.
+
+The Phase 2b work so far does not add new capability tags, does not alter the
 `/capabilities` schema, does not change SDK types, and does not route ACP,
 voice, channel-worker, file, memory, MCP, settings, branch/fork/cd/rewind,
 shell/model/language, export, archive, delete, or organization surfaces to

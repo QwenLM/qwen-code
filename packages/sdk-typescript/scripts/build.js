@@ -46,7 +46,10 @@ const rootDir = join(__dirname, '..');
 // Bumped from 138KB to 139KB for EventBus byte-backlog telemetry validation.
 // Bumped from 139KB to 140KB for history_truncated event validation and
 // transcript status projection.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 140 * 1024;
+// Bumped from 138KB to 139KB for workspace ACP status/preheat APIs.
+// Bumped from 139KB to 141KB after merging main (ACP status/preheat) into
+// the history_truncated/transcript-status branch.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 141 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't
