@@ -706,7 +706,12 @@ function SlashCommandPanel({
   } as CSSProperties;
 
   return createPortal(
-    <div ref={panelRef} className={styles.slashPortalLayer} style={themeVars}>
+    <div
+      ref={panelRef}
+      className={styles.slashPortalLayer}
+      style={themeVars}
+      data-web-shell-slash-menu
+    >
       <div
         className={styles.slashPanel}
         style={positionedPanelStyle}
@@ -1319,10 +1324,11 @@ export const ChatEditor = memo(
     const showCancelButton = isRunning && !core.hasContent;
 
     return (
-      <div className={styles.editorShell} data-composer>
+      <div className={styles.editorShell} data-composer data-web-shell-composer>
         <div
           ref={containerRef}
           className={styles.container}
+          data-web-shell-composer-surface
           data-dac-glow
           onClick={() => {
             setModeDropdownOpen(false);
@@ -1520,7 +1526,7 @@ export const ChatEditor = memo(
                   !
                 </span>
               )}
-              <div ref={core.containerRef} />
+              <div ref={core.containerRef} data-web-shell-composer-editor />
             </div>
             <div className={styles.toolbar}>
               <div className={styles.toolbarLeading}>
@@ -1549,6 +1555,7 @@ export const ChatEditor = memo(
                       <button
                         ref={modeBtnRef}
                         className={styles.toolBtn}
+                        data-web-shell-mode-button
                         onClick={(e) => {
                           e.stopPropagation();
                           core.closeSlashMenu();
@@ -1584,6 +1591,7 @@ export const ChatEditor = memo(
                       <button
                         ref={modelBtnRef}
                         className={styles.toolBtn}
+                        data-web-shell-model-button
                         onClick={(e) => {
                           e.stopPropagation();
                           core.closeSlashMenu();
@@ -1709,6 +1717,7 @@ export const ChatEditor = memo(
                         ? !onCancel
                         : core.disabled || !core.hasContent
                   }
+                  data-web-shell-composer-submit
                   onClick={(e) => {
                     e.stopPropagation();
                     if (isPreparing) {
