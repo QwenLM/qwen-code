@@ -2,17 +2,23 @@
 
 ## Summary
 
-This document records the Phase 2a contract for issue #6378 after the Phase 1
-`WorkspaceRegistry` PR and the Phase 2a foundation PR. Phase 2a is now split
-into two implementation PRs: PR 1 landed env isolation and total-admission
-guardrails while multi-workspace remained gated; PR 2 wires non-primary live
-session dispatch and publishes the additive capabilities/status schema.
+This document records the multi-workspace sessions contract for issue #6378
+after the Phase 1 `WorkspaceRegistry` PR, the Phase 2a foundation PR, and the
+first Phase 2b route-expansion PR. Phase 2a was split into two implementation
+PRs: PR 1 landed env isolation and total-admission guardrails while
+multi-workspace remained gated; PR 2 wired non-primary live session dispatch
+and published the additive capabilities/status schema. Phase 2b PR 1 adds a
+session owner index and expands the sessions-only route surface without moving
+file, memory, MCP, settings, voice, channel workers, ACP, or SDK workspace
+clients.
 
-Phase 2a remains sessions-only. It does not add plural routes, a
-`WorkspaceDaemonClient`, workspace-qualified ACP/WebSocket, file, memory, MCP,
-settings, voice, or channel-worker migration. PR 1 does not add capabilities
-`workspaces[]`, `multi_workspace_sessions`, route dispatch, or non-primary
-runtime construction.
+The multi-workspace work remains sessions-only. Phase 2a did not add plural
+routes, a `WorkspaceDaemonClient`, workspace-qualified ACP/WebSocket, file,
+memory, MCP, settings, voice, or channel-worker migration. Phase 2b PR 1 adds
+only the plural session-list alias described below; it still does not add
+workspace client APIs or migrate non-session surfaces. PR 1 did not add
+capabilities `workspaces[]`, `multi_workspace_sessions`, route dispatch, or
+non-primary runtime construction.
 
 ## Foundation Contract
 
@@ -74,10 +80,21 @@ Phase 2a-dispatched routes:
 - `DELETE /session/:id`
 - `GET /session/:id/status`
 
+Phase 2b-dispatched additions:
+
+- `POST /session/:id/load`
+- `POST /session/:id/resume`
+- `GET /session/:id/context`
+- `GET /session/:id/context-usage`
+- `GET /session/:id/stats`
+- `GET /session/:id/supported-commands`
+- `GET /session/:id/tasks`
+- `GET /session/:id/lsp`
+- `GET /session/:id/hooks`
+- `GET /session/:id/artifacts`
+
 Later or primary-only routes:
 
-- non-primary `POST /session/:id/load`
-- non-primary `POST /session/:id/resume`
 - `GET /session/:id/export`
 - `POST /sessions/delete`
 - `POST /sessions/archive`
@@ -87,9 +104,6 @@ Later or primary-only routes:
 - branch, fork, cd, rewind, shell, model, and language session mutations
 - non-session `POST /permission/:requestId`
 - `/acp`
-
-Additional live read routes may be owner-routed in a later Phase 2a slice only
-after tests prove they depend solely on the owning live bridge.
 
 ## Phase 2a Cross-PR Requirements
 
@@ -187,6 +201,46 @@ Phase 2a PR 2 does not add plural routes, workspace-qualified ACP/WebSocket,
 file/memory/MCP/settings/voice/channel-worker migration, dynamic add/remove,
 non-primary persisted load/resume/export/archive/delete, branch/fork/cd/rewind,
 shell/model/language migration, or SDK workspace client APIs.
+
+## Phase 2b PR 1 Owner Index And Restore Expansion
+
+Phase 2b PR 1 adds a bridge lifecycle callback seam and a
+`WorkspaceSessionOwnerIndex` owned by `WorkspaceRegistry`. Bridge
+register/remove lifecycle events update the index on spawn, load/resume,
+channel exit, close, kill, and daemon shutdown. Owner resolution consults the
+index first, verifies the indexed runtime with `getSessionSummary`, drops stale
+index entries, and falls back to the existing live bridge scan. Fallback hits
+are cached back into the index. The index remains an optimization and
+consistency seam, not a persisted ownership database.
+
+`POST /session/:id/load` and `POST /session/:id/resume` now accept explicit
+`cwd` for any trusted registered workspace. Omitted `cwd` still resolves to the
+primary runtime. Unknown `cwd` returns `400 workspace_mismatch`; untrusted
+non-primary `cwd` returns `403 untrusted_workspace`; if the same session id is
+already live or being restored in another runtime, restore fails closed with
+`409 session_workspace_conflict`. Same-workspace restore races keep the
+bridge's existing coalescing and `restore_in_progress` behavior. Restore still
+reads persisted session storage from the requested workspace's existing storage
+path and does not enable non-primary export/archive/delete.
+
+The owner-routed read-only live routes now use the owning runtime bridge:
+context, context-usage, stats, supported-commands, tasks, lsp, hooks, and
+artifacts. These routes do not mutate persisted storage and do not require
+ACP/WebSocket connection-local state, so they can safely follow the live owner.
+`GET /session/:id/rewind/snapshots` remains primary-only because rewind state is
+not part of the sessions-only closed loop.
+
+`GET /workspaces/:workspace/sessions` is a plural alias for
+`GET /workspace/:id/sessions`. Both resolve exact workspace id first and exact
+canonical cwd second. Primary workspaces keep persisted/live merge semantics.
+Non-primary workspaces stay live-only and continue rejecting archived or
+organized list views.
+
+Phase 2b PR 1 does not add new capability tags, does not alter the
+`/capabilities` schema, does not change SDK types, and does not route ACP,
+voice, channel-worker, file, memory, MCP, settings, branch/fork/cd/rewind,
+shell/model/language, export, archive, delete, or organization surfaces to
+non-primary runtimes.
 
 ## Audit Decisions
 

@@ -2349,6 +2349,8 @@ export default {
   '中国 (China) - 阿里云百炼': '中国 - 阿里云百炼',
   '阿里云百炼 (aliyun.com)': '阿里云百炼（aliyun.com）',
   'No compression needed.': '无需压缩。',
+  '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
+    '⚠️ 历史记录缺口：此处之前的会话记录已丢失（存储中断），且无法找回。',
 
   // ============================================================================
   // reload-plugins 命令

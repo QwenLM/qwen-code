@@ -102,6 +102,7 @@ function makeChannel(overrides: Record<string, unknown> = {}): QQChannelClass {
       sessionScope: 'user' as const,
       cwd: '/tmp',
       groupPolicy: 'disabled' as const,
+      dmPolicy: 'open',
       groups: {},
       appID: 'test-app-id',
       appSecret: 'test-secret',

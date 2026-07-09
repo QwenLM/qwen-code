@@ -231,6 +231,66 @@ describe('extension tests', () => {
       ]);
     });
 
+    it('should not reuse a dirty tempDir when falling back from GitHub release to git clone', async () => {
+      // Regression for #6334: downloadFromGitHubRelease can dirty tempDir
+      // (partial archive download / extraction) before failing. The fallback
+      // git clone must receive a clean directory, or `git clone` errors with
+      // "destination path '.' already exists and is not an empty directory".
+      vi.spyOn(ExtensionStorage, 'createTmpDir').mockImplementation(async () =>
+        fs.mkdtempSync(path.join(tempHomeDir, 'tracked-extension-')),
+      );
+      const { downloadFromGitHubRelease } = await import('./github.js');
+      const downloadMock = vi.mocked(downloadFromGitHubRelease);
+      downloadMock.mockImplementation(
+        async (_meta: ExtensionInstallMetadata, destination: string) => {
+          // Simulate a partial download that dirties tempDir before failing.
+          fs.mkdirSync(destination, { recursive: true });
+          fs.writeFileSync(path.join(destination, 'partial.tar.gz'), 'partial');
+          throw new Error('Mocked GitHub release download failure');
+        },
+      );
+
+      let cloneRanOnCleanDir = false;
+      mockGit.clone.mockImplementation(
+        async (_url: string, _target: string) => {
+          // cloneFromGit runs `git clone <url> ./` inside the tempDir it passed to
+          // simpleGit(). Real git fails on a non-empty directory; mirror that so
+          // the test fails (with the bug) if tempDir is not cleaned up first.
+          const dir = mockGit.path();
+          const isEmpty = fs.readdirSync(dir).length === 0;
+          cloneRanOnCleanDir = isEmpty;
+          if (!isEmpty) {
+            throw new Error(
+              "destination path '.' already exists and is not an empty directory.",
+            );
+          }
+          writeExtractedExtension(dir, 'git-extension');
+          return undefined;
+        },
+      );
+      mockGit.getRemotes.mockResolvedValue([{ name: 'origin' }]);
+      mockGit.fetch.mockResolvedValue(undefined);
+      mockGit.checkout.mockResolvedValue(undefined);
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          source: 'https://github.com/owner/repo',
+          type: 'git',
+        },
+        async () => {},
+      );
+
+      expect(downloadMock).toHaveBeenCalled();
+      // The fallback clone must run on a clean tempDir; without the cleanup it
+      // would throw "destination path '.' already exists and is not an empty
+      // directory" and installExtension would reject before reaching here.
+      expect(cloneRanOnCleanDir).toBe(true);
+      expect(extension.name).toBe('git-extension');
+    });
+
     it('should clean up converted temp dir for local archive installs', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'gemini-extension.zip');
       fs.writeFileSync(archivePath, 'not used by mocked extractor');

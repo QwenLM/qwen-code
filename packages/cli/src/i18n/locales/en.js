@@ -2554,6 +2554,8 @@ export default {
   reqs: 'reqs',
   in: 'in',
   out: 'out',
+  '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
+    '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.',
 
   // ============================================================================
   // reload-plugins command
