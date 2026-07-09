@@ -34,6 +34,7 @@ import {
   getThoughtSummary,
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
+import { TopLevelProtocolTagStreamFilter } from '../utils/protocol-tag-sanitizer.js';
 import type { LoopType } from '../telemetry/types.js';
 import type { ActiveGoal } from '../goals/activeGoalStore.js';
 import { getProviderToolCallId } from './toolCallIdUtils.js';
@@ -461,6 +462,7 @@ export class Turn {
         },
         this.prompt_id,
       );
+      const protocolTagFilter = new TopLevelProtocolTagStreamFilter();
 
       for await (const streamEvent of responseStream) {
         if (signal?.aborted) {
@@ -474,6 +476,7 @@ export class Turn {
           this.pendingToolCalls.length = 0;
           this.pendingCitations.clear();
           this.finishReason = undefined;
+          protocolTagFilter.reset();
           yield {
             type: GeminiEventType.Retry,
             retryInfo: streamEvent.retryInfo,
@@ -491,6 +494,7 @@ export class Turn {
           this.pendingCitations.clear();
           this.finishReason = undefined;
           this.currentResponseId = undefined;
+          protocolTagFilter.reset();
           yield {
             type: GeminiEventType.ModelFallback,
             fromModel: streamEvent.info.fromModel,
@@ -533,7 +537,10 @@ export class Turn {
 
         const text = getResponseText(resp);
         if (text) {
-          yield { type: GeminiEventType.Content, value: text };
+          const visibleText = protocolTagFilter.accept(text);
+          if (visibleText) {
+            yield { type: GeminiEventType.Content, value: visibleText };
+          }
         }
 
         // Handle function calls (requesting tool execution)
@@ -554,6 +561,11 @@ export class Turn {
 
         // This is the key change: Only yield 'Finished' if there is a finishReason.
         if (finishReason) {
+          const bufferedText = protocolTagFilter.flush();
+          if (bufferedText) {
+            yield { type: GeminiEventType.Content, value: bufferedText };
+          }
+
           // Mark pending tool calls so downstream can distinguish
           // truncation from real parameter errors.
           if (finishReason === FinishReason.MAX_TOKENS) {
@@ -579,6 +591,10 @@ export class Turn {
             },
           };
         }
+      }
+      const bufferedText = protocolTagFilter.flush();
+      if (bufferedText) {
+        yield { type: GeminiEventType.Content, value: bufferedText };
       }
     } catch (e) {
       if (signal.aborted) {

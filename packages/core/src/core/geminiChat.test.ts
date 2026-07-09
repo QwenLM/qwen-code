@@ -739,6 +739,60 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('stores top-level analysis/summary protocol responses as visible summary text only', async () => {
+      const protocolWrappedStream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ text: '<analysis>scratch' }],
+              },
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ text: '</analysis><summary>visible' }],
+              },
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ text: ' answer</summary>' }],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        protocolWrappedStream,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test message' },
+        'prompt-id-protocol-wrapper',
+      );
+      for await (const _ of stream) {
+        // Consume the stream to trigger history recording.
+      }
+
+      const history = chat.getHistory();
+      const modelTurn = history[1]!;
+      expect(modelTurn.role).toBe('model');
+      expect(modelTurn.parts).toEqual([{ text: 'visible answer' }]);
+    });
+
     it('synthesizes a functionResponse for a dangling tool_use before sending', async () => {
       // End-to-end: when sendMessageStream is invoked on a chat whose
       // history carries a dangling `model[functionCall]` (typical state
@@ -1525,7 +1579,6 @@ describe('GeminiChat', async () => {
       vi.mocked(mockConfig.getChatCompression).mockReturnValue({
         maxRecentImagesToRetain: 1,
         imagePayloadThreshold: 1,
-
       });
       chat.setHistory([
         {
@@ -1544,7 +1597,6 @@ describe('GeminiChat', async () => {
           role: 'model',
           parts: [{ text: 'I see the second image' }],
         },
-
       ]);
       const response = (async function* () {
         yield {
@@ -8063,7 +8115,6 @@ describe('GeminiChat', async () => {
       vi.mocked(mockConfig.getChatCompression).mockReturnValue({
         maxRecentImagesToRetain: 0,
         imagePayloadThreshold: 1,
-
       });
       const streams = [
         makeStream([makeChunk([{ text: 'initial' }], 'MAX_TOKENS')]),
@@ -8139,7 +8190,6 @@ describe('GeminiChat', async () => {
         .join('');
       expect(text).toBe('Hello ending.');
     });
-
 
     it('should coalesce overlapping recovery continuation text', async () => {
       const streams = [

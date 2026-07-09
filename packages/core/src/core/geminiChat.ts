@@ -73,7 +73,6 @@ import {
   buildReattachParts,
   countAllInlineImages,
   replaceImagePayloadsInPlace,
-
 } from '../services/image-payload-references.js';
 import {
   estimateContentTokens,
@@ -101,6 +100,10 @@ import {
   collectToolCallIdsFromHistory,
   normalizeModelToolCallIds,
 } from './toolCallIdUtils.js';
+import {
+  startsWithAnalysisSummaryProtocolTag,
+  stripAnalysisSummaryProtocolTags,
+} from '../utils/protocol-tag-sanitizer.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
@@ -1576,7 +1579,6 @@ export class GeminiChat {
       return requestHistory;
     }
     return curatedHistory.map(copyContentContainer);
-
   }
 
   /**
@@ -3533,11 +3535,24 @@ export class GeminiChat {
       }
     }
 
-    const contentText = consolidatedHistoryParts
+    const rawContentText = consolidatedHistoryParts
       .filter((part) => part.text)
       .map((part) => part.text)
       .join('')
       .trim();
+    const shouldSanitizeProtocolText =
+      !hasToolCall &&
+      consolidatedHistoryParts.length > 0 &&
+      consolidatedHistoryParts.every(isValidNonThoughtTextPart) &&
+      startsWithAnalysisSummaryProtocolTag(rawContentText);
+    const contentText = shouldSanitizeProtocolText
+      ? stripAnalysisSummaryProtocolTags(rawContentText)
+      : rawContentText;
+    const persistentHistoryParts: Part[] = shouldSanitizeProtocolText
+      ? contentText
+        ? [{ text: contentText }]
+        : []
+      : consolidatedHistoryParts;
 
     // Record assistant turn with raw Content and metadata. Gate matches
     // the in-memory `this.history.push` decision below so chat-recording
@@ -3622,7 +3637,7 @@ export class GeminiChat {
           role: 'model',
           parts: [
             ...(thoughtContentPart ? [thoughtContentPart] : []),
-            ...consolidatedHistoryParts,
+            ...persistentHistoryParts,
           ],
         });
         // Track the pushed turn so the outer sendMessageStream retry loop
@@ -3686,7 +3701,7 @@ export class GeminiChat {
       role: 'model',
       parts: [
         ...(thoughtContentPart ? [thoughtContentPart] : []),
-        ...consolidatedHistoryParts,
+        ...persistentHistoryParts,
       ],
     });
   }

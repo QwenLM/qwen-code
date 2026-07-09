@@ -23,6 +23,7 @@ import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 import { escapeXml } from '../utils/xml.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { stripAnalysisSummaryProtocolTags } from '../utils/protocol-tag-sanitizer.js';
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5;
 
@@ -532,8 +533,12 @@ export function stripAnalysisBlock(rawSummary: string): string {
   return result.trim();
 }
 
+export function stripCompressionProtocolTags(rawSummary: string): string {
+  return stripAnalysisSummaryProtocolTags(rawSummary);
+}
+
 export function postProcessSummary(rawSummary: string): string {
-  const stripped = stripAnalysisBlock(rawSummary);
+  const stripped = stripCompressionProtocolTags(rawSummary);
   // Defensive sentinel only. Callers gate on `isSummaryEmpty`, which now
   // checks the STRIPPED summary — so a response that strips to nothing is
   // treated as an empty summary upstream (COMPRESSION_FAILED_EMPTY_SUMMARY)

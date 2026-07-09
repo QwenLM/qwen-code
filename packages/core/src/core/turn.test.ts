@@ -182,6 +182,63 @@ describe('Turn', () => {
       ]);
     });
 
+    it('buffers and unwraps top-level analysis/summary protocol text before emitting content', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              { content: { parts: [{ text: '<analysis>scratch' }] } },
+            ],
+          } as GenerateContentResponse,
+        };
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: '</analysis><summary>visible' }],
+                },
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: { parts: [{ text: ' answer</summary>' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        { type: GeminiEventType.Content, value: 'visible answer' },
+        {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: 'STOP',
+            usageMetadata: undefined,
+          },
+        },
+      ]);
+    });
+
     it('should emit Thought events when a thought part is present', async () => {
       const mockResponseStream = (async function* () {
         yield {
