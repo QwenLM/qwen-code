@@ -2942,7 +2942,9 @@ describe('runQwenServe runtime startup failures', () => {
         '[webhook-secret] failed to read deferred webhook secret for dingtalk-main/github\\nci:',
       );
       expect(stderrWrites.join('')).not.toContain('github\nci');
-      expect(stderrWrites.join('')).toContain('QWEN_MISSING_WEBHOOK_SECRET');
+      expect(stderrWrites.join('')).toContain(
+        'webhooks.sources.github\\nci.secretEnv',
+      );
     } finally {
       await handle.close();
       fs.rmSync(tempHome, { recursive: true, force: true });
