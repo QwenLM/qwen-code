@@ -2841,7 +2841,9 @@ describe('SessionArtifactStore', () => {
       ]),
     ).resolves.toMatchObject({
       changes: [],
-      warnings: ['artifact retention change not persisted; live artifact kept'],
+      warnings: [
+        'artifact durable removal not persisted; live changes rolled back',
+      ],
     });
 
     await expect(store.list()).resolves.toMatchObject({
@@ -2849,6 +2851,59 @@ describe('SessionArtifactStore', () => {
         expect.objectContaining({
           id: artifactId,
           retention: 'restorable',
+        }),
+      ],
+    });
+  });
+
+  it('rolls back identity-changing ephemeral replacements when tombstone persistence fails', async () => {
+    let failWrites = false;
+    const store = new SessionArtifactStore({
+      sessionId: 's11-ephemeral-replacement-failure',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          if (failWrites) {
+            throw new Error('disk full');
+          }
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const url = 'https://example.com/replaced-with-ephemeral';
+    const created = await store.upsertMany([{ title: 'Durable', url }], {
+      strict: true,
+    });
+    const durableId = created.changes[0]!.artifactId;
+
+    failWrites = true;
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Ephemeral published replacement',
+            storage: 'published',
+            managedId: 'published-replacement',
+            url,
+            retention: 'ephemeral',
+          },
+        ],
+        { trustedPublisher: true },
+      ),
+    ).resolves.toMatchObject({
+      changes: [],
+      warnings: [
+        'artifact durable removal not persisted; live changes rolled back',
+      ],
+    });
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          id: durableId,
+          storage: 'external_url',
+          retention: 'restorable',
+          title: 'Durable',
         }),
       ],
     });

@@ -439,7 +439,7 @@ export class SessionArtifactStore {
               .filter(shouldCommitBeforeDurablePersistence)
               .map((change) => change.artifactId);
             const warning =
-              'artifact retention change not persisted; live artifact kept';
+              'artifact durable removal not persisted; live changes rolled back';
             return {
               v: 1,
               sessionId: this.sessionId,
@@ -2084,9 +2084,7 @@ function shouldCommitBeforeDurablePersistence(
   change: SessionArtifactChange,
 ): boolean {
   return (
-    change.action === 'removed' &&
-    change.reason === 'unpin_to_ephemeral' &&
-    change.durableTombstoneRequired === true
+    change.action === 'removed' && change.durableTombstoneRequired === true
   );
 }
 
