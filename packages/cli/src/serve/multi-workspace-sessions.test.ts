@@ -63,6 +63,7 @@ interface FakeBridge extends AcpSessionBridge {
     action: 'load' | 'resume';
     req: BridgeRestoreSessionRequest;
   }>;
+  readonly listCalls: string[];
 }
 
 function makeSummary(
@@ -101,6 +102,7 @@ function makeBridge(
   const pendingPromptCalls: string[] = [];
   const removePendingPromptCalls: FakeBridge['removePendingPromptCalls'] = [];
   const restoreCalls: FakeBridge['restoreCalls'] = [];
+  const listCalls: string[] = [];
   const bridge = {
     permissionPolicy: 'first-responder' as const,
     spawnCalls,
@@ -114,6 +116,7 @@ function makeBridge(
     pendingPromptCalls,
     removePendingPromptCalls,
     restoreCalls,
+    listCalls,
     get sessionCount() {
       return live.size;
     },
@@ -186,6 +189,7 @@ function makeBridge(
       };
     },
     listWorkspaceSessions(cwd: string) {
+      listCalls.push(cwd);
       return [...live.values()].filter(
         (summary) => summary.workspaceCwd === cwd,
       );
@@ -630,7 +634,7 @@ describe('multi-workspace session dispatch', () => {
     );
   });
 
-  it('keeps persisted load and resume primary-only before touching a bridge', async () => {
+  it('dispatches trusted non-primary persisted load and resume', async () => {
     const { app, primaryBridge, secondaryBridge } = makeHarness();
 
     for (const action of ['load', 'resume'] as const) {
@@ -639,13 +643,61 @@ describe('multi-workspace session dispatch', () => {
         .set('Host', host())
         .send({ cwd: SECONDARY_CWD });
 
-      expect(res.status).toBe(400);
-      expect(res.body.code).toBe('secondary_workspace_load_not_supported');
+      expect(res.status).toBe(200);
       expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
     }
 
     expect(primaryBridge.restoreCalls).toEqual([]);
-    expect(secondaryBridge.restoreCalls).toEqual([]);
+    expect(secondaryBridge.restoreCalls).toEqual([
+      {
+        action: 'load',
+        req: expect.objectContaining({
+          sessionId: 'secondary-session',
+          workspaceCwd: SECONDARY_CWD,
+        }),
+      },
+      {
+        action: 'resume',
+        req: expect.objectContaining({
+          sessionId: 'secondary-session',
+          workspaceCwd: SECONDARY_CWD,
+        }),
+      },
+    ]);
+  });
+
+  it('rejects unknown and untrusted restore cwd before touching a bridge', async () => {
+    const unknown = makeHarness();
+    const unknownRes = await request(unknown.app)
+      .post('/session/unknown-restore/load')
+      .set('Host', host())
+      .send({ cwd: UNKNOWN_CWD });
+
+    expect(unknownRes.status).toBe(400);
+    expect(unknownRes.body.code).toBe('workspace_mismatch');
+    expect(unknownRes.body.workspaceCount).toBe(2);
+    expect(unknown.primaryBridge.restoreCalls).toEqual([]);
+    expect(unknown.secondaryBridge.restoreCalls).toEqual([]);
+
+    const daemonLog = makeDaemonLog();
+    const untrusted = makeHarness({ secondaryTrusted: false, daemonLog });
+    const untrustedRes = await request(untrusted.app)
+      .post('/session/untrusted-restore/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+
+    expect(untrustedRes.status).toBe(403);
+    expect(untrustedRes.body.code).toBe('untrusted_workspace');
+    expect(untrusted.primaryBridge.restoreCalls).toEqual([]);
+    expect(untrusted.secondaryBridge.restoreCalls).toEqual([]);
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'session routing failed',
+      expect.objectContaining({
+        route: 'POST /session/:id/resume',
+        resolutionKind: 'untrusted_workspace',
+        workspaceCwd: SECONDARY_CWD,
+      }),
+    );
   });
 
   it('returns a clear Phase 2a error for non-primary sessions on primary-only routes', async () => {
@@ -690,6 +742,44 @@ describe('multi-workspace session dispatch', () => {
     expect(unknown.status).toBe(400);
     expect(unknown.body.code).toBe('workspace_mismatch');
     expect(unknown.body.workspaceCount).toBe(2);
+  });
+
+  it('preserves the legacy invalid workspace selector message', async () => {
+    const { app } = makeHarness();
+
+    const res = await request(app)
+      .get('/workspace/not:an:absolute:path/sessions')
+      .set('Host', host());
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(
+      '`:id` must decode to a workspace id or absolute path',
+    );
+  });
+
+  it('rejects untrusted non-primary workspace session listing', async () => {
+    const daemonLog = makeDaemonLog();
+    const { app, secondaryBridge } = makeHarness({
+      secondaryTrusted: false,
+      daemonLog,
+    });
+
+    const res = await request(app)
+      .get('/workspaces/secondary-id/sessions')
+      .set('Host', host());
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
+    expect(secondaryBridge.listCalls).toEqual([]);
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'session routing failed',
+      expect.objectContaining({
+        route: 'GET /workspaces/:workspace/sessions',
+        resolutionKind: 'untrusted_workspace',
+        workspaceCwd: SECONDARY_CWD,
+      }),
+    );
   });
 
   it('pages live non-primary workspace sessions with a stable cursor', async () => {

@@ -12,6 +12,7 @@ import { GenerateContentResponse, Type, FinishReason } from '@google/genai';
 import type { ErrorHandler, PipelineConfig } from './types.js';
 import {
   ContentGenerationPipeline,
+  NonSSEResponseError,
   StreamContentError,
   StreamInactivityTimeoutError,
 } from './pipeline.js';
@@ -1849,6 +1850,321 @@ describe('ContentGenerationPipeline', () => {
       }).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
 
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('should throw NonSSEResponseError when response has non-SSE content-type', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          // Intentionally yields nothing — simulates an HTML body parsed as SSE
+        },
+      };
+
+      const mockHttpResponse = {
+        headers: new Headers({
+          'content-type': 'text/html;charset=UTF-8',
+          'x-request-id': 'req-123',
+        }),
+        status: 200,
+        body: null,
+      } as unknown as Response;
+
+      // Create a mock API promise that has withResponse()
+      const mockApiPromise = Object.assign(Promise.resolve(mockStream), {
+        withResponse: () =>
+          Promise.resolve({
+            data: mockStream,
+            response: mockHttpResponse,
+            request_id: 'req-123',
+          }),
+      });
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockReturnValue(
+        mockApiPromise,
+      );
+
+      let thrownError: NonSSEResponseError | undefined;
+      try {
+        await pipeline.executeStream(request, userPromptId);
+      } catch (e) {
+        thrownError = e as NonSSEResponseError;
+      }
+
+      expect(thrownError).toBeInstanceOf(NonSSEResponseError);
+      expect(thrownError!.httpStatus).toBe(200);
+      expect(thrownError!.status).toBe(200);
+      expect(thrownError!.requestId).toBe('req-123');
+      expect(thrownError!.request_id).toBe('req-123');
+    });
+
+    it('should throw NonSSEResponseError for application/json streaming responses', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const jsonBody = '{"error":"gateway blocked streaming request"}';
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {},
+      };
+
+      const bodyStream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(jsonBody));
+          controller.close();
+        },
+      });
+
+      const mockHttpResponse = {
+        headers: new Headers({
+          'content-type': 'application/json',
+        }),
+        status: 200,
+        body: bodyStream,
+      } as unknown as Response;
+
+      const mockApiPromise = Object.assign(Promise.resolve(mockStream), {
+        withResponse: () =>
+          Promise.resolve({
+            data: mockStream,
+            response: mockHttpResponse,
+            request_id: 'req-json',
+          }),
+      });
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockReturnValue(
+        mockApiPromise,
+      );
+
+      let thrownError: NonSSEResponseError | undefined;
+      try {
+        await pipeline.executeStream(request, 'test-id');
+      } catch (e) {
+        thrownError = e as NonSSEResponseError;
+      }
+
+      expect(thrownError).toBeInstanceOf(NonSSEResponseError);
+      expect(thrownError!.contentType).toBe('application/json');
+      expect(thrownError!.bodyPrefix).toContain('gateway blocked');
+      expect(thrownError!.requestId).toBe('req-json');
+    });
+
+    it('should include body prefix in NonSSEResponseError when body is readable', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const htmlBody = '<html>' + 'x'.repeat(700) + '</html>';
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {},
+      };
+
+      // Create a ReadableStream with the HTML content
+      const bodyStream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(htmlBody));
+          controller.close();
+        },
+      });
+
+      const mockHttpResponse = {
+        headers: new Headers({
+          'content-type': 'text/html',
+        }),
+        status: 200,
+        body: bodyStream,
+      } as unknown as Response;
+
+      const mockApiPromise = Object.assign(Promise.resolve(mockStream), {
+        withResponse: () =>
+          Promise.resolve({
+            data: mockStream,
+            response: mockHttpResponse,
+            request_id: null,
+          }),
+      });
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockReturnValue(
+        mockApiPromise,
+      );
+
+      let thrownError: NonSSEResponseError | undefined;
+      try {
+        await pipeline.executeStream(request, 'test-id');
+      } catch (e) {
+        thrownError = e as NonSSEResponseError;
+      }
+
+      expect(thrownError).toBeInstanceOf(NonSSEResponseError);
+      expect(thrownError!.contentType).toBe('text/html');
+      expect(thrownError!.httpStatus).toBe(200);
+      expect(thrownError!.bodyPrefix).toBe(htmlBody.slice(0, 512));
+      expect(thrownError!.bodyPrefix).toHaveLength(512);
+      expect(thrownError!.requestId).toBeNull();
+    });
+
+    it('should still throw NonSSEResponseError when body prefix read fails', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {},
+      };
+
+      const bodyStream = new ReadableStream({
+        start(controller) {
+          controller.error(new Error('body already consumed'));
+        },
+      });
+
+      const mockHttpResponse = {
+        headers: new Headers({
+          'content-type': 'text/html',
+        }),
+        status: 200,
+        body: bodyStream,
+      } as unknown as Response;
+
+      const mockApiPromise = Object.assign(Promise.resolve(mockStream), {
+        withResponse: () =>
+          Promise.resolve({
+            data: mockStream,
+            response: mockHttpResponse,
+            request_id: null,
+          }),
+      });
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockReturnValue(
+        mockApiPromise,
+      );
+
+      let thrownError: NonSSEResponseError | undefined;
+      try {
+        await pipeline.executeStream(request, 'test-id');
+      } catch (e) {
+        thrownError = e as NonSSEResponseError;
+      }
+
+      expect(thrownError).toBeInstanceOf(NonSSEResponseError);
+      expect(thrownError!.bodyPrefix).toBe('');
+    });
+
+    it('should not throw NonSSEResponseError for text/event-stream content-type', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const mockGeminiResponse = new GenerateContentResponse();
+      mockGeminiResponse.candidates = [
+        {
+          content: { parts: [{ text: 'Hello' }], role: 'model' },
+          finishReason: FinishReason.STOP,
+        },
+      ];
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            object: 'chat.completion.chunk',
+            created: Date.now(),
+            model: 'test-model',
+            choices: [
+              { index: 0, delta: { content: 'Hello' }, finish_reason: 'stop' },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+
+      const mockHttpResponse = {
+        headers: new Headers({
+          'content-type': 'text/event-stream',
+        }),
+        status: 200,
+        body: null,
+      } as unknown as Response;
+
+      const mockApiPromise = Object.assign(Promise.resolve(mockStream), {
+        withResponse: () =>
+          Promise.resolve({
+            data: mockStream,
+            response: mockHttpResponse,
+            request_id: null,
+          }),
+      });
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockReturnValue(
+        mockApiPromise,
+      );
+
+      const resultGenerator = await pipeline.executeStream(request, 'test-id');
+      const results = [];
+      for await (const result of resultGenerator) {
+        results.push(result);
+      }
+      expect(results.length).toBeGreaterThan(0);
+    });
+
+    it('should fall back to regular await when withResponse is not available', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const mockGeminiResponse = new GenerateContentResponse();
+      mockGeminiResponse.candidates = [
+        {
+          content: { parts: [{ text: 'Hello' }], role: 'model' },
+          finishReason: FinishReason.STOP,
+        },
+      ];
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            object: 'chat.completion.chunk',
+            created: Date.now(),
+            model: 'test-model',
+            choices: [
+              { index: 0, delta: { content: 'Hello' }, finish_reason: 'stop' },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      // Regular mockResolvedValue — no withResponse method
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(request, 'test-id');
+      const results = [];
+      for await (const result of resultGenerator) {
+        results.push(result);
+      }
+      expect(results.length).toBeGreaterThan(0);
     });
 
     it('should pass abort signal to OpenAI client for streaming requests', async () => {

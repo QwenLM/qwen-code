@@ -67,6 +67,54 @@ export class StreamInactivityTimeoutError extends Error {
 }
 
 /**
+ * Maximum bytes of response body to include in NonSSEResponseError diagnostics.
+ */
+const NON_SSE_BODY_PREFIX_LIMIT = 512;
+
+/**
+ * Content-type prefixes that are compatible with SSE streaming. Anything
+ * outside this set (e.g. `text/html`) indicates the upstream did not return
+ * an SSE stream — typically a gateway/proxy interception page.
+ */
+function isSSECompatibleContentType(contentType: string | null): boolean {
+  if (!contentType) return true; // absence → assume SSE (SDK default)
+  const mediaType = (contentType.split(';')[0] ?? '').trim().toLowerCase();
+  return (
+    mediaType === 'text/event-stream' ||
+    mediaType === 'application/x-ndjson' ||
+    mediaType === 'application/stream+json'
+  );
+}
+
+/**
+ * Thrown when the HTTP 200 response to a streaming request has a content-type
+ * incompatible with SSE (e.g. `text/html` from a gateway block page). Carries
+ * bounded diagnostic metadata so the user/maintainer can distinguish "model
+ * returned empty stream" from "upstream returned a non-SSE page".
+ */
+export class NonSSEResponseError extends Error {
+  readonly status: number;
+  readonly request_id: string | null;
+
+  constructor(
+    readonly contentType: string | null,
+    readonly httpStatus: number,
+    readonly bodyPrefix: string,
+    readonly requestId: string | null,
+  ) {
+    const preview = bodyPrefix.length > 0 ? ` Body prefix: ${bodyPrefix}` : '';
+    super(
+      `Streaming request received a non-SSE response ` +
+        `(HTTP ${httpStatus}, Content-Type: ${contentType || 'unknown'}).` +
+        `${preview}`,
+    );
+    this.name = 'NonSSEResponseError';
+    this.status = httpStatus;
+    this.request_id = requestId;
+  }
+}
+
+/**
  * Provider-specific output-budget keys that stand in for `max_tokens` on the
  * wire (e.g. GPT-5 / o-series use `max_completion_tokens`). When a user's
  * samplingParams already carries one of these, the window clamp must not also
@@ -274,9 +322,72 @@ export class ContentGenerationPipeline {
           // Stage 1: Create OpenAI stream. Wrapped in try so a network /
           // DNS / proxy error during the SDK call still cleans up the
           // per-request child (same pattern as the non-streaming path).
-          stream = (await this.client.chat.completions.create(openaiRequest, {
-            signal: perRequestAc.signal,
-          })) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+          //
+          // Use withResponse() to access HTTP response headers — this allows
+          // early detection of non-SSE responses (e.g. gateway block pages
+          // returning text/html with HTTP 200).
+          const createPromise = this.client.chat.completions.create(
+            openaiRequest,
+            { signal: perRequestAc.signal },
+          );
+
+          // withResponse() is available on APIPromise (the OpenAI SDK's
+          // extended Promise). If unavailable (e.g. a mock), fall back.
+          if (
+            typeof (createPromise as { withResponse?: unknown })
+              .withResponse === 'function'
+          ) {
+            const {
+              data,
+              response: httpResponse,
+              request_id,
+            } = await (
+              createPromise as unknown as {
+                withResponse(): Promise<{
+                  data: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+                  response: Response;
+                  request_id: string | null;
+                }>;
+              }
+            ).withResponse();
+            stream = data;
+
+            // Validate content-type: a non-SSE content-type on a streaming
+            // request means the upstream (gateway/proxy) returned something
+            // other than an event stream — surface it immediately.
+            const contentType =
+              httpResponse.headers.get('content-type') ?? null;
+            if (!isSSECompatibleContentType(contentType)) {
+              // Read a bounded prefix of the body for diagnostics. The body
+              // may already be consumed by the SDK's stream parser; in that
+              // case we fall through with an empty prefix.
+              let bodyPrefix = '';
+              try {
+                if (httpResponse.body) {
+                  const reader = httpResponse.body.getReader();
+                  const { value } = await reader.read();
+                  reader.releaseLock();
+                  if (value) {
+                    bodyPrefix = new TextDecoder()
+                      .decode(value)
+                      .slice(0, NON_SSE_BODY_PREFIX_LIMIT);
+                  }
+                }
+              } catch {
+                // Body already consumed by the SDK — expected; proceed
+                // without the prefix.
+              }
+              throw new NonSSEResponseError(
+                contentType,
+                httpResponse.status,
+                bodyPrefix,
+                request_id,
+              );
+            }
+          } else {
+            stream =
+              (await createPromise) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+          }
         } catch (e) {
           perRequestAc.abort();
           throw e;

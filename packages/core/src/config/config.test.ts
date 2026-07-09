@@ -525,6 +525,97 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getMemoryAgentTimeoutMinutes', () => {
+    it('returns undefined when unset', () => {
+      expect(
+        new Config(baseParams).getMemoryAgentTimeoutMinutes(),
+      ).toBeUndefined();
+    });
+
+    it('passes through non-negative values, including 0 (no time limit)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentTimeoutMinutes: 30,
+        }).getMemoryAgentTimeoutMinutes(),
+      ).toBe(30);
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentTimeoutMinutes: 0,
+        }).getMemoryAgentTimeoutMinutes(),
+      ).toBe(0);
+    });
+
+    it('treats negative values as unset (schema validation is bypassed on load)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentTimeoutMinutes: -5,
+        }).getMemoryAgentTimeoutMinutes(),
+      ).toBeUndefined();
+    });
+  });
+
+  describe('getVisionBridgeTimeoutMs', () => {
+    it('returns undefined when unset', () => {
+      expect(new Config(baseParams).getVisionBridgeTimeoutMs()).toBeUndefined();
+    });
+
+    it('passes through positive values', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          visionBridgeTimeoutMs: 120_000,
+        }).getVisionBridgeTimeoutMs(),
+      ).toBe(120_000);
+    });
+
+    it('treats non-positive values as unset (schema validation is bypassed on load)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          visionBridgeTimeoutMs: 0,
+        }).getVisionBridgeTimeoutMs(),
+      ).toBeUndefined();
+      expect(
+        new Config({
+          ...baseParams,
+          visionBridgeTimeoutMs: -5000,
+        }).getVisionBridgeTimeoutMs(),
+      ).toBeUndefined();
+    });
+
+    it('rejects values AbortSignal.timeout cannot take (fractional, over 2^31-1, non-finite)', () => {
+      // These pass the number-typed schema's `minimum: 1` via /config but would
+      // make AbortSignal.timeout throw RangeError or degrade to a 1ms timer.
+      for (const bad of [
+        30_000.5,
+        2_147_483_648,
+        4_294_967_296,
+        1e300,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        expect(
+          new Config({
+            ...baseParams,
+            visionBridgeTimeoutMs: bad,
+          }).getVisionBridgeTimeoutMs(),
+        ).toBeUndefined();
+      }
+    });
+
+    it('accepts the maximum supported integer timeout', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          visionBridgeTimeoutMs: 2_147_483_647,
+        }).getVisionBridgeTimeoutMs(),
+      ).toBe(2_147_483_647);
+    });
+  });
+
   describe('getMaxSubagentDepth', () => {
     it('defaults to 5 when unset', () => {
       expect(new Config(baseParams).getMaxSubagentDepth()).toBe(5);

@@ -46,6 +46,7 @@ function createConfig(
     isManagedMemoryAvailable: vi.fn().mockReturnValue(managed),
     getProjectRoot: vi.fn().mockReturnValue(projectRoot),
     getUserMemory: vi.fn().mockReturnValue('QWEN/AGENTS guidance'),
+    getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
     ...overrides,
   } as unknown as Config;
 }
@@ -176,6 +177,48 @@ describe('remember memory helper', () => {
     expect(params.taskPrompt).toContain('Remember the project uses vitest.');
     expect(params.taskPrompt).toContain('<user-content>');
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+  });
+
+  it('threads the configured memory agent timeout into the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    } satisfies ForkedAgentResult);
+    const config = createConfig(projectRoot);
+    vi.mocked(config.getMemoryAgentTimeoutMinutes).mockReturnValue(30);
+
+    await runManagedRememberByAgent({
+      config,
+      projectRoot,
+      content: 'Remember this.',
+      contextMode: 'workspace',
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTimeMinutes: 30 }),
+    );
+  });
+
+  it('keeps the built-in 5-minute default when no timeout is configured', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    } satisfies ForkedAgentResult);
+
+    await runManagedRememberByAgent({
+      config: createConfig(projectRoot),
+      projectRoot,
+      content: 'Remember this.',
+      contextMode: 'workspace',
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTimeMinutes: 5 }),
+    );
   });
 
   it('lets managed-memory writes bypass base ask rules', async () => {
