@@ -204,6 +204,21 @@ describe('McpPromptLoader', () => {
       const result = loader.parseArgs('--key="value" some text', undefined);
       expect(result).toEqual({ key: 'value', input: 'some text' });
     });
+
+    it('should strip quotes from positional input when promptArgs is undefined', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const result = loader.parseArgs('"hello world"', undefined);
+      expect(result).toEqual({ input: 'hello world' });
+    });
+
+    it('should not overwrite a named "input" arg with positional text', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const result = loader.parseArgs(
+        '--input="named value" some text',
+        undefined,
+      );
+      expect(result).toEqual({ input: 'named value' });
+    });
   });
 
   describe('loadCommands', () => {

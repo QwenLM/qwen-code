@@ -275,8 +275,13 @@ export class McpPromptLoader implements ICommandLoader {
 
     if (!promptArgs || promptArgs.length === 0) {
       Object.assign(promptInputs, argValues);
-      if (positionalArgsString) {
-        promptInputs['input'] = positionalArgsString;
+      // Forward positional text as a default "input" argument when the prompt
+      // declares no arguments, matching Claude Code's behavior. This key is a
+      // client-side convention, not part of the MCP spec. A user-provided
+      // --input named arg takes precedence over positional text.
+      const positionalInput = positionalArgs.join(' ');
+      if (positionalInput && !Object.hasOwn(argValues, 'input')) {
+        promptInputs['input'] = positionalInput;
       }
       return promptInputs;
     }
