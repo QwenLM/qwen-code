@@ -10,6 +10,8 @@
   "exclude": [
     "client/**/*.test.ts",
     "client/**/*.test.tsx",
+    "client/e2e/**",
+    "client/test/**",
     "node_modules",
     "dist"
   ]
