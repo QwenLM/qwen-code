@@ -123,8 +123,6 @@ export const MAX_ENHANCED_TABLE_COLUMNS = 50;
 const DEFAULT_COLUMN_WIDTH = 160;
 const MIN_COLUMN_WIDTH = 80;
 const MAX_COLUMN_WIDTH = 640;
-const COMPACT_AUTO_COLUMN_MIN_WIDTH = 72;
-const COMPACT_AUTO_COLUMN_MAX_WIDTH = 240;
 const KEYBOARD_COLUMN_RESIZE_STEP = 16;
 const COLUMN_DRAG_MIME = 'application/x-qwen-web-shell-table-column';
 const LONG_CELL_TEXT_LENGTH = 60;
@@ -137,8 +135,6 @@ const DEFAULT_COLUMN_STYLE: CSSProperties = {
 };
 const COMPACT_AUTO_COLUMN_STYLE: CSSProperties = {
   width: 'auto',
-  minWidth: COMPACT_AUTO_COLUMN_MIN_WIDTH,
-  maxWidth: COMPACT_AUTO_COLUMN_MAX_WIDTH,
 };
 
 function clampColumnWidth(width: number): number {
@@ -411,7 +407,11 @@ function getSelectionText(
     lines.push(
       selectedColumns
         .map((columnIndex) =>
-          sanitizeForClipboard(row.cells[columnIndex]?.text ?? ''),
+          sanitizeForClipboard(
+            row.cells[columnIndex]?.rawText ??
+              row.cells[columnIndex]?.text ??
+              '',
+          ),
         )
         .join('\t'),
     );
@@ -428,13 +428,19 @@ function getVisibleTableText(
   const lines = [
     visibleColumnIndexes
       .map((columnIndex) =>
-        sanitizeForClipboard(headers[columnIndex]?.text ?? ''),
+        sanitizeForClipboard(
+          headers[columnIndex]?.rawText ?? headers[columnIndex]?.text ?? '',
+        ),
       )
       .join('\t'),
     ...rows.map((row) =>
       visibleColumnIndexes
         .map((columnIndex) =>
-          sanitizeForClipboard(row.cells[columnIndex]?.text ?? ''),
+          sanitizeForClipboard(
+            row.cells[columnIndex]?.rawText ??
+              row.cells[columnIndex]?.text ??
+              '',
+          ),
         )
         .join('\t'),
     ),
@@ -1459,6 +1465,7 @@ export function EnhancedTable({
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        event.preventDefault();
         setColumnContextMenu(null);
       }
     };
@@ -1483,7 +1490,7 @@ export function EnhancedTable({
       }
     };
     const clearActiveColumnOnEscape = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || openFilterMenu) return;
+      if (event.defaultPrevented || openFilterMenu || columnContextMenu) return;
       if (event.key === 'Escape') setActiveColumn(null);
     };
     document.addEventListener('mousedown', clearActiveColumnOnOutsideMouseDown);
@@ -1495,7 +1502,7 @@ export function EnhancedTable({
       );
       document.removeEventListener('keydown', clearActiveColumnOnEscape);
     };
-  }, [openFilterMenu]);
+  }, [columnContextMenu, openFilterMenu]);
 
   const filteredRows = useMemo(
     () => applyFilters(table.rows, filters),
@@ -1633,6 +1640,7 @@ export function EnhancedTable({
   ) => {
     setSelection(null);
     setActiveColumn(columnIndex);
+    setColumnContextMenu(null);
     filterTriggerRef.current = event.currentTarget;
     const buttonRect = event.currentTarget.getBoundingClientRect();
     const menuWidth = 300;
@@ -1691,10 +1699,10 @@ export function EnhancedTable({
     event: ReactMouseEvent<HTMLElement>,
     columnIndex: number,
   ) => {
+    event.preventDefault();
     if (columnIndex !== orderedVisibleColumnIndexes[0]) {
       return;
     }
-    event.preventDefault();
     setSelection(null);
     setActiveColumn(columnIndex);
     setOpenFilterMenu(null);
@@ -2014,10 +2022,10 @@ export function EnhancedTable({
   const densityLabel = t(`markdownTable.density.${density}`);
   const hasLongText = useMemo(
     () =>
-      table.rows.some((row) =>
+      visibleRows.some((row) =>
         row.cells.some((cell) => isLongCellText(cell.rawText || cell.text)),
       ),
-    [table.rows],
+    [visibleRows],
   );
   const rowSummary =
     visibleRows.length === table.rows.length

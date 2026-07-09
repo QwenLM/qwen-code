@@ -24,8 +24,6 @@
   --table-detail-padding: 9px 11px;
   --table-detail-gap: 6px;
   --table-line-height: 1.45;
-  --table-column-min-width: 120px;
-  --table-column-max-width: 360px;
 }
 
 .densityComfortable {
@@ -34,8 +32,6 @@
   --table-detail-padding: 11px 13px;
   --table-detail-gap: 8px;
   --table-line-height: 1.55;
-  --table-column-min-width: 120px;
-  --table-column-max-width: 360px;
 }
 
 .toolbar {

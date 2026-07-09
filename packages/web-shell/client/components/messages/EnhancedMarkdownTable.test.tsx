@@ -120,18 +120,18 @@ function click(el: Element): void {
   });
 }
 
-function rightClick(el: Element): void {
-  act(() => {
-    el.dispatchEvent(
-      new MouseEvent('contextmenu', {
-        bubbles: true,
-        cancelable: true,
-        button: 2,
-        clientX: 120,
-        clientY: 80,
-      }),
-    );
+function rightClick(el: Element): MouseEvent {
+  const event = new MouseEvent('contextmenu', {
+    bubbles: true,
+    cancelable: true,
+    button: 2,
+    clientX: 120,
+    clientY: 80,
   });
+  act(() => {
+    el.dispatchEvent(event);
+  });
+  return event;
 }
 
 function openColumnMenu(container: HTMLElement, columnLabel: string): void {
@@ -1247,6 +1247,76 @@ describe('EnhancedMarkdownTable', () => {
     ).not.toContain('frozenHeaderCell');
   });
 
+  it('dismisses the first-column context menu without clearing the active column', () => {
+    const container = renderWideTable();
+    const teamHandle = button(container, 'Move Team');
+
+    openColumnMenu(container, 'Team');
+    expect(container.textContent).toContain('Freeze first column');
+    expect(teamHandle.className).toContain('reorderHandleVisible');
+
+    const escapeEvent = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      key: 'Escape',
+    });
+    act(() => {
+      document.dispatchEvent(escapeEvent);
+    });
+
+    expect(escapeEvent.defaultPrevented).toBe(true);
+    expect(container.textContent).not.toContain('Freeze first column');
+    expect(teamHandle.className).toContain('reorderHandleVisible');
+    expect(teamHandle.tabIndex).toBe(0);
+  });
+
+  it('dismisses the first-column context menu on outside click, scroll, and resize', () => {
+    const container = renderWideTable();
+
+    openColumnMenu(container, 'Team');
+    expect(container.textContent).toContain('Freeze first column');
+    act(() => {
+      dataCell(container, 0, 0).dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+    });
+    expect(container.textContent).not.toContain('Freeze first column');
+
+    openColumnMenu(container, 'Team');
+    expect(container.textContent).toContain('Freeze first column');
+    act(() => {
+      document.dispatchEvent(new Event('scroll'));
+    });
+    expect(container.textContent).not.toContain('Freeze first column');
+
+    openColumnMenu(container, 'Team');
+    expect(container.textContent).toContain('Freeze first column');
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    expect(container.textContent).not.toContain('Freeze first column');
+  });
+
+  it('keeps column menus mutually exclusive and suppresses native context menus', () => {
+    const container = renderWideTable();
+    const scoreHeader = button(container, 'Sort by Score').closest('th');
+    expect(scoreHeader).not.toBeNull();
+
+    const nonFirstColumnEvent = rightClick(scoreHeader!);
+    expect(nonFirstColumnEvent.defaultPrevented).toBe(true);
+    expect(container.textContent).not.toContain('Freeze first column');
+
+    openColumnMenu(container, 'Team');
+    expect(container.textContent).toContain('Freeze first column');
+    click(button(container, 'Filter Team'));
+    expect(container.textContent).toContain('Custom filter');
+    expect(container.textContent).not.toContain('Freeze first column');
+
+    openColumnMenu(container, 'Team');
+    expect(container.textContent).toContain('Freeze first column');
+    expect(container.textContent).not.toContain('Custom filter');
+  });
+
   it('collapses long cells with a tooltip and expands them from the toolbar', () => {
     const longText =
       'This is a long operational note with enough content to exceed the table preview threshold and prove that the full value remains available.';
@@ -1328,6 +1398,95 @@ describe('EnhancedMarkdownTable', () => {
     expect(writeText).toHaveBeenCalledWith(longText);
   });
 
+  it('preserves raw multiline values when copying a selection', () => {
+    const writeText = mockClipboard();
+    const multilineText = 'line 1\nline 2\nline 3';
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Note</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>{multilineText}</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
+    click(textButton(container, 'Copy TSV'));
+
+    expect(writeText).toHaveBeenCalledWith(multilineText);
+  });
+
+  it('preserves raw multiline values when quick copying the visible table', async () => {
+    const writeText = mockClipboard();
+    const multilineText = 'line 1\nline 2\nline 3';
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Note</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>{multilineText}</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    await act(async () => {
+      textButton(container, 'Quick copy').click();
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith(`Note\n${multilineText}`);
+  });
+
+  it('only shows the long text toolbar action for visible rows', () => {
+    const longText =
+      'A long visible note that should make the table show a toolbar expand text action before filtering.';
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Team</th>
+          <th>Note</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Long</td>
+          <td>{longText}</td>
+        </tr>
+        <tr>
+          <td>Short</td>
+          <td>ok</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    expect(textButton(container, 'Expand text')).toBeDefined();
+
+    click(button(container, 'Filter Team'));
+    selectValue(
+      container.querySelector<HTMLSelectElement>(
+        'select[name="markdown-table-text-operator-0"]',
+      )!,
+      'equals',
+    );
+    inputValue(
+      container.querySelector<HTMLInputElement>(
+        'input[name="markdown-table-text-filter-0"]',
+      )!,
+      'Short',
+    );
+    click(textButton(container, 'Confirm'));
+
+    expect(rowTexts(container)).toEqual(['Short|ok']);
+    expect(container.textContent).not.toContain('Expand text');
+  });
+
   it('cycles display density from the toolbar', () => {
     const container = renderTable();
     const shell = container.querySelector('div');
@@ -1340,8 +1499,8 @@ describe('EnhancedMarkdownTable', () => {
     expect(shell?.className).toContain('densityCompact');
     expect(textButton(container, 'Density: Compact')).toBeDefined();
     expect(teamHeader?.style.width).toBe('auto');
-    expect(teamHeader?.style.minWidth).toBe('72px');
-    expect(teamHeader?.style.maxWidth).toBe('240px');
+    expect(teamHeader?.style.minWidth).toBe('');
+    expect(teamHeader?.style.maxWidth).toBe('');
 
     click(textButton(container, 'Density: Compact'));
     expect(shell?.className).toContain('densityComfortable');
@@ -2129,10 +2288,40 @@ describe('EnhancedMarkdownTable', () => {
   });
 
   it('localizes the new controls', () => {
-    const container = renderTable('zh-CN');
+    const longText =
+      '这是一段足够长的中文备注，用来触发表格里的长文本折叠和统一展开控制，并验证本地化文案在工具栏和行详情中都能正确显示，避免后续回归。';
+    const container = renderTableContent(
+      [
+        <thead key="head">
+          <tr>
+            <th>Team</th>
+            <th>Note</th>
+          </tr>
+        </thead>,
+        <tbody key="body">
+          <tr>
+            <td>Alpha</td>
+            <td>{longText}</td>
+          </tr>
+          <tr>
+            <td>Beta</td>
+            <td></td>
+          </tr>
+        </tbody>,
+      ],
+      'zh-CN',
+    );
 
     expect(container.textContent).toContain('快捷复制');
+    expect(container.textContent).toContain('密度：标准');
+    expect(container.textContent).toContain('展开文本');
     expect(container.textContent).toContain('详情');
+
+    click(textButton(container, '展开文本'));
+    expect(container.textContent).toContain('收起文本');
+    click(button(container, '查看第 2 行详情'));
+    expect(container.textContent).toContain('(空白)');
+
     openColumnMenu(container, 'Team');
     expect(container.textContent).toContain('冻结首列');
     click(button(container, '筛选 Team'));
