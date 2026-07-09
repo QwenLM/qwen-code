@@ -30,6 +30,7 @@ const builtinTagIconUrls: Record<WebShellBuiltinComposerTagKind, string> = {
 };
 
 const AT_REFERENCE_CHAR_RE = /[\p{L}\p{N}_./:-]/u;
+const WINDOWS_DRIVE_REFERENCE_RE = /^[A-Za-z]:/;
 
 function getOwnIconUrl(
   iconUrls: WebShellComposerTagIconMap | undefined,
@@ -51,7 +52,8 @@ function readAtReferenceEnd(content: string, start: number): number {
   while (index < content.length) {
     const char = content[index];
     if (char === '\\' && index + 1 < content.length) {
-      index += 2;
+      const escapedCodePoint = content.codePointAt(index + 1);
+      index += 1 + (escapedCodePoint && escapedCodePoint > 0xffff ? 2 : 1);
       continue;
     }
     if (!AT_REFERENCE_CHAR_RE.test(char)) break;
@@ -60,23 +62,55 @@ function readAtReferenceEnd(content: string, start: number): number {
   return index;
 }
 
+function trimReferenceTrailingPunctuation(
+  content: string,
+  end: number,
+): number {
+  let nextEnd = end;
+  while (nextEnd > 0) {
+    const last = content[nextEnd - 1];
+    if (
+      (last !== '.' && last !== ':') ||
+      !isAtReferenceBoundary(content[nextEnd])
+    ) {
+      break;
+    }
+    nextEnd -= 1;
+  }
+  return nextEnd;
+}
+
 function getReferenceDisplay(raw: string, prefix: string) {
   const withoutAt = raw.slice(1);
   const value = prefix ? withoutAt.slice(prefix.length) : withoutAt;
-  return value.replace(/\\(.)/g, '$1') || raw;
+  return value.replace(/\\(.)/gu, '$1') || raw;
 }
 
-// Custom providers can use the @provider:item shape, but user messages only
-// persist serialized text. Without provider metadata, default rendering should
-// leave those references as text instead of guessing they are file chips.
-function isCustomProviderReference(raw: string): boolean {
+// MCP resources are serialized as @server\:uri, with the server/URI delimiter
+// escaped by the composer. That is the only provider-prefixed form this parser
+// can recover without persisted composer tag metadata.
+function isEscapedMcpResourceReference(raw: string): boolean {
   const value = raw.slice(1);
-  const colonIndex = value.indexOf(':');
-  if (colonIndex <= 0) return false;
-  const prefix = value.slice(0, colonIndex);
-  if (prefix === 'ext' || prefix === 'mcp') return false;
-  if (prefix.length === 1 && value[colonIndex + 1] === '/') return false;
-  return /^[\p{L}\p{N}_-]+$/u.test(prefix);
+  const escapedDelimiterIndex = value.indexOf('\\:');
+  if (escapedDelimiterIndex <= 0) return false;
+  const unescaped = getReferenceDisplay(raw, '');
+  const delimiterIndex = unescaped.indexOf(':');
+  if (delimiterIndex <= 0) return false;
+  return unescaped.slice(delimiterIndex + 1).includes(':');
+}
+
+// User messages persist only text, so ambiguous mentions like @alice or
+// @types/node must remain text. Only chipify file references with path cues.
+function isBuiltInFileReference(raw: string): boolean {
+  const value = getReferenceDisplay(raw, '');
+  return (
+    value.startsWith('./') ||
+    value.startsWith('../') ||
+    value.startsWith('/') ||
+    value.endsWith('/') ||
+    value.includes('.') ||
+    WINDOWS_DRIVE_REFERENCE_RE.test(value)
+  );
 }
 
 function createComposerTagFromReference(
@@ -98,13 +132,23 @@ function createComposerTagFromReference(
       serialized: raw,
     };
   }
-  if (isCustomProviderReference(raw)) return null;
-  return {
-    id: `file:${raw}`,
-    kind: 'file',
-    value: getReferenceDisplay(raw, ''),
-    serialized: raw,
-  };
+  if (isEscapedMcpResourceReference(raw)) {
+    return {
+      id: `mcp:${raw}`,
+      kind: 'mcp',
+      value: getReferenceDisplay(raw, ''),
+      serialized: raw,
+    };
+  }
+  if (isBuiltInFileReference(raw)) {
+    return {
+      id: `file:${raw}`,
+      kind: 'file',
+      value: getReferenceDisplay(raw, ''),
+      serialized: raw,
+    };
+  }
+  return null;
 }
 
 export function getComposerTagIconUrl(
@@ -131,7 +175,11 @@ export function splitComposerTagContent(
     }
     const end = readAtReferenceEnd(content, index);
     if (end === index + 1) continue;
-    const tag = createComposerTagFromReference(content.slice(index, end));
+    const referenceEnd = trimReferenceTrailingPunctuation(content, end);
+    if (referenceEnd === index + 1) continue;
+    const tag = createComposerTagFromReference(
+      content.slice(index, referenceEnd),
+    );
     if (!tag) continue;
     if (cursor < index) {
       segments.push({ type: 'text', text: content.slice(cursor, index) });
@@ -140,8 +188,8 @@ export function splitComposerTagContent(
       type: 'reference',
       tag,
     });
-    cursor = end;
-    index = end - 1;
+    cursor = referenceEnd;
+    index = referenceEnd - 1;
   }
   if (cursor < content.length) {
     segments.push({ type: 'text', text: content.slice(cursor) });
@@ -156,8 +204,11 @@ export function getComposerTagViewModel(
 ): ComposerTagViewModel {
   const rawTagLabel = tag.label?.trim() ?? '';
   const tagValue = tag.value?.trim() ?? '';
+  const isBuiltinTag = tag.kind
+    ? getOwnIconUrl(builtinTagIconUrls, tag.kind)
+    : undefined;
   return {
-    tagLabel: tag.kind ? '' : rawTagLabel,
+    tagLabel: isBuiltinTag ? '' : rawTagLabel,
     tagValue,
     fallback: tag.id,
     iconUrl: getComposerTagIconUrl(tag.kind, composerTagIcons),

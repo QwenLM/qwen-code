@@ -63,6 +63,7 @@
   word-break: break-word;
 }
 
+/* Keep visual styles in sync with ComposerTagWidget in useComposerCore.ts. */
 .referenceChip {
   display: inline-flex;
   max-width: min(44ch, 100%);

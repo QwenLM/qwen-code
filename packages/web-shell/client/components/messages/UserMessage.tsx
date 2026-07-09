@@ -16,6 +16,7 @@ import { isSafeImageSrc } from './Markdown';
 import {
   useWebShellCustomization,
   type WebShellComposerTag,
+  type WebShellComposerTagIconMap,
 } from '../../customization';
 import { useI18n } from '../../i18n';
 import { cssUrlVar } from '../../utils/cssUrlVar';
@@ -33,9 +34,17 @@ interface UserMessageProps {
   isLocateFlashing?: boolean;
 }
 
-function UserMessageReferenceChip({ tag }: { tag: WebShellComposerTag }) {
-  const { tagLabel, tagValue, iconUrl, fallback } =
-    getComposerTagViewModel(tag);
+function UserMessageReferenceChip({
+  composerTagIcons,
+  tag,
+}: {
+  composerTagIcons?: WebShellComposerTagIconMap;
+  tag: WebShellComposerTag;
+}) {
+  const { tagLabel, tagValue, iconUrl, fallback } = getComposerTagViewModel(
+    tag,
+    composerTagIcons,
+  );
   return (
     <span className={styles.referenceChip} title={tag.serialized}>
       {iconUrl && (
@@ -51,7 +60,13 @@ function UserMessageReferenceChip({ tag }: { tag: WebShellComposerTag }) {
   );
 }
 
-function DefaultUserMessageContent({ content }: { content: string }) {
+function DefaultUserMessageContent({
+  composerTagIcons,
+  content,
+}: {
+  composerTagIcons?: WebShellComposerTagIconMap;
+  content: string;
+}) {
   // The default user renderer upgrades serialized @ references to chips while
   // still allowing hosts to replace message rendering entirely.
   const segments = useMemo(() => splitComposerTagContent(content), [content]);
@@ -62,6 +77,7 @@ function DefaultUserMessageContent({ content }: { content: string }) {
           <Fragment key={index}>{segment.text}</Fragment>
         ) : (
           <UserMessageReferenceChip
+            composerTagIcons={composerTagIcons}
             key={`${segment.tag.id}:${index}`}
             tag={segment.tag}
           />
@@ -77,16 +93,20 @@ export const UserMessage = memo(function UserMessage({
   isLocateFlashing = false,
 }: UserMessageProps) {
   const { t } = useI18n();
-  const { renderUserMessageContent } = useWebShellCustomization();
+  const { composerTagIcons, renderUserMessageContent } =
+    useWebShellCustomization();
   const contentRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [heightOverflowing, setHeightOverflowing] = useState(false);
   const renderedContent = useMemo(
     () =>
       renderUserMessageContent?.({ content, images }) ?? (
-        <DefaultUserMessageContent content={content} />
+        <DefaultUserMessageContent
+          composerTagIcons={composerTagIcons}
+          content={content}
+        />
       ),
-    [content, images, renderUserMessageContent],
+    [composerTagIcons, content, images, renderUserMessageContent],
   );
 
   const measureOverflow = useCallback(() => {

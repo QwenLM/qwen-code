@@ -560,8 +560,7 @@ class ComposerTagWidget extends WidgetType {
     const chip = document.createElement('span');
     chip.style.cssText =
       'display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border);border-radius:4px;background:var(--secondary);color:var(--foreground);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
-    const { tagLabel, tagValue, iconUrl } =
-      getComposerTagViewModel(this.tag);
+    const { tagLabel, tagValue, iconUrl } = getComposerTagViewModel(this.tag);
     const resolvedIconUrl = this.tag.iconUrl ?? iconUrl;
 
     if (resolvedIconUrl) {

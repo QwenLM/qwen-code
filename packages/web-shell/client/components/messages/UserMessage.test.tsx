@@ -44,6 +44,26 @@ describe('UserMessage', () => {
     expect(container.textContent).toContain('list .qwen/ files');
   });
 
+  it('uses configured composer tag icons for default chips', () => {
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          composerTagIcons: { file: '/custom-file.svg' },
+        }}
+      >
+        <UserMessage content="list @.qwen/ files" />
+      </WebShellCustomizationProvider>,
+    );
+    const icon = container.querySelector<HTMLElement>(
+      '[title="@.qwen/"] [aria-hidden="true"]',
+    );
+
+    expect(icon).not.toBeNull();
+    expect(icon?.style.getPropertyValue('--composer-tag-icon-url')).toBe(
+      'url("/custom-file.svg")',
+    );
+  });
+
   it('renders extension and MCP references as chips by default', () => {
     const container = render(
       <UserMessage content="@ext:browser and @mcp:docs" />,

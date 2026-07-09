@@ -28,6 +28,11 @@ describe('composer tag icon URLs', () => {
 });
 
 describe('splitComposerTagContent', () => {
+  it('returns text for empty content and bare @', () => {
+    expect(splitComposerTagContent('')).toEqual([{ type: 'text', text: '' }]);
+    expect(splitComposerTagContent('@')).toEqual([{ type: 'text', text: '@' }]);
+  });
+
   it('splits file references into text and reference segments', () => {
     expect(splitComposerTagContent('list @.qwen/ files')).toEqual([
       { type: 'text', text: 'list ' },
@@ -41,6 +46,21 @@ describe('splitComposerTagContent', () => {
         },
       },
       { type: 'text', text: ' files' },
+    ]);
+  });
+
+  it('keeps adjacent non-boundary references as text', () => {
+    expect(splitComposerTagContent('@.qwen/@src/index.ts')).toEqual([
+      {
+        type: 'reference',
+        tag: {
+          id: 'file:@.qwen/',
+          kind: 'file',
+          value: '.qwen/',
+          serialized: '@.qwen/',
+        },
+      },
+      { type: 'text', text: '@src/index.ts' },
     ]);
   });
 
@@ -68,15 +88,57 @@ describe('splitComposerTagContent', () => {
     ]);
   });
 
+  it('creates MCP resource tags from escaped server resource references', () => {
+    expect(splitComposerTagContent('open @docs\\:res\\://doc')).toEqual([
+      { type: 'text', text: 'open ' },
+      {
+        type: 'reference',
+        tag: {
+          id: 'mcp:@docs\\:res\\://doc',
+          kind: 'mcp',
+          value: 'docs:res://doc',
+          serialized: '@docs\\:res\\://doc',
+        },
+      },
+    ]);
+  });
+
   it('does not split inline email-like text', () => {
     expect(splitComposerTagContent('mail a@b.test')).toEqual([
       { type: 'text', text: 'mail a@b.test' },
     ]);
   });
 
+  it('keeps package and handle-like references as text', () => {
+    expect(
+      splitComposerTagContent('install @types/node and ask @alice'),
+    ).toEqual([{ type: 'text', text: 'install @types/node and ask @alice' }]);
+  });
+
+  it('does not split references after non-boundary characters', () => {
+    expect(splitComposerTagContent('prefix/@.qwen/')).toEqual([
+      { type: 'text', text: 'prefix/@.qwen/' },
+    ]);
+  });
+
   it('keeps custom provider-prefixed references as text', () => {
     expect(splitComposerTagContent('open @dataset:users')).toEqual([
       { type: 'text', text: 'open @dataset:users' },
+    ]);
+  });
+
+  it('keeps short Windows drive references as file tags', () => {
+    expect(splitComposerTagContent('open @C:file')).toEqual([
+      { type: 'text', text: 'open ' },
+      {
+        type: 'reference',
+        tag: {
+          id: 'file:@C:file',
+          kind: 'file',
+          value: 'C:file',
+          serialized: '@C:file',
+        },
+      },
     ]);
   });
 
@@ -96,17 +158,50 @@ describe('splitComposerTagContent', () => {
   });
 
   it('unescapes reference display text', () => {
-    expect(splitComposerTagContent('open @path\\ with\\ spaces')).toEqual([
+    expect(
+      splitComposerTagContent('open @path/file\\ with\\ spaces.txt'),
+    ).toEqual([
       { type: 'text', text: 'open ' },
       {
         type: 'reference',
         tag: {
-          id: 'file:@path\\ with\\ spaces',
+          id: 'file:@path/file\\ with\\ spaces.txt',
           kind: 'file',
-          value: 'path with spaces',
-          serialized: '@path\\ with\\ spaces',
+          value: 'path/file with spaces.txt',
+          serialized: '@path/file\\ with\\ spaces.txt',
         },
       },
+    ]);
+  });
+
+  it('advances over escaped emoji code points', () => {
+    expect(splitComposerTagContent('open @path/\\😀.txt')).toEqual([
+      { type: 'text', text: 'open ' },
+      {
+        type: 'reference',
+        tag: {
+          id: 'file:@path/\\😀.txt',
+          kind: 'file',
+          value: 'path/😀.txt',
+          serialized: '@path/\\😀.txt',
+        },
+      },
+    ]);
+  });
+
+  it('leaves trailing sentence punctuation outside chips', () => {
+    expect(splitComposerTagContent('See @file.ts.')).toEqual([
+      { type: 'text', text: 'See ' },
+      {
+        type: 'reference',
+        tag: {
+          id: 'file:@file.ts',
+          kind: 'file',
+          value: 'file.ts',
+          serialized: '@file.ts',
+        },
+      },
+      { type: 'text', text: '.' },
     ]);
   });
 });
@@ -159,6 +254,22 @@ describe('getComposerTagViewModel', () => {
       tagLabel: '',
       tagValue: '',
       fallback: 'tag-id',
+      iconUrl: undefined,
+    });
+  });
+
+  it('keeps labels for custom tag kinds', () => {
+    expect(
+      getComposerTagViewModel({
+        id: 'dataset:users',
+        kind: 'dataset',
+        label: 'Dataset',
+        value: 'users',
+      }),
+    ).toEqual({
+      tagLabel: 'Dataset',
+      tagValue: 'users',
+      fallback: 'dataset:users',
       iconUrl: undefined,
     });
   });
