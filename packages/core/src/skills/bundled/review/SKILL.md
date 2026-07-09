@@ -104,7 +104,7 @@ For **PR reviews**, `qwen review fetch-pr` (above) has already written the diff 
 - `diffPathAbsolute` — pass this to `read_file` (it rejects relative paths)
 - `diffLines`, `diffChars`, and `srcDiffLines` / `testDiffLines` / `generatedDiffLines`
 - `chunks[]` — contiguous, non-overlapping line ranges tiling the whole diff. Each entry has `id`, `startLine`, `endLine` (1-based, inclusive), `lines`, `chars`, an `oversized` flag, and `files[]` naming the source files and new-side line ranges it covers. A chunk with `oversized: true` may exceed what one `read_file` call returns.
-- `files[]` — per-file `kind` (`source` / `test` / `generated`), `hunks[]` new-side line ranges (Step 7 validates comment anchors against these), change counts, and the `heavy` flag
+- `files[]` — per-file `kind` (`source` / `test` / `generated`), `hunks[]` new-side ranges (Step 7 validates comment anchors against these), `addedRanges[]` (the exact lines the PR wrote — what Step 3B's invariant agents gate on), change counts, and the `heavy` flag
 
 A chunk is read with `read_file(file_path=diffPathAbsolute, offset=startLine - 1, limit=endLine - startLine + 1)` — `offset` is 0-based.
 
@@ -113,6 +113,7 @@ For **local-diff and file-path reviews**, capture the diff to a file the same wa
 ```bash
 git diff --no-ext-diff --no-textconv --no-color --unified=3 \
   --src-prefix=a/ --dst-prefix=b/ --find-renames --no-relative \
+  --ignore-submodules=none --submodule=short \
   HEAD > .qwen/tmp/qwen-review-local-diff.txt        # staged AND unstaged
 # for a file-path review, append: -- <file>
 ```
@@ -161,7 +162,7 @@ Use **Step 3A** or **Step 3B** as the topology gate in Step 1 decided. The dimen
 
 Launch **10 agents** for same-repo **PR** reviews (Agent 6 has three persona variants 6a/6b/6c that each count as separate parallel agents), or **9 agents** (skip Agent 7: Build & Test) for cross-repo lightweight **PR** mode since there is no local codebase to build/test. **Agent 0 (Issue Fidelity) runs only when the review target is a PR** — a local-diff or file-path review has no PR and no linked issue, so skip Agent 0 and launch **9 agents** (Agents 1–7). Each agent should focus exclusively on its dimension.
 
-Every agent reads the whole diff, **by walking the `chunks[]` ranges** — usually one or two `read_file` calls at this size. Do **not** ask for the whole diff in one read: `read_file` caps a single call at ~25 000 characters, and a 500-line diff of long lines exceeds that. Chunks are sized to fit inside one un-truncated read, which is exactly why they exist.
+Every agent reads the whole diff, **by walking the `chunks[]` ranges** — usually one or two `read_file` calls at this size. Do **not** ask for the whole diff in one read: `read_file` caps a single call at ~25 000 characters, and a 500-line diff of long lines exceeds that. Chunks are sized to fit inside one un-truncated read, which is exactly why they exist. If a read still reports `isTruncated`, page with a larger `offset`; if a chunk's `maxLineChars` exceeds the read cap it holds a line no paging can reach, and the agent must say so rather than review what it happened to receive — see "Coverage receipts" in Step 3B, which governs both paths.
 
 ## Step 3B: Territory × dimension fan-out (large source change)
 
@@ -188,9 +189,9 @@ Ten agents all reading the same diff multiplies redundant reading of the early h
 
 When a file is largely rewritten, reviewing it as a diff is the wrong frame. The bugs are not inside any one hunk; they are **between** the new lines, which can sit two thousand lines apart — a timer armed near the top of the file and a teardown path near the bottom. No chunk agent, and no reader of a diff with three lines of context, can see that pair.
 
-Give each agent the **entire post-change file** (`read_file` on the worktree path, paging until `isTruncated` is false — a 2 500-line source file needs several reads), plus the file's changed line ranges, taken from **`files[].hunks[]`** in the fetch report. It reads the whole file so it can see both ends of an invariant; the changed ranges tell it which end is **new**, so it does not report pre-existing defects (an Exclusion Criterion). A violation counts when **at least one** of its two locations is inside a changed range.
+Give each agent the **entire post-change file** (`read_file` on the worktree path, paging until `isTruncated` is false — a 2 500-line source file needs several reads), plus the file's newly written line ranges, taken from **`files[].addedRanges[]`** in the fetch report. It reads the whole file so it can see both ends of an invariant; the added ranges tell it which end is **new**, so it does not report pre-existing defects (an Exclusion Criterion). A violation counts when **at least one** of its two locations is inside an added range. If a defect is caused by a _removal_ rather than an addition, cite the surrounding hunk — that counts too.
 
-Use `files[].hunks[]`, not `chunks[].files[]`. The latter is a chunk's _coverage span_ — hunks at lines 10-12 and 900-902 merge into `10-902` — so an agent given those would treat nine hundred untouched lines as newly changed and report defects that were there before the PR.
+Three ranges exist in the report and they are not interchangeable. `chunks[].files[]` is a chunk's _coverage span_: hunks at lines 10-12 and 900-902 merge into `10-902`. `files[].hunks[]` is what git calls the change, and it includes the three context lines printed either side — on PR #6457's `QQChannel.ts` those spans cover 1 962 lines of which only 1 403 were written. `files[].addedRanges[]` is the exact set of lines the PR wrote. Gate an invariant agent on the first two and it reports defects that predate the PR; use `hunks[]` only where GitHub needs it, for anchor validation in Step 7.
 
 Each agent's job is to build a model of the object's mutable state and lifecycle, then walk **its own slice** of the checklist. Report a **Critical** for each violation.
 
@@ -215,13 +216,21 @@ Each agent's job is to build a model of the object's mutable state and lifecycle
 
 For each violation report the two locations that together make it a bug (`<file>:<lineA>` and `<file>:<lineB>`), not just one. Findings from these agents are `Source: [review]` like any other and go through Step 4 verification.
 
-**Coverage receipts are mandatory.** Every chunk agent MUST end its response with a line of exactly this form, even when it found nothing:
+**Coverage receipts are mandatory.** Every chunk agent MUST end its response with exactly one of these two lines, even when it found nothing:
 
 ```
 Covered: chunk <id> lines <startLine>-<endLine>
+Uncoverable: chunk <id> — line exceeds the read limit
 ```
 
-After all agents return, verify that the receipts cover every chunk id exactly once. **If any chunk has no receipt, relaunch an agent for that chunk before proceeding to Step 4.** A missing receipt means that territory was never reviewed; without this check the omission is invisible and the review silently reports "no blockers" on code nobody read.
+`Uncoverable` is the honest answer for a chunk whose `maxLineChars` exceeds ~25 000: it holds a single line longer than one `read_file` returns, and paging cannot reach that line's tail because every page starts at a line boundary.
+
+After all agents return, verify that **every chunk id carries exactly one receipt of either kind**. Then:
+
+- **A chunk with no receipt at all** was never reviewed. Relaunch an agent for it before proceeding to Step 4. Without this check the omission is invisible and the review silently reports "no blockers" on code nobody read.
+- **A chunk with an `Uncoverable` receipt** must not be relaunched — the next agent would fail the same way. Carry its id into Step 6 and list it under "Not reviewed". **The verdict may not be Approve while any chunk is uncoverable**, because the review does not know what is in it.
+
+This accounting applies to Step 3A as well. There the chunks are usually one or two, and a single dimension agent walks all of them — but an over-long line makes a range unreadable there too, and a truncated read must never be reported as a clean one.
 
 **Do not let precision suppress recall in this step.** The "if you're unsure, do NOT report it" rule in the Exclusion Criteria applies to **Suggestion** and **Nice to have** findings. A suspected **Critical** must always be reported, marked `low confidence` if uncertain — Step 4's verifier decides. A Critical dropped here is dropped irreversibly; a Critical dropped there is at least reviewed by a second agent.
 
@@ -529,9 +538,17 @@ List low-confidence findings here with the same format but prefixed with "Possib
 
 If there are no low-confidence findings, omit this section.
 
+### Not reviewed
+
+List every chunk that returned `Uncoverable` in Step 3, with the files it spans. These territories were not reviewed by anyone: a single line in them is longer than one `read_file` returns, and no amount of paging reaches its tail. Say so plainly rather than implying coverage.
+
+If there are none, omit this section.
+
 ### Verdict
 
 Based on **high-confidence findings only** (low-confidence findings do not influence the verdict — they are terminal-only and "Needs Human Review"):
+
+**A review with any uncoverable chunk cannot Approve** — some of the diff was never read. Use Comment and name the chunks.
 
 - **Approve** — No high-confidence critical issues, good to merge
 - **Request changes** — Has high-confidence critical issues that need fixing

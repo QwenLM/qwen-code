@@ -75,6 +75,16 @@ export interface DiffFile {
   diffStart: number;
   diffEnd: number;
   hunks: DiffHunk[];
+  /**
+   * New-side line ranges the PR actually **wrote** — the `+` lines, coalesced.
+   *
+   * Distinct from `hunks`, which also span the three context lines git prints
+   * around every change. Telling a whole-file agent that a hunk's whole range
+   * is "changed" would have it treat six untouched lines as new and report
+   * defects that predate the PR. Anchor validation wants `hunks`; deciding
+   * what is new wants this.
+   */
+  addedRanges: Array<{ start: number; end: number }>;
   addedLines: number;
   removedLines: number;
   /** True for `Binary files ... differ` sections (no hunks to review). */
@@ -261,6 +271,14 @@ export function parseDiff(diffText: string): {
   let cur: DiffFile | null = null;
   let curHunk: DiffHunk | null = null;
   let oldPath = '';
+  /** New-side line number of the next body line of the current hunk. */
+  let newCursor = 0;
+
+  const noteAdded = (f: DiffFile, line: number) => {
+    const last = f.addedRanges[f.addedRanges.length - 1];
+    if (last && last.end === line - 1) last.end = line;
+    else f.addedRanges.push({ start: line, end: line });
+  };
 
   const closeHunk = (endLine: number) => {
     if (curHunk) {
@@ -297,6 +315,7 @@ export function parseDiff(diffText: string): {
         diffStart: n,
         diffEnd: n,
         hunks: [],
+        addedRanges: [],
         addedLines: 0,
         removedLines: 0,
         binary: false,
@@ -357,12 +376,20 @@ export function parseDiff(diffText: string): {
         newCount,
       };
       cur.hunks.push(curHunk);
+      newCursor = newStart;
       continue;
     }
 
     if (curHunk) {
-      if (line.startsWith('+')) cur.addedLines++;
-      else if (line.startsWith('-')) cur.removedLines++;
+      if (line.startsWith('+')) {
+        cur.addedLines++;
+        noteAdded(cur, newCursor);
+        newCursor++;
+      } else if (line.startsWith('-')) {
+        cur.removedLines++;
+      } else if (line.startsWith(' ')) {
+        newCursor++; // a context line: present on the new side, but not new
+      }
     }
   }
   closeFile(total);

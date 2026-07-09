@@ -113,8 +113,18 @@ interface FileMetric {
    *
    * Pure-deletion hunks (`@@ -3,4 +2,0 @@`) are omitted: they occupy no new-side
    * line, nothing can be anchored in them, and nothing in them is new.
+   *
+   * These are **hunk** ranges, which include the three context lines git prints
+   * around every change. For "which lines did this PR write", use
+   * `addedRanges` — see there.
    */
   hunks: Array<{ newStart: number; newEnd: number }>;
+  /**
+   * New-side ranges the PR actually wrote. Step 3B's whole-file invariant
+   * agents gate on these, so they cannot report a defect in a context line
+   * that has been there for years.
+   */
+  addedRanges: Array<{ start: number; end: number }>;
   addedLines: number;
   removedLines: number;
   changedLines: number;
@@ -219,6 +229,7 @@ function fileMetrics(plan: DiffPlan, headSha: string): FileMetric[] {
       hunks: f.hunks
         .filter((h) => h.newCount > 0)
         .map((h) => ({ newStart: h.newStart, newEnd: h.newEnd })),
+      addedRanges: f.addedRanges,
       addedLines: f.addedLines,
       removedLines: f.removedLines,
       changedLines,
@@ -385,6 +396,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // from every path when the command runs from a subdirectory.
         '--find-renames',
         '--no-relative',
+        // `diff.ignoreSubmodules=all` hides a changed gitlink entirely — a
+        // silent coverage hole — and `diff.submodule=log` replaces the whole
+        // `diff --git` section with prose the parser cannot read.
+        '--ignore-submodules=none',
+        '--submodule=short',
         `${mergeBaseSha}..${fetchedSha}`,
       );
       writeFileSync(diffRel, buf);

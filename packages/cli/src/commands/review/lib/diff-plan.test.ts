@@ -253,6 +253,53 @@ describe('parseDiff', () => {
     expect(h[1].newCount).toBe(0);
   });
 
+  it('reports added ranges that exclude context lines', () => {
+    // A hunk range spans its three context lines either side. Handing that to
+    // an agent as "the changed lines" makes it review code the PR never wrote.
+    const diff = [
+      'diff --git a/src/a.ts b/src/a.ts',
+      '--- a/src/a.ts',
+      '+++ b/src/a.ts',
+      '@@ -10,6 +10,7 @@',
+      ' ctx1',
+      ' ctx2',
+      '+new1',
+      '+new2',
+      ' ctx3',
+      '-gone',
+      '+new3',
+      ' ctx4',
+    ].join('\n');
+    const f = parseDiff(diff).files[0];
+    expect(f.hunks[0].newStart).toBe(10);
+    expect(f.hunks[0].newEnd).toBe(16); // 7 new-side lines
+    // Only 12-13 and 15 were written. A `-` line advances nothing.
+    expect(f.addedRanges).toEqual([
+      { start: 12, end: 13 },
+      { start: 15, end: 15 },
+    ]);
+    expect(f.addedLines).toBe(3);
+    expect(f.removedLines).toBe(1);
+  });
+
+  it('coalesces added ranges across hunks without merging them', () => {
+    const diff = [
+      'diff --git a/src/a.ts b/src/a.ts',
+      '--- a/src/a.ts',
+      '+++ b/src/a.ts',
+      '@@ -1,1 +1,2 @@',
+      ' keep',
+      '+one',
+      '@@ -50,1 +51,2 @@',
+      ' keep',
+      '+two',
+    ].join('\n');
+    expect(parseDiff(diff).files[0].addedRanges).toEqual([
+      { start: 2, end: 2 },
+      { start: 52, end: 52 },
+    ]);
+  });
+
   it('marks binary sections and gives them no hunks', () => {
     const diff = [
       'diff --git a/logo.png b/logo.png',
