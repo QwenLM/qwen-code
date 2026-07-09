@@ -8511,6 +8511,14 @@ class QwenAgent implements Agent {
       ...this.argv,
       ...sessionArg,
       continue: false,
+      // SkillTool requires a live SkillManager; replay-only Configs skip it.
+      ...(initializeOptions.skipSkillManager
+        ? {
+            excludeTools: Array.from(
+              new Set([...(this.argv.excludeTools ?? []), ToolNames.SKILL]),
+            ),
+          }
+        : {}),
     };
 
     const config = await loadCliConfig(

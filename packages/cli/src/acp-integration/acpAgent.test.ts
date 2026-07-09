@@ -150,6 +150,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   },
   ToolNames: {
     AGENT: 'agent',
+    SKILL: 'skill',
   },
   FORK_SUBAGENT_TYPE: 'fork',
   IMAGE_CAPABILITY: Object.freeze({
@@ -6165,6 +6166,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       .mock.calls.at(-1)?.[1] as CliArgs | undefined;
     expect(transcriptConfigArgv?.sessionId).toBeUndefined();
     expect(transcriptConfigArgv?.resume).toBeUndefined();
+    expect(transcriptConfigArgv?.excludeTools).toContain('skill');
     expect(transcriptConfig.enableFileCheckpointing).not.toHaveBeenCalled();
     expect(transcriptConfig.initialize).toHaveBeenCalledWith({
       sendSdkMcpMessage: expect.any(Function),
