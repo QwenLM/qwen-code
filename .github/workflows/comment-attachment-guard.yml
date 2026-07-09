@@ -1,0 +1,112 @@
+name: 'Comment Attachment Guard'
+
+on:
+  issue_comment:
+    types:
+      - 'created'
+      - 'edited'
+  pull_request_review_comment:
+    types:
+      - 'created'
+      - 'edited'
+
+permissions:
+  contents: 'read'
+  issues: 'write'
+  pull-requests: 'write'
+
+jobs:
+  remove-suspicious-attachments:
+    timeout-minutes: 2
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' }}
+    runs-on: 'ubuntu-latest'
+    steps:
+      - name: 'Remove suspicious attachment comments'
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
+        with:
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          script: |
+            const trustedAssociations = new Set([
+              'OWNER',
+              'MEMBER',
+              'COLLABORATOR',
+            ]);
+            const highRiskExtension =
+              /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|sh|bat|ps1|node|dylib|so)(?:$|[\s)"'\]>?#])/i;
+            const githubFileAttachment =
+              /(?:https?:\/\/)?github\.com\/user-attachments\/files\//i;
+            const linkPattern =
+              /https?:\/\/[^\s)"'<>\]]+|\[[^\]]+\]\([^)]+\)/gi;
+            const suspiciousPatchLanguage =
+              /\b(?:patch|fix|binary|installer|injected|payload|node_modules)\b/i;
+
+            const payload = context.payload;
+            const comment = payload.comment;
+            const sender = payload.sender;
+            const association = comment?.author_association ?? '';
+            const body = comment?.body ?? '';
+            const eventName = context.eventName;
+
+            if (!comment) {
+              core.info('No comment payload found; skipping.');
+              return;
+            }
+
+            if (
+              trustedAssociations.has(association) ||
+              sender?.type === 'Bot'
+            ) {
+              core.info(`Trusted author (${association || sender?.type}); skipping.`);
+              return;
+            }
+
+            const reasons = [];
+            const linkSnippets = body.match(linkPattern) ?? [];
+            if (linkSnippets.some((snippet) => highRiskExtension.test(snippet))) {
+              reasons.push('high-risk file extension in a link or attachment');
+            }
+            if (
+              githubFileAttachment.test(body) &&
+              suspiciousPatchLanguage.test(body)
+            ) {
+              reasons.push('GitHub file attachment with patch-like language');
+            }
+
+            if (reasons.length === 0) {
+              core.info('No suspicious attachment pattern found.');
+              return;
+            }
+
+            const { owner, repo } = context.repo;
+            if (eventName === 'issue_comment') {
+              await github.rest.issues.deleteComment({
+                owner,
+                repo,
+                comment_id: comment.id,
+              });
+            } else if (eventName === 'pull_request_review_comment') {
+              await github.rest.pulls.deleteReviewComment({
+                owner,
+                repo,
+                comment_id: comment.id,
+              });
+            } else {
+              core.info(`Unsupported event ${eventName}; skipping.`);
+              return;
+            }
+
+            await core.summary
+              .addHeading('Suspicious attachment comment removed')
+              .addTable([
+                [
+                  { data: 'Field', header: true },
+                  { data: 'Value', header: true },
+                ],
+                ['Event', eventName],
+                ['Author', comment.user?.login ?? 'unknown'],
+                ['Association', association || 'none'],
+                ['Comment ID', String(comment.id)],
+                ['Reason', reasons.join(', ')],
+              ])
+              .write();
