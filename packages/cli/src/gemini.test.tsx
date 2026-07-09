@@ -2076,6 +2076,10 @@ describe('startInteractiveUI', () => {
   });
 
   it('delegates auto-update gating to post-render prefetch', async () => {
+    const { checkForUpdatesDetailed } = await import(
+      './ui/utils/updateCheck.js'
+    );
+
     const settingsWithAutoUpdateDisabled = {
       merged: {
         general: {
