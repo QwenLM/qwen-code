@@ -178,6 +178,10 @@ import {
 } from '../serve/workspace-remember-errors.js';
 import { formatWorkspaceMemoryForgetSummary } from '../serve/workspace-memory-summaries.js';
 import { mapSkillConfigToStatus } from '../serve/workspace-skills-mapping.js';
+import {
+  inactiveExtensionSkillRefs,
+  isInactiveExtensionSkill,
+} from './extension-skills.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import { HistoryReplayer } from './session/HistoryReplayer.js';
@@ -4260,12 +4264,58 @@ class QwenAgent implements Agent {
 
     try {
       const disabled = config.getDisabledSkillNames();
+      try {
+        await config.getExtensionManager().refreshCache();
+      } catch (error) {
+        debugLogger.warn('Extension cache refresh failed:', error);
+      }
+      try {
+        await skillManager.refreshCache();
+      } catch (error) {
+        debugLogger.warn('Skill cache refresh failed:', error);
+      }
       const skills = await skillManager.listSkills();
+      const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
+      const skillsByKey = new Map(
+        skills.map((skill) => [
+          `${skill.level}:${skill.extensionName ?? ''}:${skill.name}`,
+          mapSkillConfigToStatus(skill, disabled, {
+            disabled: isInactiveExtensionSkill(skill, inactiveSkillRefs),
+          }),
+        ]),
+      );
+      for (const extension of config.getExtensions()) {
+        if (extension.isActive) continue;
+        for (const skill of extension.skills ?? []) {
+          const extensionName = extension.displayName ?? extension.name;
+          const key = `extension:${extensionName}:${skill.name}`;
+          if (
+            skillsByKey.has(`extension:${extension.name}:${skill.name}`) ||
+            skillsByKey.has(key)
+          ) {
+            continue;
+          }
+          skillsByKey.set(
+            key,
+            mapSkillConfigToStatus(
+              {
+                ...skill,
+                level: 'extension',
+                extensionName,
+              },
+              disabled,
+              { disabled: true },
+            ),
+          );
+        }
+      }
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: this.workspaceCwd(config),
         initialized: true,
-        skills: skills.map((skill) => mapSkillConfigToStatus(skill, disabled)),
+        skills: Array.from(skillsByKey.values()).sort((a, b) =>
+          a.name.localeCompare(b.name),
+        ),
       };
     } catch (error) {
       return {
@@ -7343,7 +7393,23 @@ class QwenAgent implements Agent {
         const sessionId = params['sessionId'] as string;
         const session = this.sessionOrThrow(sessionId);
         const extensionManager = session.getConfig().getExtensionManager();
-        await extensionManager.refreshCache();
+        const skillManager = session.getConfig().getSkillManager();
+        await Promise.all([
+          extensionManager.refreshCache().catch((err: unknown) => {
+            debugLogger.warn(
+              `Extension refresh failed for session ${sessionId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }),
+          skillManager?.refreshCache().catch((err: unknown) => {
+            debugLogger.warn(
+              `Skill refresh failed after extension refresh for session ${sessionId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }),
+        ]);
         try {
           await extensionManager.refreshTools();
         } catch (err) {
