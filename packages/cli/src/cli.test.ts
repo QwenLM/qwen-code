@@ -425,6 +425,7 @@ describe('bootstrap import boundaries', () => {
       ['reviewCommand', 'review'],
       ['serveCommand', 'serve'],
       ['sessionsCommand', 'sessions'],
+      ['updateCommand', 'update'],
     ]);
     const registeredIdentifiers = [
       ...configSource.matchAll(/\.command\((\w+Command)\)/g),
