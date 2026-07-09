@@ -273,7 +273,11 @@ export class McpPromptLoader implements ICommandLoader {
       positionalArgs.push((match[1] ?? match[2]).replace(/\\(.)/g, '$1'));
     }
 
-    if (!promptArgs) {
+    if (!promptArgs || promptArgs.length === 0) {
+      Object.assign(promptInputs, argValues);
+      if (positionalArgsString) {
+        promptInputs['input'] = positionalArgsString;
+      }
       return promptInputs;
     }
     for (const arg of promptArgs) {
