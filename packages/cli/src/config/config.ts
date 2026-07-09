@@ -65,6 +65,7 @@ import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { ensureOfflineLicense } from '../license/offlineLicense.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -1401,6 +1402,20 @@ function parseMcpConfig(
   }
 }
 
+function readOfflineLicensePublicKey(filePath: string): string {
+  try {
+    const value = fs.readFileSync(filePath, 'utf8').trim();
+    if (!value) {
+      throw new Error('empty');
+    }
+    return value;
+  } catch (_error) {
+    throw new FatalConfigError(
+      'Offline license public key is required when offline license enforcement is enabled.',
+    );
+  }
+}
+
 /**
  * Builds the live-read closure for `Config.getDisabledSkillNames()`.
  *
@@ -1656,6 +1671,26 @@ export async function loadCliConfig(
     // Default: If we have query/prompt but output format is TEXT, assume non-interactive
     // (fallback for edge cases where query/prompt is provided with TEXT output)
     interactive = false;
+  }
+
+  const offlineLicense = settings.security?.offlineLicense;
+  if (offlineLicense?.enabled) {
+    const publicKeyPem = offlineLicense.publicKeyPem
+      ? offlineLicense.publicKeyPem
+      : readOfflineLicensePublicKey(
+          path.join(Storage.getGlobalQwenDir(), 'public-key.pem'),
+        );
+    await ensureOfflineLicense({
+      licensePath:
+        offlineLicense.licensePath ??
+        path.join(Storage.getGlobalQwenDir(), 'license.json'),
+      activationPath:
+        offlineLicense.activationPath ??
+        path.join(Storage.getGlobalQwenDir(), 'activation.json'),
+      publicKeyPem,
+      requiredFeature: offlineLicense.requiredFeature ?? 'agent-cli',
+      interactive,
+    });
   }
   // ── Unified permissions construction ─────────────────────────────────────
   // All permission sources are merged here, before constructing Config.
