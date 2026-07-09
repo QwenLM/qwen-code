@@ -312,7 +312,6 @@ function classifyChannelWebhookEnqueueError(error: unknown): {
   return {
     status: 500,
     code: 'channel_webhook_enqueue_failed',
-    detail: error instanceof Error ? error.message : String(error),
   };
 }
 

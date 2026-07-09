@@ -363,7 +363,7 @@ describe('channel webhook routes', () => {
     expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
   });
 
-  it('returns 500 when enqueueing fails', async () => {
+  it('returns 500 without leaking unexpected enqueue error details', async () => {
     const h = appHarness({
       enqueueWebhookTask: vi.fn(async () => {
         throw new Error('worker offline');
@@ -382,7 +382,6 @@ describe('channel webhook routes', () => {
     expect(res.body).toEqual({
       error: 'Failed to enqueue channel webhook task',
       code: 'channel_webhook_enqueue_failed',
-      detail: 'worker offline',
     });
   });
 

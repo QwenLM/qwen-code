@@ -173,7 +173,10 @@ import {
   registerWorkspaceToolsRoutes,
 } from './routes/workspace-tools.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
-import { parseChannelWebhookConfig } from '../commands/channel/config-utils.js';
+import {
+  parseChannelWebhookConfigLenient,
+  type parseChannelWebhookConfig,
+} from '../commands/channel/config-utils.js';
 import { loadChannelsConfig } from '../commands/channel/runtime.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
@@ -219,9 +222,18 @@ function loadServeChannelWebhookConfigs(
     }
     let webhooks: ReturnType<typeof parseChannelWebhookConfig>;
     try {
-      webhooks = parseChannelWebhookConfig(
+      webhooks = parseChannelWebhookConfigLenient(
         channelName,
         rawConfig as Record<string, unknown>,
+        (source, sourceError) => {
+          const sourceMessage =
+            sourceError instanceof Error
+              ? sourceError.message
+              : String(sourceError);
+          writeStderrLine(
+            `[daemon] Skipping malformed webhook source "${source}" for channel "${channelName}": ${sourceMessage}`,
+          );
+        },
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

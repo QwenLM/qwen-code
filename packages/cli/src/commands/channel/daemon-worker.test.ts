@@ -1570,6 +1570,51 @@ describe('daemonWorkerCommand', () => {
     }
   });
 
+  it('ignores disconnected IPC while sending webhook task results', async () => {
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    const existingMessageListeners = process.listeners('message');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'ready' }),
+        );
+      });
+      send.mockImplementation(() => {
+        throw new Error('ipc disconnected');
+      });
+
+      const webhookListener = process
+        .listeners('message')
+        .find((listener) => !existingMessageListeners.includes(listener));
+      expect(webhookListener).toBeDefined();
+      expect(() =>
+        (webhookListener as ((message: unknown) => void) | undefined)?.({
+          type: 'webhook_task',
+          id: 'webhook-1',
+          expiresAt: Date.now() + 1000,
+          task: { ...webhookTask, channelName: 'missing' },
+        }),
+      ).not.toThrow();
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await handler;
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      restoreSend();
+    }
+  });
+
   it('rejects webhook IPC messages that fail preflight before running', async () => {
     const exit = mockProcessExitNoThrow();
     const send = vi.fn();

@@ -1029,13 +1029,24 @@ export function createChannelWorkerSupervisor(
         try {
           send.call(startedChild, message, (err) => {
             if (err) {
-              rejectPendingWebhookTask(message.id, err);
+              rejectPendingWebhookTask(
+                message.id,
+                new ChannelWebhookEnqueueError(
+                  'channel_worker_unavailable',
+                  `Channel worker IPC send failed: ${err.message}`,
+                ),
+              );
             }
           });
         } catch (err) {
           rejectPendingWebhookTask(
             message.id,
-            err instanceof Error ? err : new Error(String(err)),
+            new ChannelWebhookEnqueueError(
+              'channel_worker_unavailable',
+              `Channel worker IPC send failed: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            ),
           );
         }
       });

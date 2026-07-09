@@ -2176,7 +2176,12 @@ describe('createChannelWorkerSupervisor', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     const error = await rejected;
     expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toBe('send boom');
+    expect((error as Error).message).toBe(
+      'Channel worker IPC send failed: send boom',
+    );
+    expect((error as { code?: string }).code).toBe(
+      'channel_worker_unavailable',
+    );
   });
 
   it('rejects webhook tasks when the IPC send callback reports an error', async () => {
@@ -2210,7 +2215,12 @@ describe('createChannelWorkerSupervisor', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     const error = await rejected;
     expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toBe('callback boom');
+    expect((error as Error).message).toBe(
+      'Channel worker IPC send failed: callback boom',
+    );
+    expect((error as { code?: string }).code).toBe(
+      'channel_worker_unavailable',
+    );
   });
 
   it('rejects webhook tasks when IPC result times out', async () => {

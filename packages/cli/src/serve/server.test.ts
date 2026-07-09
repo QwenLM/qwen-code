@@ -13274,6 +13274,89 @@ describe('createServeApp', () => {
         resetHomeEnvBootstrapForTesting();
       }
     });
+
+    it('keeps valid webhook sources when a sibling source is malformed', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-bad-source-'),
+      );
+      const workspace = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-workspace-'),
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((() => true) as typeof process.stderr.write);
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        await fsp.writeFile(
+          path.join(tempHome, 'settings.json'),
+          JSON.stringify({
+            channels: {
+              'dingtalk-main': {
+                type: 'dingtalk',
+                webhooks: {
+                  sources: {
+                    'github-ci': {
+                      secret: 'secret-value',
+                      targets: {
+                        default: {
+                          chatId: 'group-1',
+                          senderId: 'webhook:github-ci',
+                        },
+                      },
+                    },
+                    jenkins: {
+                      secretEnv: 'QWEN_MISSING_WEBHOOK_SECRET',
+                      targets: {
+                        default: {
+                          chatId: 'group-1',
+                          senderId: 'webhook:jenkins',
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          }),
+          'utf8',
+        );
+        resetHomeEnvBootstrapForTesting();
+
+        const enqueueChannelWebhookTask = vi.fn(async () => ({
+          accepted: true as const,
+        }));
+        const app = createServeApp({ ...baseOpts, workspace }, undefined, {
+          bridge: fakeBridge(),
+          enqueueChannelWebhookTask,
+        });
+        const res = await request(app)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+
+        expect(res.status).toBe(202);
+        expect(enqueueChannelWebhookTask).toHaveBeenCalledTimes(1);
+        expect(
+          stderrSpy.mock.calls.some(([chunk]) =>
+            String(chunk).includes(
+              'Skipping malformed webhook source "jenkins" for channel "dingtalk-main"',
+            ),
+          ),
+        ).toBe(true);
+      } finally {
+        stderrSpy.mockRestore();
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        await fsp.rm(workspace, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
   });
 
   describe('session limit (chiga0 Rec 3 — --max-sessions)', () => {

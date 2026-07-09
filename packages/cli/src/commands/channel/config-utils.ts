@@ -348,6 +348,36 @@ export function parseChannelWebhookConfig(
   return parseWebhookConfig(channelName, rawConfig);
 }
 
+export function parseChannelWebhookConfigLenient(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+  onSourceError?: (source: string, error: unknown) => void,
+): ChannelWebhookConfig | undefined {
+  const raw = rawConfig['webhooks'];
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  const record = requireObjectField(channelName, 'webhooks', raw);
+  const rawSources = requireObjectField(
+    channelName,
+    'webhooks.sources',
+    record['sources'],
+  );
+  const sources: Record<string, ChannelWebhookSourceConfig> = {};
+  for (const [source, sourceConfig] of Object.entries(rawSources)) {
+    try {
+      sources[source] = parseWebhookSource(
+        channelName,
+        `webhooks.sources.${source}`,
+        sourceConfig,
+      );
+    } catch (error) {
+      onSourceError?.(source, error);
+    }
+  }
+  return { sources };
+}
+
 export async function parseChannelConfig(
   name: string,
   rawConfig: Record<string, unknown>,

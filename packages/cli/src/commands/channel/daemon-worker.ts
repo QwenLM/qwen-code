@@ -579,11 +579,15 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
               error: string;
             },
       ) => {
-        process.send?.({
-          type: 'webhook_task_result',
-          id,
-          ...result,
-        });
+        try {
+          process.send?.({
+            type: 'webhook_task_result',
+            id,
+            ...result,
+          });
+        } catch {
+          // Supervisor will time out if the IPC channel is already closed.
+        }
       };
       const activeWebhookTasks = new Map<string, Promise<void>>();
       const onMessage = (message: unknown) => {
