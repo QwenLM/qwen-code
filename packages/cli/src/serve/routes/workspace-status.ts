@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Application } from 'express';
+import type { Application, RequestHandler } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
@@ -13,10 +13,13 @@ import {
 } from '../server/request-helpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 
+const MAX_ACP_PREHEAT_TIMEOUT_MS = 60_000;
+
 interface RegisterWorkspaceStatusRoutesDeps {
   boundWorkspace: string;
   bridge: AcpSessionBridge;
   workspace: DaemonWorkspaceService;
+  mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
 }
 
@@ -24,7 +27,7 @@ export function registerWorkspaceStatusRoutes(
   app: Application,
   deps: RegisterWorkspaceStatusRoutesDeps,
 ): void {
-  const { boundWorkspace, bridge, workspace, sendBridgeError } = deps;
+  const { boundWorkspace, bridge, workspace, mutate, sendBridgeError } = deps;
   const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
 
   app.get('/workspace/mcp', async (_req, res) => {
@@ -92,6 +95,46 @@ export function registerWorkspaceStatusRoutes(
       res.status(200).json(await workspace.getWorkspaceSkillsStatus(ctx));
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/skills' });
+    }
+  });
+
+  app.post('/workspace/acp/preheat', mutate(), async (req, res) => {
+    try {
+      const ctx = buildWorkspaceCtx('POST /workspace/acp/preheat');
+      const timeoutMsRaw = req.query['timeoutMs'];
+      const timeoutMs =
+        typeof timeoutMsRaw === 'string' && timeoutMsRaw.trim()
+          ? Number(timeoutMsRaw)
+          : undefined;
+      if (
+        timeoutMs !== undefined &&
+        (!Number.isFinite(timeoutMs) ||
+          !Number.isInteger(timeoutMs) ||
+          timeoutMs <= 0 ||
+          timeoutMs > MAX_ACP_PREHEAT_TIMEOUT_MS)
+      ) {
+        res.status(400).json({
+          error: '`timeoutMs` must be a positive integer no greater than 60000',
+          code: 'invalid_timeout',
+        });
+        return;
+      }
+      res.status(200).json(
+        await workspace.preheatAcpChild(ctx, {
+          ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        }),
+      );
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'POST /workspace/acp/preheat' });
+    }
+  });
+
+  app.get('/workspace/acp/status', async (_req, res) => {
+    try {
+      const ctx = buildWorkspaceCtx('GET /workspace/acp/status');
+      res.status(200).json(await workspace.getWorkspaceAcpStatus(ctx));
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/acp/status' });
     }
   });
 

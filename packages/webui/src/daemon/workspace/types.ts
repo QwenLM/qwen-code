@@ -188,6 +188,13 @@ export interface DaemonScheduledTask {
   /** Id of the dedicated session this task is bound to — its transcript is the
    * task's run history. Null for unbound tool-created/legacy tasks. */
   sessionId: string | null;
+  /** How each fire runs. `'shared'` (default) runs in the bound session so runs
+   * accumulate in one transcript; `'isolated'` dispatches each scheduled fire
+   * into a fresh sub-session daemon-side, so the bound session's transcript
+   * stays empty. Normalized (never undefined). Note: `runs[].sessionId` always
+   * records the anchor (bound) session — the sub-session id is not surfaced
+   * here. */
+  runMode: 'shared' | 'isolated';
   /** Bounded, newest-last history of recent fires. Empty for tasks that have
    * not fired (and, by nature, for one-shots — they are deleted on fire). */
   runs: DaemonScheduledTaskRun[];
@@ -202,6 +209,9 @@ export interface DaemonCreateScheduledTaskRequest {
   recurring?: boolean;
   /** Defaults to true. */
   enabled?: boolean;
+  /** Defaults to `'shared'` (the #6389 single-session model). `'isolated'`
+   * spawns a fresh session per fire. */
+  runMode?: 'shared' | 'isolated';
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are
@@ -212,6 +222,7 @@ export interface DaemonUpdateScheduledTaskRequest {
   name?: string | null;
   recurring?: boolean;
   enabled?: boolean;
+  runMode?: 'shared' | 'isolated';
 }
 
 export interface DaemonWorkspaceActions {

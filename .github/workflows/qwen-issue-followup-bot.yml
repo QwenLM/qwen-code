@@ -292,7 +292,7 @@ jobs:
           echo "Issue follow-up state: event=${EVENT_NAME} dispatch_dry=${DISPATCH_DRY_RUN} issues_dry=${ISSUE_OPENED_DRY_RUN} schedule_dry=${SCHEDULE_DRY_RUN} resolved_dry_run=${dry_run} scheduled_limit=${SCHEDULED_LIMIT_INPUT}"
 
       - name: 'Run Qwen issue follow-up'
-        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
+        uses: 'QwenLM/qwen-code-action@6d08e91aa807257b9c8af60edb5bb6bb2d7d951f'
         env:
           GITHUB_TOKEN: '${{ env.BOT_GITHUB_TOKEN }}'
           GH_TOKEN: '${{ env.BOT_GITHUB_TOKEN }}'

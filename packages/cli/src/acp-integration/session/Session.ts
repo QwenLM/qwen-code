@@ -34,6 +34,7 @@ import type {
   LoopTickResult,
   ToolArtifact,
   VisionBridgeResult,
+  SubSessionSpawner,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -131,8 +132,13 @@ import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/b
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
 import { MID_TURN_QUEUE_DRAIN_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
+import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
+import {
+  inactiveExtensionSkillRefs,
+  isInactiveExtensionSkill,
+} from '../extension-skills.js';
 
 import { RequestError } from '@agentclientprotocol/sdk';
 import type {
@@ -737,10 +743,26 @@ export async function buildAvailableCommandsSnapshot(
     settings,
   );
   const disabledSkillNames = config.getDisabledSkillNames();
+  const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
 
   const visibleSlashCommands = slashCommands.filter((cmd) => {
     if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
-    return !disabledSkillNames.has(cmd.skillDetail.name.toLowerCase());
+    const skillName = cmd.skillDetail.name.toLowerCase();
+    const isInactiveExtensionCommand =
+      cmd.skillDetail.level === 'extension' &&
+      isInactiveExtensionSkill(
+        {
+          name: cmd.skillDetail.name,
+          level: 'extension',
+          extensionName:
+            'extensionName' in cmd.skillDetail &&
+            typeof cmd.skillDetail.extensionName === 'string'
+              ? cmd.skillDetail.extensionName
+              : undefined,
+        },
+        inactiveSkillRefs,
+      );
+    return !disabledSkillNames.has(skillName) && !isInactiveExtensionCommand;
   });
 
   const availableCommands: AvailableCommand[] = visibleSlashCommands.map(
@@ -783,7 +805,9 @@ export async function buildAvailableCommandsSnapshot(
     const skillManager = config.getSkillManager();
     if (skillManager) {
       const skills = (await skillManager.listSkills()).filter(
-        (skill) => !disabledSkillNames.has(skill.name.toLowerCase()),
+        (skill) =>
+          !disabledSkillNames.has(skill.name.toLowerCase()) &&
+          !isInactiveExtensionSkill(skill, inactiveSkillRefs),
       );
       availableSkills = skills.map((skill) => skill.name);
       for (const skill of skills) {
@@ -806,6 +830,9 @@ export async function buildAvailableCommandsSnapshot(
       continue;
     }
     const existing = skillDetailsByName.get(command.skillDetail.name);
+    if (command.skillDetail.level === 'extension' && !existing) {
+      continue;
+    }
     skillDetailsByName.set(command.skillDetail.name, {
       ...existing,
       ...command.skillDetail,
@@ -954,6 +981,47 @@ export class Session implements SessionContext {
 
     this.#installGoalTerminalObserver();
     this.#registerBackgroundNotificationCallbacks();
+    this.#registerSubSessionSpawner();
+  }
+
+  /**
+   * Wire the sub-session spawner to the daemon over the ACP `extMethod` request
+   * channel. Two callers: the `create_sub_session` tool (model-initiated) and
+   * `#dispatchIsolatedCronFire` (scheduler-initiated). ONLY the ACP/daemon
+   * session wires it, so the tool is inert (reports daemon-only) in interactive
+   * TUI / headless, where no bridge exists.
+   *
+   * A tool-initiated request runs while the caller's turn is suspended in the
+   * tool await — safe because the ACP channel supports concurrent bidirectional
+   * in-flight requests and prompts serialize per-session, not per-child.
+   */
+  #registerSubSessionSpawner(): void {
+    this.config.setSubSessionSpawner(async (req) => {
+      const resp = await this.client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        {
+          prompt: req.prompt,
+          completion: req.completion,
+          ...(req.model ? { model: req.model } : {}),
+          ...(req.name ? { name: req.name } : {}),
+          callerSessionId: this.sessionId,
+        },
+      );
+      if (typeof resp['sessionId'] !== 'string' || !resp['sessionId']) {
+        throw new Error(
+          'create_sub_session: bridge returned non-string sessionId',
+        );
+      }
+      return {
+        sessionId: resp['sessionId'],
+        ...(typeof resp['result'] === 'string'
+          ? { result: resp['result'] }
+          : {}),
+        ...(typeof resp['stopReason'] === 'string'
+          ? { stopReason: resp['stopReason'] }
+          : {}),
+      };
+    });
   }
 
   getId(): string {
@@ -1028,6 +1096,7 @@ export class Session implements SessionContext {
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
+    this.config.setSubSessionSpawner(undefined);
     clearGoalTerminalObserver(this.sessionId);
   }
 
@@ -2812,9 +2881,32 @@ export class Session implements SessionContext {
     if (!scheduler.hasPendingWork) return;
 
     scheduler.start(
-      (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
+      (job: {
+        prompt: string;
+        cronExpr?: string;
+        missed?: boolean;
+        runMode?: 'shared' | 'isolated';
+      }) => {
         if (this.cronDisabledByTokenLimit) return;
         if (job.missed && detectAutonomousSentinel(job.prompt)) return;
+        // An `isolated` task gets a FRESH sub-session per fire instead of
+        // accumulating in this bound session. Dispatch it straight to the
+        // daemon rather than asking the model to call `create_sub_session`:
+        // that tool's permission is 'ask', and under the default approval mode
+        // an unattended fire has nobody to answer the prompt — the call would
+        // hang until the daemon's permission timeout cancels it. A `missed`
+        // one-shot keeps the in-session confirm-first path.
+        if (!job.missed && job.runMode === 'isolated') {
+          const spawner = this.config.getSubSessionSpawner();
+          if (spawner) {
+            void this.#dispatchIsolatedCronFire(spawner, job.prompt);
+            return;
+          }
+          // Defensive: an isolated task can only be created through the daemon's
+          // REST route, which binds it to a session that always has a spawner
+          // (and a bound task fires nowhere else). Should that ever change, run
+          // the fire in-session — losing the task is worse than losing isolation.
+        }
         this.cronQueue.push({
           prompt: job.prompt,
           source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
@@ -2822,6 +2914,43 @@ export class Session implements SessionContext {
         void this.#drainCronQueue();
       },
     );
+  }
+
+  /**
+   * Runs one `isolated` scheduled fire in a fresh sub-session. Fire-and-forget:
+   * `'sent'` resolves once the prompt is dispatched, and the daemon-side
+   * launcher holds a concurrency slot until that sub-session's turn drains.
+   *
+   * A dispatch failure (concurrency cap reached, bridge gone, daemon shutting
+   * down) is logged and the fire is dropped. It deliberately does NOT fall back
+   * to an in-session run: the prompt may already have been dispatched, and
+   * silently running an isolated task inside the bound session would defeat the
+   * isolation the user asked for.
+   */
+  async #dispatchIsolatedCronFire(
+    spawner: SubSessionSpawner,
+    prompt: string,
+  ): Promise<void> {
+    try {
+      const { sessionId } = await spawner({ prompt, completion: 'sent' });
+      debugLogger.info(
+        `Isolated scheduled task dispatched into sub-session ${sessionId} [session ${this.sessionId}]`,
+      );
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      // Must reach stderr. `debugLogger.warn` writes nothing unless a debug log
+      // session is active, and the scheduler has already persisted this fire as
+      // a run — so a dropped dispatch would otherwise look like a successful
+      // one, with no trace anywhere. The daemon forwards child stderr.
+      writeStderrLine(
+        `qwen serve: isolated scheduled task dispatch failed — the fire was ` +
+          `dropped [session ${this.sessionId}]: ${detail}`,
+      );
+      debugLogger.warn(
+        `Isolated scheduled task dispatch failed — the fire was dropped ` +
+          `[session ${this.sessionId}]: ${detail}`,
+      );
+    }
   }
 
   /**

@@ -236,6 +236,8 @@ export function DialogShell({
           aria-modal="true"
           aria-label={title}
           tabIndex={-1}
+          data-web-shell-dialog
+          data-web-shell-dialog-title={title}
         >
           <header className={styles.header}>
             <div className={styles.titleWrap}>

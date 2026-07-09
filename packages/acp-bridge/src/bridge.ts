@@ -1757,6 +1757,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             outputTokens,
             durationMs,
           ),
+        // `create_sub_session` tool: forward the request/response hook so a child
+        // tool can ask the daemon to spawn a sub-session and (for 'first-turn')
+        // return its result. Omitted → the method reports daemon-only.
+        opts.onCreateSubSession,
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 

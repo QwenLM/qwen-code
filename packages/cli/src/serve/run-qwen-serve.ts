@@ -40,6 +40,11 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
+// Dynamic-imported below (not at module scope) so the serve fast-path bundle
+// closure check doesn't trace create-sub-session's transitive deps through
+// the run-qwen-serve chunk. The launcher is only needed after listen().
+import { PathMutexRegistry } from './fs/path-mutex-registry.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
@@ -794,8 +799,6 @@ async function loadServeRuntimeModules() {
     workspaceProvidersStatusModule,
     workspaceSkillsStatusModule,
     totalSessionAdmissionModule,
-    bridgeFileSystemAdapterModule,
-    pathMutexRegistryModule,
     workspaceRegistryModule,
   ] = await Promise.all([
     import('./server.js'),
@@ -807,8 +810,6 @@ async function loadServeRuntimeModules() {
     import('./workspace-providers-status.js'),
     import('./workspace-skills-status.js'),
     import('./total-session-admission.js'),
-    import('./bridge-file-system-adapter.js'),
-    import('./fs/path-mutex-registry.js'),
     import('./workspace-registry.js'),
   ]);
   return {
@@ -830,9 +831,6 @@ async function loadServeRuntimeModules() {
       workspaceSkillsStatusModule.createWorkspaceSkillsStatusProvider,
     createTotalSessionAdmissionController:
       totalSessionAdmissionModule.createTotalSessionAdmissionController,
-    createBridgeFileSystemAdapter:
-      bridgeFileSystemAdapterModule.createBridgeFileSystemAdapter,
-    PathMutexRegistry: pathMutexRegistryModule.PathMutexRegistry,
     createWorkspaceRegistry: workspaceRegistryModule.createWorkspaceRegistry,
     createWorkspaceSessionOwnerIndex:
       workspaceRegistryModule.createWorkspaceSessionOwnerIndex,
@@ -2533,7 +2531,7 @@ export async function runQwenServe(
       secondary: boundWorkspaces.slice(1),
       ideEnvPresent: !!process.env['QWEN_CODE_IDE_WORKSPACE_PATH'],
     });
-    const sharedPathLocks = new runtime.PathMutexRegistry();
+    const sharedPathLocks = new PathMutexRegistry();
     const fsFactory = runtime.resolveBridgeFsFactory({
       // Secondary roots share a write-capable factory only after their own
       // folder trust check passes; untrusted secondary roots stay outside.
@@ -2670,12 +2668,27 @@ export async function runQwenServe(
           );
         }
       });
+    // `create_sub_session` tool: spawn a fresh top-level sub-session on request
+    // from a child's agent turn and (for 'first-turn') return its result.
+    // Dynamic-imported (not at module scope) so the serve fast-path bundle
+    // closure check doesn't trace create-sub-session's transitive deps.
+    const { createSubSessionLauncher } = await import(
+      './create-sub-session.js'
+    );
+    // Late-binds the bridge (constructed just below) via `() => bridgeRef`. Only
+    // wired on the daemon-created bridge — an injected `deps.bridge` (embed/test)
+    // brings its own options.
+    const subSessionLauncher = createSubSessionLauncher({
+      getBridge: () => bridgeRef,
+      boundWorkspace,
+    });
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
         // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
+        onCreateSubSession: subSessionLauncher.launch,
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
@@ -2712,7 +2725,7 @@ export async function runQwenServe(
           : {}),
         permissionAudit: permissionAuditPublisher,
         statusProvider,
-        fileSystem: runtime.createBridgeFileSystemAdapter(fsFactory),
+        fileSystem: createBridgeFileSystemAdapter(fsFactory),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
             const fresh = settingsRuntime.settings.loadSettings(workspace);
@@ -2734,6 +2747,7 @@ export async function runQwenServe(
       persistDisabledTools: persistDisabledToolsFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
+      preheatAcpChild: () => bridge.preheat(),
       reloadDaemonEnv: (workspace) =>
         withSettingsLock(workspace, async () => {
           const fresh = settingsRuntime.settings.loadSettings(workspace, {
@@ -2880,6 +2894,11 @@ export async function runQwenServe(
       };
     };
 
+    // Collects stop() callbacks from every per-workspace sub-session launcher
+    // (primary + secondaries). Called during shutdown so no new sub-sessions
+    // are admitted while bridges are being torn down.
+    const subSessionStoppers: Array<() => void> = [];
+
     for (const workspaceInput of workspaceInputs.slice(1)) {
       let secondarySettings:
         | ReturnType<SettingsRuntime['loadSettings']>
@@ -2942,8 +2961,20 @@ export async function runQwenServe(
           : {}),
       });
       const secondaryClientMcpSenderRegistry = new ClientMcpSenderRegistry();
+      // Wire sub-session support for the secondary workspace too — without
+      // this, isolated scheduled tasks and create_sub_session calls from
+      // sessions bound to a secondary workspace hit methodNotFound.
+      // eslint-disable-next-line prefer-const -- assigned once after bridge creation; `let` required because the launcher closure captures it before the assignment.
+      let secondaryBridgeRef:
+        | ReturnType<typeof runtime.createAcpSessionBridge>
+        | undefined;
+      const secondarySubSessionLauncher = createSubSessionLauncher({
+        getBridge: () => secondaryBridgeRef,
+        boundWorkspace: workspaceInput.cwd,
+      });
       const secondaryBridge = runtime.createAcpSessionBridge({
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
+        onCreateSubSession: secondarySubSessionLauncher.launch,
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
@@ -2982,17 +3013,17 @@ export async function runQwenServe(
           : {}),
         permissionAudit: permissionAuditPublisher,
         statusProvider: secondaryStatusProvider,
-        fileSystem: runtime.createBridgeFileSystemAdapter(
-          secondaryBridgeFsFactory,
-        ),
+        fileSystem: createBridgeFileSystemAdapter(secondaryBridgeFsFactory),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
             const fresh = settingsRuntime.settings.loadSettings(workspace);
             fresh.setValue(WORKSPACE_SETTING_SCOPE, 'tools.approvalMode', mode);
           }),
       });
+      secondaryBridgeRef = secondaryBridge;
       runtimeBridges.push(secondaryBridge);
       internalRuntimeBridgesForCleanup.push(secondaryBridge);
+      subSessionStoppers.push(secondarySubSessionLauncher.stop);
       const secondaryWorkspaceService = runtime.createDaemonWorkspaceService({
         boundWorkspace: workspaceInput.cwd,
         contextFilename: contextFilenameForInit ?? 'QWEN.md',
@@ -3004,6 +3035,7 @@ export async function runQwenServe(
         workspaceSkillsStatusProvider:
           runtime.createWorkspaceSkillsStatusProvider(),
         isChannelLive: () => secondaryBridge.isChannelLive(),
+        preheatAcpChild: () => secondaryBridge.preheat(),
         persistDisabledTools: persistDisabledToolsFn,
         persistSetting: persistSettingFn,
         persistSettings: persistSettingsFn,
@@ -3328,6 +3360,14 @@ export async function runQwenServe(
           },
         ),
     });
+    // Park the sub-session launcher's stop on app.locals so the close handler
+    // can flip it off before tearing down the bridge it spawns into (symmetric
+    // with stopScheduledTaskKeepalive). Defensive: a launch during drain would
+    // otherwise just fail its spawnOrAttach against the shutting-down bridge.
+    (
+      app.locals as { subSessionStoppers?: Array<() => void> }
+    ).subSessionStoppers = subSessionStoppers;
+    subSessionStoppers.push(subSessionLauncher.stop);
     return { app, bridge };
   };
 
@@ -3849,6 +3889,15 @@ export async function runQwenServe(
             (
               app.locals as { stopScheduledTaskKeepalive?: () => void }
             ).stopScheduledTaskKeepalive?.();
+            // Same rationale for the create_sub_session launchers: stop accepting
+            // new sub-session spawns before the bridges are torn down. Calls
+            // every workspace's launcher stop (primary + secondaries).
+            const stoppers = (
+              app.locals as { subSessionStoppers?: Array<() => void> }
+            ).subSessionStoppers;
+            if (stoppers) {
+              for (const stop of stoppers) stop();
+            }
             clearRuntimeStartAfterHealthTimer();
             clearRuntimeStartFallbackTimer();
             cancelDeferredRuntimeStartup();
