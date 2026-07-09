@@ -104,8 +104,6 @@ export class QQChannel extends ChannelBase {
   private seenMessages: Map<string, number> = new Map();
   /** Cleanup timer for seenMessages TTL eviction. */
   private seenCleanupTimer: ReturnType<typeof setInterval> | null = null;
-  /** Cross-event-type dedup cache (e.g., GROUP_AT_MESSAGE_CREATE + GROUP_MESSAGE_CREATE). */
-  private crossEventDedup: Map<string, number> = new Map();
   /** Timestamp of last received HEARTBEAT_ACK, for zombie-connection detection. */
   private lastHeartbeatAck: number = 0;
   /** Debounce timer for saveQQState to avoid blocking event loop. */
@@ -236,10 +234,11 @@ export class QQChannel extends ChannelBase {
       (qqCfg.groupAllPolicy === 'keyword' || qqCfg.groupAllPolicy === 'all') &&
       config.sessionScope !== 'single'
     ) {
+      const originalScope = config.sessionScope;
       process.stderr.write(
-        `[QQ:${name}] WARNING: groupAllPolicy is '${qqCfg.groupAllPolicy}' but sessionScope is '${config.sessionScope}' (not 'single'). Forcing sessionScope to 'single' to ensure shared group context.\n`,
+        `[QQ:${name}] WARNING: groupAllPolicy is '${qqCfg.groupAllPolicy}' but sessionScope is '${originalScope}' (not 'single'). Forcing sessionScope to 'single' to ensure shared group context.\n`,
       );
-      config.sessionScope = 'single';
+      config = { ...config, sessionScope: 'single' as const };
     }
 
     const router =
@@ -570,7 +569,7 @@ export class QQChannel extends ChannelBase {
         // Log diagnostic info for non-429 failures
         if (resp.status !== 429) {
           process.stderr.write(
-            `[QQ:${this.name}] Send failed (HTTP ${resp.status}: ${errBody})
+            `[QQ:${this.name}] Send failed (HTTP ${resp.status}: ${errBody})\n
 `,
           );
         }
@@ -854,7 +853,6 @@ export class QQChannel extends ChannelBase {
     this.botOpenIdByGroup.clear();
     this.groupActiveMsgEnabled.clear();
     this.seenMessages.clear();
-    this.crossEventDedup.clear();
     this.coldStart = true;
     if (this._inCronFlow > 0) {
       process.stderr.write(
@@ -1016,7 +1014,7 @@ export class QQChannel extends ChannelBase {
           (e.code === 'RETRY_EXHAUSTED' || e.code === 'ACTIVE_MSG_DISABLED')
         ) {
           process.stderr.write(
-            `[QQ:${this.name}] ${logLabel} delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}\n`,
+            `[QQ:${this.name}] ${logLabel} delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, dropping ${buffer.length} chars\n`,
           );
           // RETRY_EXHAUSTED / ACTIVE_MSG_DISABLED = permanent failure.
           // Don't retry — just clean up state.
@@ -1219,7 +1217,7 @@ export class QQChannel extends ChannelBase {
           /* best-effort cleanup */
         }
         process.stderr.write(
-          `[QQ:${this.name}] saveQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
+          `[QQ:${this.name}] saveQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n
 `,
         );
       }
@@ -1287,7 +1285,7 @@ export class QQChannel extends ChannelBase {
         /* best-effort cleanup */
       }
       process.stderr.write(
-        `[QQ:${this.name}] flushQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
+        `[QQ:${this.name}] flushQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n
 `,
       );
     }
@@ -1445,7 +1443,7 @@ export class QQChannel extends ChannelBase {
       }
     } catch (e) {
       process.stderr.write(
-        `[QQ:${this.name}] backupGlobalSessions failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
+        `[QQ:${this.name}] backupGlobalSessions failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n
 `,
       );
     }
@@ -1465,7 +1463,7 @@ export class QQChannel extends ChannelBase {
       }
     } catch (e) {
       process.stderr.write(
-        `[QQ:${this.name}] restoreGlobalSessions failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
+        `[QQ:${this.name}] restoreGlobalSessions failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n
 `,
       );
     }
@@ -1511,7 +1509,7 @@ export class QQChannel extends ChannelBase {
       }
     } catch (e) {
       process.stderr.write(
-        `[QQ:${this.name}] fixRestoredSessions failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
+        `[QQ:${this.name}] fixRestoredSessions failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n
 `,
       );
     }
@@ -1610,7 +1608,7 @@ export class QQChannel extends ChannelBase {
         this.fetchToken().catch((e) => {
           if (this.disposed || this._reconnectId !== tokenReconnectId) return;
           process.stderr.write(
-            `[QQ:${this.name}] Token refresh failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}, will retry
+            `[QQ:${this.name}] Token refresh failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}, will retry\n
 `,
           );
           // Retry up to 10 times at 60s intervals, then give up.
@@ -1624,7 +1622,7 @@ export class QQChannel extends ChannelBase {
             if (this.disposed || this._reconnectId !== tokenReconnectId) return;
             if (++retryCount > 10) {
               process.stderr.write(
-                `[QQ:${this.name}] FATAL: token refresh exhausted, reconnecting
+                `[QQ:${this.name}] FATAL: token refresh exhausted, reconnecting\n
 `,
               );
               this.isReconnecting = true;
@@ -1648,7 +1646,7 @@ export class QQChannel extends ChannelBase {
                 if (this.disposed || this._reconnectId !== tokenReconnectId)
                   return;
                 process.stderr.write(
-                  `[QQ:${this.name}] Token refresh retry failed (attempt ${retryCount}): ${sanitizeLogText(e2 instanceof Error ? e2.message : String(e2), 200)}
+                  `[QQ:${this.name}] Token refresh retry failed (attempt ${retryCount}): ${sanitizeLogText(e2 instanceof Error ? e2.message : String(e2), 200)}\n
 `,
                 );
                 retry();
@@ -1917,16 +1915,13 @@ export class QQChannel extends ChannelBase {
           // session state, QQ routing state, and global sessions.json are
           // still intact. Calling restoreSessions() would drop and re-attach
           // every session, aborting in-flight LLM prompts.
-          this.reconnectAttempts = 0;
-          this.isReconnecting = false;
           if (this.readyTimeout) {
             clearTimeout(this.readyTimeout);
             this.readyTimeout = null;
           }
           this.connectReject = null;
-          this._ready = true;
+          this.finalizeReady();
           this.startHeartbeat();
-          this.attachCronHandler();
           onReady();
         }
         break;
@@ -2068,7 +2063,7 @@ export class QQChannel extends ChannelBase {
             await this.fetchToken();
           } catch {
             process.stderr.write(
-              `[QQ:${this.name}] RC: token refresh failed, retrying...
+              `[QQ:${this.name}] RC: token refresh failed, retrying...\n
 `,
             );
             await this.sleep(2000);
@@ -2166,10 +2161,7 @@ export class QQChannel extends ChannelBase {
         for (const [id, ts] of this.seenMessages) {
           if (ts < cutoff) this.seenMessages.delete(id);
         }
-        for (const [key, ts] of this.crossEventDedup) {
-          if (ts < cutoff) this.crossEventDedup.delete(key);
-        }
-        if (this.seenMessages.size === 0 && this.crossEventDedup.size === 0) {
+        if (this.seenMessages.size === 0) {
           clearInterval(this.seenCleanupTimer!);
           this.seenCleanupTimer = null;
         }
@@ -2177,25 +2169,6 @@ export class QQChannel extends ChannelBase {
     }
     return false;
   }
-  /**
-   * Check if a message was already processed via a different event type
-   * (e.g., GROUP_AT_MESSAGE_CREATE + GROUP_MESSAGE_CREATE for the same message).
-   * Note: QQ guarantees these events are mutually exclusive per-group
-   * (groupAllPolicy determines which event type fires), so this dedup is
-   * a safety net, not a normal code path. Keyed on event.id since the
-   * same underlying message has the same event.id across both event types.
-   */
-  private isCrossEventDuplicate(
-    chatId: string,
-    event: QQGroupMessageEvent,
-  ): boolean {
-    const key = `${chatId}:${event.id}`;
-    const now = Date.now();
-    if (this.crossEventDedup.has(key)) return true;
-    this.crossEventDedup.set(key, now);
-    return false;
-  }
-
   /**
    * Extract common group-message fields shared by handleGroup and handleGroupAll.
    * Returns null when the message has no meaningful text after @-tag stripping.
@@ -2368,9 +2341,8 @@ export class QQChannel extends ChannelBase {
 
     // Deduplicate before handleInbound — prepareGroupMessage already ran
     // so side effects (extractBotOpenId) are applied regardless of dedup.
-    // Also check cross-event dedup: GROUP_MESSAGE_CREATE may also fire for the same message.
-    if (this.isDuplicate(event.id) || this.isCrossEventDuplicate(chatId, event))
-      return;
+    // so side effects (extractBotOpenId) are applied regardless of dedup.
+    if (this.isDuplicate(event.id)) return;
 
     if (isSlash) {
       process.stderr.write(
@@ -2473,11 +2445,10 @@ export class QQChannel extends ChannelBase {
           this._keywordTriggerCache = (this.qqConfig.keywordTriggers ?? [])
             .filter((kw) => kw.length > 0)
             .map((kw) => {
-              const escaped = kw
-                .normalize('NFC')
-                .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              const firstIsAscii = /^[A-Za-z0-9_]/.test(kw);
-              const lastIsAscii = /[A-Za-z0-9_]$/.test(kw);
+              const normalized = kw.normalize('NFC');
+              const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const firstIsAscii = /^[A-Za-z0-9_]/.test(normalized);
+              const lastIsAscii = /[A-Za-z0-9_]$/.test(normalized);
               const lb = firstIsAscii ? '(?:^|[^\\w])' : '';
               const la = lastIsAscii ? '(?:[^\\w]|$)' : '';
               return new RegExp(`${lb}${escaped}${la}`, 'i');
@@ -2511,12 +2482,8 @@ export class QQChannel extends ChannelBase {
       );
     }
 
-    // Dedup after policy check: QQ guarantees GROUP_MESSAGE_CREATE and
-    // GROUP_AT_MESSAGE_CREATE are mutually exclusive per-group based on
-    // full-message access setting, so cross-event dedup is a safety net.
     // isDuplicate handles reconnect replay protection (same event.id).
-    if (this.isDuplicate(event.id) || this.isCrossEventDuplicate(chatId, event))
-      return;
+    if (this.isDuplicate(event.id)) return;
 
     if (isSlash) {
       process.stderr.write(
@@ -2566,8 +2533,18 @@ export class QQChannel extends ChannelBase {
 
   private handleGroupAddRobot(event: GroupAddRobotEvent): void {
     const groupId = event.group_openid;
-    if (!groupId) return;
-    if (!isValidChatId(groupId)) return;
+    if (!groupId) {
+      process.stderr.write(
+        `[QQ:${this.name}] handleGroupAddRobot: missing group_openid\n`,
+      );
+      return;
+    }
+    if (!isValidChatId(groupId)) {
+      process.stderr.write(
+        `[QQ:${this.name}] handleGroupAddRobot: invalid group_openid (length=${groupId.length})\n`,
+      );
+      return;
+    }
     this.chatTypeMap.set(groupId, 'group');
     this.saveQQState();
     process.stderr.write(

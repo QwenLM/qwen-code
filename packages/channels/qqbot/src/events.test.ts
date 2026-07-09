@@ -952,41 +952,6 @@ describe('群管理事件', () => {
       expect(groupActiveMsgEnabled.get('group-recv-1')).toBe(true);
     });
   });
-
-  describe('isCrossEventDuplicate', () => {
-    it('returns false on first call for a new chatId+eventId', () => {
-      const ch = makeChannel();
-      const pvt = ch as unknown as QQChannelRaw;
-      const evt = makeGroupEvent({ id: 'dedup-1' });
-      expect(pvt['isCrossEventDuplicate']('group-openid-1', evt)).toBe(false);
-    });
-
-    it('returns true on second call with same chatId+eventId', () => {
-      const ch = makeChannel();
-      const pvt = ch as unknown as QQChannelRaw;
-      const evt = makeGroupEvent({ id: 'dedup-2' });
-      pvt['isCrossEventDuplicate']('group-openid-1', evt);
-      expect(pvt['isCrossEventDuplicate']('group-openid-1', evt)).toBe(true);
-    });
-
-    it('returns false for same eventId but different chatId', () => {
-      const ch = makeChannel();
-      const pvt = ch as unknown as QQChannelRaw;
-      const evt = makeGroupEvent({ id: 'dedup-3' });
-      pvt['isCrossEventDuplicate']('group-a', evt);
-      expect(pvt['isCrossEventDuplicate']('group-b', evt)).toBe(false);
-    });
-
-    it('returns false for same chatId but different eventId', () => {
-      const ch = makeChannel();
-      const pvt = ch as unknown as QQChannelRaw;
-      const evt1 = makeGroupEvent({ id: 'dedup-4a' });
-      const evt2 = makeGroupEvent({ id: 'dedup-4b' });
-      pvt['isCrossEventDuplicate']('group-openid-1', evt1);
-      expect(pvt['isCrossEventDuplicate']('group-openid-1', evt2)).toBe(false);
-    });
-  });
-
   describe('sendIdentify intent subscription', () => {
     it('includes GROUP_MESSAGE intent when groupAllPolicy=keyword', () => {
       const ch = makeChannel({ groupAllPolicy: 'keyword' });
