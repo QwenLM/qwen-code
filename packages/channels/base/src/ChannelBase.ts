@@ -1030,6 +1030,9 @@ export abstract class ChannelBase {
       target.threadId,
       this.config.cwd,
       target.isGroup,
+      {
+        routingThreadId: this.webhookRoutingThreadId(task, target),
+      },
     );
     const promptText = buildChannelWebhookPrompt(task, target);
     const taskId = `webhook:${task.source}:${task.eventType}`;
@@ -1219,6 +1222,13 @@ export abstract class ChannelBase {
       current.then(() => undefined).catch(() => undefined),
     );
     return await current;
+  }
+
+  private webhookRoutingThreadId(
+    task: ChannelWebhookTask,
+    target: SessionTarget,
+  ): string {
+    return `webhook:${task.source}:${target.threadId ?? target.chatId}`;
   }
 
   private async runLoopBridgePrompt(

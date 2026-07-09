@@ -10085,6 +10085,39 @@ describe('ChannelBase', () => {
         ]);
       });
 
+      it('keeps thread-scope webhook tasks out of human chat sessions', async () => {
+        const ch = createChannel({
+          approvalMode: 'yolo',
+          sessionScope: 'thread',
+          groupPolicy: 'open',
+          webhooks,
+        });
+        ch.proactiveSupported = true;
+
+        await ch.handleInbound(
+          envelope({
+            senderId: 'alice-human',
+            chatId: 'group-1',
+            isGroup: true,
+            isMentioned: true,
+            text: 'human prompt',
+          }),
+        );
+        await ch.runWebhookTask(webhookTask);
+
+        expect(bridge.newSession).toHaveBeenCalledTimes(2);
+        expect(
+          (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls.map(
+            (call) => call[0],
+          ),
+        ).toEqual(['s-1', 's-2']);
+        expect(ch.proactiveTargets.at(-1)).toMatchObject({
+          chatId: 'group-1',
+          senderId: 'webhook:github-ci',
+          isGroup: true,
+        });
+      });
+
       it('prepends first-session webhook context once, including memory, instructions, and boundary metadata', async () => {
         const channelMemory = {
           readChannelMemory: vi

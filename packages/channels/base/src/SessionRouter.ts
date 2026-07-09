@@ -17,6 +17,9 @@ interface SessionReservation {
 }
 
 type SessionLoadWindow = Set<string>;
+interface ResolveOptions {
+  routingThreadId?: string;
+}
 
 export class SessionRouter {
   private toSession: Map<string, string> = new Map(); // routing key → session ID
@@ -97,8 +100,14 @@ export class SessionRouter {
     threadId?: string,
     cwd?: string,
     isGroup?: boolean,
+    options?: ResolveOptions,
   ): Promise<string> {
-    const key = this.routingKey(channelName, senderId, chatId, threadId);
+    const key = this.routingKey(
+      channelName,
+      senderId,
+      chatId,
+      options?.routingThreadId ?? threadId,
+    );
     let failedCreateWaits = 0;
     for (;;) {
       const existing = this.toSession.get(key);
