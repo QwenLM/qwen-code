@@ -679,6 +679,7 @@ const EN: Messages = {
   'scheduledTasks.reference.extension': 'Extensions',
   'scheduledTasks.reference.skill': 'Skills',
   'scheduledTasks.reference.mcp': 'MCP',
+  'scheduledTasks.referencePicker': 'Reference picker',
   'scheduledTasks.reference.loading': 'Loading…',
   'scheduledTasks.reference.empty': 'No available items.',
   'scheduledTasks.frequency': 'Frequency',
@@ -715,6 +716,8 @@ const EN: Messages = {
   'scheduledTasks.cancel': 'Cancel',
   'scheduledTasks.error.invalidSchedule': 'Invalid schedule',
   'scheduledTasks.error.emptyPrompt': 'Prompt is required',
+  'scheduledTasks.error.promptTooLong': (v) =>
+    `Prompt exceeds ${v?.max ?? 100_000}-character limit`,
   'scheduledTasks.error.toggleFailed': 'Failed to update task',
   'scheduledTasks.error.deleteFailed': 'Failed to delete task',
   'scheduledTasks.edit': 'Edit',
@@ -2374,6 +2377,7 @@ const ZH: Messages = {
   'scheduledTasks.reference.extension': '扩展',
   'scheduledTasks.reference.skill': '技能',
   'scheduledTasks.reference.mcp': 'MCP',
+  'scheduledTasks.referencePicker': '引用选择器',
   'scheduledTasks.reference.loading': '加载中…',
   'scheduledTasks.reference.empty': '暂无可选项。',
   'scheduledTasks.frequency': '频率',
@@ -2409,6 +2413,8 @@ const ZH: Messages = {
   'scheduledTasks.cancel': '取消',
   'scheduledTasks.error.invalidSchedule': '计划无效',
   'scheduledTasks.error.emptyPrompt': '提示词不能为空',
+  'scheduledTasks.error.promptTooLong': (v) =>
+    `提示词超过 ${v?.max ?? 100_000} 字符限制`,
   'scheduledTasks.error.toggleFailed': '更新任务失败',
   'scheduledTasks.error.deleteFailed': '删除任务失败',
   'scheduledTasks.edit': '编辑',

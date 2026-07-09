@@ -116,9 +116,10 @@ const MAX_SET_TIMEOUT_MS = 2_147_483_647;
 // back to the slow lane so a permanently-stuck task can't spin a 1 Hz GET loop.
 const PAST_DUE_FAST_RELOADS = 3;
 const OVERDUE_RELOAD_INTERVAL_MS = 30_000;
+const MAX_PROMPT_LENGTH = 100_000;
 const AT_REFERENCE_UNSAFE_CHARS = /[^\p{L}\p{N}_./-]/gu;
 const PROMPT_REFERENCE_TOKEN =
-  /(^|[\s])(@(?:ext|mcp):(?:\\.|[^\s])+|\/[^\s/]+)/gu;
+  /(^|[\s])(@(?:ext|mcp):(?:\\.|[^\s])+|\/(?:\\.|[^\s/])+)(?=$|\s)/gu;
 const REFERENCE_PICKER_THEME_VARS = [
   '--background',
   '--foreground',
@@ -176,7 +177,7 @@ function promptReferenceItemFromToken(
     };
   }
   if (token.startsWith('/')) {
-    const label = token.slice(1);
+    const label = unescapeReferenceText(token.slice(1));
     if (!label) return null;
     return {
       id: `skill:${label}`,
@@ -246,6 +247,24 @@ function setPromptEditorText(root: HTMLElement, text: string) {
   });
 }
 
+function normalizePromptEditor(root: HTMLElement): string {
+  let next = textFromPromptEditor(root);
+  if (next.length > MAX_PROMPT_LENGTH) {
+    next = next.slice(0, MAX_PROMPT_LENGTH);
+    setPromptEditorText(root, next);
+  } else if (next.trim().length === 0) {
+    clearPromptEditor(root);
+    next = '';
+  }
+  return next;
+}
+
+function insertPlainPromptText(root: HTMLElement, text: string) {
+  const remaining = MAX_PROMPT_LENGTH - textFromPromptEditor(root).length;
+  if (remaining <= 0) return;
+  document.execCommand('insertText', false, text.slice(0, remaining));
+}
+
 function makePromptTagElement(item: PromptReferenceItem): HTMLElement {
   const tag = document.createElement('span');
   tag.className = styles.promptTag;
@@ -309,12 +328,14 @@ function insertPromptTagElement(root: HTMLElement, item: PromptReferenceItem) {
 
 function PromptReferenceEditor({
   value,
+  label,
   placeholder,
   onChange,
   insertItem,
   onInserted,
 }: {
   value: string;
+  label: string;
   placeholder: string;
   onChange: (value: string) => void;
   insertItem: PromptReferenceItem | null;
@@ -349,21 +370,27 @@ function PromptReferenceEditor({
         className={styles.promptEditor}
         contentEditable
         role="textbox"
+        aria-label={label}
         aria-multiline="true"
         aria-placeholder={placeholder}
         onInput={(event) => {
-          let next = textFromPromptEditor(event.currentTarget);
-          if (next.trim().length === 0) {
-            clearPromptEditor(event.currentTarget);
-            next = '';
-          }
+          const next = normalizePromptEditor(event.currentTarget);
           lastAppliedValueRef.current = next;
           onChange(next);
         }}
         onPaste={(event) => {
           event.preventDefault();
-          const text = event.clipboardData.getData('text/plain');
-          document.execCommand('insertText', false, text);
+          insertPlainPromptText(
+            event.currentTarget,
+            event.clipboardData.getData('text/plain'),
+          );
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          insertPlainPromptText(
+            event.currentTarget,
+            event.dataTransfer.getData('text/plain'),
+          );
         }}
       />
       {value.trim().length === 0 && (
@@ -432,6 +459,7 @@ export function ScheduledTasksDialog({
   // create/toggle/delete's reload must not overwrite the newer list with
   // stale data. Only the latest reload is allowed to apply its result.
   const reloadSeqRef = useRef(0);
+  const referenceLoadSeqRef = useRef(0);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -541,10 +569,22 @@ export function ScheduledTasksDialog({
     });
   }, []);
 
+  const resetReferenceState = useCallback(() => {
+    referenceLoadSeqRef.current += 1;
+    setReferenceKind(null);
+    setReferenceItems([]);
+    setReferenceLoading(false);
+    setReferenceError(null);
+    setPendingPromptTag(null);
+    setReferencePickerPosition(null);
+    setReferencePickerThemeVars({});
+  }, []);
+
   const loadReferences = useCallback(
     async (kind: PromptTagKind) => {
+      const seq = ++referenceLoadSeqRef.current;
       if (referenceKind === kind) {
-        setReferenceKind(null);
+        resetReferenceState();
         return;
       }
       updateReferencePickerPosition();
@@ -553,54 +593,58 @@ export function ScheduledTasksDialog({
       setReferenceError(null);
       setReferenceItems([]);
       try {
+        let items: PromptReferenceItem[];
         if (kind === 'extension') {
           const status = await actions.loadExtensionsStatus();
-          setReferenceItems(
-            (status.extensions ?? [])
-              .filter((extension) => extension.isActive)
-              .map((extension) => ({
-                id: extension.id || extension.name,
-                kind,
-                label: extension.name,
-                description: extensionDescription(extension),
-                insertText: `@ext:${escapeAtReferenceText(extension.name)} `,
-              })),
-          );
+          items = (status.extensions ?? [])
+            .filter((extension) => extension.isActive)
+            .map((extension) => ({
+              id: extension.id || extension.name,
+              kind,
+              label: extension.name,
+              description: extensionDescription(extension),
+              insertText: `@ext:${escapeAtReferenceText(extension.name)} `,
+            }));
         } else if (kind === 'skill') {
           const status = await actions.loadSkillsStatus();
-          setReferenceItems(
-            (status.skills ?? [])
-              .filter((skill) => skill.modelInvocable)
-              .map((skill) => ({
-                id: skill.name,
-                kind,
-                label: skill.name,
-                description: skillDescription(skill),
-                insertText: `/${skill.name} `,
-              })),
-          );
+          items = (status.skills ?? [])
+            .filter((skill) => skill.modelInvocable)
+            .map((skill) => ({
+              id: skill.name,
+              kind,
+              label: skill.name,
+              description: skillDescription(skill),
+              insertText: `/${escapeAtReferenceText(skill.name)} `,
+            }));
         } else {
           const status = await actions.loadMcpStatus();
-          setReferenceItems(
-            (status.servers ?? [])
-              .filter((server) => !server.disabled)
-              .map((server) => ({
-                id: server.name,
-                kind,
-                label: server.name,
-                description: mcpDescription(server),
-                insertText: `@mcp:${escapeAtReferenceText(server.name)} `,
-              })),
-          );
+          items = (status.servers ?? [])
+            .filter((server) => !server.disabled)
+            .map((server) => ({
+              id: server.name,
+              kind,
+              label: server.name,
+              description: mcpDescription(server),
+              insertText: `@mcp:${escapeAtReferenceText(server.name)} `,
+            }));
         }
+        if (!mountedRef.current || seq !== referenceLoadSeqRef.current) return;
+        setReferenceItems(items);
       } catch (err) {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || seq !== referenceLoadSeqRef.current) return;
         setReferenceError(err instanceof Error ? err.message : String(err));
       } finally {
-        if (mountedRef.current) setReferenceLoading(false);
+        if (mountedRef.current && seq === referenceLoadSeqRef.current) {
+          setReferenceLoading(false);
+        }
       }
     },
-    [actions, referenceKind, updateReferencePickerPosition],
+    [
+      actions,
+      referenceKind,
+      resetReferenceState,
+      updateReferencePickerPosition,
+    ],
   );
 
   useEffect(() => {
@@ -612,13 +656,13 @@ export function ScheduledTasksDialog({
       const picker = referencePickerRef.current;
       if (popover?.contains(event.target as Node)) return;
       if (picker?.contains(event.target as Node)) return;
-      setReferenceKind(null);
+      resetReferenceState();
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
-        setReferenceKind(null);
+        resetReferenceState();
       }
     };
 
@@ -634,7 +678,7 @@ export function ScheduledTasksDialog({
       window.removeEventListener('resize', handleReposition);
       window.removeEventListener('scroll', handleReposition, true);
     };
-  }, [referenceKind, updateReferencePickerPosition]);
+  }, [referenceKind, resetReferenceState, updateReferencePickerPosition]);
 
   const resetForm = useCallback(() => {
     setName('');
@@ -644,12 +688,8 @@ export function ScheduledTasksDialog({
     setFormError(null);
     setShowForm(false);
     setEditingId(null);
-    setReferenceKind(null);
-    setReferenceItems([]);
-    setReferenceError(null);
-    setPendingPromptTag(null);
-    setReferencePickerPosition(null);
-  }, []);
+    resetReferenceState();
+  }, [resetReferenceState]);
 
   const openCreate = useCallback(() => {
     setEditingId(null);
@@ -658,30 +698,25 @@ export function ScheduledTasksDialog({
     setBuilder(DEFAULT_BUILDER);
     setRunMode('shared');
     setFormError(null);
-    setReferenceKind(null);
-    setReferenceItems([]);
-    setReferenceError(null);
-    setPendingPromptTag(null);
-    setReferencePickerPosition(null);
+    resetReferenceState();
     setShowForm(true);
-  }, []);
+  }, [resetReferenceState]);
 
-  const openEdit = useCallback((task: DaemonScheduledTask) => {
-    setEditingId(task.id);
-    setName(task.name ?? '');
-    setPrompt(task.prompt);
-    // Reverse the cron back onto the pickers; an expression the pickers can't
-    // represent lands in the `custom` field, never silently rewritten.
-    setBuilder(parseCronToBuilder(task.cron));
-    setRunMode(task.runMode ?? 'shared');
-    setFormError(null);
-    setReferenceKind(null);
-    setReferenceItems([]);
-    setReferenceError(null);
-    setPendingPromptTag(null);
-    setReferencePickerPosition(null);
-    setShowForm(true);
-  }, []);
+  const openEdit = useCallback(
+    (task: DaemonScheduledTask) => {
+      setEditingId(task.id);
+      setName(task.name ?? '');
+      setPrompt(task.prompt);
+      // Reverse the cron back onto the pickers; an expression the pickers can't
+      // represent lands in the `custom` field, never silently rewritten.
+      setBuilder(parseCronToBuilder(task.cron));
+      setRunMode(task.runMode ?? 'shared');
+      setFormError(null);
+      resetReferenceState();
+      setShowForm(true);
+    },
+    [resetReferenceState],
+  );
 
   const handleSubmit = useCallback(async () => {
     const cron = buildCron(builder);
@@ -691,6 +726,14 @@ export function ScheduledTasksDialog({
     }
     if (prompt.trim().length === 0) {
       setFormError(t('scheduledTasks.error.emptyPrompt'));
+      return;
+    }
+    if (prompt.length > MAX_PROMPT_LENGTH) {
+      setFormError(
+        t('scheduledTasks.error.promptTooLong', {
+          max: MAX_PROMPT_LENGTH,
+        }),
+      );
       return;
     }
     setSubmitting(true);
@@ -852,6 +895,8 @@ export function ScheduledTasksDialog({
           <div
             ref={referencePickerRef}
             className={styles.referencePicker}
+            role="listbox"
+            aria-label={t('scheduledTasks.referencePicker')}
             style={
               {
                 ...referencePickerThemeVars,
@@ -878,6 +923,8 @@ export function ScheduledTasksDialog({
                   key={`${item.kind}:${item.id}`}
                   type="button"
                   className={styles.referenceItem}
+                  role="option"
+                  aria-selected="false"
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => {
                     setPendingPromptTag(item);
@@ -965,6 +1012,7 @@ export function ScheduledTasksDialog({
               </span>
               <PromptReferenceEditor
                 value={prompt}
+                label={t('scheduledTasks.prompt')}
                 placeholder={t('scheduledTasks.promptPlaceholder')}
                 onChange={setPrompt}
                 insertItem={pendingPromptTag}
