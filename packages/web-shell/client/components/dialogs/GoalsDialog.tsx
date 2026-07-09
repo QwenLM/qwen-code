@@ -18,9 +18,10 @@ import styles from './GoalsDialog.module.css';
 const MAX_GOAL_LENGTH = 4000;
 
 /**
- * How often the list is refetched. Unlike scheduled tasks there is no
- * `nextRunAt` to schedule against: a goal advances whenever its session
- * finishes a turn, which the page can't predict, so it polls on a slow lane.
+ * Gap between the end of one refetch and the start of the next. Unlike
+ * scheduled tasks there is no `nextRunAt` to schedule against: a goal advances
+ * whenever its session finishes a turn, which the page can't predict, so it
+ * polls on a slow lane.
  */
 const RELOAD_INTERVAL_MS = 10_000;
 /** The elapsed-time column ticks independently of the refetch. */
@@ -80,13 +81,25 @@ export function GoalsDialog({
     }
   }, [actions]);
 
+  // One self-chaining loop owns both the initial load and the polling: each
+  // fetch is scheduled only once the previous one has settled. `GET /goals`
+  // probes every live session, and a wedged child holds it for the bridge's
+  // ext-method timeout — the same order as this interval — so a fixed
+  // setInterval would stack overlapping fan-outs. `withActionTimeout` rejects
+  // the wait but does not abort the request, so those would keep running.
   useEffect(() => {
-    void reload();
-  }, [reload]);
-
-  useEffect(() => {
-    const id = window.setInterval(() => void reload(), RELOAD_INTERVAL_MS);
-    return () => window.clearInterval(id);
+    let cancelled = false;
+    let timer = 0;
+    const run = async () => {
+      await reload();
+      if (cancelled) return;
+      timer = window.setTimeout(() => void run(), RELOAD_INTERVAL_MS);
+    };
+    void run();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [reload]);
 
   // Only tick the elapsed column while something is actually elapsing.

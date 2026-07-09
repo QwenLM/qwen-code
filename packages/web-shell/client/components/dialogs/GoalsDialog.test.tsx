@@ -224,6 +224,92 @@ describe('GoalsDialog', () => {
     expect(document.querySelector('textarea')).toBeNull();
   });
 
+  it('never lets a slow /goals poll overlap itself', async () => {
+    // `GET /goals` fans out one probe per live session and a wedged child can
+    // hold it for the bridge's ext-method timeout, which is the same order as
+    // the poll interval. A fixed setInterval would stack fan-outs, and the
+    // action timeout rejects the wait without aborting the request.
+    vi.useFakeTimers();
+    let release: (() => void) | undefined;
+    actions.listGoals.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve([]);
+        }),
+    );
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <GoalsDialog
+            onCreateGoal={vi.fn()}
+            onOpenSession={vi.fn()}
+            onError={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    // The mount load is in flight and never settles.
+    expect(actions.listGoals).toHaveBeenCalledTimes(1);
+
+    // Well past several intervals: still exactly one request.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(45_000);
+    });
+    expect(actions.listGoals).toHaveBeenCalledTimes(1);
+
+    // Once it settles, the next poll is scheduled one interval later.
+    await act(async () => {
+      release?.();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(actions.listGoals).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(actions.listGoals).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+  });
+
+  it('stops polling once unmounted', async () => {
+    vi.useFakeTimers();
+    actions.listGoals.mockResolvedValue([]);
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <GoalsDialog
+            onCreateGoal={vi.fn()}
+            onOpenSession={vi.fn()}
+            onError={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const afterMount = actions.listGoals.mock.calls.length;
+
+    act(() => root?.unmount());
+    root = null;
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(actions.listGoals).toHaveBeenCalledTimes(afterMount);
+
+    vi.useRealTimers();
+  });
+
   it('renders the load error and keeps the list usable', async () => {
     actions.listGoals.mockRejectedValue(new Error('daemon unreachable'));
     container = document.createElement('div');
