@@ -184,7 +184,8 @@ function createWebhookRateLimitMiddleware(
       next();
       return;
     }
-    if (deps.rateLimiter.checkRate('webhook:preauth', 'mutation')) {
+    const ip = req.ip ?? req.socket.remoteAddress ?? 'unknown';
+    if (deps.rateLimiter.checkRate(`webhook:preauth:${ip}`, 'mutation')) {
       next();
       return;
     }
@@ -288,6 +289,31 @@ function classifyChannelWebhookEnqueueError(error: unknown): {
   status: number;
   code: string;
 } {
+  const errorCode =
+    typeof error === 'object' && error !== null && 'code' in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+  if (typeof errorCode === 'string') {
+    switch (errorCode) {
+      case 'WORKER_NOT_RUNNING':
+      case 'WORKER_EXITED':
+      case 'WORKER_STOPPED':
+      case 'IPC_SEND_FAILED':
+        return { status: 503, code: 'channel_worker_unavailable' };
+      case 'IPC_TIMEOUT':
+        return { status: 504, code: 'channel_webhook_enqueue_timeout' };
+      case 'QUEUE_FULL':
+        return { status: 503, code: 'channel_webhook_queue_full' };
+      case 'UNSUPPORTED_TASK':
+      case 'SCOPE_RESTRICTED':
+        return { status: 409, code: 'channel_webhook_target_unavailable' };
+      case 'INVALID_TARGET':
+      case 'INVALID_TASK':
+        return { status: 400, code: 'channel_webhook_invalid_task' };
+      default:
+        break;
+    }
+  }
   const message = error instanceof Error ? error.message : String(error);
   if (
     message === 'Channel worker is not running.' ||

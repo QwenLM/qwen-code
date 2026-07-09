@@ -205,7 +205,7 @@ describe('channel webhook routes', () => {
     expect(res.status).toBe(401);
     expect(rateLimiter.checkRate).toHaveBeenCalledTimes(1);
     expect(rateLimiter.checkRate).toHaveBeenCalledWith(
-      'webhook:preauth',
+      expect.stringMatching(/^webhook:preauth:/u),
       'mutation',
     );
   });
@@ -229,7 +229,7 @@ describe('channel webhook routes', () => {
     expect(res.status).toBe(202);
     expect(rateLimiter.checkRate).toHaveBeenNthCalledWith(
       1,
-      'webhook:preauth',
+      expect.stringMatching(/^webhook:preauth:/u),
       'mutation',
     );
     expect(rateLimiter.checkRate).toHaveBeenNthCalledWith(
@@ -258,7 +258,7 @@ describe('channel webhook routes', () => {
     expect(res.status).toBe(401);
     expect(rateLimiter.checkRate).toHaveBeenCalledTimes(1);
     expect(rateLimiter.checkRate).toHaveBeenCalledWith(
-      'webhook:preauth',
+      expect.stringMatching(/^webhook:preauth:/u),
       'mutation',
     );
   });
@@ -384,11 +384,36 @@ describe('channel webhook routes', () => {
     });
   });
 
+  it('classifies coded worker errors without depending on message text', async () => {
+    const h = appHarness({
+      enqueueWebhookTask: vi.fn(async () => {
+        const err = new Error('message changed');
+        (err as Error & { code: string }).code = 'WORKER_NOT_RUNNING';
+        throw err;
+      }),
+    });
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+      });
+
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({
+      error: 'Failed to enqueue channel webhook task',
+      code: 'channel_worker_unavailable',
+    });
+  });
+
   it.each([
     'Channel worker is not running.',
     'Channel worker exited.',
     'Channel worker stopped.',
     'Channel worker IPC send failed.',
+    'Channel "dingtalk-main" is not running.',
   ])('returns 503 when the worker is unavailable: %s', async (message) => {
     const h = appHarness({
       enqueueWebhookTask: vi.fn(async () => {

@@ -3363,7 +3363,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       const clientId = registerClient(entry, req.clientId);
       if (req.approvalMode) {
-        await applyApprovalMode(entry, req.approvalMode, false, clientId);
+        await applyApprovalModeForAttach(entry, req.approvalMode, clientId);
       }
       // Fold synchronous coalesce reservations into the new entry's
       // `attachCount`. By this point all coalescers that beat us must

@@ -262,6 +262,12 @@ function resolveWebhookSecretEnv(secretEnv: string): string {
   if (secretEnv.startsWith('$')) {
     return resolveConfigEnvVar(secretEnv, 'available');
   }
+  if (
+    ENV_VAR_NAME_PATTERN.test(secretEnv) &&
+    process.env[secretEnv] !== undefined
+  ) {
+    return resolveConfigEnvVar(normalizeSecretEnvRef(secretEnv), 'available');
+  }
   if (ENV_VAR_NAME_PATTERN.test(secretEnv) && secretEnv.includes('_')) {
     return resolveConfigEnvVar(normalizeSecretEnvRef(secretEnv), 'available');
   }

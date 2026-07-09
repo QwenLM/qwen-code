@@ -2738,6 +2738,7 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-webhook-auth-')),
     );
+    const logBaseDir = path.join(tmpDir, 'debug');
     const previousQwenHome = process.env['QWEN_HOME'];
     const tempHome = fs.mkdtempSync(
       path.join(os.tmpdir(), 'qws-runtime-webhook-home-'),
@@ -2796,9 +2797,11 @@ describe('runQwenServe runtime startup failures', () => {
         resolveOnListen: true,
         deferRuntimeUntilFirstHealth: true,
         runtimeStartupTimeoutMs: 0,
+        daemonLogBaseDir: logBaseDir,
       },
     );
 
+    let closed = false;
     try {
       const res = await fetch(
         `${handle.url}/channels/dingtalk-main/webhooks/github-ci`,
@@ -2818,8 +2821,21 @@ describe('runQwenServe runtime startup failures', () => {
       expect(res.status).toBe(401);
       expect(await res.json()).toEqual({ error: 'Invalid webhook secret' });
       expect(createBridge).not.toHaveBeenCalled();
-    } finally {
       await handle.close();
+      closed = true;
+
+      const log = fs.readFileSync(
+        path.join(logBaseDir, 'daemon', `serve-${process.pid}.log`),
+        'utf8',
+      );
+      expect(log).toContain('deferred webhook auth failed');
+      expect(log).toContain('channelName=dingtalk-main');
+      expect(log).toContain('source=github-ci');
+      expect(log).toContain('reason="secret mismatch"');
+    } finally {
+      if (!closed) {
+        await handle.close();
+      }
       fs.rmSync(tempHome, { recursive: true, force: true });
       if (previousQwenHome === undefined) {
         delete process.env['QWEN_HOME'];

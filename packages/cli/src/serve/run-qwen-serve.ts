@@ -1394,12 +1394,18 @@ function isChannelWebhookRequest(req: Request): boolean {
 function createDeferredChannelWebhookAuth(
   workspace: string,
   runtime: ChannelWebhookConfigRuntime,
+  daemonLog: Pick<DaemonLogger, 'warn'>,
 ): RequestHandler {
   return (req, res, next) => {
     const match = /^\/channels\/([^/]+)\/webhooks\/([^/]+)\/?$/u.exec(req.path);
     const channelName = decodeDeferredWebhookPathSegment(match?.[1]);
     const source = decodeDeferredWebhookPathSegment(match?.[2]);
     if (!channelName || !source) {
+      daemonLog.warn('deferred webhook auth failed', {
+        channelName: channelName ?? 'unknown',
+        source: source ?? 'unknown',
+        reason: 'invalid webhook path',
+      });
       res.status(401).json({ error: 'Invalid webhook secret' });
       return;
     }
@@ -1411,6 +1417,11 @@ function createDeferredChannelWebhookAuth(
       source,
     );
     if (!matchesWebhookSecret(req.get('x-qwen-webhook-secret'), secret)) {
+      daemonLog.warn('deferred webhook auth failed', {
+        channelName,
+        source,
+        reason: secret ? 'secret mismatch' : 'source not configured',
+      });
       res.status(401).json({ error: 'Invalid webhook secret' });
       return;
     }
@@ -3353,6 +3364,7 @@ export async function runQwenServe(
     ? createDeferredChannelWebhookAuth(
         boundWorkspace,
         await loadChannelWebhookConfigRuntime(),
+        daemonLog,
       )
     : undefined;
   const app =
