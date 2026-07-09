@@ -367,8 +367,16 @@ jobs:
 
   web_shell_e2e_smoke:
     name: 'web-shell E2E Smoke (ubuntu-latest, Node 22.x)'
-    needs: 'classify_pr'
-    if: "${{ !cancelled() && github.event_name == 'pull_request' && needs.classify_pr.outputs.skip_ci != 'true' }}"
+    needs:
+      - 'classify_pr'
+      - 'test'
+    if: |-
+      ${{
+        !cancelled() &&
+        github.event_name == 'pull_request' &&
+        needs.classify_pr.outputs.skip_ci != 'true' &&
+        needs.test.outputs.ci_profile == 'full'
+      }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 20
     permissions:
