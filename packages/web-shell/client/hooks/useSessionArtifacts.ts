@@ -56,6 +56,7 @@ export function useSessionArtifacts(): SessionArtifactsState {
       setLoading(false);
       return;
     }
+    setArtifacts([]);
     setLoading(true);
     try {
       const result = await actions.loadArtifacts();
