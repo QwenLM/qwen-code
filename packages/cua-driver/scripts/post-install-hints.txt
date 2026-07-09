@@ -34,6 +34,12 @@ Next steps:
      • Codex (OpenAI):
          codex mcp add cua-driver -- {{BINARY}} mcp
 
+     • Qwen Code:
+         qwen mcp add cua-driver {{BINARY}} mcp
+
+     • Factory Droid:
+         droid mcp add cua-driver "{{BINARY}} mcp"
+
      • OpenClaw:
          {{BINARY}} mcp-config --client openclaw
 
@@ -54,7 +60,10 @@ Next steps:
          {{BINARY}} mcp-config --client opencode   # JSON for opencode.json
          {{BINARY}} mcp-config --client hermes     # YAML for ~/.hermes/config.yaml
 
+     • ZCode (Z.ai — GUI app; paste in Settings → MCP Servers):
+         {{BINARY}} mcp-config --client zcode
+
      For other clients accepting the generic mcpServers shape:
          {{BINARY}} mcp-config
 
-Docs: https://github.com/trycua/cua/tree/main/libs/cua-driver/rust
+Docs: https://github.com/QwenLM/qwen-code/tree/main/packages/cua-driver/rust

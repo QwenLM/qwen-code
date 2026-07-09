@@ -21,6 +21,37 @@ simplify.
 
 _Adapted from Andrej Karpathy's [CLAUDE.md](https://github.com/multica-ai/andrej-karpathy-skills/blob/main/CLAUDE.md)._
 
+### Core Infrastructure Is Maintainer-Only (triage gate, two-tier rule)
+
+Core modules — `packages/core/src/**`, `packages/*/src/auth/**`,
+`packages/*/src/providers/**`, `packages/*/src/models/**`,
+`packages/*/src/config/**`, `packages/*/src/tools/**`,
+`packages/*/src/services/**`, cross-package changes — are the architectural
+backbone. External PRs touching them face a two-tier gate (maintainer-authored
+PRs are exempt):
+
+1. **Large-scope `refactor` changes (500+ production logic lines in core,
+   excluding test and generated/schema files) → hard block.**
+   Skip evaluation entirely — the maintainer exemption above is the sole
+   exception. Large-scale core refactors must be maintainer-initiated.
+   When counting lines, exclude files matching `*.test.ts`, `*.test.tsx`,
+   `*.spec.ts`, `*.spec.tsx`, `__tests__/**`, `*.schema.ts`, `*.schema.json`,
+   `*.generated.ts`, and `**/generated/**` — only production logic counts.
+   `feat`-type and other non-`refactor` PRs are NOT hard-blocked on size; they
+   escalate to the maintainer for awareness instead. A non-blocking advisory
+   also applies at 1000+ production logic lines. Breadth alone is not size — a
+   low-risk sweep that touches 10+
+   files but changes a line or two each is escalated to a maintainer for
+   awareness and otherwise judged under Tier 2's 100%-confidence bar, not
+   auto-rejected on file count.
+2. **Small-scope changes → gate may evaluate, but must be 100% confident.**
+   Any doubt at all → escalate to maintainer. "The direction looks correct"
+   is not confidence. The gate must name every downstream consumer; if it
+   cannot, escalate.
+
+**When in doubt, escalate. Better to wrongly escalate than to wrongly
+approve.**
+
 ## Common Commands
 
 ### Building
@@ -129,7 +160,7 @@ npm run preflight  # Full check: clean → install → format → lint → build
 
 ### General workflow
 
-1. **Design doc for non-trivial work** — write one in `.qwen/design/` if the
+1. **Design doc for non-trivial work** — write one in `docs/design/` if the
    change touches multiple files or involves design decisions. Skip for small
    bugfixes.
 2. **Test plan for behavioral changes** — write an E2E test plan in
@@ -189,11 +220,18 @@ applicable.
 
 ## Project Directories
 
-Project artifacts live under `.qwen/`:
+Design docs and implementation plans are committed under `docs/` so they are
+tracked in version control:
+
+| Directory      | Purpose                          |
+| -------------- | -------------------------------- |
+| `docs/design/` | Design docs for planned features |
+| `docs/plans/`  | Implementation plans             |
+
+Other working artifacts live under `.qwen/` (git-ignored):
 
 | Directory               | Purpose                              |
 | ----------------------- | ------------------------------------ |
-| `.qwen/design/`         | Design docs for planned features     |
 | `.qwen/e2e-tests/`      | E2E test plans and results           |
 | `.qwen/issues/`         | Issue drafts before filing on GitHub |
 | `.qwen/pr-drafts/`      | PR drafts before submitting          |

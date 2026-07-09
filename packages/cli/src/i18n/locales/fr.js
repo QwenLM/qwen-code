@@ -1324,6 +1324,12 @@ export default {
   // Boîtes de dialogue - Modèle
   // ============================================================================
   'Select Model': 'Sélectionner un modèle',
+  ' (this project)': ' (ce projet)',
+  ' (global)': ' (global)',
+  'Persist the model selection to the project settings (workspace scope)':
+    'Persister la sélection du modèle dans les paramètres du projet (étendue workspace)',
+  'Persist the model selection to the user settings (global scope)':
+    'Persister la sélection du modèle dans les paramètres utilisateur (étendue globale)',
   'API Key': 'API Key',
   '(default)': '(par défaut)',
   '(not set)': '(non défini)',
@@ -1945,6 +1951,8 @@ export default {
     '(Utilisez les flèches ↑ ↓ pour naviguer, Enter pour sélectionner, Ctrl+C pour quitter)\n',
   'Switch to plan mode or exit plan mode':
     'Passer en mode plan ou quitter le mode plan',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    "Définit l'intensité de réflexion des modèles compatibles avec le raisonnement ({{tiers}}) ; mappée et limitée selon le fournisseur.",
   'Exited plan mode. Previous approval mode restored.':
     "Mode plan quitté. Mode d'approbation précédent restauré.",
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -2129,4 +2137,34 @@ export default {
   in: 'ent.',
   out: 'sort.',
   'In/Out': 'Ent/Sort',
+
+  // ============================================================================
+  // reload-plugins command
+  // ============================================================================
+  '{{count}} extension': '{{count}} extension',
+  '{{count}} extensions': '{{count}} extensions',
+  '{{count}} command': '{{count}} command',
+  '{{count}} commands': '{{count}} commands',
+  '{{count}} skill': '{{count}} skill',
+  '{{count}} skills': '{{count}} skills',
+  '{{count}} agent': '{{count}} agent',
+  '{{count}} agents': '{{count}} agents',
+  '{{count}} hook': '{{count}} hook',
+  '{{count}} hooks': '{{count}} hooks',
+  '{{count}} extension MCP server': '{{count}} extension MCP server',
+  '{{count}} extension MCP servers': '{{count}} extension MCP servers',
+  '{{count}} extension LSP server': '{{count}} extension LSP server',
+  '{{count}} extension LSP servers': '{{count}} extension LSP servers',
+  'Reload extension changes from disk': 'Reload extension changes from disk',
+  'Reloaded extensions: {{summary}}': 'Reloaded extensions: {{summary}}',
+  'Reload failed: {{message}}': 'Reload failed: {{message}}',
+  'Reload failed.': 'Reload failed.',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    'Extensions changed on disk. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    'Extension reload did not complete. Run /reload-plugins to try again.',
 };

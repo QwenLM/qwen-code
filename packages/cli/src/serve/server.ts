@@ -6,8 +6,14 @@
 
 import express from 'express';
 import type { Application } from 'express';
+import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
+import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from './daemon-logger.js';
-import type { DaemonStartupSnapshot } from './daemon-status.js';
+import type {
+  DaemonMetricsBucket,
+  DaemonPerfSnapshot,
+  DaemonStartupSnapshot,
+} from './daemon-status.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import {
   allowOriginCors,
@@ -21,10 +27,10 @@ import type {
   DeviceFlowProvider,
   DeviceFlowRegistry,
 } from './auth/device-flow.js';
-import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
 import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
+import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
 import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
 import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
 import {
@@ -63,6 +69,12 @@ import { registerWorkspaceSetupGithubRoutes } from './routes/workspace-setup-git
 import { registerWorkspaceTrustRoutes } from './routes/workspace-trust.js';
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
+import { registerScheduledTasksRoutes } from './routes/scheduled-tasks.js';
+import { registerUsageStatsRoutes } from './routes/usage-stats.js';
+import {
+  startScheduledTaskKeepalive,
+  rehydrateScheduledTaskSessions,
+} from './scheduled-task-keepalive.js';
 import {
   registerWorkspaceDiagnosticStatusRoutes,
   registerWorkspaceStatusRoutes,
@@ -84,6 +96,10 @@ import {
 } from './routes/workspace-voice.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import { setRateLimiter } from './rate-limit.js';
+import {
+  createTotalSessionAdmissionController,
+  type TotalSessionAdmissionSnapshot,
+} from './total-session-admission.js';
 import {
   sendBridgeError as sendBridgeErrorResponse,
   sendPermissionVoteError as sendPermissionVoteErrorResponse,
@@ -107,12 +123,19 @@ import { installRateLimiter } from './server/rate-limiter-setup.js';
 import { createServeFeatures } from './server/serve-features.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
 import { installSelfOriginStripMiddleware } from './server/self-origin.js';
+import {
+  createSingleWorkspaceRegistry,
+  createWorkspaceSessionOwnerIndex,
+  type WorkspaceRegistry,
+  type WorkspaceRuntimeEnvMetadata,
+} from './workspace-registry.js';
 import { registerWorkspaceLifecycleRoutes } from './routes/workspace-lifecycle.js';
 import { registerWorkspaceMcpControlRoutes } from './routes/workspace-mcp-control.js';
 import { registerWorkspaceToolsRoutes } from './routes/workspace-tools.js';
 
 export {
   createDefaultFsAuditEmit,
+  resolveBoundWorkspacesFromIdeEnv,
   resolveBridgeFsFactory,
 } from './server/fs-factory.js';
 export {
@@ -137,9 +160,33 @@ export { getActiveSseCount } from './routes/sse-events.js';
  */
 let warnedDefaultTrust = false;
 
+function describeRegistryPrimaryForConflict(
+  registry: WorkspaceRegistry,
+): string {
+  return (
+    `registry primary cwd=${JSON.stringify(registry.primary.workspaceCwd)}, ` +
+    `workspaceId=${JSON.stringify(registry.primary.workspaceId)}`
+  );
+}
+
+function getRuntimeEffectiveEnv(
+  metadata: WorkspaceRuntimeEnvMetadata | undefined,
+): Readonly<Record<string, string | undefined>> | undefined {
+  return metadata?.effectiveEnv;
+}
+
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
+  /**
+   * Enables resident management of scheduled-task-owned sessions: a periodic
+   * keepalive (so their schedulers aren't idle-reaped) and a boot-time
+   * rehydration (so they re-arm after a restart). Opt-in — only the real
+   * long-running daemon (`runQwenServe`) sets it. Tests and direct embeds
+   * leave it off so `createServeApp` neither spawns sessions on boot nor holds
+   * a heartbeat timer.
+   */
+  manageScheduledTaskSessions?: boolean;
   /**
    * Directory of the built Web Shell SPA (`index.html` + `assets/`). When
    * set (and `opts.serveWebShell !== false`), `createServeApp` mounts the
@@ -209,6 +256,15 @@ export interface ServeAppDeps {
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  getPerfSnapshot?: () => DaemonPerfSnapshot;
+  /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
+  getMetricsSeries?: () => DaemonMetricsBucket[];
+  getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
+  /**
+   * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
+   * the metrics ring can bucket request rate and latency for the charts.
+   */
+  recordDaemonRequest?: (durationMs: number, statusCode: number) => void;
   workspace?: DaemonWorkspaceService;
   statusProvider?: DaemonStatusProvider;
   persistDisabledTools?: (
@@ -242,6 +298,9 @@ export interface ServeAppDeps {
    * builds its own registry and wires it into the bridge it creates.
    */
   clientMcpSenderRegistry?: ClientMcpSenderRegistry;
+  workspaceRegistry?: WorkspaceRegistry;
+  primaryWorkspaceTrusted?: boolean;
+  primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
 }
 
@@ -274,6 +333,33 @@ export interface ServeAppDeps {
  * a "healthy"-looking daemon whose every spawn fails with cryptic
  * child-process ENOENT.
  */
+// Mirrors the bridge's session-idle reaper default (30 min). Used only to
+// size the scheduled-task keepalive interval when no explicit timeout is set.
+const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
+// Bounds for the keepalive interval: ≥30s (avoid busy-looping on a tiny custom
+// timeout) and ≤10min (stay well inside the 30-min default reaper window).
+const KEEPALIVE_MIN_INTERVAL_MS = 30_000;
+const KEEPALIVE_MAX_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * Sizes the keepalive heartbeat interval so a resident task session is beaten
+ * BEFORE the idle reaper closes it. Targets a third of the reaper window, but
+ * never exceeds HALF of it — so at least one heartbeat lands in time even for a
+ * small custom timeout, where the 30s floor would otherwise overshoot the whole
+ * window and let the session be reaped before the first beat. When the reaper is
+ * disabled (idle timeout ≤ 0) sessions are never reaped, so heartbeats aren't
+ * needed — the loop still runs (to revive re-enabled bound sessions) but at the
+ * relaxed max cadence.
+ */
+export function computeKeepaliveIntervalMs(idleTimeoutMs: number): number {
+  if (idleTimeoutMs <= 0) return KEEPALIVE_MAX_INTERVAL_MS;
+  const target = Math.min(
+    Math.max(KEEPALIVE_MIN_INTERVAL_MS, Math.floor(idleTimeoutMs / 3)),
+    KEEPALIVE_MAX_INTERVAL_MS,
+  );
+  return Math.max(1, Math.min(target, Math.floor(idleTimeoutMs / 2)));
+}
+
 export function createServeApp(
   opts: ServeOptions,
   getPort: () => number = () => opts.port,
@@ -286,20 +372,76 @@ export function createServeApp(
   // bridge silently fell back to `DEFAULT_MAX_SESSIONS` (20) and
   // only the `runQwenServe` path piped the option through.
   //
-  // The daemon is bound to exactly one workspace. The value advertised
-  // on `/capabilities`, used for the `POST /session` cwd fallback,
-  // AND passed into the bridge must be the SAME canonical form.
+  // The primary workspace value advertised on `/capabilities`, used for the
+  // `POST /session` cwd fallback, AND passed into the primary bridge must be
+  // the SAME canonical form.
   // `deps.boundWorkspace` is the pre-canonicalized fast-path from
   // `runQwenServe`; when omitted we canonicalize ourselves.
+  const injectedWorkspaceRegistry = deps.workspaceRegistry;
   const boundWorkspace =
+    injectedWorkspaceRegistry?.primary.workspaceCwd ??
     deps.boundWorkspace ??
     canonicalizeWorkspace(opts.workspace ?? process.cwd());
+  if (injectedWorkspaceRegistry) {
+    const primary = injectedWorkspaceRegistry.primary;
+    const registryConflictCandidates = [
+      {
+        depName: 'deps.boundWorkspace',
+        depValue: deps.boundWorkspace,
+        registryValue: primary.workspaceCwd,
+        detail: `deps.boundWorkspace=${JSON.stringify(deps.boundWorkspace)}`,
+      },
+      {
+        depName: 'deps.bridge',
+        depValue: deps.bridge,
+        registryValue: primary.bridge,
+        detail: 'deps.bridge is a different object',
+      },
+      {
+        depName: 'deps.workspace',
+        depValue: deps.workspace,
+        registryValue: primary.workspaceService,
+        detail: 'deps.workspace is a different object',
+      },
+      {
+        depName: 'deps.fsFactory',
+        depValue: deps.fsFactory,
+        registryValue: primary.routeFileSystemFactory,
+        detail: 'deps.fsFactory is a different object',
+      },
+      {
+        depName: 'deps.clientMcpSenderRegistry',
+        depValue: deps.clientMcpSenderRegistry,
+        registryValue: primary.clientMcpSenderRegistry,
+        detail: 'deps.clientMcpSenderRegistry is a different object',
+      },
+    ];
+    for (const candidate of registryConflictCandidates) {
+      if (
+        candidate.depValue === undefined ||
+        candidate.depValue === candidate.registryValue
+      ) {
+        continue;
+      }
+      throw new Error(
+        'createServeApp: workspaceRegistry conflicts with ' +
+          `${candidate.depName}: ${describeRegistryPrimaryForConflict(
+            injectedWorkspaceRegistry,
+          )}; ${candidate.detail}.`,
+      );
+    }
+  }
   // Construct `fsFactory` BEFORE the bridge so the bridge can wire it
   // through `BridgeFileSystem` for ACP-side writeTextFile/readTextFile.
   // Default trust is `false` (test-safe). Embeds without `deps.fsFactory`
   // or `deps.bridge` will see agent writes rejected with
   // `untrusted_workspace` — warn once so the asymmetry is visible.
-  if (!deps.fsFactory && !deps.bridge && !warnedDefaultTrust) {
+  if (
+    !injectedWorkspaceRegistry &&
+    !deps.fsFactory &&
+    !deps.bridge &&
+    !warnedDefaultTrust
+  ) {
     warnedDefaultTrust = true;
     process.stderr.write(
       'qwen serve: createServeApp default fsFactory uses trusted=false ' +
@@ -307,11 +449,13 @@ export function createServeApp(
         'Inject deps.fsFactory (with explicit trust) or deps.bridge to override.\n',
     );
   }
-  const fsFactory = resolveBridgeFsFactory({
-    boundWorkspace,
-    injected: deps.fsFactory,
-    trusted: false,
-  });
+  const fsFactory =
+    injectedWorkspaceRegistry?.primary.routeFileSystemFactory ??
+    resolveBridgeFsFactory({
+      boundWorkspaces: [boundWorkspace],
+      injected: deps.fsFactory,
+      trusted: false,
+    });
   const tokenConfigured =
     typeof opts.token === 'string' && opts.token.length > 0;
   const sessionShellCommandEnabled =
@@ -334,6 +478,7 @@ export function createServeApp(
   if (
     opts.clientMcpOverWs === true &&
     deps.bridge &&
+    !injectedWorkspaceRegistry &&
     !deps.clientMcpSenderRegistry
   ) {
     throw new Error(
@@ -343,22 +488,59 @@ export function createServeApp(
     );
   }
   const clientMcpSenderRegistry =
-    deps.clientMcpSenderRegistry ?? new ClientMcpSenderRegistry();
+    injectedWorkspaceRegistry?.primary.clientMcpSenderRegistry ??
+    deps.clientMcpSenderRegistry ??
+    new ClientMcpSenderRegistry();
+  const primaryRuntimeEnvMetadata =
+    injectedWorkspaceRegistry?.primary.env ?? deps.primaryRuntimeEnv;
+  const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
   const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
     createServeFeatures({
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
-      reloadAvailable: deps.workspace !== undefined,
+      // Registry injection supplies the primary workspace service through the
+      // runtime, so it has the same reload surface as legacy deps.workspace.
+      reloadAvailable:
+        deps.workspace !== undefined || injectedWorkspaceRegistry !== undefined,
       sessionShellCommandEnabled,
+      multiWorkspaceSessionsEnabled:
+        (injectedWorkspaceRegistry?.list().length ?? 1) > 1,
     });
-  const statusProvider = deps.statusProvider ?? createDaemonStatusProvider();
+  const statusProvider =
+    deps.statusProvider ??
+    createDaemonStatusProvider(
+      primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
+    );
+  let defaultBridgeForAdmission: AcpSessionBridge | undefined;
+  const totalSessionAdmission =
+    !deps.bridge && !injectedWorkspaceRegistry
+      ? createTotalSessionAdmissionController({
+          maxTotalSessions: opts.maxTotalSessions,
+          getBridges: () =>
+            defaultBridgeForAdmission ? [defaultBridgeForAdmission] : [],
+        })
+      : undefined;
+  const defaultSessionOwnerIndex = !injectedWorkspaceRegistry
+    ? createWorkspaceSessionOwnerIndex()
+    : undefined;
   const bridge =
+    injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
       maxSessions: opts.maxSessions,
+      ...(totalSessionAdmission
+        ? { freshSessionAdmission: totalSessionAdmission.admit }
+        : {}),
+      ...(defaultSessionOwnerIndex
+        ? {
+            sessionLifecycle:
+              defaultSessionOwnerIndex.handleBridgeSessionLifecycle,
+          }
+        : {}),
       maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
+      compactedReplayMaxBytes: opts.compactedReplayMaxBytes,
       permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
       boundWorkspace,
       sessionShellCommandEnabled,
@@ -372,6 +554,9 @@ export function createServeApp(
       // ext-method by reaching the WS connection that hosts the named server.
       clientMcpSender: clientMcpSenderRegistry.lookup,
     });
+  if (!injectedWorkspaceRegistry && !deps.bridge) {
+    defaultBridgeForAdmission = bridge;
+  }
   const archiveCoordinator = new SessionArchiveCoordinator();
 
   installSelfOriginStripMiddleware(app, getPort);
@@ -404,13 +589,16 @@ export function createServeApp(
   ) => sendPermissionVoteErrorResponse(res, err, ctx, daemonLog);
 
   const workspace: DaemonWorkspaceService =
+    injectedWorkspaceRegistry?.primary.workspaceService ??
     deps.workspace ??
     createDaemonWorkspaceService({
       boundWorkspace,
       contextFilename: deps.contextFilename ?? 'QWEN.md',
       statusProvider,
-      workspaceProvidersStatusProvider:
-        createWorkspaceProvidersStatusProvider(),
+      workspaceProvidersStatusProvider: createWorkspaceProvidersStatusProvider(
+        primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
+      ),
+      workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider(),
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
@@ -423,6 +611,7 @@ export function createServeApp(
         bridge.queryWorkspaceStatus(method, idle),
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
         bridge.invokeWorkspaceCommand(method, params, invokeOpts),
+      preheatAcpChild: () => bridge.preheat(),
       refreshExtensionsForAllSessions: () =>
         bridge.refreshExtensionsForAllSessions(),
       ...(deps.persistSetting ? { persistSetting: deps.persistSetting } : {}),
@@ -439,6 +628,35 @@ export function createServeApp(
         bridge.publishWorkspaceEvent(event);
       },
     });
+  const workspaceRegistry =
+    injectedWorkspaceRegistry ??
+    createSingleWorkspaceRegistry(
+      {
+        workspaceId: hashDaemonWorkspace(boundWorkspace),
+        workspaceCwd: boundWorkspace,
+        primary: true,
+        trusted: deps.primaryWorkspaceTrusted ?? false,
+        env: primaryRuntimeEnvMetadata ?? {
+          mode: 'parent-process',
+          overlayKeys: [],
+        },
+        bridge,
+        workspaceService: workspace,
+        routeFileSystemFactory: fsFactory,
+        clientMcpSenderRegistry,
+      },
+      defaultSessionOwnerIndex
+        ? { sessionOwnerIndex: defaultSessionOwnerIndex }
+        : {},
+    );
+  (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
+    workspaceRegistry;
+  const primaryRuntime = workspaceRegistry.primary;
+  const primaryBoundWorkspace = primaryRuntime.workspaceCwd;
+  const primaryBridge = primaryRuntime.bridge;
+  const primaryWorkspace = primaryRuntime.workspaceService;
+  const primaryRouteFileSystemFactory = primaryRuntime.routeFileSystemFactory;
+
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
   // gets a full 10MB `JSON.parse` before the 401 fires — a trivially
@@ -471,7 +689,7 @@ export function createServeApp(
   const healthDemoRoutes = createHealthDemoRoutes({
     opts,
     getPort,
-    bridge,
+    bridge: primaryBridge,
     getActiveSseCount,
     getRateLimiter: () => rateLimiter,
   });
@@ -532,12 +750,17 @@ export function createServeApp(
     requireAuth: opts.requireAuth === true,
   });
 
-  app.use(daemonTelemetryMiddleware(boundWorkspace));
+  app.use(
+    daemonTelemetryMiddleware(
+      () => primaryBoundWorkspace,
+      deps.recordDaemonRequest,
+    ),
+  );
 
-  const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
+  const buildWorkspaceCtx = createBuildWorkspaceCtx(primaryBoundWorkspace);
 
   const acpHandleRef: { current?: AcpHttpHandle } = {};
-  const workspaceRememberLane = new WorkspaceRememberTaskLane(bridge);
+  const workspaceRememberLane = new WorkspaceRememberTaskLane(primaryBridge);
 
   // Plan C CDP tunnel (issue #5626): process-scoped registry pairing the
   // extension `/acp` connection with the `/cdp` puppeteer endpoint. Inert until
@@ -547,9 +770,10 @@ export function createServeApp(
 
   registerDaemonStatusRoutes(app, {
     opts,
-    boundWorkspace,
-    bridge,
-    workspace,
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspaceRegistry,
+    workspace: primaryWorkspace,
     daemonLog,
     startup: deps.startup,
     qwenCodeVersion: deps.qwenCodeVersion,
@@ -561,59 +785,68 @@ export function createServeApp(
     deviceFlowRegistry,
     sessionShellCommandEnabled,
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
+    getPerfSnapshot: deps.getPerfSnapshot,
+    getMetricsSeries: deps.getMetricsSeries,
+    getTotalSessionAdmissionSnapshot:
+      deps.getTotalSessionAdmissionSnapshot ?? totalSessionAdmission?.snapshot,
   });
 
   registerCapabilitiesRoutes(app, {
     qwenCodeVersion: deps.qwenCodeVersion,
     mode: opts.mode,
     currentServeFeatures,
-    boundWorkspace,
-    permissionPolicy: bridge.permissionPolicy,
+    boundWorkspace: primaryBoundWorkspace,
+    workspaceRegistry,
+    permissionPolicy: primaryBridge.permissionPolicy,
+    maxSessionsPerWorkspace: opts.maxSessions,
+    maxTotalSessions: opts.maxTotalSessions,
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
     languageCodes,
   });
 
   registerWorkspaceStatusRoutes(app, {
-    boundWorkspace,
-    bridge,
-    workspace,
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspace: primaryWorkspace,
+    mutate,
     sendBridgeError,
   });
 
   // Workspace memory + agents CRUD routes.
   mountWorkspaceMemoryRoutes(app, {
-    bridge,
-    boundWorkspace,
+    bridge: primaryBridge,
+    boundWorkspace: primaryBoundWorkspace,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
   });
   mountWorkspaceMemoryRememberRoutes(app, {
-    bridge,
+    bridge: primaryBridge,
     lane: workspaceRememberLane,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
   });
   mountWorkspaceAgentsRoutes(app, {
-    bridge,
-    boundWorkspace,
+    bridge: primaryBridge,
+    boundWorkspace: primaryBoundWorkspace,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
   });
 
   registerWorkspaceDiagnosticStatusRoutes(app, {
-    boundWorkspace,
-    bridge,
-    workspace,
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspace: primaryWorkspace,
+    mutate,
     sendBridgeError,
   });
 
   registerWorkspaceExtensionRoutes(app, {
-    boundWorkspace,
-    bridge,
-    workspace,
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspace: primaryWorkspace,
     mutate,
     safeBody,
     sendBridgeError,
@@ -627,25 +860,25 @@ export function createServeApp(
     parseClientId: parseClientIdHeader,
   });
   registerWorkspaceFileWriteRoutes(app, {
-    bridge,
+    bridge: primaryBridge,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
   });
   registerWorkspaceSetupGithubRoutes(app, {
-    boundWorkspace,
-    bridge,
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
   });
   registerWorkspaceTrustRoutes(app, {
-    boundWorkspace,
-    workspace,
+    boundWorkspace: primaryBoundWorkspace,
+    workspace: primaryWorkspace,
     mutate,
     safeBody,
     parseAndValidateClientId: (req, res) =>
-      parseAndValidateWorkspaceClientId(req, res, bridge),
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
 
   const broadcastSettingsChanged = (
@@ -655,7 +888,7 @@ export function createServeApp(
     clientId: string | undefined,
   ) => {
     invalidateServeFeaturesCache();
-    bridge.publishWorkspaceEvent({
+    primaryBridge.publishWorkspaceEvent({
       type: 'settings_changed',
       data: { key, value, scope },
       ...(clientId ? { originatorClientId: clientId } : {}),
@@ -665,7 +898,7 @@ export function createServeApp(
   if (deps.persistSetting) {
     const persistSetting = deps.persistSetting;
     registerWorkspaceSettingsRoutes(app, {
-      boundWorkspace,
+      boundWorkspace: primaryBoundWorkspace,
       mutate,
       safeBody,
       persistSetting: async (...args) => {
@@ -673,19 +906,19 @@ export function createServeApp(
       },
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
-        parseAndValidateWorkspaceClientId(req, res, bridge),
+        parseAndValidateWorkspaceClientId(req, res, primaryBridge),
     });
   }
   registerWorkspacePermissionsRoutes(app, {
-    boundWorkspace,
+    boundWorkspace: primaryBoundWorkspace,
     mutate,
     safeBody,
-    workspace,
+    workspace: primaryWorkspace,
     parseAndValidateClientId: (req, res) =>
-      parseAndValidateWorkspaceClientId(req, res, bridge),
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
   registerWorkspaceVoiceRoutes(app, {
-    boundWorkspace,
+    boundWorkspace: primaryBoundWorkspace,
     mutate,
     safeBody,
     persistSetting: deps.persistSetting,
@@ -693,21 +926,22 @@ export function createServeApp(
     transcribe: deps.voiceTranscriber,
     broadcastSettingsChanged,
     parseAndValidateClientId: (req, res) =>
-      parseAndValidateWorkspaceClientId(req, res, bridge),
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
 
   // A2UI action inbound (the upstream half of A2UI-over-MCP): user
   // interactions from web clients are proxied to the UI MCP server's
   // standard `action` tool.
   registerA2uiActionRoutes(app, {
-    boundWorkspace,
+    boundWorkspace: primaryBoundWorkspace,
     mutate,
     safeBody,
+    env: getRuntimeEffectiveEnv(primaryRuntime.env),
     // UI-server discovery uses the daemon's workspace MCP status, which
     // includes servers registered at runtime.
     getMcpServers: async () => {
       const ctx = buildWorkspaceCtx('POST /session/:id/a2ui-action');
-      const status = await workspace.getWorkspaceMcpStatus(ctx);
+      const status = await primaryWorkspace.getWorkspaceMcpStatus(ctx);
       return (status.servers ?? []) as Array<{
         name: string;
         mcpStatus?: string;
@@ -721,14 +955,15 @@ export function createServeApp(
     deviceFlowRegistry,
     getSupportedDeviceFlowProviders,
     sendBridgeError,
-    boundWorkspace,
+    boundWorkspace: primaryBoundWorkspace,
     allowPrivateAuthBaseUrl: opts.allowPrivateAuthBaseUrl === true,
     installAuthProvider: deps.installAuthProvider,
   });
 
   registerSessionRoutes(app, {
-    boundWorkspace,
-    bridge,
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspaceRegistry,
     archiveCoordinator,
     mutate,
     sendBridgeError,
@@ -739,43 +974,121 @@ export function createServeApp(
   });
 
   registerWorkspaceMcpControlRoutes(app, {
-    boundWorkspace,
-    bridge,
-    workspace,
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspace: primaryWorkspace,
     mutate,
     safeBody,
     sendBridgeError,
     parseAndValidateClientId: (req, res) =>
-      parseAndValidateWorkspaceClientId(req, res, bridge),
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
   registerWorkspaceLifecycleRoutes(app, {
-    boundWorkspace,
-    workspace,
+    boundWorkspace: primaryBoundWorkspace,
+    workspace: primaryWorkspace,
     mutate,
     safeBody,
     sendBridgeError,
     invalidateServeFeaturesCache,
     parseAndValidateClientId: (req, res) =>
-      parseAndValidateWorkspaceClientId(req, res, bridge),
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
   registerWorkspaceToolsRoutes(app, {
-    boundWorkspace,
-    workspace,
+    boundWorkspace: primaryBoundWorkspace,
+    workspace: primaryWorkspace,
     mutate,
     safeBody,
     sendBridgeError,
     parseAndValidateClientId: (req, res) =>
-      parseAndValidateWorkspaceClientId(req, res, bridge),
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
 
+  // Durable scheduled-tasks CRUD (the Web Shell "Scheduled tasks" page).
+  // Reads/writes the per-project cron file only; firing stays with the
+  // session-side scheduler. Non-strict mutate: creating a scheduled prompt
+  // is the same capability class as POST /session/:id/prompt.
+  //
+  // The bridge is passed ONLY when resident task-session management is enabled.
+  // Binding a task to a dedicated session is only safe when something keeps that
+  // session resident and reloads it after a restart (the keepalive + rehydration
+  // below); without it, a bound task would fire only inside a session nothing
+  // revives and silently go dormant. So embedders that leave the manager off
+  // get UNBOUND tasks (shared-owner firing) instead.
+  registerScheduledTasksRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    mutate,
+    safeBody,
+    bridge: deps.manageScheduledTaskSessions ? bridge : undefined,
+  });
+
+  // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
+  // usage only; open GET like /daemon/status, with its own short TTL cache.
+  registerUsageStatsRoutes(app);
+
+  // Resident management of scheduled-task-owned sessions — opt-in, so tests and
+  // embeds that call createServeApp neither spawn sessions on boot nor hold a
+  // heartbeat timer (both would read the bound workspace's real tasks file).
+  if (deps.manageScheduledTaskSessions) {
+    // Keepalive: keep task sessions resident so their in-child schedulers keep
+    // ticking rather than being idle-reaped, AND revive a re-enabled bound
+    // session the reaper already let go. The revive loop is needed even when the
+    // reaper is disabled (idle timeout ≤ 0), because archiving a task closes its
+    // session — so this always runs when task sessions are managed, not only
+    // when a reaper is active.
+    const idleTimeoutMs =
+      opts.sessionIdleTimeoutMs ?? DEFAULT_SESSION_IDLE_TIMEOUT_MS;
+    const keepalive = startScheduledTaskKeepalive({
+      bridge,
+      boundWorkspace,
+      intervalMs: computeKeepaliveIntervalMs(idleTimeoutMs),
+    });
+    // Park the stop fn on `app.locals` (same pattern as `fsFactory` /
+    // `boundWorkspace` / `acpHandle` above) so the shutdown sequence in
+    // run-qwen-serve.ts can invoke it without threading it back through the
+    // createServeApp return type.
+    (
+      app.locals as { stopScheduledTaskKeepalive?: () => void }
+    ).stopScheduledTaskKeepalive = keepalive.stop;
+
+    // Rehydrate task-owned sessions on boot so their schedulers re-arm after a
+    // restart (a bound task fires only in its own session, which nothing else
+    // reloads). Fire-and-forget so it never delays the server coming up; a
+    // no-op when there are no bound tasks. Deliberately not awaited.
+    void rehydrateScheduledTaskSessions({
+      bridge,
+      boundWorkspace,
+      onError: (sessionId, err) => {
+        process.stderr.write(
+          `qwen serve: failed to rehydrate scheduled-task session ${sessionId}: ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
+      },
+      // Outer catch is defense-in-depth: rehydrateScheduledTaskSessions already
+      // catches readCronTasks failures and per-session load errors internally
+      // (returning { loaded, failed }), so this only guards an unexpected throw
+      // from the function entry itself. Log rather than swallow it — a silent
+      // failure here leaves every bound task dormant with no diagnostic.
+    }).catch((err) => {
+      process.stderr.write(
+        `qwen serve: unexpected scheduled-task rehydration failure: ${
+          err instanceof Error ? err.message : String(err)
+        }\n`,
+      );
+    });
+  }
+
   registerPermissionRoutes(app, {
-    bridge,
+    bridge: primaryBridge,
+    workspaceRegistry,
+    daemonLog,
     mutate,
     sendPermissionVoteError,
   });
 
   registerSseEventsRoutes(app, {
-    bridge,
+    bridge: primaryBridge,
+    workspaceRegistry,
     daemonLog,
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
     sendBridgeError,
@@ -788,11 +1101,11 @@ export function createServeApp(
   // decision. Mounted AFTER the REST routes (distinct path, no overlap)
   // and BEFORE the final error handler so malformed `/acp` bodies still
   // route through the JSON error contract below.
-  acpHandleRef.current = mountAcpHttp(app, bridge, {
-    boundWorkspace,
+  acpHandleRef.current = mountAcpHttp(app, primaryBridge, {
+    boundWorkspace: primaryBoundWorkspace,
     archiveCoordinator,
-    workspace,
-    fsFactory,
+    workspace: primaryWorkspace,
+    fsFactory: primaryRouteFileSystemFactory,
     deviceFlowRegistry,
     token: opts.token,
     // Mirror the REST CORS allowlist onto the WS CSRF wall so an
@@ -802,6 +1115,7 @@ export function createServeApp(
       opts.allowOrigins && opts.allowOrigins.length > 0
         ? parseAllowOriginPatterns(opts.allowOrigins)
         : undefined,
+    hostname: opts.hostname,
     sessionShellCommandEnabled,
     workspaceRememberLane,
     checkRate: rateLimiter?.checkRate,
@@ -815,8 +1129,8 @@ export function createServeApp(
       ? {
           clientMcpProviderFactory: (connectionId: string) =>
             createClientMcpServerProvider(
-              clientMcpSenderRegistry,
-              bridge,
+              primaryRuntime.clientMcpSenderRegistry,
+              primaryBridge,
               connectionId,
             ),
         }
@@ -831,7 +1145,9 @@ export function createServeApp(
     extraWsRoutes: [
       {
         path: '/voice/stream',
-        onConnection: createVoiceWsConnectionHandler(boundWorkspace),
+        onConnection: createVoiceWsConnectionHandler(primaryBoundWorkspace, {
+          env: getRuntimeEffectiveEnv(primaryRuntime.env),
+        }),
       },
     ],
   });

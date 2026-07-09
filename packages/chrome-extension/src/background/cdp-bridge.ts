@@ -310,8 +310,8 @@ async function handleAttach(
 /**
  * Handle a `cdp_command` frame: run it on the attached tab and reply.
  *
- * TRUST MODEL — deliberately NO method allowlist: chrome-devtools-mcp drives the
- * tab over the full CDP surface, so any allowlist would break its tools.
+ * TRUST MODEL — deliberately NO method allowlist: an external CDP MCP adapter
+ * drives the tab over the full CDP surface, so any allowlist would break tools.
  * Arbitrary-CDP exposure (incl. `Runtime.evaluate`) is bounded by the CHANNEL,
  * not the payload: the daemon `/cdp` endpoint is loopback-only, the daemon binds
  * the reverse link only to the `qwen-cdp-bridge` connection, and Chrome shows

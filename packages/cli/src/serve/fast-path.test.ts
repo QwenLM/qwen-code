@@ -363,13 +363,12 @@ afterEach(() => {
 
 describe('CLI entry import boundary', () => {
   it('does not statically import the full gemini entry before the serve fast path can run', () => {
-    const indexSource = readFileSync('index.ts', 'utf8');
+    const cliSource = readFileSync('src/cli.ts', 'utf8');
 
-    expect(indexSource).not.toContain("import './src/gemini.js'");
-    expect(indexSource).not.toContain("import { main } from './src/gemini.js'");
-    expect(indexSource).not.toContain("process.argv[2] === 'serve'");
-    expect(indexSource).toContain('import { isServeFastPathArgv }');
-    expect(indexSource).toContain("await import('./src/serve/fast-path.js')");
+    expect(cliSource).not.toContain("import './gemini.js'");
+    expect(cliSource).not.toContain("import { main } from './gemini.js'");
+    expect(cliSource).not.toContain("process.argv[2] === 'serve'");
+    expect(cliSource).toContain("await import('./serve/fast-path.js')");
   });
 
   it('does not import the full settings loader on the serve fast path', () => {
@@ -515,6 +514,24 @@ describe('serve fast path argument parsing', () => {
     });
   });
 
+  it('parses --tls-cert and --tls-key on the fast path', () => {
+    const parsed = parseServeFastPathArgs([
+      'serve',
+      '--tls-cert',
+      '/tmp/cert.pem',
+      '--tls-key',
+      '/tmp/key.pem',
+    ]);
+
+    expect(parsed).toMatchObject({
+      kind: 'serve',
+      options: {
+        tlsCert: '/tmp/cert.pem',
+        tlsKey: '/tmp/key.pem',
+      },
+    });
+  });
+
   it('parses bundled entrypoint argv before serve', () => {
     const parsed = parseServeFastPathArgs([
       '/repo/dist/cli.js',
@@ -526,6 +543,27 @@ describe('serve fast path argument parsing', () => {
     expect(parsed).toMatchObject({
       kind: 'serve',
       options: { port: 0 },
+    });
+  });
+
+  it('falls back to the full parser for repeatable --workspace values', () => {
+    expect(
+      parseServeFastPathArgs([
+        'serve',
+        '--workspace',
+        '/tmp/primary',
+        '--workspace',
+        '/tmp/secondary',
+      ]),
+    ).toEqual({ kind: 'fallback' });
+  });
+
+  it('falls back to the full parser for empty --workspace values', () => {
+    expect(parseServeFastPathArgs(['serve', '--workspace='])).toEqual({
+      kind: 'fallback',
+    });
+    expect(parseServeFastPathArgs(['serve', '--workspace', ''])).toEqual({
+      kind: 'fallback',
     });
   });
 
@@ -575,15 +613,22 @@ describe('serve fast path argument parsing', () => {
       ['hostname', ['--hostname', '127.0.0.1']],
       ['token', ['--token', 'token']],
       ['max-sessions', ['--max-sessions', '10']],
+      ['max-total-sessions', ['--max-total-sessions', '20']],
       [
         'max-pending-prompts-per-session',
         ['--max-pending-prompts-per-session', '5'],
       ],
       ['max-connections', ['--max-connections', '256']],
       ['event-ring-size', ['--event-ring-size', '8000']],
+      [
+        'compacted-replay-max-bytes',
+        ['--compacted-replay-max-bytes', '4194304'],
+      ],
       ['workspace', ['--workspace', process.cwd()]],
       ['require-auth', ['--require-auth']],
       ['enable-session-shell', ['--enable-session-shell']],
+      ['tls-cert', ['--tls-cert', '/tmp/cert.pem']],
+      ['tls-key', ['--tls-key', '/tmp/key.pem']],
       ['web', ['--no-web']],
       ['open', ['--open']],
       ['http-bridge', ['--no-http-bridge']],
@@ -638,11 +683,28 @@ describe('serve fast path argument parsing', () => {
       },
     });
     expect(fastPathParsed).not.toHaveProperty('options.maxSessions');
+    expect(fastPathParsed).not.toHaveProperty('options.maxTotalSessions');
     expect(fastPathParsed).not.toHaveProperty('options.maxConnections');
     expect(fastPathParsed).not.toHaveProperty('options.eventRingSize');
     expect(fastPathParsed).not.toHaveProperty(
+      'options.compactedReplayMaxBytes',
+    );
+    expect(fastPathParsed).not.toHaveProperty(
       'options.maxPendingPromptsPerSession',
     );
+  });
+
+  it('parses --compacted-replay-max-bytes on the fast path', () => {
+    const parsed = parseServeFastPathArgs([
+      'serve',
+      '--compacted-replay-max-bytes',
+      '1048576',
+    ]);
+
+    expect(parsed).toMatchObject({
+      kind: 'serve',
+      options: { compactedReplayMaxBytes: 1024 * 1024 },
+    });
   });
 
   it('keeps --experimental-lsp on the fast path', () => {
@@ -691,6 +753,10 @@ describe('serve fast path argument parsing', () => {
     [
       ['serve', '--max-pending-prompts-per-session=-1'],
       'qwen serve: --max-pending-prompts-per-session must be a non-negative integer (0 / Infinity = unlimited).',
+    ],
+    [
+      ['serve', '--compacted-replay-max-bytes=0'],
+      'qwen serve: --compacted-replay-max-bytes must be a positive safe integer in [1, 268435456].',
     ],
     [
       ['serve', '--rate-limit', '--rate-limit-prompt=0'],

@@ -80,6 +80,10 @@ async function buildCleanMemorySystemPrompt(
       memoryDir: getUserAutoMemoryRoot(),
       indexContent: userIndex,
     },
+    /* teamSection */ undefined,
+    // The remember agent needs the full protocol (type definitions, scope routing,
+    // exclusion rules) to write correct memories — do not remove.
+    { forceFullProtocol: true },
   );
 }
 
@@ -169,6 +173,7 @@ export async function runManagedRememberByAgent(params: {
     hiddenConfig,
     params.projectRoot,
     {
+      bypassBaseAskForScopedPaths: true,
       restrictReadsToMemoryPaths: true,
     },
   );
@@ -180,7 +185,7 @@ export async function runManagedRememberByAgent(params: {
     }),
     systemPrompt: buildRememberSystemPrompt(memoryPrompt),
     maxTurns: 6,
-    maxTimeMinutes: 5,
+    maxTimeMinutes: params.config.getMemoryAgentTimeoutMinutes() ?? 5,
     extraHistory: params.contextMode === 'clean' ? [] : undefined,
     preserveEmptyExtraHistory: params.contextMode === 'clean',
     tools: [

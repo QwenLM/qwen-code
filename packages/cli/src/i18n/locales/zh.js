@@ -178,6 +178,7 @@ export default {
   'toolDisplayName.SaveMemory': '保存记忆',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '制品',
+  'toolDisplayName.RecordArtifact': '记录制品',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '进入计划模式',
   'toolDisplayName.ExitPlanMode': '退出计划模式',
@@ -196,6 +197,7 @@ export default {
   'toolDisplayName.TaskStop': '停止任务',
   'toolDisplayName.TeamCreate': '创建团队',
   'toolDisplayName.TeamDelete': '删除团队',
+  'toolDisplayName.TeamPlanApproval': '团队计划审批',
   'toolDisplayName.SendMessage': '发送消息',
   'toolDisplayName.StructuredOutput': '结构化输出',
   'toolDisplayName.Monitor': '监控',
@@ -1365,6 +1367,7 @@ export default {
   'Size:': '大小：',
   '{{count}} bytes': '{{count}} 字节',
   'Reference in chat': '在对话中引用',
+  'MCP server': 'MCP 服务器',
   'MCP resource server': 'MCP 资源服务器',
 
   // Invalid tool related translations
@@ -1409,8 +1412,8 @@ export default {
     '切换此会话的模型（--fast 可设置建议模型）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
     '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，[model-id] 可立即切换）',
-  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
-    '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，--vision 可设置视觉桥接模型，[model-id] 可立即切换，或用 [model-id] [prompt] 在另一个模型上运行一次性提示；内联提示按原文发送，不展开 @file）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    '切换此会话的模型（--fast 建议模型，--voice 语音转写模型，--vision 视觉桥接模型，--project 持久化到项目设置，--global 持久化到用户设置，[model-id] 立即切换，或用 [model-id] [prompt] 在另一个模型上运行一次性提示；内联提示按原文发送，不展开 @file）',
   "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
     "此模式不支持内联一次性覆盖——请先运行 '/model {{model}}'，再发送你的提示。",
   "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
@@ -1423,6 +1426,10 @@ export default {
   'Set the model for voice transcription': '设置语音转写模型',
   'Set the image-capable model used to transcribe images for a text-only main model':
     '设置用于为纯文本主模型转写图像的图像能力模型',
+  'Persist the model selection to the project settings (workspace scope)':
+    '将模型选择持久化到项目设置（工作区）',
+  'Persist the model selection to the user settings (global scope)':
+    '将模型选择持久化到用户设置（全局）',
   'Select Fast Model': '选择快速模型',
   'Select Vision Model': '选择视觉模型',
   'Select Voice Model': '选择语音模型',
@@ -1644,6 +1651,8 @@ export default {
   // Dialogs - Model
   // ============================================================================
   'Select Model': '选择模型',
+  ' (this project)': '（当前项目）',
+  ' (global)': '（全局）',
   'API Key': 'API Key',
   '(default)': '(默认)',
   '(not set)': '(未设置)',
@@ -2151,6 +2160,8 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
   'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    '设置具备推理能力的模型思考的强度（{{tiers}}）；按各提供方进行映射与钳制。',
   'Set a goal — keep working until the condition is met':
     '设定目标 — 持续工作直到条件满足',
   'Exited plan mode. Previous approval mode restored.':
@@ -2367,4 +2378,36 @@ export default {
   '中国 (China) - 阿里云百炼': '中国 - 阿里云百炼',
   '阿里云百炼 (aliyun.com)': '阿里云百炼（aliyun.com）',
   'No compression needed.': '无需压缩。',
+  '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
+    '⚠️ 历史记录缺口：此处之前的会话记录已丢失（存储中断），且无法找回。',
+
+  // ============================================================================
+  // reload-plugins 命令
+  // ============================================================================
+  '{{count}} extension': '{{count}} 个扩展',
+  '{{count}} extensions': '{{count}} 个扩展',
+  '{{count}} command': '{{count}} 个命令',
+  '{{count}} commands': '{{count}} 个命令',
+  '{{count}} skill': '{{count}} 个技能',
+  '{{count}} skills': '{{count}} 个技能',
+  '{{count}} agent': '{{count}} 个代理',
+  '{{count}} agents': '{{count}} 个代理',
+  '{{count}} hook': '{{count}} 个钩子',
+  '{{count}} hooks': '{{count}} 个钩子',
+  '{{count}} extension MCP server': '{{count}} 个扩展 MCP 服务器',
+  '{{count}} extension MCP servers': '{{count}} 个扩展 MCP 服务器',
+  '{{count}} extension LSP server': '{{count}} 个扩展 LSP 服务器',
+  '{{count}} extension LSP servers': '{{count}} 个扩展 LSP 服务器',
+  'Reload extension changes from disk': '从磁盘重新加载扩展变更',
+  'Reloaded extensions: {{summary}}': '已重新加载扩展：{{summary}}',
+  'Reload failed: {{message}}': '重新加载失败：{{message}}',
+  'Reload failed.': '重新加载失败。',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    '磁盘上的扩展已变更。运行 /reload-plugins 来应用更新。',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    '扩展内容刷新失败：{{message}}。运行 /reload-plugins 来应用更新。',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    '扩展内容刷新失败。运行 /reload-plugins 来应用更新。',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    '扩展重新加载未完成。运行 /reload-plugins 重试。',
 };

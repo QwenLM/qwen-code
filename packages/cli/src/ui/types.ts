@@ -339,6 +339,8 @@ export interface ToolDefinition {
 
 export interface SkillDefinition {
   name: string;
+  description?: string;
+  level?: string;
 }
 
 export type HistoryItemToolsList = HistoryItemBase & {

@@ -16,6 +16,8 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
+  DEFAULT_MAX_SUBAGENT_DEPTH,
+  DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   DEFAULT_STOP_HOOK_BLOCK_CAP,
@@ -32,6 +34,7 @@ export type SettingsType =
   | 'boolean'
   | 'string'
   | 'number'
+  | 'integer'
   | 'array'
   | 'object'
   | 'enum';
@@ -86,9 +89,9 @@ export interface SettingDefinition {
   options?: readonly SettingEnumOption[];
   /** Schema for array items when type is 'array' */
   items?: SettingItemDefinition;
-  /** Minimum value for number-type settings. */
+  /** Minimum value for number/integer-type settings. */
   minimum?: number;
-  /** Maximum value for number-type settings. */
+  /** Maximum value for number/integer-type settings. */
   maximum?: number;
   /**
    * Primitive shapes a field accepted before it was expanded to its current
@@ -1268,6 +1271,32 @@ const SETTINGS_SCHEMA = {
     showInDialog: true,
   },
 
+  visionBridgeTimeoutMs: {
+    type: 'integer',
+    label: 'Vision Bridge Timeout (ms)',
+    category: 'Model',
+    // Read once in the Config constructor with no setter, so a mid-session
+    // change only takes effect on restart.
+    requiresRestart: true,
+    default: undefined as number | undefined,
+    minimum: 1,
+    maximum: 2_147_483_647,
+    description:
+      'Per-attempt timeout in milliseconds for the vision bridge image transcription call (a positive integer up to 2147483647). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints.',
+    showInDialog: false,
+  },
+
+  modelFallbacks: {
+    type: 'string',
+    label: 'Model Fallbacks',
+    category: 'Model',
+    requiresRestart: true,
+    default: '',
+    description:
+      'Ordered list of fallback model IDs (comma-separated, max 3) to try when the primary model hits capacity errors (429/503/529). Example: "qwen-plus,qwen-turbo". Set via CLI with --fallback-model.',
+    showInDialog: true,
+  },
+
   voiceModel: {
     type: 'string',
     label: 'Voice Model',
@@ -1307,6 +1336,23 @@ const SETTINGS_SCHEMA = {
           'Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.',
         showInDialog: false,
       },
+      reasoningEffort: {
+        type: 'enum',
+        label: 'Reasoning Effort',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'How hard reasoning-capable models think, applied across all providers. Set with /effort. Each provider maps and clamps this to what the active model supports (e.g. Gemini caps at "high"; Anthropic clamps tiers a model lacks). Leave unset to use the model/provider default.',
+        showInDialog: true,
+        options: [
+          { value: 'low', label: 'Low' },
+          { value: 'medium', label: 'Medium' },
+          { value: 'high', label: 'High' },
+          { value: 'xhigh', label: 'Extra High' },
+          { value: 'max', label: 'Max' },
+        ],
+      },
       maxSessionTurns: {
         type: 'number',
         label: 'Max Session Turns',
@@ -1335,6 +1381,16 @@ const SETTINGS_SCHEMA = {
         default: -1,
         description:
           'Cumulative tool-call budget for a run (counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.',
+        showInDialog: false,
+      },
+      maxSubagentDepth: {
+        type: 'number',
+        label: 'Max Sub-agent Nesting Depth',
+        category: 'Model',
+        requiresRestart: false,
+        default: DEFAULT_MAX_SUBAGENT_DEPTH,
+        description:
+          'Maximum sub-agent nesting depth (1-based levels: a top-level sub-agent is level 1). 1 keeps sub-agents available but disables nesting; the default 5 allows nesting up to five levels deep. Values clamp to the range 1-100; non-finite values fall back to the default. Teammates, forks, and workflow-spawned agents never nest regardless of this setting. Overridable via --max-subagent-depth.',
         showInDialog: false,
       },
       chatCompression: {
@@ -1381,7 +1437,17 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. A minimal always-on guard (consecutive identical tool calls plus a per-turn tool-call cap) still runs regardless of this setting.',
+          'Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. A minimal always-on guard (consecutive identical tool calls plus a per-turn tool-call cap, see model.maxToolCallsPerTurn) still runs regardless of this setting.',
+        showInDialog: false,
+      },
+      maxToolCallsPerTurn: {
+        type: 'number',
+        label: 'Max Tool Calls Per Turn',
+        category: 'Model',
+        requiresRestart: false,
+        default: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+        description:
+          'Hard cap on tool calls within a single turn (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
         showInDialog: false,
       },
       skipStartupContext: {
@@ -1759,6 +1825,17 @@ const SETTINGS_SCHEMA = {
           'Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately.',
         showInDialog: false,
       },
+      agentTimeoutMinutes: {
+        type: 'number',
+        label: 'Memory Agent Timeout (minutes)',
+        category: 'Memory',
+        requiresRestart: true,
+        default: undefined as number | undefined,
+        minimum: 0,
+        description:
+          "Max runtime in minutes for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (2–5 minutes); 0 disables the time limit. Useful for slow local models that need longer than the defaults.",
+        showInDialog: false,
+      },
       enableTeamMemory: {
         type: 'boolean',
         label: 'Enable Team Memory',
@@ -2133,9 +2210,9 @@ const SETTINGS_SCHEMA = {
             label: 'Pager',
             category: 'Tools',
             requiresRestart: false,
-            default: 'cat' as string | undefined,
+            default: undefined as string | undefined,
             description:
-              'The pager command to use for shell output. Defaults to `cat`.',
+              'The pager command to use for shell output. Defaults to `cat` on non-Windows platforms and unset on Windows. Set to an empty string to disable pager environment variables.',
             showInDialog: false,
           },
           showColor: {
@@ -2187,6 +2264,17 @@ const SETTINGS_SCHEMA = {
         default: undefined as string[] | undefined,
         description:
           'Tool names hidden from the registry. Differs from permissions.deny: disabled tools are not registered at all, so they never appear in /tools and cannot be discovered by the model. Managed by the daemon mutation route POST /workspace/tools/:name/enable.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+      visible: {
+        type: 'array',
+        label: 'Visible Deferred Tools',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Deferred tool names made visible at startup without requiring tool_search. Listed tools appear alongside core tools in the initial session.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
@@ -2452,6 +2540,18 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
       },
+      toolIdleTimeoutMs: {
+        type: 'number',
+        label: 'MCP Tool Idle Timeout (ms)',
+        category: 'MCP',
+        requiresRestart: false,
+        default: 300000,
+        minimum: 10000,
+        maximum: 3600000,
+        description:
+          'Idle timeout in milliseconds for MCP tool calls. If the MCP server does not produce any response or progress update within this time, the call is aborted. Default: 300000 (5 minutes). Can be overridden via QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS environment variable.',
+        showInDialog: false,
+      },
     },
   },
   security: {
@@ -2631,6 +2731,21 @@ const SETTINGS_SCHEMA = {
       'Settings for multi-agent collaboration features (Arena, Team, Swarm).',
     showInDialog: false,
     properties: {
+      maxParallelAgents: {
+        type: 'number',
+        label: 'Max Parallel Agents',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as number | undefined,
+        minimum: 1,
+        description:
+          'Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Per-model limits are not supported yet.',
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'integer',
+          minimum: 1,
+        },
+      },
       displayMode: {
         type: 'enum',
         label: 'Display Mode',
@@ -2942,6 +3057,23 @@ const SETTINGS_SCHEMA = {
           'Enable in-session cron/loop tools. When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can be disabled via QWEN_CODE_DISABLE_CRON=1 environment variable.',
         showInDialog: true,
       },
+      cronRecurringMaxAgeDays: {
+        type: 'number',
+        label: 'Recurring Cron Max Age (Days)',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: 7,
+        description:
+          'Days a recurring cron/loop job lives before auto-expiring (it fires one final time, then is deleted). Set to 0 to disable expiry so jobs run until deleted — useful for long-running daemon deployments. Can be overridden via the QWEN_CODE_CRON_MAX_AGE_DAYS environment variable.',
+        // A deployment-time knob (cloud daemons, containers), not a common
+        // interactive preference.
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'number',
+          minimum: 0,
+          default: 7,
+        },
+      },
       agentTeam: {
         type: 'boolean',
         label: 'Enable Agent Team',
@@ -2959,7 +3091,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Enable the Artifact tool (experimental). When enabled, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Interactive, non-SDK sessions only. Can also be enabled via QWEN_CODE_ENABLE_ARTIFACT=1, or hard-disabled via QWEN_CODE_DISABLE_ARTIFACT=1.',
+          'Enable the Artifact tool (experimental). When enabled, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Interactive, non-SDK sessions only. QWEN_CODE_ENABLE_ARTIFACT=1 enables the metadata-only record_artifact tool for non-SDK daemon sessions, and also enables the Artifact tool in interactive sessions. QWEN_CODE_DISABLE_ARTIFACT=1 hard-disables both.',
         showInDialog: true,
       },
       emitToolUseSummaries: {

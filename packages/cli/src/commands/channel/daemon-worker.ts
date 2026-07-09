@@ -1,5 +1,10 @@
 import type { CommandModule } from 'yargs';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import {
+  appendChannelMemory,
+  clearChannelMemory,
+  readChannelMemory,
+} from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import {
   DaemonChannelBridge,
@@ -17,6 +22,7 @@ import type { ServeChannelSelection } from '../../serve/types.js';
 import { normalizeServeChannelSelection } from '../../serve/channel-selection.js';
 import {
   CHANNEL_DAEMON_WORKER_SENTINEL,
+  CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS,
   QWEN_DAEMON_TOKEN_ENV,
   QWEN_DAEMON_URL_ENV,
   QWEN_DAEMON_WORKSPACE_ENV,
@@ -30,11 +36,13 @@ import {
   loadChannelsConfig,
   loadChannelsFromExtensions,
   parseConfiguredChannels,
+  registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
   selectFirstModel,
   type ParsedChannel,
 } from './runtime.js';
+import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 
@@ -150,12 +158,20 @@ export function createDaemonChannelBridgeFacade(
     cancelSession: bridge.cancelSession.bind(bridge),
   };
 
+  if (bridge.respondToPermission) {
+    facade.respondToPermission = bridge.respondToPermission.bind(bridge);
+  }
+
   if (bridge.getAvailableCommands) {
     facade.getAvailableCommands = bridge.getAvailableCommands.bind(bridge);
   }
 
   if (opts.exposeShellCommand && bridge.shellCommand) {
     facade.shellCommand = bridge.shellCommand.bind(bridge);
+  }
+
+  if (bridge.listSessions) {
+    facade.listSessions = bridge.listSessions.bind(bridge);
   }
 
   return facade;
@@ -332,12 +348,22 @@ export async function runChannelDaemonWorker(
           createChannel(name, config, bridgeFacade, {
             ...(proxy ? { proxy } : {}),
             router: createdRouter,
+            channelMemory: {
+              readChannelMemory,
+              appendChannelMemory,
+              clearChannelMemory,
+            },
+            memoryIntentClassifier: new BridgeChannelMemoryIntentClassifier(
+              bridgeFacade,
+              config.cwd,
+            ),
           }),
           startupSignal,
         ),
       );
     }
     registerToolCallDispatch(bridgeFacade, createdRouter, channels);
+    registerPermissionRelay(bridgeFacade, createdRouter, channels);
     registerSessionCleanup(bridgeFacade, createdRouter, channels);
 
     for (const [name, channel] of channels) {
@@ -502,6 +528,25 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       });
       removeEarlyShutdownHandlers();
 
+      let heartbeatTimer: NodeJS.Timeout | undefined;
+      const clearHeartbeat = () => {
+        if (!heartbeatTimer) return;
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = undefined;
+      };
+      heartbeatTimer = setInterval(() => {
+        try {
+          process.send?.({
+            type: 'heartbeat',
+            pid: process.pid,
+            at: new Date().toISOString(),
+          });
+        } catch {
+          clearHeartbeat();
+        }
+      }, CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS);
+      heartbeatTimer.unref();
+
       let shuttingDown = false;
       let exitCode = 0;
       let finish!: () => void;
@@ -513,6 +558,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           process.exit(1);
         } else {
           shuttingDown = true;
+          clearHeartbeat();
           try {
             await handle.close();
           } catch (err) {
@@ -526,6 +572,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
               `[Channel] daemon worker failed to shut down after ${safeReason}: ${safeMessage}`,
             );
           } finally {
+            clearHeartbeat();
             finish();
           }
         }
@@ -540,6 +587,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         void shutdown(pendingShutdownReason);
       }
       await finished;
+      clearHeartbeat();
       process.removeListener('SIGINT', shutdown);
       process.removeListener('SIGTERM', shutdown);
       process.removeListener('disconnect', onDisconnect);

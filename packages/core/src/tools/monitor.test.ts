@@ -9,6 +9,22 @@ import { EventEmitter } from 'node:events';
 import type { Readable } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
 
+const mockOsPlatform = vi.hoisted(() =>
+  vi.fn<() => NodeJS.Platform>(() => 'linux'),
+);
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      platform: mockOsPlatform,
+    },
+    platform: mockOsPlatform,
+  };
+});
+
 // Mock child_process.spawn
 const mockSpawn = vi.hoisted(() => vi.fn());
 vi.mock('node:child_process', async (importOriginal) => {
@@ -175,9 +191,17 @@ describe('MonitorTool', () => {
   let monitorRegistry: MonitorRegistry;
   let mockChild: ReturnType<typeof createMockChild>;
   let mockIsPathWithinWorkspace: ReturnType<typeof vi.fn>;
+  let originalPager: string | undefined;
+  let originalGitPager: string | undefined;
 
   beforeEach(() => {
+    originalPager = process.env['PAGER'];
+    originalGitPager = process.env['GIT_PAGER'];
+    delete process.env['PAGER'];
+    delete process.env['GIT_PAGER'];
+
     vi.clearAllMocks();
+    mockOsPlatform.mockReturnValue('linux');
 
     monitorRegistry = new MonitorRegistry();
     mockIsPathWithinWorkspace = vi.fn().mockReturnValue(true);
@@ -195,6 +219,7 @@ describe('MonitorTool', () => {
         isPathWithinWorkspace: mockIsPathWithinWorkspace,
       }),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getShellExecutionConfig: vi.fn().mockReturnValue({}),
       storage: {
         getUserSkillsDirs: vi
           .fn()
@@ -211,6 +236,18 @@ describe('MonitorTool', () => {
 
   afterEach(() => {
     monitorRegistry.abortAll();
+
+    if (originalPager === undefined) {
+      delete process.env['PAGER'];
+    } else {
+      process.env['PAGER'] = originalPager;
+    }
+
+    if (originalGitPager === undefined) {
+      delete process.env['GIT_PAGER'];
+    } else {
+      process.env['GIT_PAGER'] = originalGitPager;
+    }
   });
 
   // Helper to access protected validateToolParamValues
@@ -237,6 +274,17 @@ describe('MonitorTool', () => {
         };
       }
     ).createInvocation(params);
+
+  describe('schema', () => {
+    it('declares monitor limits as integers', () => {
+      const schema = monitorTool.schema.parametersJsonSchema as {
+        properties?: Record<string, { type?: string }>;
+      };
+
+      expect(schema.properties?.['max_events']?.type).toBe('integer');
+      expect(schema.properties?.['idle_timeout_ms']?.type).toBe('integer');
+    });
+  });
 
   describe('confirmation details', () => {
     it('includes command-scoped permission rules for monitor commands', async () => {
@@ -499,6 +547,12 @@ describe('MonitorTool', () => {
       );
     });
 
+    it('rejects fractional max_events', () => {
+      expect(validate({ command: 'tail -f log', max_events: 1.5 })).toBe(
+        'max_events must be a positive integer.',
+      );
+    });
+
     it('rejects max_events over limit', () => {
       expect(validate({ command: 'tail -f log', max_events: 20000 })).toBe(
         'max_events cannot exceed 10000.',
@@ -507,6 +561,12 @@ describe('MonitorTool', () => {
 
     it('rejects invalid idle_timeout_ms', () => {
       expect(validate({ command: 'tail -f log', idle_timeout_ms: -100 })).toBe(
+        'idle_timeout_ms must be a positive integer.',
+      );
+    });
+
+    it('rejects fractional idle_timeout_ms', () => {
+      expect(validate({ command: 'tail -f log', idle_timeout_ms: 500.5 })).toBe(
         'idle_timeout_ms must be a positive integer.',
       );
     });
@@ -630,6 +690,59 @@ describe('MonitorTool', () => {
       expect(result.llmContent).toContain('Monitor started');
       expect(result.llmContent).toContain('mon_');
       expect(result.returnDisplay).toContain('watch app logs');
+    });
+
+    it('uses default pager env for spawned processes when pager is unset', async () => {
+      const invocation = createInvocation({
+        command: 'tail -f /var/log/app.log',
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      const spawnOptions = mockSpawn.mock.calls[0][2];
+      expect(spawnOptions.env['PAGER']).toBe('cat');
+      expect(spawnOptions.env['GIT_PAGER']).toBeUndefined();
+    });
+
+    it('preserves inherited git pager values for spawned processes', async () => {
+      process.env['GIT_PAGER'] = 'delta';
+      const invocation = createInvocation({
+        command: 'git log --oneline',
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      const spawnOptions = mockSpawn.mock.calls[0][2];
+      expect(spawnOptions.env['PAGER']).toBe('cat');
+      expect(spawnOptions.env['GIT_PAGER']).toBe('delta');
+    });
+
+    it('does not inject Unix pager defaults into Windows monitor env when unset', async () => {
+      mockOsPlatform.mockReturnValue('win32');
+      const invocation = createInvocation({
+        command: 'tail -f /var/log/app.log',
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      const spawnOptions = mockSpawn.mock.calls[0][2];
+      expect(spawnOptions.env['PAGER']).toBe('');
+      expect(spawnOptions.env['GIT_PAGER']).toBeUndefined();
+    });
+
+    it('propagates explicit pager configuration to spawned processes', async () => {
+      vi.mocked(mockConfig.getShellExecutionConfig).mockReturnValue({
+        pager: 'more',
+      });
+      const invocation = createInvocation({
+        command: 'tail -f /var/log/app.log',
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      const spawnOptions = mockSpawn.mock.calls[0][2];
+      expect(spawnOptions.env['PAGER']).toBe('more');
+      expect(spawnOptions.env['GIT_PAGER']).toBeUndefined();
     });
 
     it('does not spawn when the turn signal is already aborted', async () => {

@@ -58,6 +58,12 @@ export interface ServeOptions {
    */
   maxSessions?: number;
   /**
+   * Non-negative integer cap on concurrent live sessions across all workspace
+   * runtimes. Defaults to unlimited until multi-workspace sessions are ungated.
+   * `0` or `Infinity` disables the cap.
+   */
+  maxTotalSessions?: number;
+  /**
    * Per-session cap on accepted prompts that have not settled yet.
    * Defaults to 5. `0` or `Infinity` disables the cap.
    */
@@ -87,21 +93,22 @@ export interface ServeOptions {
    */
   eventRingSize?: number;
   /**
-   * Absolute workspace path this daemon binds to. The daemon is
-   * **1 daemon = 1 workspace × N sessions**: one bound
-   * workspace at boot, sessions multiplexed on the single
-   * `qwen --acp` child via `connection.newSession()`.
+   * Per-session in-memory compacted replay snapshot byte cap. Threaded into
+   * `BridgeOptions.compactedReplayMaxBytes`. Defaults to 4 MiB. Must be a
+   * positive safe integer; there is no unlimited sentinel.
+   */
+  compactedReplayMaxBytes?: number;
+  /**
+   * Absolute workspace path this daemon binds as its primary workspace.
+   * The CLI parser accepts repeated `--workspace` values for
+   * sessions-only multi-workspace mode, but this public option remains the
+   * primary workspace string so existing embeds do not need to understand
+   * the internal runtime registry.
    *
    * `POST /session` calls whose `cwd` doesn't canonicalize to this
-   * path are rejected with `400 workspace_mismatch`. Clients may
-   * also omit `cwd` — the route falls back to this bound path.
-   *
-   * Multi-workspace deployments use **multiple daemon processes**
-   * (one per workspace, each on its own port), supervised by
-   * systemd / docker-compose / k8s / `qwen-coordinator` reference
-   * orchestrator. There is no intra-daemon multi-workspace mode
-   * (the previous Stage 1 `byWorkspaceChannel` routing layer was
-   * removed in the design revision).
+   * path, or to another registered runtime's canonical workspace, are
+   * rejected with `400 workspace_mismatch`. Clients may also omit `cwd` —
+   * the route falls back to this primary path.
    *
    * Defaults to `process.cwd()` when omitted.
    */
@@ -126,6 +133,22 @@ export interface ServeOptions {
    * requires a configured bearer token and a session-bound client id.
    */
   enableSessionShell?: boolean;
+  /**
+   * Path to a PEM certificate file. When both `tlsCert` and `tlsKey`
+   * are set, the daemon serves over HTTPS (`https.createServer`) instead
+   * of plain HTTP. Both must be provided together. The main motivation is
+   * mobile/cross-device access: browsers only expose secure-context APIs
+   * (`getUserMedia` for voice input, WebRTC) over HTTPS or `localhost`, so
+   * a LAN IP like `192.168.x.x` needs TLS. Scope is TLS termination only —
+   * no auto-generation, no ACME. TLS is orthogonal to the bearer-token
+   * auth layer; both still apply on non-loopback binds.
+   */
+  tlsCert?: string;
+  /**
+   * Path to a PEM private key file. See `tlsCert` — both must be set
+   * together to enable HTTPS.
+   */
+  tlsKey?: string;
   /**
    * Serve the built Web Shell SPA at the daemon root (default true). Set
    * false (the CLI's `--no-web`) for an API-only daemon. No effect when the
@@ -208,23 +231,20 @@ export interface ServeOptions {
   /** Rate limit window duration in ms (default 60000). Requires --rate-limit. */
   rateLimitWindowMs?: number;
   /**
-   * Opt-in: accept client-hosted MCP servers over the daemon WS (issue #5626,
+   * Accept client-hosted MCP servers over the daemon WS (issue #5626,
    * Phase 2 "reverse tool channel"). When enabled, a connected WS client may
    * send `mcp_register` / `mcp_message` / `mcp_unregister` frames so the
    * daemon's agent can call tools that execute in the client (e.g. the Chrome
-   * extension's browser tools). Off by default — the public contract is still
-   * settling, so the `client_mcp_over_ws` capability tag and the WS frame
-   * handling stay gated behind explicit operator opt-in.
+   * extension's browser tools). `runQwenServe` only enables this when a caller
+   * or environment variable opts in.
    */
   clientMcpOverWs?: boolean;
   /**
-   * Opt-in: tunnel raw CDP to a real browser tab over the reverse `/acp` WS
-   * (Plan C "CDP tunnel", issue #5626). When enabled, a loopback puppeteer
-   * client (chrome-devtools-mcp) can connect to a new `/cdp` WebSocket and
-   * drive ONE real tab via the extension's `chrome.debugger`, reusing the
-   * ready-made chrome-devtools-mcp toolset. Off by default — the public
-   * contract is still settling, so the `cdp_tunnel_over_ws` capability tag and
-   * the `/cdp` endpoint stay gated behind explicit operator opt-in.
+   * Tunnel raw CDP to a real browser tab over the reverse `/acp` WS
+   * (Plan C "CDP tunnel", issue #5626). When enabled, a loopback CDP client can
+   * connect to a new `/cdp` WebSocket and drive ONE real tab via the extension's
+   * `chrome.debugger`, reusing browser automation tools. `runQwenServe` enables this for
+   * Chrome extension origins or explicit env opt-in; callers may pass `false`.
    */
   cdpTunnelOverWs?: boolean;
   /** Forward the experimental LSP opt-in to spawned ACP children. */
@@ -266,12 +286,14 @@ export interface CapabilitiesEnvelope {
    */
   modelServices: string[];
   /**
-   * Absolute workspace path this daemon is bound to
-   * (`1 daemon = 1 workspace`). Clients use this to:
-   *   - Detect mismatch before posting `/session` (vs. waiting for
-   *     400 workspace_mismatch from the bridge).
+   * Absolute primary workspace path. Clients use this to:
+   *   - Preserve single-workspace compatibility.
    *   - Omit `cwd` on `POST /session` — the route falls back to this
    *     path when the body has no `cwd` field.
+   *
+   * When `features` contains `multi_workspace_sessions`, `workspaces[]`
+   * lists every registered runtime. `workspaceCwd` remains the primary
+   * entry for old clients.
    *
    * Optional at the type level (matches the SDK's `DaemonCapabilities`
    * type) because the field is an additive extension of the v=1
@@ -280,6 +302,13 @@ export interface CapabilitiesEnvelope {
    * current server code always populates it.
    */
   workspaceCwd?: string;
+  /** Registered session runtimes, present only for multi-workspace daemons. */
+  workspaces?: Array<{
+    id: string;
+    cwd: string;
+    primary: boolean;
+    trusted: boolean;
+  }>;
   /**
    * Transport families this daemon supports. Always includes `'rest'`;
    * future builds may add `'acp-http'` and/or `'acp-ws'`. SDK clients
@@ -311,6 +340,8 @@ export interface CapabilitiesEnvelope {
    */
   limits?: {
     maxPendingPromptsPerSession?: number | null;
+    maxSessionsPerWorkspace?: number | null;
+    maxTotalSessions?: number | null;
   };
   /**
    * Language codes accepted by `POST /session/:id/language`.

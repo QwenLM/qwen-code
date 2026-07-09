@@ -1444,6 +1444,8 @@ export default {
   'to view transcript': 'トランスクリプトを表示',
   'Switch to plan mode or exit plan mode':
     'プランモードに切り替えるか、プランモードを終了する',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    '推論対応モデルの思考の強さを設定します（{{tiers}}）。プロバイダーごとにマッピング・制限されます。',
   'Exited plan mode. Previous approval mode restored.':
     'プランモードを終了しました。以前の承認モードに戻りました。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -1771,6 +1773,12 @@ export default {
   'ANTHROPIC_BASE_URL environment variable not found.':
     '環境変数 ANTHROPIC_BASE_URL が見つかりません。',
   'Invalid auth method selected.': '無効な認証方式が選択されました。',
+  ' (this project)': ' (このプロジェクト)',
+  ' (global)': ' (グローバル)',
+  'Persist the model selection to the project settings (workspace scope)':
+    'モデルの選択をプロジェクト設定に永続化（ワークスペーススコープ）',
+  'Persist the model selection to the user settings (global scope)':
+    'モデルの選択をユーザー設定に永続化（グローバルスコープ）',
   'API Key': 'API Key',
   '(default)': '(デフォルト)',
   '(not set)': '(未設定)',
@@ -1893,4 +1901,34 @@ export default {
   in: '入力',
   out: '出力',
   'In/Out': '入力/出力',
+
+  // ============================================================================
+  // reload-plugins command
+  // ============================================================================
+  '{{count}} extension': '{{count}} extension',
+  '{{count}} extensions': '{{count}} extensions',
+  '{{count}} command': '{{count}} command',
+  '{{count}} commands': '{{count}} commands',
+  '{{count}} skill': '{{count}} skill',
+  '{{count}} skills': '{{count}} skills',
+  '{{count}} agent': '{{count}} agent',
+  '{{count}} agents': '{{count}} agents',
+  '{{count}} hook': '{{count}} hook',
+  '{{count}} hooks': '{{count}} hooks',
+  '{{count}} extension MCP server': '{{count}} extension MCP server',
+  '{{count}} extension MCP servers': '{{count}} extension MCP servers',
+  '{{count}} extension LSP server': '{{count}} extension LSP server',
+  '{{count}} extension LSP servers': '{{count}} extension LSP servers',
+  'Reload extension changes from disk': 'Reload extension changes from disk',
+  'Reloaded extensions: {{summary}}': 'Reloaded extensions: {{summary}}',
+  'Reload failed: {{message}}': 'Reload failed: {{message}}',
+  'Reload failed.': 'Reload failed.',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    'Extensions changed on disk. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    'Extension reload did not complete. Run /reload-plugins to try again.',
 };

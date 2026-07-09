@@ -22,7 +22,7 @@ import { normalizeContent } from './textUtils.js';
 import { QWEN_DIR } from './paths.js';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from './debugLogger.js';
-import { resolveProjectRelativePath } from './projectPath.js';
+import { resolveSymlinkAwareRelativePaths } from './projectPath.js';
 
 const logger = createDebugLogger('RULES_DISCOVERY');
 
@@ -254,23 +254,21 @@ export class ConditionalRulesRegistry {
    * @param filePath - Absolute path of the file being accessed.
    * @returns Formatted rule content, or undefined if no new rules match.
    */
-  matchAndConsume(filePath: string): string | undefined {
+  async matchAndConsume(filePath: string): Promise<string | undefined> {
     if (this.compiledRules.length === 0) return undefined;
 
-    // Shared helper handles `..` outside-root, plus the Windows
-    // cross-drive case (where `path.relative('C:\\proj', 'D:\\else')`
-    // returns an absolute path that would otherwise normalize to
-    // forward slashes and false-match a broad glob like `**/*.ts`).
-    // Without this guard the rules registry diverged from
-    // SkillActivationRegistry, which had been hardened earlier.
-    const relativePath = resolveProjectRelativePath(filePath, this.projectRoot);
-    if (relativePath === null) {
+    // Resolve symlinks and check both original and realpath-resolved paths
+    const relativePaths = await resolveSymlinkAwareRelativePaths(
+      filePath,
+      this.projectRoot,
+    );
+    if (relativePaths.length === 0) {
       return undefined;
     }
 
     const newMatches = this.compiledRules.filter(({ rule, matchers }) => {
       if (this.injected.has(rule.filePath)) return false;
-      return matchers.some((m) => m(relativePath));
+      return relativePaths.some((relPath) => matchers.some((m) => m(relPath)));
     });
 
     if (newMatches.length === 0) return undefined;

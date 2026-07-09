@@ -14,6 +14,7 @@ import type {
   ToolResultDisplay,
   SlashCommandRecordPayload,
   AtCommandRecordPayload,
+  HistoryGap,
 } from '@qwen-code/qwen-code-core';
 import { getToolResponseDisplayText } from '@qwen-code/qwen-code-core';
 import type {
@@ -25,6 +26,10 @@ import type {
 import { ToolCallStatus, MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
+import {
+  formatHistoryGapNotice,
+  indexGapsByChild,
+} from './history-gap-notice.js';
 
 /**
  * Extracts text content from a Content object's parts (excluding thought parts).
@@ -141,6 +146,18 @@ function restoreHistoryItem(raw: unknown): HistoryItemWithoutId | undefined {
 }
 
 /**
+ * INFO divider shown at a detected history gap: an earlier segment of the
+ * session was physically lost (storage interruption) and could not be
+ * recovered. Mirrors the ACP replay notice so both surfaces read the same.
+ */
+function createHistoryGapItem(gap: HistoryGap): HistoryItemInfo {
+  return {
+    type: MessageType.INFO,
+    text: formatHistoryGapNotice(gap),
+  };
+}
+
+/**
  * Converts ChatRecord messages to UI history items for display.
  *
  * This function transforms the raw ChatRecords into a format suitable
@@ -153,8 +170,10 @@ function restoreHistoryItem(raw: unknown): HistoryItemWithoutId | undefined {
 function convertToHistoryItems(
   conversation: ConversationRecord,
   config: Config | null,
+  historyGaps?: HistoryGap[],
 ): HistoryItemWithoutId[] {
   const items: HistoryItemWithoutId[] = [];
+  const gapByChildUuid = indexGapsByChild(historyGaps);
   const pendingAtCommands: AtCommandRecordPayload[] = [];
   let atCommandCounter = 0;
 
@@ -227,6 +246,27 @@ function convertToHistoryItems(
   };
 
   for (const record of conversation.messages) {
+    // A detected history gap begins at this record — surface a visible divider
+    // so the surviving turns below are not read as contiguous across the lost
+    // segment. Flush any pending tool group first so the divider is not
+    // swallowed into it.
+    const gap = gapByChildUuid.get(record.uuid);
+    if (gap) {
+      if (currentToolGroup.length > 0) {
+        items.push({ type: 'tool_group', tools: [...currentToolGroup] });
+        currentToolGroup = [];
+      }
+      // Reset pending @-command state at the boundary as well: the divider
+      // means the records below begin a fresh reachable island, so an
+      // unconsumed pre-gap at_command must never be shift()-paired with the
+      // post-gap user turn (which would attach @file reads to a turn the user
+      // never wrote them on). Today reconstructHistory truncates to the tail,
+      // so the buffer is already empty here; this keeps the invariant if that
+      // ever changes.
+      pendingAtCommands.length = 0;
+      items.push(createHistoryGapItem(gap));
+    }
+
     if (record.type === 'system') {
       if (record.subtype === 'slash_command') {
         // Flush any pending tool group to avoid mixing contexts.
@@ -520,7 +560,11 @@ export function buildResumedHistoryItems(
   const getNextId = (): number => baseTimestamp + idCounter++;
 
   // Convert conversation directly to history items
-  const historyItems = convertToHistoryItems(sessionData.conversation, config);
+  const historyItems = convertToHistoryItems(
+    sessionData.conversation,
+    config,
+    sessionData.historyGaps,
+  );
   for (const item of historyItems) {
     items.push({
       ...item,

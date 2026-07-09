@@ -5,8 +5,46 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { DaemonEvent } from '@qwen-code/sdk/daemon';
-import { getReplayTokenCount, getReplayTokenUsage } from './mappers.js';
+import type {
+  DaemonEvent,
+  DaemonWorkspaceSkillsStatus,
+} from '@qwen-code/sdk/daemon';
+import {
+  getReplayTokenCount,
+  getReplayTokenUsage,
+  mapWorkspaceSkills,
+  updateConnectionFromDaemonEvent,
+} from './mappers.js';
+import type { DaemonConnectionState } from './types.js';
+
+function availableCommandsEvent(
+  availableCommands: Array<Record<string, unknown>>,
+  availableSkills: string[],
+): DaemonEvent {
+  return {
+    id: 1,
+    v: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'available_commands_update',
+        availableCommands,
+        availableSkills,
+      },
+    },
+  } as DaemonEvent;
+}
+
+function applyEvent(
+  current: DaemonConnectionState,
+  event: DaemonEvent,
+): DaemonConnectionState {
+  let next = current;
+  updateConnectionFromDaemonEvent(event, (update) => {
+    next = typeof update === 'function' ? update(next) : update;
+  });
+  return next;
+}
 
 function usageEvent(
   id: number,
@@ -140,5 +178,112 @@ describe('getReplayTokenCount', () => {
     expect(
       getReplayTokenCount([usageEvent(1, { inputTokens: 500 }), throwing]),
     ).toBe(500);
+  });
+});
+
+describe('mapWorkspaceSkills', () => {
+  it('returns empty commands and skills for undefined status', () => {
+    expect(mapWorkspaceSkills(undefined)).toEqual({ commands: [], skills: [] });
+  });
+
+  it('maps workspace skills into skill slash commands', () => {
+    const status: DaemonWorkspaceSkillsStatus = {
+      v: 1,
+      workspaceCwd: '/ws',
+      initialized: true,
+      skills: [
+        {
+          kind: 'skill',
+          status: 'ok',
+          name: 'review',
+          description: 'Review a GitHub pull request',
+          level: 'bundled',
+          modelInvocable: true,
+          argumentHint: '<pr-number>',
+        },
+        {
+          kind: 'skill',
+          status: 'ok',
+          name: 'deep-research',
+          description: '',
+          level: 'bundled',
+          modelInvocable: false,
+        },
+        {
+          kind: 'skill',
+          status: 'disabled',
+          name: 'disabled-skill',
+          description: 'Disabled in settings',
+          level: 'project',
+          modelInvocable: true,
+        },
+      ],
+    };
+
+    const result = mapWorkspaceSkills(status);
+
+    expect(result.skills).toEqual(['review', 'deep-research']);
+    expect(result.commands).toEqual([
+      {
+        name: 'review',
+        description: 'Review a GitHub pull request',
+        argumentHint: '<pr-number>',
+        raw: {
+          name: 'review',
+          description: 'Review a GitHub pull request',
+          input: { hint: '<pr-number>' },
+          _meta: { source: 'skill' },
+        },
+      },
+      {
+        name: 'deep-research',
+        description: '',
+        raw: {
+          name: 'deep-research',
+          description: '',
+          input: null,
+          _meta: { source: 'skill' },
+        },
+      },
+    ]);
+  });
+});
+
+describe('updateConnectionFromDaemonEvent', () => {
+  it('replaces commands and skills from an available_commands_update', () => {
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      availableCommandsEvent(
+        [{ name: 'review', description: 'Review a PR', input: null }],
+        ['review'],
+      ),
+    );
+
+    expect(next.commands?.map((command) => command.name)).toEqual(['review']);
+    expect(next.skills).toEqual(['review']);
+  });
+
+  it('clears stale commands when the update reports an empty list', () => {
+    // The daemon snapshot is authoritative: a list that shrank to empty must
+    // not leave the previous commands autocompleting. Keying on length would
+    // preserve the stale entries.
+    const next = applyEvent(
+      {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        commands: [
+          {
+            name: 'review',
+            description: '',
+            raw: { name: 'review', description: '', input: null },
+          },
+        ],
+        skills: ['review'],
+      },
+      availableCommandsEvent([], []),
+    );
+
+    expect(next.commands).toEqual([]);
+    expect(next.skills).toEqual([]);
   });
 });

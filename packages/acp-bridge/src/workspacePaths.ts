@@ -67,6 +67,18 @@ export function canonicalizeWorkspace(p: string): string {
   }
 }
 
+export function canonicalizeWorkspaces(paths: readonly string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const p of paths) {
+    const canonical = canonicalizeWorkspace(p);
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    out.push(canonical);
+  }
+  return out;
+}
+
 /**
  * PATH_MAX on Linux is 4096; macOS / BSD is 1024. We use the Linux
  * value as a generous ceiling — anything bigger is either a

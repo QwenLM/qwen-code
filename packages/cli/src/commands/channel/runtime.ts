@@ -7,6 +7,8 @@ import type {
   ChannelBase,
   ChannelBaseOptions,
   ChannelPlugin,
+  PermissionRequestEvent,
+  PermissionResolvedEvent,
   ToolCallEvent,
 } from '@qwen-code/channel-base';
 import { sanitizeLogText } from '@qwen-code/channel-base';
@@ -158,8 +160,61 @@ export function registerToolCallDispatch(
     if (target) {
       const channel = channels.get(target.channelName);
       if (channel) {
-        channel.onToolCall(target.chatId, event);
+        channel.dispatchToolCall(event);
       }
+    }
+  });
+}
+
+function cancelPermissionRequest(
+  bridge: ChannelAgentBridge,
+  requestId: string,
+): void {
+  if (!bridge.respondToPermission) {
+    return;
+  }
+  void bridge
+    .respondToPermission(requestId, { outcome: { outcome: 'cancelled' } })
+    .catch((err: unknown) => {
+      writeStderrLine(
+        `[Channel] Permission cancellation failed for ${sanitizeLogText(requestId, 128)}: ${err instanceof Error ? sanitizeLogText(err.message, 512) : sanitizeLogText(String(err), 512)}`,
+      );
+    });
+}
+
+export function registerPermissionRelay(
+  bridge: ChannelAgentBridge,
+  router: SessionRouter,
+  channels: Map<string, ChannelBase>,
+): void {
+  bridge.on('permissionRequest', (event: PermissionRequestEvent) => {
+    const target = router.getTarget(event.sessionId);
+    if (!target) {
+      writeStderrLine(
+        `[Channel] No route for session ${sanitizeLogText(event.sessionId, 128)}; cancelling permission ${sanitizeLogText(event.requestId, 128)}`,
+      );
+      cancelPermissionRequest(bridge, event.requestId);
+      return;
+    }
+    const channel = channels.get(target.channelName);
+    if (!channel) {
+      writeStderrLine(
+        `[Channel] No channel "${sanitizeLogText(target.channelName, 64)}" for session ${sanitizeLogText(event.sessionId, 128)}; cancelling permission ${sanitizeLogText(event.requestId, 128)}`,
+      );
+      cancelPermissionRequest(bridge, event.requestId);
+      return;
+    }
+    channel.dispatchPermissionRequest(event).catch((err: unknown) => {
+      writeStderrLine(
+        `[Channel] Permission relay failed for ${sanitizeLogText(event.requestId, 128)}: ${err instanceof Error ? sanitizeLogText(err.message, 512) : sanitizeLogText(String(err), 512)}`,
+      );
+      cancelPermissionRequest(bridge, event.requestId);
+    });
+  });
+
+  bridge.on('permissionResolved', (event: PermissionResolvedEvent) => {
+    for (const channel of channels.values()) {
+      channel.dispatchPermissionResolved(event);
     }
   });
 }
@@ -205,6 +260,7 @@ export async function parseConfiguredChannels(
           name,
           rawConfig as Record<string, unknown>,
           opts.defaultCwd,
+          { resolveEnvVars: 'available' },
         ),
       });
     } catch (err) {

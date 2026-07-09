@@ -155,6 +155,29 @@ describe('runVisionBridge', () => {
     expect(result.modelEndpoint).toBe('dashscope.aliyuncs.com');
   });
 
+  it('uses the endpoint-qualified selector only for the side query', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'button text' });
+    const configWithEndpoint = {
+      getDefaultVisionBridgeModel: () => ({
+        id: 'openai:qwen3-vl-plus',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      }),
+    } as unknown as Config;
+
+    const result = await runVisionBridge({
+      config: configWithEndpoint,
+      parts: ['look', image()],
+      signal: signal(),
+    });
+
+    expect(mockSideQuery.mock.calls[0][1].model).toBe(
+      'openai:qwen3-vl-plus\0https://dashscope.aliyuncs.com/compatible-mode/v1',
+    );
+    expect(result.modelId).toBe('openai:qwen3-vl-plus');
+    expect(textOf(result.parts)).toContain('by openai:qwen3-vl-plus');
+    expect(textOf(result.parts)).not.toContain('\0');
+  });
+
   it('does not expose raw invalid endpoint URLs in the egress host', async () => {
     mockSideQuery.mockResolvedValue({ text: 'desc' });
     const configWithBadEndpoint = {
@@ -304,6 +327,26 @@ describe('runVisionBridge', () => {
     expect(mockSideQuery.mock.calls[0][1].model).toBe('qwen3.7-plus');
   });
 
+  it('passes the selected model baseUrl to the side query for endpoint disambiguation', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'auto-described' });
+    const configWithPinnedEndpoint = {
+      getDefaultVisionBridgeModel: () => ({
+        id: 'openai:qwen3.7-plus',
+        baseUrl: 'https://token-plan.example.com/v1',
+      }),
+    } as unknown as Config;
+
+    await runVisionBridge({
+      config: configWithPinnedEndpoint,
+      parts: ['look', image()],
+      signal: signal(),
+    });
+
+    expect(mockSideQuery.mock.calls[0][1].model).toBe(
+      'openai:qwen3.7-plus\0https://token-plan.example.com/v1',
+    );
+  });
+
   it('marks cancellation after dispatch as skipped with egress disclosure', async () => {
     const controller = new AbortController();
     mockSideQuery.mockImplementation(() => {
@@ -348,13 +391,16 @@ describe('runVisionBridge', () => {
     expect(result.error).toBeUndefined();
   });
 
-  it('classifies a timeout (user did not cancel) as a failed result with a safe reason', async () => {
-    // Control the bridge's internal timeout signal so we can fire it (the user
-    // signal stays un-aborted — this is the timeout-only path, not a cancel).
-    const timeoutCtl = new AbortController();
+  it('classifies a timeout on every attempt (user did not cancel) as a failed result with a safe reason', async () => {
+    // Control the bridge's internal timeout signals so we can fire them (the
+    // user signal stays un-aborted — this is the timeout-only path, not a
+    // cancel). One controller per attempt: the bridge retries a timeout once
+    // with a fresh timeout signal.
+    const timeoutCtls = [new AbortController(), new AbortController()];
     const timeoutSpy = vi
       .spyOn(AbortSignal, 'timeout')
-      .mockReturnValue(timeoutCtl.signal);
+      .mockReturnValueOnce(timeoutCtls[0].signal)
+      .mockReturnValueOnce(timeoutCtls[1].signal);
     mockSideQuery.mockImplementation(
       (_config: unknown, opts: { abortSignal: AbortSignal }) =>
         new Promise((_resolve, reject) => {
@@ -369,13 +415,108 @@ describe('runVisionBridge', () => {
         parts: ['look', image()],
         signal: signal(), // user never cancels
       });
-      timeoutCtl.abort(); // fire the 30s timeout
+      timeoutCtls[0].abort(); // fire attempt 1's timeout → retry
+      await vi.waitFor(() => expect(mockSideQuery).toHaveBeenCalledTimes(2));
+      timeoutCtls[1].abort(); // fire attempt 2's timeout → give up
       const result = await pending;
       expect(result.status).toBe('failed');
       expect(result.error).toMatch(/timed out/);
       // The timeout reason is safe to surface to the primary model.
       expect(textOf(result.parts)).toMatch(/timed out/);
       expect(result.egressOccurred).toBe(true);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
+  it('retries a timed-out attempt once with a fresh timeout and can still succeed', async () => {
+    const timeoutCtl = new AbortController();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValueOnce(timeoutCtl.signal)
+      .mockReturnValueOnce(new AbortController().signal);
+    mockSideQuery
+      .mockImplementationOnce(
+        (_config: unknown, opts: { abortSignal: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            opts.abortSignal.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            );
+          }),
+      )
+      .mockResolvedValueOnce({ text: 'recovered description' });
+    try {
+      const pending = runVisionBridge({
+        config,
+        parts: ['look', image()],
+        signal: signal(),
+      });
+      timeoutCtl.abort(); // attempt 1 times out
+      const result = await pending;
+      expect(result.status).toBe('ok');
+      expect(textOf(result.parts)).toContain('recovered description');
+      expect(mockSideQuery).toHaveBeenCalledTimes(2);
+      // Fresh timeout budget per attempt, not one shared signal.
+      expect(timeoutSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
+  it('does not retry non-timeout failures', async () => {
+    mockSideQuery.mockRejectedValue(new Error('HTTP 401 unauthorized'));
+    const result = await runVisionBridge({
+      config,
+      parts: ['look', image()],
+      signal: signal(),
+    });
+    expect(result.status).toBe('failed');
+    expect(mockSideQuery).toHaveBeenCalledOnce();
+  });
+
+  it('honors the configured visionBridgeTimeoutMs for each attempt', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    mockSideQuery.mockResolvedValue({ text: 'desc' });
+    try {
+      await runVisionBridge({
+        config: {
+          getDefaultVisionBridgeModel: () => ({ id: 'qwen3-vl-plus' }),
+          getVisionBridgeTimeoutMs: () => 120_000,
+        } as unknown as Config,
+        parts: ['look', image()],
+        signal: signal(),
+      });
+      expect(timeoutSpy).toHaveBeenCalledWith(120_000);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
+  it('turns an unusable timeout value into a failure instead of throwing', async () => {
+    // Config normally rejects such values, but if one ever reaches the bridge
+    // (a future caller, a direct call), AbortSignal.timeout throws RangeError.
+    // Its creation lives inside the try, so it must surface as failure() — the
+    // TUI caller has no try/catch and would otherwise swallow the whole turn.
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation(() => {
+        throw new RangeError('timeout value is out of range');
+      });
+    try {
+      const result = await runVisionBridge({
+        config: {
+          getDefaultVisionBridgeModel: () => ({ id: 'qwen3-vl-plus' }),
+          getVisionBridgeTimeoutMs: () => 30_000.5,
+        } as unknown as Config,
+        parts: ['look', image()],
+        signal: signal(),
+      });
+      expect(result.status).toBe('failed');
+      expect(result.egressOccurred).toBe(true);
+      // Classified as a generic failure, not a timeout.
+      expect(textOf(result.parts)).not.toMatch(/timed out/i);
+      // No model call — the signal blew up before dispatch.
+      expect(mockSideQuery).not.toHaveBeenCalled();
     } finally {
       timeoutSpy.mockRestore();
     }

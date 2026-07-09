@@ -9,6 +9,8 @@ import {
   MODEL_GENERATION_CONFIG_FIELDS,
   type ContentGeneratorConfig,
   type ContentGeneratorConfigSources,
+  normalizeReasoningEffort,
+  REASONING_EFFORT_TIERS,
   resolveModelConfig,
   resolveProviderProtocol,
   type ModelConfigSourcesInput,
@@ -195,31 +197,33 @@ export interface ResolvedCliGenerationConfig {
   warnings: string[];
 }
 
-export function getAuthTypeFromEnv(): AuthType | undefined {
-  if (process.env['QWEN_OAUTH']) {
+export function getAuthTypeFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): AuthType | undefined {
+  if (env['QWEN_OAUTH']) {
     return AuthType.QWEN_OAUTH;
   }
 
   if (
-    process.env['OPENAI_API_KEY'] &&
-    (process.env['OPENAI_MODEL'] || process.env['QWEN_MODEL']) &&
-    process.env['OPENAI_BASE_URL']
+    env['OPENAI_API_KEY'] &&
+    (env['OPENAI_MODEL'] || env['QWEN_MODEL']) &&
+    env['OPENAI_BASE_URL']
   ) {
     return AuthType.USE_OPENAI;
   }
 
-  if (process.env['GEMINI_API_KEY'] && process.env['GEMINI_MODEL']) {
+  if (env['GEMINI_API_KEY'] && env['GEMINI_MODEL']) {
     return AuthType.USE_GEMINI;
   }
 
-  if (process.env['GOOGLE_API_KEY'] && process.env['GOOGLE_MODEL']) {
+  if (env['GOOGLE_API_KEY'] && env['GOOGLE_MODEL']) {
     return AuthType.USE_VERTEX_AI;
   }
 
   if (
-    process.env['ANTHROPIC_API_KEY'] &&
-    process.env['ANTHROPIC_MODEL'] &&
-    process.env['ANTHROPIC_BASE_URL']
+    env['ANTHROPIC_API_KEY'] &&
+    env['ANTHROPIC_MODEL'] &&
+    env['ANTHROPIC_BASE_URL']
   ) {
     return AuthType.USE_ANTHROPIC;
   }
@@ -416,6 +420,26 @@ export function resolveCliGenerationConfig(
     openAILoggingDir,
   };
 
+  // Apply the global reasoning-effort preference (settings.model.reasoningEffort,
+  // set via /effort) onto the unified reasoning config. Skip when thinking is
+  // explicitly disabled (reasoning === false) so effort never silently
+  // re-enables it; provider adapters clamp the tier to the active model.
+  const rawReasoningEffort = settings.model?.reasoningEffort;
+  const reasoningEffort = normalizeReasoningEffort(rawReasoningEffort);
+  // A configured-but-unrecognized value (e.g. a "hihg" typo in settings.json)
+  // normalizes to undefined and is silently skipped below. Surface it as a
+  // warning so the user isn't left wondering why /effort had no effect.
+  const invalidReasoningEffortWarning =
+    rawReasoningEffort && !reasoningEffort
+      ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: ${REASONING_EFFORT_TIERS.join(', ')}.`
+      : undefined;
+  if (reasoningEffort && generationConfig.reasoning !== false) {
+    generationConfig.reasoning = {
+      ...(generationConfig.reasoning ?? {}),
+      effort: reasoningEffort,
+    };
+  }
+
   return {
     model: resolved.config.model || '',
     apiKey: resolved.config.apiKey || '',
@@ -424,6 +448,7 @@ export function resolveCliGenerationConfig(
     sources: resolved.sources,
     warnings: [
       ...resolved.warnings,
+      ...(invalidReasoningEffortWarning ? [invalidReasoningEffortWarning] : []),
       ...(disambiguationWarning ? [disambiguationWarning] : []),
       ...(ignoredGenerationConfigWarning
         ? [ignoredGenerationConfigWarning]

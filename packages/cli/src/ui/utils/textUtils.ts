@@ -300,8 +300,7 @@ const BARE_C0_CONTROL_CHARS_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 
 // Unicode bidirectional override / isolate characters (the "Trojan Source"
 // attack class, CVE-2021-42572) that can visually reorder rendered text.
-const BIDI_OVERRIDE_CHARS_REGEX =
-  /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+const BIDI_OVERRIDE_CHARS_REGEX = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 
 /**
  * Full sanitization for raw, untrusted text about to be rendered into a
@@ -463,7 +462,12 @@ export function sanitizeSensitiveText(
 // eslint-disable-next-line no-control-regex
 const FILENAME_CONTROL_CHARS_REGEX = /[\x00-\x1f\x7f-\x9f]/g;
 
-function escapeFilenameControlChar(ch: string): string {
+// Same as FILENAME_CONTROL_CHARS_REGEX minus `\n` (row separator) and `\t`
+// (benign indentation), which multi-line display treats as layout.
+// eslint-disable-next-line no-control-regex
+const MULTILINE_CONTROL_CHARS_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+
+function escapeControlChar(ch: string): string {
   switch (ch) {
     case '\b':
       return '\\b';
@@ -499,6 +503,20 @@ function escapeFilenameControlChar(ch: string): string {
 export function sanitizeFilenameForDisplay(name: string): string {
   return escapeAnsiCtrlCodes(name).replace(
     FILENAME_CONTROL_CHARS_REGEX,
-    escapeFilenameControlChar,
+    escapeControlChar,
+  );
+}
+
+/**
+ * Make untrusted multi-line text (e.g. model-generated file contents) safe to
+ * render in the TUI while preserving its line structure: neutralizes
+ * multi-byte ANSI/VT sequences (via `escapeAnsiCtrlCodes`), then escapes the
+ * remaining bare control bytes — BEL, BS, CR, DEL, C1, the 8-bit CSI — as
+ * inert, visible text. `\n` and `\t` pass through untouched.
+ */
+export function sanitizeMultilineForDisplay(text: string): string {
+  return escapeAnsiCtrlCodes(text).replace(
+    MULTILINE_CONTROL_CHARS_REGEX,
+    escapeControlChar,
   );
 }

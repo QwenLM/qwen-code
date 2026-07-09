@@ -15,6 +15,8 @@ import type {
 import type { DaemonLogger } from '../daemon-logger.js';
 import {
   buildDaemonStatusResponse,
+  type DaemonMetricsBucket,
+  type DaemonPerfSnapshot,
   type DaemonStartupSnapshot,
   parseDaemonStatusDetail,
 } from '../daemon-status.js';
@@ -23,11 +25,14 @@ import type { ServeOptions } from '../types.js';
 import type { ChannelWorkerSnapshot } from '../channel-worker-supervisor.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import { getServeProtocolVersions } from '../capabilities.js';
+import type { TotalSessionAdmissionSnapshot } from '../total-session-admission.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 interface RegisterDaemonStatusRoutesDeps {
   opts: ServeOptions;
   boundWorkspace: string;
   bridge: AcpSessionBridge;
+  workspaceRegistry: WorkspaceRegistry;
   workspace: DaemonWorkspaceService;
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
@@ -42,6 +47,9 @@ interface RegisterDaemonStatusRoutesDeps {
   deviceFlowRegistry: DeviceFlowRegistry;
   sessionShellCommandEnabled: boolean;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  getPerfSnapshot?: () => DaemonPerfSnapshot;
+  getMetricsSeries?: () => DaemonMetricsBucket[];
+  getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
 }
 
 export function registerDaemonStatusRoutes(
@@ -63,6 +71,7 @@ export function registerDaemonStatusRoutes(
           opts: deps.opts,
           boundWorkspace: deps.boundWorkspace,
           bridge: deps.bridge,
+          workspaceRegistry: deps.workspaceRegistry,
           workspace: deps.workspace,
           daemonLog: deps.daemonLog,
           startup: deps.startup,
@@ -76,6 +85,10 @@ export function registerDaemonStatusRoutes(
           deviceFlowRegistry: deps.deviceFlowRegistry,
           sessionShellCommandEnabled: deps.sessionShellCommandEnabled,
           getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
+          getPerfSnapshot: deps.getPerfSnapshot,
+          getMetricsSeries: deps.getMetricsSeries,
+          getTotalSessionAdmissionSnapshot:
+            deps.getTotalSessionAdmissionSnapshot,
         }),
       );
     } catch (err) {

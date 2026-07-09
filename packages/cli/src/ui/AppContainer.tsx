@@ -91,7 +91,11 @@ import {
   profileCheckpoint,
   finalizeStartupProfile,
 } from '../utils/startupProfiler.js';
-import { appEvents } from '../utils/events.js';
+import {
+  AppEvent,
+  appEvents,
+  type StartupIdeConnectionStatus,
+} from '../utils/events.js';
 import process from 'node:process';
 
 /**
@@ -123,6 +127,7 @@ import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
+import { useEffortCommand } from './hooks/use-effort-command.js';
 import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
@@ -164,6 +169,7 @@ import {
 } from './utils/workflow-keyword.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
+import { ExtensionRefreshState } from '../config/extension-refresh-state.js';
 import { useFocus } from './hooks/useFocus.js';
 import { useAwaySummary } from './hooks/useAwaySummary.js';
 import { useBracketedPaste } from './hooks/useBracketedPaste.js';
@@ -283,6 +289,54 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
   });
 }
 
+function isCompressionPending(pendingHistoryItems: HistoryItemWithoutId[]) {
+  return pendingHistoryItems.some(
+    (item) =>
+      item.type === MessageType.COMPRESSION && item.compression.isPending,
+  );
+}
+
+export function isInputActiveForState({
+  initError,
+  isProcessing,
+  hasPendingCompression,
+  streamingState,
+}: {
+  initError: unknown;
+  isProcessing: boolean;
+  hasPendingCompression: boolean;
+  streamingState: StreamingState;
+}) {
+  return (
+    !initError &&
+    (!isProcessing || hasPendingCompression) &&
+    (streamingState === StreamingState.Idle ||
+      streamingState === StreamingState.Responding)
+  );
+}
+
+export function shouldDrainMessageQueue({
+  isConfigInitialized,
+  streamingState,
+  isProcessing,
+  dialogsVisible,
+  messageQueueLength,
+}: {
+  isConfigInitialized: boolean;
+  streamingState: StreamingState;
+  isProcessing: boolean;
+  dialogsVisible: boolean;
+  messageQueueLength: number;
+}) {
+  return (
+    isConfigInitialized &&
+    streamingState === StreamingState.Idle &&
+    !isProcessing &&
+    !dialogsVisible &&
+    messageQueueLength > 0
+  );
+}
+
 function getResponseCandidateTokens(
   pendingGeminiHistoryItems: HistoryItemWithoutId[],
 ): number {
@@ -346,12 +400,39 @@ export function mergeStartupWarnings(
   return [...new Set([...currentWarnings, ...nextWarnings])];
 }
 
+/**
+ * Whether the skill-review dialog should auto-open. Exported for tests.
+ *
+ * Auto-open requires an undismissed pending batch while the app is idle, the
+ * auto-skill feature enabled (live flag — the dialog's turn-off must keep the
+ * batch from re-popping, while re-enabling from /memory lets it resurface),
+ * and /memory itself closed (the review dialog must not pop over the dialog
+ * where the flag is being toggled).
+ */
+export function shouldAutoOpenSkillReview(args: {
+  pending: UIState['skillReviewPending'];
+  streamingState: StreamingState;
+  isMemoryDialogOpen: boolean;
+  autoSkillEnabled: boolean;
+  dismissedTaskIds: ReadonlySet<string>;
+}): boolean {
+  return (
+    args.pending !== null &&
+    args.pending.skills.length > 0 &&
+    args.streamingState === StreamingState.Idle &&
+    !args.isMemoryDialogOpen &&
+    args.autoSkillEnabled &&
+    !args.dismissedTaskIds.has(args.pending.taskId)
+  );
+}
+
 interface AppContainerProps {
   config: Config;
   settings: LoadedSettings;
   startupWarnings?: string[];
   version: string;
   initializationResult: InitializationResult;
+  extensionRefreshState?: ExtensionRefreshState;
 }
 
 /**
@@ -368,6 +449,10 @@ const SHELL_HEIGHT_PADDING = 10;
 
 export const AppContainer = (props: AppContainerProps) => {
   const { settings, config, initializationResult } = props;
+  const extensionRefreshState = useMemo(
+    () => props.extensionRefreshState ?? new ExtensionRefreshState(),
+    [props.extensionRefreshState],
+  );
   const historyManager = useHistory();
   // `useHistory()` returns a fresh memoized object whenever `history` changes,
   // so depending on `historyManager` directly inside event-handler callbacks
@@ -905,6 +990,12 @@ export const AppContainer = (props: AppContainerProps) => {
   // Note: isIdleRef.current is assigned after streamingState becomes available
   // (see the assignment below useGeminiStream).
   const isIdleRef = useRef(true);
+  // Live content-area height, kept in a ref so useGeminiStream (called above the
+  // point where availableTerminalHeight is computed) can read the current value
+  // when bounding the pending item's rendered height. terminalWidthRef pairs
+  // with it so the commit loop reads width and height consistently (both live).
+  const availableTerminalHeightRef = useRef(0);
+  const terminalWidthRef = useRef(0);
   const updateHandlerRef = useRef<{
     cleanup: () => void;
     flush: () => void;
@@ -1107,6 +1198,9 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeSelect,
   } = useApprovalModeCommand(settings, config);
 
+  const { isEffortDialogOpen, openEffortDialog, handleEffortSelect } =
+    useEffortCommand(settings, config, historyManager.addItem);
+
   const auth = useAuthCommand(
     settings,
     config,
@@ -1187,6 +1281,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isFastModelMode,
     isVoiceModelMode,
     isVisionModelMode,
+    modelDialogPersistScope,
     openModelDialog,
     closeModelDialog,
   } = useModelCommand();
@@ -1375,6 +1470,7 @@ export const AppContainer = (props: AppContainerProps) => {
       const pendingSkills = withPending.metadata!['pendingSkills'] as Array<{
         name: string;
         description: string;
+        stagedManifestPath: string;
       }>;
       const sig = `${withPending.id}|${pendingSkills
         .map((p) => p.name)
@@ -1386,6 +1482,7 @@ export const AppContainer = (props: AppContainerProps) => {
         skills: pendingSkills.map((p) => ({
           name: p.name,
           description: p.description,
+          stagedManifestPath: p.stagedManifestPath,
         })),
       });
     };
@@ -1407,6 +1504,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       openPermissionsDialog,
       openApprovalModeDialog,
+      openEffortDialog,
       quit: (messages: HistoryItem[]) => {
         setQuittingMessages(messages);
         // Signal the client to skip background memory tasks (extract, dream,
@@ -1450,6 +1548,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openTrustDialog,
       openPermissionsDialog,
       openApprovalModeDialog,
+      openEffortDialog,
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
@@ -1499,6 +1598,7 @@ export const AppContainer = (props: AppContainerProps) => {
     logger,
     historyManager.updateItem,
     setSessionName,
+    extensionRefreshState,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
@@ -1745,6 +1845,8 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalHeight,
     midTurnDrainRef,
     logger,
+    availableTerminalHeightRef,
+    terminalWidthRef,
   );
 
   // Now that streamingState is available, keep isIdleRef in sync and
@@ -1761,16 +1863,28 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [streamingState]);
 
   // Auto-open the skill-review dialog when idle and there are pending skills.
+  // Gated on the live auto-skill flag: after the dialog's turn-off option
+  // (which disables the feature and closes WITHOUT dismissing), the batch must
+  // not re-pop — but re-enabling auto-skill from /memory flips the flag back,
+  // and the batch can then reopen. The flag lives on the stable `config`
+  // object (mutated imperatively), so no dependency changes when it flips;
+  // `isMemoryDialogOpen` is a dependency precisely so that closing /memory —
+  // the only in-session place the flag can be re-enabled — re-runs this check
+  // even when the app is already idle. It doubles as a gate so the review
+  // dialog never pops over the open /memory dialog.
   useEffect(() => {
     if (
-      skillReviewPending &&
-      skillReviewPending.skills.length > 0 &&
-      streamingState === StreamingState.Idle &&
-      !skillReviewDismissedTaskIdsRef.current.has(skillReviewPending.taskId)
+      shouldAutoOpenSkillReview({
+        pending: skillReviewPending,
+        streamingState,
+        isMemoryDialogOpen,
+        autoSkillEnabled: config.getAutoSkillEnabled(),
+        dismissedTaskIds: skillReviewDismissedTaskIdsRef.current,
+      })
     ) {
       setIsSkillReviewDialogOpen(true);
     }
-  }, [skillReviewPending, streamingState]);
+  }, [skillReviewPending, streamingState, isMemoryDialogOpen, config]);
 
   // Contextual tips — show tips based on context usage after model responses
   // Defer TipHistory loading when tips are disabled to avoid side effects
@@ -2166,6 +2280,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
       if (
         streamingState === StreamingState.Idle &&
+        !isProcessing &&
         isSlashCommand(submittedValue)
       ) {
         void submitQuery(submittedValue);
@@ -2178,6 +2293,7 @@ export const AppContainer = (props: AppContainerProps) => {
       addMessage,
       agentViewState,
       streamingState,
+      isProcessing,
       submitQuery,
       handleSlashCommand,
       config,
@@ -2259,6 +2375,7 @@ export const AppContainer = (props: AppContainerProps) => {
   );
   const stickyTodos = useStableStickyTodos(rawStickyTodos);
   const hasExecutingTool = isToolExecuting(pendingHistoryItems);
+  const hasPendingCompression = isCompressionPending(pendingHistoryItems);
 
   // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
   useTerminalProgress(streamingState, hasExecutingTool);
@@ -2452,15 +2569,16 @@ export const AppContainer = (props: AppContainerProps) => {
    * Determines if the input prompt should be active and accept user input.
    * Input is disabled during:
    * - Initialization errors
-   * - Slash command processing
+   * - Slash command processing, except pending compression where input can queue
    * - Tool confirmations (WaitingForConfirmation state)
    * - Any future streaming states not explicitly allowed
    */
-  const isInputActive =
-    !initError &&
-    !isProcessing &&
-    (streamingState === StreamingState.Idle ||
-      streamingState === StreamingState.Responding);
+  const isInputActive = isInputActiveForState({
+    initError,
+    isProcessing,
+    hasPendingCompression,
+    streamingState,
+  });
 
   const isFocused = useFocus();
   useBracketedPaste();
@@ -2645,6 +2763,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const [idePromptAnswered, setIdePromptAnswered] = useState(false);
   const [currentIDE, setCurrentIDE] = useState<IdeInfo | null>(null);
+  const [startupIdeConnectionStatus, setStartupIdeConnectionStatus] =
+    useState<StartupIdeConnectionStatus>({ state: 'idle' });
 
   useEffect(() => {
     const getIde = async () => {
@@ -2767,6 +2887,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isHooksDialogOpen ||
     isStatsDialogOpen ||
     isApprovalModeDialogOpen ||
+    isEffortDialogOpen ||
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
     isHelpDialogOpen ||
@@ -2871,6 +2992,9 @@ export const AppContainer = (props: AppContainerProps) => {
       mainContentHeightReservation -
       tabBarHeight,
   );
+  // Expose to useGeminiStream (called earlier) for rendered-height-aware commit.
+  availableTerminalHeightRef.current = availableTerminalHeight;
+  terminalWidthRef.current = terminalWidth;
 
   config.setShellExecutionConfig({
     terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
@@ -2905,6 +3029,16 @@ export const AppContainer = (props: AppContainerProps) => {
     const unsubscribe = ideContextStore.subscribe(setIdeContextState);
     setIdeContextState(ideContextStore.get());
     return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const listener = (status: StartupIdeConnectionStatus) => {
+      setStartupIdeConnectionStatus(status);
+    };
+    appEvents.on(AppEvent.StartupIdeConnectionStatusChanged, listener);
+    return () => {
+      appEvents.off(AppEvent.StartupIdeConnectionStatusChanged, listener);
+    };
   }, []);
 
   const handleEscapePromptChange = useCallback((showPrompt: boolean) => {
@@ -3305,6 +3439,8 @@ export const AppContainer = (props: AppContainerProps) => {
     handleThemeSelect,
     isApprovalModeDialogOpen,
     handleApprovalModeSelect,
+    isEffortDialogOpen,
+    handleEffortSelect,
     isAuthDialogOpen,
     closeAuthDialog,
     pendingAuthType,
@@ -3786,13 +3922,20 @@ export const AppContainer = (props: AppContainerProps) => {
   const [queueDrainNonce, setQueueDrainNonce] = useState(0);
   useEffect(() => {
     if (queueDrainingRef.current) return;
-    if (!isConfigInitialized) return;
-    if (streamingState !== StreamingState.Idle) return;
-    if (dialogsVisible) return;
+    if (
+      !shouldDrainMessageQueue({
+        isConfigInitialized,
+        streamingState,
+        isProcessing,
+        dialogsVisible,
+        messageQueueLength: messageQueue.length,
+      })
+    ) {
+      return;
+    }
     // Don't silently auto-submit queued messages while the transcript is open
     // (it isn't part of `dialogsVisible`). Resume draining once it closes.
     if (isTranscriptOpenRef.current) return;
-    if (messageQueue.length === 0) return;
 
     // Two-phase: batch plain prompts as one turn, else pop next slash command.
     const plainPrompts = drainQueue();
@@ -3808,6 +3951,7 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [
     isConfigInitialized,
     streamingState,
+    isProcessing,
     dialogsVisible,
     // Re-run the drain when the transcript closes so queued messages resume.
     isTranscriptOpen,
@@ -3843,10 +3987,12 @@ export const AppContainer = (props: AppContainerProps) => {
       isFastModelMode,
       isVoiceModelMode,
       isVisionModelMode,
+      modelDialogPersistScope,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
+      isEffortDialogOpen,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -3918,6 +4064,7 @@ export const AppContainer = (props: AppContainerProps) => {
       terminalHeight,
       mainControlsRef,
       currentIDE,
+      startupIdeConnectionStatus,
       updateInfo,
       showIdeRestartPrompt,
       ideTrustRestartReason,
@@ -3982,10 +4129,12 @@ export const AppContainer = (props: AppContainerProps) => {
       isFastModelMode,
       isVoiceModelMode,
       isVisionModelMode,
+      modelDialogPersistScope,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
+      isEffortDialogOpen,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -4056,6 +4205,7 @@ export const AppContainer = (props: AppContainerProps) => {
       terminalHeight,
       mainControlsRef,
       currentIDE,
+      startupIdeConnectionStatus,
       updateInfo,
       showIdeRestartPrompt,
       ideTrustRestartReason,
@@ -4116,6 +4266,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
+      handleEffortSelect,
       auth: authActions,
       handleEditorSelect,
       exitEditorDialog,
@@ -4206,6 +4357,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
+      handleEffortSelect,
       authActions,
       handleEditorSelect,
       exitEditorDialog,

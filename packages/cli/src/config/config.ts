@@ -36,6 +36,7 @@ import {
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
+  MAX_SUBAGENT_DEPTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -138,6 +139,7 @@ function parseApprovalModeValue(value: string): ApprovalMode {
 export interface CliArgs {
   query: string | undefined;
   model: string | undefined;
+  fallbackModel: string[] | undefined;
   sandbox: boolean | string | undefined;
   sandboxImage: string | undefined;
   debug: boolean | undefined;
@@ -206,6 +208,7 @@ export interface CliArgs {
   maxSessionTurns: number | undefined;
   maxWallTime: string | undefined;
   maxToolCalls: number | undefined;
+  maxSubagentDepth: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
   disabledSlashCommands: string[] | undefined;
@@ -651,6 +654,16 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description: `Model`,
         })
+        .option('fallback-model', {
+          type: 'array',
+          string: true,
+          description:
+            'Fallback model(s) for capacity errors (429/503/529), repeatable or comma-separated (max 3)',
+          coerce: (models: string[]) =>
+            models
+              .flatMap((m) => m.split(',').map((s) => s.trim()))
+              .filter(Boolean),
+        })
         .option('prompt', {
           alias: 'p',
           type: 'string',
@@ -886,6 +899,11 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'number',
           description:
             'Maximum cumulative tool calls executed during the run (success or failure; `structured_output` under --json-schema is exempt). Aborts with exit code 55 when exceeded. -1 / unset means no limit; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos.',
+        })
+        .option('max-subagent-depth', {
+          type: 'number',
+          description:
+            'Maximum sub-agent nesting depth (1-based levels). 1 keeps sub-agents available but disables nesting; capped at 100. Overrides model.maxSubagentDepth from settings. Defaults to 5.',
         })
         .option('core-tools', {
           type: 'array',
@@ -1177,6 +1195,34 @@ export async function loadHierarchicalGeminiMemory(
 }
 
 /**
+ * Merge CLI `--fallback-model` values with the `modelFallbacks` setting.
+ * CLI values take precedence when provided; otherwise the setting value
+ * (a comma-separated string) is split and used.
+ *
+ * @param cliValues  - Repeated/comma-split values from `--fallback-model`.
+ * @param settingValue - Comma-separated string from the `modelFallbacks` setting.
+ * @returns An array of model IDs (may be empty). Core-level normalization
+ *          (dedup, cap at 3) is handled by `normalizeModelFallbacks` in Config.
+ */
+function resolveModelFallbacks(
+  cliValues: string[] | undefined,
+  settingValue: string | undefined,
+): string[] | undefined {
+  // CLI flag takes precedence when provided
+  if (cliValues && cliValues.length > 0) {
+    return cliValues;
+  }
+  // Fall back to settings (comma-separated string)
+  if (settingValue && settingValue.trim().length > 0) {
+    return settingValue
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  return undefined;
+}
+
+/**
  * Resolves the wall-clock budget for a run. Returns seconds (`-1` =
  * unlimited). Order of precedence: `--max-wall-time` flag, then
  * `model.maxWallTimeSeconds` from settings, else unlimited.
@@ -1233,6 +1279,36 @@ function resolveMaxToolCalls(argv: CliArgs, settings: Settings): number {
     }
   }
   return -1;
+}
+
+/**
+ * Resolves the sub-agent nesting cap. Order of precedence:
+ * `--max-subagent-depth` flag, then `model.maxSubagentDepth` from settings,
+ * else undefined (Config applies the default of 5).
+ *
+ * Yargs accepts `NaN` from non-numeric flag values, and Config's clamp
+ * would silently fall back to the default — validate up front so a typo
+ * fails loudly. Settings values stay lenient (Config clamps them) so a bad
+ * settings.json cannot break startup.
+ */
+function resolveMaxSubagentDepth(
+  argv: CliArgs,
+  settings: Settings,
+): number | undefined {
+  const value = argv.maxSubagentDepth;
+  if (value !== undefined && value !== null) {
+    if (
+      !Number.isInteger(value) ||
+      value < 1 ||
+      value > MAX_SUBAGENT_DEPTH_LIMIT
+    ) {
+      throw new Error(
+        `--max-subagent-depth must be an integer between 1 and ${MAX_SUBAGENT_DEPTH_LIMIT}; got ${value}.`,
+      );
+    }
+    return value;
+  }
+  return settings.model?.maxSubagentDepth;
 }
 
 export function isDebugMode(argv: CliArgs): boolean {
@@ -1663,6 +1739,10 @@ export async function loadCliConfig(
     bareMode || safeMode
       ? []
       : normalizeDisabledToolList(settings.tools?.disabled);
+  const visibleTools =
+    bareMode || safeMode
+      ? []
+      : normalizeDisabledToolList(settings.tools?.visible);
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
@@ -1888,7 +1968,7 @@ export async function loadCliConfig(
       ? {}
       : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
   const pendingMcpServers =
-    bareMode || safeMode
+    bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
 
@@ -1923,6 +2003,7 @@ export async function loadCliConfig(
     disabledSkillNamesProvider:
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
+    visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     // New unified permissions (PermissionManager source of truth).
     permissions: {
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,
@@ -1951,6 +2032,7 @@ export async function loadCliConfig(
       bareMode || safeMode ? undefined : settings.tools?.callCommand,
     mcpServerCommand:
       bareMode || safeMode ? undefined : settings.mcp?.serverCommand,
+    mcpToolIdleTimeoutMs: settings.mcp?.toolIdleTimeoutMs,
     mcpServers,
     topTierMcpServers,
     pendingMcpServers,
@@ -1973,6 +2055,12 @@ export async function loadCliConfig(
     showResponseTokensPerSecond:
       settings.ui?.showResponseTokensPerSecond === true,
     telemetry: telemetrySettings,
+    // Ordinary interactive TUI defers telemetry until after first paint. Auth
+    // events emitted before the deferred init are an accepted startup-latency
+    // tradeoff. This intentionally differs from IDE deferral: `qwen -i
+    // "prompt"` must await IDE context before auto-submit, but telemetry can
+    // still initialize after render unless an initial prompt is present.
+    deferTelemetryInitialization: interactive && !isAcpMode && !question,
     outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
@@ -1995,8 +2083,11 @@ export async function loadCliConfig(
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
+    // Undefined flows through to Config's default (5) and clamp logic.
+    maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? true,
+    cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     artifactEnabled: settings.experimental?.artifact ?? false,
     artifactAutoOpen: settings.artifact?.autoOpen ?? true,
@@ -2018,7 +2109,7 @@ export async function loadCliConfig(
         }
       : undefined,
     // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
-    // through chrome-devtools-mcp (far lighter than the OS-level computer-use
+    // through the CDP tunnel (far lighter than the OS-level computer-use
     // driver), so disable computer-use to keep the agent off that heavy path.
     computerUseEnabled: (() => {
       const tunnelOn = process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] === '1';
@@ -2028,7 +2119,7 @@ export async function loadCliConfig(
         writeStderrLine(
           'qwen serve: ignoring tools.computerUse.enabled=true — the CDP ' +
             'tunnel (QWEN_SERVE_CDP_TUNNEL_OVER_WS) routes browser automation ' +
-            'through chrome-devtools-mcp, so computer-use stays disabled.',
+            'through the CDP tunnel, so computer-use stays disabled.',
         );
       }
       return tunnelOn ? false : (settings.tools?.computerUse?.enabled ?? true);
@@ -2070,6 +2161,7 @@ export async function loadCliConfig(
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,
     skipLoopDetection: settings.model?.skipLoopDetection ?? true,
+    maxToolCallsPerTurn: settings.model?.maxToolCallsPerTurn,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,
     truncateToolOutputLines: settings.tools?.truncateToolOutputLines,
@@ -2101,8 +2193,14 @@ export async function loadCliConfig(
       bareMode || safeMode
         ? false
         : (settings.memory?.autoSkillConfirm ?? true),
+    memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
     fastModel: settings.fastModel || undefined,
     visionModel: settings.visionModel || undefined,
+    visionBridgeTimeoutMs: settings.visionBridgeTimeoutMs,
+    modelFallbacks: resolveModelFallbacks(
+      argv.fallbackModel,
+      settings.modelFallbacks,
+    ),
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks:
       bareMode || safeMode
@@ -2134,6 +2232,7 @@ export async function loadCliConfig(
     },
     agents: settings.agents
       ? {
+          maxParallelAgents: settings.agents.maxParallelAgents,
           displayMode: settings.agents.displayMode,
           arena: settings.agents.arena
             ? {

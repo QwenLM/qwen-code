@@ -25,6 +25,8 @@ import fs from 'node:fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const defaultRoot = join(__dirname, '..');
+const BUNDLED_SKILL_TEST_FILE_RE =
+  /\.(?:test|spec)\.(?:d\.)?[cm]?[jt]sx?(?:\.map)?$/;
 
 export function copyBundleAssets({ root = defaultRoot } = {}) {
   const distDir = join(root, 'dist');
@@ -66,7 +68,10 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
   );
   if (existsSync(bundledSkillsDir)) {
     const destBundledDir = join(distDir, 'bundled');
-    copyRecursiveSync(bundledSkillsDir, destBundledDir);
+    fs.rmSync(destBundledDir, { recursive: true, force: true });
+    copyRecursiveSync(bundledSkillsDir, destBundledDir, {
+      skipEntry: isBundledSkillTestFile,
+    });
     console.log('Copied bundled skills to dist/bundled/');
   } else {
     console.warn(
@@ -159,7 +164,7 @@ function isDirectRun() {
 /**
  * Recursively copy directory
  */
-function copyRecursiveSync(src, dest) {
+function copyRecursiveSync(src, dest, options = {}) {
   if (!existsSync(src)) {
     return;
   }
@@ -173,14 +178,13 @@ function copyRecursiveSync(src, dest) {
 
     const entries = fs.readdirSync(src);
     for (const entry of entries) {
-      // Skip .DS_Store files
-      if (entry === '.DS_Store') {
+      if (entry === '.DS_Store' || options.skipEntry?.(entry)) {
         continue;
       }
 
       const srcPath = join(src, entry);
       const destPath = join(dest, entry);
-      copyRecursiveSync(srcPath, destPath);
+      copyRecursiveSync(srcPath, destPath, options);
     }
   } else {
     copyFileSync(src, dest);
@@ -190,4 +194,8 @@ function copyRecursiveSync(src, dest) {
       fs.chmodSync(dest, srcStats.mode);
     }
   }
+}
+
+function isBundledSkillTestFile(fileName) {
+  return BUNDLED_SKILL_TEST_FILE_RE.test(fileName);
 }

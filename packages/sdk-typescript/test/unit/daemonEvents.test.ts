@@ -155,6 +155,86 @@ describe('daemon event schema', () => {
     expect(isDaemonEventType(event, 'trust_change_requested')).toBe(true);
   });
 
+  it('recognizes artifact_changed as a known daemon event', () => {
+    const event: DaemonEvent = {
+      id: 3,
+      v: 1,
+      type: 'artifact_changed',
+      data: {
+        sessionId: 's-1',
+        change: {
+          action: 'created',
+          artifactId: 'art-1',
+          artifact: {
+            id: 'art-1',
+            kind: 'link',
+            storage: 'external_url',
+            source: 'client',
+            status: 'available',
+            title: 'Lineage',
+            url: 'https://example.com/lineage',
+            clientRetained: true,
+            createdAt: '2026-06-30T00:00:00.000Z',
+            updatedAt: '2026-06-30T00:00:00.000Z',
+          },
+        },
+      },
+    };
+
+    const known = asKnownDaemonEvent(event);
+
+    expect(known).toBe(event);
+    expect(known?.type).toBe('artifact_changed');
+    expect(isDaemonEventType(event, 'artifact_changed')).toBe(true);
+  });
+
+  it('keeps artifact_changed events with future artifact literals', () => {
+    const event: DaemonEvent = {
+      id: 4,
+      v: 1,
+      type: 'artifact_changed',
+      data: {
+        sessionId: 's-1',
+        change: {
+          action: 'created',
+          artifactId: 'art-2',
+          artifact: {
+            id: 'art-2',
+            kind: 'diagram',
+            storage: 'remote_preview',
+            source: 'extension',
+            status: 'warming',
+            title: 'Future artifact',
+            url: 'https://example.com/future',
+            clientRetained: false,
+            createdAt: '2026-06-30T00:00:00.000Z',
+            updatedAt: '2026-06-30T00:00:00.000Z',
+          },
+        },
+      },
+    };
+
+    expect(asKnownDaemonEvent(event)).toBe(event);
+  });
+
+  it('keeps artifact_changed events with future change literals', () => {
+    const event: DaemonEvent = {
+      id: 5,
+      v: 1,
+      type: 'artifact_changed',
+      data: {
+        sessionId: 's-1',
+        change: {
+          action: 'renamed',
+          artifactId: 'art-3',
+          reason: 'lifecycle_policy',
+        },
+      },
+    };
+
+    expect(asKnownDaemonEvent(event)).toBe(event);
+  });
+
   it('leaves malformed or unknown events on the raw DaemonEvent path', () => {
     expect(
       asKnownDaemonEvent({
@@ -844,10 +924,29 @@ describe('daemon event schema', () => {
       // No `id` on synthetic frames (matches the daemon's emit shape).
       v: 1,
       type: 'slow_client_warning',
-      data: { queueSize: 192, maxQueued: 256, lastEventId: 42 },
+      data: {
+        queueSize: 192,
+        maxQueued: 256,
+        lastEventId: 42,
+        queuedBytes: 1_800_000,
+        maxQueuedBytes: 2_097_152,
+        threshold: 'bytes',
+      },
     } satisfies DaemonEvent;
     const known = asKnownDaemonEvent(warning);
     expect(known?.type).toBe('slow_client_warning');
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: {
+          queueSize: 192,
+          maxQueued: 256,
+          lastEventId: 42,
+          threshold: 'frames',
+        },
+      }),
+    ).toBeDefined();
 
     // Schema validation: required numeric fields. Missing or wrongly
     // typed payloads must NOT be recognized as known events.
@@ -887,6 +986,34 @@ describe('daemon event schema', () => {
         },
       }),
     ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: {
+          queueSize: 192,
+          maxQueued: 256,
+          lastEventId: 42,
+          queuedBytes: Number.NaN,
+          maxQueuedBytes: 2_097_152,
+          threshold: 'bytes',
+        },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: {
+          queueSize: 192,
+          maxQueued: 256,
+          lastEventId: 42,
+          queuedBytes: 1_800_000,
+          maxQueuedBytes: 2_097_152,
+          threshold: 'bogus',
+        },
+      }),
+    ).toBeUndefined();
   });
 
   it('reduces slow_client_warning into the view state without ending the stream', () => {
@@ -901,13 +1028,25 @@ describe('daemon event schema', () => {
       {
         v: 1,
         type: 'slow_client_warning',
-        data: { queueSize: 200, maxQueued: 256, lastEventId: 1 },
+        data: {
+          queueSize: 200,
+          maxQueued: 256,
+          lastEventId: 1,
+          threshold: 'frames',
+        },
       },
       // Warning #2 (e.g. after a drain + refill on the daemon side).
       {
         v: 1,
         type: 'slow_client_warning',
-        data: { queueSize: 220, maxQueued: 256, lastEventId: 5 },
+        data: {
+          queueSize: 220,
+          maxQueued: 256,
+          lastEventId: 5,
+          queuedBytes: 1_900_000,
+          maxQueuedBytes: 2_097_152,
+          threshold: 'frames_and_bytes',
+        },
       },
     ]);
 
@@ -917,6 +1056,9 @@ describe('daemon event schema', () => {
       queueSize: 220,
       maxQueued: 256,
       lastEventId: 5,
+      queuedBytes: 1_900_000,
+      maxQueuedBytes: 2_097_152,
+      threshold: 'frames_and_bytes',
     });
     // Warning is non-terminal — stream is still alive, no
     // terminalEvent recorded.
@@ -925,6 +1067,71 @@ describe('daemon event schema', () => {
     // Warnings carry no `id`, so `lastEventId` stays at the highest
     // id observed (the original session_update at id=1).
     expect(state.lastEventId).toBe(1);
+  });
+
+  it('treats byte-overflow client_evicted as terminal', () => {
+    const evicted = {
+      id: 1,
+      v: 1,
+      type: 'client_evicted',
+      data: {
+        reason: 'queue_bytes_overflow',
+        droppedAfter: 8,
+        queueSize: 1,
+        maxQueued: 256,
+        queuedBytes: 1_900_000,
+        maxQueuedBytes: 2_097_152,
+        eventBytes: 300_000,
+      },
+    } satisfies DaemonEvent;
+    const known = asKnownDaemonEvent(evicted);
+    expect(known?.type).toBe('client_evicted');
+    if (known?.type !== 'client_evicted') {
+      throw new Error('expected client_evicted event');
+    }
+    expect(known.data.queuedBytes).toBe(1_900_000);
+
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'client_evicted',
+        data: {
+          reason: 'queue_bytes_overflow',
+          droppedAfter: 8,
+          queueSize: 1,
+          maxQueued: 256,
+          queuedBytes: Number.NaN,
+          maxQueuedBytes: 2_097_152,
+          eventBytes: 300_000,
+        },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'client_evicted',
+        data: {
+          reason: 'queue_bytes_overflow',
+          droppedAfter: 8,
+          queueSize: 1,
+          maxQueued: 256,
+          queuedBytes: 1_900_000,
+          maxQueuedBytes: 2_097_152,
+          eventBytes: Number.NaN,
+        },
+      }),
+    ).toBeUndefined();
+
+    const state = reduceDaemonSessionEvents([evicted]);
+
+    expect(state.alive).toBe(false);
+    expect(state.terminalEvent?.type).toBe('client_evicted');
+    expect(state.terminalEvent?.data).toMatchObject({
+      reason: 'queue_bytes_overflow',
+      queuedBytes: 1_900_000,
+      maxQueuedBytes: 2_097_152,
+      eventBytes: 300_000,
+    });
   });
 
   // PR 14b: MCP guardrail push events. Mirrors the slow_client_warning
@@ -2443,6 +2650,100 @@ describe('PR 21 — auth device-flow events', () => {
   });
 
   describe('state_resync_required (#4175 F4 prereq, Ilya0527 issue #15)', () => {
+    it('recognizes history_truncated and records it without entering resync', () => {
+      const event = {
+        v: 1,
+        type: 'history_truncated',
+        data: {
+          reason: 'replay_window_exceeded',
+          truncatedEvents: 4,
+          retainedEvents: 2,
+          maxBytes: 512,
+          truncatedTurns: 2,
+          fullTranscriptAvailable: false,
+        },
+      } satisfies DaemonEvent;
+
+      const known = asKnownDaemonEvent(event);
+      expect(known?.type).toBe('history_truncated');
+
+      const state = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        event,
+      );
+      expect(state.awaitingResync).toBe(false);
+      expect(state.historyTruncatedCount).toBe(1);
+      expect(state.lastHistoryTruncated).toEqual(event.data);
+    });
+
+    it('rejects malformed history_truncated payloads', () => {
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: false,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: -1,
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: false,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: 4,
+            retainedEvents: 2.5,
+            maxBytes: 512,
+            fullTranscriptAvailable: false,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: 4,
+            retainedEvents: 2,
+            maxBytes: 512,
+            truncatedTurns: -1,
+            fullTranscriptAvailable: false,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'wrong_reason',
+            truncatedEvents: 4,
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: false,
+          },
+        }),
+      ).toBeUndefined();
+    });
+
     it('sets awaitingResync + records the resync data when daemon emits state_resync_required', () => {
       const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
         v: 1,

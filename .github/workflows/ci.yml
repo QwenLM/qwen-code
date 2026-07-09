@@ -119,6 +119,8 @@ jobs:
     if: "${{ !cancelled() && github.event_name != 'push' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     timeout-minutes: 60
+    outputs:
+      ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     permissions:
       contents: 'read'
       checks: 'write'
@@ -128,14 +130,15 @@ jobs:
       # instant the branch is pushed) instead of github.ref. github.ref is the
       # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
       # can serve stale for minutes after a push, repeatedly flaking this gate.
-      # The merge queue (integration_cli on merge_group) validates the merged
-      # result. Non-PR events keep github.ref.
+      # Merge queue refs are ephemeral; check out the event head SHA directly so
+      # slow hosted runners do not fail after the queue branch is removed.
+      # Non-PR/non-queue events keep github.ref.
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
           # Shallow: nothing here walks git history (the verify guard below checks
           # head.sha == HEAD, schema/tests touch only the working tree). On the
           # in-repo ECS runner a full-history clone is the heaviest transfer and
@@ -157,9 +160,50 @@ jobs:
             exit 1
           fi
 
+      - name: 'Classify CI profile'
+        id: 'ci_profile'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          IS_SAME_REPO_PR: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}"
+        run: |-
+          profile=full
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
+            if [[ "${IS_SAME_REPO_PR}" == "true" ]]; then
+              changed_files="${RUNNER_TEMP}/changed-files.jsonl"
+              if gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[] | {filename, status, previous_filename}' > "${changed_files}"; then
+                if ! profile="$(node .github/scripts/ci/classify-profile.mjs "${changed_files}")"; then
+                  echo "::error::CI profile classifier exited non-zero; running full CI."
+                  profile=full
+                fi
+              else
+                echo "::warning::Unable to list PR changed files; running full CI."
+              fi
+            else
+              echo "Fork PR detected; running full CI."
+            fi
+          fi
+          echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
+          echo "Selected CI profile: ${profile}"
+
+      - name: 'Docs-only CI'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'docs_only' }}"
+        run: 'echo "Docs-only change; full CI skipped."'
+
+      - name: 'GitHub CI helper checks'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
+        timeout-minutes: 5
+        run: |-
+          # Keep this path dependency-free; script formatting is checked when those files hit full CI.
+          node scripts/lint.js --setup
+          node scripts/lint.js --actionlint
+          node scripts/lint.js --yamllint
+          node --test .github/scripts/pr-safety-precheck.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/resolve-sandbox-image.test.mjs
+
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js 22.x (hosted)'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'github-hosted' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
@@ -168,7 +212,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org/'
 
       - name: 'Use pre-installed Node.js (self-hosted)'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: |-
           if ! command -v node >/dev/null 2>&1; then
             echo "::error::Node.js is not on PATH for this self-hosted runner. Provision Node 22.x or set the MAINTAINER_ECS_RUNNER_DISABLED repository variable to 'true' to route PRs back to hosted runners."
@@ -179,8 +223,17 @@ jobs:
             echo "::warning::Expected Node 22.x but found $(node -v); tests will run against the runner's Node."
           fi
 
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
       - name: 'Configure npm for rate limiting'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
           npm config set fetch-retry-mintimeout 20000
           npm config set fetch-retry-maxtimeout 120000
@@ -188,61 +241,68 @@ jobs:
           npm config set fetch-timeout 300000
 
       - name: 'Install dependencies'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
 
+      - name: 'Report npm cache usage (self-hosted)'
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
+          echo "npm cache: ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
       - name: 'Audit critical runtime dependencies'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run audit:runtime:critical'
 
       - name: 'Check lockfile'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check:lockfile'
 
       - name: 'Check desktop workspace isolation'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check:desktop-isolation'
 
       - name: 'Install linters'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node scripts/lint.js --setup'
 
       - name: 'Run ESLint'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node scripts/lint.js --eslint'
 
       - name: 'Run actionlint'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         timeout-minutes: 5
         run: 'node scripts/lint.js --actionlint'
 
       - name: 'Run shellcheck'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node scripts/lint.js --shellcheck'
 
       - name: 'Run yamllint'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node scripts/lint.js --yamllint'
 
       - name: 'Run Prettier'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node scripts/lint.js --prettier'
 
       - name: 'Run sensitive keyword linter'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node scripts/lint.js --sensitive-keywords'
 
       - name: 'Run i18n check'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check-i18n'
 
       - name: 'Generate settings schema'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run generate:settings-schema'
 
       - name: 'Check settings schema is up-to-date'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
           if [[ -n $(git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json) ]]; then
             echo "Error: settings.schema.json is out of date."
@@ -253,13 +313,16 @@ jobs:
           fi
           echo "Settings schema is up-to-date"
 
+      # Keep this Linux-only PR gate explicit. macOS/Windows merge-queue jobs run
+      # npm run test:ci only, so they intentionally do not repeat this
+      # platform-independent bundle closure check.
       - name: 'Check serve fast-path bundle closure'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check:serve-fast-path-bundle'
 
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         env:
           NO_COLOR: true
           HOME: '${{ runner.temp }}/qwen-ci-home'
@@ -274,12 +337,12 @@ jobs:
           npm run test:ci
 
       - name: 'Run no-AK integration smoke tests'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name == 'pull_request' }}"
         run: 'npm run test:integration:no-ak:sandbox:none'
 
       - name: 'Publish Test Report (for non-forks)'
         if: |-
-          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.unit_tests.outcome != 'skipped' && (github.event.pull_request.head.repo.full_name == github.repository) }}
+          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && steps.unit_tests.outcome != 'skipped' && (github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: 'dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2' # ratchet:dorny/test-reporter@v3
         with:
           name: 'Test Results (ubuntu-latest, Node 22.x)'
@@ -289,18 +352,76 @@ jobs:
 
       - name: 'Upload Test Results Artifact (for forks)'
         if: |-
-          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'test-results-fork-22.x-ubuntu-latest'
           path: 'packages/*/junit.xml'
 
       - name: 'Upload coverage reports'
-        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'coverage-reports-22.x-ubuntu-latest'
           path: 'packages/*/coverage'
+
+  web_shell_e2e_smoke:
+    name: 'web-shell E2E Smoke (ubuntu-latest, Node 22.x)'
+    needs:
+      - 'classify_pr'
+      - 'test'
+    if: |-
+      ${{
+        !cancelled() &&
+        github.event_name == 'pull_request' &&
+        needs.classify_pr.outputs.skip_ci != 'true' &&
+        needs.test.outputs.ci_profile == 'full'
+      }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 20
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: "${{ format('refs/pull/{0}/head', github.event.pull_request.number) }}"
+          fetch-depth: 1
+
+      - name: 'Set up Node.js 22.x'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Configure npm for rate limiting'
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        run: |-
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Install Playwright Chromium'
+        run: 'npx playwright install --with-deps chromium'
+
+      - name: 'Run web-shell browser smoke'
+        run: 'npm run test:e2e:smoke --workspace=packages/web-shell'
+
+      - name: 'Upload web-shell Playwright artifacts'
+        if: '${{ always() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'web-shell-e2e-smoke'
+          path: |-
+            packages/web-shell/client/e2e/test-results
+            packages/web-shell/client/e2e/playwright-report
+          if-no-files-found: 'ignore'
 
   # macOS/Windows: slowest/costliest runners, rare platform regressions — run
   # only in the merge queue. Skipped on PR (ubuntu is the fast PR signal) and on
@@ -318,14 +439,14 @@ jobs:
     permissions:
       contents: 'read'
     steps:
-      # See the Ubuntu gate's checkout: on PRs use the immutable refs/pull/N/head
-      # to avoid merge-ref rebuild lag; other events keep github.ref.
+      # See the Ubuntu gate's checkout: PRs use the immutable refs/pull/N/head
+      # and merge queue uses the event head SHA.
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
 
       - name: 'Set up Node.js 22.x'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -378,9 +499,9 @@ jobs:
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
 
       - name: 'Set up Node.js 22.x'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -430,6 +551,7 @@ jobs:
       ${{
         !cancelled() &&
         needs.classify_pr.outputs.skip_ci != 'true' &&
+        needs.test.outputs.ci_profile == 'full' &&
         github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository
       }}
@@ -446,7 +568,7 @@ jobs:
           - '22.x'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
 
       - name: 'Download coverage reports artifact'
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
@@ -493,8 +615,9 @@ jobs:
       OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
           # Shallow, mirroring the Ubuntu gate: nothing here walks git history,
           # and a full-history clone is the heaviest transfer on the ECS runner.
           fetch-depth: 1
@@ -534,11 +657,27 @@ jobs:
             echo "::warning::Expected Node 22.x but found $(node -v); integration tests will run against the runner's Node."
           fi
 
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
           npm ci --no-audit --progress=false
+
+      - name: 'Report npm cache usage (self-hosted)'
+        if: "${{ always() && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
+          echo "npm cache: ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Run CLI Integration Tests'
         run: |-

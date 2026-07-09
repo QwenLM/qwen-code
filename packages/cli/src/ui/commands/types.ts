@@ -24,6 +24,7 @@ import type {
   ExtensionUpdateAction,
   ExtensionUpdateStatus,
 } from '../state/extensions.js';
+import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 
 // Grouped dependencies for clarity and easier mocking
 export interface CommandContext {
@@ -50,6 +51,7 @@ export interface CommandContext {
     config: Config | null;
     settings: LoadedSettings;
     logger: Logger | null;
+    extensionRefreshState?: ExtensionRefreshState;
   };
   // UI state and history management
   ui: {
@@ -165,6 +167,12 @@ export interface OpenDialogActionReturn {
   /** Optional session name for /branch — passed through to handleBranch. */
   name?: string;
 
+  /**
+   * Optional persist scope for model dialog — controls which settings file
+   * the model selection is written to ('workspace' = project, 'user' = global).
+   */
+  persistScope?: 'workspace' | 'user';
+
   dialog:
     | 'help'
     | 'arena_start'
@@ -187,6 +195,7 @@ export interface OpenDialogActionReturn {
     | 'trust'
     | 'permissions'
     | 'approval-mode'
+    | 'effort'
     | 'resume'
     | 'delete'
     | 'branch'
@@ -418,6 +427,7 @@ export interface SlashCommand {
     body?: string;
     filePath?: string;
     level?: string;
+    extensionName?: string;
   };
 
   // The action to run. Optional for parent commands that only group sub-commands.

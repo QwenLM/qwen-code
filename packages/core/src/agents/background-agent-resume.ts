@@ -19,11 +19,13 @@ import { AgentTerminateMode } from './runtime/agent-types.js';
 import { AgentHeadless, ContextState } from './runtime/agent-headless.js';
 import {
   getSubagentSessionDir,
+  normalizeResumedAgentDepth,
   readAgentMeta,
   patchAgentMeta,
   attachJsonlTranscriptWriter,
 } from './agent-transcript.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import { buildOrderedUuidChain } from '../utils/conversation-chain.js';
 import { getInitialChatHistory } from '../utils/environmentContext.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
@@ -210,29 +212,22 @@ function reconstructHistory(
 ): ChatRecord[] {
   if (records.length === 0) return [];
 
-  const recordsByUuid = new Map<string, ChatRecord[]>();
+  // First record per uuid (preserves the historical `?.[0]` selection — this
+  // path does not aggregate duplicate-uuid records).
+  const firstByUuid = new Map<string, ChatRecord>();
   for (const record of records) {
-    const existing = recordsByUuid.get(record.uuid) ?? [];
-    existing.push(record);
-    recordsByUuid.set(record.uuid, existing);
+    if (!firstByUuid.has(record.uuid)) firstByUuid.set(record.uuid, record);
   }
 
-  let currentUuid: string | null =
-    leafUuid ?? records[records.length - 1]!.uuid;
-  const uuidChain: string[] = [];
-  const visited = new Set<string>();
+  // Gap detection is intentionally OFF here. Unlike the interactive `/resume`
+  // (sessionService) and ACP replay (HistoryReplayer) paths, this background
+  // transcript recovery has no surface to render a gap marker on, so detecting
+  // gaps only to drop them would be an inconsistent half-measure. The walk
+  // truncates at a broken parent link either way; here it just truncates.
+  const { uuids } = buildOrderedUuidChain(records, { leafUuid });
 
-  while (currentUuid && !visited.has(currentUuid)) {
-    visited.add(currentUuid);
-    uuidChain.push(currentUuid);
-    const recordsForUuid = recordsByUuid.get(currentUuid);
-    if (!recordsForUuid?.length) break;
-    currentUuid = recordsForUuid[0]!.parentUuid;
-  }
-
-  uuidChain.reverse();
-  return uuidChain
-    .map((uuid) => recordsByUuid.get(uuid)?.[0])
+  return uuids
+    .map((uuid) => firstByUuid.get(uuid))
     .filter((record): record is ChatRecord => !!record);
 }
 
@@ -443,6 +438,12 @@ export class BackgroundAgentResumeService {
           error:
             meta.lastError === resumeBlockedReason ? undefined : meta.lastError,
           resumeBlockedReason,
+          // Restore nesting lineage from the sidecar so a restart-recovered
+          // nested agent keeps its place in the tree display. parentName is
+          // not persisted (the parent is usually gone after a restart); the
+          // UI falls back to its generic orphan annotation.
+          parentAgentId: meta.parentAgentId,
+          depth: meta.depth,
         };
         const entry = registry.register(registration);
         recovered.push(entry);
@@ -1028,7 +1029,17 @@ export class BackgroundAgentResumeService {
         }
       };
 
-      const framedRunBody = () => runWithAgentContext(meta.agentId, runBody);
+      // Restore the persisted launch depth so a resumed nested agent keeps
+      // its original nesting level (and spawn eligibility) instead of
+      // recomputing to depth 0 from this top-level resume frame. Normalized
+      // because the sidecar is untrusted input — a tampered negative depth
+      // would otherwise mint unbounded spawn capacity.
+      const framedRunBody = () =>
+        runWithAgentContext(
+          meta.agentId,
+          runBody,
+          normalizeResumedAgentDepth(meta.depth),
+        );
       void (target.isFork ? runInForkContext(framedRunBody) : framedRunBody());
       return entry;
     } catch (error) {
@@ -1190,6 +1201,9 @@ export class BackgroundAgentResumeService {
     },
   ): Promise<void> {
     const hookSystem = this.config.getHookSystem();
+    // Always set hook_context so ${hook_context} in systemPrompt does not
+    // throw when no hook is configured or the hook returns no additional context.
+    contextState.set('hook_context', '');
     if (!hookSystem) return;
 
     try {
@@ -1262,6 +1276,7 @@ export class BackgroundAgentResumeService {
           'task_prompt',
           typedStopOutput.getEffectiveReason(),
         );
+        continueContext.set('hook_context', '');
         await subagent.execute(continueContext, signal);
 
         if (signal?.aborted) return undefined;

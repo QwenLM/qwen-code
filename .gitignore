@@ -26,6 +26,8 @@ package-lock.json
 .qoder
 .claude
 .codex
+.worktrees/
+.atlarix/
 
 # Qwen Code Configs
 .qwen/*
@@ -74,6 +76,8 @@ bundle
 # Test report files
 junit.xml
 packages/*/coverage/
+packages/web-shell/client/e2e/playwright-report/
+packages/web-shell/client/e2e/test-results/
 
 # PR body draft
 pr_body.md
@@ -119,9 +123,12 @@ coverage/
 # Dev symlink: qc-helper bundled skill docs (created by scripts/dev.js)
 packages/core/src/skills/bundled/qc-helper/docs
 tmp/
+.worktrees/
 
 # code graph skills
 .venv
 .codegraph
 .qwen/computer-use/installed.json
+# Auto-generated computer-use marker can also appear under nested packages.
+**/.qwen/computer-use/
 .playwright-mcp/

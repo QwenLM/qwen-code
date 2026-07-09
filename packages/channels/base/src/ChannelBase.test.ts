@@ -3,8 +3,16 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ChannelConfig, Envelope } from './types.js';
-import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
+import type {
+  ChannelConfig,
+  ChannelTaskLifecycleEvent,
+  Envelope,
+  SessionTarget,
+} from './types.js';
+import type {
+  ChannelAgentBridge,
+  ChannelLoopToolHandler,
+} from './ChannelAgentBridge.js';
 import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
@@ -13,9 +21,13 @@ import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 class TestChannel extends ChannelBase {
   sent: Array<{ chatId: string; text: string }> = [];
   proactive: Array<{ chatId: string; text: string }> = [];
+  proactiveTargets: SessionTarget[] = [];
   proactiveSupported = false;
+  proactiveTargetSupported: boolean | undefined;
+  sendMessageError?: Error;
   connected = false;
   toolCalls: Array<{ chatId: string; event: unknown }> = [];
+  taskEvents: ChannelTaskLifecycleEvent[] = [];
   promptStarts: Array<{
     chatId: string;
     sessionId: string;
@@ -23,15 +35,30 @@ class TestChannel extends ChannelBase {
   }> = [];
   promptEnds: Array<{ chatId: string; sessionId: string; messageId?: string }> =
     [];
+  promptBuffers: Array<{
+    chatId: string;
+    sessionId: string;
+    messageId?: string;
+    bufferSize: number;
+  }> = [];
+  promptBufferDrops: Array<{
+    chatId: string;
+    sessionId: string;
+    messageIds: string[];
+  }> = [];
   responseChunks: Array<{ chatId: string; chunk: string; sessionId: string }> =
     [];
   /** When set, onPromptEnd throws AFTER recording — to exercise the finally guard. */
   throwOnPromptEnd = false;
+  responseCompleteGate?: Promise<void>;
 
   async connect() {
     this.connected = true;
   }
   async sendMessage(chatId: string, text: string) {
+    if (this.sendMessageError) {
+      throw this.sendMessageError;
+    }
     this.sent.push({ chatId, text });
   }
   disconnect() {
@@ -42,19 +69,38 @@ class TestChannel extends ChannelBase {
     this.toolCalls.push({ chatId, event });
   }
 
+  protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
+    this.taskEvents.push(event);
+  }
+
   override supportsProactiveSend(): boolean {
     return this.proactiveSupported;
   }
 
+  protected override supportsProactiveTarget(target: SessionTarget): boolean {
+    return (
+      this.proactiveTargetSupported ?? super.supportsProactiveTarget(target)
+    );
+  }
+
   protected override async pushProactive(
-    target: { chatId: string },
+    target: SessionTarget,
     text: string,
   ): Promise<void> {
     this.proactive.push({ chatId: target.chatId, text });
+    this.proactiveTargets.push(target);
   }
 
   enableCancelCommand(): void {
     this.registerCancelCommand();
+  }
+
+  cancelPromptForTest(sessionId: string): Promise<boolean> {
+    return this.requestActivePromptCancellation(sessionId, 'cancel_command');
+  }
+
+  debugPayloadForTest(platform: string, payload: unknown): void {
+    this.logDebugPayload(platform, payload);
   }
 
   protected override onPromptStart(
@@ -76,6 +122,32 @@ class TestChannel extends ChannelBase {
     }
   }
 
+  protected override onPromptBufferDropped(
+    chatId: string,
+    sessionId: string,
+    messageIds: string[],
+  ): void {
+    this.promptBufferDrops.push({ chatId, sessionId, messageIds });
+  }
+
+  protected override onPromptBuffered(
+    chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    const buffers = (
+      this as unknown as {
+        collectBuffers: Map<string, unknown[]>;
+      }
+    ).collectBuffers;
+    this.promptBuffers.push({
+      chatId,
+      sessionId,
+      messageId,
+      bufferSize: buffers.get(sessionId)?.length ?? 0,
+    });
+  }
+
   protected override onResponseChunk(
     chatId: string,
     chunk: string,
@@ -83,11 +155,27 @@ class TestChannel extends ChannelBase {
   ): void {
     this.responseChunks.push({ chatId, chunk, sessionId });
   }
+
+  protected override async onResponseComplete(
+    chatId: string,
+    fullText: string,
+    sessionId: string,
+  ): Promise<void> {
+    await this.responseCompleteGate;
+    await super.onResponseComplete(chatId, fullText, sessionId);
+  }
+}
+
+class UnsafeProcessChannel extends TestChannel {
+  processWithoutPreflight(envelope: Envelope): Promise<void> {
+    return this.processInbound(envelope);
+  }
 }
 
 function createBridge(): ChannelAgentBridge {
   const emitter = new EventEmitter();
   let sessionCounter = 0;
+  let channelLoopToolHandler: ChannelLoopToolHandler | undefined;
   const bridge = Object.assign(emitter, {
     newSession: vi.fn().mockImplementation(() => `s-${++sessionCounter}`),
     loadSession: vi.fn(),
@@ -98,6 +186,11 @@ function createBridge(): ChannelAgentBridge {
     isConnected: true,
     availableCommands: [],
     setBridge: vi.fn(),
+    respondToPermission: vi.fn().mockResolvedValue(true),
+    registerChannelLoopToolHandler: vi.fn((handler: ChannelLoopToolHandler) => {
+      channelLoopToolHandler = handler;
+    }),
+    getChannelLoopToolHandler: () => channelLoopToolHandler,
   });
   return bridge as unknown as ChannelAgentBridge;
 }
@@ -111,6 +204,7 @@ function defaultConfig(overrides: Partial<ChannelConfig> = {}): ChannelConfig {
     sessionScope: 'user',
     cwd: '/tmp',
     groupPolicy: 'disabled',
+    dmPolicy: 'open',
     groups: {},
     ...overrides,
   };
@@ -164,10 +258,293 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('logs the preflight rejection reason for group gates', async () => {
+      const ch = createChannel();
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ isGroup: true }));
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=group_disabled',
+      );
+    });
+
+    it('does not log expected mention-required group drops', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        groups: { '*': { requireMention: true } },
+      });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ isGroup: true, isMentioned: false }));
+
+      const callCount = writeSpy.mock.calls.length;
+      writeSpy.mockRestore();
+      expect(callCount).toBe(0);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('does not log debug payloads by default', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let callCount = 0;
+
+      try {
+        ch.debugPayloadForTest('Test', { token: 'secret-token' });
+      } finally {
+        callCount = writeSpy.mock.calls.length;
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(callCount).toBe(0);
+    });
+
+    it('logs sanitized debug payloads when enabled', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'test-chan';
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let logged = '';
+
+      try {
+        ch.debugPayloadForTest('Test', {
+          msgId: 'm1',
+          token: 'secret-token',
+          password: 'secret-password',
+          cookie: 'session-cookie',
+          signature: 'message-signature',
+          encrypt: 'encrypted-body',
+          response_url: 'https://example.invalid/hook?token=secret',
+          open_id: 'ou_123',
+          union_id: 'on_123',
+          userid: 'wecom-user-123',
+          user_id: { open_id: 'nested-ou' },
+          senderStaffId: 'staff-123',
+          senderId: 'sender-123',
+          senderNick: 'Alice',
+          senderName: 'Bob',
+          nested: { aeskey: 'media-key' },
+        });
+        logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      } finally {
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(logged).toContain('[Test:test-chan] debug payload');
+      expect(logged).toContain('"msgId":"m1"');
+      expect(logged).toContain('"token":"[redacted]"');
+      expect(logged).toContain('"password":"[redacted]"');
+      expect(logged).toContain('"cookie":"[redacted]"');
+      expect(logged).toContain('"signature":"[redacted]"');
+      expect(logged).toContain('"encrypt":"[redacted]"');
+      expect(logged).toContain('"response_url":"[redacted]"');
+      expect(logged).toContain('"open_id":"[redacted]"');
+      expect(logged).toContain('"union_id":"[redacted]"');
+      expect(logged).toContain('"userid":"[redacted]"');
+      expect(logged).toContain('"user_id":"[redacted]"');
+      expect(logged).toContain('"senderStaffId":"[redacted]"');
+      expect(logged).toContain('"senderId":"[redacted]"');
+      expect(logged).toContain('"senderNick":"[redacted]"');
+      expect(logged).toContain('"senderName":"[redacted]"');
+      expect(logged).toContain('"aeskey":"[redacted]"');
+      expect(logged).not.toContain('\\n');
+      expect(logged).not.toContain('secret-token');
+      expect(logged).not.toContain('secret-password');
+      expect(logged).not.toContain('session-cookie');
+      expect(logged).not.toContain('message-signature');
+      expect(logged).not.toContain('encrypted-body');
+      expect(logged).not.toContain('media-key');
+      expect(logged).not.toContain('ou_123');
+      expect(logged).not.toContain('on_123');
+      expect(logged).not.toContain('wecom-user-123');
+      expect(logged).not.toContain('Alice');
+      expect(logged).not.toContain('Bob');
+      expect(logged).not.toContain('nested-ou');
+      expect(logged).not.toContain('staff-123');
+      expect(logged).not.toContain('sender-123');
+    });
+
+    it('handles debug payload serialization failures gracefully', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'test-chan';
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let logged = '';
+
+      try {
+        const payload: Record<string, unknown> = {};
+        payload['self'] = payload;
+        ch.debugPayloadForTest('Test', payload);
+        logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      } finally {
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(logged).toContain('[Test:test-chan] debug payload');
+      expect(logged).toContain('could not be serialized');
+    });
+
+    it('logs debug payloads for global enable values', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'all';
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let logged = '';
+
+      try {
+        ch.debugPayloadForTest('Test', { msgId: 'm1' });
+        logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      } finally {
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(logged).toContain('[Test:test-chan] debug payload');
+    });
+
+    it('matches debug payload channel names exactly', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'test';
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let callCount = 0;
+
+      try {
+        ch.debugPayloadForTest('Test', { msgId: 'm1' });
+      } finally {
+        callCount = writeSpy.mock.calls.length;
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(callCount).toBe(0);
+    });
+
     it('allows DM messages through', async () => {
       const ch = createChannel();
       await ch.handleInbound(envelope());
       expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('silently drops DM messages when dmPolicy=disabled', async () => {
+      const ch = createChannel({ dmPolicy: 'disabled' });
+      await ch.handleInbound(envelope());
+      expect(ch.sent).toEqual([]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('logs the preflight rejection reason for DM gates', async () => {
+      const ch = createChannel({ dmPolicy: 'disabled' });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope());
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=dm_disabled',
+      );
+    });
+
+    it('logs the preflight rejection reason for sender gates', async () => {
+      const ch = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['user2'],
+      });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope());
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=sender_denied',
+      );
+    });
+
+    it('allows group messages through when dmPolicy=disabled', async () => {
+      const ch = createChannel({
+        dmPolicy: 'disabled',
+        groupPolicy: 'open',
+      });
+      await ch.handleInbound(envelope({ isGroup: true, isMentioned: true }));
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('rejects direct processing without preflight', async () => {
+      const ch = new UnsafeProcessChannel('test-chan', defaultConfig(), bridge);
+
+      await expect(ch.processWithoutPreflight(envelope())).rejects.toThrow(
+        'processInbound called without a successful preflightInbound check.',
+      );
+    });
+
+    it('waits for thenable preflight results', async () => {
+      class ThenablePreflightChannel extends TestChannel {
+        protected override preflightInbound(): PromiseLike<boolean> {
+          return { then: (resolve) => resolve(false) };
+        }
+      }
+      const ch = new ThenablePreflightChannel(
+        'test-chan',
+        defaultConfig(),
+        bridge,
+      );
+
+      await ch.handleInbound(envelope());
+
+      expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
     it('rejects sender with allowlist policy', async () => {
@@ -186,6 +563,666 @@ describe('ChannelBase', () => {
       });
       await ch.handleInbound(envelope());
       expect(bridge.prompt).toHaveBeenCalled();
+    });
+  });
+
+  describe('permission relay', () => {
+    function respondToPermissionMock(): ReturnType<typeof vi.fn> {
+      return (
+        bridge as unknown as {
+          respondToPermission: ReturnType<typeof vi.fn>;
+        }
+      ).respondToPermission;
+    }
+
+    function emitPermission(
+      sessionId: string,
+      requestId: string,
+      options = [
+        {
+          optionId: 'proceed_always_project',
+          kind: 'allow_always',
+          name: 'Always Allow in project',
+        },
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow once' },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Deny' },
+      ],
+    ): void {
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId,
+        sessionId,
+        request: {
+          toolCall: {
+            toolCallId: `tool-${requestId}`,
+            kind: 'shell',
+            title: `Run ${requestId}`,
+            rawInput: { command: 'echo secret-token' },
+          },
+          options,
+        },
+      });
+    }
+
+    async function startSession(
+      ch: TestChannel,
+      env: Partial<Envelope> = {},
+    ): Promise<string> {
+      await ch.handleInbound(envelope({ text: 'run tests', ...env }));
+      const results = (bridge.newSession as ReturnType<typeof vi.fn>).mock
+        .results;
+      return results[results.length - 1]!.value as string;
+    }
+
+    it('sends permission requests to the owning chat and approves with /approve', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+
+      expect(ch.sent.at(-1)?.chatId).toBe('chat1');
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Permission required to run a tool',
+      );
+      expect(ch.sent.at(-1)?.text).toContain('Command:');
+      expect(ch.sent.at(-1)?.text).toContain('Run req-1');
+      expect(ch.sent.at(-1)?.text).toContain('/approve        allow once');
+      expect(ch.sent.at(-1)?.text).toContain('/approve-always always allow');
+      expect(ch.sent.at(-1)?.text).toContain('/deny           deny');
+      expect(ch.sent.at(-1)?.text).not.toContain('Request: req-1');
+      expect(ch.sent.at(-1)?.text).not.toContain('proceed_once');
+      expect(ch.sent.at(-1)?.text).not.toContain('secret-token');
+
+      await ch.handleInbound(envelope({ text: '/approve' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+      expect(ch.sent.at(-1)?.text).toBe('Permission approved.');
+    });
+
+    it('cancels bridge permissions when the target no longer belongs to the channel', async () => {
+      const router = {
+        getTarget: vi.fn(() => ({
+          channelName: 'other-channel',
+          chatId: 'chat1',
+        })),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
+
+      await ch.dispatchPermissionRequest({
+        requestId: 'req-stale',
+        sessionId: 'session-1',
+        request: {
+          toolCall: {
+            toolCallId: 'tool-req-stale',
+            kind: 'shell',
+            title: 'Run req-stale',
+          },
+          options: [],
+        },
+      });
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-stale', {
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(ch.sent).toEqual([]);
+    });
+
+    it('requires an explicit request id when multiple permissions are pending', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      emitPermission(sessionId, 'req-2');
+
+      await ch.handleInbound(envelope({ text: '/approve' }));
+
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Multiple permission requests are pending',
+      );
+      expect(ch.sent.at(-1)?.text).toContain('req-1');
+      expect(ch.sent.at(-1)?.text).toContain('req-2');
+      expect(ch.sent.at(-1)?.text).toContain('req-1: Run req-1');
+      expect(ch.sent.at(-1)?.text).toContain('req-2: Run req-2');
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledTimes(1);
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('does not fall back to another pending request when an explicit id is wrong', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      emitPermission(sessionId, 'req-2');
+
+      await ch.handleInbound(envelope({ text: '/approve missing-request' }));
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('does not answer permission requests from another chat', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch, { chatId: 'chat2' });
+      emitPermission(sessionId, 'req-chat2');
+
+      await ch.handleInbound(
+        envelope({ chatId: 'chat1', text: '/approve req-chat2' }),
+      );
+
+      expect(ch.sent.at(-1)?.chatId).toBe('chat1');
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+    });
+
+    it('does not answer permission requests from another thread', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'thread',
+      });
+      const sessionId = await startSession(ch, {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'alice',
+        threadId: 'thread-1',
+      });
+      emitPermission(sessionId, 'req-thread-1');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'alice',
+          text: '/approve req-thread-1',
+          threadId: 'thread-2',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'alice',
+          text: '/approve req-thread-1',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-thread-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('delivers threaded permission requests through proactive targets when supported', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'thread',
+      });
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+      const sessionId = await startSession(ch, {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'alice',
+        threadId: 'thread-1',
+      });
+
+      emitPermission(sessionId, 'req-thread-1');
+
+      expect(ch.proactiveTargets.at(-1)).toMatchObject({
+        chatId: 'group1',
+        senderId: 'alice',
+        threadId: 'thread-1',
+      });
+      expect(ch.proactive.at(-1)?.text).toContain(
+        'Permission required to run a tool',
+      );
+      expect(ch.sent.at(-1)?.text).not.toContain(
+        'Permission required to run a tool',
+      );
+    });
+
+    it('routes single-scope permission requests to the active chat', async () => {
+      const ch = createChannel({ sessionScope: 'single' });
+      await startSession(ch, { senderId: 'alice', chatId: 'alice-dm' });
+
+      let resolveBob!: (value: string) => void;
+      const bobPrompt = new Promise<string>((resolve) => {
+        resolveBob = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () => bobPrompt,
+      );
+
+      const bobTurn = ch.handleInbound(
+        envelope({
+          senderId: 'bob',
+          senderName: 'Bob',
+          chatId: 'bob-dm',
+          text: 'needs permission',
+        }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1]![0] as string;
+
+      emitPermission(sessionId, 'req-bob');
+
+      await vi.waitFor(() =>
+        expect(ch.sent.at(-1)?.text).toContain(
+          'Permission required to run a tool',
+        ),
+      );
+      expect(ch.sent.at(-1)?.chatId).toBe('bob-dm');
+
+      resolveBob('agent response');
+      await bobTurn;
+    });
+
+    it('does not let another group member approve user-scoped permissions', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'user',
+      });
+      const sessionId = await startSession(ch, {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'alice',
+        threadId: 'thread-1',
+      });
+      emitPermission(sessionId, 'req-alice');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'bob',
+          text: '/approve req-alice',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'alice',
+          text: '/approve req-alice',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-alice', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('matches the current sender before reporting ambiguous permissions', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'user',
+      });
+      const group = {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        threadId: 'thread-1',
+      };
+      const aliceSessionId = await startSession(ch, {
+        ...group,
+        senderId: 'alice',
+      });
+      emitPermission(aliceSessionId, 'req-alice');
+      const bobSessionId = await startSession(ch, {
+        ...group,
+        senderId: 'bob',
+      });
+      emitPermission(bobSessionId, 'req-bob');
+
+      await ch.handleInbound(
+        envelope({
+          ...group,
+          senderId: 'alice',
+          text: '/approve',
+        }),
+      );
+
+      expect(ch.sent.at(-1)?.text).toBe('Permission approved.');
+      expect(respondToPermissionMock()).toHaveBeenCalledTimes(1);
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-alice', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('gates shared-session permission responses to authorized senders', async () => {
+      const ch = createChannel({
+        allowedUsers: ['boss'],
+        groupPolicy: 'open',
+        sessionScope: 'thread',
+      });
+      const sessionId = await startSession(ch, {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'boss',
+        threadId: 'thread-1',
+      });
+      emitPermission(sessionId, 'req-1');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'rando',
+          text: '/approve req-1',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toContain('Only authorized members');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'boss',
+          text: '/approve req-1',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('uses ACP option kinds for approval and denial', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        { optionId: 'always', kind: 'allow_always', name: 'Allow always' },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+        { optionId: 'never', kind: 'reject_always', name: 'Deny always' },
+        { optionId: 'reject', kind: 'reject_once', name: 'Deny once' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'once' },
+      });
+
+      emitPermission(sessionId, 'req-2', [
+        { optionId: 'reject', kind: 'reject_once', name: 'Deny once' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/deny req-2' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-2', {
+        outcome: { outcome: 'selected', optionId: 'reject' },
+      });
+      expect(ch.sent.at(-1)?.text).toBe('Permission denied.');
+
+      emitPermission(sessionId, 'req-3', [
+        { optionId: 'always', kind: 'allow_always', name: 'Allow always' },
+        { optionId: 'never', kind: 'reject_always', name: 'Deny always' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/deny req-3' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-2', {
+        outcome: { outcome: 'selected', optionId: 'reject' },
+      });
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-3', {
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(ch.sent.at(-1)?.text).toBe('Permission denied.');
+    });
+
+    it('reports permission requests that lack requested approval options', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        { optionId: 'reject', kind: 'reject_once', name: 'Deny once' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'This permission request has no approvable option.',
+      );
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+
+      await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'This permission request has no always-allow option.',
+      );
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+    });
+
+    it('clears pending permission requests when response dispatch fails', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      respondToPermissionMock().mockRejectedValueOnce(new Error('send failed'));
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('supports explicit approve-always for persistent permission grants', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        {
+          optionId: 'proceed_always_user',
+          kind: 'allow_always',
+          name: 'Always Allow for user',
+        },
+        {
+          optionId: 'proceed_always_project',
+          kind: 'allow_always',
+          name: 'Always Allow in project',
+        },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+      ]);
+
+      expect(ch.sent.at(-1)?.text).toContain(
+        '/approve-always always allow for this project',
+      );
+
+      await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_always_project' },
+      });
+      expect(ch.sent.at(-1)?.text).toBe('Permission approved always.');
+    });
+
+    it('falls back to user-scope approve-always when project scope is unavailable', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        {
+          optionId: 'proceed_always_user',
+          kind: 'allow_always',
+          name: 'Always Allow for user',
+        },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+      ]);
+
+      expect(ch.sent.at(-1)?.text).toContain(
+        '/approve-always always allow for this user',
+      );
+
+      await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_always_user' },
+      });
+    });
+
+    it('does not infer approve-always scope from noncanonical option ids', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        {
+          optionId: 'sandbox_bypass_project',
+          kind: 'allow_always',
+          name: 'Always allow sandbox bypass',
+        },
+        {
+          optionId: 'proceed_always_user',
+          kind: 'allow_always',
+          name: 'Always Allow for user',
+        },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+      ]);
+
+      expect(ch.sent.at(-1)?.text).toContain(
+        '/approve-always always allow for this user',
+      );
+
+      await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_always_user' },
+      });
+    });
+
+    it('allows approve-always without a request id when one request is pending', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        { optionId: 'always', kind: 'allow_always', name: 'Allow always' },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/approve-always' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'always' },
+      });
+    });
+
+    it('clears pending permission requests when the session is cleared', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+
+      await ch.handleInbound(envelope({ text: '/clear' }));
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('clears pending permission requests when the session dies', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+
+      (bridge as unknown as EventEmitter).emit('sessionDied', {
+        sessionId,
+      });
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('reports when the bridge cannot answer permission requests', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      delete (bridge as unknown as { respondToPermission?: unknown })
+        .respondToPermission;
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'Permission relay is not available for this session.',
+      );
+    });
+
+    it('cancels the permission request when the relay message cannot be sent', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      ch.sendMessageError = new Error('send failed');
+
+      emitPermission(sessionId, 'req-1');
+      await vi.waitFor(() =>
+        expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+          outcome: { outcome: 'cancelled' },
+        }),
+      );
+      ch.sendMessageError = undefined;
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('clears pending permission requests when the bridge is replaced', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      const oldRespondToPermission = respondToPermissionMock();
+      const newBridge = createBridge();
+
+      ch.setBridge(newBridge);
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+      expect(oldRespondToPermission).not.toHaveBeenCalled();
+      expect(
+        (
+          newBridge as unknown as {
+            respondToPermission: ReturnType<typeof vi.fn>;
+          }
+        ).respondToPermission,
+      ).not.toHaveBeenCalled();
     });
   });
 
@@ -728,6 +1765,7 @@ describe('ChannelBase', () => {
       expect(ch.sent).toHaveLength(1);
       expect(ch.sent[0]!.text).toContain('/help');
       expect(ch.sent[0]!.text).toContain('/clear');
+      expect(ch.sent[0]!.text).toContain('/approve-always [request-id]');
       expect(ch.sent[0]!.text).not.toContain('/cancel');
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
@@ -764,6 +1802,769 @@ describe('ChannelBase', () => {
       expect(getAvailableCommands).toHaveBeenCalledWith(sid);
       expect(ch.sent[0]!.text).toContain('/compress');
       expect(ch.sent[0]!.text).not.toContain('/global-only');
+    });
+
+    it('natural remember rejects group memory writes', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'], groupPolicy: 'open' },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '帮我记一下，发布前跑 npm run build',
+          senderId: 'alice',
+          isGroup: true,
+          chatId: 'group-1',
+          isMentioned: true,
+        }),
+      );
+
+      expect(channelMemory.appendChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'group-1',
+          text: 'Channel memory cannot be changed in group chats.',
+        },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('llm memory classifier can save natural remember requests', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'remember',
+          memory: '回复前必须说 1122',
+          confidence: 0.91,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '你记一下以后回复前要说 1122',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).toHaveBeenCalledWith('你记一下以后回复前要说 1122');
+      expect(channelMemory.appendChannelMemory).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          chatId: 'chat1',
+          threadId: undefined,
+        },
+        '回复前必须说 1122',
+      );
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Channel memory updated.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('regex memory intent skips the llm classifier', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'none',
+          confidence: 1,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '记住: 回复前必须说 1122',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).not.toHaveBeenCalled();
+      expect(channelMemory.appendChannelMemory).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          chatId: 'chat1',
+          threadId: undefined,
+        },
+        '回复前必须说 1122',
+      );
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Channel memory updated.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('llm memory classifier is skipped when channel memory is not configured', async () => {
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'list',
+          confidence: 0.88,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '你现在都记住了哪些东西',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('llm memory classifier can list memory for natural questions', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'list',
+          confidence: 0.88,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'], groupPolicy: 'open' },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '你现在都记住了哪些东西',
+          senderId: 'alice',
+          isGroup: true,
+          chatId: 'group-1',
+          isMentioned: true,
+        }),
+      );
+
+      expect(channelMemory.readChannelMemory).toHaveBeenCalledWith({
+        channelName: 'test-chan',
+        chatId: 'group-1',
+        threadId: undefined,
+      });
+      expect(ch.sent).toEqual([{ chatId: 'group-1', text: 'Use staging.' }]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('llm memory classifier can start clear flow for natural requests', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'clear_all',
+          confidence: 0.9,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '请删除这个聊天里的全部 memory',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).toHaveBeenCalledWith('请删除这个聊天里的全部 memory');
+      expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+        },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('llm memory classifier gate ignores platform format characters', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'list',
+          confidence: 0.88,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '看看你记\u200b忆里有什么',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).toHaveBeenCalledWith('看看你记\u200b忆里有什么');
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'Use staging.' }]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('llm memory classifier low confidence falls through to agent', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'list',
+          confidence: 0.49,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '这个 memory 设计怎么做',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(channelMemory.appendChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('llm memory classifier none intent falls through to agent', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'none',
+          confidence: 0.92,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '这个 memory 设计怎么做',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(channelMemory.appendChannelMemory).not.toHaveBeenCalled();
+      expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('llm memory classifier errors fall through to agent', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi
+          .fn()
+          .mockRejectedValue(new Error('classifier unavailable')),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(
+        envelope({
+          text: '看看你记忆里有什么',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(channelMemory.appendChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+      expect(bridge.prompt).toHaveBeenCalled();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('channel memory intent classifier failed'),
+      );
+      stderrSpy.mockRestore();
+    });
+
+    it('natural remember reports append failures', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi
+          .fn()
+          .mockRejectedValue(new Error('Channel memory exceeds maximum size')),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'], groupPolicy: 'open' },
+        { channelMemory },
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(
+        envelope({ text: '记住：new memory', senderId: 'alice' }),
+      );
+
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'Failed to save channel memory: An error occurred while accessing channel memory.',
+        },
+      ]);
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Channel memory exceeds maximum size'),
+      );
+      stderrSpy.mockRestore();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural memory management denies when allowedUsers is empty', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: [] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: '查看记忆', senderId: 'alice' }));
+
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'Only authorized members can manage channel memory.',
+        },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural memory list shows trimmed memory for an allowed user', async () => {
+      const channelMemory = {
+        readChannelMemory: vi
+          .fn()
+          .mockResolvedValue('Use staging by default.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'], groupPolicy: 'open' },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(envelope({ text: '查看记忆', senderId: 'alice' }));
+
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Use staging by default.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural memory list sanitizes stored memory before showing it', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('safe\u202Ehidden\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: '查看记忆', senderId: 'alice' }));
+
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'safe hidden' }]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural memory list ignores platform format characters', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'], groupPolicy: 'open' },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '查看记忆\u200b',
+          senderId: 'alice',
+          isGroup: true,
+          chatId: 'group-1',
+          isMentioned: true,
+        }),
+      );
+
+      expect(ch.sent).toEqual([{ chatId: 'group-1', text: 'Use staging.' }]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural memory list reports read failures', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockRejectedValue(new Error('disk full')),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ text: '查看记忆', senderId: 'alice' }));
+
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'Failed to read channel memory: An error occurred while accessing channel memory.',
+        },
+      ]);
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('disk full'),
+      );
+      stderrSpy.mockRestore();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural clear requires confirmation and then clears memory', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: '清空记忆', senderId: 'alice' }));
+
+      expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+        },
+      ]);
+
+      ch.sent = [];
+      await ch.handleInbound(
+        envelope({ text: '确认清空记忆', senderId: 'alice' }),
+      );
+
+      expect(channelMemory.clearChannelMemory).toHaveBeenCalledTimes(1);
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Channel memory cleared.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural group clear requests are rejected', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'], groupPolicy: 'open' },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '清空记忆',
+          senderId: 'alice',
+          isGroup: true,
+          chatId: 'group-1',
+          isMentioned: true,
+        }),
+      );
+
+      expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'group-1',
+          text: 'Channel memory cannot be changed in group chats.',
+        },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural clear rejects confirm from a different sender', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice', 'bob'] },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(envelope({ text: '清空记忆', senderId: 'alice' }));
+      await ch.handleInbound(
+        envelope({ text: '确认清空记忆', senderId: 'bob' }),
+      );
+
+      expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+        },
+        {
+          chatId: 'chat1',
+          text: 'No pending clear request. Say "清空记忆" first.',
+        },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural clear rejects confirm from a different thread', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(
+        envelope({
+          text: '清空记忆',
+          senderId: 'alice',
+          threadId: 'thread-a',
+        }),
+      );
+      await ch.handleInbound(
+        envelope({
+          text: '确认清空记忆',
+          senderId: 'alice',
+          threadId: 'thread-b',
+        }),
+      );
+
+      expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+        },
+        {
+          chatId: 'chat1',
+          text: 'No pending clear request. Say "清空记忆" first.',
+        },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural clear confirm expires after the TTL window', async () => {
+      vi.useFakeTimers();
+      try {
+        const channelMemory = {
+          readChannelMemory: vi.fn().mockResolvedValue(''),
+          appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+          clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        };
+        const ch = createChannel(
+          { allowedUsers: ['alice'] },
+          { channelMemory },
+        );
+
+        await ch.handleInbound(
+          envelope({ text: '清空记忆', senderId: 'alice' }),
+        );
+
+        await vi.advanceTimersByTimeAsync(60_001);
+        ch.sent = [];
+        await ch.handleInbound(
+          envelope({ text: '确认清空记忆', senderId: 'alice' }),
+        );
+
+        expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+        expect(ch.sent).toEqual([
+          {
+            chatId: 'chat1',
+            text: 'No pending clear request. Say "清空记忆" first.',
+          },
+        ]);
+        expect(bridge.prompt).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('natural clear reports when no memory was saved', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: false }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: '清空记忆', senderId: 'alice' }));
+      await ch.handleInbound(
+        envelope({ text: '确认清空记忆', senderId: 'alice' }),
+      );
+
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+        },
+        { chatId: 'chat1', text: 'No channel memory saved.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural clear confirm reports clear failures', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockRejectedValue(new Error('EACCES')),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ text: '清空记忆', senderId: 'alice' }));
+      await ch.handleInbound(
+        envelope({ text: '确认清空记忆', senderId: 'alice' }),
+      );
+
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+        },
+        {
+          chatId: 'chat1',
+          text: 'Failed to clear channel memory: An error occurred while accessing channel memory.',
+        },
+      ]);
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('EACCES'));
+      stderrSpy.mockRestore();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural remember reports when channel memory callbacks are missing', async () => {
+      const ch = createChannel({ allowedUsers: ['alice'] });
+
+      await ch.handleInbound(envelope({ text: '记住：x', senderId: 'alice' }));
+
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'Channel memory is not configured for this channel.',
+        },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('keeps legacy channel memory slash commands as hidden aliases', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(
+        envelope({ text: '/remember-channel Use staging.', senderId: 'alice' }),
+      );
+      await ch.handleInbound(
+        envelope({ text: '/channel-memory', senderId: 'alice' }),
+      );
+      await ch.handleInbound(
+        envelope({ text: '/forget-channel confirm', senderId: 'alice' }),
+      );
+
+      expect(channelMemory.appendChannelMemory).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          chatId: 'chat1',
+          threadId: undefined,
+        },
+        'Use staging.',
+      );
+      expect(channelMemory.readChannelMemory).toHaveBeenCalledWith({
+        channelName: 'test-chan',
+        chatId: 'chat1',
+        threadId: undefined,
+      });
+      expect(channelMemory.clearChannelMemory).toHaveBeenCalledWith({
+        channelName: 'test-chan',
+        chatId: 'chat1',
+        threadId: undefined,
+      });
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Channel memory updated.' },
+        { chatId: 'chat1', text: 'Use staging.' },
+        { chatId: 'chat1', text: 'Channel memory cleared.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('/help does not expose channel memory commands', async () => {
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope({ text: '/help' }));
+
+      expect(ch.sent[0]!.text).not.toContain('/remember-channel');
+      expect(ch.sent[0]!.text).not.toContain('/channel-memory');
+      expect(ch.sent[0]!.text).not.toContain('/forget-channel');
+      expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
     it('/clear removes session and confirms', async () => {
@@ -996,6 +2797,71 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('Channel: test-chan');
     });
 
+    it('derives default channel identity and memory metadata for task lifecycle events', async () => {
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope({ messageId: 'm-1' }));
+
+      expect(ch.taskEvents[0]).toMatchObject({
+        type: 'started',
+        channelName: 'test-chan',
+        chatId: 'chat1',
+        sessionId: 's-1',
+        messageId: 'm-1',
+        identity: {
+          id: 'channel:test-chan',
+          displayName: 'test-chan',
+        },
+        memoryScope: {
+          namespace: 'channel:test-chan',
+          mode: 'metadata-only',
+        },
+      });
+    });
+
+    it('uses configured channel identity and memory namespace in lifecycle metadata', async () => {
+      const ch = createChannel({
+        identity: {
+          id: 'ops-agent',
+          displayName: 'Ops Agent',
+          description: 'Coordinates repository operations.',
+        },
+        memoryScope: {
+          namespace: 'qwen-tag:ops',
+          mode: 'metadata-only',
+        },
+      });
+
+      await ch.handleInbound(envelope());
+
+      expect(ch.taskEvents[0]).toMatchObject({
+        identity: {
+          id: 'ops-agent',
+          displayName: 'Ops Agent',
+          description: 'Coordinates repository operations.',
+        },
+        memoryScope: {
+          namespace: 'qwen-tag:ops',
+          mode: 'metadata-only',
+        },
+      });
+    });
+
+    it('/who and /status include channel identity and memory metadata', async () => {
+      const ch = createChannel({
+        identity: { id: 'ops-agent', displayName: 'Ops Agent' },
+        memoryScope: { namespace: 'qwen-tag:ops', mode: 'metadata-only' },
+      });
+
+      await ch.handleInbound(envelope({ text: '/who' }));
+      await ch.handleInbound(envelope({ text: '/status' }));
+
+      expect(ch.sent[0]!.text).toContain('Identity: Ops Agent');
+      expect(ch.sent[0]!.text).toContain('Memory: qwen-tag:ops');
+      expect(ch.sent[1]!.text).toContain('Identity: ops-agent');
+      expect(ch.sent[1]!.text).toContain('Memory: metadata-only');
+    });
+
     it('/loop add stores a job for the current channel target', async () => {
       const created: ChannelLoop = {
         id: 'job-1',
@@ -1076,6 +2942,654 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toBe(
         'Loops are not supported when sessionScope is single.',
       );
+    });
+
+    it('channel loop tool creates a proactive loop for the current session target', async () => {
+      const created: ChannelLoop = {
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+        },
+        cwd: '/tmp',
+        cron: '*/5 * * * *',
+        prompt: 'drink water',
+        recurring: true,
+        enabled: true,
+        createdBy: 'user1',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+      const createForTarget = vi.fn().mockResolvedValue(created);
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      await ch.handleInbound(envelope({ text: 'hello' }));
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+      const result = await handler!.create('s-1', {
+        cron: '  */5 * * * *  ',
+        prompt: 'drink water',
+        recurring: false,
+      });
+
+      expect(createForTarget).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'user1',
+            chatId: 'chat1',
+            threadId: undefined,
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '*/5 * * * *',
+          prompt: 'drink water',
+          label: 'drink water',
+          recurring: false,
+          createdBy: 'user1',
+        },
+        10,
+      );
+      expect(result).toBe('Loop job-1: */5 * * * *');
+    });
+
+    it('does not register channel loop tools without a loop controller', () => {
+      createChannel();
+
+      expect(
+        (
+          bridge as unknown as {
+            getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+          }
+        ).getChannelLoopToolHandler(),
+      ).toBeUndefined();
+    });
+
+    it('channel loop tool rejects channels without proactive send support', async () => {
+      const createForTarget = vi.fn();
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      await ch.handleInbound(envelope({ text: 'hello' }));
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+
+      await expect(
+        handler!.create('s-1', {
+          cron: '*/5 * * * *',
+          prompt: 'drink water',
+        }),
+      ).resolves.toEqual({
+        text: 'This channel does not support proactive loop messages.',
+        isError: true,
+      });
+      expect(createForTarget).not.toHaveBeenCalled();
+    });
+
+    it('channel loop tool rejects single-scope sessions', async () => {
+      const createForTarget = vi.fn();
+      const ch = createChannel(
+        { sessionScope: 'single' },
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      await ch.handleInbound(envelope({ text: 'hello' }));
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+
+      await expect(
+        handler!.create('s-1', {
+          cron: '*/5 * * * *',
+          prompt: 'drink water',
+        }),
+      ).resolves.toEqual({
+        text: 'Loops are not supported when sessionScope is single.',
+        isError: true,
+      });
+      expect(createForTarget).not.toHaveBeenCalled();
+    });
+
+    it('channel loop tool rejects unsupported proactive targets', async () => {
+      const createForTarget = vi.fn();
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = false;
+      await ch.handleInbound(envelope({ text: 'hello' }));
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+
+      await expect(
+        handler!.create('s-1', {
+          cron: '*/5 * * * *',
+          prompt: 'drink water',
+        }),
+      ).resolves.toEqual({
+        text: 'This channel does not support proactive loop messages for this chat target.',
+        isError: true,
+      });
+      expect(createForTarget).not.toHaveBeenCalled();
+    });
+
+    it('channel loop tool returns invalid cron errors', async () => {
+      const createForTarget = vi.fn();
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(() => {
+              throw new Error('bad cron');
+            }),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      await ch.handleInbound(envelope({ text: 'hello' }));
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+
+      await expect(
+        handler!.create('s-1', {
+          cron: 'bad',
+          prompt: 'drink water',
+        }),
+      ).resolves.toEqual({
+        text: 'Invalid cron expression: bad cron',
+        isError: true,
+      });
+      expect(createForTarget).not.toHaveBeenCalled();
+    });
+
+    it('channel loop tool normalizes legacy targets without isGroup', async () => {
+      const created: ChannelLoop = {
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+        },
+        cwd: '/tmp',
+        cron: '*/5 * * * *',
+        prompt: 'drink water',
+        recurring: true,
+        enabled: true,
+        createdBy: 'user1',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+      const createForTarget = vi.fn().mockResolvedValue(created);
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      const legacy = ch as unknown as {
+        router: {
+          resolve(
+            channelName: string,
+            senderId: string,
+            chatId: string,
+            threadId?: string,
+            cwd?: string,
+          ): Promise<string>;
+        };
+      };
+      await legacy.router.resolve('test-chan', 'user1', 'chat1', undefined);
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+      await expect(
+        handler!.create('s-1', {
+          cron: '*/5 * * * *',
+          prompt: 'drink water',
+        }),
+      ).resolves.toBe('Loop job-1: */5 * * * *');
+
+      expect(createForTarget).toHaveBeenCalledWith(
+        expect.objectContaining({
+          target: expect.objectContaining({ isGroup: false }),
+        }),
+        10,
+      );
+    });
+
+    it('channel loop tools require shared-session authorization', async () => {
+      const createForTarget = vi.fn();
+      const listForTarget = vi.fn();
+      const disable = vi.fn();
+      const ch = createChannel(
+        {
+          allowedUsers: ['owner'],
+          groupPolicy: 'open',
+          sessionScope: 'thread',
+        },
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget,
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      await ch.handleInbound(
+        envelope({
+          senderId: 'stranger',
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot hello',
+        }),
+      );
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+
+      await expect(
+        handler!.create('s-1', {
+          cron: '* * * * *',
+          prompt: 'drink water',
+        }),
+      ).resolves.toEqual({
+        text: 'Only authorized members can use loops in this shared session.',
+        isError: true,
+      });
+      await expect(handler!.list('s-1')).resolves.toEqual({
+        text: 'Only authorized members can use loops in this shared session.',
+        isError: true,
+      });
+      await expect(handler!.cancel('s-1', 'job-1')).resolves.toEqual({
+        text: 'Only authorized members can use loops in this shared session.',
+        isError: true,
+      });
+      expect(createForTarget).not.toHaveBeenCalled();
+      expect(listForTarget).not.toHaveBeenCalled();
+      expect(disable).not.toHaveBeenCalled();
+    });
+
+    it('channel loop tools authorize the current shared-session caller', async () => {
+      let finishPrompt: (() => void) | undefined;
+      const createForTarget = vi.fn().mockResolvedValue({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'owner',
+          chatId: 'group1',
+          isGroup: true,
+        },
+        cwd: '/tmp',
+        cron: '* * * * *',
+        prompt: 'drink water',
+        recurring: true,
+        enabled: true,
+        createdBy: 'owner',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      } satisfies ChannelLoop);
+      const ch = createChannel(
+        {
+          allowedUsers: ['owner'],
+          groupPolicy: 'open',
+          sessionScope: 'thread',
+        },
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner',
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot hello',
+        }),
+      );
+      vi.mocked(bridge.prompt).mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishPrompt = () => resolve('agent response');
+          }),
+      );
+      const strangerPrompt = ch.handleInbound(
+        envelope({
+          senderId: 'stranger',
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot create a loop',
+        }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+      await expect(
+        handler!.create('s-1', {
+          cron: '* * * * *',
+          prompt: 'drink water',
+        }),
+      ).resolves.toEqual({
+        text: 'Only authorized members can use loops in this shared session.',
+        isError: true,
+      });
+      expect(createForTarget).not.toHaveBeenCalled();
+
+      finishPrompt?.();
+      await strangerPrompt;
+    });
+
+    it('channel loop tools use the active shared-session caller target', async () => {
+      let finishPrompt: (() => void) | undefined;
+      const job: ChannelLoop = {
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'admin',
+          chatId: 'group1',
+          isGroup: true,
+        },
+        cwd: '/tmp',
+        cron: '* * * * *',
+        prompt: 'drink water',
+        recurring: true,
+        enabled: true,
+        createdBy: 'admin',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+      const createForTarget = vi.fn().mockResolvedValue(job);
+      const listForTarget = vi.fn().mockResolvedValue([job]);
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        {
+          allowedUsers: ['owner', 'admin'],
+          groupPolicy: 'open',
+          sessionScope: 'thread',
+        },
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget,
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner',
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot hello',
+        }),
+      );
+      vi.mocked(bridge.prompt).mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishPrompt = () => resolve('agent response');
+          }),
+      );
+      const adminPrompt = ch.handleInbound(
+        envelope({
+          senderId: 'admin',
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot manage loops',
+        }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+      await expect(
+        handler!.create('s-1', {
+          cron: '* * * * *',
+          prompt: 'drink water',
+        }),
+      ).resolves.toBe('Loop job-1: * * * * *');
+      await expect(handler!.list('s-1')).resolves.toContain('job-1');
+      await expect(handler!.cancel('s-1', 'job-1')).resolves.toBe(
+        'Cancelled loop job-1.',
+      );
+
+      expect(createForTarget).toHaveBeenCalledWith(
+        expect.objectContaining({
+          target: expect.objectContaining({ senderId: 'admin' }),
+        }),
+        10,
+      );
+      expect(listForTarget).toHaveBeenNthCalledWith(
+        1,
+        'test-chan',
+        expect.objectContaining({ senderId: 'admin' }),
+      );
+      expect(listForTarget).toHaveBeenNthCalledWith(
+        2,
+        'test-chan',
+        expect.objectContaining({ senderId: 'admin' }),
+      );
+      expect(disable).toHaveBeenCalledWith('job-1');
+
+      finishPrompt?.();
+      await adminPrompt;
+    });
+
+    it('channel loop tool keeps group targets proactive-capable', async () => {
+      const created: ChannelLoop = {
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'group1',
+          isGroup: true,
+        },
+        cwd: '/tmp',
+        cron: '*/1 * * * *',
+        prompt: 'drink water',
+        recurring: true,
+        enabled: true,
+        createdBy: 'user1',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+      const createForTarget = vi.fn().mockResolvedValue(created);
+      const ch = createChannel(
+        { groupPolicy: 'open', sessionScope: 'thread' },
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot hello',
+        }),
+      );
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+      const result = await handler!.create('s-1', {
+        cron: '*/1 * * * *',
+        prompt: 'drink water',
+      });
+
+      expect(createForTarget).toHaveBeenCalledWith(
+        expect.objectContaining({
+          target: expect.objectContaining({
+            chatId: 'group1',
+            isGroup: true,
+          }),
+        }),
+        10,
+      );
+      expect(result).toBe('Loop job-1: */1 * * * *');
+    });
+
+    it('channel loop tool lists and cancels loops for the current session target', async () => {
+      const job: ChannelLoop = {
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'user1',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+        label: 'post summary',
+      };
+      const listForTarget = vi.fn().mockResolvedValue([job]);
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget,
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      await ch.handleInbound(envelope({ text: 'hello' }));
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+
+      await expect(handler!.list('s-1')).resolves.toContain('job-1');
+      await expect(handler!.cancel('s-1', 'job-1')).resolves.toBe(
+        'Cancelled loop job-1.',
+      );
+      expect(disable).toHaveBeenCalledWith('job-1');
     });
 
     it('/schedule is not a local command', async () => {
@@ -1187,6 +3701,45 @@ describe('ChannelBase', () => {
 
       expect(disable).toHaveBeenCalledWith('job-1');
       expect(ch.sent[0]!.text).toBe('Cancelled loop job-1.');
+    });
+
+    it('/loop cancel reports failure when a visible loop cannot be disabled', async () => {
+      const loop: ChannelLoop = {
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+      const disable = vi.fn().mockResolvedValue(false);
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn().mockResolvedValue([loop]),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+
+      await ch.handleInbound(envelope({ text: '/loop cancel job-1' }));
+
+      expect(disable).toHaveBeenCalledWith('job-1');
+      expect(ch.sent[0]!.text).toBe('Failed to cancel loop job-1.');
     });
 
     it('/loop inspect and cancel require an id', async () => {
@@ -1633,6 +4186,31 @@ describe('ChannelBase', () => {
       ch.setBridge(newBridge);
 
       expect(router.setBridge).toHaveBeenCalledWith(newBridge);
+    });
+
+    it('registers channel loop tools again after setBridge', () => {
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      const newBridge = createBridge();
+
+      ch.setBridge(newBridge);
+
+      expect(newBridge.registerChannelLoopToolHandler).toHaveBeenCalledWith(
+        (
+          bridge as ReturnType<typeof createBridge> & {
+            getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+          }
+        ).getChannelLoopToolHandler(),
+      );
     });
 
     it('moves direct bridge events and router bridge on setBridge', () => {
@@ -2220,6 +4798,97 @@ describe('ChannelBase', () => {
           expect.objectContaining({ text: 'Cancelled current request.' }),
         ]),
       );
+    });
+
+    it('/cancel still delivers the response when cancellation fails after the response settles', async () => {
+      let resolvePrompt!: (v: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let rejectCancel!: (err: Error) => void;
+      const pendingCancel = new Promise<void>((_resolve, reject) => {
+        rejectCancel = reject;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+      resolvePrompt('agent response');
+      rejectCancel(new Error('session not found'));
+      await Promise.all([prompt, cancel]);
+
+      expect(ch.sent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            text: 'Failed to cancel current request.',
+          }),
+          expect.objectContaining({ text: 'agent response' }),
+        ]),
+      );
+      expect(ch.sent).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'Cancelled current request.' }),
+        ]),
+      );
+    });
+
+    it('/cancel still delivers the response when cancellation times out then fails', async () => {
+      vi.useFakeTimers();
+      try {
+        let resolvePrompt!: (v: string) => void;
+        const pendingPrompt = new Promise<string>((resolve) => {
+          resolvePrompt = resolve;
+        });
+        let rejectCancel!: (err: Error) => void;
+        const pendingCancel = new Promise<void>((_resolve, reject) => {
+          rejectCancel = reject;
+        });
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+          pendingPrompt,
+        );
+        (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+          pendingCancel,
+        );
+        vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+        const ch = createChannel();
+        ch.enableCancelCommand();
+        const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+        const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+        await Promise.resolve();
+        resolvePrompt('agent response');
+        await vi.advanceTimersByTimeAsync(3000);
+        rejectCancel(new Error('session not found'));
+        await Promise.all([prompt, cancel]);
+
+        expect(ch.sent).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              text: 'Failed to cancel current request.',
+            }),
+            expect.objectContaining({ text: 'agent response' }),
+          ]),
+        );
+        expect(ch.taskEvents).toEqual([
+          expect.objectContaining({ type: 'started' }),
+          expect.objectContaining({ type: 'completed' }),
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('/cancel retries after a failed cancellation while the prompt is still active', async () => {
@@ -2890,11 +5559,531 @@ describe('ChannelBase', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const firstPrompt = (bridge.prompt as any).mock.calls[0][1] as string;
       expect(firstPrompt).toContain('Be concise.');
+      expect(firstPrompt).not.toContain('Channel identity:');
 
       await ch.handleInbound(envelope({ text: 'second' }));
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const secondPrompt = (bridge.prompt as any).mock.calls[1][1] as string;
       expect(secondPrompt).not.toContain('Be concise.');
+    });
+
+    it('prepends channel boundary metadata after custom instructions once per session', async () => {
+      const ch = createChannel({
+        instructions: 'Be concise.',
+        identity: {
+          id: 'ops-agent',
+          displayName: 'Ops Agent',
+          description: 'Coordinates repository operations.',
+        },
+        memoryScope: {
+          namespace: 'qwen-tag:ops',
+          mode: 'metadata-only',
+        },
+      });
+
+      await ch.handleInbound(envelope({ text: 'first' }));
+      await ch.handleInbound(envelope({ text: 'second' }));
+
+      const firstPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![1] as string;
+      expect(firstPrompt).toContain('Channel identity:');
+      expect(firstPrompt).toContain('- id: ops-agent');
+      expect(firstPrompt).toContain('- display name: Ops Agent');
+      expect(firstPrompt).toContain(
+        '- description: Coordinates repository operations.',
+      );
+      expect(firstPrompt).toContain('Memory scope:');
+      expect(firstPrompt).toContain('- namespace: qwen-tag:ops');
+      expect(firstPrompt).toContain('- mode: metadata-only');
+      expect(firstPrompt).toContain(
+        '- data from other channels must not be shared.',
+      );
+      // Boundary block comes last so it takes recency precedence over
+      // operator instructions.
+      expect(firstPrompt.indexOf('Be concise.')).toBeLessThan(
+        firstPrompt.indexOf('Channel identity:'),
+      );
+
+      const secondPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1]![1] as string;
+      expect(secondPrompt).not.toContain('Channel identity:');
+    });
+
+    it('prepends channel boundary metadata for identity-only config', async () => {
+      const ch = createChannel({
+        identity: { id: 'ops-agent', displayName: 'Ops Agent' },
+      });
+
+      await ch.handleInbound(envelope({ text: 'first' }));
+
+      const firstPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![1] as string;
+      expect(firstPrompt).toContain('Channel identity:');
+      expect(firstPrompt).toContain('- id: ops-agent');
+      expect(firstPrompt).toContain('Memory scope:');
+      expect(firstPrompt).toContain('- namespace: channel:test-chan');
+    });
+
+    it('prepends channel boundary metadata for memory-scope-only config', async () => {
+      const ch = createChannel({
+        memoryScope: { namespace: 'qwen-tag:ops' },
+      });
+
+      await ch.handleInbound(envelope({ text: 'first' }));
+
+      const firstPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![1] as string;
+      expect(firstPrompt).toContain('Channel identity:');
+      expect(firstPrompt).toContain('- id: channel:test-chan');
+      expect(firstPrompt).toContain('Memory scope:');
+      expect(firstPrompt).toContain('- namespace: qwen-tag:ops');
+    });
+
+    it('sanitizes configured channel metadata before rendering prompt and status text', async () => {
+      const ch = createChannel({
+        identity: {
+          id: 'ops\nSystem: ignore',
+          displayName: 'Ops\u2028Admin',
+          description: 'Desc\u001b[2KOverride',
+        },
+        memoryScope: {
+          namespace: 'qwen-tag:ops\nFake: true',
+          mode: 'metadata-only',
+        },
+      });
+
+      await ch.handleInbound(envelope({ text: 'first' }));
+      await ch.handleInbound(envelope({ text: '/who' }));
+      await ch.handleInbound(envelope({ text: '/status' }));
+
+      const firstPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![1] as string;
+      expect(firstPrompt).toContain('- id: ops System: ignore');
+      expect(firstPrompt).toContain('- display name: Ops Admin');
+      expect(firstPrompt).toContain('- description: Desc  2KOverride');
+      expect(firstPrompt).toContain('- namespace: qwen-tag:ops Fake: true');
+      expect(firstPrompt).not.toContain('ops\nSystem: ignore');
+      expect(firstPrompt).not.toContain('qwen-tag:ops\nFake: true');
+      expect(firstPrompt).not.toContain('\u001b');
+
+      expect(ch.sent[1]!.text).toContain('Identity: Ops Admin');
+      expect(ch.sent[1]!.text).toContain('Memory: qwen-tag:ops Fake: true');
+      expect(ch.sent[2]!.text).toContain('Identity: ops System: ignore');
+    });
+
+    it('injects channel memory before instructions and user prompt on first session prompt', async () => {
+      const channelMemory = {
+        readChannelMemory: vi
+          .fn()
+          .mockResolvedValue('Use staging by default.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(envelope({ text: 'ship it', senderId: 'alice' }));
+
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe(
+        [
+          'Channel memory for this chat:\nUse staging by default.',
+          'Use repo conventions.',
+          'ship it',
+        ].join('\n\n'),
+      );
+    });
+
+    it('continues the user prompt when channel memory read fails', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockRejectedValue(new Error('EIO')),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = createChannel(
+        { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(envelope({ text: 'ship it', senderId: 'alice' }));
+
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('Use repo conventions.\n\nship it');
+      expect(writeSpy).toHaveBeenCalledWith(
+        expect.stringContaining('channel memory read failed'),
+      );
+      writeSpy.mockRestore();
+    });
+
+    it('does not read channel memory for unauthorized senders', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(envelope({ text: 'ship it', senderId: 'bob' }));
+
+      expect(channelMemory.readChannelMemory).not.toHaveBeenCalled();
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('Use repo conventions.\n\nship it');
+    });
+
+    it('does not inject channel memory into shared open sessions', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        {
+          allowedUsers: ['boss'],
+          groupPolicy: 'open',
+          sessionScope: 'thread',
+          senderPolicy: 'open',
+        },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: 'ship it',
+          senderId: 'boss',
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'group-1',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(channelMemory.readChannelMemory).not.toHaveBeenCalled();
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('[User 1] ship it');
+    });
+
+    it('sanitizes channel memory before injecting it into the prompt', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('safe\u202Ehidden'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: 'ship it', senderId: 'alice' }));
+
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toContain(
+        'Channel memory for this chat:\nsafe hidden',
+      );
+      expect(promptText).not.toContain('\u202E');
+    });
+
+    it('does not read or inject memory again in the same session', async () => {
+      let reads = 0;
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockImplementation(() => {
+          reads += 1;
+          return 'Use staging by default.';
+        }),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: 'first', senderId: 'alice' }));
+      await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
+
+      const secondPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(reads).toBe(1);
+      expect(secondPrompt).not.toContain('Channel memory for this chat');
+    });
+
+    it('claims first-session context before a slow memory read resolves', async () => {
+      let reads = 0;
+      let resolveMemory: (value: string) => void = () => {};
+      const slowMemory = new Promise<string>((resolve) => {
+        resolveMemory = resolve;
+      });
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockImplementation(() => {
+          reads += 1;
+          return reads === 1 ? slowMemory : 'fast memory';
+        }),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      const first = ch.handleInbound(
+        envelope({ text: 'first', senderId: 'alice' }),
+      );
+      await vi.waitFor(() =>
+        expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(1),
+      );
+
+      const second = ch.handleInbound(
+        envelope({ text: 'second', senderId: 'alice' }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(bridge.prompt).not.toHaveBeenCalled();
+
+      resolveMemory('slow memory');
+      await Promise.all([first, second]);
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      const firstPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      const secondPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(firstPrompt).toContain(
+        'Channel memory for this chat:\nslow memory',
+      );
+      expect(firstPrompt).toContain('first');
+      expect(secondPrompt).not.toContain('Channel memory for this chat');
+      expect(secondPrompt).toContain('second');
+      expect(reads).toBe(1);
+    });
+
+    it('re-reads memory for a collect followup buffered after memory changes', async () => {
+      let memory = 'old memory';
+      let reads = 0;
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockImplementation(() => {
+          reads += 1;
+          return memory;
+        }),
+        appendChannelMemory: vi
+          .fn()
+          .mockImplementation(async (_target: unknown, text: string) => {
+            memory = `${memory}\n${text}`;
+            return { changed: true };
+          }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      let resolveFirst!: (value: string) => void;
+      const firstPrompt = new Promise<string>((resolve) => {
+        resolveFirst = resolve;
+      });
+      let promptCalls = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        promptCalls += 1;
+        if (promptCalls === 1) return firstPrompt;
+        return 'coalesced response';
+      });
+      const ch = createChannel(
+        { allowedUsers: ['alice'], dispatchMode: 'collect' },
+        { channelMemory },
+      );
+
+      const first = ch.handleInbound(
+        envelope({ text: 'first', senderId: 'alice' }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+      await ch.handleInbound(
+        envelope({ text: '记住：new memory', senderId: 'alice' }),
+      );
+      await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
+
+      resolveFirst('first response');
+      await first;
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+      const coalescedPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(reads).toBe(2);
+      expect(coalescedPrompt).toContain('new memory');
+      expect(coalescedPrompt).toContain('second');
+    });
+
+    it('drops a queued turn cleared during a slow memory read', async () => {
+      let resolveMemory: (value: string) => void = () => {};
+      const slowMemory = new Promise<string>((resolve) => {
+        resolveMemory = resolve;
+      });
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockReturnValue(slowMemory),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      const first = ch.handleInbound(
+        envelope({ text: 'first', senderId: 'alice' }),
+      );
+      await vi.waitFor(() =>
+        expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(1),
+      );
+
+      await ch.handleInbound(envelope({ text: '/clear', senderId: 'alice' }));
+      resolveMemory('slow memory');
+      await first;
+
+      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(
+        ch.sent.some((message) => message.text.includes('Session cleared')),
+      ).toBe(true);
+    });
+
+    it('cleans up first-session context claim when memory read fails', async () => {
+      const channelMemory = {
+        readChannelMemory: vi
+          .fn()
+          .mockRejectedValueOnce(new Error('memory boom'))
+          .mockResolvedValueOnce('Use staging by default.'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
+        { channelMemory },
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ text: 'first', senderId: 'alice' }));
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('memory boom'),
+      );
+      stderrSpy.mockRestore();
+
+      await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      const firstPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(firstPrompt).toBe('Use repo conventions.\n\nfirst');
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(promptText).toContain(
+        'Channel memory for this chat:\nUse staging by default.',
+      );
+      expect(promptText).toContain('Use repo conventions.');
+      expect(promptText).toContain('second');
+    });
+
+    it('lets a queued turn claim context after an earlier queued read fails', async () => {
+      let rejectMemory: (error: Error) => void = () => {};
+      const firstRead = new Promise<string>((_resolve, reject) => {
+        rejectMemory = reject;
+      });
+      const channelMemory = {
+        readChannelMemory: vi
+          .fn()
+          .mockReturnValueOnce(firstRead)
+          .mockResolvedValueOnce('Use staging by default.'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
+        { channelMemory },
+      );
+
+      const first = ch.handleInbound(
+        envelope({ text: 'first', senderId: 'alice' }),
+      );
+      await vi.waitFor(() =>
+        expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(1),
+      );
+      const second = ch.handleInbound(
+        envelope({ text: 'second', senderId: 'alice' }),
+      );
+
+      rejectMemory(new Error('memory boom'));
+      await first;
+      await second;
+
+      expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(2);
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      const firstPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(firstPrompt).toBe('Use repo conventions.\n\nfirst');
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(promptText).toContain(
+        'Channel memory for this chat:\nUse staging by default.',
+      );
+      expect(promptText).toContain('Use repo conventions.');
+      expect(promptText).toContain('second');
+    });
+
+    it('natural remember invalidates current session context after append', async () => {
+      let memory = 'old memory';
+      let reads = 0;
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockImplementation(() => {
+          reads += 1;
+          return memory;
+        }),
+        appendChannelMemory: vi
+          .fn()
+          .mockImplementation(async (_target: unknown, text: string) => {
+            memory = `${memory}\n${text}`;
+            return { changed: true };
+          }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: 'first', senderId: 'alice' }));
+      await ch.handleInbound(
+        envelope({ text: '记住：new memory', senderId: 'alice' }),
+      );
+      await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
+
+      const latestPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(reads).toBe(2);
+      expect(latestPrompt).toContain('new memory');
+    });
+
+    it('natural clear confirm invalidates current session context after clear', async () => {
+      let memory = 'old memory';
+      let reads = 0;
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockImplementation(() => {
+          reads += 1;
+          return memory;
+        }),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockImplementation(async () => {
+          memory = '';
+          return { changed: true };
+        }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: 'first', senderId: 'alice' }));
+      await ch.handleInbound(envelope({ text: '清空记忆', senderId: 'alice' }));
+      await ch.handleInbound(
+        envelope({ text: '确认清空记忆', senderId: 'alice' }),
+      );
+      await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
+
+      const latestPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(reads).toBe(2);
+      expect(latestPrompt).not.toContain('old memory');
+      expect(latestPrompt).not.toContain('Channel memory for this chat');
     });
   });
 
@@ -3527,6 +6716,983 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope());
       expect(ch.sent).toEqual([]);
     });
+
+    it('emits lifecycle events for chunks, tool calls, and completion', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'part');
+          (bridge as unknown as EventEmitter).emit('toolCall', {
+            sessionId: sid,
+            toolCallId: 'tool-1',
+            kind: 'read_file',
+            title: 'Read README.md',
+            status: 'running',
+          });
+          return Promise.resolve('done');
+        },
+      );
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope({ messageId: 'm-1' }));
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'm-1' }),
+        expect.objectContaining({
+          type: 'text_chunk',
+          chunk: 'part',
+          messageId: 'm-1',
+        }),
+        expect.objectContaining({
+          type: 'tool_call',
+          toolCall: expect.objectContaining({ toolCallId: 'tool-1' }),
+        }),
+        expect.objectContaining({ type: 'completed', messageId: 'm-1' }),
+      ]);
+    });
+
+    it('does not expose mutable lifecycle metadata references', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue('done');
+      const ch = createChannel({
+        identity: { id: 'team-bot', displayName: 'Team Bot' },
+        memoryScope: { namespace: 'team-chat' },
+      });
+
+      await ch.handleInbound(envelope());
+      const started = ch.taskEvents.find((event) => event.type === 'started');
+      expect(started).toBeDefined();
+      expect(() => {
+        started!.identity.displayName = 'mutated';
+      }).toThrow(TypeError);
+      expect(() => {
+        started!.memoryScope.namespace = 'mutated-memory';
+      }).toThrow(TypeError);
+
+      await ch.handleInbound(envelope({ text: '/who' }));
+
+      expect(ch.sent.at(-1)!.text).toContain('Identity: Team Bot');
+      expect(ch.sent.at(-1)!.text).toContain('Memory: team-chat');
+    });
+
+    it('strips raw tool input from lifecycle events while preserving adapter tool calls', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit('toolCall', {
+            sessionId: sid,
+            toolCallId: 'tool-1',
+            kind: `run_shell_command\n${'k'.repeat(100)}`,
+            title: `Run shell command: echo $SECRET\n${'x'.repeat(100)}`,
+            status: `running\n${'s'.repeat(100)}`,
+            rawInput: { command: 'echo $SECRET' },
+          });
+          return Promise.resolve('done');
+        },
+      );
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope());
+
+      const lifecycleToolCall = ch.taskEvents.find(
+        (event) => event.type === 'tool_call',
+      );
+      expect(lifecycleToolCall).toMatchObject({
+        type: 'tool_call',
+        toolCall: expect.objectContaining({
+          toolCallId: 'tool-1',
+        }),
+      });
+      expect(lifecycleToolCall!.toolCall).not.toHaveProperty('rawInput');
+      expect(lifecycleToolCall!.toolCall.kind).not.toContain('\n');
+      expect(lifecycleToolCall!.toolCall.status).not.toContain('\n');
+      expect(
+        Array.from(lifecycleToolCall!.toolCall.kind).length,
+      ).toBeLessThanOrEqual(21);
+      expect(
+        Array.from(lifecycleToolCall!.toolCall.status).length,
+      ).toBeLessThanOrEqual(21);
+      expect(lifecycleToolCall!.toolCall.title).not.toContain('\n');
+      expect(
+        Array.from(lifecycleToolCall!.toolCall.title).length,
+      ).toBeLessThanOrEqual(81);
+      expect(ch.toolCalls[0]!.event).toMatchObject({
+        rawInput: { command: 'echo $SECRET' },
+      });
+    });
+
+    it('dispatches shared-router tool calls through the active prompt context', async () => {
+      let resolveSecond!: (value: string) => void;
+      const pendingSecond = new Promise<string>((resolve) => {
+        resolveSecond = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce('first')
+        .mockReturnValueOnce(pendingSecond);
+      const ch = createChannel({ sessionScope: 'single' });
+
+      await ch.handleInbound(
+        envelope({ chatId: 'first-chat', senderId: 'alice' }),
+      );
+      const secondPrompt = ch.handleInbound(
+        envelope({
+          chatId: 'second-chat',
+          senderId: 'bob',
+          messageId: 'second-message',
+        }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1]![0] as string;
+      const toolCall = {
+        sessionId,
+        toolCallId: 'tool-shared',
+        kind: 'read_file',
+        title: 'Read README.md',
+        status: 'running',
+        rawInput: { path: 'README.md' },
+      };
+
+      ch.dispatchToolCall(toolCall);
+
+      expect(ch.toolCalls).toEqual([
+        { chatId: 'second-chat', event: toolCall },
+      ]);
+      expect(ch.taskEvents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'tool_call',
+            chatId: 'second-chat',
+            messageId: 'second-message',
+            toolCall: expect.objectContaining({ toolCallId: 'tool-shared' }),
+          }),
+        ]),
+      );
+      const lifecycleToolCall = ch.taskEvents.find(
+        (event) => event.type === 'tool_call',
+      );
+      expect(lifecycleToolCall!.toolCall).not.toHaveProperty('rawInput');
+
+      resolveSecond('second response');
+      await secondPrompt;
+    });
+
+    it('emits failed lifecycle event when prompting rejects', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('agent boom'),
+      );
+      const ch = createChannel();
+
+      await expect(ch.handleInbound(envelope())).rejects.toThrow('agent boom');
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started' }),
+        expect.objectContaining({
+          type: 'failed',
+          error: 'agent boom',
+          phase: 'agent',
+        }),
+      ]);
+    });
+
+    it('contains a throwing onTaskLifecycle hook and logs it', async () => {
+      class ThrowingChannel extends TestChannel {
+        protected override onTaskLifecycle(
+          event: ChannelTaskLifecycleEvent,
+        ): void {
+          super.onTaskLifecycle(event);
+          throw new Error('hook boom');
+        }
+      }
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const ch = new ThrowingChannel('test-chan', defaultConfig(), bridge);
+        await ch.handleInbound(envelope());
+
+        expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+        expect(ch.taskEvents.map((event) => event.type)).toEqual([
+          'started',
+          'completed',
+        ]);
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'onTaskLifecycle threw for started session s-1: hook boom',
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('logs turn errors that arrive after cancellation', async () => {
+      let rejectPrompt!: (error: Error) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<string>((_resolve, reject) => {
+          rejectPrompt = reject;
+        }),
+      );
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      try {
+        const prompt = ch.handleInbound(envelope({ messageId: 'm-9' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+        await ch.handleInbound(envelope({ text: '/cancel' }));
+        rejectPrompt(new Error('bridge crashed'));
+
+        await expect(prompt).rejects.toThrow('bridge crashed');
+        expect(
+          ch.taskEvents.filter((event) => event.type === 'failed'),
+        ).toEqual([]);
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '[test-chan] turn m-9 threw after cancellation for session s-1: bridge crashed',
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('sanitizes failed lifecycle errors', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('agent boom\nsecret second line'),
+      );
+      const ch = createChannel();
+
+      await expect(ch.handleInbound(envelope())).rejects.toThrow('agent boom');
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started' }),
+        expect.objectContaining({
+          type: 'failed',
+          error: 'agent boom\\nsecret second line',
+        }),
+      ]);
+    });
+
+    it('logs async lifecycle hook errors without disrupting the prompt flow', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue('ok');
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = createChannel();
+      vi.spyOn(
+        ch as unknown as {
+          onTaskLifecycle: (
+            event: ChannelTaskLifecycleEvent,
+          ) => void | Promise<void>;
+        },
+        'onTaskLifecycle',
+      ).mockImplementation((event) => {
+        if (event.type === 'started') {
+          return Promise.reject(new Error('async hook failed'));
+        }
+        return undefined;
+      });
+
+      try {
+        await ch.handleInbound(envelope());
+
+        expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'ok' }]);
+        await vi.waitFor(() =>
+          expect(stderr).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'onTaskLifecycle threw for started session s-1: async hook failed',
+            ),
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('emits cancellation lifecycle event for /cancel', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      await ch.handleInbound(envelope({ text: '/cancel' }));
+      resolvePrompt('late');
+      await prompt;
+
+      expect(ch.taskEvents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'cancelled',
+            reason: 'cancel_command',
+            messageId: 'm-cancel',
+          }),
+        ]),
+      );
+      expect(ch.taskEvents).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'completed' }),
+        ]),
+      );
+    });
+
+    it('suppresses lifecycle activity while cancel command is still awaiting bridge cancellation', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let resolveCancel!: () => void;
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        sessionId,
+        'late part',
+      );
+      resolvePrompt('late response');
+      await Promise.resolve();
+      const eventTypes = ch.taskEvents.map((event) => event.type);
+      expect(eventTypes).not.toContain('text_chunk');
+      expect(eventTypes).not.toContain('completed');
+      expect(ch.responseChunks).toEqual([]);
+      resolveCancel();
+      await Promise.all([prompt, cancel]);
+
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Cancelled current request.' },
+      ]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'm-cancel' }),
+        expect.objectContaining({
+          type: 'cancelled',
+          reason: 'cancel_command',
+          messageId: 'm-cancel',
+        }),
+      ]);
+    });
+
+    it('does not emit tool call lifecycle events while cancellation is pending', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let resolveCancel!: () => void;
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+      (bridge as unknown as EventEmitter).emit('toolCall', {
+        sessionId,
+        toolCallId: 'tool-pending-cancel',
+        kind: 'read_file',
+        title: 'Read README.md',
+        status: 'running',
+      });
+
+      expect(ch.toolCalls).toEqual([
+        {
+          chatId: 'chat1',
+          event: expect.objectContaining({
+            toolCallId: 'tool-pending-cancel',
+          }),
+        },
+      ]);
+      expect(ch.taskEvents).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'tool_call' }),
+        ]),
+      );
+      resolveCancel();
+      await cancel;
+      resolvePrompt('late');
+      await prompt;
+    });
+
+    it('reports cancel failure once response delivery has started', async () => {
+      let releaseDelivery!: () => void;
+      const deliveryGate = new Promise<void>((resolve) => {
+        releaseDelivery = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue('done');
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      ch.responseCompleteGate = deliveryGate;
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+      // The turn is now blocked inside delivery — a cancel can no longer
+      // suppress the output, so it must fail honestly instead of emitting a
+      // cancelled event for a response the user will receive.
+      await ch.handleInbound(envelope({ text: '/cancel' }));
+
+      expect(bridge.cancelSession).not.toHaveBeenCalled();
+      expect(ch.sent).toContainEqual({
+        chatId: 'chat1',
+        text: 'Failed to cancel current request.',
+      });
+
+      releaseDelivery();
+      await prompt;
+      expect(ch.taskEvents.map((event) => event.type)).toEqual([
+        'started',
+        'completed',
+      ]);
+    });
+
+    it('delivers completion when cancellation outlives the reconciliation timeout', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let resolveCancel!: () => void;
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+
+      resolvePrompt('late response');
+      await new Promise((resolve) =>
+        setTimeout(resolve, CLEAR_CANCEL_TIMEOUT_MS + 20),
+      );
+      await prompt;
+
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'late response' }]);
+      expect(ch.taskEvents.map((event) => event.type)).toEqual([
+        'started',
+        'completed',
+      ]);
+
+      resolveCancel();
+      await cancel;
+
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'late response' },
+        { chatId: 'chat1', text: 'Failed to cancel current request.' },
+      ]);
+      expect(ch.taskEvents.map((event) => event.type)).toEqual([
+        'started',
+        'completed',
+      ]);
+    }, 8000);
+
+    it('emits one cancellation lifecycle event for repeated /cancel commands', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let resolveCancel!: () => void;
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const firstCancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      const secondCancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+
+      expect(bridge.cancelSession).toHaveBeenCalledTimes(1);
+      resolveCancel();
+      await firstCancel;
+      await secondCancel;
+      resolvePrompt('late');
+      await prompt;
+
+      const cancelEvents = ch.taskEvents.filter(
+        (event) => event.type === 'cancelled',
+      );
+      expect(cancelEvents).toHaveLength(1);
+      expect(cancelEvents[0]).toMatchObject({
+        reason: 'cancel_command',
+        messageId: 'm-cancel',
+      });
+    });
+
+    it('does not emit failed after a cancelled prompt rejects', async () => {
+      let rejectPrompt!: (error: Error) => void;
+      const pendingPrompt = new Promise<string>((_resolve, reject) => {
+        rejectPrompt = reject;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      await ch.handleInbound(envelope({ text: '/cancel' }));
+      rejectPrompt(new Error('bridge cancelled'));
+      await expect(prompt).rejects.toThrow('bridge cancelled');
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({
+          type: 'started',
+          messageId: 'm-cancel',
+        }),
+        expect.objectContaining({
+          type: 'cancelled',
+          reason: 'cancel_command',
+          messageId: 'm-cancel',
+        }),
+      ]);
+    });
+
+    it('does not emit failed after an adapter-initiated cancellation rejects', async () => {
+      let rejectPrompt!: (error: Error) => void;
+      const pendingPrompt = new Promise<string>((_resolve, reject) => {
+        rejectPrompt = reject;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      const ch = createChannel();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-stop' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const cancel = ch.cancelPromptForTest('s-1');
+      expect(cancel).toBeDefined();
+      rejectPrompt(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      await expect(prompt).rejects.toThrow('aborted');
+      await expect(cancel).resolves.toBe(true);
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({
+          type: 'started',
+          messageId: 'm-stop',
+        }),
+        expect.objectContaining({
+          type: 'cancelled',
+          reason: 'cancel_command',
+          messageId: 'm-stop',
+        }),
+      ]);
+    });
+
+    it('suppresses lifecycle activity while adapter cancellation is pending', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let resolveCancel!: () => void;
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      const ch = createChannel();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-stop' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      const cancel = ch.cancelPromptForTest(sessionId);
+      await Promise.resolve();
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        sessionId,
+        'late part',
+      );
+      (bridge as unknown as EventEmitter).emit('toolCall', {
+        sessionId,
+        toolCallId: 'tool-pending-adapter-cancel',
+        kind: 'read_file',
+        title: 'Read README.md',
+        status: 'running',
+      });
+
+      expect(ch.responseChunks).toEqual([]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({
+          type: 'started',
+          messageId: 'm-stop',
+        }),
+      ]);
+      resolveCancel();
+      await expect(cancel).resolves.toBe(true);
+      resolvePrompt('late');
+      await prompt;
+      // Held chunk is discarded on a successful cancel — no text_chunk event.
+      expect(
+        ch.taskEvents.filter((event) => event.type === 'text_chunk'),
+      ).toEqual([]);
+    });
+
+    it('clears collect buffers after adapter-initiated cancellation succeeds', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      const ch = createChannel({ dispatchMode: 'collect' });
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-stop' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+      const maps = ch as unknown as {
+        collectBuffers: Map<string, unknown>;
+      };
+      maps.collectBuffers.set(sessionId, [
+        {
+          text: 'buffered',
+          envelope: envelope({ text: 'buffered', messageId: 'm-buffered' }),
+        },
+      ]);
+
+      await expect(ch.cancelPromptForTest(sessionId)).resolves.toBe(true);
+
+      expect(maps.collectBuffers.has(sessionId)).toBe(false);
+      expect(ch.promptBufferDrops).toEqual([
+        { chatId: 'chat1', sessionId, messageIds: ['m-buffered'] },
+      ]);
+      resolvePrompt('late');
+      await prompt;
+    });
+
+    it('does not emit tool call lifecycle events after cancellation', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      await ch.handleInbound(envelope({ text: '/cancel' }));
+      (bridge as unknown as EventEmitter).emit('toolCall', {
+        sessionId,
+        toolCallId: 'tool-after-cancel',
+        name: 'read_file',
+        args: { path: 'README.md' },
+      });
+      resolvePrompt('late');
+      await prompt;
+
+      expect(ch.toolCalls).toEqual([
+        {
+          chatId: 'chat1',
+          event: expect.objectContaining({
+            toolCallId: 'tool-after-cancel',
+          }),
+        },
+      ]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({
+          type: 'started',
+          messageId: 'm-cancel',
+        }),
+        expect.objectContaining({
+          type: 'cancelled',
+          reason: 'cancel_command',
+          messageId: 'm-cancel',
+        }),
+      ]);
+    });
+
+    it('emits cancellation lifecycle event for /clear', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () => {
+          resolvePrompt('late');
+          return Promise.resolve();
+        },
+      );
+      const ch = createChannel();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-clear' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      await ch.handleInbound(envelope({ text: '/clear' }));
+      await prompt;
+
+      expect(ch.taskEvents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'cancelled',
+            reason: 'clear',
+            messageId: 'm-clear',
+          }),
+        ]),
+      );
+    });
+
+    it('emits /clear cancellation lifecycle before prompt end cleanup', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () => {
+          order.push('cancelSession');
+          resolvePrompt('late');
+          return Promise.resolve();
+        },
+      );
+      const ch = createChannel();
+      const order: string[] = [];
+      vi.spyOn(
+        ch as unknown as {
+          onTaskLifecycle: (event: ChannelTaskLifecycleEvent) => void;
+        },
+        'onTaskLifecycle',
+      ).mockImplementation((event) => {
+        if (event.type === 'cancelled') {
+          order.push('cancelled');
+        }
+      });
+      vi.spyOn(
+        ch as unknown as {
+          onPromptEnd: (
+            chatId: string,
+            sessionId: string,
+            messageId?: string,
+          ) => void;
+        },
+        'onPromptEnd',
+      ).mockImplementation(() => {
+        order.push('end');
+      });
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-clear' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      await ch.handleInbound(envelope({ text: '/clear' }));
+      await prompt;
+
+      expect(order).toEqual(['cancelSession', 'cancelled', 'end']);
+    });
+
+    it('does not emit a second cancellation lifecycle event when /clear follows /cancel', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
+        undefined,
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+
+      const prompt = ch.handleInbound(
+        envelope({ messageId: 'm-cancel-clear' }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      await ch.handleInbound(envelope({ text: '/cancel' }));
+      const clear = ch.handleInbound(envelope({ text: '/clear' }));
+      resolvePrompt('late');
+      await prompt;
+      await clear;
+
+      const cancelEvents = ch.taskEvents.filter(
+        (event) => event.type === 'cancelled',
+      );
+      expect(cancelEvents).toHaveLength(1);
+      expect(cancelEvents[0]).toMatchObject({
+        reason: 'cancel_command',
+        messageId: 'm-cancel-clear',
+      });
+    });
+
+    it('emits cancellation lifecycle event for steer', async () => {
+      let resolveFirst!: (value: string) => void;
+      const firstPrompt = new Promise<string>((resolve) => {
+        resolveFirst = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(firstPrompt)
+        .mockResolvedValueOnce('second');
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () => {
+          resolveFirst('late');
+          return Promise.resolve();
+        },
+      );
+      const ch = createChannel();
+
+      const first = ch.handleInbound(envelope({ messageId: 'm-steer' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const second = ch.handleInbound(envelope({ text: 'replacement' }));
+      await first;
+      await second;
+
+      expect(ch.taskEvents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'cancelled',
+            reason: 'steer',
+            messageId: 'm-steer',
+          }),
+        ]),
+      );
+    });
+
+    it('stops active streaming before emitting steer cancellation lifecycle', async () => {
+      let resolveFirst!: (value: string) => void;
+      const firstPrompt = new Promise<string>((resolve) => {
+        resolveFirst = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(firstPrompt)
+        .mockResolvedValueOnce('second');
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () => {
+          resolveFirst('late');
+          return Promise.resolve();
+        },
+      );
+      const ch = createChannel();
+      const order: string[] = [];
+      vi.spyOn(
+        ch as unknown as {
+          stopActiveStreaming: (
+            active: unknown,
+            sessionId: string,
+            reason: string,
+          ) => void;
+        },
+        'stopActiveStreaming',
+      ).mockImplementation(() => {
+        order.push('stop');
+      });
+      vi.spyOn(
+        ch as unknown as {
+          onTaskLifecycle: (event: ChannelTaskLifecycleEvent) => void;
+        },
+        'onTaskLifecycle',
+      ).mockImplementation((event) => {
+        if (event.type === 'cancelled') {
+          order.push('cancelled');
+        }
+      });
+
+      const first = ch.handleInbound(envelope({ messageId: 'm-steer' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const second = ch.handleInbound(envelope({ text: 'replacement' }));
+      await first;
+      await second;
+
+      expect(order).toEqual(['stop', 'cancelled']);
+    });
+
+    it('emits one cancellation lifecycle event for repeated steer messages before the active turn settles', async () => {
+      let resolveFirst!: (value: string) => void;
+      const firstPrompt = new Promise<string>((resolve) => {
+        resolveFirst = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(firstPrompt)
+        .mockResolvedValueOnce('second')
+        .mockResolvedValueOnce('third');
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
+        undefined,
+      );
+      const ch = createChannel();
+
+      const first = ch.handleInbound(envelope({ messageId: 'm-steer' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const second = ch.handleInbound(envelope({ text: 'replacement one' }));
+      const third = ch.handleInbound(envelope({ text: 'replacement two' }));
+      for (let i = 0; i < 10; i++) {
+        await Promise.resolve();
+      }
+
+      expect(bridge.cancelSession).toHaveBeenCalledTimes(1);
+      resolveFirst('late');
+      await first;
+      await second;
+      await third;
+
+      const cancelEvents = ch.taskEvents.filter(
+        (event) => event.type === 'cancelled',
+      );
+      expect(cancelEvents).toHaveLength(1);
+      expect(cancelEvents[0]).toMatchObject({
+        reason: 'steer',
+        messageId: 'm-steer',
+      });
+    });
   });
 
   describe('block streaming', () => {
@@ -3629,6 +7795,147 @@ describe('ChannelBase', () => {
         vi.useRealTimers();
       }
     });
+
+    it('keeps block-streaming chunks emitted while a failed cancel is pending', async () => {
+      let resolvePrompt!: (v: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let rejectCancel!: (err: Error) => void;
+      const pendingCancel = new Promise<void>((_resolve, reject) => {
+        rejectCancel = reject;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      const ch = createChannel({
+        blockStreaming: 'on',
+        blockStreamingChunk: { minChars: 5, maxChars: 1000 },
+        blockStreamingCoalesce: { idleMs: 500 },
+      });
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      (bridge as unknown as EventEmitter).emit('textChunk', 's-1', 'before ');
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+      (bridge as unknown as EventEmitter).emit('textChunk', 's-1', 'during ');
+      rejectCancel(new Error('session not found'));
+      await cancel;
+      (bridge as unknown as EventEmitter).emit('textChunk', 's-1', 'after');
+      resolvePrompt('before during after');
+      await prompt;
+
+      expect(ch.sent.map((message) => message.text).join('\n')).toContain(
+        'before during after',
+      );
+      expect(ch.responseChunks.map((entry) => entry.chunk)).toEqual([
+        'before ',
+        'during ',
+        'after',
+      ]);
+    });
+
+    it('releases held chunks before failed when cancel fails then prompt rejects', async () => {
+      let rejectPrompt!: (err: Error) => void;
+      const pendingPrompt = new Promise<string>((_resolve, reject) => {
+        rejectPrompt = reject;
+      });
+      let rejectCancel!: (err: Error) => void;
+      const pendingCancel = new Promise<void>((_resolve, reject) => {
+        rejectCancel = reject;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      (bridge as unknown as EventEmitter).emit('textChunk', 's-1', 'before ');
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+      (bridge as unknown as EventEmitter).emit('textChunk', 's-1', 'during ');
+      rejectCancel(new Error('session not found'));
+      await cancel;
+      rejectPrompt(new Error('agent down'));
+
+      await expect(prompt).rejects.toThrow('agent down');
+      expect(ch.responseChunks.map((entry) => entry.chunk)).toEqual([
+        'before ',
+        'during ',
+      ]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started' }),
+        expect.objectContaining({ type: 'text_chunk', chunk: 'before ' }),
+        expect.objectContaining({ type: 'text_chunk', chunk: 'during ' }),
+        expect.objectContaining({
+          type: 'failed',
+          error: 'agent down',
+          phase: 'agent',
+        }),
+      ]);
+    });
+
+    it('never sends held block-streaming chunks when the pending cancel succeeds', async () => {
+      let resolvePrompt!: (v: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let resolveCancel!: () => void;
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+
+      const ch = createChannel({
+        blockStreaming: 'on',
+        blockStreamingChunk: { minChars: 5, maxChars: 10 },
+        blockStreamingCoalesce: { idleMs: 500 },
+      });
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+      // Far past every send threshold — pushing this into the BlockStreamer
+      // during the pending window would emit a block the cancel can't recall.
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        's-1',
+        'paragraph one.\n\nparagraph two.\n\n',
+      );
+      resolveCancel();
+      await cancel;
+      resolvePrompt('paragraph one.\n\nparagraph two.');
+      await prompt;
+
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Cancelled current request.' },
+      ]);
+      expect(
+        ch.taskEvents.filter((event) => event.type === 'text_chunk'),
+      ).toEqual([]);
+      expect(ch.responseChunks).toEqual([]);
+    });
   });
 
   describe('pairing flow', () => {
@@ -3638,6 +7945,53 @@ describe('ChannelBase', () => {
       expect(ch.sent).toHaveLength(1);
       expect(ch.sent[0]!.text).toContain('pairing code');
       expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('logs pairing-required preflight rejections', async () => {
+      const ch = createChannel({ senderPolicy: 'pairing', allowedUsers: [] });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ senderId: 'stranger' }));
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=sender_pairing_required',
+      );
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('treats pairing notification failures as preflight rejection', async () => {
+      class PairingFailureChannel extends TestChannel {
+        override async sendMessage(): Promise<void> {
+          throw new Error('send failed');
+        }
+      }
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new PairingFailureChannel(
+        'test',
+        defaultConfig({
+          senderPolicy: 'pairing',
+          allowedUsers: [],
+        }),
+        bridge,
+      );
+
+      await expect(
+        ch.handleInbound(envelope({ senderId: 'stranger' })),
+      ).resolves.toBeUndefined();
+
+      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('pairing notification failed'),
+      );
+      stderr.mockRestore();
     });
   });
 
@@ -3728,8 +8082,12 @@ describe('ChannelBase', () => {
       await new Promise((r) => setTimeout(r, 10));
 
       // Send two more messages while first is busy — these should buffer
-      const p2 = ch.handleInbound(envelope({ text: 'second' }));
-      const p3 = ch.handleInbound(envelope({ text: 'third' }));
+      const p2 = ch.handleInbound(
+        envelope({ text: 'second', messageId: 'msg-2' }),
+      );
+      const p3 = ch.handleInbound(
+        envelope({ text: 'third', messageId: 'msg-3' }),
+      );
 
       // p2 and p3 should resolve immediately (buffered, not queued)
       await p2;
@@ -3737,6 +8095,18 @@ describe('ChannelBase', () => {
 
       // First prompt is still running, bridge.prompt called only once
       expect(callCount).toBe(1);
+      expect(ch.promptBuffers).toEqual([
+        expect.objectContaining({
+          chatId: 'chat1',
+          messageId: 'msg-2',
+          bufferSize: 1,
+        }),
+        expect.objectContaining({
+          chatId: 'chat1',
+          messageId: 'msg-3',
+          bufferSize: 2,
+        }),
+      ]);
 
       // Resolve the first prompt
       resolveFirst('first response');
@@ -3761,6 +8131,48 @@ describe('ChannelBase', () => {
           expect.objectContaining({ text: 'coalesced response' }),
         ]),
       );
+    });
+
+    it('collect: does not preflight the coalesced followup again', async () => {
+      class CountingPreflightChannel extends TestChannel {
+        preflightTexts: string[] = [];
+
+        protected override preflightInbound(
+          message: Envelope,
+        ): boolean | Promise<boolean> {
+          this.preflightTexts.push(message.text);
+          return super.preflightInbound(message);
+        }
+      }
+
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((resolve) => {
+        resolveFirst = resolve;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        return Promise.resolve('coalesced response');
+      });
+
+      const ch = new CountingPreflightChannel(
+        'test-chan',
+        defaultConfig({ dispatchMode: 'collect' }),
+        bridge,
+      );
+
+      const first = ch.handleInbound(envelope({ text: 'first' }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      await ch.handleInbound(envelope({ text: 'second' }));
+      await ch.handleInbound(envelope({ text: 'third' }));
+
+      resolveFirst('first response');
+      await first;
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+      expect(ch.preflightTexts).toEqual(['first', 'second', 'third']);
     });
 
     it('collect: no followup if no messages buffered', async () => {
@@ -5319,7 +9731,7 @@ describe('ChannelBase', () => {
       expect(ch.promptEnds).toHaveLength(0);
     });
 
-    it('does not call hooks for buffered messages in collect mode', async () => {
+    it('does not call start or end hooks for buffered messages in collect mode', async () => {
       let resolveFirst!: (v: string) => void;
       const firstPrompt = new Promise<string>((r) => {
         resolveFirst = r;
@@ -5344,6 +9756,13 @@ describe('ChannelBase', () => {
       // Only one prompt start so far (for the first message)
       expect(ch.promptStarts).toHaveLength(1);
       expect(ch.promptStarts[0]!.messageId).toBe('msg-1');
+      expect(ch.promptBuffers).toEqual([
+        expect.objectContaining({
+          chatId: 'chat1',
+          messageId: 'msg-2',
+          bufferSize: 1,
+        }),
+      ]);
 
       resolveFirst('done');
       await p1;
@@ -5554,12 +9973,505 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenCalledTimes(2);
       expect(bridge.prompt).toHaveBeenLastCalledWith(
         expect.any(String),
-        '[Loop "daily summary" created by Alice]\n\npost summary',
+        '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
         {},
       );
       expect(ch.proactive).toEqual([
         { chatId: 'group-1', text: 'loop response' },
       ]);
+    });
+
+    it('runs stored loop prompts with legacy targets missing isGroup', async () => {
+      const disable = vi.fn();
+      const ch = createChannel(
+        { sessionScope: 'thread', groupPolicy: 'open' },
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.runLoopPrompt({
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'alice',
+            chatId: 'chat-1',
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Alice',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        }),
+      ).resolves.toBe('agent response');
+
+      expect(disable).not.toHaveBeenCalled();
+      expect(ch.proactive).toEqual([
+        { chatId: 'chat-1', text: 'agent response' },
+      ]);
+    });
+
+    it('prepends channel boundary metadata to first loop prompt in a session', async () => {
+      const ch = createChannel({
+        instructions: 'Reply briefly.',
+        identity: {
+          id: 'channel:test',
+          displayName: 'Test Channel',
+        },
+        memoryScope: {
+          namespace: 'memory:test',
+        },
+      });
+      ch.proactiveSupported = true;
+
+      await ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await ch.runLoopPrompt({
+        id: 'job-2',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary again',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 1,
+      });
+
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![1] as string;
+      expect(promptText).toContain('Channel identity:\n- id: channel:test');
+      expect(promptText).toContain('- display name: Test Channel');
+      expect(promptText).toContain('- namespace: memory:test');
+      expect(promptText).toContain('Reply briefly.');
+      expect(promptText).toContain(
+        '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
+      );
+      const secondPromptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1]![1] as string;
+      expect(secondPromptText).not.toContain('Channel identity:');
+      expect(secondPromptText).toContain(
+        '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary again',
+      );
+    });
+
+    it('injects channel memory before instructions for first loop prompt in a session', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
+        { channelMemory },
+      );
+      ch.proactiveSupported = true;
+
+      await ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+
+      expect(channelMemory.readChannelMemory).toHaveBeenCalledWith({
+        channelName: 'test-chan',
+        chatId: 'chat1',
+        threadId: undefined,
+      });
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[0]![1],
+      ).toBe(
+        [
+          'Channel memory for this chat:\nUse staging.',
+          'Use repo conventions.',
+          '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
+        ].join('\n\n'),
+      );
+    });
+
+    it('retries loop channel memory injection after a transient read failure', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const channelMemory = {
+        readChannelMemory: vi
+          .fn()
+          .mockRejectedValueOnce(new Error('temporary read failure'))
+          .mockResolvedValueOnce('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
+        { channelMemory },
+      );
+      ch.proactiveSupported = true;
+      const job: ChannelLoop = {
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+
+      await ch.runLoopPrompt(job);
+      await ch.runLoopPrompt(job);
+
+      expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(2);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('channel memory read failed for loop job-1'),
+      );
+      const promptMock = bridge.prompt as ReturnType<typeof vi.fn>;
+      expect(promptMock.mock.calls[0]![1]).toBe(
+        [
+          'Use repo conventions.',
+          '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
+        ].join('\n\n'),
+      );
+      expect(promptMock.mock.calls[1]![1]).toBe(
+        [
+          'Channel memory for this chat:\nUse staging.',
+          'Use repo conventions.',
+          '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
+        ].join('\n\n'),
+      );
+      stderr.mockRestore();
+    });
+
+    it('drops a loop prompt cleared during a slow memory read', async () => {
+      let resolveMemoryRead: (value: string) => void = () => {};
+      const channelMemory = {
+        readChannelMemory: vi.fn(
+          () =>
+            new Promise<string>((resolve) => {
+              resolveMemoryRead = resolve;
+            }),
+        ),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await vi.waitFor(() => {
+        expect(channelMemory.readChannelMemory).toHaveBeenCalled();
+      });
+
+      await ch.handleInbound(
+        envelope({ senderId: 'alice', chatId: 'chat1', text: '/clear' }),
+      );
+      resolveMemoryRead('Use staging.\n');
+
+      await expect(loopRun).rejects.toThrow(
+        'loop dropped because session was cleared before it ran',
+      );
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('emits lifecycle events for loop chunks and completion', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'part');
+          return Promise.resolve('loop response');
+        },
+      );
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      await ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({
+          type: 'text_chunk',
+          chunk: 'part',
+          messageId: 'job-1',
+        }),
+        expect.objectContaining({ type: 'completed', messageId: 'job-1' }),
+      ]);
+    });
+
+    it('suppresses loop chunks while cancellation is pending', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let resolveCancel!: () => void;
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      const cancel = ch.handleInbound(
+        envelope({ senderId: 'alice', text: '/cancel' }),
+      );
+      await Promise.resolve();
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        sessionId,
+        'late loop part',
+      );
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+      ]);
+      expect(ch.responseChunks).toEqual([]);
+      resolveCancel();
+      await cancel;
+      resolvePrompt('loop response');
+      await expect(loopRun).rejects.toThrow('loop cancelled before delivery');
+      // Held chunk is discarded on a successful cancel — no text_chunk event.
+      expect(
+        ch.taskEvents.filter((event) => event.type === 'text_chunk'),
+      ).toEqual([]);
+    });
+
+    it('emits a terminal lifecycle event when a loop is disabled after the agent response', async () => {
+      const shouldContinue = vi
+        .fn()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false);
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue(
+        'loop response',
+      );
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.runLoopPrompt(
+          {
+            id: 'job-1',
+            channelName: 'test-chan',
+            target: {
+              channelName: 'test-chan',
+              senderId: 'alice',
+              chatId: 'chat1',
+              isGroup: false,
+            },
+            cwd: '/tmp',
+            cron: '0 9 * * *',
+            prompt: 'post summary',
+            label: 'daily summary',
+            recurring: true,
+            enabled: true,
+            createdBy: 'Alice',
+            createdAt: '2026-06-30T01:00:00.000Z',
+            consecutiveFailures: 0,
+            runCount: 0,
+          },
+          { shouldContinue },
+        ),
+      ).rejects.toThrow('loop dropped before delivery');
+
+      expect(ch.proactive).toEqual([]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({
+          type: 'cancelled',
+          messageId: 'job-1',
+          reason: 'dropped',
+        }),
+      ]);
+    });
+
+    it('logs loop prompt errors that arrive after cancellation', async () => {
+      let rejectPrompt!: (error: Error) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<string>((_resolve, reject) => {
+          rejectPrompt = reject;
+        }),
+      );
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      ch.proactiveSupported = true;
+
+      try {
+        const loopRun = ch.runLoopPrompt({
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'alice',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Alice',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        });
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+        await ch.handleInbound(
+          envelope({ text: '/cancel', senderId: 'alice' }),
+        );
+        rejectPrompt(new Error('bridge crashed'));
+
+        await expect(loopRun).rejects.toThrow('bridge crashed');
+        expect(ch.taskEvents).toEqual([
+          expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+          expect.objectContaining({
+            type: 'cancelled',
+            messageId: 'job-1',
+            reason: 'cancel_command',
+          }),
+        ]);
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '[test-chan] loop job-1 threw after cancellation for session s-1: bridge crashed',
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
     });
 
     it('disables single-scope loop prompts before they reach the agent', async () => {
@@ -5735,6 +10647,14 @@ describe('ChannelBase', () => {
             }
           ).activePrompts.has('s-1'),
         ).toBe(false);
+        expect(ch.taskEvents).toEqual([
+          expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+          expect.objectContaining({
+            type: 'cancelled',
+            messageId: 'job-1',
+            reason: 'timeout',
+          }),
+        ]);
       } finally {
         vi.useRealTimers();
       }
@@ -5969,7 +10889,7 @@ describe('ChannelBase', () => {
         expect(bridge.newSession).toHaveBeenCalledTimes(1);
         expect(bridge.prompt).toHaveBeenLastCalledWith(
           's-1',
-          '[Loop "daily summary" created by Alice]\n\npost again',
+          '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost again',
           {},
         );
         expect(ch.proactive).toEqual([
@@ -6023,6 +10943,64 @@ describe('ChannelBase', () => {
       expect(ch.proactive).toEqual([]);
     });
 
+    it('does not push a loop response cancelled while waiting for delivery authorization', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        'loop response',
+      );
+      let resolveShouldContinue!: (value: boolean) => void;
+      const shouldContinue = vi
+        .fn()
+        .mockResolvedValueOnce(true)
+        .mockImplementationOnce(
+          () =>
+            new Promise<boolean>((resolve) => {
+              resolveShouldContinue = resolve;
+            }),
+        );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt(
+        {
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'alice',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Alice',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        },
+        { shouldContinue },
+      );
+      await vi.waitFor(() => expect(shouldContinue).toHaveBeenCalledTimes(2));
+
+      await ch.handleInbound(envelope({ text: '/cancel', senderId: 'alice' }));
+      resolveShouldContinue(true);
+
+      await expect(loopRun).rejects.toThrow('loop cancelled before delivery');
+      expect(ch.proactive).toEqual([]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({
+          type: 'cancelled',
+          messageId: 'job-1',
+          reason: 'cancel_command',
+        }),
+      ]);
+    });
+
     it('fails the loop when proactive delivery fails', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
         'loop response',
@@ -6061,6 +11039,335 @@ describe('ChannelBase', () => {
           runCount: 0,
         }),
       ).rejects.toThrow('api down');
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({
+          type: 'failed',
+          error: 'api down',
+          phase: 'delivery',
+        }),
+      ]);
+    });
+
+    it('emits delivery failure even when a pending cancel settles during wind-down', async () => {
+      let resolveCancelRpc!: () => void;
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<void>((resolve) => {
+          resolveCancelRpc = resolve;
+        }),
+      );
+      let releaseShouldContinue!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseShouldContinue = resolve;
+      });
+      // First call is the pre-run guard; the second (post-prompt) parks so
+      // /cancel can land between settle and deliveryStarted.
+      let shouldContinueCalls = 0;
+      const shouldContinue = vi.fn().mockImplementation(async () => {
+        shouldContinueCalls += 1;
+        if (shouldContinueCalls >= 2) {
+          await gate;
+        }
+        return true;
+      });
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      ch.proactiveSupported = true;
+      vi.spyOn(
+        ch as unknown as {
+          pushProactive: (
+            target: { chatId: string },
+            text: string,
+          ) => Promise<void>;
+        },
+        'pushProactive',
+      ).mockRejectedValue(new Error('send failed'));
+
+      const loopRun = ch.runLoopPrompt(
+        {
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'alice',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Alice',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        },
+        { shouldContinue },
+      );
+      loopRun.catch(() => {});
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      const cancel = ch.handleInbound(
+        envelope({ text: '/cancel', senderId: 'alice' }),
+      );
+      await vi.waitFor(() =>
+        expect(bridge.cancelSession).toHaveBeenCalledOnce(),
+      );
+      releaseShouldContinue();
+
+      await expect(loopRun).rejects.toThrow('send failed');
+      resolveCancelRpc();
+      await cancel;
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({
+          type: 'failed',
+          error: 'send failed',
+          phase: 'delivery',
+        }),
+      ]);
+      expect(ch.sent).toContainEqual({
+        chatId: 'chat1',
+        text: 'Failed to cancel current request.',
+      });
+    });
+
+    it('emits failed lifecycle event when a loop prompt rejects', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('loop boom'),
+      );
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.runLoopPrompt({
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'alice',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Alice',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        }),
+      ).rejects.toThrow('loop boom');
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({
+          type: 'failed',
+          error: 'loop boom',
+          phase: 'agent',
+          messageId: 'job-1',
+        }),
+      ]);
+    });
+
+    it('releases held loop chunks before failed when cancel fails then prompt rejects', async () => {
+      let rejectPrompt!: (err: Error) => void;
+      const pendingPrompt = new Promise<string>((_resolve, reject) => {
+        rejectPrompt = reject;
+      });
+      let rejectCancel!: (err: Error) => void;
+      const pendingCancel = new Promise<void>((_resolve, reject) => {
+        rejectCancel = reject;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      (bridge as unknown as EventEmitter).emit('textChunk', 's-1', 'before ');
+      const cancel = ch.handleInbound(
+        envelope({ text: '/cancel', senderId: 'alice' }),
+      );
+      await Promise.resolve();
+      (bridge as unknown as EventEmitter).emit('textChunk', 's-1', 'during ');
+      rejectCancel(new Error('session not found'));
+      await cancel;
+      rejectPrompt(new Error('loop boom'));
+
+      await expect(loopRun).rejects.toThrow('loop boom');
+      expect(ch.responseChunks.map((entry) => entry.chunk)).toEqual([
+        'before ',
+        'during ',
+      ]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({ type: 'text_chunk', chunk: 'before ' }),
+        expect.objectContaining({ type: 'text_chunk', chunk: 'during ' }),
+        expect.objectContaining({
+          type: 'failed',
+          error: 'loop boom',
+          phase: 'agent',
+          messageId: 'job-1',
+        }),
+      ]);
+    });
+
+    it('emits tool_call lifecycle events during loop prompts', async () => {
+      let resolvePrompt!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<string>((resolve) => {
+          resolvePrompt = resolve;
+        }),
+      );
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      ch.dispatchToolCall({
+        sessionId: 's-1',
+        toolCallId: 'tool-loop',
+        kind: 'read_file',
+        title: 'Read README.md',
+        status: 'running',
+        rawInput: { path: 'README.md' },
+      });
+
+      const lifecycleToolCall = ch.taskEvents.find(
+        (event) => event.type === 'tool_call',
+      );
+      expect(lifecycleToolCall).toEqual(
+        expect.objectContaining({
+          type: 'tool_call',
+          messageId: 'job-1',
+          toolCall: expect.objectContaining({ toolCallId: 'tool-loop' }),
+        }),
+      );
+      expect(lifecycleToolCall!.toolCall).not.toHaveProperty('rawInput');
+
+      resolvePrompt('loop response');
+      await loopRun;
+    });
+
+    it('completes a loop when cancellation settles after proactive delivery', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        'loop response',
+      );
+      let resolveDelivery!: () => void;
+      const delivery = new Promise<void>((resolve) => {
+        resolveDelivery = resolve;
+      });
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      ch.proactiveSupported = true;
+      vi.spyOn(
+        ch as unknown as {
+          pushProactive: (
+            target: { chatId: string },
+            text: string,
+          ) => Promise<void>;
+        },
+        'pushProactive',
+      ).mockImplementation(async () => {
+        await delivery;
+        ch.proactive.push({ chatId: 'chat1', text: 'loop response' });
+      });
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: false,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+      await vi.waitFor(() =>
+        expect(bridge.cancelSession).not.toHaveBeenCalled(),
+      );
+
+      const cancel = ch.handleInbound(
+        envelope({ text: '/cancel', senderId: 'alice' }),
+      );
+      await Promise.resolve();
+      resolveDelivery();
+      await cancel;
+
+      await expect(loopRun).resolves.toBe('loop response');
+      expect(ch.proactive).toEqual([
+        { chatId: 'chat1', text: 'loop response' },
+      ]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({ type: 'completed', messageId: 'job-1' }),
+      ]);
     });
 
     it('disables a stored job when its sender is no longer allowed', async () => {
@@ -6106,6 +11413,88 @@ describe('ChannelBase', () => {
 
       expect(disable).toHaveBeenCalledWith('job-1');
       expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('disables a stored DM job when dmPolicy=disabled', async () => {
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        { dmPolicy: 'disabled' },
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.runLoopPrompt({
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'user1',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'User 1',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        }),
+      ).rejects.toThrow('no longer authorized');
+
+      expect(disable).toHaveBeenCalledWith('job-1');
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('allows stored group job when dmPolicy=disabled', async () => {
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        { dmPolicy: 'disabled', groupPolicy: 'open' },
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'group-1',
+          isGroup: true,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+
+      expect(disable).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalled();
     });
 
     it('rejects stored threaded jobs unless the adapter supports the target', async () => {
@@ -6189,6 +11578,68 @@ describe('ChannelBase', () => {
         'while loop runs',
         expect.any(Object),
       );
+    });
+
+    it('does not preflight collected messages again after a loop prompt completes', async () => {
+      class CountingPreflightChannel extends TestChannel {
+        preflightTexts: string[] = [];
+
+        protected override preflightInbound(
+          message: Envelope,
+        ): boolean | Promise<boolean> {
+          this.preflightTexts.push(message.text);
+          return super.preflightInbound(message);
+        }
+      }
+
+      let resolveLoop: (value: string) => void = () => {};
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockImplementationOnce(
+          () =>
+            new Promise<string>((resolve) => {
+              resolveLoop = resolve;
+            }),
+        )
+        .mockResolvedValueOnce('follow-up response');
+      const ch = new CountingPreflightChannel(
+        'test-chan',
+        defaultConfig({ dispatchMode: 'collect' }),
+        bridge,
+      );
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await vi.waitFor(() => {
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      });
+
+      await ch.handleInbound(envelope({ text: 'while loop runs' }));
+      resolveLoop('loop response');
+      await loopRun;
+
+      await vi.waitFor(() => {
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      });
+      expect(ch.preflightTexts).toEqual(['while loop runs']);
     });
   });
 });

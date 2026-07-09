@@ -191,6 +191,25 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.apiKey).toBe('explicit-key');
       expect(result.baseUrl).toBe('https://explicit.example.com');
     });
+
+    it('should use explicit baseUrl when looking up a registry model', () => {
+      const getResolvedModel = vi.fn().mockReturnValue(resolvedModel);
+      const config = {
+        getContentGeneratorConfig: () => parentConfig,
+        getModelsConfig: () => ({ getResolvedModel }),
+      } as unknown as Config;
+
+      buildAgentContentGeneratorConfig(config, 'registry-model-id', {
+        authType: 'anthropic',
+        baseUrl: 'https://registry.example.com',
+      });
+
+      expect(getResolvedModel).toHaveBeenCalledWith(
+        'anthropic',
+        'registry-model-id',
+        'https://registry.example.com',
+      );
+    });
   });
 
   describe('edge cases', () => {

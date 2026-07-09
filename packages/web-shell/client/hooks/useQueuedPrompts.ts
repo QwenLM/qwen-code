@@ -52,6 +52,12 @@ interface UseQueuedPromptsArgs {
 
 const MAX_COMPLETED_PROMPT_IDS = 100;
 
+type RefreshPendingPromptsResult =
+  | 'refreshed'
+  | 'skipped'
+  | 'superseded'
+  | 'failed';
+
 function areQueuedPromptsEqual(
   left: readonly QueuedPrompt[],
   right: readonly QueuedPrompt[],
@@ -221,26 +227,28 @@ export function useQueuedPrompts({
   );
 
   const refreshPendingPrompts = useCallback(
-    async (targetSessionId = sessionId): Promise<boolean> => {
-      if (!connected || !targetSessionId) return false;
-      if (latestSessionIdRef.current !== targetSessionId) return false;
+    async (
+      targetSessionId = sessionId,
+    ): Promise<RefreshPendingPromptsResult> => {
+      if (!connected || !targetSessionId) return 'skipped';
+      if (latestSessionIdRef.current !== targetSessionId) return 'skipped';
       const requestSeq = ++refreshRequestSeqRef.current;
       try {
         const result = await sessionActions.getPendingPrompts({
           sessionId: targetSessionId,
         });
-        if (requestSeq !== refreshRequestSeqRef.current) return false;
-        if (latestSessionIdRef.current !== targetSessionId) return false;
+        if (requestSeq !== refreshRequestSeqRef.current) return 'superseded';
+        if (latestSessionIdRef.current !== targetSessionId) return 'skipped';
         syncServerQueuedPrompts(
           result.pendingPrompts.filter(
             (p) => p.state === 'queued' || p.state === 'running',
           ),
           targetSessionId,
         );
-        return true;
+        return 'refreshed';
       } catch (error) {
         console.warn('Failed to refresh pending prompts', error);
-        return false;
+        return 'failed';
       }
     },
     [connected, sessionActions, sessionId, syncServerQueuedPrompts],
@@ -525,7 +533,6 @@ export function useQueuedPrompts({
     if (streamingState !== 'idle') return;
     const ctrl = midTurnEnqueueAbortRef.current;
     if (!ctrl) return;
-    console.debug('[mid-turn] turn settled; cancelling any in-flight push');
     ctrl.abort();
     midTurnEnqueueAbortRef.current = null;
   }, [streamingState]);
@@ -595,7 +602,7 @@ export function useQueuedPrompts({
           return false;
         }
         completionCallbacksRef.current.delete(target.serverPromptId);
-        if (!(await refreshPendingPrompts(targetSessionId))) {
+        if ((await refreshPendingPrompts(targetSessionId)) === 'failed') {
           setQueuedPromptFlags(target.id, {
             isEditing: false,
             isRemoving: false,
@@ -612,7 +619,7 @@ export function useQueuedPrompts({
           isEditing: false,
           isRemoving: false,
         });
-        if (!(await refreshPendingPrompts(targetSessionId))) {
+        if ((await refreshPendingPrompts(targetSessionId)) !== 'refreshed') {
           restoreQueuedPrompts([target]);
         }
         reportError(error, fallback);
@@ -906,16 +913,6 @@ export function useQueuedPrompts({
     useDaemonMidTurnInjected();
   useEffect(() => {
     if (!sessionId || midTurnInjectedBatches.length === 0) return;
-    if (
-      clientId === undefined &&
-      midTurnInjectedBatches.some(
-        (b) => b.sessionId === sessionId && b.originatorClientId !== undefined,
-      )
-    ) {
-      console.debug(
-        '[mid-turn] originator-stamped batches but no client id; dedupe skipped (may resend next turn)',
-      );
-    }
     const next = removeInjectedFromQueue(
       queuedPromptsRef.current,
       midTurnInjectedBatches,

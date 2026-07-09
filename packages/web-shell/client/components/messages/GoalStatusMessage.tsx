@@ -88,14 +88,12 @@ function getTitle(
   status: SerializedGoalStatusMessage,
   t: ReturnType<typeof useI18n>['t'],
 ): {
-  prefix: string;
   title: string;
   colorClass: string;
 } {
   switch (status.kind) {
     case 'checking':
       return {
-        prefix: '○',
         title: `${t('goal.check')}${
           status.iterations && status.iterations > 0
             ? ` · ${t('goal.turnLabel', { count: status.iterations })}`
@@ -105,31 +103,26 @@ function getTitle(
       };
     case 'set':
       return {
-        prefix: '◎',
         title: t('goal.set'),
         colorClass: styles.accent,
       };
     case 'achieved':
       return {
-        prefix: '✓',
         title: t('goal.achieved'),
         colorClass: styles.success,
       };
     case 'cleared':
       return {
-        prefix: '○',
         title: t('goal.cleared'),
         colorClass: styles.muted,
       };
     case 'failed':
       return {
-        prefix: '✖',
         title: t('goal.failed'),
         colorClass: styles.error,
       };
     case 'aborted':
       return {
-        prefix: '!',
         title: t('goal.aborted'),
         colorClass: styles.warning,
       };
@@ -181,9 +174,6 @@ export function GoalStatusMessage({
 
   return (
     <div className={styles.message}>
-      <span className={`${styles.prefix} ${title.colorClass}`}>
-        {title.prefix}
-      </span>
       <div className={styles.body}>
         <div className={`${styles.title} ${title.colorClass}`}>
           {title.title}

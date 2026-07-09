@@ -5,7 +5,11 @@ const mockLoadChannelsConfig = vi.hoisted(() => vi.fn());
 const mockLoadChannelsFromExtensions = vi.hoisted(() => vi.fn());
 const mockParseConfiguredChannels = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
+const mockReadChannelMemory = vi.hoisted(() => vi.fn());
+const mockAppendChannelMemory = vi.hoisted(() => vi.fn());
+const mockClearChannelMemory = vi.hoisted(() => vi.fn());
 const mockRegisterToolCallDispatch = vi.hoisted(() => vi.fn());
+const mockRegisterPermissionRelay = vi.hoisted(() => vi.fn());
 const mockRegisterSessionCleanup = vi.hoisted(() => vi.fn());
 const mockSessionsPath = vi.hoisted(() => vi.fn(() => '/tmp/sessions.json'));
 const mockLoadSettings = vi.hoisted(() =>
@@ -71,6 +75,7 @@ const mockBridgeNewSession = vi.hoisted(() => vi.fn());
 const mockBridgeLoadSession = vi.hoisted(() => vi.fn());
 const mockBridgePrompt = vi.hoisted(() => vi.fn());
 const mockBridgeCancelSession = vi.hoisted(() => vi.fn());
+const mockBridgeRespondToPermission = vi.hoisted(() => vi.fn());
 const mockBridgeShellCommand = vi.hoisted(() => vi.fn());
 const mockBridgeGetAvailableCommands = vi.hoisted(() => vi.fn(() => []));
 const mockDaemonChannelBridge = vi.hoisted(() =>
@@ -85,6 +90,7 @@ const mockDaemonChannelBridge = vi.hoisted(() =>
     loadSession: mockBridgeLoadSession,
     prompt: mockBridgePrompt,
     cancelSession: mockBridgeCancelSession,
+    respondToPermission: mockBridgeRespondToPermission,
     shellCommand: mockBridgeShellCommand,
     start: mockBridgeStart,
     stop: mockBridgeStop,
@@ -110,6 +116,12 @@ vi.mock('@qwen-code/acp-bridge/workspacePaths', () => ({
   canonicalizeWorkspace: mockCanonicalizeWorkspace,
 }));
 
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  appendChannelMemory: mockAppendChannelMemory,
+  clearChannelMemory: mockClearChannelMemory,
+  readChannelMemory: mockReadChannelMemory,
+}));
+
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
   writeStdoutLine: mockWriteStdoutLine,
@@ -128,6 +140,7 @@ vi.mock('./runtime.js', () => ({
   loadChannelsConfig: mockLoadChannelsConfig,
   loadChannelsFromExtensions: mockLoadChannelsFromExtensions,
   parseConfiguredChannels: mockParseConfiguredChannels,
+  registerPermissionRelay: mockRegisterPermissionRelay,
   registerSessionCleanup: mockRegisterSessionCleanup,
   registerToolCallDispatch: mockRegisterToolCallDispatch,
   selectFirstModel: mockSelectFirstModel,
@@ -368,6 +381,118 @@ describe('createDaemonChannelBridgeFacade', () => {
     ]);
     expect(getAvailableCommands).toHaveBeenCalledWith('session-1');
   });
+
+  it('forwards listSessions when present on bridge', () => {
+    const listSessions = vi.fn(() => [
+      {
+        sessionId: 'sess-1',
+        workspaceCwd: '/repo',
+        hasActivePrompt: false,
+      },
+    ]);
+    const bridge = {
+      availableCommands: [],
+      on: mockBridgeOn,
+      off: mockBridgeOff,
+      newSession: mockBridgeNewSession,
+      loadSession: mockBridgeLoadSession,
+      prompt: mockBridgePrompt,
+      cancelSession: mockBridgeCancelSession,
+      listSessions,
+    };
+
+    const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeShellCommand: false,
+    });
+
+    expect(facade.listSessions?.()).toEqual([
+      {
+        sessionId: 'sess-1',
+        workspaceCwd: '/repo',
+        hasActivePrompt: false,
+      },
+    ]);
+    expect(listSessions).toHaveBeenCalled();
+  });
+
+  it('forwards permission responses when present on bridge', async () => {
+    const respondToPermission = vi.fn().mockResolvedValue(true);
+    const bridge = {
+      availableCommands: [],
+      on: mockBridgeOn,
+      off: mockBridgeOff,
+      newSession: mockBridgeNewSession,
+      loadSession: mockBridgeLoadSession,
+      prompt: mockBridgePrompt,
+      cancelSession: mockBridgeCancelSession,
+      respondToPermission,
+    };
+
+    const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeShellCommand: false,
+    });
+
+    const response = { outcome: { outcome: 'cancelled' as const } };
+    await expect(facade.respondToPermission?.('req-1', response)).resolves.toBe(
+      true,
+    );
+    expect(respondToPermission).toHaveBeenCalledWith('req-1', response);
+  });
+
+  it('omits permission responses when absent on bridge', () => {
+    const bridge = {
+      availableCommands: [],
+      on: mockBridgeOn,
+      off: mockBridgeOff,
+      newSession: mockBridgeNewSession,
+      loadSession: mockBridgeLoadSession,
+      prompt: mockBridgePrompt,
+      cancelSession: mockBridgeCancelSession,
+    };
+
+    const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeShellCommand: false,
+    });
+
+    expect('respondToPermission' in facade).toBe(false);
+  });
+
+  it('omits listSessions when absent on bridge', () => {
+    const bridge = {
+      availableCommands: [],
+      on: mockBridgeOn,
+      off: mockBridgeOff,
+      newSession: mockBridgeNewSession,
+      loadSession: mockBridgeLoadSession,
+      prompt: mockBridgePrompt,
+      cancelSession: mockBridgeCancelSession,
+    };
+
+    const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeShellCommand: false,
+    });
+
+    expect('listSessions' in facade).toBe(false);
+  });
+
+  it('does not expose channel loop MCP registration through the daemon facade', () => {
+    const bridge = {
+      availableCommands: [],
+      on: mockBridgeOn,
+      off: mockBridgeOff,
+      newSession: mockBridgeNewSession,
+      loadSession: mockBridgeLoadSession,
+      prompt: mockBridgePrompt,
+      cancelSession: mockBridgeCancelSession,
+      registerChannelLoopToolHandler: vi.fn(),
+    };
+
+    const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeShellCommand: false,
+    });
+
+    expect('registerChannelLoopToolHandler' in facade).toBe(false);
+  });
 });
 
 describe('runChannelDaemonWorker', () => {
@@ -413,7 +538,20 @@ describe('runChannelDaemonWorker', () => {
       expect.objectContaining({
         proxy: 'http://settings-proxy:8080',
         router: mockSessionRouter.mock.results[0]!.value,
+        channelMemory: {
+          appendChannelMemory: mockAppendChannelMemory,
+          clearChannelMemory: mockClearChannelMemory,
+          readChannelMemory: mockReadChannelMemory,
+        },
+        memoryIntentClassifier: expect.objectContaining({
+          classifyChannelMemoryIntent: expect.any(Function),
+        }),
       }),
+    );
+    expect(mockRegisterPermissionRelay).toHaveBeenCalledWith(
+      bridgeFacade,
+      mockSessionRouter.mock.results[0]!.value,
+      expect.any(Map),
     );
     expect(mockResolveProxyUrl).toHaveBeenCalledWith(
       undefined,
@@ -937,6 +1075,152 @@ describe('daemonWorkerCommand', () => {
       expect(exit).toHaveBeenCalledWith(0);
     } finally {
       restoreSend();
+    }
+  });
+
+  it('sends heartbeat messages while the daemon worker is live', async () => {
+    vi.useFakeTimers();
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_TOKEN', 'daemon-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'ready',
+            channels: ['telegram'],
+            requestedChannels: ['telegram'],
+            pid: process.pid,
+          }),
+        );
+      });
+      send.mockClear();
+
+      await vi.advanceTimersByTimeAsync(15_000);
+
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'heartbeat', pid: process.pid }),
+      );
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await handler;
+      expect(exit).toHaveBeenCalledWith(0);
+
+      send.mockClear();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(send).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'heartbeat' }),
+      );
+    } finally {
+      restoreSend();
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears heartbeat messages when the IPC send channel is closed', async () => {
+    vi.useFakeTimers();
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'ready',
+            channels: ['telegram'],
+            requestedChannels: ['telegram'],
+            pid: process.pid,
+          }),
+        );
+      });
+      send.mockClear();
+      send.mockImplementation(() => {
+        throw Object.assign(new Error('Channel closed'), {
+          code: 'ERR_IPC_CHANNEL_CLOSED',
+        });
+      });
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'heartbeat' }),
+      );
+
+      send.mockClear();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(send).not.toHaveBeenCalled();
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await handler;
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      restoreSend();
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears heartbeat messages when parent IPC disconnects', async () => {
+    vi.useFakeTimers();
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'ready',
+            channels: ['telegram'],
+            requestedChannels: ['telegram'],
+            pid: process.pid,
+          }),
+        );
+      });
+
+      process.emit('disconnect');
+      send.mockClear();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(send).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'heartbeat' }),
+      );
+
+      await handler;
+      expect(exit).toHaveBeenCalledWith(0);
+
+      send.mockClear();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(send).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'heartbeat' }),
+      );
+    } finally {
+      restoreSend();
+      vi.useRealTimers();
     }
   });
 
