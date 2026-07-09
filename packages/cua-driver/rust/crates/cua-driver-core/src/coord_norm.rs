@@ -8,7 +8,7 @@
 //!
 //! Three hooks, wired into `ToolRegistry::invoke` / `tools_list`:
 //!   - input  : `denormalize_args`  — 0–1000 → pixels, before the real tool
-//!   - output : `normalize_result`  — pixels → 0–1000, on the way back
+//!   - output : `normalize_result`  — no-op (query results returned unmodified)
 //!   - listing: `rewrite_coord_desc`— pixel wording → normalized wording
 //!
 //! Conversion is anchored to the **downscaled screenshot size** the matching
@@ -227,31 +227,13 @@ pub fn extract_screenshot_size(result: &ToolResult) -> Option<(u32, u32)> {
     Some((w, h))
 }
 
-/// In-place normalize a tool result's pixel coordinates back to 0–`scale`.
-///
-/// Rewrites `screenshot_width/height` to the configured full-scale (default
-/// 1000) so the model treats the returned image as a 0–`scale` grid — matching
-/// the basis `denormalize_args` uses for input. Element frames stay in pixels —
-/// they are screen-global with no window-origin/scale basis available in core
-/// (see design doc §5), so converting them here would introduce error.
-pub fn normalize_result(tool: &str, result: &mut ToolResult) {
-    if tool != "get_window_state" && tool != "get_desktop_state" {
-        return;
-    }
-    let scale = coordinate_scale() as u64;
-    if let Some(obj) = result
-        .structured_content
-        .as_mut()
-        .and_then(|v| v.as_object_mut())
-    {
-        if obj.contains_key("screenshot_width") {
-            obj.insert("screenshot_width".to_string(), json!(scale));
-        }
-        if obj.contains_key("screenshot_height") {
-            obj.insert("screenshot_height".to_string(), json!(scale));
-        }
-    }
-}
+/// No-op in normalized mode. Previously this rewrote `screenshot_width/height`
+/// to 1000 to hint the model about the 0–1000 grid, but that conflicted with
+/// `elements[].frame` (which stays in pixels) and `screen_width/height`,
+/// giving the model contradictory coordinate information. The model is now
+/// guided to use 0–1000 coordinates purely through tool schema descriptions
+/// and MCP instructions; query results are returned unmodified.
+pub fn normalize_result(_tool: &str, _result: &mut ToolResult) {}
 
 /// Rewrite coordinate-field descriptions in a `tools/list` payload from pixel
 /// wording to 0–`scale` normalized wording. Caller gates on normalized mode.
@@ -790,13 +772,15 @@ mod tests {
     }
 
     #[test]
-    fn normalize_result_rewrites_screenshot_dims_to_1000() {
+    fn normalize_result_is_noop() {
+        // normalize_result no longer rewrites screenshot_width/height —
+        // query results are returned unmodified.
         let mut r = ToolResult::text("ok")
             .with_structured(json!({ "screenshot_width": 800, "screenshot_height": 600 }));
         normalize_result("get_window_state", &mut r);
         let sc = r.structured_content.as_ref().unwrap();
-        assert_eq!(sc["screenshot_width"], json!(1000));
-        assert_eq!(sc["screenshot_height"], json!(1000));
+        assert_eq!(sc["screenshot_width"], json!(800));
+        assert_eq!(sc["screenshot_height"], json!(600));
     }
 
     #[test]
@@ -965,7 +949,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_result_rewrites_get_desktop_state() {
+    fn normalize_result_desktop_state_is_noop() {
         let mut r = ToolResult::text("ok")
             .with_structured(json!({
                 "screenshot_width": 3840,
@@ -975,8 +959,10 @@ mod tests {
             }));
         normalize_result("get_desktop_state", &mut r);
         let sc = r.structured_content.as_ref().unwrap();
-        assert_eq!(sc["screenshot_width"], json!(1000));
-        assert_eq!(sc["screenshot_height"], json!(1000));
+        assert_eq!(sc["screenshot_width"], json!(3840));
+        assert_eq!(sc["screenshot_height"], json!(2160));
+        assert_eq!(sc["screen_width"], json!(1920));
+        assert_eq!(sc["screen_height"], json!(1080));
     }
 
     #[test]

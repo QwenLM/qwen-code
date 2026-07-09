@@ -433,8 +433,7 @@ impl ToolRegistry {
             None => return ToolResult::error(format!("Unknown tool: {name}")),
         };
 
-        // ── coord_norm output hook: cache the size basis, then pixels → 0–1000.
-        // ingest must precede normalize_result (which rewrites the dims to 1000).
+        // ── coord_norm output hook: cache the size basis for subsequent calls.
         if self.normalized {
             crate::coord_norm::ingest_window_size(resolved_name, &args, &result);
             crate::coord_norm::ingest_screen_size(resolved_name, &result);
