@@ -77,11 +77,8 @@ fn input_coord_fields(tool: &str) -> &'static [(&'static str, bool, bool)] {
         // field descriptions; denormalize_args converts them the same way.
         "type_text" | "press_key" | "hotkey" => &[("x", true, false), ("y", false, false)],
         // parallel_mouse_drag has nested coords handled specially in
-        // denormalize_args, but a non-empty entry ensures rewrite_coord_desc
-        // processes its top-level description and from_zoom field.
-        // The from_x/to_x/path fields are inside drags[] so they can't be
-        // listed here; their descriptions are handled by the nested rewrite
-        // in rewrite_coord_desc below.
+        // denormalize_args. Listed here (with empty fields) so
+        // rewrite_coord_desc processes its top-level description.
         "parallel_mouse_drag" => &[],
         _ => &[],
     }
@@ -101,7 +98,11 @@ pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screens
     // from_zoom coords live in the zoom-image space, not window-local.
     // Denormalize against the cached zoom image dimensions instead of the
     // window screenshot size. If no zoom cache exists, return an error.
-    if args.get("from_zoom").and_then(|v| v.as_bool()).unwrap_or(false) {
+    // parallel_mouse_drag does not support from_zoom — skip this block
+    // so its nested handler below is always reached.
+    if tool != "parallel_mouse_drag"
+        && args.get("from_zoom").and_then(|v| v.as_bool()).unwrap_or(false)
+    {
         let pid = args.get("pid").and_then(|v| v.as_i64()).unwrap_or(0);
         if let Some((zw, zh)) = get_zoom_size(pid) {
             let scale = coordinate_scale();
@@ -172,25 +173,29 @@ pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screens
         }
     }
     // parallel_mouse_drag: coordinates are nested inside drags[].{path, from_x,
-    // from_y, to_x, to_y}. Each drag item may have a window_id so we use the
-    // caller-provided screenshot basis (same as click/drag).
+    // from_y, to_x, to_y, x_from, x_to}. Each drag item has its own window_id,
+    // so we look up per-item size from SIZE_CACHE.
     if tool == "parallel_mouse_drag" {
         if let Some(drags) = args.get_mut("drags").and_then(|v| v.as_array_mut()) {
             let scale = coordinate_scale();
-            let (dw, dh) = if screenshot_w > 0 {
-                (screenshot_w, screenshot_h)
-            } else {
-                // parallel_mouse_drag always has window targets
-                return Err(
-                    "Coordinate normalization requires window screenshot size. \
-                     Call get_window_state first so the driver can convert \
-                     0–1000 coordinates to pixels."
-                        .to_string(),
-                );
-            };
             for item in drags.iter_mut() {
-                // from_x/from_y/to_x/to_y
-                for (field, is_x) in &[("from_x", true), ("from_y", false), ("to_x", true), ("to_y", false)] {
+                let item_pid = item.get("pid").and_then(|v| v.as_i64()).unwrap_or(0);
+                let item_wid = item.get("window_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                let (dw, dh) = match get_size(item_pid, item_wid) {
+                    Some(s) => s,
+                    None => return Err(
+                        "Coordinate normalization requires window screenshot size. \
+                         Call get_window_state for this window first so the driver \
+                         can convert 0–1000 coordinates to pixels."
+                            .to_string(),
+                    ),
+                };
+                // from_x/from_y/to_x/to_y + fn domain bounds x_from/x_to
+                for (field, is_x) in &[
+                    ("from_x", true), ("from_y", false),
+                    ("to_x", true), ("to_y", false),
+                    ("x_from", true), ("x_to", true),
+                ] {
                     let dim = if *is_x { dw } else { dh };
                     if let Some(v) = item.get(*field).and_then(|v| v.as_f64()) {
                         item[*field] = json!(norm_to_px(v, dim, scale));
@@ -698,31 +703,42 @@ mod tests {
 
     #[test]
     fn denormalize_parallel_mouse_drag_converts_nested_coords() {
+        // Each drag item uses its own (pid, window_id) for SIZE_CACHE lookup.
+        put_size(990030, 1, 800, 600);
+        put_size(990030, 2, 1024, 768);
         let mut args = json!({
             "drags": [
                 {
-                    "session": "s1", "window_id": 1,
+                    "session": "s1", "pid": 990030, "window_id": 1,
                     "from_x": 0.0, "from_y": 0.0, "to_x": 1000.0, "to_y": 1000.0
                 },
                 {
-                    "session": "s2", "window_id": 1,
+                    "session": "s2", "pid": 990030, "window_id": 1,
                     "path": [[500.0, 500.0], [1000.0, 0.0]]
+                },
+                {
+                    "session": "s3", "pid": 990030, "window_id": 2,
+                    "fn": "sin(x)", "x_from": 0.0, "x_to": 500.0
                 }
             ]
         });
-        denormalize_args("parallel_mouse_drag", &mut args, 800, 600).unwrap();
+        // screenshot_w/h args are ignored — per-item lookup used instead
+        denormalize_args("parallel_mouse_drag", &mut args, 0, 0).unwrap();
         let d = args["drags"].as_array().unwrap();
-        // Item 0: from_x/to_x by width, from_y/to_y by height
+        // Item 0 (window_id=1 → 800x600): from_x/to_x by width, from_y/to_y by height
         assert_eq!(d[0]["from_x"], json!(0.0));
         assert_eq!(d[0]["from_y"], json!(0.0));
         assert_eq!(d[0]["to_x"], json!(800.0));
         assert_eq!(d[0]["to_y"], json!(600.0));
-        // Item 1: path points
+        // Item 1 (window_id=1 → 800x600): path points
         let path = d[1]["path"].as_array().unwrap();
         assert_eq!(path[0][0], json!(400.0)); // 500/1000 * 800
         assert_eq!(path[0][1], json!(300.0)); // 500/1000 * 600
-        assert_eq!(path[1][0], json!(800.0)); // 1000/1000 * 800
-        assert_eq!(path[1][1], json!(0.0));   // 0/1000 * 600
+        assert_eq!(path[1][0], json!(800.0));
+        assert_eq!(path[1][1], json!(0.0));
+        // Item 2 (window_id=2 → 1024x768): fn domain x_from/x_to
+        assert_eq!(d[2]["x_from"], json!(0.0));
+        assert_eq!(d[2]["x_to"], json!(512.0)); // 500/1000 * 1024
     }
 
     #[test]
