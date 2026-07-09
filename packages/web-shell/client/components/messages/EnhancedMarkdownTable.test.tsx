@@ -680,7 +680,7 @@ describe('EnhancedMarkdownTable', () => {
     expect(rowTexts(container)).toEqual(['0.5', '75%']);
   });
 
-  it('preserves markdown table cell alignment', () => {
+  it('preserves table alignment without applying it to row details', () => {
     const container = renderTableContent([
       <thead key="head">
         <tr>
@@ -705,20 +705,21 @@ describe('EnhancedMarkdownTable', () => {
     expect(dataCell(container, 0, 1).style.textAlign).toBe('center');
 
     click(button(container, 'View details for row 1'));
-    const detailElements = [...container.querySelectorAll<HTMLElement>('div')];
+    const detailPanel = container.querySelector<HTMLElement>(
+      '[class*="detailPanel"]',
+    );
+    expect(detailPanel).not.toBeNull();
+    const detailElements = [
+      ...detailPanel!.querySelectorAll<HTMLElement>('div'),
+    ];
     expect(
-      detailElements.find(
-        (element) =>
-          element.textContent === '$10' && element.style.textAlign === 'right',
-      ),
-    ).toBeDefined();
+      detailElements.find((element) => element.textContent === '$10')?.style
+        .textAlign,
+    ).toBe('');
     expect(
-      detailElements.find(
-        (element) =>
-          element.textContent === 'Done' &&
-          element.style.textAlign === 'center',
-      ),
-    ).toBeDefined();
+      detailElements.find((element) => element.textContent === 'Done')?.style
+        .textAlign,
+    ).toBe('');
   });
 
   it('quick copies the visible sorted table', () => {

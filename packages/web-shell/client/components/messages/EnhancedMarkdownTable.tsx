@@ -2379,12 +2379,6 @@ export function EnhancedTable({
                             const header = table.headers[columnIndex];
                             const cell = row.cells[columnIndex];
                             if (!header || !cell) return null;
-                            const headerAlignStyle = header.textAlign
-                              ? { textAlign: header.textAlign }
-                              : undefined;
-                            const cellAlignStyle = cell.textAlign
-                              ? { textAlign: cell.textAlign }
-                              : undefined;
                             return (
                               <div
                                 key={`${row.key}-detail-${columnIndex}`}
@@ -2392,15 +2386,11 @@ export function EnhancedTable({
                               >
                                 <div
                                   className={styles.detailLabel}
-                                  style={headerAlignStyle}
                                   title={header.text}
                                 >
                                   {header.content}
                                 </div>
-                                <div
-                                  className={styles.detailValue}
-                                  style={cellAlignStyle}
-                                >
+                                <div className={styles.detailValue}>
                                   {renderDetailValue(cell, longTextExpanded)}
                                 </div>
                               </div>
