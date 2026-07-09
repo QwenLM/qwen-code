@@ -2384,6 +2384,8 @@ export class GeminiClient {
       // exits (headless `-p`) before a slow hook's queue drained. Not gated
       // on !turn.pendingToolCalls the way the Stop hook below is, since a
       // message boundary and a Stop-worthy end-of-turn are different things.
+      // The dispatcher mirrors warnings to console.warn itself; this sink
+      // only adds them to the debug-log file.
       messageDisplay =
         hooksEnabled &&
         messageBus &&
@@ -2532,10 +2534,12 @@ export class GeminiClient {
         }
       }
 
-      // Deliver `is_final: true` (and drain any still-queued mid-stream
-      // payload) BEFORE the Stop hook below fires, so consumers combining the
-      // two events can rely on receiving MessageDisplay's completion signal
-      // first.
+      // Dispatch `is_final: true` — and wait, bounded by the shared drain
+      // budget, for its delivery to complete — BEFORE the Stop hook below
+      // fires, so a consumer combining the two events receives
+      // MessageDisplay's completion payload before Stop starts. The finish()
+      // in the outer finally is a no-op after this one (idempotent, and the
+      // drain budget is shared, not per-call).
       await messageDisplay?.finish();
 
       // Track API completion time for thinking block idle cleanup

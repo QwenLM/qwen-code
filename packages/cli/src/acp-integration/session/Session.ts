@@ -2356,6 +2356,8 @@ export class Session implements SessionContext {
     ) {
       return null;
     }
+    // The dispatcher mirrors warnings to console.warn itself; this sink
+    // only adds them to the debug-log file.
     return new MessageDisplayDispatcher(messageBus, signal, (message) =>
       debugLogger.warn(message),
     );

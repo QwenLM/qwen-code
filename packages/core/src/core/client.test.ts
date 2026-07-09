@@ -7686,6 +7686,9 @@ Other open files:
           warn: vi.fn(),
           error: vi.fn(),
         };
+        const consoleWarnSpy = vi
+          .spyOn(console, 'warn')
+          .mockImplementation(() => {});
         const mockMessageBus = {
           request: vi.fn().mockRejectedValue(new Error('hook process failed')),
           response: vi.fn(),
@@ -7720,6 +7723,13 @@ Other open files:
             /^MessageDisplay hook failed \[[0-9a-f-]{36}\]: Error: hook process failed$/,
           ),
         );
+        // Also surfaced on the console: the debug logger writes only to a
+        // gated log file, and a dropped/failed delivery is the moment a
+        // documented guarantee is at stake — it must be visible by default.
+        expect(consoleWarnSpy).toHaveBeenCalledWith(
+          expect.stringMatching(/^MessageDisplay hook failed/),
+        );
+        consoleWarnSpy.mockRestore();
       });
 
       it('does not end the turn until the final MessageDisplay payload has been delivered', async () => {
