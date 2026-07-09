@@ -348,6 +348,7 @@ function makeDaemonLog(): DaemonLogger {
 }
 
 function makeHarness(opts?: {
+  primaryTrusted?: boolean;
   secondaryTrusted?: boolean;
   secondaryChannelLive?: boolean;
   daemonLog?: DaemonLogger;
@@ -370,7 +371,7 @@ function makeHarness(opts?: {
       workspaceId: 'primary-id',
       workspaceCwd: PRIMARY_CWD,
       primary: true,
-      trusted: true,
+      trusted: opts?.primaryTrusted ?? true,
       bridge: primaryBridge,
     }),
     makeRuntime({
@@ -997,6 +998,30 @@ describe('multi-workspace session dispatch', () => {
         route: 'GET /workspaces/:workspace/sessions',
         resolutionKind: 'untrusted_workspace',
         workspaceCwd: SECONDARY_CWD,
+      }),
+    );
+  });
+
+  it('rejects untrusted primary workspace on plural session routes', async () => {
+    const daemonLog = makeDaemonLog();
+    const { app } = makeHarness({
+      primaryTrusted: false,
+      daemonLog,
+    });
+
+    const res = await request(app)
+      .get('/workspaces/primary-id/session-groups')
+      .set('Host', host());
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(res.body.workspaceCwd).toBe(PRIMARY_CWD);
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'session routing failed',
+      expect.objectContaining({
+        route: 'GET /workspaces/:workspace/session-groups',
+        resolutionKind: 'untrusted_workspace',
+        workspaceCwd: PRIMARY_CWD,
       }),
     );
   });

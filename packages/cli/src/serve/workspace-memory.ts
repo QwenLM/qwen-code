@@ -84,6 +84,78 @@ export interface WorkspaceMemoryRouteDeps {
 
 const MAX_MEMORY_CONTENT_BYTES = 1024 * 1024;
 
+function sendWorkspaceMemoryWriteError(
+  res: Response,
+  err: unknown,
+  options: {
+    route: string;
+    scope: ServeContextFileScope;
+    mode: 'append' | 'replace';
+  },
+): void {
+  const { route, scope, mode } = options;
+  if (err instanceof WorkspaceMemoryWriteTimeoutError) {
+    writeStderrLine(
+      `qwen serve: ${route} timeout — file lock at ` +
+        `${err.filePath} did not acquire within ${err.timeoutMs}ms ` +
+        `(stalled FS / OneDrive / NFS)`,
+    );
+    const debug = isServeDebugMode();
+    res.status(500).json({
+      error: debug
+        ? err.message
+        : 'Workspace memory write timed out waiting for the per-file lock. Retry or restart the daemon.',
+      code: 'memory_write_timeout',
+      scope,
+      mode,
+      timeoutMs: err.timeoutMs,
+      ...(debug ? { filePath: err.filePath } : {}),
+    });
+    return;
+  }
+  if (err instanceof WorkspaceMemoryFileTooLargeError) {
+    writeStderrLine(
+      `qwen serve: ${route} refused — existing file ` +
+        `${err.filePath} is ${err.bytes} bytes (cap ${err.limit})`,
+    );
+    const debug = isServeDebugMode();
+    res.status(413).json({
+      error: debug
+        ? err.message
+        : 'Existing memory file exceeds the safe-append cap. Trim the file or POST with mode=replace.',
+      code: 'memory_file_too_large',
+      scope,
+      mode,
+      ...(debug ? { filePath: err.filePath } : {}),
+      bytes: err.bytes,
+      limit: err.limit,
+    });
+    return;
+  }
+  writeStderrLine(
+    `qwen serve: ${route} failed (scope=${scope} mode=${mode}): ${
+      err instanceof Error ? (err.stack ?? err.message) : String(err)
+    }`,
+  );
+  const osCode =
+    err && typeof err === 'object' && 'code' in err
+      ? (err as { code?: unknown }).code
+      : undefined;
+  const debug = isServeDebugMode();
+  res.status(500).json({
+    error: 'Failed to write workspace memory',
+    code: 'file_error',
+    scope,
+    mode,
+    ...(typeof osCode === 'string' ? { osCode } : {}),
+    ...(debug
+      ? {
+          errorMessage: err instanceof Error ? err.message : String(err),
+        }
+      : {}),
+  });
+}
+
 /** Mount the two memory routes on the supplied Express app. */
 export function mountWorkspaceMemoryRoutes(
   app: Application,
@@ -221,89 +293,10 @@ export function mountWorkspaceMemoryRoutes(
         }
         res.status(200).json(responseBody);
       } catch (err) {
-        // 413 + structured fields for the "memory file is past the
-        // safe-append cap" case so callers can tell pathological
-        // file size apart from generic file errors. The helper
-        // refuses to pull >16 MB into memory on append; clients
-        // either trim the file or switch to mode=replace.
-        if (err instanceof WorkspaceMemoryWriteTimeoutError) {
-          writeStderrLine(
-            `qwen serve: POST /workspace/memory timeout — file lock at ` +
-              `${err.filePath} did not acquire within ${err.timeoutMs}ms ` +
-              `(stalled FS / OneDrive / NFS)`,
-          );
-          const debug = isServeDebugMode();
-          res.status(500).json({
-            error: debug
-              ? err.message
-              : 'Workspace memory write timed out waiting for the per-file lock. Retry or restart the daemon.',
-            code: 'memory_write_timeout',
-            scope,
-            mode,
-            timeoutMs: err.timeoutMs,
-            ...(debug ? { filePath: err.filePath } : {}),
-          });
-          return;
-        }
-        if (err instanceof WorkspaceMemoryFileTooLargeError) {
-          writeStderrLine(
-            `qwen serve: POST /workspace/memory refused — existing file ` +
-              `${err.filePath} is ${err.bytes} bytes (cap ${err.limit})`,
-          );
-          // Path disclosure: both `error` (which embeds the absolute
-          // file path in the constructor message — see
-          // `WorkspaceMemoryFileTooLargeError`) and `filePath` are
-          // gated behind QWEN_SERVE_DEBUG so production responses
-          // don't include `/Users/<x>/.qwen/...` in the body.
-          // Operators triaging an issue locally enable the debug
-          // toggle to get the full text; in default mode SDK
-          // callers branch on `code` + `bytes` / `limit` instead
-          // (the structured discriminator survives without the
-          // disclosure).
-          const debug = isServeDebugMode();
-          res.status(413).json({
-            error: debug
-              ? err.message
-              : 'Existing memory file exceeds the safe-append cap. Trim the file or POST with mode=replace.',
-            code: 'memory_file_too_large',
-            scope,
-            mode,
-            ...(debug ? { filePath: err.filePath } : {}),
-            bytes: err.bytes,
-            limit: err.limit,
-          });
-          return;
-        }
-        writeStderrLine(
-          `qwen serve: POST /workspace/memory failed (scope=${scope} mode=${mode}): ${
-            err instanceof Error ? (err.stack ?? err.message) : String(err)
-          }`,
-        );
-        // Surface enough context for callers to debug without leaking
-        // absolute paths in the response body. `osCode` (`EACCES` /
-        // `EROFS` / `EDQUOT` / `ENOSPC` / ...) stays unconditional so
-        // SDK clients can branch on the failure class. The full
-        // `errorMessage` (which often embeds the file path on Node's
-        // ENOENT/EACCES messages) is gated behind `QWEN_SERVE_DEBUG`.
-        // Without the debug toggle, callers see only the generic
-        // `error` + `code` + `osCode` envelope; the daemon's stderr
-        // log has the full message for the operator.
-        const osCode =
-          err && typeof err === 'object' && 'code' in err
-            ? (err as { code?: unknown }).code
-            : undefined;
-        const debug = isServeDebugMode();
-        res.status(500).json({
-          error: 'Failed to write workspace memory',
-          code: 'file_error',
+        sendWorkspaceMemoryWriteError(res, err, {
+          route: 'POST /workspace/memory',
           scope,
           mode,
-          ...(typeof osCode === 'string' ? { osCode } : {}),
-          ...(debug
-            ? {
-                errorMessage: err instanceof Error ? err.message : String(err),
-              }
-            : {}),
         });
       }
     },
@@ -428,14 +421,10 @@ export function mountWorkspaceQualifiedMemoryRoutes(
           changed: result.changed,
         });
       } catch (err) {
-        writeStderrLine(
-          `qwen serve: POST /workspaces/:workspace/memory failed (mode=${mode}): ${
-            err instanceof Error ? (err.stack ?? err.message) : String(err)
-          }`,
-        );
-        res.status(500).json({
-          error: 'Failed to write workspace memory',
-          code: 'file_error',
+        sendWorkspaceMemoryWriteError(res, err, {
+          route: 'POST /workspaces/:workspace/memory',
+          scope: 'workspace',
+          mode,
         });
       }
     },

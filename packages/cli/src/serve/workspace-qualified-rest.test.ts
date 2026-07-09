@@ -392,4 +392,32 @@ describe('workspace-qualified core REST', () => {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
+
+  it('returns typed memory write errors on workspace-qualified routes', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      await fsp.writeFile(
+        path.join(h.secondaryCwd, 'QWEN.md'),
+        'x'.repeat(17 * 1024 * 1024),
+        'utf8',
+      );
+
+      const res = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'workspace', mode: 'append', content: '- entry' });
+
+      expect(res.status).toBe(413);
+      expect(res.body.code).toBe('memory_file_too_large');
+      expect(res.body.scope).toBe('workspace');
+      expect(res.body.mode).toBe('append');
+      expect(res.body.bytes).toBe(17 * 1024 * 1024);
+      expect(res.body.limit).toBe(16 * 1024 * 1024);
+      expect(res.body.filePath).toBeUndefined();
+      expect(res.body.error).not.toContain(h.secondaryCwd);
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
 });

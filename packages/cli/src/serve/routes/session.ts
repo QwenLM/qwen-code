@@ -279,7 +279,7 @@ export function registerSessionRoutes(
   ): WorkspaceRuntime | null => {
     const runtime = resolveRuntimeFromWorkspaceParam(req, res, 'workspace');
     if (runtime === null) return null;
-    if (!runtime.primary && !runtime.trusted) {
+    if (!runtime.trusted) {
       logSessionRoutingFailure(route, 'untrusted_workspace', {
         workspaceId: runtime.workspaceId,
         workspaceCwd: runtime.workspaceCwd,
@@ -1921,7 +1921,11 @@ export function registerSessionRoutes(
       // GET /workspace/%2Fwork%2Fa/sessions).
       const runtime = resolveRuntimeFromWorkspaceParam(req, res, paramName);
       if (runtime === null) return;
-      if (!runtime.primary && !runtime.trusted) {
+      if (
+        paramName === 'workspace'
+          ? !runtime.trusted
+          : !runtime.primary && !runtime.trusted
+      ) {
         logSessionRoutingFailure(route, 'untrusted_workspace', {
           workspaceId: runtime.workspaceId,
           workspaceCwd: runtime.workspaceCwd,
