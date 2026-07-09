@@ -470,6 +470,18 @@ function parseTranscriptReplayState(replay: unknown): {
   const pendingToolCalls = Array.isArray(rawPending)
     ? rawPending.filter(isPendingReplayToolCall)
     : [];
+  if (
+    Array.isArray(rawPending) &&
+    pendingToolCalls.length !== rawPending.length
+  ) {
+    // A cursor from a newer or corrupted daemon can carry pending tool calls
+    // whose shape no longer matches; drop them defensively but log it so an
+    // operator can tell this apart from a genuine "tool never completed".
+    const dropped = rawPending.length - pendingToolCalls.length;
+    debugLogger.warn(
+      `[transcript] replay state dropped ${dropped} of ${rawPending.length} malformed pending tool calls`,
+    );
+  }
   const cumulativeUsage = isCumulativeUsage(replay['cumulativeUsage'])
     ? { ...replay['cumulativeUsage'] }
     : createReplayCumulativeUsage();
