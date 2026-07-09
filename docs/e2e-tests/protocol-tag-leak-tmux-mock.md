@@ -27,6 +27,12 @@ npx vitest run interactive/protocol-tags-interactive.test.ts --retry 0
 
 The interactive test runs the built `dist/cli.js` through a PTY, points it at a fake OpenAI-compatible server, sends a real user prompt, waits for `VISIBLE_TMUX_SUMMARY_DONE`, and asserts that the rendered TUI output does not contain protocol tags or scratchpad text.
 
+## Latest Tmux Evidence
+
+The latest manual tmux replay report with screenshots is tracked in:
+
+- [2026-07-09-protocol-tag-leak-tmux-report.md](./2026-07-09-protocol-tag-leak-tmux-report.md)
+
 ## Manual Tmux Recheck
 
 Use this when a reviewer wants a readable tmux transcript attached to a PR review.
