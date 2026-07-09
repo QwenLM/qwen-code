@@ -371,6 +371,11 @@
           "type": "boolean",
           "default": false
         },
+        "showScrollbar": {
+          "description": "Show the auto-hiding scrollbar in the in-app scrollable viewport (Virtualized History). The bar appears while scrolling and fades out when idle. Disable to hide it entirely.",
+          "type": "boolean",
+          "default": true
+        },
         "shellOutputMaxLines": {
           "description": "Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.",
           "type": "number",

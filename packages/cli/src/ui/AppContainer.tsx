@@ -207,11 +207,6 @@ import {
   type RenderMode,
 } from './contexts/RenderModeContext.js';
 import { TerminalOutputProvider } from './contexts/TerminalOutputContext.js';
-import {
-  ThinkingViewerProvider,
-  type ThinkingViewerData,
-} from './contexts/ThinkingViewerContext.js';
-import { ThinkingViewer } from './components/ThinkingViewer.js';
 import { TranscriptView } from './components/TranscriptView.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
 import {
@@ -572,20 +567,6 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const [userMessages, setUserMessages] = useState<string[]>([]);
 
-  // Thinking viewer overlay state
-  const [thinkingViewerData, setThinkingViewerData] =
-    useState<ThinkingViewerData | null>(null);
-  const openThinkingViewer = useCallback((data: ThinkingViewerData) => {
-    // The transcript owns the whole screen and renders ahead of the thinking
-    // viewer; opening the viewer underneath it would queue a stale popup that
-    // surfaces the instant the transcript closes.
-    if (isTranscriptOpenRef.current) return;
-    setThinkingViewerData(data);
-  }, []);
-  const closeThinkingViewer = useCallback(() => {
-    setThinkingViewerData(null);
-  }, []);
-
   // Transcript full-detail screen (Ctrl+O). Freezes a snapshot of the
   // conversation at entry time. Both committed history and the streaming
   // `pendingHistoryItems` are stored as shallow copies (`.slice()` / spread):
@@ -606,8 +587,25 @@ export const AppContainer = (props: AppContainerProps) => {
     setTranscriptFreeze(null);
   }, []);
 
-  // Alt+T inline expansion toggle for thinking blocks
+  // Alt+T inline expansion toggle for thinking blocks (expands all at once).
   const [thoughtExpanded, setThoughtExpanded] = useState(false);
+  // Per-thought inline expansion: head ids the user expanded by clicking the
+  // collapsed thinking line (VP mode). Replaces the old full-screen viewer —
+  // the thought expands in place and scrolls with the conversation.
+  const [expandedThoughtHeadIds, setExpandedThoughtHeadIds] = useState<
+    ReadonlySet<number>
+  >(() => new Set<number>());
+  const toggleThoughtExpanded = useCallback((headId: number) => {
+    setExpandedThoughtHeadIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(headId)) {
+        next.delete(headId);
+      } else {
+        next.add(headId);
+      }
+      return next;
+    });
+  }, []);
 
   // Terminal and layout hooks
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
@@ -1081,11 +1079,12 @@ export const AppContainer = (props: AppContainerProps) => {
   // re-reading `mergedHistory` / `allVirtualItems` on whatever state
   // change triggered refreshStatic (Ctrl+O, model change, etc.).
   const useTerminalBuffer = settings.merged.ui?.useTerminalBuffer ?? false;
+  const showScrollbar = settings.merged.ui?.showScrollbar ?? true;
   const refreshStatic = useCallback(() => {
     // While the transcript (alt-screen) owns the whole screen, suppress static
     // refreshes (e.g. resize-settle repaints) so they don't write into / reorder
     // the normal-buffer scrollback that is currently hidden behind the alt
-    // screen. Mirrors ThinkingViewer's overlay model. On transcript close the
+    // screen. On transcript close the
     // AlternateScreen unmount restores the normal buffer; the next legitimate
     // refreshStatic (model change, Alt+T, etc.) repaints as usual.
     if (isTranscriptOpenRef.current) {
@@ -2336,9 +2335,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const pendingForTranscriptRef = useRef(pendingHistoryItems);
   pendingForTranscriptRef.current = pendingHistoryItems;
   const openTranscript = useCallback(() => {
-    // Clear any pending thinking viewer so it can't resurface as a stale popup
-    // when the transcript closes (the transcript renders ahead of it).
-    setThinkingViewerData(null);
     setTranscriptFreeze({
       // Share MainContent's visibility predicate so the transcript shows exactly
       // what the main view shows. Items collapsed on session resume
@@ -3587,20 +3583,6 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
-      // ThinkingViewer owns all input while open.
-      // Ctrl+C / Ctrl+D close the viewer and fall through to quit/exit.
-      if (thinkingViewerData) {
-        if (keyMatchers[Command.QUIT](key) || keyMatchers[Command.EXIT](key)) {
-          closeThinkingViewer();
-        } else if (keyMatchers[Command.TOGGLE_TRANSCRIPT](key)) {
-          // Ctrl+O swaps the thinking viewer for the transcript: fall through
-          // to the TOGGLE_TRANSCRIPT handler below (openTranscript clears the
-          // viewer) instead of swallowing the key with no feedback.
-        } else {
-          return;
-        }
-      }
-
       // Alt+T: toggle inline expansion of thinking blocks.
       if (keyMatchers[Command.TOGGLE_THINKING_EXPANDED](key)) {
         setThoughtExpanded((prev) => !prev);
@@ -3866,8 +3848,6 @@ export const AppContainer = (props: AppContainerProps) => {
       handleDoubleEscRewind,
       vimEnabled,
       vimMode,
-      thinkingViewerData,
-      closeThinkingViewer,
       setThoughtExpanded,
       openTranscript,
       closeTranscript,
@@ -4045,6 +4025,7 @@ export const AppContainer = (props: AppContainerProps) => {
       contextFileNames,
       availableTerminalHeight,
       useTerminalBuffer,
+      showScrollbar,
       mainAreaWidth,
       staticAreaMaxItemHeight,
       staticExtraHeight,
@@ -4186,6 +4167,7 @@ export const AppContainer = (props: AppContainerProps) => {
       contextFileNames,
       availableTerminalHeight,
       useTerminalBuffer,
+      showScrollbar,
       mainAreaWidth,
       staticAreaMaxItemHeight,
       staticExtraHeight,
@@ -4441,9 +4423,13 @@ export const AppContainer = (props: AppContainerProps) => {
     [renderMode, setRenderMode],
   );
 
-  const thinkingViewerValue = useMemo(
-    () => ({ openThinkingViewer }),
-    [openThinkingViewer],
+  const thoughtExpandedValue = useMemo(
+    () => ({
+      allExpanded: thoughtExpanded,
+      expandedHeadIds: expandedThoughtHeadIds,
+      toggle: toggleThoughtExpanded,
+    }),
+    [thoughtExpanded, expandedThoughtHeadIds, toggleThoughtExpanded],
   );
 
   return (
@@ -4456,27 +4442,19 @@ export const AppContainer = (props: AppContainerProps) => {
               startupWarnings,
             }}
           >
-            <ThoughtExpandedProvider value={thoughtExpanded}>
+            <ThoughtExpandedProvider value={thoughtExpandedValue}>
               <RenderModeProvider value={renderModeValue}>
                 <TerminalOutputProvider value={writeRaw}>
-                  <ThinkingViewerProvider value={thinkingViewerValue}>
-                    <ShellFocusContext.Provider value={isFocused}>
-                      {transcriptFreeze ? (
-                        <TranscriptView
-                          items={transcriptItems}
-                          useAlternateScreen={!useTerminalBuffer}
-                        />
-                      ) : thinkingViewerData ? (
-                        <ThinkingViewer
-                          data={thinkingViewerData}
-                          onClose={closeThinkingViewer}
-                          useAlternateScreen={!useTerminalBuffer}
-                        />
-                      ) : (
-                        <App />
-                      )}
-                    </ShellFocusContext.Provider>
-                  </ThinkingViewerProvider>
+                  <ShellFocusContext.Provider value={isFocused}>
+                    {transcriptFreeze ? (
+                      <TranscriptView
+                        items={transcriptItems}
+                        useAlternateScreen={!useTerminalBuffer}
+                      />
+                    ) : (
+                      <App />
+                    )}
+                  </ShellFocusContext.Provider>
                 </TerminalOutputProvider>
               </RenderModeProvider>
             </ThoughtExpandedProvider>
