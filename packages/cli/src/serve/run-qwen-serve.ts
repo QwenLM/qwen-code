@@ -855,7 +855,10 @@ function currentServeFeaturesForRunQwenServe(
     // so the bootstrap `/capabilities` window doesn't briefly under-report them.
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
-    browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts),
+    browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
+      opts,
+      process.env,
+    ),
   });
 }
 
