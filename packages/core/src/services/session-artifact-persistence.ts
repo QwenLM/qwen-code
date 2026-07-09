@@ -314,7 +314,10 @@ export function remapSessionArtifactPayloadForFork(
         sourceSessionId,
         newSessionId,
       );
-      if (!remapped) continue;
+      if (!remapped) {
+        seedForkArtifactIdRemap(artifact, newSessionId, remappedArtifactIds);
+        continue;
+      }
       remappedArtifactIds.set(artifact.id, remapped.id);
       artifacts.push(remapped);
     }
@@ -324,14 +327,16 @@ export function remapSessionArtifactPayloadForFork(
     ]);
     const markerArtifacts = (snapshotMarkerArtifacts ?? [])
       .filter((artifact) => markerIds.has(artifact.id))
-      .filter((artifact) => isForkSafeArtifact(artifact))
       .map((artifact) => {
         const remapped = remapForkSafeSessionArtifactForFork(
           artifact,
           sourceSessionId,
           newSessionId,
         );
-        if (!remapped) return undefined;
+        if (!remapped) {
+          seedForkArtifactIdRemap(artifact, newSessionId, remappedArtifactIds);
+          return undefined;
+        }
         remappedArtifactIds.set(artifact.id, remapped.id);
         return remapped;
       })
@@ -376,6 +381,11 @@ export function remapSessionArtifactPayloadForFork(
           );
           if (!artifact) {
             if (change.action !== 'removed') return undefined;
+            seedForkArtifactIdRemap(
+              change.artifact,
+              newSessionId,
+              remappedArtifactIds,
+            );
             const { artifact: _unsafeArtifact, ...changeWithoutArtifact } =
               change;
             return {
@@ -427,6 +437,33 @@ function remapForkSafeSessionArtifactForFork(
 ): PersistedSessionArtifact | undefined {
   if (!isForkSafeArtifact(artifact)) return undefined;
   return remapSessionArtifactForFork(artifact, sourceSessionId, newSessionId);
+}
+
+function seedForkArtifactIdRemap(
+  artifact: PersistedSessionArtifact,
+  newSessionId: string,
+  remappedArtifactIds: Map<string, string>,
+): void {
+  const identityKey = forkSafeSessionArtifactIdentityKey(artifact);
+  if (!identityKey) return;
+  remappedArtifactIds.set(
+    artifact.id,
+    stableSessionArtifactId(newSessionId, identityKey),
+  );
+}
+
+function forkSafeSessionArtifactIdentityKey(
+  artifact: Pick<
+    PersistedSessionArtifact,
+    'workspacePath' | 'managedId' | 'url'
+  >,
+): string | undefined {
+  if (artifact.workspacePath) return `workspace:${artifact.workspacePath}`;
+  if (artifact.managedId) return `managed:${artifact.managedId}`;
+  if (artifact.url && !hasRestoreUnsafeUrl(artifact.url)) {
+    return `url:${artifact.url}`;
+  }
+  return undefined;
 }
 
 function remapArtifactIdForFork(
@@ -529,10 +566,28 @@ function hasRestoreUnsafeUrl(value: string): boolean {
     }
   }
   const fragment = parsed.hash.slice(1);
-  return (
-    fragment !== '' &&
-    (isSecretLikeText(fragment) || isSecretLikeUrlValue(fragment))
-  );
+  return hasSecretLikeUrlFragment(fragment);
+}
+
+function hasSecretLikeUrlFragment(fragment: string): boolean {
+  if (!fragment) return false;
+  const candidates = new Set([fragment]);
+  try {
+    candidates.add(decodeURIComponent(fragment));
+  } catch {
+    // Keep scanning the raw fragment if URL parsing accepted malformed escape.
+  }
+  for (const candidate of candidates) {
+    if (isSecretLikeText(candidate) || isSecretLikeUrlValue(candidate)) {
+      return true;
+    }
+    for (const [key, value] of new URLSearchParams(candidate)) {
+      if (isSecretLikeText(key) || isSecretLikeUrlValue(value)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function isSecretLikeText(value: string): boolean {

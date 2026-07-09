@@ -578,7 +578,7 @@ describe('session artifact persistence records', () => {
     expect(remapped.changes[0]?.artifact).not.toHaveProperty('clientId');
   });
 
-  it('drops unsafe forked event artifact payloads before persistence', () => {
+  it('drops unsafe forked event artifact payloads but keeps safe identity tombstones', () => {
     const unsafe = artifact(
       'source-session',
       'https://example.com/deleted-unsafe-event',
@@ -612,11 +612,38 @@ describe('session artifact persistence records', () => {
         action: 'removed',
         artifactId: stableSessionArtifactId(
           'forked-session',
-          `fork:source-session:${unsafe.id}`,
+          'url:https://example.com/deleted-unsafe-event',
         ),
         reason: 'explicit',
       },
     ]);
+  });
+
+  it('drops forked event artifact payloads with encoded secret fragments', () => {
+    const unsafe = artifact(
+      'source-session',
+      'https://example.com/report#access%5Ftoken=sk-abcdefghijkl',
+    );
+
+    const remapped = remapSessionArtifactPayloadForFork(
+      {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 'source-session',
+        sequence: 6,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [
+          {
+            action: 'created',
+            artifactId: unsafe.id,
+            artifact: unsafe,
+          },
+        ],
+      },
+      'source-session',
+      'forked-session',
+    ) as SessionArtifactEventRecordPayload;
+
+    expect(remapped.changes).toEqual([]);
   });
 
   it('remaps forked tombstone changes that omit artifact metadata', () => {
@@ -809,7 +836,7 @@ describe('session artifact persistence records', () => {
     expect(remapped.artifacts[0]).not.toHaveProperty('persistenceWarning');
   });
 
-  it('drops unsafe snapshot marker artifacts before fork persistence', () => {
+  it('drops unsafe snapshot marker artifacts but keeps safe identity tombstones', () => {
     const unsafe = artifact(
       'source-session',
       'https://example.com/deleted-unsafe',
@@ -843,13 +870,11 @@ describe('session artifact persistence records', () => {
       'forked-session',
       'url:https://example.com/deleted-safe',
     );
-    expect(remapped.tombstonedIds).toEqual([
-      stableSessionArtifactId(
-        'forked-session',
-        `fork:source-session:${unsafe.id}`,
-      ),
-      forkedSafeId,
-    ]);
+    const forkedUnsafeId = stableSessionArtifactId(
+      'forked-session',
+      'url:https://example.com/deleted-unsafe',
+    );
+    expect(remapped.tombstonedIds).toEqual([forkedUnsafeId, forkedSafeId]);
     expect(remapped.markerArtifacts).toEqual([
       expect.objectContaining({
         id: forkedSafeId,

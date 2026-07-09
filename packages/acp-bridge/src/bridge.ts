@@ -2994,7 +2994,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
     const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
     const historyReplay =
-      action === 'load' ? (req.historyReplay ?? 'response') : 'stream';
+      action === 'load' ? (req.historyReplay ?? 'stream') : 'stream';
 
     const existing = byId.get(req.sessionId);
     if (existing) {

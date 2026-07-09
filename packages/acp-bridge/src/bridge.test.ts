@@ -1404,7 +1404,6 @@ describe('createAcpSessionBridge', () => {
         sessionId: 'persisted-1',
         cwd: WS_A,
         mcpServers: [],
-        _meta: { 'qwen.session.loadReplayMode': 'bulk' },
       },
     ]);
     expect(bridge.sessionCount).toBe(1);
@@ -2008,7 +2007,7 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('restores artifacts from default bulk load replay when no snapshot is available', async () => {
+  it('restores artifacts from response-mode load replay when no snapshot is available', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
       const h = makeChannel({
@@ -2051,6 +2050,7 @@ describe('createAcpSessionBridge', () => {
     const loaded = await bridge.loadSession({
       sessionId: 'persisted-replayed-artifact',
       workspaceCwd: WS_A,
+      historyReplay: 'response',
     });
 
     expect(handles[0]?.agent.loadSessionCalls[0]).toMatchObject({

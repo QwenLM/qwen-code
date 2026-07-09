@@ -2602,10 +2602,28 @@ function hasSecretLikeUrlComponent(parsed: URL): boolean {
     }
   }
   const fragment = parsed.hash.slice(1);
-  return (
-    fragment !== '' &&
-    (isSecretLikeUrlText(fragment) || isSecretLikeUrlValue(fragment))
-  );
+  return hasSecretLikeUrlFragment(fragment);
+}
+
+function hasSecretLikeUrlFragment(fragment: string): boolean {
+  if (!fragment) return false;
+  const candidates = new Set([fragment]);
+  try {
+    candidates.add(decodeURIComponent(fragment));
+  } catch {
+    // Keep scanning the raw fragment if URL parsing accepted malformed escape.
+  }
+  for (const candidate of candidates) {
+    if (isSecretLikeUrlText(candidate) || isSecretLikeUrlValue(candidate)) {
+      return true;
+    }
+    for (const [key, value] of new URLSearchParams(candidate)) {
+      if (isSecretLikeUrlText(key) || isSecretLikeUrlValue(value)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function isSecretLikeUrlText(value: string): boolean {

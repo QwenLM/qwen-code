@@ -1914,6 +1914,18 @@ describe('SessionArtifactStore', () => {
       store.upsertMany(
         [
           {
+            title: 'Encoded fragment token',
+            url: 'https://example.com/report#access%5Ftoken=abc',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'url' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
             title: 'Fragment token',
             url: 'https://example.com/report#access_token=abc',
           },
