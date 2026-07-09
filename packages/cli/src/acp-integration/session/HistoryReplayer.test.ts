@@ -801,6 +801,115 @@ describe('HistoryReplayer', () => {
     });
   });
 
+  describe('goal card replay', () => {
+    const goalRecord = (
+      ...outputHistoryItems: Array<Record<string, unknown>>
+    ): ChatRecord =>
+      ({
+        uuid: 'goal-uuid',
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'slash_command',
+        cwd: '/test',
+        version: '1.0.0',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/goal',
+          outputHistoryItems,
+        },
+      }) as unknown as ChatRecord;
+
+    const goalStatuses = () =>
+      sentUpdates()
+        .map((u) => u['_meta'] as Record<string, unknown> | undefined)
+        .map((meta) => meta?.['goalStatus'])
+        .filter(Boolean);
+
+    it('re-emits a persisted goal card as _meta.goalStatus, without the type field', async () => {
+      await replayer.replay([
+        goalRecord({
+          type: 'goal_status',
+          kind: 'set',
+          condition: 'ship it',
+          setAt: 1234,
+        }),
+      ]);
+
+      expect(goalStatuses()).toEqual([
+        { kind: 'set', condition: 'ship it', setAt: 1234 },
+      ]);
+    });
+
+    it('re-emits terminal goal cards', async () => {
+      await replayer.replay([
+        goalRecord({
+          type: 'goal_status',
+          kind: 'achieved',
+          condition: 'ship it',
+          iterations: 3,
+          durationMs: 900,
+          lastReason: 'tests pass',
+        }),
+      ]);
+
+      expect(goalStatuses()).toEqual([
+        {
+          kind: 'achieved',
+          condition: 'ship it',
+          iterations: 3,
+          durationMs: 900,
+          lastReason: 'tests pass',
+        },
+      ]);
+    });
+
+    it('skips per-iteration checking cards so a long TUI goal loop does not flood replay', async () => {
+      await replayer.replay([
+        goalRecord({ type: 'goal_status', kind: 'set', condition: 'ship it' }),
+        goalRecord({
+          type: 'goal_status',
+          kind: 'checking',
+          condition: 'ship it',
+          iterations: 1,
+        }),
+        goalRecord({
+          type: 'goal_status',
+          kind: 'checking',
+          condition: 'ship it',
+          iterations: 2,
+        }),
+      ]);
+
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
+    });
+
+    it('does not fall through to the plain-text path for goal cards', async () => {
+      await replayer.replay([
+        goalRecord({ type: 'goal_status', kind: 'set', condition: 'ship it' }),
+      ]);
+
+      expect(sentUpdates()).toHaveLength(1);
+      expect(sentUpdates()[0]['content']).toEqual({ type: 'text', text: '' });
+    });
+
+    it('still replays non-goal output items as agent text', async () => {
+      await replayer.replay([
+        goalRecord(
+          { type: 'goal_status', kind: 'set', condition: 'ship it' },
+          { type: 'assistant', text: 'hello' },
+        ),
+      ]);
+
+      const texts = sentUpdates()
+        .map((u) => (u['content'] as Record<string, unknown>)?.['text'])
+        .filter(Boolean);
+      expect(texts).toEqual(['hello']);
+      expect(goalStatuses()).toHaveLength(1);
+    });
+  });
+
   describe('mixed record types', () => {
     it('should handle a complete conversation replay', async () => {
       const records: ChatRecord[] = [

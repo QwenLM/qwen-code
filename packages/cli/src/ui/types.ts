@@ -566,7 +566,29 @@ export type HistoryItemDoctor = HistoryItemBase & {
 };
 
 export type GoalStatusKind =
-  'set' | 'achieved' | 'cleared' | 'failed' | 'aborted' | 'checking';
+  | 'set'
+  | 'achieved'
+  | 'cleared'
+  | 'failed'
+  | 'aborted'
+  | 'checking';
+
+export const GOAL_STATUS_KINDS = [
+  'set',
+  'achieved',
+  'cleared',
+  'failed',
+  'aborted',
+  'checking',
+] as const satisfies readonly GoalStatusKind[];
+
+/** Narrows an untrusted value (e.g. a persisted transcript field). */
+export function isGoalStatusKind(value: unknown): value is GoalStatusKind {
+  return (
+    typeof value === 'string' &&
+    (GOAL_STATUS_KINDS as readonly string[]).includes(value)
+  );
+}
 
 export const TERMINAL_GOAL_STATUS_KINDS = [
   'achieved',

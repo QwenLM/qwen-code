@@ -313,6 +313,10 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     updatedModelProviders: {},
   }),
   unregisterGoalHook: vi.fn(),
+  // Reached through the real `ui/utils/restoreGoal.js` on the resume path.
+  registerGoalHook: vi.fn(),
+  setGoalTerminalObserver: vi.fn(),
+  setLastGoalTerminal: vi.fn(),
   uiTelemetryService: {
     removeSession: vi.fn(),
   },
@@ -628,6 +632,7 @@ import {
   applyProviderInstallPlan,
   Storage,
   unregisterGoalHook,
+  registerGoalHook,
   startEventLoopLagMonitor,
   registerAcpEventLoopLagGauge,
 } from '@qwen-code/qwen-code-core';
@@ -7872,6 +7877,179 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       code: -32002,
       data: { uri: 'session:persisted-missing' },
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  /**
+   * A persisted `system` / `slash_command` record carrying goal cards — the only
+   * place a daemon transcript stores them.
+   */
+  function goalRecord(...outputHistoryItems: Array<Record<string, unknown>>) {
+    return {
+      uuid: 'goal-rec',
+      parentUuid: null,
+      sessionId: 'persisted-1',
+      timestamp: new Date(0).toISOString(),
+      type: 'system',
+      subtype: 'slash_command',
+      cwd: '/tmp',
+      version: '1.0.0',
+      systemPayload: {
+        phase: 'result',
+        rawCommand: '/goal',
+        outputHistoryItems,
+      },
+    };
+  }
+
+  /** Lets `restoreGoalFromHistory` past its trust / hook-policy gates. */
+  function allowGoalRestore(innerConfig: Record<string, unknown>) {
+    innerConfig['isTrustedFolder'] = vi.fn().mockReturnValue(true);
+    innerConfig['getDisableAllHooks'] = vi.fn().mockReturnValue(false);
+    innerConfig['getHookSystem'] = vi.fn().mockReturnValue({
+      addFunctionHook: vi.fn().mockReturnValue('hook-1'),
+      removeFunctionHook: vi.fn().mockReturnValue(true),
+    });
+  }
+
+  it('loadSession re-registers the goal hook when the transcript ends on an unsatisfied goal', async () => {
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [
+          goalRecord({
+            type: 'goal_status',
+            kind: 'set',
+            condition: 'ship it',
+            setAt: 5,
+          }),
+          goalRecord({
+            type: 'goal_status',
+            kind: 'checking',
+            condition: 'ship it',
+            iterations: 4,
+          }),
+        ],
+      },
+    });
+    allowGoalRestore(innerConfig as unknown as Record<string, unknown>);
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    expect(registerGoalHook).toHaveBeenCalledWith({
+      config: innerConfig,
+      sessionId: 'persisted-1',
+      condition: 'ship it',
+      tokensAtStart: 0,
+      // Carried across resume so MAX_GOAL_ITERATIONS stays a cross-resume cap.
+      initialIterations: 4,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession does not revive a goal the transcript already recorded as achieved', async () => {
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [
+          goalRecord({
+            type: 'goal_status',
+            kind: 'set',
+            condition: 'ship it',
+            setAt: 5,
+          }),
+          goalRecord({
+            type: 'goal_status',
+            kind: 'achieved',
+            condition: 'ship it',
+            iterations: 4,
+            durationMs: 900,
+          }),
+        ],
+      },
+    });
+    allowGoalRestore(innerConfig as unknown as Record<string, unknown>);
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    expect(registerGoalHook).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('unstable_resumeSession also re-registers the goal hook', async () => {
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [
+          goalRecord({
+            type: 'goal_status',
+            kind: 'set',
+            condition: 'keep going',
+            setAt: 5,
+          }),
+        ],
+      },
+    });
+    allowGoalRestore(innerConfig as unknown as Record<string, unknown>);
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.unstable_resumeSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    expect(registerGoalHook).toHaveBeenCalledWith(
+      expect.objectContaining({
+        condition: 'keep going',
+        initialIterations: 0,
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession leaves the goal hook alone when hooks are disabled by policy', async () => {
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [
+          goalRecord({
+            type: 'goal_status',
+            kind: 'set',
+            condition: 'ship it',
+            setAt: 5,
+          }),
+        ],
+      },
+    });
+    // makeRestoreInnerConfig defaults to getDisableAllHooks() === true.
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    expect(registerGoalHook).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

@@ -262,6 +262,10 @@ import {
   formatContextUsageText,
 } from '../ui/commands/contextCommand.js';
 import type { HistoryItemContextUsage } from '../ui/types.js';
+import {
+  collectGoalStatusItemsFromRecords,
+  restoreGoalFromHistory,
+} from '../ui/utils/restoreGoal.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
 const QWEN_ACP_LOCAL_READ_ROOTS_ENV = 'QWEN_ACP_LOCAL_READ_ROOTS';
@@ -3171,6 +3175,7 @@ class QwenAgent implements Agent {
     }
 
     await this.#restoreWorktreeOnResume(config, session);
+    this.#restoreGoalOnResume(config);
 
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
@@ -3228,6 +3233,7 @@ class QwenAgent implements Agent {
     );
 
     await this.#restoreWorktreeOnResume(config, session);
+    this.#restoreGoalOnResume(config);
 
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
@@ -3260,6 +3266,34 @@ class QwenAgent implements Agent {
       }
     } catch (error) {
       debugLogger.warn(`ACP worktree restore failed: ${error}`);
+    }
+  }
+
+  /**
+   * Re-registers the `/goal` Stop hook when a resumed transcript ends on an
+   * unsatisfied goal — the daemon counterpart of the TUI's resume restore.
+   * Without this the goal loop silently dies whenever a session is reloaded or
+   * `qwen serve` restarts, even though the transcript still shows it as active.
+   *
+   * The terminal observer is installed by the `Session` constructor, so the
+   * `addItem` bridge that `restoreGoalFromHistory` takes in the TUI is not
+   * needed here. Best-effort: a failed restore must not block session load.
+   */
+  #restoreGoalOnResume(config: Config): void {
+    try {
+      const records = config.getResumedSessionData()?.conversation.messages;
+      if (!records?.length) return;
+      const restored = restoreGoalFromHistory(
+        collectGoalStatusItemsFromRecords(records),
+        config,
+      );
+      if (restored.restored) {
+        debugLogger.info(
+          `ACP goal restored sessionId=${config.getSessionId()} condition=${restored.condition}`,
+        );
+      }
+    } catch (error) {
+      debugLogger.warn(`ACP goal restore failed: ${error}`);
     }
   }
 

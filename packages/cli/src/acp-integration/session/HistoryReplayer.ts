@@ -23,6 +23,7 @@ import {
   formatHistoryGapNotice,
   indexGapsByChild,
 } from '../../ui/utils/history-gap-notice.js';
+import { parseGoalStatusItem } from '../../ui/utils/restoreGoal.js';
 
 export const MISSING_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
@@ -378,6 +379,13 @@ export class HistoryReplayer {
    * Replays a slash_command system record by re-emitting its output as an
    * agent message chunk. This allows Zed to reconstruct the correct turn
    * structure (user → agent) on session resume without polluting model context.
+   *
+   * Goal cards are re-emitted as `_meta.goalStatus` rather than text: they carry
+   * no `text` field, so the plain-text path below would silently drop them and
+   * the client would lose the goal card (and its status pill) on every reload.
+   * Per-iteration `checking` cards are skipped — a TUI transcript persists one
+   * per stop-hook turn, and clients suppress them as noise. Skipping costs no
+   * fidelity: goal restore reads the records directly, not this replay.
    */
   private async replaySlashCommandResult(record: ChatRecord): Promise<void> {
     const payload = record.systemPayload as
@@ -387,6 +395,14 @@ export class HistoryReplayer {
       return;
     }
     for (const item of payload.outputHistoryItems) {
+      const goalStatus = parseGoalStatusItem(item);
+      if (goalStatus) {
+        if (goalStatus.kind !== 'checking') {
+          const { type: _type, ...status } = goalStatus;
+          await this.messageEmitter.emitGoalStatus(status);
+        }
+        continue;
+      }
       const text = typeof item['text'] === 'string' ? item['text'] : '';
       if (text) {
         await this.messageEmitter.emitAgentMessage(

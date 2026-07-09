@@ -9,15 +9,18 @@ import {
   setGoalTerminalObserver,
   setLastGoalTerminal,
   unregisterGoalHook,
+  type ChatRecord,
   type Config,
   type GoalTerminalEvent,
   type GoalTerminalKind,
+  type SlashCommandRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import {
+  isGoalStatusKind,
   isTerminalGoalStatusKind,
   MessageType,
-  type HistoryItem,
   type HistoryItemGoalStatus,
+  type HistoryItemWithoutId,
 } from '../types.js';
 
 /**
@@ -32,7 +35,7 @@ import {
  * iteration, so they restore at 0.
  */
 export function findGoalToRestore(
-  history: HistoryItem[],
+  history: readonly HistoryItemWithoutId[],
 ): { condition: string; iterations: number } | null {
   for (let i = history.length - 1; i >= 0; i--) {
     const item = history[i];
@@ -55,7 +58,7 @@ export function findGoalToRestore(
  * goal" cache so empty `/goal` after a reload still shows the summary card.
  */
 export function findLastTerminalGoal(
-  history: HistoryItem[],
+  history: readonly HistoryItemWithoutId[],
 ): GoalTerminalEvent | null {
   for (let i = history.length - 1; i >= 0; i--) {
     const item = history[i];
@@ -73,8 +76,71 @@ export function findLastTerminalGoal(
   return null;
 }
 
-type GoalStatusItem = Omit<HistoryItemGoalStatus, 'id'>;
+export type GoalStatusItem = Omit<HistoryItemGoalStatus, 'id'>;
 type AddGoalStatusItem = (item: GoalStatusItem, timestamp: number) => void;
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+/**
+ * Rebuilds a goal card from one persisted `outputHistoryItems` entry, or
+ * returns null when the entry is not a well-formed goal card. Transcripts store
+ * these as loose `Record<string, unknown>`, so every field is re-validated
+ * rather than cast.
+ */
+export function parseGoalStatusItem(
+  item: Record<string, unknown>,
+): GoalStatusItem | null {
+  if (item['type'] !== MessageType.GOAL_STATUS) return null;
+  const kind = item['kind'];
+  const condition = item['condition'];
+  if (!isGoalStatusKind(kind) || typeof condition !== 'string') return null;
+
+  const iterations = finiteNumber(item['iterations']);
+  const setAt = finiteNumber(item['setAt']);
+  const durationMs = finiteNumber(item['durationMs']);
+  const lastReason =
+    typeof item['lastReason'] === 'string' ? item['lastReason'] : undefined;
+
+  return {
+    type: MessageType.GOAL_STATUS,
+    kind,
+    condition,
+    ...(iterations !== undefined ? { iterations } : {}),
+    ...(setAt !== undefined ? { setAt } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(lastReason !== undefined ? { lastReason } : {}),
+  };
+}
+
+/**
+ * Extracts the goal cards a transcript persisted inside its `system` /
+ * `slash_command` records, oldest first. This is the daemon-side counterpart to
+ * the TUI's in-memory `HistoryItem[]`: on the ACP path no `HistoryItem[]` ever
+ * exists, so `findGoalToRestore` / `findLastTerminalGoal` are fed from here.
+ */
+export function collectGoalStatusItemsFromRecords(
+  records: readonly ChatRecord[],
+): GoalStatusItem[] {
+  const items: GoalStatusItem[] = [];
+  for (const record of records) {
+    if (record.type !== 'system' || record.subtype !== 'slash_command') {
+      continue;
+    }
+    const payload = record.systemPayload as
+      | SlashCommandRecordPayload
+      | undefined;
+    if (payload?.phase !== 'result') continue;
+    for (const raw of payload.outputHistoryItems ?? []) {
+      const item = parseGoalStatusItem(raw);
+      if (item) items.push(item);
+    }
+  }
+  return items;
+}
 
 export function goalTerminalEventToHistoryItem(
   event: GoalTerminalEvent,
@@ -128,7 +194,7 @@ export function installGoalTerminalObserver(args: {
  * longer cancel.
  */
 export function restoreGoalFromHistory(
-  history: HistoryItem[],
+  history: readonly HistoryItemWithoutId[],
   config: Config,
   addItem?: AddGoalStatusItem,
 ): { restored: true; condition: string } | { restored: false } {

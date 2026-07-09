@@ -170,6 +170,10 @@ import {
   MessageType,
   type HistoryItemGoalStatus,
 } from '../../ui/types.js';
+import {
+  goalTerminalEventToHistoryItem,
+  recordGoalStatusItem,
+} from '../../ui/utils/restoreGoal.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
@@ -1054,14 +1058,30 @@ export class Session implements SessionContext {
           `Failed to emit goal terminal update: ${this.#formatError(error)}`,
         );
       });
+      // The wire update is live-only. Persist the terminal card too, so a
+      // resumed session sees the goal as finished instead of re-registering it
+      // from the still-present `set` card.
+      recordGoalStatusItem(this.config, goalTerminalEventToHistoryItem(event));
     });
   }
 
+  /**
+   * Emits a goal card and persists it to the transcript. Both `set` and
+   * `cleared` reach the client this way — from `#emitGoalStatusItems` for a
+   * `/goal` prompt, and from the `sessionGoalClear` ext method — so recording
+   * here (rather than at each call site) keeps the transcript in step with the
+   * hook. Replay goes through `messageEmitter.emitGoalStatus` directly and so
+   * does not re-record.
+   */
   emitGoalStatus(status: Omit<HistoryItemGoalStatus, 'id' | 'type'>): void {
     void this.messageEmitter.emitGoalStatus(status).catch((error) => {
       debugLogger.warn(
         `Failed to emit goal status update: ${this.#formatError(error)}`,
       );
+    });
+    recordGoalStatusItem(this.config, {
+      type: MessageType.GOAL_STATUS,
+      ...status,
     });
   }
 

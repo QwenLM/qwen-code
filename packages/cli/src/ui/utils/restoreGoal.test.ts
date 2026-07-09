@@ -11,12 +11,15 @@ import {
   getLastGoalTerminal,
   notifyGoalTerminal,
   setActiveGoal,
+  type ChatRecord,
   type Config,
 } from '@qwen-code/qwen-code-core';
 import type { HistoryItem } from '../types.js';
 import {
+  collectGoalStatusItemsFromRecords,
   findGoalToRestore,
   findLastTerminalGoal,
+  parseGoalStatusItem,
   restoreGoalFromHistory,
 } from './restoreGoal.js';
 
@@ -321,6 +324,178 @@ describe('findLastTerminalGoal', () => {
       kind: 'failed',
       condition: 'goal B',
       lastReason: 'external service unavailable',
+    });
+  });
+});
+
+const slashCommandRecord = (
+  outputHistoryItems: Array<Record<string, unknown>>,
+  phase: 'invocation' | 'result' = 'result',
+): ChatRecord =>
+  ({
+    uuid: 'rec-1',
+    parentUuid: null,
+    sessionId: 'sess-1',
+    timestamp: new Date(0).toISOString(),
+    type: 'system',
+    subtype: 'slash_command',
+    cwd: '/w',
+    version: '1.0.0',
+    systemPayload: { phase, rawCommand: '/goal', outputHistoryItems },
+  }) as unknown as ChatRecord;
+
+describe('parseGoalStatusItem', () => {
+  it('rebuilds a goal card, dropping absent optional fields', () => {
+    expect(
+      parseGoalStatusItem({
+        type: 'goal_status',
+        kind: 'set',
+        condition: 'ship it',
+        setAt: 42,
+      }),
+    ).toEqual({
+      type: 'goal_status',
+      kind: 'set',
+      condition: 'ship it',
+      setAt: 42,
+    });
+  });
+
+  it('keeps iterations, durationMs and lastReason when present', () => {
+    expect(
+      parseGoalStatusItem({
+        type: 'goal_status',
+        kind: 'achieved',
+        condition: 'ship it',
+        iterations: 3,
+        durationMs: 1000,
+        lastReason: 'tests pass',
+      }),
+    ).toEqual({
+      type: 'goal_status',
+      kind: 'achieved',
+      condition: 'ship it',
+      iterations: 3,
+      durationMs: 1000,
+      lastReason: 'tests pass',
+    });
+  });
+
+  it('returns null for non-goal items', () => {
+    expect(parseGoalStatusItem({ type: 'assistant', text: 'hi' })).toBeNull();
+  });
+
+  it('returns null for an unknown kind', () => {
+    expect(
+      parseGoalStatusItem({
+        type: 'goal_status',
+        kind: 'bogus',
+        condition: 'x',
+      }),
+    ).toBeNull();
+  });
+
+  it('returns null when condition is missing or not a string', () => {
+    expect(
+      parseGoalStatusItem({ type: 'goal_status', kind: 'set' }),
+    ).toBeNull();
+    expect(
+      parseGoalStatusItem({ type: 'goal_status', kind: 'set', condition: 7 }),
+    ).toBeNull();
+  });
+
+  it('drops non-finite numeric fields rather than propagating NaN', () => {
+    expect(
+      parseGoalStatusItem({
+        type: 'goal_status',
+        kind: 'set',
+        condition: 'x',
+        setAt: Number.NaN,
+        iterations: '3',
+      }),
+    ).toEqual({ type: 'goal_status', kind: 'set', condition: 'x' });
+  });
+});
+
+describe('collectGoalStatusItemsFromRecords', () => {
+  it('collects goal cards from slash_command result records, oldest first', () => {
+    const items = collectGoalStatusItemsFromRecords([
+      slashCommandRecord([
+        { type: 'goal_status', kind: 'set', condition: 'goal A' },
+      ]),
+      slashCommandRecord([
+        { type: 'assistant', text: 'chatter' },
+        {
+          type: 'goal_status',
+          kind: 'checking',
+          condition: 'goal A',
+          iterations: 2,
+        },
+      ]),
+    ]);
+    expect(items.map((i) => i.kind)).toEqual(['set', 'checking']);
+    expect(items[1]).toMatchObject({ condition: 'goal A', iterations: 2 });
+  });
+
+  it('ignores invocation-phase records', () => {
+    expect(
+      collectGoalStatusItemsFromRecords([
+        slashCommandRecord(
+          [{ type: 'goal_status', kind: 'set', condition: 'goal A' }],
+          'invocation',
+        ),
+      ]),
+    ).toEqual([]);
+  });
+
+  it('ignores non-slash_command system records and other record types', () => {
+    const compression = {
+      ...slashCommandRecord([]),
+      subtype: 'chat_compression',
+    } as ChatRecord;
+    const user = { ...slashCommandRecord([]), type: 'user' } as ChatRecord;
+    expect(collectGoalStatusItemsFromRecords([compression, user])).toEqual([]);
+  });
+
+  it('feeds findGoalToRestore so a daemon transcript restores its iteration count', () => {
+    const items = collectGoalStatusItemsFromRecords([
+      slashCommandRecord([
+        { type: 'goal_status', kind: 'set', condition: 'goal A' },
+      ]),
+      slashCommandRecord([
+        {
+          type: 'goal_status',
+          kind: 'checking',
+          condition: 'goal A',
+          iterations: 4,
+        },
+      ]),
+    ]);
+    expect(findGoalToRestore(items)).toEqual({
+      condition: 'goal A',
+      iterations: 4,
+    });
+  });
+
+  it('yields no restorable goal once the transcript records a terminal card', () => {
+    const items = collectGoalStatusItemsFromRecords([
+      slashCommandRecord([
+        { type: 'goal_status', kind: 'set', condition: 'goal A' },
+      ]),
+      slashCommandRecord([
+        {
+          type: 'goal_status',
+          kind: 'achieved',
+          condition: 'goal A',
+          iterations: 2,
+          durationMs: 500,
+        },
+      ]),
+    ]);
+    expect(findGoalToRestore(items)).toBeNull();
+    expect(findLastTerminalGoal(items)).toMatchObject({
+      kind: 'achieved',
+      condition: 'goal A',
     });
   });
 });
