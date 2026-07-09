@@ -102,7 +102,7 @@ function buildChromeDevToolsMcpRuntimeConfig(
   ) {
     return undefined;
   }
-  const command = resolveCdpMcpCommand();
+  const command = resolveCdpMcpCommand(process.env);
   if (!command) {
     writeStderrLine(
       `qwen serve: set ${QWEN_CDP_MCP_COMMAND_ENV} to enable browser automation MCP (no adapter is bundled)`,
