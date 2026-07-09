@@ -1256,13 +1256,16 @@ export function KeypressProvider({
     const pasteModePrefixBuf = Buffer.from(PASTE_MODE_PREFIX);
     const pasteModeSuffixBuf = Buffer.from(PASTE_MODE_SUFFIX);
 
-    function partialMarkerTailLength(chunk: Buffer, marker: Buffer): number {
-      // Start from min(chunk.length, marker.length - 1) down to 2.
-      // We skip length 1 because a lone ESC (0x1b) is the start of ALL
-      // ANSI escape sequences, not just paste markers — holding it back
-      // would swallow ESC keypresses and break readline's CSI parsing.
+    function partialMarkerTailLength(
+      chunk: Buffer,
+      marker: Buffer,
+      minLen: number = 2,
+    ): number {
+      // Default minLen=2 skips lone ESC (0x1b) which starts ALL ANSI
+      // sequences. In the paste-accumulating path, use minLen=1 since
+      // ESC there is most likely the start of paste-end, not a keypress.
       const maxCheck = Math.min(chunk.length, marker.length - 1);
-      for (let len = maxCheck; len >= 2; len--) {
+      for (let len = maxCheck; len >= minLen; len--) {
         const tail = chunk.subarray(chunk.length - len);
         if (marker.subarray(0, len).equals(tail)) {
           return len;
@@ -1368,6 +1371,7 @@ export function KeypressProvider({
             const tailLen = partialMarkerTailLength(
               remaining,
               pasteModeSuffixBuf,
+              1,
             );
             const contentEnd = remaining.length - tailLen;
             if (contentEnd > 0) {
