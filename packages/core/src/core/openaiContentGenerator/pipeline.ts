@@ -67,6 +67,23 @@ export class StreamInactivityTimeoutError extends Error {
 }
 
 /**
+ * Provider-specific output-budget keys that stand in for `max_tokens` on the
+ * wire (e.g. GPT-5 / o-series use `max_completion_tokens`). When a user's
+ * samplingParams already carries one of these, the window clamp must not also
+ * inject `max_tokens`: sending the pair double-specifies the output budget and
+ * some endpoints reject it.
+ */
+const PROVIDER_OUTPUT_BUDGET_KEYS = ['max_completion_tokens', 'max_new_tokens'];
+
+function hasProviderOutputBudgetKey(samplingParams: {
+  [key: string]: unknown;
+}): boolean {
+  return PROVIDER_OUTPUT_BUDGET_KEYS.some(
+    (key) => samplingParams[key] !== undefined,
+  );
+}
+
+/**
  * Resolve the effective streaming inactivity timeout (ms). Precedence:
  * explicit `ContentGeneratorConfig.streamIdleTimeoutMs` (programmatic, wins —
  * including `0` to disable) > the `QWEN_STREAM_IDLE_TIMEOUT_MS` env deployment
@@ -684,19 +701,25 @@ export class ContentGenerationPipeline {
     // When samplingParams is set, its keys pass through to the wire verbatim.
     // This lets users target provider-specific parameter names
     // (e.g. `max_completion_tokens` for GPT-5 / o-series) without a client release.
-    // One exception: a user-set max_tokens is a ceiling, not an exemption from
-    // the window clamp — when the request carries a (clamped) maxOutputTokens
-    // and it is lower, it wins, so `prompt + max_tokens ≤ window` holds even
-    // for samplingParams users. When samplingParams omits max_tokens entirely,
-    // nothing is injected (the user opted into verbatim wire control).
-    // When absent, the historical default behavior applies.
+    // max_tokens is a ceiling, not an exemption from the window clamp: when both
+    // a config max_tokens and the (clamped) request maxOutputTokens are present
+    // the smaller wins, and when samplingParams omits max_tokens the clamped
+    // request value is injected — so `prompt + max_tokens ≤ window` holds for
+    // samplingParams users too, matching the Anthropic path. The injection is
+    // suppressed when samplingParams already carries a provider-specific
+    // output-budget key (e.g. `max_completion_tokens`): adding `max_tokens`
+    // alongside it would double the budget and some endpoints (o-series) reject
+    // the pair, so those configs stay verbatim.
     if (configSamplingParams !== undefined) {
-      const reconciled = reconcileMaxTokens(
-        configSamplingParams.max_tokens,
-        request.config?.maxOutputTokens,
-      );
-      if (reconciled !== undefined) {
-        return { ...configSamplingParams, max_tokens: reconciled };
+      const requestMaxTokens = request.config?.maxOutputTokens;
+      const maxTokens =
+        reconcileMaxTokens(configSamplingParams.max_tokens, requestMaxTokens) ??
+        configSamplingParams.max_tokens ??
+        (hasProviderOutputBudgetKey(configSamplingParams)
+          ? undefined
+          : requestMaxTokens);
+      if (maxTokens !== undefined) {
+        return { ...configSamplingParams, max_tokens: maxTokens };
       }
       return { ...configSamplingParams };
     }

@@ -2697,6 +2697,43 @@ describe('ContentGenerationPipeline', () => {
       expect(call).not.toHaveProperty('max_tokens');
     });
 
+    it('should inject the window-clamped max_tokens when samplingParams omits it and carries no provider output-budget key', async () => {
+      // Arrange: samplingParams is set but specifies no output budget (no
+      // max_tokens, no provider-specific key). The window clamp
+      // (request.config.maxOutputTokens) must still reach the wire as
+      // max_tokens so these users get the same `prompt + max_tokens ≤ window`
+      // protection as everyone else, matching the Anthropic path.
+      mockContentGeneratorConfig.samplingParams = {
+        temperature: 0.7,
+      } as ContentGeneratorConfig['samplingParams'];
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { maxOutputTokens: 777 },
+      };
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'r' } }],
+      });
+
+      // Act
+      await pipeline.execute(request, 'prompt-id');
+
+      // Assert: clamped value injected as max_tokens; other keys pass through.
+      const call = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(call).toMatchObject({
+        temperature: 0.7,
+        max_tokens: 777,
+      });
+    });
+
     it('should preserve historical default behavior when samplingParams is absent', async () => {
       // Arrange: no samplingParams — request.config.maxOutputTokens must still
       // fall through to max_tokens on the wire (original behavior unchanged).
