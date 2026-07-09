@@ -34,24 +34,13 @@ jobs:
             ]);
             const highRiskExtension =
               /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|sh|bat|ps1|node|dylib|so)(?:$|[\s)"'\]>?#])/i;
-            const githubFileAttachment =
-              /(?:https?:\/\/)?github\.com\/user-attachments\/files\//i;
             const linkPattern =
               /https?:\/\/[^\s)"'<>\]]+|\[[^\]]+\]\([^)]+\)/gi;
-            const suspiciousPatchLanguage =
-              /\b(?:patch|fix|binary|installer|injected|payload|node_modules)\b/i;
 
-            const payload = context.payload;
-            const comment = payload.comment;
-            const sender = payload.sender;
-            const association = comment?.author_association ?? '';
-            const body = comment?.body ?? '';
+            const { comment, sender } = context.payload;
+            const association = comment.author_association ?? '';
+            const body = comment.body ?? '';
             const eventName = context.eventName;
-
-            if (!comment) {
-              core.info('No comment payload found; skipping.');
-              return;
-            }
 
             if (
               trustedAssociations.has(association) ||
@@ -65,12 +54,6 @@ jobs:
             const linkSnippets = body.match(linkPattern) ?? [];
             if (linkSnippets.some((snippet) => highRiskExtension.test(snippet))) {
               reasons.push('high-risk file extension in a link or attachment');
-            }
-            if (
-              githubFileAttachment.test(body) &&
-              suspiciousPatchLanguage.test(body)
-            ) {
-              reasons.push('GitHub file attachment with patch-like language');
             }
 
             if (reasons.length === 0) {
@@ -91,9 +74,6 @@ jobs:
                 repo,
                 comment_id: comment.id,
               });
-            } else {
-              core.info(`Unsupported event ${eventName}; skipping.`);
-              return;
             }
 
             await core.summary
@@ -104,7 +84,7 @@ jobs:
                   { data: 'Value', header: true },
                 ],
                 ['Event', eventName],
-                ['Author', comment.user?.login ?? 'unknown'],
+                ['Author', comment.user.login],
                 ['Association', association || 'none'],
                 ['Comment ID', String(comment.id)],
                 ['Reason', reasons.join(', ')],
