@@ -168,7 +168,12 @@ import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
 } from '../config/config.js';
-import { extractRememberErrorCode } from '../serve/workspace-remember-errors.js';
+import {
+  createWorkspaceMemoryExtractionErrorLogger,
+  shouldSuppressRememberErrorDetails,
+  workspaceMemoryFailureCode,
+  workspaceMemoryFailureDiagnostics,
+} from '../serve/workspace-remember-errors.js';
 import { formatWorkspaceMemoryForgetSummary } from '../serve/workspace-memory-summaries.js';
 import { mapSkillConfigToStatus } from '../serve/workspace-skills-mapping.js';
 import {
@@ -275,6 +280,19 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
+
+function workspaceMemoryErrorData(
+  code: string,
+  diagnostics: { details?: string },
+): { errorKind: string; details?: string } {
+  return {
+    errorKind: code,
+    ...(diagnostics.details ? { details: diagnostics.details } : {}),
+  };
+}
+
+const logWorkspaceMemoryExtractionError =
+  createWorkspaceMemoryExtractionErrorLogger(debugLogger);
 
 function parseAcpLocalReadRootsEnv(
   raw = process.env[QWEN_ACP_LOCAL_READ_ROOTS_ENV],
@@ -5854,10 +5872,12 @@ class QwenAgent implements Agent {
         const childSignal = AbortSignal.timeout(
           WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS,
         );
+        let projectRoot = '<unknown>';
         try {
+          projectRoot = this.config.getProjectRoot();
           const result = await runManagedRememberByAgent({
             config: this.config,
-            projectRoot: this.config.getProjectRoot(),
+            projectRoot,
             content: content.trim(),
             contextMode,
             abortSignal: childSignal,
@@ -5867,15 +5887,36 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
+          const diagnostics = workspaceMemoryFailureDiagnostics(
+            err,
+            logWorkspaceMemoryExtractionError,
+          );
+          const code = workspaceMemoryFailureCode(
+            err,
+            'remember_failed',
+            logWorkspaceMemoryExtractionError,
+          );
           if (childSignal.aborted) {
+            const timeoutCode = 'remember_timeout';
+            debugLogger.error('Workspace memory remember timed out:', {
+              projectRoot,
+              code: timeoutCode,
+              details: diagnostics.debugDetails,
+              ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
+            });
             throw new RequestError(
               -32099,
               'Workspace memory remember timed out',
-              { errorKind: 'remember_timeout' },
+              workspaceMemoryErrorData(timeoutCode, diagnostics),
             );
           }
-          const code = extractRememberErrorCode(err);
-          if (code === 'managed_memory_unavailable') {
+          debugLogger.error('Workspace memory remember failed:', {
+            projectRoot,
+            code,
+            details: diagnostics.debugDetails,
+            ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
+          });
+          if (shouldSuppressRememberErrorDetails(code)) {
             throw new RequestError(
               -32009,
               'Managed memory is unavailable for this daemon workspace',
@@ -5884,12 +5925,8 @@ class QwenAgent implements Agent {
           }
           throw new RequestError(
             -32099,
-            err instanceof Error && err.message
-              ? err.message
-              : 'Workspace memory remember failed',
-            {
-              errorKind: code,
-            },
+            'Workspace memory remember failed',
+            workspaceMemoryErrorData(code, diagnostics),
           );
         }
       }
@@ -5921,8 +5958,9 @@ class QwenAgent implements Agent {
         const childSignal = AbortSignal.timeout(
           WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS,
         );
+        let projectRoot = '<unknown>';
         try {
-          const projectRoot = this.config.getProjectRoot();
+          projectRoot = this.config.getProjectRoot();
           const hiddenConfig = createHiddenWorkspaceMemoryConfig(this.config);
           const result = await this.config
             .getMemoryManager()
@@ -5942,26 +5980,47 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
+          const diagnostics = workspaceMemoryFailureDiagnostics(
+            err,
+            logWorkspaceMemoryExtractionError,
+          );
+          const code = workspaceMemoryFailureCode(
+            err,
+            'forget_failed',
+            logWorkspaceMemoryExtractionError,
+          );
           if (childSignal.aborted) {
+            const timeoutCode = 'forget_timeout';
+            debugLogger.error('Workspace memory forget timed out:', {
+              projectRoot,
+              code: timeoutCode,
+              details: diagnostics.debugDetails,
+              ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
+            });
             throw new RequestError(
               -32099,
               'Workspace memory forget timed out',
-              {
-                errorKind: 'forget_timeout',
-              },
+              workspaceMemoryErrorData(timeoutCode, diagnostics),
             );
           }
-          const code = extractRememberErrorCode(err, 'forget_failed');
-          if (code === 'managed_memory_unavailable') {
+          debugLogger.error('Workspace memory forget failed:', {
+            projectRoot,
+            code,
+            details: diagnostics.debugDetails,
+            ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
+          });
+          if (shouldSuppressRememberErrorDetails(code)) {
             throw new RequestError(
               -32009,
               'Managed memory is unavailable for this daemon workspace',
               { errorKind: 'managed_memory_unavailable' },
             );
           }
-          throw new RequestError(-32099, 'Workspace memory forget failed', {
-            errorKind: code,
-          });
+          throw new RequestError(
+            -32099,
+            'Workspace memory forget failed',
+            workspaceMemoryErrorData(code, diagnostics),
+          );
         }
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream: {
@@ -5976,9 +6035,11 @@ class QwenAgent implements Agent {
         const childSignal = AbortSignal.timeout(
           WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS,
         );
+        let projectRoot = '<unknown>';
         try {
+          projectRoot = this.config.getProjectRoot();
           const result = await runManagedAutoMemoryDream(
-            this.config.getProjectRoot(),
+            projectRoot,
             new Date(),
             createHiddenWorkspaceMemoryConfig(this.config),
             childSignal,
@@ -5997,22 +6058,47 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
+          const diagnostics = workspaceMemoryFailureDiagnostics(
+            err,
+            logWorkspaceMemoryExtractionError,
+          );
+          const code = workspaceMemoryFailureCode(
+            err,
+            'dream_failed',
+            logWorkspaceMemoryExtractionError,
+          );
           if (childSignal.aborted) {
-            throw new RequestError(-32099, 'Workspace memory dream timed out', {
-              errorKind: 'dream_timeout',
+            const timeoutCode = 'dream_timeout';
+            debugLogger.error('Workspace memory dream timed out:', {
+              projectRoot,
+              code: timeoutCode,
+              details: diagnostics.debugDetails,
+              ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
             });
+            throw new RequestError(
+              -32099,
+              'Workspace memory dream timed out',
+              workspaceMemoryErrorData(timeoutCode, diagnostics),
+            );
           }
-          const code = extractRememberErrorCode(err, 'dream_failed');
-          if (code === 'managed_memory_unavailable') {
+          debugLogger.error('Workspace memory dream failed:', {
+            projectRoot,
+            code,
+            details: diagnostics.debugDetails,
+            ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
+          });
+          if (shouldSuppressRememberErrorDetails(code)) {
             throw new RequestError(
               -32009,
               'Managed memory is unavailable for this daemon workspace',
               { errorKind: 'managed_memory_unavailable' },
             );
           }
-          throw new RequestError(-32099, 'Workspace memory dream failed', {
-            errorKind: code,
-          });
+          throw new RequestError(
+            -32099,
+            'Workspace memory dream failed',
+            workspaceMemoryErrorData(code, diagnostics),
+          );
         }
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart: {
