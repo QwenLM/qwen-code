@@ -8413,6 +8413,11 @@ class QwenAgent implements Agent {
       skipHooks: true,
       skipSkillManager: true,
       skipFileCheckpointing: true,
+      // Read-only replay: tolerate tools that cannot construct without the
+      // subsystems skipped above (e.g. SkillTool needs the SkillManager). The
+      // registry is only consulted for optional tool_call metadata during
+      // replay, and ToolCallEmitter falls back to the recorded tool name.
+      lenientToolWarmup: true,
     });
     entry.pending = pending;
     this.transcriptReplayConfigCache.set(key, entry);
@@ -8511,14 +8516,6 @@ class QwenAgent implements Agent {
       ...this.argv,
       ...sessionArg,
       continue: false,
-      // SkillTool requires a live SkillManager; replay-only Configs skip it.
-      ...(initializeOptions.skipSkillManager
-        ? {
-            excludeTools: Array.from(
-              new Set([...(this.argv.excludeTools ?? []), ToolNames.SKILL]),
-            ),
-          }
-        : {}),
     };
 
     const config = await loadCliConfig(

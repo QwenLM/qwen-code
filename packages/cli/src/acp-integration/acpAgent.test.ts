@@ -6166,7 +6166,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       .mock.calls.at(-1)?.[1] as CliArgs | undefined;
     expect(transcriptConfigArgv?.sessionId).toBeUndefined();
     expect(transcriptConfigArgv?.resume).toBeUndefined();
-    expect(transcriptConfigArgv?.excludeTools).toContain('skill');
     expect(transcriptConfig.enableFileCheckpointing).not.toHaveBeenCalled();
     expect(transcriptConfig.initialize).toHaveBeenCalledWith({
       sendSdkMcpMessage: expect.any(Function),
@@ -6174,6 +6173,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       skipHooks: true,
       skipSkillManager: true,
       skipFileCheckpointing: true,
+      lenientToolWarmup: true,
     });
 
     mockConnectionState.resolve();
