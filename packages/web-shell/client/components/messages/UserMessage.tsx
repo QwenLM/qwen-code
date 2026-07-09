@@ -13,6 +13,7 @@ import type {
   ComposerTagClickHandler,
   ComposerTagRenderer,
   WebShellComposerTag,
+  WebShellComposerTagIconMap,
   WebShellUserMessagePart,
 } from '../../customization';
 import {
@@ -46,6 +47,7 @@ export const UserMessage = memo(function UserMessage({
   const {
     parseUserMessageContent,
     renderUserMessageContent,
+    composerTagIcons,
     renderComposerTag,
     renderComposerTagTooltip,
     onComposerTagClick,
@@ -70,6 +72,7 @@ export const UserMessage = memo(function UserMessage({
         <UserMessageTag
           key={`${part.tag.id}-${index}`}
           tag={part.tag}
+          composerTagIcons={composerTagIcons}
           renderComposerTag={renderComposerTag}
           renderComposerTagTooltip={renderComposerTagTooltip}
           onComposerTagClick={onComposerTagClick}
@@ -81,6 +84,7 @@ export const UserMessage = memo(function UserMessage({
     images,
     onComposerTagClick,
     parseUserMessageContent,
+    composerTagIcons,
     renderComposerTag,
     renderComposerTagTooltip,
     renderUserMessageContent,
@@ -176,11 +180,13 @@ function getTagText(tag: WebShellComposerTag): string {
 
 function UserMessageTag({
   tag,
+  composerTagIcons,
   renderComposerTag,
   renderComposerTagTooltip,
   onComposerTagClick,
 }: {
   tag: WebShellComposerTag;
+  composerTagIcons: WebShellComposerTagIconMap | undefined;
   renderComposerTag: ComposerTagRenderer | undefined;
   renderComposerTagTooltip: ComposerTagRenderer | undefined;
   onComposerTagClick: ComposerTagClickHandler | undefined;
@@ -192,7 +198,7 @@ function UserMessageTag({
   const rawTagLabel = getComposerTagLabel(tag);
   const tagValue = getComposerTagValue(tag);
   const tagLabel = tag.kind ? '' : rawTagLabel;
-  const iconUrl = tag.icon ?? getComposerTagIconUrl(tag.kind);
+  const iconUrl = tag.icon ?? getComposerTagIconUrl(tag.kind, composerTagIcons);
   return (
     <span
       className={`${styles.messageTag}${

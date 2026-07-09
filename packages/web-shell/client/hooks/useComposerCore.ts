@@ -518,7 +518,7 @@ export function buildComposerPrompt(
   return `${tagText}\n\n${text}`;
 }
 
-export interface WebShellComposerTagPlacement {
+export interface InlineTagPlacement {
   start: number;
   end: number;
   tag: WebShellComposerTag;
@@ -527,7 +527,7 @@ export interface WebShellComposerTagPlacement {
 export function buildComposerPromptWithInlineTagPlacements(
   text: string,
   topTags: readonly WebShellComposerTag[],
-  inlineTags: readonly WebShellComposerTagPlacement[],
+  inlineTags: readonly InlineTagPlacement[],
 ): string {
   return buildComposerPrompt(
     replaceInlineTagPlacements(text, inlineTags),
@@ -537,7 +537,7 @@ export function buildComposerPromptWithInlineTagPlacements(
 
 export function replaceInlineTagPlacements(
   text: string,
-  inlineTags: readonly WebShellComposerTagPlacement[],
+  inlineTags: readonly InlineTagPlacement[],
 ): string {
   const placements = inlineTags
     .filter(
@@ -763,14 +763,14 @@ class ComposerTagWidget extends WidgetType {
     remove.textContent = '×';
     remove.addEventListener('mousedown', (event) => event.preventDefault());
     remove.addEventListener('keydown', (event) => {
-      if (
-        event.key === 'Enter' ||
-        event.key === ' ' ||
-        event.key === 'Backspace' ||
-        event.key === 'Delete'
-      ) {
+      if (event.key === 'Enter' || event.key === ' ') {
         event.stopPropagation();
+        return;
       }
+      if (event.key !== 'Backspace' && event.key !== 'Delete') return;
+      event.preventDefault();
+      event.stopPropagation();
+      remove.click();
     });
     remove.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -805,6 +805,8 @@ class ComposerTagWidget extends WidgetType {
   destroy() {
     this.contentRoot?.unmount();
     this.tooltipRoot?.unmount();
+    this.contentRoot = null;
+    this.tooltipRoot = null;
   }
 
   ignoreEvent(): boolean {
@@ -863,8 +865,8 @@ export function getInlineComposerTags(view: EditorView): WebShellComposerTag[] {
 
 function getInlineComposerTagPlacements(
   view: EditorView,
-): WebShellComposerTagPlacement[] {
-  const placements: WebShellComposerTagPlacement[] = [];
+): InlineTagPlacement[] {
+  const placements: InlineTagPlacement[] = [];
   view.state
     .field(inlineComposerTagField)
     .between(0, view.state.doc.length, (from, to, value) => {
@@ -2335,6 +2337,7 @@ export function useComposerCore(
     );
 
     return () => {
+      view.dispatch({ effects: clearInlineTagsEffect.of() });
       view.destroy();
       viewRef.current = null;
       observer.disconnect();

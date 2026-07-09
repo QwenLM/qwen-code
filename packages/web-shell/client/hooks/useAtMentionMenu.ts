@@ -219,6 +219,24 @@ function isBuiltinProviderEnabled(
   return true;
 }
 
+function getRegisteredCustomProviders(
+  customProviders: readonly WebShellAtProvider[],
+): WebShellAtProvider[] {
+  const registeredIds = new Set<string>(BUILTIN_PROVIDER_IDS);
+  const accepted: WebShellAtProvider[] = [];
+  for (const provider of customProviders) {
+    if (registeredIds.has(provider.id)) {
+      console.error(
+        `[@mention] duplicate provider id="${provider.id}" ignored`,
+      );
+      continue;
+    }
+    registeredIds.add(provider.id);
+    accepted.push(provider);
+  }
+  return accepted;
+}
+
 function getProviderTextValue(provider: WebShellAtProvider): string {
   return (
     (provider.textValue === undefined
@@ -501,6 +519,10 @@ function sanitizeAtMentionItem(
     detail:
       item.detail === undefined ? undefined : sanitizeDisplayText(item.detail),
     icon: item.icon === undefined ? undefined : sanitizeDisplayText(item.icon),
+    iconTooltip:
+      item.iconTooltip === undefined
+        ? undefined
+        : sanitizeDisplayText(item.iconTooltip),
     insertText:
       item.insertText === undefined
         ? undefined
@@ -859,10 +881,9 @@ export function useAtMentionMenu({
         builtinProviders,
       ),
     );
-    const builtinProviderIds = new Set<string>(BUILTIN_PROVIDER_IDS);
     return [
       ...builtinAtProviders,
-      ...providers.filter((provider) => !builtinProviderIds.has(provider.id)),
+      ...getRegisteredCustomProviders(providers),
     ].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   }, [builtinProviders, providers, t, workspaceActionsRef]);
   const allProvidersRef = useRef(allProviders);

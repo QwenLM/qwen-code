@@ -172,6 +172,86 @@ describe('useAtMentionMenu', () => {
     ]);
   });
 
+  it('rejects custom providers that reuse built-in ids', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mount({
+      builtinProviders: ['files'],
+      providers: [
+        {
+          id: 'extensions',
+          label: 'Custom Extensions',
+          search: vi.fn().mockResolvedValue([]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+
+    expect(latest!.state?.providers.map((provider) => provider.id)).toEqual([
+      'files',
+    ]);
+    expect(error).toHaveBeenCalledWith(
+      '[@mention] duplicate provider id="extensions" ignored',
+    );
+    error.mockRestore();
+  });
+
+  it('rejects custom providers that reuse disabled built-in ids', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mount({
+      builtinProviders: false,
+      providers: [
+        {
+          id: 'files',
+          label: 'Custom Files',
+          search: vi.fn().mockResolvedValue([]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+
+    expect(latest!.state?.providers).toEqual([]);
+    expect(error).toHaveBeenCalledWith(
+      '[@mention] duplicate provider id="files" ignored',
+    );
+    error.mockRestore();
+  });
+
+  it('rejects duplicate custom provider ids', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mount({
+      providers: [
+        {
+          id: 'custom',
+          label: 'First',
+          order: 0,
+          search: vi.fn().mockResolvedValue([]),
+        },
+        {
+          id: 'custom',
+          label: 'Second',
+          order: 1,
+          search: vi.fn().mockResolvedValue([]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+
+    expect(latest!.state?.providers.map((provider) => provider.id)).toEqual([
+      'custom',
+      'files',
+      'extensions',
+      'mcp-resources',
+    ]);
+    expect(latest!.state?.providers[0]?.label).toBe('First');
+    expect(error).toHaveBeenCalledWith(
+      '[@mention] duplicate provider id="custom" ignored',
+    );
+    error.mockRestore();
+  });
+
   it('strips ANSI, BiDi, and control characters from extension display text', async () => {
     vi.useFakeTimers();
     mount({
@@ -791,6 +871,7 @@ describe('useAtMentionMenu', () => {
   });
 
   it('keeps built-in providers when custom provider ids collide', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const search = vi.fn().mockResolvedValue([]);
     mount({
       providers: [
@@ -809,6 +890,11 @@ describe('useAtMentionMenu', () => {
       'extensions',
       'mcp-resources',
     ]);
+    expect(search).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(
+      '[@mention] duplicate provider id="files" ignored',
+    );
+    error.mockRestore();
   });
 
   it('accepts a custom item by inserting its label fallback', async () => {
@@ -1408,6 +1494,7 @@ describe('useAtMentionMenu', () => {
               label: '\u001b[31mName\u001b[0m\u202E',
               description: 'Desc\u202E',
               detail: 'Detail\u202E',
+              iconTooltip: 'Tip\u202E',
             },
           ]),
         },
@@ -1422,6 +1509,7 @@ describe('useAtMentionMenu', () => {
       label: 'Name',
       description: 'Desc',
       detail: 'Detail',
+      iconTooltip: 'Tip',
     });
   });
 
@@ -1568,6 +1656,63 @@ describe('useAtMentionMenu', () => {
       expect(latest!.select(1)).toBe(true);
     });
     expect(latest!.state?.selectedIndex).toBe(1);
+  });
+
+  it('selects enabled provider tabs and ignores disabled or same-tab choices', async () => {
+    vi.useFakeTimers();
+    const search = vi.fn(({ tabId }) =>
+      Promise.resolve([{ id: tabId ?? 'none', label: tabId ?? 'none' }]),
+    );
+    mount({
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          order: 0,
+          tabs: [
+            { id: 'open', label: 'Open' },
+            { id: 'disabled', label: 'Disabled', disabled: true },
+            { id: 'all', label: 'All' },
+          ],
+          search,
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+
+    expect(search).toHaveBeenLastCalledWith(
+      expect.objectContaining({ query: '', tabId: 'open' }),
+    );
+    expect(latest!.state).toMatchObject({
+      selectedTabId: 'open',
+      items: [expect.objectContaining({ id: 'open' })],
+    });
+
+    act(() => {
+      expect(latest!.selectTab('disabled')).toBe(false);
+      expect(latest!.selectTab('open')).toBe(true);
+    });
+
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(latest!.state?.selectedTabId).toBe('open');
+
+    act(() => {
+      expect(latest!.selectTab('all')).toBe(true);
+    });
+    expect(latest!.state).toMatchObject({
+      selectedTabId: 'all',
+      loading: true,
+    });
+    await runDebounce();
+
+    expect(search).toHaveBeenCalledTimes(2);
+    expect(search).toHaveBeenLastCalledWith(
+      expect.objectContaining({ query: '', tabId: 'all' }),
+    );
+    expect(latest!.state?.items[0]?.id).toBe('all');
   });
 
   it('prefers the first matching file over the current-directory item', async () => {

@@ -120,6 +120,83 @@ describe('UserMessage', () => {
     expect(container.querySelector('[title="project.orders"]')).not.toBeNull();
   });
 
+  it('uses custom composer tag icons for parsed user-message tags', () => {
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          composerTagIcons: {
+            table: 'https://example.test/table.svg',
+          },
+          parseUserMessageContent: () => [
+            {
+              type: 'tag',
+              tag: {
+                id: 'ctx-1',
+                value: 'project.orders',
+                kind: 'table',
+                serialized: '<context />',
+              },
+            },
+          ],
+        }}
+      >
+        <UserMessage content="<context />" />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(
+      container.querySelector('[style*="https://example.test/table.svg"]'),
+    ).not.toBeNull();
+  });
+
+  it('fires user-message tag clicks with the user-message placement', () => {
+    const onComposerTagClick = vi.fn();
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          onComposerTagClick,
+          parseUserMessageContent: () => [
+            {
+              type: 'tag',
+              tag: {
+                id: 'ctx-1',
+                value: 'project.orders',
+                kind: 'table',
+                serialized: '<context />',
+              },
+            },
+          ],
+        }}
+      >
+        <UserMessage content="<context />" />
+      </WebShellCustomizationProvider>,
+    );
+    const chip = container.querySelector('[role="button"]') as HTMLElement;
+
+    act(() => chip.click());
+    expect(onComposerTagClick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        placement: 'user-message',
+        readonly: true,
+        tag: expect.objectContaining({ id: 'ctx-1' }),
+        anchorRect: expect.any(Object),
+      }),
+    );
+
+    act(() => {
+      chip.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    expect(onComposerTagClick).toHaveBeenCalledTimes(2);
+    expect(onComposerTagClick).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        placement: 'user-message',
+        readonly: true,
+      }),
+    );
+  });
+
   it('falls back to raw content when user-message parsing throws', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const container = render(

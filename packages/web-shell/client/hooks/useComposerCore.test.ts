@@ -160,6 +160,38 @@ describe('composer tag serialization', () => {
     ).toBe('<top />\n\nexplain <table /> now');
   });
 
+  it('ignores invalid and overlapping inline tag placements', () => {
+    expect(
+      replaceInlineTagPlacements('a @one and @two', [
+        {
+          start: -1,
+          end: 2,
+          tag: { id: 'negative', serialized: '<negative />' },
+        },
+        {
+          start: 2,
+          end: 6,
+          tag: { id: 'one', serialized: '<one />' },
+        },
+        {
+          start: 4,
+          end: 12,
+          tag: { id: 'overlap', serialized: '<overlap />' },
+        },
+        {
+          start: 11,
+          end: 15,
+          tag: { id: 'two', serialized: '<two />' },
+        },
+        {
+          start: 14,
+          end: 99,
+          tag: { id: 'beyond', serialized: '<beyond />' },
+        },
+      ]),
+    ).toBe('a <one /> and <two />');
+  });
+
   it('replaces inline tags before expanding large paste placeholders', () => {
     const pending = new Map<string, string>();
     const paste = createLargePastePlaceholder(

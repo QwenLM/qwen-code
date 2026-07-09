@@ -133,6 +133,11 @@ export interface WebShellComposerTagRenderInfo {
   anchorRect?: DOMRectReadOnly;
 }
 
+/**
+ * Custom composer tag content. Inline composer tags are mounted from
+ * CodeMirror-managed React roots, so JSX returned for inline tags must not
+ * depend on React context from the surrounding app tree.
+ */
 export type ComposerTagRenderer = (
   info: WebShellComposerTagRenderInfo,
 ) => ReactNode | null | undefined;
@@ -362,6 +367,7 @@ export interface WebShellCustomization {
   renderWelcomeFooter?: WelcomeFooterRenderer;
   parseUserMessageContent?: UserMessageContentParser;
   renderUserMessageContent?: UserMessageContentRenderer;
+  composerTagIcons?: WebShellComposerTagIconMap;
   renderComposerTag?: ComposerTagRenderer;
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
