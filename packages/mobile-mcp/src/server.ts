@@ -1247,8 +1247,7 @@ export const createMcpServer = (): McpServer => {
     { readOnlyHint: true },
     async ({ device, compressed, output_path }) => {
       const robot = getAndroidRobotFromDevice(device, 'mobile_ui_dump');
-      let xml = await robot.dumpUiHierarchy(compressed ?? false);
-      xml = xml.replace(/ bounds="\[[0-9,]+\]\[[0-9,]+\]"/g, '');
+      const xml = await robot.dumpUiHierarchy(compressed ?? false);
       if (output_path) {
         validateOutputPath(output_path);
         fs.writeFileSync(output_path, xml, 'utf-8');
