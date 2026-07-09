@@ -32,17 +32,12 @@ import { isPathWithinRoot } from '../utils/workspaceContext.js';
 const debugLogger = createDebugLogger('GLOB');
 
 const MAX_FILE_COUNT = 100;
-const MAX_GLOB_COLLECTED_ENTRIES = 10_000;
+const MAX_GLOB_COLLECTED_ENTRIES = MAX_FILE_COUNT * 10;
 
 // Subset of 'Path' interface provided by 'glob' that we can implement for testing
 export interface GlobPath {
   fullpath(): string;
   mtimeMs?: number;
-}
-
-interface GlobDirectoryResult {
-  entries: GlobPath[];
-  hitLimit: boolean;
 }
 
 /**
@@ -143,7 +138,7 @@ class GlobToolInvocation extends BaseToolInvocation<
     pattern: string,
     signal: AbortSignal,
     entryLimit: number,
-  ): Promise<GlobDirectoryResult> {
+  ): Promise<{ entries: GlobPath[]; hitLimit: boolean }> {
     let effectivePattern = pattern;
     const fullPath = path.join(searchDir, effectivePattern);
     if (fs.existsSync(fullPath)) {
@@ -190,22 +185,11 @@ class GlobToolInvocation extends BaseToolInvocation<
       }
     };
 
-    const normalizePathForComparison = (p: string) =>
-      process.platform === 'win32' || process.platform === 'darwin'
-        ? p.toLowerCase()
-        : p;
-
     const isAllowedByFileFilters = (entry: GlobPath): boolean => {
       const relativePath = path.relative(projectRoot, entry.fullpath());
-      const { filteredPaths } = this.fileService.filterFilesWithReport(
-        [relativePath],
-        fileFilteringOptions,
-      );
-      const entryFullPath = normalizePathForComparison(entry.fullpath());
-      return filteredPaths.some(
-        (p) =>
-          normalizePathForComparison(path.resolve(projectRoot, p)) ===
-          entryFullPath,
+      return (
+        this.fileService.filterFiles([relativePath], fileFilteringOptions)
+          .length > 0
       );
     };
 
