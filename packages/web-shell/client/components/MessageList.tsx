@@ -1726,13 +1726,13 @@ const SessionTimeline = memo(function SessionTimeline({
     hideTooltip();
   }, [hideTooltip]);
 
-  const showTooltip = useCallback(
+  const buildTooltip = useCallback(
     (entry: SessionTimelineEntry, el: HTMLElement) => {
       const panel = panelRef.current;
-      if (!panel) return;
+      if (!panel) return null;
       const computedStyle = getComputedStyle(panel);
       const rect = el.getBoundingClientRect();
-      setTooltip({
+      return {
         entry,
         top: rect.top + rect.height / 2,
         left: rect.right + 8,
@@ -1743,9 +1743,47 @@ const SessionTimeline = memo(function SessionTimeline({
             computedStyle.getPropertyValue(name),
           ]),
         ) as CSSProperties,
-      });
+      };
     },
     [],
+  );
+
+  const findTooltipAnchor = useCallback((entry: SessionTimelineEntry) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return null;
+    const item = Array.from(
+      viewport.querySelectorAll<HTMLElement>(
+        '[data-testid="session-timeline-entry"]',
+      ),
+    ).find((node) => node.getAttribute('data-turn-id') === entry.id);
+    return item?.querySelector<HTMLButtonElement>('button') ?? null;
+  }, []);
+
+  const isTooltipAnchorVisible = useCallback((anchor: HTMLElement) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return false;
+    const viewportRect = viewport.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
+    return (
+      anchorRect.bottom >= viewportRect.top &&
+      anchorRect.top <= viewportRect.bottom
+    );
+  }, []);
+
+  const syncTooltip = useCallback(() => {
+    setTooltip((current) => {
+      if (!current) return null;
+      const anchor = findTooltipAnchor(current.entry);
+      if (!anchor || !isTooltipAnchorVisible(anchor)) return null;
+      return buildTooltip(current.entry, anchor);
+    });
+  }, [buildTooltip, findTooltipAnchor, isTooltipAnchorVisible]);
+
+  const showTooltip = useCallback(
+    (entry: SessionTimelineEntry, el: HTMLElement) => {
+      setTooltip(buildTooltip(entry, el));
+    },
+    [buildTooltip],
   );
 
   useLayoutEffect(() => {
@@ -1767,12 +1805,21 @@ const SessionTimeline = memo(function SessionTimeline({
     viewport.scrollTop = nextScrollTop;
     const frame = requestAnimationFrame(() => {
       programmaticScrollRef.current = false;
+      syncTooltip();
     });
     return () => {
       cancelAnimationFrame(frame);
       programmaticScrollRef.current = false;
     };
-  }, [currentIndex, hidden]);
+  }, [currentIndex, hidden, syncTooltip]);
+
+  useLayoutEffect(() => {
+    if (!tooltip || typeof window === 'undefined') return;
+    window.addEventListener('resize', syncTooltip);
+    return () => {
+      window.removeEventListener('resize', syncTooltip);
+    };
+  }, [syncTooltip, tooltip]);
 
   useLayoutEffect(() => {
     if (!tooltip || tooltip.clamped) return;

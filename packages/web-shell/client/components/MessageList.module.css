@@ -393,6 +393,7 @@
   border-radius: 14px;
   background: color-mix(in srgb, var(--background) 96%, white);
   box-shadow: 0 10px 28px color-mix(in srgb, black 10%, transparent);
+  font-family: var(--font-sans, system-ui, sans-serif);
   pointer-events: none;
   text-align: left;
   opacity: 1;

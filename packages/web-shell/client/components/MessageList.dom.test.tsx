@@ -565,6 +565,71 @@ describe('MessageList — turn collapse (DOM)', () => {
     }
   });
 
+  it('hides timeline details when the focused marker moves out of view', async () => {
+    let markerOffset = 0;
+    const rect = (
+      width: number,
+      height: number,
+      top: number,
+      left = 0,
+    ): DOMRect => ({
+      width,
+      height,
+      top,
+      right: left + width,
+      bottom: top + height,
+      left,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    });
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.getAttribute('data-testid') === 'session-timeline-viewport') {
+          return rect(70, 220, 0);
+        }
+        const item = this.closest('[data-testid="session-timeline-entry"]');
+        if (item) {
+          const index = Number(item.getAttribute('data-timeline-index'));
+          return rect(58, 16, 40 + index * 60 - markerOffset);
+        }
+        return rect(1200, 600, 0);
+      });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    try {
+      renderInto(root, simpleTurns(4));
+      await nextFrame();
+
+      const focusedButton = container.querySelector<HTMLButtonElement>(
+        '[data-turn-id="u2"] button',
+      );
+      expect(focusedButton).not.toBeNull();
+      focusIn(focusedButton!);
+      expect(
+        document.querySelector('[data-testid="session-timeline-detail"]'),
+      ).not.toBeNull();
+
+      markerOffset = 700;
+      act(() => window.dispatchEvent(new Event('resize')));
+
+      expect(
+        document.querySelector('[data-testid="session-timeline-detail"]'),
+      ).toBeNull();
+      expect(
+        container
+          .querySelector<HTMLButtonElement>('[data-turn-id="u2"] button')
+          ?.hasAttribute('aria-describedby'),
+      ).toBe(false);
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
   it('hides timeline details when the user scrolls the timeline viewport', async () => {
     const rectSpy = mockMessageListWidth(1200);
     const c = mount(simpleTurns(4));
