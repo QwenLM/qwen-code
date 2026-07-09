@@ -792,8 +792,15 @@ export abstract class ChannelBase {
           releaseHeldChunks();
         }
       };
+      const onResponseBoundary = (sid: string) => {
+        if (sid !== sessionId || promptState.cancelled) {
+          return;
+        }
+        heldChunks.length = 0;
+      };
       const promptBridge = this.bridge;
       promptBridge.on('textChunk', onChunk);
+      promptBridge.on('responseBoundary', onResponseBoundary);
 
       try {
         const response = await this.runLoopBridgePrompt(
@@ -884,6 +891,7 @@ export abstract class ChannelBase {
         throw err;
       } finally {
         promptBridge.off('textChunk', onChunk);
+        promptBridge.off('responseBoundary', onResponseBoundary);
         const stillCurrent = this.activePrompts.get(sessionId) === promptState;
         if (!promptState.clearEvicted) {
           try {
@@ -3547,8 +3555,16 @@ export abstract class ChannelBase {
           releaseHeldChunks();
         }
       };
+      const onResponseBoundary = (sid: string) => {
+        if (sid !== sessionId || promptState.cancelled) {
+          return;
+        }
+        heldChunks.length = 0;
+        streamer?.stop();
+      };
       const promptBridge = this.bridge;
       promptBridge.on('textChunk', onChunk);
+      promptBridge.on('responseBoundary', onResponseBoundary);
 
       try {
         const response = await promptBridge.prompt(sessionId, promptToSend, {
@@ -3615,6 +3631,7 @@ export abstract class ChannelBase {
         throw err;
       } finally {
         promptBridge.off('textChunk', onChunk);
+        promptBridge.off('responseBoundary', onResponseBoundary);
         streamer?.stop();
         // Identity guard: a turn that wedged past /clear's bounded wait gets
         // EVICTED — /clear gives up on active.done, deletes activePrompts, and a

@@ -7720,6 +7720,31 @@ describe('ChannelBase', () => {
       expect(ch.sent.length).toBeGreaterThanOrEqual(1);
     });
 
+    it('drops buffered block stream text at response boundaries', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sid,
+            'intermediate ',
+          );
+          (bridge as unknown as EventEmitter).emit('responseBoundary', sid);
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'final');
+          return Promise.resolve('final');
+        },
+      );
+
+      const ch = createChannel({
+        blockStreaming: 'on',
+        blockStreamingChunk: { minChars: 100, maxChars: 1000 },
+        blockStreamingCoalesce: { idleMs: 0 },
+      });
+
+      await ch.handleInbound(envelope());
+
+      expect(ch.sent.map((message) => message.text)).toEqual(['final']);
+    });
+
     it('does not emit buffered stream text after cancellation', async () => {
       vi.useFakeTimers();
       try {
