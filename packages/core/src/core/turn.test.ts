@@ -239,6 +239,74 @@ describe('Turn', () => {
       ]);
     });
 
+    it('drops buffered protocol text from a failed attempt when retrying', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              { content: { parts: [{ text: '<analysis>failed scratch' }] } },
+            ],
+          } as GenerateContentResponse,
+        };
+        yield { type: StreamEventType.RETRY };
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text:
+                        '<analysis>successful scratch</analysis>' +
+                        '<summary>visible after retry',
+                    },
+                  ],
+                },
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: { parts: [{ text: '</summary>' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events[0]).toEqual({
+        type: GeminiEventType.Retry,
+        retryInfo: undefined,
+        isContinuation: undefined,
+      });
+      const contentText = events
+        .filter((event) => event.type === GeminiEventType.Content)
+        .map((event) => event.value)
+        .join('');
+      expect(contentText).toBe('visible after retry');
+      expect(contentText).not.toContain('failed scratch');
+      expect(contentText).not.toContain('successful scratch');
+      expect(contentText).not.toContain('<analysis>');
+      expect(contentText).not.toContain('<summary>');
+    });
+
     it('should emit Thought events when a thought part is present', async () => {
       const mockResponseStream = (async function* () {
         yield {

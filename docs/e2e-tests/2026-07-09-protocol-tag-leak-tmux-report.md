@@ -48,8 +48,8 @@ PASS.
 - The tmux-readable log does not contain leaked protocol tags.
 - The tmux-readable log does not contain `internal scratchpad`.
 - The final TUI frame shows only the visible summary marker.
-- A separate retry mock shows request #1 returning HTTP 500 and request #2 streaming the tagged SSE chunks that the TUI filters.
-- A focused core unit test verifies that tagged partial content from a failed attempt is discarded on retry and that the successful retry's protocol wrappers are stripped before persistence.
+- A separate retry mock shows request #1 returning HTTP 500 and request #2 streaming the tagged SSE chunks that the TUI filters after the HTTP-level retry.
+- Focused core unit tests verify that buffered tagged content is dropped across retry events and that tagged partial content from a failed attempt is discarded before persistence.
 
 ## Screenshots
 
@@ -65,7 +65,7 @@ Filtered summary state:
 
 ## Retry Evidence
 
-The retry-specific tmux mock used a fake server that returned HTTP 500 for request #1 and then returned protocol-tagged SSE chunks for request #2. The server-side trace is the evidence for retry and for the raw tagged chunks:
+The retry-specific tmux mock used a fake server that returned HTTP 500 for request #1 and then returned protocol-tagged SSE chunks for request #2. The server-side trace is the evidence for HTTP-level retry and for the raw tagged chunks:
 
 ![Retry server trace](https://raw.githubusercontent.com/yiliang114/img-host/main/assets/protocol-tags-retry-server-trace-20260709-220220.png)
 
@@ -73,7 +73,7 @@ The retry run's final TUI frame still shows only the visible summary marker:
 
 ![Retry filtered TUI](https://raw.githubusercontent.com/yiliang114/img-host/main/assets/protocol-tags-retry-tui-summary-20260709-220220.png)
 
-The focused retry unit test covers the stricter in-memory/persistence behavior: tagged partial content from the failed attempt is discarded, and tagged content from the successful retry is stripped to the summary text before entering history.
+The focused retry unit test covers the stricter in-memory/persistence behavior: tagged partial content from the failed attempt is discarded, and tagged content from the successful retry is stripped to the summary text before entering history. A separate `Turn` unit test covers the UI event layer by resetting a buffered protocol prefix on retry before the successful attempt emits content.
 
 ![Focused retry unit test](https://raw.githubusercontent.com/yiliang114/img-host/main/assets/protocol-tags-retry-unit-test-20260709-220220.png)
 
@@ -113,5 +113,9 @@ grep -q "RESPONSE #1 HTTP 500" tmp/protocol-tags-retry-mock-tmux-20260709-220220
 grep -q "REQUEST #2" tmp/protocol-tags-retry-mock-tmux-20260709-220220/server-trace.txt
 grep -q "VISIBLE_TMUX_SUMMARY_DONE" tmp/protocol-tags-retry-mock-tmux-20260709-220220/tmux-readable-full.log
 ! grep -E "</?analysis|</?summary|internal scratchpad" tmp/protocol-tags-retry-mock-tmux-20260709-220220/tmux-readable-full.log
-cd packages/core && npx vitest run src/core/geminiChat.test.ts --test-name-pattern "discard tagged partial content"
+(
+  cd packages/core
+  npx vitest run src/core/geminiChat.test.ts --test-name-pattern "discard tagged partial content"
+  npx vitest run src/core/turn.test.ts --test-name-pattern "drops buffered protocol text"
+)
 ```
