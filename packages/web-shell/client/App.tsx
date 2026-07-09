@@ -70,6 +70,7 @@ import { SplitView } from './components/SplitView';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
 import { MAX_SPLIT_PANES, parseSplitSessionIds } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
+import { GoalsDialog } from './components/dialogs/GoalsDialog';
 import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
@@ -264,12 +265,13 @@ const GOAL_CLEAR_KEYWORDS = new Set([
   'cancel',
 ]);
 
+/** The argument of a `/goal …` command; `''` for a bare `/goal`. */
+function goalArgOf(text: string): string {
+  return text.replace(/^\/goal\b/i, '').trim();
+}
+
 function isGoalClearCommand(text: string): boolean {
-  const goalArg = text
-    .replace(/^\/goal\b/i, '')
-    .trim()
-    .toLowerCase();
-  return GOAL_CLEAR_KEYWORDS.has(goalArg);
+  return GOAL_CLEAR_KEYWORDS.has(goalArgOf(text).toLowerCase());
 }
 
 interface ActiveGoalStatus {
@@ -1252,9 +1254,9 @@ export function App({
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
   // is one of the activePanel values below.)
-  const [mainView, setMainView] = useState<'chat' | 'scheduledTasks' | 'split'>(
-    'chat',
-  );
+  const [mainView, setMainView] = useState<
+    'chat' | 'scheduledTasks' | 'goals' | 'split'
+  >('chat');
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
   const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
@@ -1280,6 +1282,10 @@ export function App({
   const openScheduledTasks = useCallback(() => {
     setActivePanel(null);
     setMainView('scheduledTasks');
+  }, []);
+  const openGoals = useCallback(() => {
+    setActivePanel(null);
+    setMainView('goals');
   }, []);
   // Open the in-window split view showing 2+ sessions side by side. `splitSessionIds`
   // is the live pane set — SplitView mirrors add/remove back into it via
@@ -1476,12 +1482,14 @@ export function App({
     if (activePanel) setActivePanel(null);
     if (modelDialogMode) setModelDialogMode(null);
     if (showApprovalModeDialog) setShowApprovalModeDialog(false);
-    // The Scheduled Tasks page is a full-pane overlay (position:absolute) that
-    // covers the chat footer too, so dismiss it for the same reason. The split
-    // view is deliberately NOT dismissed: each pane owns and renders its own
-    // session's approval, so an approval on the (outer) main session must not
-    // yank the user out of the panes they are working in.
-    if (mainView === 'scheduledTasks') setMainView('chat');
+    // The Scheduled Tasks and Goals pages are full-pane overlays
+    // (position:absolute) that cover the chat footer too, so dismiss them for
+    // the same reason. The split view is deliberately NOT dismissed: each pane
+    // owns and renders its own session's approval, so an approval on the (outer)
+    // main session must not yank the user out of the panes they are working in.
+    if (mainView === 'scheduledTasks' || mainView === 'goals') {
+      setMainView('chat');
+    }
   }, [
     approvalOverlayActive,
     activePanel,
@@ -2908,7 +2916,7 @@ export function App({
         commitComposerAccepted?: ComposerSubmitCommit;
       },
     ) => {
-      const goalArg = text.replace(/^\/goal\b/i, '').trim();
+      const goalArg = goalArgOf(text);
       const lowerGoalArg = goalArg.toLowerCase();
       const sendToDaemon = opts?.sendToDaemon ?? true;
       const sendGoalPrompt = () => {
@@ -2942,16 +2950,17 @@ export function App({
         return sendGoalPrompt();
       }
 
-      if (sendToDaemon) {
-        return sendGoalPrompt();
-      }
-      store.appendLocalUserMessage(text);
+      // Bare `/goal` opens the Goals page instead of asking the daemon to print
+      // its status as text — the same move `/schedule` makes. Nothing is sent,
+      // so the composer is cleared by returning true.
+      openGoals();
       return true;
     },
     [
       dispatchGoalCleared,
       dispatchGoalSet,
       handleBusyGoalClear,
+      openGoals,
       reportError,
       sendPrompt,
       store,
@@ -3033,6 +3042,12 @@ export function App({
             return true;
           }
           if (cmd === 'goal') {
+            // A bare `/goal` just opens the Goals page; it neither sends a
+            // prompt nor touches the session, so it works mid-turn too.
+            if (!goalArgOf(text)) {
+              openGoals();
+              return true;
+            }
             if (promptBlocked) {
               if (isGoalClearCommand(text)) {
                 return handleBusyGoalClear(text);
@@ -3861,6 +3876,7 @@ export function App({
       closePanel,
       openPanel,
       openScheduledTasks,
+      openGoals,
       createNewSession,
       handleBusyGoalClear,
       handleGoalSlashCommand,
@@ -4639,6 +4655,10 @@ export function App({
                     closeMobileDrawer();
                     openScheduledTasks();
                   }}
+                  onOpenGoals={() => {
+                    closeMobileDrawer();
+                    openGoals();
+                  }}
                   onOpenSessions={() => {
                     closeMobileDrawer();
                     openPanel('sessions');
@@ -4833,6 +4853,65 @@ export function App({
                       onOpenSession={(sessionId) => {
                         // The task's bound session IS its run history — switch
                         // to the chat view and load that session's transcript.
+                        setMainView('chat');
+                        loadSidebarSession(sessionId).catch(
+                          (error: unknown) => {
+                            reportError(error, 'Failed to open session');
+                          },
+                        );
+                      }}
+                      onError={reportError}
+                    />
+                  </div>
+                </div>
+              )}
+              {mainView === 'goals' && (
+                <div className={styles.fullPage} data-testid="goals-page">
+                  <div className={styles.fullPageHeader}>
+                    <button
+                      type="button"
+                      className={styles.fullPageBack}
+                      onClick={() => setMainView('chat')}
+                      aria-label={t('common.back')}
+                      title={t('common.back')}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        width="18"
+                        height="18"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M15 18l-6-6 6-6" />
+                      </svg>
+                    </button>
+                    <div className={styles.fullPageTitle}>
+                      {t('goals.title')}
+                    </div>
+                  </div>
+                  <div className={styles.fullPageBody}>
+                    <GoalsDialog
+                      onCreateGoal={async (condition) => {
+                        // Setting a goal registers the Stop hook AND kicks off
+                        // the first turn, so it has to travel the prompt path.
+                        // Start a FRESH session so the goal loop doesn't take
+                        // over the conversation the user was already having.
+                        setMainView('chat');
+                        const created = await createNewSession();
+                        // createNewSession already surfaced the failure; don't
+                        // drop the goal into the wrong (still-current) session.
+                        if (!created) return;
+                        onSessionIdChange?.(undefined);
+                        await sendPrompt(`/goal ${condition}`, undefined, {
+                          clearComposerOnPromptStart: true,
+                        });
+                      }}
+                      onOpenSession={(sessionId) => {
+                        // The goal's session transcript IS its history.
                         setMainView('chat');
                         loadSidebarSession(sessionId).catch(
                           (error: unknown) => {
@@ -5155,6 +5234,7 @@ export function App({
                           onReturnToInput={handleReturnToEditor}
                           tasks={backgroundTasks}
                           activeGoal={activeGoal}
+                          onOpenGoals={openGoals}
                           hideSettings={hideSettings}
                           onToggleShortcuts={handleToggleShortcuts}
                           compact={true}

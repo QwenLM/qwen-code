@@ -280,6 +280,8 @@ export type {
   DaemonGlobOptions,
   /** Glob match result containing matched file paths. */
   DaemonGlobResult,
+  /** One session's active `/goal`, as listed workspace-wide by the daemon. */
+  DaemonGoal,
   /** A durable scheduled task (cron) as returned by the daemon. */
   DaemonScheduledTask,
   /** One recorded fire in a scheduled task's run history. */

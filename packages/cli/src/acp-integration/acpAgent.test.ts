@@ -313,6 +313,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     updatedModelProviders: {},
   }),
   unregisterGoalHook: vi.fn(),
+  getActiveGoal: vi.fn(),
+  getLastGoalTerminal: vi.fn(),
   // Reached through the real `ui/utils/restoreGoal.js` on the resume path.
   registerGoalHook: vi.fn(),
   setGoalTerminalObserver: vi.fn(),
@@ -632,6 +634,8 @@ import {
   applyProviderInstallPlan,
   Storage,
   unregisterGoalHook,
+  getActiveGoal,
+  getLastGoalTerminal,
   registerGoalHook,
   startEventLoopLagMonitor,
   registerAcpEventLoopLagGauge,
@@ -4153,6 +4157,117 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sessionId,
       }),
     ).resolves.toEqual({ cleared: false, condition: undefined });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('reads a live session goal, including the judge verdict', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    vi.mocked(getActiveGoal).mockReturnValue({
+      condition: 'ship it',
+      iterations: 2,
+      setAt: 123,
+      tokensAtStart: 456,
+      hookId: 'goal-hook',
+      lastReason: 'one test still fails',
+    });
+    vi.mocked(getLastGoalTerminal).mockReturnValue(undefined);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalGet, { sessionId }),
+    ).resolves.toEqual({
+      active: {
+        condition: 'ship it',
+        iterations: 2,
+        setAt: 123,
+        lastReason: 'one test still fails',
+      },
+      lastTerminal: null,
+    });
+    // tokensAtStart / hookId are internals and must not leak over the wire.
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('reports null goal state and the last terminal goal when nothing is active', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    vi.mocked(getActiveGoal).mockReturnValue(undefined);
+    vi.mocked(getLastGoalTerminal).mockReturnValue({
+      kind: 'achieved',
+      condition: 'ship it',
+      iterations: 3,
+      durationMs: 9000,
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalGet, { sessionId }),
+    ).resolves.toEqual({
+      active: null,
+      lastTerminal: {
+        kind: 'achieved',
+        condition: 'ship it',
+        iterations: 3,
+        durationMs: 9000,
+      },
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects a goal read for a session that is not resident', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalGet, {
+        sessionId: 'not-a-live-session',
+      }),
+    ).rejects.toThrow();
+    expect(getActiveGoal).not.toHaveBeenCalledWith('not-a-live-session');
 
     mockConnectionState.resolve();
     await agentPromise;

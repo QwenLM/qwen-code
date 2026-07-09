@@ -533,6 +533,43 @@ describe('qwen serve — cancel + list', () => {
   });
 });
 
+describe('qwen serve — GET /goals', () => {
+  const getGoals = async () => {
+    const res = await fetch(`${base}/goals`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    return { status: res.status, body: await res.json() };
+  };
+
+  it('returns an empty, versioned list when no session has a goal', async () => {
+    const { status, body } = await getGoals();
+    expect(status).toBe(200);
+    expect(body).toEqual({ v: 1, goals: [] });
+  });
+
+  it('probes each live session over the bridge without reporting a goal', async () => {
+    // The real round trip: serve -> bridge -> `sessionGoalGet` ext method in
+    // the `qwen --acp` child -> back. A live session with no `/goal` must come
+    // back as "no goal" rather than an error or a phantom entry.
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    try {
+      const { status, body } = await getGoals();
+      expect(status).toBe(200);
+      expect(body).toEqual({ v: 1, goals: [] });
+    } finally {
+      await client.closeSession(session.sessionId);
+    }
+  });
+
+  it('requires the bearer token', async () => {
+    const res = await fetch(`${base}/goals`);
+    expect(res.status).toBe(401);
+  });
+});
+
 describe('qwen serve — DELETE /session/:id', () => {
   it('204 on explicit close', async () => {
     const session = await client.createOrAttachSession({

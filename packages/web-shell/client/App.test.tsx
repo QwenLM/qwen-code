@@ -114,6 +114,10 @@ const {
         ) => Promise<void>;
         onCreateViaChat?: () => void;
       } | null,
+      latestGoalsProps: null as {
+        onCreateGoal?: (condition: string) => Promise<void>;
+        onOpenSession?: (sessionId: string) => void;
+      } | null,
     },
     sidebarTokens: [] as Array<number | undefined>,
     rawEnqueuePrompt: vi.fn(() => true),
@@ -412,6 +416,20 @@ vi.doMock('./components/dialogs/ScheduledTasksDialog', async () => {
     },
   };
 });
+// Capturing mock: stores App's real onCreateGoal / onOpenSession handlers so
+// tests can drive the goal-creation orchestration without a daemon.
+vi.doMock('./components/dialogs/GoalsDialog', async () => {
+  const React = await import('react');
+  return {
+    GoalsDialog: (props: {
+      onCreateGoal?: (condition: string) => Promise<void>;
+      onOpenSession?: (sessionId: string) => void;
+    }) => {
+      testState.latestGoalsProps = props;
+      return React.createElement('div');
+    },
+  };
+});
 mockComponent('./components/dialogs/ExtensionsDialog', 'ExtensionsDialog');
 mockComponent('./components/dialogs/ThemeDialog', 'ThemeDialog');
 mockComponent(
@@ -539,6 +557,7 @@ beforeEach(() => {
   testState.blocks = [];
   testState.latestChatEditorProps = null;
   testState.latestScheduledTasksProps = null;
+  testState.latestGoalsProps = null;
   sidebarTokens.length = 0;
   rawEnqueuePrompt.mockClear();
   editorClear.mockClear();
@@ -2023,6 +2042,113 @@ describe('App session callbacks', () => {
       rerender({ onSessionChange });
     });
     expect(onSessionChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('App /goal command', () => {
+  it('opens the Goals page for a bare /goal instead of sending a prompt', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="goals-page"]'),
+    ).not.toBeNull();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('opens the Goals page for a bare /goal even while a turn is running', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({});
+    });
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="goals-page"]'),
+    ).not.toBeNull();
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('still sends /goal <condition> as a prompt rather than opening the page', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal ship it';
+    await clickSubmit(container);
+    await flush();
+
+    expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
+  });
+
+  it('still routes /goal clear through the daemon clear path', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal clear';
+    await clickSubmit(container);
+    await flush();
+
+    expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
+    expect(mockSessionActions.clearGoal).toHaveBeenCalled();
+  });
+
+  it('starts a goal in a fresh session from the Goals page', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+    mockSessionActions.clearSession.mockClear();
+    mockSessionActions.sendPrompt.mockClear();
+
+    await act(async () => {
+      await onCreateGoal('all tests pass');
+    });
+
+    // A goal takes over its session's turns, so it starts in a NEW one
+    // (clearSession is how createNewSession starts one) rather than hijacking
+    // the conversation the user was already having.
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/goal all tests pass',
+      expect.anything(),
+    );
+  });
+
+  it('does not drop the goal into the current session when the new session fails', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+    mockSessionActions.clearSession.mockRejectedValueOnce(
+      new Error('daemon unreachable'),
+    );
+    mockSessionActions.sendPrompt.mockClear();
+
+    await act(async () => {
+      await onCreateGoal('all tests pass');
+    });
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
   });
 });
 

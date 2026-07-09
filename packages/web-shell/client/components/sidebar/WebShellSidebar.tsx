@@ -95,6 +95,7 @@ interface WebShellSidebarProps {
   onOpenSettings: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
+  onOpenGoals: () => void;
   onOpenSessions: () => void;
   /**
    * Whether to offer the Session Overview entry point. Gated to large screens
@@ -283,6 +284,16 @@ function IconSchedule() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <circle cx="12" cy="12" r="9" />
       <path d="M12 7v5l3 2" />
+    </svg>
+  );
+}
+
+function IconGoal() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <circle cx="12" cy="12" r="5" />
+      <circle cx="12" cy="12" r="1" />
     </svg>
   );
 }
@@ -497,6 +508,7 @@ export function WebShellSidebar({
   onOpenSettings,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
+  onOpenGoals,
   onOpenSessions,
   canOpenSessionsOverview,
   onOpenSplitView,
@@ -2580,6 +2592,15 @@ export function WebShellSidebar({
           onClick={onOpenScheduledTasks}
         >
           <IconSchedule />
+        </button>
+        <button
+          className={styles.collapseButton}
+          type="button"
+          title={t('sidebar.goals')}
+          aria-label={t('sidebar.goals')}
+          onClick={onOpenGoals}
+        >
+          <IconGoal />
         </button>
         {canOpenSessionsOverview && (
           <button

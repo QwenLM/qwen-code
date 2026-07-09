@@ -145,6 +145,7 @@ function renderSidebar(
             onOpenSettings={noop}
             onOpenDaemonStatus={noop}
             onOpenScheduledTasks={noop}
+            onOpenGoals={noop}
             onOpenSessions={noop}
             onOpenSplitView={noop}
             onNewSession={() => false}

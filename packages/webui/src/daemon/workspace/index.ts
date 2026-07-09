@@ -16,6 +16,7 @@ export type {
   DaemonFileStat,
   DaemonGlobOptions,
   DaemonGlobResult,
+  DaemonGoal,
   DaemonScheduledTask,
   DaemonScheduledTaskRun,
   DaemonCreateScheduledTaskRequest,

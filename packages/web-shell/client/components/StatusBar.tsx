@@ -54,6 +54,8 @@ interface StatusBarProps {
     condition: string;
     setAt: number;
   } | null;
+  /** Open the Goals page. When omitted the goal pill stays a plain label. */
+  onOpenGoals?: () => void;
   /** Hide the settings gear button (e.g. when /settings is in hiddenSlashCommands). */
   hideSettings?: boolean;
   /** Toggle the keyboard-shortcuts panel (same as typing `?` in the editor). */
@@ -166,6 +168,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
       onReturnToInput,
       tasks,
       activeGoal,
+      onOpenGoals,
       hideSettings,
       onToggleShortcuts,
       compact = false,
@@ -356,11 +359,22 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
               </span>
             </button>
           )}
-          {goalLabel && (
-            <span className={styles.goal} title={activeGoal?.condition}>
-              {goalLabel}
-            </span>
-          )}
+          {goalLabel &&
+            (onOpenGoals ? (
+              <button
+                type="button"
+                className={styles.goalButton}
+                onClick={onOpenGoals}
+                title={activeGoal?.condition}
+                aria-label={t('sidebar.goals')}
+              >
+                <span className={styles.goal}>{goalLabel}</span>
+              </button>
+            ) : (
+              <span className={styles.goal} title={activeGoal?.condition}>
+                {goalLabel}
+              </span>
+            ))}
         </div>
       </div>
     );

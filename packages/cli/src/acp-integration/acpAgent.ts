@@ -58,6 +58,8 @@ import {
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
+  getActiveGoal,
+  getLastGoalTerminal,
   unregisterGoalHook,
   ToolNames,
   FORK_SUBAGENT_TYPE,
@@ -6989,6 +6991,34 @@ class QwenAgent implements Agent {
         return {
           cleared: !!cleared,
           condition: cleared?.condition,
+        };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionGoalGet: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        // Throws when the session is not live. That is the honest answer: the
+        // goal store is in-memory, so a goal only exists — and only advances —
+        // while its session is resident.
+        this.sessionOrThrow(sessionId);
+        const active = getActiveGoal(sessionId);
+        const lastTerminal = getLastGoalTerminal(sessionId);
+        return {
+          active: active
+            ? {
+                condition: active.condition,
+                iterations: active.iterations,
+                setAt: active.setAt,
+                ...(active.lastReason !== undefined
+                  ? { lastReason: active.lastReason }
+                  : {}),
+              }
+            : null,
+          lastTerminal: lastTerminal ?? null,
         };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionContinue: {

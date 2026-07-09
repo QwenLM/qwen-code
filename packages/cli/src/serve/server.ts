@@ -70,6 +70,7 @@ import { registerWorkspaceTrustRoutes } from './routes/workspace-trust.js';
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
 import { registerScheduledTasksRoutes } from './routes/scheduled-tasks.js';
+import { registerGoalsRoutes } from './routes/goals.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
   startScheduledTaskKeepalive,
@@ -1016,6 +1017,14 @@ export function createServeApp(
     mutate,
     safeBody,
     bridge: deps.manageScheduledTaskSessions ? bridge : undefined,
+  });
+
+  // Workspace-wide active-goal listing (the Web Shell "Goals" page). Read-only
+  // GET like /daemon/status: it fans out to the live sessions and reports what
+  // their in-memory goal stores hold.
+  registerGoalsRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
   });
 
   // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local

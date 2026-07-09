@@ -1,0 +1,281 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.intro {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.toolbarActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.primaryButton,
+.secondaryButton {
+  appearance: none;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  transition:
+    background 0.15s ease,
+    opacity 0.15s ease;
+}
+
+.primaryButton {
+  background: var(--primary);
+  color: var(--background);
+  border-color: var(--primary);
+}
+
+.secondaryButton {
+  background: transparent;
+  color: var(--foreground);
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.secondaryButton:hover:not(:disabled) {
+  background: var(--muted);
+}
+
+/* ── Create form ─────────────────────────────────────────────── */
+
+.formFields {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fieldLabel {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.required {
+  color: var(--destructive, #dc2626);
+  margin-left: 2px;
+}
+
+.textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 13px;
+  font-family: inherit;
+  padding: 8px 10px;
+  resize: vertical;
+  min-height: 84px;
+}
+
+.textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.formHint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+}
+
+.formError,
+.loadError {
+  font-size: 12px;
+  color: var(--destructive, #dc2626);
+}
+
+.formActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ── List ────────────────────────────────────────────────────── */
+
+.empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--background);
+  min-width: 0;
+}
+
+.cardHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Idle: the goal is registered but its session is between turns. Running: the
+ * loop is mid-turn right now. */
+.statusDot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted-foreground);
+}
+
+.statusDotRunning {
+  background: var(--agent-blue-500);
+}
+
+.cardTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cardMenu {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.iconAction {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  border-radius: 6px;
+  width: 26px;
+  height: 26px;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.iconAction:hover:not(:disabled) {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.iconAction:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.cardReason {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.reasonLabel {
+  font-weight: 600;
+}
+
+.cardFooter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: auto;
+}
+
+.statusPill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--foreground);
+  background: var(--muted);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+
+.meta {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.sessionLink {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin-left: auto;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionLink:hover,
+.sessionLink:focus-visible {
+  color: var(--foreground);
+  text-decoration: underline;
+}
