@@ -461,6 +461,12 @@ export function extractContextFilename(value: unknown): string | undefined {
   return undefined;
 }
 
+function sessionArtifactsPersistenceAvailableFromSettings(
+  settings: { general?: { chatRecording?: unknown } } | undefined,
+): boolean {
+  return settings?.general?.chatRecording !== false;
+}
+
 /**
  * Per-workspace promise chain that serializes settings read-modify-write
  * cycles inside this process.
@@ -837,6 +843,7 @@ function sessionIdleTimeoutMs(value: number | undefined): number {
 function currentServeFeaturesForRunQwenServe(
   opts: ServeOptions,
   sessionShellCommandEnabled: boolean,
+  sessionArtifactsPersistenceAvailable: boolean,
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
     requireAuth: opts.requireAuth === true,
@@ -851,6 +858,7 @@ function currentServeFeaturesForRunQwenServe(
       : {}),
     persistSettingAvailable: true,
     sessionShellCommandEnabled,
+    sessionArtifactsPersistenceAvailable,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
     // Advertise the same WS feature flags as the runtime path (serve-features.ts)
@@ -869,6 +877,7 @@ function createBootstrapCapabilities(input: {
   boundWorkspace: string;
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
+  sessionArtifactsPersistenceAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
 }): CapabilitiesEnvelope {
   return {
@@ -881,6 +890,7 @@ function createBootstrapCapabilities(input: {
     features: currentServeFeaturesForRunQwenServe(
       input.opts,
       input.sessionShellCommandEnabled,
+      input.sessionArtifactsPersistenceAvailable,
     ),
     modelServices: [],
     workspaceCwd: input.boundWorkspace,
@@ -1056,6 +1066,7 @@ function createBootstrapServeApp(input: {
   daemonLog: DaemonLogger;
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
+  sessionArtifactsPersistenceAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   multiWorkspaceCapabilitiesRequireRuntime: boolean;
   getRuntimeError: () => string | undefined;
@@ -1072,6 +1083,7 @@ function createBootstrapServeApp(input: {
     daemonLog,
     qwenCodeVersion,
     sessionShellCommandEnabled,
+    sessionArtifactsPersistenceAvailable,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime,
     getRuntimeError,
@@ -1137,6 +1149,7 @@ function createBootstrapServeApp(input: {
         boundWorkspace,
         qwenCodeVersion,
         sessionShellCommandEnabled,
+        sessionArtifactsPersistenceAvailable,
         permissionPolicy,
       }),
     );
@@ -1218,6 +1231,7 @@ function createBootstrapServeApp(input: {
         features: currentServeFeaturesForRunQwenServe(
           opts,
           sessionShellCommandEnabled,
+          sessionArtifactsPersistenceAvailable,
         ),
       },
       runtime: {
@@ -1805,9 +1819,12 @@ export async function runQwenServe(
   let permissionPolicy: PermissionPolicy | undefined;
   let permissionConsensusQuorum: number | undefined;
   let bootSettings: ServeFastPathSettings | undefined;
+  let sessionArtifactsPersistenceAvailable = true;
   try {
     bootSettings =
       deps.bootSettings ?? loadServeFastPathSettings(boundWorkspace);
+    sessionArtifactsPersistenceAvailable =
+      sessionArtifactsPersistenceAvailableFromSettings(bootSettings);
     contextFilenameForInit = extractContextFilename(
       bootSettings.context?.fileName,
     );
@@ -3184,6 +3201,10 @@ export async function runQwenServe(
       persistDisabledTools: persistDisabledToolsFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
+      sessionArtifactsPersistenceAvailable:
+        sessionArtifactsPersistenceAvailableFromSettings(
+          runtimeBootSettings?.merged,
+        ),
       installAuthProvider: (req) =>
         withSettingsLock(
           boundWorkspace,
@@ -3261,6 +3282,7 @@ export async function runQwenServe(
     daemonLog,
     qwenCodeVersion: cliVersion,
     sessionShellCommandEnabled,
+    sessionArtifactsPersistenceAvailable,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime: workspaceInputs.length > 1,
     getRuntimeError: () => runtimeStartupError,

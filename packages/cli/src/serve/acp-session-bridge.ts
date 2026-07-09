@@ -130,4 +130,7 @@ export {
   canonicalizeWorkspace,
 } from '@qwen-code/acp-bridge/workspacePaths';
 
-export { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
+export {
+  SessionArtifactAuthorizationError,
+  SessionArtifactValidationError,
+} from '@qwen-code/acp-bridge/sessionArtifacts';

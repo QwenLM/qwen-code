@@ -287,6 +287,7 @@ export interface ServeAppDeps {
       value: unknown;
     }>,
   ) => Promise<void>;
+  sessionArtifactsPersistenceAvailable?: boolean;
   /**
    * Reverse tool channel (issue #5626, Phase 2). Shared sender registry that
    * bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
@@ -499,6 +500,8 @@ export function createServeApp(
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
+      sessionArtifactsPersistenceAvailable:
+        deps.sessionArtifactsPersistenceAvailable !== false,
       // Registry injection supplies the primary workspace service through the
       // runtime, so it has the same reload surface as legacy deps.workspace.
       reloadAvailable:
