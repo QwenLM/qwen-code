@@ -5,6 +5,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type ReactNode,
 } from 'react';
 import { Markdown } from './Markdown';
 import { CompactModeContext } from '../../App';
@@ -21,6 +22,7 @@ interface AssistantMessageProps {
   showFooterActions?: boolean;
   showBranchAction?: boolean;
   isLocateFlashing?: boolean;
+  customFooter?: ReactNode;
 }
 
 export const AssistantMessage = memo(function AssistantMessage({
@@ -31,6 +33,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   showFooterActions = false,
   showBranchAction = false,
   isLocateFlashing = false,
+  customFooter,
 }: AssistantMessageProps) {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
@@ -63,6 +66,9 @@ export const AssistantMessage = memo(function AssistantMessage({
             />
           </div>
         </div>
+      )}
+      {customFooter && (
+        <div className={styles.customFooter}>{customFooter}</div>
       )}
       {showFooter && (
         <div className={styles.messageFooter}>

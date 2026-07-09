@@ -405,10 +405,10 @@ function findFinalAnswerIndex(
   return -1;
 }
 
-function collectFinalAssistantIdsByTurn(
+function collectFinalAssistantTurnIds(
   items: readonly DisplayItem[],
   isResponding: boolean,
-): ReadonlySet<string> {
+): ReadonlyMap<string, string> {
   const userIdxs: number[] = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
@@ -417,19 +417,24 @@ function collectFinalAssistantIdsByTurn(
     }
   }
 
-  const ids = new Set<string>();
+  const turnIdByAssistantId = new Map<string, string>();
   for (let k = 0; k < userIdxs.length; k++) {
     if (k === userIdxs.length - 1 && isResponding) continue;
     const start = userIdxs[k];
     const end = (k + 1 < userIdxs.length ? userIdxs[k + 1] : items.length) - 1;
+    const turnHead = items[start];
     const answerIdx = findFinalAnswerIndex(items, start, end);
     if (answerIdx < 0) continue;
     const item = items[answerIdx];
-    if (item.type === 'message' && item.message.role === 'assistant') {
-      ids.add(item.message.id);
+    if (
+      turnHead?.type === 'message' &&
+      item.type === 'message' &&
+      item.message.role === 'assistant'
+    ) {
+      turnIdByAssistantId.set(item.message.id, turnHead.message.id);
     }
   }
-  return ids;
+  return turnIdByAssistantId;
 }
 
 /**
@@ -2156,8 +2161,8 @@ export const MessageList = memo(
       }
       return null;
     }, [isResponding, mergedMessages]);
-    const finalAssistantIdsByTurn = useMemo(
-      () => collectFinalAssistantIdsByTurn(displayItems, isResponding),
+    const finalAssistantTurnIdByAssistantId = useMemo(
+      () => collectFinalAssistantTurnIds(displayItems, isResponding),
       [displayItems, isResponding],
     );
 
@@ -2168,7 +2173,8 @@ export const MessageList = memo(
     // (collapsed once complete). `displayItems` stays the full, pre-collapse
     // list — used only to locate rows hidden inside a collapsed turn — while
     // `visibleItems` is what actually renders.
-    const { collapseCompletedTurns } = useWebShellCustomization();
+    const { collapseCompletedTurns, renderAssistantTurnFooter } =
+      useWebShellCustomization();
     const collapseEnabled = collapseCompletedTurns ?? true;
     const [collapseOverrides, setCollapseOverrides] = useState<
       ReadonlyMap<string, boolean>
@@ -3140,6 +3146,26 @@ export const MessageList = memo(
             );
           }
 
+          const finalAssistantTurnId =
+            displayItem.message.role === 'assistant'
+              ? finalAssistantTurnIdByAssistantId.get(displayItem.message.id)
+              : undefined;
+          let assistantCustomFooter: ReactNode;
+          if (
+            displayItem.message.role === 'assistant' &&
+            finalAssistantTurnId
+          ) {
+            assistantCustomFooter = renderAssistantTurnFooter?.({
+              turnId: finalAssistantTurnId,
+              message: {
+                id: displayItem.message.id,
+                content: displayItem.message.content,
+                isStreaming: displayItem.message.isStreaming,
+                timestamp: displayItem.message.timestamp,
+              },
+            });
+          }
+
           return (
             <MessageItem
               message={displayItem.message}
@@ -3152,7 +3178,7 @@ export const MessageList = memo(
               onBranchSession={onBranchSession}
               showAssistantActions={
                 displayItem.message.role === 'assistant' &&
-                finalAssistantIdsByTurn.has(displayItem.message.id)
+                finalAssistantTurnIdByAssistantId.has(displayItem.message.id)
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
@@ -3162,6 +3188,7 @@ export const MessageList = memo(
                 displayItem,
                 flashTarget,
               )}
+              assistantTurnFooter={assistantCustomFooter}
             />
           );
         };
@@ -3191,13 +3218,14 @@ export const MessageList = memo(
         headerOffset,
         visibleItems,
         flashTarget,
-        finalAssistantIdsByTurn,
+        finalAssistantTurnIdByAssistantId,
         lastCompletedAssistantId,
         workspaceCwd,
         showRetryHint,
         onRetryClick,
         onBranchSession,
         handleToggleCollapse,
+        renderAssistantTurnFooter,
       ],
     );
 

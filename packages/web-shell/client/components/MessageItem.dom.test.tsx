@@ -30,12 +30,19 @@ vi.mock('./messages/UserMessage', async () => {
 vi.mock('./messages/AssistantMessage', async () => {
   const React = await import('react');
   return {
-    AssistantMessage: ({ content }: { content: string }) => {
+    AssistantMessage: ({
+      content,
+      customFooter,
+    }: {
+      content: string;
+      customFooter?: React.ReactNode;
+    }) => {
       if (content.includes('__BOOM__')) throw new Error('assistant boom');
       return React.createElement(
         'div',
         { 'data-testid': 'assistant-ok' },
         content,
+        customFooter,
       );
     },
     ThinkingMessage: () => null,
@@ -162,5 +169,24 @@ describe('MessageItem selectable wrapper', () => {
     // The message body renders inside the wrapper, so the CSS descendant
     // selector `[data-user-selectable] *` still re-enables selection.
     expect(wrapper.querySelector('[data-testid="user-ok"]')).not.toBeNull();
+  });
+});
+
+describe('MessageItem assistant turn footer', () => {
+  it('passes custom footer content to assistant messages', () => {
+    const container = render(
+      <I18nProvider language="en">
+        <MessageItem
+          message={assistantMsg('1', 'hello')}
+          assistantTurnFooter={
+            <div data-testid="assistant-footer">artifact</div>
+          }
+        />
+      </I18nProvider>,
+    );
+
+    expect(
+      container.querySelector('[data-testid="assistant-footer"]')?.textContent,
+    ).toBe('artifact');
   });
 });

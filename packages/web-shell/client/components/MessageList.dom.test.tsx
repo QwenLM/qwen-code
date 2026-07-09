@@ -3,6 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, createRef, type RefObject } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { Message } from '../adapters/types';
+import {
+  WebShellCustomizationProvider,
+  type WebShellCustomization,
+} from '../customization';
 import { I18nProvider } from '../i18n';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
@@ -20,10 +24,12 @@ vi.mock('./MessageItem', async () => {
       message,
       showAssistantActions,
       isLocateFlashing,
+      assistantTurnFooter,
     }: {
       message: Message;
       showAssistantActions?: boolean;
       isLocateFlashing?: boolean;
+      assistantTurnFooter?: React.ReactNode;
     }) =>
       React.createElement(
         'div',
@@ -38,6 +44,7 @@ vi.mock('./MessageItem', async () => {
               'data-testid': `disclosure-${message.id}`,
             })
           : null,
+        assistantTurnFooter,
       ),
   };
 });
@@ -121,6 +128,7 @@ afterEach(() => {
 type UserMessage = Extract<Message, { role: 'user' }>;
 type ToolGroupMessage = Extract<Message, { role: 'tool_group' }>;
 type AssistantMessage = Extract<Message, { role: 'assistant' }>;
+type SystemMessage = Extract<Message, { role: 'system' }>;
 type ThinkingMessage = Extract<Message, { role: 'thinking' }>;
 type PlanMessage = Extract<Message, { role: 'plan' }>;
 
@@ -159,6 +167,13 @@ const asstMsg = (id: string): AssistantMessage => ({
   role: 'assistant',
   content: 'answer',
 });
+const systemMsg = (id: string): SystemMessage => ({
+  id,
+  role: 'system',
+  content: 'cancelled',
+  variant: 'warning',
+  source: 'prompt_cancelled',
+});
 const thinkingMsg = (id: string): ThinkingMessage => ({
   id,
   role: 'thinking',
@@ -179,6 +194,7 @@ function mount(
     catchingUp?: boolean;
     isResponding?: boolean;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
+    customization?: WebShellCustomization;
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -187,16 +203,18 @@ function mount(
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <MessageList
-          ref={ref}
-          messages={messages}
-          pendingApproval={null}
-          hideSessionTimeline={opts.hideSessionTimeline}
-          loadingTranscript={opts.loadingTranscript}
-          catchingUp={opts.catchingUp}
-          isResponding={opts.isResponding}
-          onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
-        />
+        <WebShellCustomizationProvider value={opts.customization ?? {}}>
+          <MessageList
+            ref={ref}
+            messages={messages}
+            pendingApproval={null}
+            hideSessionTimeline={opts.hideSessionTimeline}
+            loadingTranscript={opts.loadingTranscript}
+            catchingUp={opts.catchingUp}
+            isResponding={opts.isResponding}
+            onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
+          />
+        </WebShellCustomizationProvider>
       </I18nProvider>,
     );
   });
@@ -339,6 +357,62 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(queryToggle(c, 'u1')).toBeNull();
     expect(text).not.toContain('Processed');
     expect(text).not.toContain('13s');
+  });
+
+  it('renders custom footer on the completed turn final assistant message', () => {
+    const renderAssistantTurnFooter = vi.fn(({ turnId, message }) => (
+      <span data-testid="assistant-turn-footer">
+        {turnId}:{message.id}:{message.content}
+      </span>
+    ));
+
+    const c = mount([userMsg('u1'), toolMsg('g1'), asstMsg('a1')], undefined, {
+      customization: { renderAssistantTurnFooter },
+    });
+
+    expect(renderAssistantTurnFooter).toHaveBeenCalledWith({
+      turnId: 'u1',
+      message: {
+        id: 'a1',
+        content: 'answer',
+        isStreaming: undefined,
+        timestamp: undefined,
+      },
+    });
+    expect(
+      c.querySelector('[data-testid="assistant-turn-footer"]')?.textContent,
+    ).toBe('u1:a1:answer');
+  });
+
+  it('does not render the custom assistant footer for the active streaming turn', () => {
+    const renderAssistantTurnFooter = vi.fn(() => (
+      <span data-testid="assistant-turn-footer">footer</span>
+    ));
+
+    const c = mount(
+      [userMsg('u1'), { ...asstMsg('a1'), isStreaming: true }],
+      undefined,
+      {
+        isResponding: true,
+        customization: { renderAssistantTurnFooter },
+      },
+    );
+
+    expect(renderAssistantTurnFooter).not.toHaveBeenCalled();
+    expect(c.querySelector('[data-testid="assistant-turn-footer"]')).toBeNull();
+  });
+
+  it('does not render the custom assistant footer when a turn has no final assistant message', () => {
+    const renderAssistantTurnFooter = vi.fn(() => (
+      <span data-testid="assistant-turn-footer">footer</span>
+    ));
+
+    const c = mount([userMsg('u1'), systemMsg('s1')], undefined, {
+      customization: { renderAssistantTurnFooter },
+    });
+
+    expect(renderAssistantTurnFooter).not.toHaveBeenCalled();
+    expect(c.querySelector('[data-testid="assistant-turn-footer"]')).toBeNull();
   });
 
   it('shows live elapsed time for a running step-less turn', () => {

@@ -1,4 +1,4 @@
-import { memo, type ReactElement } from 'react';
+import { memo, type ReactElement, type ReactNode } from 'react';
 import type {
   ACPToolCall,
   Message,
@@ -31,6 +31,7 @@ interface MessageItemProps {
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
   isLocateFlashing?: boolean;
+  assistantTurnFooter?: ReactNode;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -45,6 +46,7 @@ export const MessageItem = memo(function MessageItem({
   showAssistantActions = false,
   showAssistantBranch = false,
   isLocateFlashing = false,
+  assistantTurnFooter,
 }: MessageItemProps) {
   const { t } = useI18n();
   const body = ((): ReactElement | null => {
@@ -67,6 +69,7 @@ export const MessageItem = memo(function MessageItem({
             showFooterActions={showAssistantActions}
             showBranchAction={showAssistantBranch}
             isLocateFlashing={isLocateFlashing}
+            customFooter={assistantTurnFooter}
           />
         );
       case 'thinking':
