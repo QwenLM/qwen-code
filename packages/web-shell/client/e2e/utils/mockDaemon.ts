@@ -296,7 +296,10 @@ export async function installMockDaemon(
     burstEvents: (events) => sse.burst(events),
     promptRequests: () =>
       requests.filter((request) =>
-        /\/session\/[^/]+\/prompt$/.test(request.path),
+    promptRequests: () =>
+      requests.filter((request) =>
+        /\/session\/[^/]+\/prompt\/?$/.test(request.path),
+      ),
       ),
     permissionRequests: () =>
       requests.filter((request) => /\/permission\/[^/]+$/.test(request.path)),
