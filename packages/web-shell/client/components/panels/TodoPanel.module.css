@@ -164,3 +164,9 @@
     transform: rotate(1turn);
   }
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .loadingIcon {
+    animation: none;
+  }
+}

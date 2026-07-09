@@ -373,7 +373,7 @@ function ModelStatsCard({ status }: { status: DaemonSessionStatsStatus }) {
         ))}
       />
       <PivotRow
-        metric={t('stats.prompt')}
+        metric={t('stats.inputTokens')}
         values={vals((m) => m.tokens.prompt.toLocaleString())}
         variant="sub"
       />
@@ -390,7 +390,7 @@ function ModelStatsCard({ status }: { status: DaemonSessionStatsStatus }) {
         />
       )}
       <PivotRow
-        metric={t('stats.output')}
+        metric={t('stats.outputTokens')}
         values={vals((m) => m.tokens.candidates.toLocaleString())}
         variant="sub"
       />

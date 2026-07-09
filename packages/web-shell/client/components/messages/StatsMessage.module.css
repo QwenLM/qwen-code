@@ -161,7 +161,7 @@
 .tableValueCol {
   min-width: 10ch;
   color: var(--foreground);
-  text-align: left;
+  text-align: right;
   white-space: nowrap;
 }
 
