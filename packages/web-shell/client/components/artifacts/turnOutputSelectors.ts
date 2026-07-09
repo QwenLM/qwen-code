@@ -236,11 +236,9 @@ function getFileChange(
     path: filePath,
     status,
     toolCallId: tool.callId,
-    isArtifact:
-      normalizedPath !== undefined &&
-      Array.from(artifactPaths).some((artifactPath) =>
-        isSameWorkspacePath(normalizedPath, artifactPath),
-      ),
+    isArtifact: Array.from(artifactPaths).some((artifactPath) =>
+      isSameWorkspacePath(normalizedPath, artifactPath),
+    ),
     ...(lineStats
       ? { additions: lineStats.additions, deletions: lineStats.deletions }
       : {}),

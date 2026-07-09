@@ -1174,7 +1174,9 @@ function CodeMirrorDiff({
   return (
     <div className={styles.codeMirrorDiffWrap}>
       <div ref={hostRef} className={styles.codeMirrorDiff} />
-      {error && <div className={styles.diffError}>Diff unavailable.</div>}
+      {error && (
+        <div className={styles.diffError}>Diff unavailable: {error}</div>
+      )}
     </div>
   );
 }
