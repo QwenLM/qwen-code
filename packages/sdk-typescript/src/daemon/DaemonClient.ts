@@ -698,6 +698,7 @@ export class DaemonClient {
       method?: string;
       clientId?: string;
       timeoutMs?: number;
+      okNotFoundCode?: string;
     } = {},
   ): Promise<void> {
     return await this.fetchWithTimeout(
@@ -714,6 +715,12 @@ export class DaemonClient {
             /* body already consumed or no body */
           }
           return;
+        }
+        if (res.status === 404 && opts.okNotFoundCode) {
+          const err = await this.failOnError(res, label);
+          const body = err.body as { code?: unknown } | undefined;
+          if (body?.code === opts.okNotFoundCode) return;
+          throw err;
         }
         throw await this.failOnError(res, label);
       },
@@ -3446,7 +3453,11 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       `/agents/${urlEncode(agentType)}${query}`,
       'DELETE /workspaces/:workspace/agents/:agentType',
-      { method: 'DELETE', clientId: opts.clientId },
+      {
+        method: 'DELETE',
+        clientId: opts.clientId,
+        okNotFoundCode: 'agent_not_found',
+      },
     );
   }
 

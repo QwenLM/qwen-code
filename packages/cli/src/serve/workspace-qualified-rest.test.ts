@@ -6,7 +6,7 @@
 
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { promises as fsp } from 'node:fs';
+import { promises as fsp, realpathSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
@@ -176,6 +176,7 @@ async function makeHarness(opts?: {
     undefined,
     {
       workspaceRegistry: createWorkspaceRegistry([primary, secondary]),
+      persistSetting: vi.fn(async () => {}),
     },
   );
 
@@ -232,6 +233,7 @@ async function makeWindowsSelectorHarness() {
     undefined,
     {
       workspaceRegistry: createWorkspaceRegistry([primary, windowsRuntime]),
+      persistSetting: vi.fn(async () => {}),
     },
   );
   return { app, scratch, windowsCwd };
@@ -325,37 +327,20 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
-  it('logs canonicalization failures for absolute cwd selectors', async () => {
+  it('does not canonicalize unregistered absolute cwd selectors', async () => {
     const h = await makeHarness();
-    const stderrSpy = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation(() => true);
+    const realpathSpy = vi.spyOn(realpathSync, 'native');
     try {
-      const loop = path.join(h.scratch, 'loop');
-      try {
-        await fsp.symlink(loop, loop);
-      } catch (err) {
-        if (
-          err &&
-          typeof err === 'object' &&
-          'code' in err &&
-          (err as { code?: unknown }).code === 'EPERM'
-        ) {
-          return;
-        }
-        throw err;
-      }
+      const uncSelector = '\\\\attacker\\share';
       const res = await request(h.app)
-        .get(`/workspaces/${encodeURIComponent(loop)}/file`)
+        .get(`/workspaces/${encodeURIComponent(uncSelector)}/file`)
         .query({ path: 'target.txt' })
         .set('Host', host());
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('workspace_mismatch');
-      expect(stderrSpy).toHaveBeenCalledWith(
-        expect.stringContaining('canonicalizeWorkspace'),
-      );
+      expect(realpathSpy).not.toHaveBeenCalled();
     } finally {
-      stderrSpy.mockRestore();
+      realpathSpy.mockRestore();
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });

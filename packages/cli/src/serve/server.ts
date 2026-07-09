@@ -152,7 +152,10 @@ import {
   type WorkspaceRegistry,
   type WorkspaceRuntimeEnvMetadata,
 } from './workspace-registry.js';
-import { isPortableAbsolutePath } from './workspace-route-runtime.js';
+import {
+  isPortableAbsolutePath,
+  resolveRegisteredWorkspaceRuntimeByPathSelector,
+} from './workspace-route-runtime.js';
 import {
   registerWorkspaceLifecycleRoutes,
   registerWorkspaceQualifiedLifecycleRoutes,
@@ -793,15 +796,10 @@ export function createServeApp(
           const byId = workspaceRegistry.getByWorkspaceId(selector);
           if (byId) return byId.workspaceCwd;
           if (isPortableAbsolutePath(selector)) {
-            const key = canonicalizeWorkspace(selector);
-            const runtime =
-              workspaceRegistry.getByWorkspaceCwd(key) ??
-              workspaceRegistry
-                .list()
-                .find(
-                  (candidate) =>
-                    canonicalizeWorkspace(candidate.workspaceCwd) === key,
-                );
+            const runtime = resolveRegisteredWorkspaceRuntimeByPathSelector(
+              workspaceRegistry,
+              selector,
+            );
             if (runtime) return runtime.workspaceCwd;
           }
         } catch {

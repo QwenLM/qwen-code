@@ -262,9 +262,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // only when one daemon hosts more than one registered workspace runtime.
   multi_workspace_sessions: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
-  // Covers core file/status/settings/permissions/trust/lifecycle/MCP/tool,
-  // memory, workspace agent CRUD, and persisted session organization
-  // surfaces. ACP/WebSocket, auth, voice, and extensions stay on their
+  // Covers core file/status/permissions/trust/lifecycle/MCP/tool, memory,
+  // workspace agent CRUD, and persisted session organization surfaces.
+  // Workspace-qualified settings also require the existing
+  // `workspace_settings` tag because that surface depends on settings
+  // persistence. ACP/WebSocket, auth, voice, and extensions stay on their
   // existing primary-workspace routes in this phase.
   workspace_qualified_rest_core: { since: 'v1' },
   // Phase 2 "reverse tool channel" (issue #5626). A connected WS client (e.g.
@@ -405,6 +407,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'multi_workspace_sessions',
     (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
+  ],
+  [
+    'workspace_qualified_rest_core',
+    (toggles) => toggles.persistSettingAvailable === true,
   ],
   ['client_mcp_over_ws', (toggles) => toggles.clientMcpOverWsEnabled === true],
   ['cdp_tunnel_over_ws', (toggles) => toggles.cdpTunnelOverWsEnabled === true],

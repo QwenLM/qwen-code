@@ -6,8 +6,6 @@
 
 import path from 'node:path';
 import type { Request, Response } from 'express';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { canonicalizeWorkspace } from './acp-session-bridge.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -24,6 +22,30 @@ export function isPortableAbsolutePath(value: string): boolean {
     /^[A-Za-z]:[\\/]/.test(value) ||
     /^\\\\[^\\]+\\[^\\]+/.test(value)
   );
+}
+
+function normalizePortableAbsolutePath(value: string): string {
+  if (/^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value)) {
+    return path.win32.normalize(value).toLowerCase();
+  }
+  return path.resolve(value);
+}
+
+export function resolveRegisteredWorkspaceRuntimeByPathSelector(
+  registry: WorkspaceRegistry,
+  selector: string,
+): WorkspaceRuntime | undefined {
+  const exact = registry.getByWorkspaceCwd(selector);
+  if (exact) return exact;
+
+  const normalizedSelector = normalizePortableAbsolutePath(selector);
+  return registry
+    .list()
+    .find(
+      (runtime) =>
+        normalizePortableAbsolutePath(runtime.workspaceCwd) ===
+        normalizedSelector,
+    );
 }
 
 export function resolveWorkspaceRuntimeFromParam(
@@ -45,28 +67,12 @@ export function resolveWorkspaceRuntimeFromParam(
     return null;
   }
 
-  let key: string;
-  try {
-    key = canonicalizeWorkspace(selector);
-  } catch (err) {
-    writeStderrLine(
-      `qwen serve: canonicalizeWorkspace(${JSON.stringify(selector)}) failed: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    sendWorkspaceMismatch(res, registry, selector);
-    return null;
-  }
-
-  const runtime =
-    registry.getByWorkspaceCwd(key) ??
-    registry
-      .list()
-      .find(
-        (candidate) => canonicalizeWorkspace(candidate.workspaceCwd) === key,
-      );
+  const runtime = resolveRegisteredWorkspaceRuntimeByPathSelector(
+    registry,
+    selector,
+  );
   if (!runtime) {
-    sendWorkspaceMismatch(res, registry, key);
+    sendWorkspaceMismatch(res, registry, selector);
     return null;
   }
   return runtime;

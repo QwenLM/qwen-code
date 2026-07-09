@@ -4342,6 +4342,31 @@ describe('DaemonClient', () => {
       expect(calls[3]?.headers['x-qwen-client-id']).toBe('client-2');
       expect(calls[4]?.headers['x-qwen-client-id']).toBe('client-3');
     });
+
+    it('workspace-qualified deleteWorkspaceAgent preserves idempotent structured 404 handling', async () => {
+      {
+        const { fetch } = recordingFetch(() =>
+          jsonResponse(404, { error: 'not found', code: 'agent_not_found' }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await expect(
+          client.workspaceById('workspace-id').deleteWorkspaceAgent('x'),
+        ).resolves.toBeUndefined();
+      }
+      {
+        const { fetch } = recordingFetch(
+          () =>
+            new Response('Not Found', {
+              status: 404,
+              headers: { 'content-type': 'text/plain' },
+            }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await expect(
+          client.workspaceById('workspace-id').deleteWorkspaceAgent('x'),
+        ).rejects.toBeInstanceOf(DaemonHttpError);
+      }
+    });
   });
 
   describe('addRuntimeMcpServer (T2.8 #4514)', () => {

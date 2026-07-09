@@ -304,7 +304,6 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_hooks',
   'workspace_extensions',
   'session_branch',
-  'workspace_qualified_rest_core',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -2037,7 +2036,11 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'workspace_settings' || feature === 'workspace_voice') {
+        if (
+          feature === 'workspace_settings' ||
+          feature === 'workspace_voice' ||
+          feature === 'workspace_qualified_rest_core'
+        ) {
           expect(predicate({ persistSettingAvailable: true })).toBe(true);
           expect(predicate({ persistSettingAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);
