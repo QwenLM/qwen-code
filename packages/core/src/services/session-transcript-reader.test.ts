@@ -320,23 +320,30 @@ describe('SessionTranscriptReader', () => {
     ]);
   });
 
-  it('skips a cached segment when the raw fragment uuid no longer matches', async () => {
+  it('raises snapshot-unavailable when a same-size in-place rewrite reuses a cached segment', async () => {
     const initial = `${JSON.stringify(record('u1', null, 'hello'))}\n`;
     const filePath = await writeRawTranscript(initial);
+    const fixed = new Date('2026-02-02T02:02:02.000Z');
+    await fs.utimes(filePath, fixed, fixed);
     const reader = new SessionTranscriptReader(workspaceDir);
 
     await expect(reader.readPage(sessionId)).resolves.toMatchObject({
       records: [expect.objectContaining({ uuid: 'u1' })],
     });
 
+    // Keep the byte length and (forced) mtime so the cached index is reused,
+    // but change the uuid so the recorded offset now parses to a different
+    // record. The reader must surface 409, not silently drop the record.
     await fs.writeFile(
       filePath,
       initial.replace('"uuid":"u1"', '"uuid":"x1"'),
       'utf8',
     );
+    await fs.utimes(filePath, fixed, fixed);
 
-    const reread = await reader.readPage(sessionId);
-    expect(reread.records).toEqual([]);
+    await expect(reader.readPage(sessionId)).rejects.toBeInstanceOf(
+      SessionTranscriptSnapshotUnavailableError,
+    );
   });
 
   it('does not repeatedly copy pending bytes for one large record', async () => {
@@ -445,5 +452,47 @@ describe('SessionTranscriptReader', () => {
     await expect(
       reader.readPage(sessionId, { cursor: tampered }),
     ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+  });
+
+  // Regression: an in-place rewrite that keeps the inode AND byte length must
+  // not be masked by the index cache (cache key includes the file mtime).
+  it('reflects an in-place same-size rewrite once the mtime advances', async () => {
+    const mk = (uuid: string, parentUuid: string | null): ChatRecord => ({
+      uuid,
+      parentUuid,
+      sessionId,
+      timestamp: '2026-01-01T00:00:01.000Z',
+      type: 'user',
+      cwd: workspaceDir,
+      version: '1.0.0',
+      message: { role: 'user', parts: [{ text: 'hello world' }] },
+    });
+    const filePath = await writeRecords([
+      mk('11111111', null),
+      mk('22222222', '11111111'),
+    ]);
+    const reader = new SessionTranscriptReader(workspaceDir);
+    expect(
+      (await reader.readPage(sessionId, { limit: 100 })).records.map(
+        (r) => r.uuid,
+      ),
+    ).toEqual(['11111111', '22222222']);
+
+    // Same inode, identical byte length (8-char uuids), new content + mtime.
+    await fs.writeFile(
+      filePath,
+      [mk('33333333', null), mk('44444444', '33333333')]
+        .map((r) => JSON.stringify(r))
+        .join('\n') + '\n',
+      'utf8',
+    );
+    const later = new Date(Date.now() + 60_000);
+    await fs.utimes(filePath, later, later);
+
+    expect(
+      (await reader.readPage(sessionId, { limit: 100 })).records.map(
+        (r) => r.uuid,
+      ),
+    ).toEqual(['33333333', '44444444']);
   });
 });

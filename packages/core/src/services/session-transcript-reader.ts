@@ -367,8 +367,13 @@ function makeCacheKey(
   filePath: string,
   fileIdentity: SessionTranscriptFileIdentity,
   snapshotSize: number,
+  lastUpdated: string,
 ): string {
-  return `${filePath}:${fileIdentity.dev}:${fileIdentity.ino}:${snapshotSize}`;
+  // `lastUpdated` (file mtime) is part of the key so an in-place rewrite that
+  // preserves the inode AND byte length (e.g. `rsync --inplace`, a redaction
+  // pass) still invalidates the cached index instead of serving a stale one
+  // whose byte offsets now point at different records.
+  return `${filePath}:${fileIdentity.dev}:${fileIdentity.ino}:${snapshotSize}:${lastUpdated}`;
 }
 
 function getIndexCacheMaxBytes(): number {
@@ -536,24 +541,25 @@ async function readSegmentRecords(
   const records = jsonl
     .parseLineTolerant<ChatRecord>(line, filePath)
     .filter((record) => isChatRecord(record));
+  const anomalySessionId = path.basename(filePath, '.jsonl');
   const record = records[segment.fragmentIndex];
   if (!record) {
     debugLogger.debug(
-      `segment read anomaly: no fragment session=${path.basename(
-        filePath,
-        '.jsonl',
-      )} uuid=${uuid} offset=${segment.offset} fragment=${segment.fragmentIndex}`,
+      `segment read anomaly: no fragment session=${anomalySessionId} ` +
+        `uuid=${uuid} offset=${segment.offset} fragment=${segment.fragmentIndex}`,
     );
-    return [];
+    // The frozen snapshot changed under us (e.g. an in-place rewrite that kept
+    // the inode and byte length): the recorded offset no longer parses to the
+    // expected record. Surface it as snapshot-unavailable (→ 409) rather than
+    // silently dropping the record and returning a short/empty transcript.
+    throw new SessionTranscriptSnapshotUnavailableError(anomalySessionId);
   }
   if (record.uuid !== uuid) {
     debugLogger.debug(
-      `segment read anomaly: uuid mismatch session=${path.basename(
-        filePath,
-        '.jsonl',
-      )} expected=${uuid} actual=${record.uuid} offset=${segment.offset}`,
+      `segment read anomaly: uuid mismatch session=${anomalySessionId} ` +
+        `expected=${uuid} actual=${record.uuid} offset=${segment.offset}`,
     );
-    return [];
+    throw new SessionTranscriptSnapshotUnavailableError(anomalySessionId);
   }
   return [record];
 }
@@ -756,6 +762,7 @@ async function getCachedIndex(params: {
     params.filePath,
     params.fileIdentity,
     params.snapshotSize,
+    params.lastUpdated,
   );
   const cached = indexCache.get(key);
   if (cached?.value && cached.expiresAt > now) {
