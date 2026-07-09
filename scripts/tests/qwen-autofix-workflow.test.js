@@ -304,12 +304,9 @@ describe('qwen-autofix workflow', () => {
       '[[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true',
     );
     expect(workflow).toContain(
-      'if [[ "${ASSIGNEE_LOGIN}" == "${AUTOFIX_BOT}" && "${ISSUE_STATE}" == \'open\' ]]; then',
+      '[[ "${ASSIGNEE_LOGIN}" == "${AUTOFIX_BOT}" ]] && label_is_trigger=true',
     );
-    expect(workflow).toContain('ROUTE_ISSUE="${ISSUE_NUMBER}"');
-    expect(workflow).toContain(
-      'issue #${ISSUE_NUMBER} assigned to ${AUTOFIX_BOT} → issue phase',
-    );
+    expect(routeStep).not.toContain('ROUTE_ISSUE="${ISSUE_NUMBER}"');
     expect(workflow).toContain(
       'issue event ignored: state_open=$([[ "${ISSUE_STATE}" == \'open\' ]]',
     );
