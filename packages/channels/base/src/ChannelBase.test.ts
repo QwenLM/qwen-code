@@ -21,8 +21,10 @@ import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 class TestChannel extends ChannelBase {
   sent: Array<{ chatId: string; text: string }> = [];
   proactive: Array<{ chatId: string; text: string }> = [];
+  proactiveTargets: SessionTarget[] = [];
   proactiveSupported = false;
   proactiveTargetSupported: boolean | undefined;
+  sendMessageError?: Error;
   connected = false;
   toolCalls: Array<{ chatId: string; event: unknown }> = [];
   taskEvents: ChannelTaskLifecycleEvent[] = [];
@@ -54,6 +56,9 @@ class TestChannel extends ChannelBase {
     this.connected = true;
   }
   async sendMessage(chatId: string, text: string) {
+    if (this.sendMessageError) {
+      throw this.sendMessageError;
+    }
     this.sent.push({ chatId, text });
   }
   disconnect() {
@@ -79,10 +84,11 @@ class TestChannel extends ChannelBase {
   }
 
   protected override async pushProactive(
-    target: { chatId: string },
+    target: SessionTarget,
     text: string,
   ): Promise<void> {
     this.proactive.push({ chatId: target.chatId, text });
+    this.proactiveTargets.push(target);
   }
 
   enableCancelCommand(): void {
@@ -91,6 +97,10 @@ class TestChannel extends ChannelBase {
 
   cancelPromptForTest(sessionId: string): Promise<boolean> {
     return this.requestActivePromptCancellation(sessionId, 'cancel_command');
+  }
+
+  debugPayloadForTest(platform: string, payload: unknown): void {
+    this.logDebugPayload(platform, payload);
   }
 
   protected override onPromptStart(
@@ -176,6 +186,7 @@ function createBridge(): ChannelAgentBridge {
     isConnected: true,
     availableCommands: [],
     setBridge: vi.fn(),
+    respondToPermission: vi.fn().mockResolvedValue(true),
     registerChannelLoopToolHandler: vi.fn((handler: ChannelLoopToolHandler) => {
       channelLoopToolHandler = handler;
     }),
@@ -193,6 +204,7 @@ function defaultConfig(overrides: Partial<ChannelConfig> = {}): ChannelConfig {
     sessionScope: 'user',
     cwd: '/tmp',
     groupPolicy: 'disabled',
+    dmPolicy: 'open',
     groups: {},
     ...overrides,
   };
@@ -246,9 +258,267 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('logs the preflight rejection reason for group gates', async () => {
+      const ch = createChannel();
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ isGroup: true }));
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=group_disabled',
+      );
+    });
+
+    it('does not log expected mention-required group drops', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        groups: { '*': { requireMention: true } },
+      });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ isGroup: true, isMentioned: false }));
+
+      const callCount = writeSpy.mock.calls.length;
+      writeSpy.mockRestore();
+      expect(callCount).toBe(0);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('does not log debug payloads by default', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let callCount = 0;
+
+      try {
+        ch.debugPayloadForTest('Test', { token: 'secret-token' });
+      } finally {
+        callCount = writeSpy.mock.calls.length;
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(callCount).toBe(0);
+    });
+
+    it('logs sanitized debug payloads when enabled', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'test-chan';
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let logged = '';
+
+      try {
+        ch.debugPayloadForTest('Test', {
+          msgId: 'm1',
+          token: 'secret-token',
+          password: 'secret-password',
+          cookie: 'session-cookie',
+          signature: 'message-signature',
+          encrypt: 'encrypted-body',
+          response_url: 'https://example.invalid/hook?token=secret',
+          open_id: 'ou_123',
+          union_id: 'on_123',
+          userid: 'wecom-user-123',
+          user_id: { open_id: 'nested-ou' },
+          senderStaffId: 'staff-123',
+          senderId: 'sender-123',
+          senderNick: 'Alice',
+          senderName: 'Bob',
+          nested: { aeskey: 'media-key' },
+        });
+        logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      } finally {
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(logged).toContain('[Test:test-chan] debug payload');
+      expect(logged).toContain('"msgId":"m1"');
+      expect(logged).toContain('"token":"[redacted]"');
+      expect(logged).toContain('"password":"[redacted]"');
+      expect(logged).toContain('"cookie":"[redacted]"');
+      expect(logged).toContain('"signature":"[redacted]"');
+      expect(logged).toContain('"encrypt":"[redacted]"');
+      expect(logged).toContain('"response_url":"[redacted]"');
+      expect(logged).toContain('"open_id":"[redacted]"');
+      expect(logged).toContain('"union_id":"[redacted]"');
+      expect(logged).toContain('"userid":"[redacted]"');
+      expect(logged).toContain('"user_id":"[redacted]"');
+      expect(logged).toContain('"senderStaffId":"[redacted]"');
+      expect(logged).toContain('"senderId":"[redacted]"');
+      expect(logged).toContain('"senderNick":"[redacted]"');
+      expect(logged).toContain('"senderName":"[redacted]"');
+      expect(logged).toContain('"aeskey":"[redacted]"');
+      expect(logged).not.toContain('\\n');
+      expect(logged).not.toContain('secret-token');
+      expect(logged).not.toContain('secret-password');
+      expect(logged).not.toContain('session-cookie');
+      expect(logged).not.toContain('message-signature');
+      expect(logged).not.toContain('encrypted-body');
+      expect(logged).not.toContain('media-key');
+      expect(logged).not.toContain('ou_123');
+      expect(logged).not.toContain('on_123');
+      expect(logged).not.toContain('wecom-user-123');
+      expect(logged).not.toContain('Alice');
+      expect(logged).not.toContain('Bob');
+      expect(logged).not.toContain('nested-ou');
+      expect(logged).not.toContain('staff-123');
+      expect(logged).not.toContain('sender-123');
+    });
+
+    it('handles debug payload serialization failures gracefully', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'test-chan';
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let logged = '';
+
+      try {
+        const payload: Record<string, unknown> = {};
+        payload['self'] = payload;
+        ch.debugPayloadForTest('Test', payload);
+        logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      } finally {
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(logged).toContain('[Test:test-chan] debug payload');
+      expect(logged).toContain('could not be serialized');
+    });
+
+    it('logs debug payloads for global enable values', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'all';
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let logged = '';
+
+      try {
+        ch.debugPayloadForTest('Test', { msgId: 'm1' });
+        logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      } finally {
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(logged).toContain('[Test:test-chan] debug payload');
+    });
+
+    it('matches debug payload channel names exactly', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'test';
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let callCount = 0;
+
+      try {
+        ch.debugPayloadForTest('Test', { msgId: 'm1' });
+      } finally {
+        callCount = writeSpy.mock.calls.length;
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(callCount).toBe(0);
+    });
+
     it('allows DM messages through', async () => {
       const ch = createChannel();
       await ch.handleInbound(envelope());
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('silently drops DM messages when dmPolicy=disabled', async () => {
+      const ch = createChannel({ dmPolicy: 'disabled' });
+      await ch.handleInbound(envelope());
+      expect(ch.sent).toEqual([]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('logs the preflight rejection reason for DM gates', async () => {
+      const ch = createChannel({ dmPolicy: 'disabled' });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope());
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=dm_disabled',
+      );
+    });
+
+    it('logs the preflight rejection reason for sender gates', async () => {
+      const ch = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['user2'],
+      });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope());
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=sender_denied',
+      );
+    });
+
+    it('allows group messages through when dmPolicy=disabled', async () => {
+      const ch = createChannel({
+        dmPolicy: 'disabled',
+        groupPolicy: 'open',
+      });
+      await ch.handleInbound(envelope({ isGroup: true, isMentioned: true }));
       expect(bridge.prompt).toHaveBeenCalled();
     });
 
@@ -293,6 +563,666 @@ describe('ChannelBase', () => {
       });
       await ch.handleInbound(envelope());
       expect(bridge.prompt).toHaveBeenCalled();
+    });
+  });
+
+  describe('permission relay', () => {
+    function respondToPermissionMock(): ReturnType<typeof vi.fn> {
+      return (
+        bridge as unknown as {
+          respondToPermission: ReturnType<typeof vi.fn>;
+        }
+      ).respondToPermission;
+    }
+
+    function emitPermission(
+      sessionId: string,
+      requestId: string,
+      options = [
+        {
+          optionId: 'proceed_always_project',
+          kind: 'allow_always',
+          name: 'Always Allow in project',
+        },
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow once' },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Deny' },
+      ],
+    ): void {
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId,
+        sessionId,
+        request: {
+          toolCall: {
+            toolCallId: `tool-${requestId}`,
+            kind: 'shell',
+            title: `Run ${requestId}`,
+            rawInput: { command: 'echo secret-token' },
+          },
+          options,
+        },
+      });
+    }
+
+    async function startSession(
+      ch: TestChannel,
+      env: Partial<Envelope> = {},
+    ): Promise<string> {
+      await ch.handleInbound(envelope({ text: 'run tests', ...env }));
+      const results = (bridge.newSession as ReturnType<typeof vi.fn>).mock
+        .results;
+      return results[results.length - 1]!.value as string;
+    }
+
+    it('sends permission requests to the owning chat and approves with /approve', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+
+      expect(ch.sent.at(-1)?.chatId).toBe('chat1');
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Permission required to run a tool',
+      );
+      expect(ch.sent.at(-1)?.text).toContain('Command:');
+      expect(ch.sent.at(-1)?.text).toContain('Run req-1');
+      expect(ch.sent.at(-1)?.text).toContain('/approve        allow once');
+      expect(ch.sent.at(-1)?.text).toContain('/approve-always always allow');
+      expect(ch.sent.at(-1)?.text).toContain('/deny           deny');
+      expect(ch.sent.at(-1)?.text).not.toContain('Request: req-1');
+      expect(ch.sent.at(-1)?.text).not.toContain('proceed_once');
+      expect(ch.sent.at(-1)?.text).not.toContain('secret-token');
+
+      await ch.handleInbound(envelope({ text: '/approve' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+      expect(ch.sent.at(-1)?.text).toBe('Permission approved.');
+    });
+
+    it('cancels bridge permissions when the target no longer belongs to the channel', async () => {
+      const router = {
+        getTarget: vi.fn(() => ({
+          channelName: 'other-channel',
+          chatId: 'chat1',
+        })),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
+
+      await ch.dispatchPermissionRequest({
+        requestId: 'req-stale',
+        sessionId: 'session-1',
+        request: {
+          toolCall: {
+            toolCallId: 'tool-req-stale',
+            kind: 'shell',
+            title: 'Run req-stale',
+          },
+          options: [],
+        },
+      });
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-stale', {
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(ch.sent).toEqual([]);
+    });
+
+    it('requires an explicit request id when multiple permissions are pending', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      emitPermission(sessionId, 'req-2');
+
+      await ch.handleInbound(envelope({ text: '/approve' }));
+
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Multiple permission requests are pending',
+      );
+      expect(ch.sent.at(-1)?.text).toContain('req-1');
+      expect(ch.sent.at(-1)?.text).toContain('req-2');
+      expect(ch.sent.at(-1)?.text).toContain('req-1: Run req-1');
+      expect(ch.sent.at(-1)?.text).toContain('req-2: Run req-2');
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledTimes(1);
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('does not fall back to another pending request when an explicit id is wrong', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      emitPermission(sessionId, 'req-2');
+
+      await ch.handleInbound(envelope({ text: '/approve missing-request' }));
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('does not answer permission requests from another chat', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch, { chatId: 'chat2' });
+      emitPermission(sessionId, 'req-chat2');
+
+      await ch.handleInbound(
+        envelope({ chatId: 'chat1', text: '/approve req-chat2' }),
+      );
+
+      expect(ch.sent.at(-1)?.chatId).toBe('chat1');
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+    });
+
+    it('does not answer permission requests from another thread', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'thread',
+      });
+      const sessionId = await startSession(ch, {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'alice',
+        threadId: 'thread-1',
+      });
+      emitPermission(sessionId, 'req-thread-1');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'alice',
+          text: '/approve req-thread-1',
+          threadId: 'thread-2',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'alice',
+          text: '/approve req-thread-1',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-thread-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('delivers threaded permission requests through proactive targets when supported', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'thread',
+      });
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+      const sessionId = await startSession(ch, {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'alice',
+        threadId: 'thread-1',
+      });
+
+      emitPermission(sessionId, 'req-thread-1');
+
+      expect(ch.proactiveTargets.at(-1)).toMatchObject({
+        chatId: 'group1',
+        senderId: 'alice',
+        threadId: 'thread-1',
+      });
+      expect(ch.proactive.at(-1)?.text).toContain(
+        'Permission required to run a tool',
+      );
+      expect(ch.sent.at(-1)?.text).not.toContain(
+        'Permission required to run a tool',
+      );
+    });
+
+    it('routes single-scope permission requests to the active chat', async () => {
+      const ch = createChannel({ sessionScope: 'single' });
+      await startSession(ch, { senderId: 'alice', chatId: 'alice-dm' });
+
+      let resolveBob!: (value: string) => void;
+      const bobPrompt = new Promise<string>((resolve) => {
+        resolveBob = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () => bobPrompt,
+      );
+
+      const bobTurn = ch.handleInbound(
+        envelope({
+          senderId: 'bob',
+          senderName: 'Bob',
+          chatId: 'bob-dm',
+          text: 'needs permission',
+        }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1]![0] as string;
+
+      emitPermission(sessionId, 'req-bob');
+
+      await vi.waitFor(() =>
+        expect(ch.sent.at(-1)?.text).toContain(
+          'Permission required to run a tool',
+        ),
+      );
+      expect(ch.sent.at(-1)?.chatId).toBe('bob-dm');
+
+      resolveBob('agent response');
+      await bobTurn;
+    });
+
+    it('does not let another group member approve user-scoped permissions', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'user',
+      });
+      const sessionId = await startSession(ch, {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'alice',
+        threadId: 'thread-1',
+      });
+      emitPermission(sessionId, 'req-alice');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'bob',
+          text: '/approve req-alice',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'alice',
+          text: '/approve req-alice',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-alice', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('matches the current sender before reporting ambiguous permissions', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'user',
+      });
+      const group = {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        threadId: 'thread-1',
+      };
+      const aliceSessionId = await startSession(ch, {
+        ...group,
+        senderId: 'alice',
+      });
+      emitPermission(aliceSessionId, 'req-alice');
+      const bobSessionId = await startSession(ch, {
+        ...group,
+        senderId: 'bob',
+      });
+      emitPermission(bobSessionId, 'req-bob');
+
+      await ch.handleInbound(
+        envelope({
+          ...group,
+          senderId: 'alice',
+          text: '/approve',
+        }),
+      );
+
+      expect(ch.sent.at(-1)?.text).toBe('Permission approved.');
+      expect(respondToPermissionMock()).toHaveBeenCalledTimes(1);
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-alice', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('gates shared-session permission responses to authorized senders', async () => {
+      const ch = createChannel({
+        allowedUsers: ['boss'],
+        groupPolicy: 'open',
+        sessionScope: 'thread',
+      });
+      const sessionId = await startSession(ch, {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'boss',
+        threadId: 'thread-1',
+      });
+      emitPermission(sessionId, 'req-1');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'rando',
+          text: '/approve req-1',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toContain('Only authorized members');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'boss',
+          text: '/approve req-1',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('uses ACP option kinds for approval and denial', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        { optionId: 'always', kind: 'allow_always', name: 'Allow always' },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+        { optionId: 'never', kind: 'reject_always', name: 'Deny always' },
+        { optionId: 'reject', kind: 'reject_once', name: 'Deny once' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'once' },
+      });
+
+      emitPermission(sessionId, 'req-2', [
+        { optionId: 'reject', kind: 'reject_once', name: 'Deny once' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/deny req-2' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-2', {
+        outcome: { outcome: 'selected', optionId: 'reject' },
+      });
+      expect(ch.sent.at(-1)?.text).toBe('Permission denied.');
+
+      emitPermission(sessionId, 'req-3', [
+        { optionId: 'always', kind: 'allow_always', name: 'Allow always' },
+        { optionId: 'never', kind: 'reject_always', name: 'Deny always' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/deny req-3' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-2', {
+        outcome: { outcome: 'selected', optionId: 'reject' },
+      });
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-3', {
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(ch.sent.at(-1)?.text).toBe('Permission denied.');
+    });
+
+    it('reports permission requests that lack requested approval options', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        { optionId: 'reject', kind: 'reject_once', name: 'Deny once' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'This permission request has no approvable option.',
+      );
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+
+      await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'This permission request has no always-allow option.',
+      );
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+    });
+
+    it('clears pending permission requests when response dispatch fails', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      respondToPermissionMock().mockRejectedValueOnce(new Error('send failed'));
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('supports explicit approve-always for persistent permission grants', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        {
+          optionId: 'proceed_always_user',
+          kind: 'allow_always',
+          name: 'Always Allow for user',
+        },
+        {
+          optionId: 'proceed_always_project',
+          kind: 'allow_always',
+          name: 'Always Allow in project',
+        },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+      ]);
+
+      expect(ch.sent.at(-1)?.text).toContain(
+        '/approve-always always allow for this project',
+      );
+
+      await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_always_project' },
+      });
+      expect(ch.sent.at(-1)?.text).toBe('Permission approved always.');
+    });
+
+    it('falls back to user-scope approve-always when project scope is unavailable', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        {
+          optionId: 'proceed_always_user',
+          kind: 'allow_always',
+          name: 'Always Allow for user',
+        },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+      ]);
+
+      expect(ch.sent.at(-1)?.text).toContain(
+        '/approve-always always allow for this user',
+      );
+
+      await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_always_user' },
+      });
+    });
+
+    it('does not infer approve-always scope from noncanonical option ids', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        {
+          optionId: 'sandbox_bypass_project',
+          kind: 'allow_always',
+          name: 'Always allow sandbox bypass',
+        },
+        {
+          optionId: 'proceed_always_user',
+          kind: 'allow_always',
+          name: 'Always Allow for user',
+        },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+      ]);
+
+      expect(ch.sent.at(-1)?.text).toContain(
+        '/approve-always always allow for this user',
+      );
+
+      await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_always_user' },
+      });
+    });
+
+    it('allows approve-always without a request id when one request is pending', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        { optionId: 'always', kind: 'allow_always', name: 'Allow always' },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/approve-always' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'always' },
+      });
+    });
+
+    it('clears pending permission requests when the session is cleared', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+
+      await ch.handleInbound(envelope({ text: '/clear' }));
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('clears pending permission requests when the session dies', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+
+      (bridge as unknown as EventEmitter).emit('sessionDied', {
+        sessionId,
+      });
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('reports when the bridge cannot answer permission requests', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      delete (bridge as unknown as { respondToPermission?: unknown })
+        .respondToPermission;
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'Permission relay is not available for this session.',
+      );
+    });
+
+    it('cancels the permission request when the relay message cannot be sent', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      ch.sendMessageError = new Error('send failed');
+
+      emitPermission(sessionId, 'req-1');
+      await vi.waitFor(() =>
+        expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+          outcome: { outcome: 'cancelled' },
+        }),
+      );
+      ch.sendMessageError = undefined;
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('clears pending permission requests when the bridge is replaced', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      const oldRespondToPermission = respondToPermissionMock();
+      const newBridge = createBridge();
+
+      ch.setBridge(newBridge);
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+      expect(oldRespondToPermission).not.toHaveBeenCalled();
+      expect(
+        (
+          newBridge as unknown as {
+            respondToPermission: ReturnType<typeof vi.fn>;
+          }
+        ).respondToPermission,
+      ).not.toHaveBeenCalled();
     });
   });
 
@@ -835,6 +1765,7 @@ describe('ChannelBase', () => {
       expect(ch.sent).toHaveLength(1);
       expect(ch.sent[0]!.text).toContain('/help');
       expect(ch.sent[0]!.text).toContain('/clear');
+      expect(ch.sent[0]!.text).toContain('/approve-always [request-id]');
       expect(ch.sent[0]!.text).not.toContain('/cancel');
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
@@ -7016,6 +7947,24 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('logs pairing-required preflight rejections', async () => {
+      const ch = createChannel({ senderPolicy: 'pairing', allowedUsers: [] });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ senderId: 'stranger' }));
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=sender_pairing_required',
+      );
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it('treats pairing notification failures as preflight rejection', async () => {
       class PairingFailureChannel extends TestChannel {
         override async sendMessage(): Promise<void> {
@@ -10464,6 +11413,88 @@ describe('ChannelBase', () => {
 
       expect(disable).toHaveBeenCalledWith('job-1');
       expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('disables a stored DM job when dmPolicy=disabled', async () => {
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        { dmPolicy: 'disabled' },
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.runLoopPrompt({
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'user1',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'User 1',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        }),
+      ).rejects.toThrow('no longer authorized');
+
+      expect(disable).toHaveBeenCalledWith('job-1');
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('allows stored group job when dmPolicy=disabled', async () => {
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        { dmPolicy: 'disabled', groupPolicy: 'open' },
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'group-1',
+          isGroup: true,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+
+      expect(disable).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalled();
     });
 
     it('rejects stored threaded jobs unless the adapter supports the target', async () => {

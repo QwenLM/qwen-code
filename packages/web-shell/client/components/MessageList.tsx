@@ -9,10 +9,13 @@ import {
   useCallback,
   useMemo,
   useState,
+  type CSSProperties,
   type ReactNode,
+  type FocusEvent as ReactFocusEvent,
   type MouseEvent as ReactMouseEvent,
   type MutableRefObject,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Message, ACPToolCall, TurnCollapseHead } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
@@ -456,7 +459,6 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
       // assign to `never` here. At runtime (e.g. a newer daemon sending an
       // unknown role) it falls through as not-hideable — kept visible rather
       // than crashing the transcript or vanishing from a collapsed turn.
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const _exhaustive: never = item.message;
       return false;
     }
@@ -475,12 +477,15 @@ function isMidTurnInjectedDebugMessage(message: {
   );
 }
 
-export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
+export function getTurnTimelineNode(
+  item: DisplayItem,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): TurnTimelineNode {
   if (item.type === 'parallel_agents') {
     return {
       kind: 'agents',
       timestamp: item.timestamp,
-      label: 'Parallel agents',
+      label: t ? t('timeline.parallelAgents') : 'Parallel agents',
     };
   }
   if (item.type !== 'message') return { kind: 'none' };
@@ -491,7 +496,7 @@ export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
       return {
         kind: 'thought',
         timestamp: message.timestamp,
-        label: 'Thinking',
+        label: t ? t('timeline.thinking') : 'Thinking',
       };
     case 'assistant':
       if (item.turnCollapse)
@@ -501,28 +506,30 @@ export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
       return {
         kind: 'commentary',
         timestamp: message.timestamp,
-        label: 'Assistant update',
+        label: t ? t('timeline.assistantUpdate') : 'Assistant update',
       };
     case 'tool_group': {
       const count = message.tools.length;
       return {
         kind: 'tool',
         timestamp: message.timestamp,
-        label: `${count} tool call${count === 1 ? '' : 's'}`,
+        label: t
+          ? t('timeline.toolCalls', { count })
+          : `${count} tool call${count === 1 ? '' : 's'}`,
       };
     }
     case 'plan':
       return {
         kind: 'plan',
         timestamp: message.timestamp,
-        label: 'Plan update',
+        label: t ? t('timeline.planUpdate') : 'Plan update',
       };
     case 'system':
       return isMidTurnInjectedDebugMessage(message)
         ? {
             kind: 'status',
             timestamp: message.timestamp,
-            label: 'Status update',
+            label: t ? t('timeline.statusUpdate') : 'Status update',
           }
         : { kind: 'none', timestamp: message.timestamp };
     case 'user':
@@ -533,7 +540,6 @@ export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
     case 'insight_error':
       return { kind: 'none', timestamp: message.timestamp };
     default: {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const _exhaustive: never = message;
       return { kind: 'none' };
     }
@@ -613,7 +619,10 @@ function stripBalancedTimelineMarker(raw: string, marker: string): string {
   return result;
 }
 
-function timelineLabelForTurn(message: Message): string {
+function timelineLabelForTurn(
+  message: Message,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
   const raw =
     message.role === 'user'
       ? message.content
@@ -621,7 +630,7 @@ function timelineLabelForTurn(message: Message): string {
         ? message.command
         : '';
   const compact = compactTimelineText(raw, 32);
-  if (!compact) return 'User turn';
+  if (!compact) return t ? t('timeline.userTurn') : 'User turn';
   return compact;
 }
 
@@ -641,19 +650,24 @@ function isTurnStartMessage(message: Message): boolean {
   return message.role === 'user' || message.role === 'user_shell';
 }
 
-function timelineDetailSnippetForMessage(message: Message): string {
+function timelineDetailSnippetForMessage(
+  message: Message,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
   switch (message.role) {
     case 'thinking':
       // Thinking content may include private model reasoning; keep details label-only.
-      return SESSION_TIMELINE_KIND_LABEL.thought;
+      return t ? t('timeline.kind.thought') : 'thinking';
     case 'assistant':
       return compactTimelineText(message.content, 120, { stripMarkdown: true });
     case 'tool_group': {
       const count = message.tools.length;
-      return `${count} tool call${count === 1 ? '' : 's'}`;
+      return t
+        ? t('timeline.toolCalls', { count })
+        : `${count} tool call${count === 1 ? '' : 's'}`;
     }
     case 'plan':
-      return 'plan update';
+      return t ? t('timeline.planDetail') : 'plan update';
     case 'system':
       return isMidTurnInjectedDebugMessage(message)
         ? compactTimelineText(message.content, 120, { stripMarkdown: true })
@@ -666,26 +680,39 @@ function timelineDetailSnippetForMessage(message: Message): string {
     case 'insight_error':
       return '';
     default: {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const _exhaustive: never = message;
       return '';
     }
   }
 }
 
-function timelineDetailSnippetForItem(item: DisplayItem): string {
+function timelineDetailSnippetForItem(
+  item: DisplayItem,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
   if (item.type === 'parallel_agents') {
     const count = item.agents.length;
-    return `${count} parallel agent${count === 1 ? '' : 's'}`;
+    return t
+      ? t('timeline.parallelAgentsDetail', { count })
+      : `${count} parallel agent${count === 1 ? '' : 's'}`;
   }
   if (item.type !== 'message') return '';
-  return timelineDetailSnippetForMessage(item.message);
+  return timelineDetailSnippetForMessage(item.message, t);
+}
+
+function getKindLabel(
+  kind: TurnTimelineNodeKind,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  if (!t) return SESSION_TIMELINE_KIND_LABEL[kind];
+  return t(`timeline.kind.${kind}`);
 }
 
 function timelineDetailForTurn(
   turnItems: readonly DisplayItem[],
   finalAssistantId: string | null,
   nodeKinds: readonly TurnTimelineNodeKind[],
+  t?: (key: string, vars?: Record<string, string | number>) => string,
 ): string {
   if (finalAssistantId !== null) {
     for (const item of turnItems) {
@@ -711,22 +738,21 @@ function timelineDetailForTurn(
     ) {
       continue;
     }
-    const snippet = timelineDetailSnippetForItem(item);
+    const snippet = timelineDetailSnippetForItem(item, t);
     if (snippet) snippets.push(snippet);
   }
 
   const detail = compactTimelineText(snippets.join(' · '), 180);
   if (detail) return detail;
   if (nodeKinds.length > 0) {
-    return nodeKinds
-      .map((kind) => SESSION_TIMELINE_KIND_LABEL[kind])
-      .join(' · ');
+    return nodeKinds.map((kind) => getKindLabel(kind, t)).join(' · ');
   }
-  return 'No activity';
+  return t ? t('timeline.noActivity') : 'No activity';
 }
 
 export function getSessionTimelineEntries(
   messages: readonly Message[],
+  t?: (key: string, vars?: Record<string, string | number>) => string,
 ): SessionTimelineEntry[] {
   const entries: SessionTimelineEntry[] = [];
   let turnStart: Message | null = null;
@@ -760,7 +786,7 @@ export function getSessionTimelineEntries(
       ) {
         continue;
       }
-      const node = getTurnTimelineNode(item);
+      const node = getTurnTimelineNode(item, t);
       if (node.kind !== 'none' && !nodeKinds.includes(node.kind)) {
         nodeKinds.push(node.kind);
       }
@@ -768,8 +794,13 @@ export function getSessionTimelineEntries(
 
     entries.push({
       id: turnStart.id,
-      label: timelineLabelForTurn(turnStart),
-      detail: timelineDetailForTurn(timelineItems, finalAssistantId, nodeKinds),
+      label: timelineLabelForTurn(turnStart, t),
+      detail: timelineDetailForTurn(
+        timelineItems,
+        finalAssistantId,
+        nodeKinds,
+        t,
+      ),
       timestamp: turnStart.timestamp,
       nodeKinds,
       ...(isScheduledTaskMessage(turnStart) ? { isScheduledTask: true } : {}),
@@ -851,7 +882,6 @@ export function getSessionTimelineSignature(
         case 'insight_error':
           return base;
         default: {
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
           const _exhaustive: never = message;
           return base;
         }
@@ -1641,6 +1671,24 @@ const SESSION_TIMELINE_KIND_LABEL: Record<TurnTimelineNodeKind, string> = {
   none: 'turn',
 };
 
+type SessionTimelineTooltip = {
+  entry: SessionTimelineEntry;
+  top: number;
+  left: number;
+  clamped: boolean;
+  themeVars: CSSProperties;
+};
+
+const SESSION_TIMELINE_TOOLTIP_THEME_VARS = [
+  '--background',
+  '--foreground',
+  '--muted-foreground',
+  '--border',
+  '--font-sans',
+];
+
+const SESSION_TIMELINE_TOOLTIP_ID = 'session-timeline-detail-tooltip';
+
 const SessionTimeline = memo(function SessionTimeline({
   entries,
   currentTurnId,
@@ -1654,80 +1702,300 @@ const SessionTimeline = memo(function SessionTimeline({
   hidden: boolean;
   onSelect: (turnId: string) => void;
 }) {
+  const { t } = useI18n();
+  const panelRef = useRef<HTMLElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const programmaticScrollRef = useRef(false);
+  const focusScrollGuardRef = useRef(false);
+  const focusScrollGuardFrameRef = useRef<number | null>(null);
+  const focusScrollGuardFallbackRef = useRef<number | null>(null);
+  const [tooltip, setTooltip] = useState<SessionTimelineTooltip | null>(null);
+
+  const currentIndex =
+    currentRange !== null
+      ? currentRange.currentIndex
+      : entries.findIndex((entry) => entry.id === currentTurnId);
+
+  const hideTooltip = useCallback(() => setTooltip(null), []);
+
+  const handleViewportScroll = useCallback(() => {
+    if (programmaticScrollRef.current || focusScrollGuardRef.current) return;
+    hideTooltip();
+  }, [hideTooltip]);
+
+  const buildTooltip = useCallback(
+    (entry: SessionTimelineEntry, el: HTMLElement) => {
+      const panel = panelRef.current;
+      if (!panel) return null;
+      const computedStyle = getComputedStyle(panel);
+      const rect = el.getBoundingClientRect();
+      return {
+        entry,
+        top: rect.top + rect.height / 2,
+        left: rect.right + 8,
+        clamped: false,
+        themeVars: Object.fromEntries(
+          SESSION_TIMELINE_TOOLTIP_THEME_VARS.map((name) => [
+            name,
+            computedStyle.getPropertyValue(name),
+          ]),
+        ) as CSSProperties,
+      };
+    },
+    [],
+  );
+
+  const findTooltipAnchor = useCallback((entry: SessionTimelineEntry) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return null;
+    const item = Array.from(
+      viewport.querySelectorAll<HTMLElement>(
+        '[data-testid="session-timeline-entry"]',
+      ),
+    ).find((node) => node.getAttribute('data-turn-id') === entry.id);
+    return item?.querySelector<HTMLButtonElement>('button') ?? null;
+  }, []);
+
+  const isTooltipAnchorVisible = useCallback((anchor: HTMLElement) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return false;
+    const viewportRect = viewport.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
+    return (
+      anchorRect.bottom >= viewportRect.top &&
+      anchorRect.top <= viewportRect.bottom
+    );
+  }, []);
+
+  const syncTooltip = useCallback(() => {
+    setTooltip((current) => {
+      if (!current) return null;
+      const anchor = findTooltipAnchor(current.entry);
+      if (!anchor || !isTooltipAnchorVisible(anchor)) return null;
+      return buildTooltip(current.entry, anchor);
+    });
+  }, [buildTooltip, findTooltipAnchor, isTooltipAnchorVisible]);
+
+  const showTooltip = useCallback(
+    (entry: SessionTimelineEntry, el: HTMLElement) => {
+      setTooltip(buildTooltip(entry, el));
+    },
+    [buildTooltip],
+  );
+
+  const guardFocusScroll = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    if (focusScrollGuardFrameRef.current !== null) {
+      window.cancelAnimationFrame(focusScrollGuardFrameRef.current);
+    }
+    if (focusScrollGuardFallbackRef.current !== null) {
+      window.clearTimeout(focusScrollGuardFallbackRef.current);
+    }
+    focusScrollGuardRef.current = true;
+    focusScrollGuardFrameRef.current = window.requestAnimationFrame(() => {
+      focusScrollGuardFrameRef.current = null;
+      focusScrollGuardRef.current = false;
+      syncTooltip();
+    });
+    focusScrollGuardFallbackRef.current = window.setTimeout(() => {
+      focusScrollGuardFallbackRef.current = null;
+      focusScrollGuardRef.current = false;
+    }, 100);
+  }, [syncTooltip]);
+
+  useLayoutEffect(() => {
+    if (hidden) return;
+    const viewport = viewportRef.current;
+    if (!viewport || currentIndex < 0) return;
+    const item = viewport.querySelector<HTMLElement>(
+      `[data-timeline-index="${currentIndex}"]`,
+    );
+    if (!item) return;
+    const itemCenter = item.offsetTop + item.offsetHeight / 2;
+    const maxScrollTop = viewport.scrollHeight - viewport.clientHeight;
+    const nextScrollTop = Math.max(
+      0,
+      Math.min(itemCenter - viewport.clientHeight / 2, maxScrollTop),
+    );
+    if (viewport.scrollTop === nextScrollTop) return;
+    programmaticScrollRef.current = true;
+    viewport.scrollTop = nextScrollTop;
+    const frame = window.requestAnimationFrame(() => {
+      programmaticScrollRef.current = false;
+      syncTooltip();
+    });
+    const fallback = window.setTimeout(() => {
+      programmaticScrollRef.current = false;
+    }, 100);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(fallback);
+      programmaticScrollRef.current = false;
+    };
+  }, [currentIndex, hidden, syncTooltip]);
+
+  useLayoutEffect(() => {
+    if (!tooltip || typeof window === 'undefined') return;
+    window.addEventListener('resize', syncTooltip);
+    return () => {
+      window.removeEventListener('resize', syncTooltip);
+    };
+  }, [syncTooltip, tooltip]);
+
+  useLayoutEffect(
+    () => () => {
+      if (focusScrollGuardFrameRef.current !== null) {
+        window.cancelAnimationFrame(focusScrollGuardFrameRef.current);
+      }
+      if (focusScrollGuardFallbackRef.current !== null) {
+        window.clearTimeout(focusScrollGuardFallbackRef.current);
+      }
+      focusScrollGuardRef.current = false;
+    },
+    [],
+  );
+
+  useLayoutEffect(() => {
+    if (!tooltip || tooltip.clamped) return;
+    const panel = panelRef.current;
+    const tooltipEl = tooltipRef.current;
+    if (!panel || !tooltipEl || typeof window === 'undefined') return;
+    const rect = tooltipEl.getBoundingClientRect();
+    const margin = 12;
+    let nextTop = tooltip.top;
+    if (rect.top < margin) {
+      nextTop += margin - rect.top;
+    } else if (rect.bottom > window.innerHeight - margin) {
+      nextTop -= rect.bottom - (window.innerHeight - margin);
+    }
+    if (nextTop === tooltip.top) return;
+    setTooltip((current) =>
+      current?.entry.id === tooltip.entry.id
+        ? { ...current, top: nextTop, clamped: true }
+        : current,
+    );
+  }, [tooltip]);
+
   if (hidden || entries.length === 0) return null;
 
   return (
     <div className={styles.sessionTimelineLayer} aria-hidden="false">
       <nav
+        ref={panelRef}
         className={styles.sessionTimelinePanel}
-        aria-label="Session timeline"
+        aria-label={t('timeline.sessionTimeline')}
         data-testid="session-timeline"
+        onMouseLeave={hideTooltip}
       >
-        <ol className={styles.sessionTimelineList}>
-          {entries.map((entry, index) => {
-            const isInCurrentRange =
-              currentRange !== null &&
-              index >= currentRange.startIndex &&
-              index <= currentRange.endIndex;
-            const isCurrent =
-              currentRange !== null
-                ? index === currentRange.currentIndex
-                : entry.id === currentTurnId;
-            const nodeKinds = entry.nodeKinds.join(',');
-            const ariaLabel = [
-              `Turn ${index + 1}: ${entry.label}`,
-              isCurrent ? 'Current turn' : null,
-            ]
-              .filter(Boolean)
-              .join('. ');
-            return (
-              <li
-                key={entry.id}
-                className={styles.sessionTimelineItem}
-                data-testid="session-timeline-entry"
-                data-turn-id={entry.id}
-                data-node-kinds={nodeKinds}
-                data-in-current-range={isInCurrentRange ? 'true' : undefined}
-              >
-                <button
-                  type="button"
-                  className={joinClassNames(
-                    styles.sessionTimelineButton,
-                    isInCurrentRange
-                      ? styles.sessionTimelineButtonInRange
-                      : undefined,
-                    isCurrent ? styles.sessionTimelineButtonCurrent : undefined,
-                  )}
-                  aria-current={isCurrent ? 'step' : undefined}
-                  aria-label={ariaLabel}
-                  onClick={() => onSelect(entry.id)}
+        <div
+          ref={viewportRef}
+          className={styles.sessionTimelineViewport}
+          data-testid="session-timeline-viewport"
+          onScroll={handleViewportScroll}
+        >
+          <ol className={styles.sessionTimelineList}>
+            {entries.map((entry, index) => {
+              const isInCurrentRange =
+                currentRange !== null &&
+                index >= currentRange.startIndex &&
+                index <= currentRange.endIndex;
+              const isCurrent =
+                currentRange !== null
+                  ? index === currentRange.currentIndex
+                  : entry.id === currentTurnId;
+              const nodeKinds = entry.nodeKinds.join(',');
+              const ariaLabel = [
+                `${t('timeline.turnPrefix', { index: index + 1 })}: ${entry.label}`,
+                isCurrent ? t('timeline.currentTurn') : null,
+              ]
+                .filter(Boolean)
+                .join('. ');
+              const revealTooltip = (
+                event:
+                  | ReactMouseEvent<HTMLButtonElement>
+                  | ReactFocusEvent<HTMLButtonElement>,
+              ) => showTooltip(entry, event.currentTarget);
+              const revealFocusedTooltip = (
+                event: ReactFocusEvent<HTMLButtonElement>,
+              ) => {
+                guardFocusScroll();
+                showTooltip(entry, event.currentTarget);
+              };
+              const describedByTooltip = tooltip?.entry.id === entry.id;
+              return (
+                <li
+                  key={entry.id}
+                  className={styles.sessionTimelineItem}
+                  data-testid="session-timeline-entry"
+                  data-turn-id={entry.id}
+                  data-timeline-index={index}
+                  data-node-kinds={nodeKinds}
+                  data-in-current-range={isInCurrentRange ? 'true' : undefined}
                 >
-                  <span className={styles.sessionTimelineTick} />
-                  <span
-                    className={styles.sessionTimelineDetails}
-                    data-testid="session-timeline-detail"
-                    data-title={entry.label}
-                    data-detail={entry.detail}
-                    data-scheduled-task={
-                      entry.isScheduledTask ? 'true' : undefined
+                  <button
+                    type="button"
+                    className={joinClassNames(
+                      styles.sessionTimelineButton,
+                      isInCurrentRange
+                        ? styles.sessionTimelineButtonInRange
+                        : undefined,
+                      isCurrent
+                        ? styles.sessionTimelineButtonCurrent
+                        : undefined,
+                    )}
+                    aria-current={isCurrent ? 'step' : undefined}
+                    aria-describedby={
+                      describedByTooltip
+                        ? SESSION_TIMELINE_TOOLTIP_ID
+                        : undefined
                     }
-                    aria-hidden="true"
+                    aria-label={ariaLabel}
+                    onClick={() => onSelect(entry.id)}
+                    onFocus={revealFocusedTooltip}
+                    onBlur={hideTooltip}
+                    onMouseEnter={revealTooltip}
+                    onMouseLeave={hideTooltip}
                   >
-                    <span className={styles.sessionTimelineDetailsTitle}>
-                      {entry.isScheduledTask && <TimelineClockIcon />}
-                      <span className={styles.sessionTimelineDetailsTitleText}>
-                        {entry.label}
-                      </span>
-                    </span>
-                    <span className={styles.sessionTimelineDetailsDetail}>
-                      {entry.detail}
-                    </span>
-                  </span>
-                </button>
-              </li>
-            );
-          })}
-        </ol>
+                    <span className={styles.sessionTimelineTick} />
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+        {tooltip &&
+          typeof document !== 'undefined' &&
+          createPortal(
+            <div
+              ref={tooltipRef}
+              className={styles.sessionTimelineDetails}
+              id={SESSION_TIMELINE_TOOLTIP_ID}
+              data-testid="session-timeline-detail"
+              data-title={tooltip.entry.label}
+              data-detail={tooltip.entry.detail}
+              data-scheduled-task={
+                tooltip.entry.isScheduledTask ? 'true' : undefined
+              }
+              role="tooltip"
+              style={{
+                ...tooltip.themeVars,
+                top: tooltip.top,
+                left: tooltip.left,
+              }}
+            >
+              <span className={styles.sessionTimelineDetailsTitle}>
+                {tooltip.entry.isScheduledTask && <TimelineClockIcon />}
+                <span className={styles.sessionTimelineDetailsTitleText}>
+                  {tooltip.entry.label}
+                </span>
+              </span>
+              <span className={styles.sessionTimelineDetailsDetail}>
+                {tooltip.entry.detail}
+              </span>
+            </div>,
+            document.body,
+          )}
       </nav>
     </div>
   );
@@ -1823,6 +2091,7 @@ export const MessageList = memo(
       useState(false);
     const sessionTimelineCache = useRef<{
       signature: string;
+      t: typeof t;
       entries: SessionTimelineEntry[];
     } | null>(null);
     // Signature + entries are O(transcript text); only pay for them while the
@@ -1830,14 +2099,18 @@ export const MessageList = memo(
     const sessionTimelineEntries = useMemo(() => {
       if (!isSessionTimelineVisible) return EMPTY_SESSION_TIMELINE_ENTRIES;
       const signature = getSessionTimelineSignature(mergedMessages);
-      if (sessionTimelineCache.current?.signature !== signature) {
+      if (
+        sessionTimelineCache.current?.signature !== signature ||
+        sessionTimelineCache.current?.t !== t
+      ) {
         sessionTimelineCache.current = {
           signature,
-          entries: getSessionTimelineEntries(mergedMessages),
+          t,
+          entries: getSessionTimelineEntries(mergedMessages, t),
         };
       }
       return sessionTimelineCache.current.entries;
-    }, [isSessionTimelineVisible, mergedMessages]);
+    }, [isSessionTimelineVisible, mergedMessages, t]);
     const sessionTimelineEntryIndexById = useMemo(
       () =>
         new Map(
@@ -2819,6 +3092,7 @@ export const MessageList = memo(
       <div
         ref={containerRef}
         className={styles.list}
+        data-web-shell-message-list
         onClickCapture={handleDisclosureClickCapture}
       >
         {showLoadingSkeleton && (
@@ -2849,6 +3123,7 @@ export const MessageList = memo(
                     visibleItems[virtualRow.index - headerOffset],
                   ),
                 )}
+                data-web-shell-message-row
                 style={{
                   position: 'absolute',
                   top: 0,
@@ -2870,6 +3145,7 @@ export const MessageList = memo(
                 key={key}
                 data-index={index}
                 className={getRowClassName(item)}
+                data-web-shell-message-row
               >
                 {renderVirtualItem(index)}
               </div>

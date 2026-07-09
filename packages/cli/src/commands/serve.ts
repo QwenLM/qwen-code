@@ -14,6 +14,7 @@ import { normalizeServeChannelSelection } from '../serve/channel-selection.js';
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { DEFAULT_RING_SIZE } from '@qwen-code/acp-bridge/eventBus';
+import { DEFAULT_COMPACTED_REPLAY_MAX_BYTES } from '@qwen-code/acp-bridge/replayWindowLimits';
 import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,
@@ -100,6 +101,7 @@ interface ServeArgs {
   'max-pending-prompts-per-session': number;
   'max-connections': number;
   'event-ring-size': number;
+  'compacted-replay-max-bytes': number;
   workspace?: string | string[];
   'require-auth': boolean;
   'enable-session-shell': boolean;
@@ -187,8 +189,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Absolute workspace path this daemon binds to. ' +
           'POST /session requests with a mismatched cwd return 400 workspace_mismatch. ' +
           'Defaults to process.cwd() when omitted. ' +
-          'For multi-workspace deployments, run one `qwen serve` per workspace ' +
-          'on separate ports (or behind an external orchestrator).',
+          'Repeat for sessions-only multi-workspace mode; legacy workspace APIs ' +
+          'remain primary-workspace only.',
       })
       .option('max-connections', {
         type: 'number',
@@ -266,14 +268,23 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'headroom at the cost of a few hundred KB extra RAM per session. ' +
           'Must be a positive finite integer.',
       })
+      .option('compacted-replay-max-bytes', {
+        type: 'number',
+        default: DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
+        description:
+          'Per-session in-memory compacted replay snapshot byte cap for ' +
+          '`POST /session/:id/load` late attaches. Larger = more recent ' +
+          'history in load snapshots at higher heap cost. Must be a positive ' +
+          'safe integer no larger than 256 MiB.',
+      })
       .option('http-bridge', {
         type: 'boolean',
         default: true,
         description:
-          'Stage 1 mode: one `qwen --acp` child per daemon (the daemon binds to ' +
-          'one workspace at boot, multiplexing N sessions onto that child via ' +
-          "the agent's native `newSession()`). Stage 2 native in-process mode " +
-          'is not yet implemented; this flag will become opt-in then.',
+          'HTTP bridge mode: one `qwen --acp` child per registered workspace ' +
+          '(sessions-only multi-workspace routing is enabled when multiple ' +
+          '--workspace values are supplied). Stage 2 native in-process mode is ' +
+          'not yet implemented; this flag will become opt-in then.',
       })
       .option('mcp-client-budget', {
         type: 'number',
@@ -555,6 +566,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         maxPendingPromptsPerSession,
         maxConnections: argv['max-connections'],
         eventRingSize: argv['event-ring-size'],
+        compactedReplayMaxBytes: argv['compacted-replay-max-bytes'],
         workspace: argv.workspace,
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],

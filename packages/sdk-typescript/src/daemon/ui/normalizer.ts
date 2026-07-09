@@ -179,6 +179,9 @@ export function normalizeDaemonEvent(
     case 'state_resync_required':
       return normalizeStateResyncRequired(event, base);
 
+    case 'history_truncated':
+      return normalizeHistoryTruncated(event, base);
+
     case 'session_rewound':
       return normalizeSessionRewound(event, base);
 
@@ -356,6 +359,33 @@ function normalizeStateResyncRequired(
       reason,
       lastDeliveredId,
       earliestAvailableId,
+    },
+  ];
+}
+
+function normalizeHistoryTruncated(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const reason = getString(event.data, 'reason');
+  const truncatedEvents = numberField(event.data, 'truncatedEvents');
+  const retainedEvents = numberField(event.data, 'retainedEvents');
+  const maxBytes = numberField(event.data, 'maxBytes');
+  if (
+    reason !== 'replay_window_exceeded' ||
+    truncatedEvents === undefined ||
+    retainedEvents === undefined ||
+    maxBytes === undefined ||
+    (isRecord(event.data) && event.data['fullTranscriptAvailable'] !== false)
+  ) {
+    return fallbackDebug(event, base, 'malformed history_truncated payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'status',
+      text: `History truncated: retained ${retainedEvents}, dropped ${truncatedEvents} (window ${maxBytes} bytes).`,
+      source: 'history_truncated',
     },
   ];
 }

@@ -12,7 +12,7 @@ import type { ToolInvocation, ToolLocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 
-import type { PartUnion } from '@google/genai';
+import type { PartListUnion } from '@google/genai';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
   processSingleFileContent,
@@ -277,7 +277,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       });
     }
 
-    let llmContent: PartUnion;
+    let llmContent: PartListUnion;
     if (
       result.isTruncated &&
       result.linesShown &&
@@ -416,8 +416,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
             type: 'integer',
           },
           pages: {
-            description:
-              `Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max ${PDF_MAX_PAGES_PER_READ} pages per request. Open-ended ranges like '3-' are not supported. Use this for large PDFs or when the model does not support native PDF input.`,
+            description: `Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max ${PDF_MAX_PAGES_PER_READ} pages per request. Open-ended ranges like '3-' are not supported. Use this for large PDFs or when the model does not support native PDF input.`,
             type: 'string',
           },
         },

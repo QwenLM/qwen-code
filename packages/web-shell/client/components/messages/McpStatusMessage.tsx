@@ -565,7 +565,7 @@ export function McpStatusMessage({
           ? t('mcp.oauth.title')
           : step === 'tools'
             ? t('mcp.toolsForServer', {
-                name: selectedServer?.name ?? 'Server',
+                name: selectedServer?.name ?? t('common.server'),
               })
             : (selectedTool?.name ?? t('mcp.toolDetail'));
 

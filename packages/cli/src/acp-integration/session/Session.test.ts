@@ -473,6 +473,9 @@ describe('Session', () => {
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      setSubSessionSpawner: vi.fn(),
+      getSubSessionSpawner: vi.fn(),
+      getExtensions: vi.fn().mockReturnValue([]),
     } as unknown as Config;
 
     mockClient = {
@@ -1640,6 +1643,211 @@ describe('Session', () => {
       expect(meta.availableSkills).toEqual(['enabled-skill']);
       expect(meta.availableSkillDetails.map((detail) => detail.name)).toEqual([
         'enabled-skill',
+      ]);
+    });
+
+    it('omits inactive extension skills from availableSkills and details', async () => {
+      mockConfig.getExtensions = vi.fn().mockReturnValue([
+        {
+          name: 'disabled-ext',
+          displayName: 'Disabled Extension',
+          isActive: false,
+          skills: [
+            {
+              name: 'disabled-extension-skill',
+              description: 'Disabled extension skill',
+              body: 'Hidden instructions',
+              filePath: '/skills/disabled/SKILL.md',
+              level: 'extension',
+            },
+          ],
+        },
+      ]);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'active-extension-skill',
+            description: 'Active extension skill',
+            body: 'Visible instructions',
+            filePath: '/skills/active/SKILL.md',
+            level: 'extension',
+            extensionName: 'active-ext',
+          },
+          {
+            name: 'display-name-collision-skill',
+            description: 'Active extension skill with colliding name',
+            body: 'Visible collision instructions',
+            filePath: '/skills/collision/SKILL.md',
+            level: 'extension',
+            extensionName: 'Disabled Extension',
+          },
+          {
+            name: 'disabled-extension-skill',
+            description: 'Disabled extension skill',
+            body: 'Hidden instructions',
+            filePath: '/skills/disabled/SKILL.md',
+            level: 'extension',
+            extensionName: 'Disabled Extension',
+          },
+        ]),
+      });
+
+      await session.sendAvailableCommandsUpdate();
+
+      const update = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([call]) => call)
+        .find(
+          (call) => call.update.sessionUpdate === 'available_commands_update',
+        ) as {
+        update: {
+          _meta: {
+            availableSkills: string[];
+            availableSkillDetails: Array<{ name: string }>;
+          };
+        };
+      };
+      const meta = update.update._meta;
+      expect(meta.availableSkills).toEqual([
+        'active-extension-skill',
+        'display-name-collision-skill',
+      ]);
+      expect(meta.availableSkillDetails.map((detail) => detail.name)).toEqual([
+        'active-extension-skill',
+        'display-name-collision-skill',
+      ]);
+    });
+
+    it('does not restore inactive extension skills from skill slash commands', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'disabled-extension-skill',
+          description: 'Disabled extension skill',
+          kind: 'skill',
+          skillDetail: {
+            name: 'disabled-extension-skill',
+            description: 'Disabled extension skill',
+            body: 'Hidden instructions',
+            level: 'extension',
+            extensionName: 'disabled-ext',
+          },
+        },
+      ]);
+      mockConfig.getExtensions = vi.fn().mockReturnValue([
+        {
+          name: 'disabled-ext',
+          isActive: false,
+          skills: [
+            {
+              name: 'disabled-extension-skill',
+              description: 'Disabled extension skill',
+              body: 'Hidden instructions',
+              filePath: '/skills/disabled/SKILL.md',
+              level: 'extension',
+            },
+          ],
+        },
+      ]);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'disabled-extension-skill',
+            description: 'Disabled extension skill',
+            body: 'Hidden instructions',
+            filePath: '/skills/disabled/SKILL.md',
+            level: 'extension',
+            extensionName: 'disabled-ext',
+          },
+        ]),
+      });
+
+      await session.sendAvailableCommandsUpdate();
+
+      const update = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([call]) => call)
+        .find(
+          (call) => call.update.sessionUpdate === 'available_commands_update',
+        ) as {
+        update: {
+          availableCommands: Array<{ name: string }>;
+          _meta?: {
+            availableSkills: string[];
+            availableSkillDetails: Array<{ name: string }>;
+          };
+        };
+      };
+      expect(
+        update.update.availableCommands.map((command) => command.name),
+      ).not.toContain('disabled-extension-skill');
+      expect(update.update._meta).toBeUndefined();
+    });
+
+    it('keeps active extension slash commands that share a skill name with inactive extensions', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'review',
+          description: 'Active review skill',
+          kind: 'skill',
+          skillDetail: {
+            name: 'review',
+            description: 'Active review skill',
+            body: 'Visible instructions',
+            level: 'extension',
+            extensionName: 'active-ext',
+          },
+        },
+      ]);
+      mockConfig.getExtensions = vi.fn().mockReturnValue([
+        {
+          name: 'disabled-ext',
+          isActive: false,
+          skills: [
+            {
+              name: 'review',
+              description: 'Disabled review skill',
+              body: 'Hidden instructions',
+              filePath: '/skills/disabled-review/SKILL.md',
+              level: 'extension',
+            },
+          ],
+        },
+      ]);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'review',
+            description: 'Active review skill',
+            body: 'Visible instructions',
+            filePath: '/skills/active-review/SKILL.md',
+            level: 'extension',
+            extensionName: 'active-ext',
+          },
+        ]),
+      });
+
+      await session.sendAvailableCommandsUpdate();
+
+      const update = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([call]) => call)
+        .find(
+          (call) => call.update.sessionUpdate === 'available_commands_update',
+        ) as {
+        update: {
+          availableCommands: Array<{ name: string }>;
+          _meta: {
+            availableSkills: string[];
+            availableSkillDetails: Array<{ name: string }>;
+          };
+        };
+      };
+      expect(
+        update.update.availableCommands.map((command) => command.name),
+      ).toContain('review');
+      expect(update.update._meta.availableSkills).toEqual(['review']);
+      expect(update.update._meta.availableSkillDetails).toEqual([
+        expect.objectContaining({ name: 'review' }),
       ]);
     });
 
@@ -8355,6 +8563,177 @@ describe('Session', () => {
           'Auto mode denial counters reset after fallback approval',
         ),
       );
+    });
+
+    describe('isolated scheduled tasks', () => {
+      /** Mock scheduler that delivers exactly one job through `start`. */
+      function schedulerFiring(job: {
+        prompt: string;
+        cronExpr?: string;
+        missed?: boolean;
+        runMode?: 'shared' | 'isolated';
+      }) {
+        return {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn((callback: (j: typeof job) => void) => callback(job)),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+      }
+
+      it('dispatches an isolated fire into a sub-session, never into the bound session', async () => {
+        // The whole point of `isolated`: the fire must NOT be relayed through
+        // the model in this session. Relaying it would put the run behind
+        // create_sub_session's 'ask' permission, which an unattended fire has
+        // nobody to answer.
+        const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+        const scheduler = schedulerFiring({
+          prompt: 'nightly report',
+          runMode: 'isolated',
+        });
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockConfig.getSubSessionSpawner = vi.fn().mockReturnValue(spawner);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        await vi.waitFor(() => expect(spawner).toHaveBeenCalledTimes(1));
+        // Raw prompt, fire-and-forget — no wrapper instructing the model.
+        expect(spawner).toHaveBeenCalledWith({
+          prompt: 'nightly report',
+          completion: 'sent',
+        });
+        // Only the user's own turn reached the model; the cron fire did not.
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('runs an isolated fire in-session when no sub-session spawner is wired', async () => {
+        // Outside `qwen serve` there is no bridge to spawn into. Losing the
+        // task is worse than losing isolation, so the fire runs inline.
+        const scheduler = schedulerFiring({
+          prompt: 'nightly report',
+          runMode: 'isolated',
+        });
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockConfig.getSubSessionSpawner = vi.fn().mockReturnValue(undefined);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+        );
+        const cronCall = (
+          mockChat.sendMessageStream as ReturnType<typeof vi.fn>
+        ).mock.calls[1];
+        const text = (cronCall![1].message as Array<{ text?: string }>)
+          .map((p) => p.text ?? '')
+          .join('');
+        expect(text).toContain('nightly report');
+      });
+
+      it('keeps a missed isolated one-shot on the in-session confirm-first path', async () => {
+        const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+        const scheduler = schedulerFiring({
+          prompt: 'nightly report',
+          runMode: 'isolated',
+          missed: true,
+        });
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockConfig.getSubSessionSpawner = vi.fn().mockReturnValue(spawner);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+        );
+        expect(spawner).not.toHaveBeenCalled();
+      });
+
+      it('drops the fire (never falls back in-session) when the dispatch fails', async () => {
+        // A failed dispatch may already have sent the prompt, and running an
+        // isolated task inside the bound session would defeat the isolation the
+        // user asked for. Log and drop.
+        //
+        // The scheduler has already persisted this fire as a run, and
+        // `debugLogger.warn` writes nothing unless a debug log session is
+        // active — so the drop MUST also reach stderr, or a nightly task can
+        // fail forever while its history claims it ran.
+        const stderrWrite = vi
+          .spyOn(process.stderr, 'write')
+          .mockReturnValue(true);
+        const spawner = vi.fn().mockRejectedValue(new Error('cap reached'));
+        const scheduler = schedulerFiring({
+          prompt: 'nightly report',
+          runMode: 'isolated',
+        });
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockConfig.getSubSessionSpawner = vi.fn().mockReturnValue(spawner);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        await vi.waitFor(() =>
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            expect.stringContaining('Isolated scheduled task dispatch failed'),
+          ),
+        );
+        const stderr = stderrWrite.mock.calls.map((c) => String(c[0])).join('');
+        expect(stderr).toContain('isolated scheduled task dispatch failed');
+        expect(stderr).toContain('cap reached');
+        stderrWrite.mockRestore();
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('leaves a shared fire on the in-session path', async () => {
+        const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+        const scheduler = schedulerFiring({
+          prompt: 'nightly report',
+          runMode: 'shared',
+        });
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockConfig.getSubSessionSpawner = vi.fn().mockReturnValue(spawner);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+        );
+        expect(spawner).not.toHaveBeenCalled();
+      });
     });
 
     describe('hooks', () => {

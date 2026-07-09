@@ -108,7 +108,7 @@ export async function planManagedAutoMemoryDreamByAgent(
     taskPrompt: buildConsolidationTaskPrompt(memoryRoot, transcriptDir),
     systemPrompt: DREAM_AGENT_SYSTEM_PROMPT,
     maxTurns: MAX_TURNS,
-    maxTimeMinutes: MAX_TIME_MINUTES,
+    maxTimeMinutes: config.getMemoryAgentTimeoutMinutes() ?? MAX_TIME_MINUTES,
     tools: [
       ToolNames.READ_FILE,
       ToolNames.GREP,

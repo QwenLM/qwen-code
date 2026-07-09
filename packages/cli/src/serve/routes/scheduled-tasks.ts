@@ -125,6 +125,7 @@ interface ScheduledTaskView {
   lastFiredAt: number | null;
   nextRunAt: number | null;
   sessionId: string | null;
+  runMode: 'shared' | 'isolated';
   runs: CronTaskRun[];
 }
 
@@ -160,6 +161,9 @@ function toView(task: DurableCronTask): ScheduledTaskView {
       typeof task.sessionId === 'string' && task.sessionId.length > 0
         ? task.sessionId
         : null,
+    // Absent runMode normalizes to 'shared' so the client never special-cases
+    // undefined (tool-created / legacy tasks omit it).
+    runMode: task.runMode === 'isolated' ? 'isolated' : 'shared',
     // Absent runs (tool-created / never-fired) normalizes to [] so the client
     // never special-cases undefined.
     runs: Array.isArray(task.runs) ? task.runs : [],
@@ -297,8 +301,20 @@ export function registerScheduledTasksRoutes(
       });
       return;
     }
+    if (
+      body['runMode'] !== undefined &&
+      body['runMode'] !== 'shared' &&
+      body['runMode'] !== 'isolated'
+    ) {
+      res.status(400).json({
+        error: "`runMode` must be 'shared' or 'isolated'",
+        code: 'invalid_run_mode',
+      });
+      return;
+    }
     const recurring = body['recurring'] !== false;
     const enabled = body['enabled'] !== false;
+    const runMode = body['runMode'] === 'isolated' ? 'isolated' : 'shared';
 
     // Mint the task's dedicated session up front. The task is BOUND to it and
     // fires only inside it — its transcript becomes the task's run history, and
@@ -372,6 +388,8 @@ export function registerScheduledTasksRoutes(
       enabled,
       ...(boundSessionId !== undefined ? { sessionId: boundSessionId } : {}),
       ...(nameResult.value !== undefined ? { name: nameResult.value } : {}),
+      // Omit when 'shared' so tool-created / default tasks stay byte-identical.
+      ...(runMode === 'isolated' ? { runMode } : {}),
     };
 
     // Best-effort teardown of the just-minted session when the create can't be
@@ -499,6 +517,21 @@ export function registerScheduledTasksRoutes(
         return;
       }
       patch.enabled = body['enabled'];
+    }
+    if ('runMode' in body) {
+      if (body['runMode'] !== 'shared' && body['runMode'] !== 'isolated') {
+        res.status(400).json({
+          error: "`runMode` must be 'shared' or 'isolated'",
+          code: 'invalid_run_mode',
+        });
+        return;
+      }
+      // Switching mode only changes fire behavior; the child scheduler picks up
+      // the new runMode on its next file-watch reload (via durableTaskToJob). No
+      // anchor re-seat needed — the schedule itself is unchanged. Setting to
+      // 'shared' explicitly clears the field (same on-disk representation as
+      // legacy / default tasks — absent means 'shared').
+      patch.runMode = body['runMode'] === 'isolated' ? 'isolated' : undefined;
     }
 
     if (Object.keys(patch).length === 0 && !clearName) {
