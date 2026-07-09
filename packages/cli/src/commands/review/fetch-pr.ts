@@ -159,15 +159,18 @@ function fileLineCount(ref: string, path: string): number {
   }
 }
 
-function fileMetrics(
-  plan: DiffPlan,
-  baseSha: string | null,
-  headSha: string,
-): FileMetric[] {
+function fileMetrics(plan: DiffPlan, headSha: string): FileMetric[] {
   return plan.files.map((f) => {
     const changedLines = f.addedLines + f.removedLines;
     const fileLines = f.binary ? 0 : fileLineCount(headSha, f.path);
-    const preLines = f.binary || !baseSha ? 0 : fileLineCount(baseSha, f.path);
+    // Derived, not measured. `git show <base>:<path>` would need a second
+    // process per file and, worse, would return nothing for a **renamed**
+    // file — whose new path does not exist at the base — silently reporting
+    // preLines 0 and classifying a wholesale rewrite as "not heavy". The
+    // identity is exact for a complete unified diff (verified against every
+    // file of PR #6457) and stays correct for creations, deletions, and
+    // renames alike.
+    const preLines = Math.max(0, fileLines - f.addedLines + f.removedLines);
     const { rewriteRatio, heavy } = classifyHeavy({
       preLines,
       fileLines,
@@ -345,7 +348,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffLines: plan.diffLines,
     diffChars: plan.diffChars,
     chunks: plan.chunks,
-    files: fileMetrics(plan, mergeBaseSha, fetchedSha),
+    files: fileMetrics(plan, fetchedSha),
   };
 
   writeFileSync(out, JSON.stringify(result, null, 2) + '\n', 'utf8');

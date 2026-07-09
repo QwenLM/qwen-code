@@ -147,7 +147,9 @@ Use **Step 3A** when the diff is ≤ 500 lines (one chunk) and **Step 3B** when 
 
 ## Step 3A: Dimension fan-out (diffs ≤ 500 lines)
 
-Launch **10 agents** for same-repo **PR** reviews (Agent 6 has three persona variants 6a/6b/6c that each count as separate parallel agents), or **9 agents** (skip Agent 7: Build & Test) for cross-repo lightweight **PR** mode since there is no local codebase to build/test. **Agent 0 (Issue Fidelity) runs only when the review target is a PR** — a local-diff or file-path review has no PR and no linked issue, so skip Agent 0 and launch **9 agents** (Agents 1–7). Each agent should focus exclusively on its dimension. Every agent reads the whole diff from `diffPathAbsolute`.
+Launch **10 agents** for same-repo **PR** reviews (Agent 6 has three persona variants 6a/6b/6c that each count as separate parallel agents), or **9 agents** (skip Agent 7: Build & Test) for cross-repo lightweight **PR** mode since there is no local codebase to build/test. **Agent 0 (Issue Fidelity) runs only when the review target is a PR** — a local-diff or file-path review has no PR and no linked issue, so skip Agent 0 and launch **9 agents** (Agents 1–7). Each agent should focus exclusively on its dimension.
+
+Every agent reads the whole diff, **by walking the `chunks[]` ranges** — usually one or two `read_file` calls at this size. Do **not** ask for the whole diff in one read: `read_file` caps a single call at ~25 000 characters, and a 500-line diff of long lines exceeds that. Chunks are sized to fit inside one un-truncated read, which is exactly why they exist.
 
 ## Step 3B: Territory × dimension fan-out (diffs > 500 lines)
 

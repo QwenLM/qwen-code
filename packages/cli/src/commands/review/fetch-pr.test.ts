@@ -71,6 +71,24 @@ describe('classifyHeavy', () => {
     expect(r.heavy).toBe(true);
   });
 
+  it('flags a renamed-and-rewritten file', () => {
+    // `preLines` is derived as `fileLines - added + removed`, not measured with
+    // `git show <base>:<newpath>` — that path does not exist at the base for a
+    // rename, would report 0, and would classify a wholesale rewrite as light.
+    const fileLines = 2000;
+    const added = 1400;
+    const removed = 900;
+    const preLines = fileLines - added + removed; // 1500
+    expect(preLines).toBe(1500);
+    const r = classifyHeavy({
+      preLines,
+      fileLines,
+      changedLines: added + removed,
+      binary: false,
+    });
+    expect(r.heavy).toBe(true);
+  });
+
   it('never flags a binary blob', () => {
     expect(
       classifyHeavy({
