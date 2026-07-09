@@ -129,7 +129,7 @@ function TurnOutputsComponent({
     const previewContent = getArtifactPreviewContent(artifact, changes);
     if (onOpenRequest) {
       onOpenRequest({
-        id: `artifact:${turnId}:${artifact.id}`,
+        id: `artifact:${artifact.id}`,
         kind: 'artifact',
         title: artifact.title ?? 'Artifact',
         turnId,

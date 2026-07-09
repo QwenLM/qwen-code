@@ -150,4 +150,34 @@ describe('useSessionArtifacts', () => {
       'from-session-b',
     ]);
   });
+
+  it('keeps current artifacts visible while refreshing the same session', async () => {
+    const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const refreshLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts
+      .mockReturnValueOnce(initialLoad.promise)
+      .mockReturnValueOnce(refreshLoad.promise);
+
+    await renderHookHost();
+    await act(async () => {
+      initialLoad.resolve({ artifacts: [artifact('current-artifact')] });
+      await initialLoad.promise;
+    });
+
+    sdkMock.artifactsVersion = 1;
+    await rerenderHookHost();
+
+    expect(latestState?.loading).toBe(true);
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'current-artifact',
+    ]);
+
+    await act(async () => {
+      refreshLoad.resolve({ artifacts: [artifact('refreshed-artifact')] });
+      await refreshLoad.promise;
+    });
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'refreshed-artifact',
+    ]);
+  });
 });

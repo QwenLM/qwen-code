@@ -1681,7 +1681,7 @@ function HtmlArtifactPreview({
 
 function withArtifactPreviewCsp(html: string) {
   const csp =
-    "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:;";
+    "default-src 'none'; base-uri 'none'; style-src 'unsafe-inline'; img-src data: blob:;";
   if (typeof DOMParser === 'undefined') {
     return `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${csp}"></head><body>${html}</body></html>`;
   }

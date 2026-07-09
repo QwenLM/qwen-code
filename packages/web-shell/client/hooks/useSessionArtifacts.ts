@@ -32,6 +32,7 @@ export function useSessionArtifacts(): SessionArtifactsState {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestIdRef = useRef(0);
+  const loadedSessionIdRef = useRef<string | undefined>(undefined);
   const previousPromptStatusRef = useRef(promptStatus);
   const previousArtifactsVersionRef = useRef(artifactsVersion);
 
@@ -39,28 +40,37 @@ export function useSessionArtifacts(): SessionArtifactsState {
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
     if (!sessionId) {
+      loadedSessionIdRef.current = undefined;
       setArtifacts([]);
       setError(null);
       setLoading(false);
       return;
     }
     if (!isConnected) {
+      loadedSessionIdRef.current = undefined;
       setArtifacts([]);
       setError(null);
       setLoading(false);
       return;
     }
     if (!supportsArtifacts) {
+      loadedSessionIdRef.current = undefined;
       setArtifacts([]);
       setError(null);
       setLoading(false);
       return;
     }
-    setArtifacts([]);
+    if (
+      loadedSessionIdRef.current !== undefined &&
+      loadedSessionIdRef.current !== sessionId
+    ) {
+      setArtifacts([]);
+    }
     setLoading(true);
     try {
       const result = await actions.loadArtifacts();
       if (requestIdRef.current !== requestId) return;
+      loadedSessionIdRef.current = sessionId;
       setArtifacts(result.artifacts);
       setError(null);
     } catch (err) {
