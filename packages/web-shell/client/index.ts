@@ -49,6 +49,7 @@ export type {
   WebShellAtProviderTab,
   WebShellAtItem,
   WebShellAtProvider,
+  WebShellBottomStatusItem,
   WebShellCodeBlockRenderInfo,
   WebShellIconSource,
   WebShellTaskInfo,

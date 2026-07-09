@@ -12,10 +12,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { Ignore } from '@qwen-code/qwen-code-core';
 import { createServeApp } from '../server.js';
+import { workspaceRelative } from './workspace-file-read.js';
 import {
   canonicalizeWorkspace,
   createWorkspaceFileSystemFactory,
 } from '../fs/index.js';
+import type { Request } from 'express';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { ServeOptions } from '../types.js';
 
@@ -66,6 +68,35 @@ function loopbackHost(): string {
 function rawHash(data: string | Buffer): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(data).digest('hex')}`;
 }
+
+describe('workspaceRelative', () => {
+  let scratch: string;
+
+  beforeEach(async () => {
+    scratch = await fsp.mkdtemp(
+      path.join(
+        os.tmpdir(),
+        `qwen-route-rel-${randomBytes(4).toString('hex')}-`,
+      ),
+    );
+  });
+
+  afterEach(async () => {
+    await fsp.rm(scratch, { recursive: true, force: true });
+  });
+
+  it('rejects paths that remain outside the workspace after canonicalization', async () => {
+    const workspace = path.join(scratch, 'ws');
+    await fsp.mkdir(workspace);
+    const req = {
+      app: { locals: { boundWorkspace: workspace } },
+    } as unknown as Request;
+
+    expect(() =>
+      workspaceRelative(req, path.join(scratch, 'outside.txt')),
+    ).toThrow(expect.objectContaining({ kind: 'path_outside_workspace' }));
+  });
+});
 
 describe('GET /file', () => {
   let h: Harness;

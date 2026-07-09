@@ -8,7 +8,7 @@ import { describe, it, expect } from 'vitest';
 import type { HistoryItem } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import {
-  buildThinkingFullTextMap,
+  buildThoughtHeadIdMap,
   findLastUserItemIndex,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
@@ -123,48 +123,59 @@ describe('itemsAfterAreOnlySynthetic', () => {
   });
 });
 
-describe('buildThinkingFullTextMap', () => {
+describe('buildThoughtHeadIdMap', () => {
   it('returns empty map when no gemini_thought items exist', () => {
     const h: HistoryItem[] = [
       mk({ type: 'user', text: 'hi' }, 1),
       mk({ type: 'gemini_content', text: 'hello' }, 2),
     ];
-    expect(buildThinkingFullTextMap(h).size).toBe(0);
+    expect(buildThoughtHeadIdMap(h).size).toBe(0);
   });
 
-  it('omits thought items with no continuations', () => {
-    const h: HistoryItem[] = [
-      mk({ type: 'gemini_thought', text: 'thinking...' }, 1),
-      mk({ type: 'gemini_content', text: 'answer' }, 2),
-    ];
-    expect(buildThinkingFullTextMap(h).size).toBe(0);
-  });
-
-  it('aggregates consecutive gemini_thought_content into the preceding thought', () => {
-    const thought = mk({ type: 'gemini_thought', text: 'header' }, 1);
+  it('maps a lone thought head to its own id', () => {
+    const thought = mk({ type: 'gemini_thought', text: 'thinking...' }, 1);
     const h: HistoryItem[] = [
       thought,
-      mk({ type: 'gemini_thought_content', text: 'part1' }, 2),
-      mk({ type: 'gemini_thought_content', text: 'part2' }, 3),
-      mk({ type: 'gemini_content', text: 'answer' }, 4),
+      mk({ type: 'gemini_content', text: 'answer' }, 2),
     ];
-    const map = buildThinkingFullTextMap(h);
-    expect(map.get(thought)).toBe('header\npart1\npart2');
+    const map = buildThoughtHeadIdMap(h);
+    expect(map.get(thought)).toBe(1);
+    expect(map.size).toBe(1);
   });
 
-  it('stops aggregation at the first non-continuation item', () => {
-    const thought1 = mk({ type: 'gemini_thought', text: 't1' }, 1);
-    const thought2 = mk({ type: 'gemini_thought', text: 't2' }, 4);
+  it('maps consecutive continuations to the preceding head id', () => {
+    const head = mk({ type: 'gemini_thought', text: 'header' }, 1);
+    const c1 = mk({ type: 'gemini_thought_content', text: 'part1' }, 2);
+    const c2 = mk({ type: 'gemini_thought_content', text: 'part2' }, 3);
     const h: HistoryItem[] = [
-      thought1,
-      mk({ type: 'gemini_thought_content', text: 'c1' }, 2),
-      mk({ type: 'gemini_content', text: 'answer' }, 3),
-      thought2,
-      mk({ type: 'gemini_thought_content', text: 'c2' }, 5),
+      head,
+      c1,
+      c2,
+      mk({ type: 'gemini_content', text: 'answer' }, 4),
     ];
-    const map = buildThinkingFullTextMap(h);
-    expect(map.get(thought1)).toBe('t1\nc1');
-    expect(map.get(thought2)).toBe('t2\nc2');
+    const map = buildThoughtHeadIdMap(h);
+    expect(map.get(head)).toBe(1);
+    expect(map.get(c1)).toBe(1);
+    expect(map.get(c2)).toBe(1);
+  });
+
+  it('stops grouping at the first non-continuation item', () => {
+    const head1 = mk({ type: 'gemini_thought', text: 't1' }, 1);
+    const c1 = mk({ type: 'gemini_thought_content', text: 'c1' }, 2);
+    const head2 = mk({ type: 'gemini_thought', text: 't2' }, 4);
+    const c2 = mk({ type: 'gemini_thought_content', text: 'c2' }, 5);
+    const h: HistoryItem[] = [
+      head1,
+      c1,
+      mk({ type: 'gemini_content', text: 'answer' }, 3),
+      head2,
+      c2,
+    ];
+    const map = buildThoughtHeadIdMap(h);
+    expect(map.get(head1)).toBe(1);
+    expect(map.get(c1)).toBe(1);
+    expect(map.get(head2)).toBe(4);
+    expect(map.get(c2)).toBe(4);
   });
 });
 

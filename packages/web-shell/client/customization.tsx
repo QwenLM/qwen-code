@@ -99,6 +99,14 @@ export type UserMessageContentRenderer = (
   info: UserMessageContentRenderInfo,
 ) => ReactNode;
 
+export interface WebShellBottomStatusItem {
+  id: string;
+  label: ReactNode;
+  title?: string;
+  ariaLabel?: string;
+  onClick?: () => void;
+}
+
 export type WebShellIconSource = string;
 
 export type WebShellBuiltinComposerTagKind =

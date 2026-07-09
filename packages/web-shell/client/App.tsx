@@ -189,6 +189,7 @@ import {
   type ComposerTagClickHandler,
   type ComposerTagRenderer,
   type WebShellComposerTagIconMap,
+  type WebShellBottomStatusItem,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import styles from './App.module.css';
@@ -447,6 +448,8 @@ export interface WebShellProps {
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;
   /** Custom component for the footer area below the Editor. Replaces the built-in StatusBar. */
   renderFooter?: FooterRenderer;
+  /** Extra status items shown in the floating bottom panel beside the TODO summary. */
+  bottomStatusItems?: readonly WebShellBottomStatusItem[];
   /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
   compactThinking?: boolean;
   /** Auto-collapse completed turns to just the prompt and final answer, with a per-turn toggle. Defaults to true. */
@@ -503,7 +506,10 @@ const emptyComposerApi: WebShellComposerApi = {
   submit: () => {},
 };
 
+const EMPTY_BOTTOM_STATUS_ITEMS: readonly WebShellBottomStatusItem[] = [];
 const DEFAULT_CHAT_MAX_WIDTH = 1000;
+const BOTTOM_PANEL_GAP_PX = 6;
+const BOTTOM_PANEL_FALLBACK_INSET_PX = 40;
 type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
@@ -859,6 +865,7 @@ export function App({
   renderComposerToolbarEnd,
   renderComposerToolbarRight,
   renderFooter,
+  bottomStatusItems,
   chatMaxWidth,
   sidebar,
   splitSessionIds: externalSplitSessionIds,
@@ -1162,6 +1169,55 @@ export function App({
     setTodoPanelMode(nextTodoPanelMode);
   }
   const showFloatingTodos = nextTodoPanelMode !== 'hidden';
+  const floatingBottomStatusItems =
+    bottomStatusItems ?? EMPTY_BOTTOM_STATUS_ITEMS;
+  const showBottomPanels =
+    showFloatingTodos || floatingBottomStatusItems.length > 0;
+  const footerRef = useRef<HTMLDivElement>(null);
+  const bottomPanelsRef = useRef<HTMLDivElement>(null);
+  const [bottomPanelInset, setBottomPanelInset] = useState(0);
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(0);
+  useLayoutEffect(() => {
+    if (!showBottomPanels) {
+      setBottomPanelInset(0);
+      setBottomPanelHeight(0);
+      return;
+    }
+    const node = bottomPanelsRef.current;
+    if (!node) {
+      setBottomPanelInset(BOTTOM_PANEL_FALLBACK_INSET_PX);
+      setBottomPanelHeight(0);
+      return;
+    }
+    const updateInset = () => {
+      const footer = footerRef.current;
+      const panelRect = node.getBoundingClientRect();
+      const footerRect = footer?.getBoundingClientRect();
+      const panelHeight = Math.ceil(panelRect.height);
+      const overlapAboveFooter = footerRect
+        ? Math.max(0, footerRect.top - panelRect.top)
+        : panelHeight + BOTTOM_PANEL_GAP_PX;
+      setBottomPanelHeight(panelHeight);
+      setBottomPanelInset(
+        Math.max(BOTTOM_PANEL_FALLBACK_INSET_PX, Math.ceil(overlapAboveFooter)),
+      );
+    };
+    updateInset();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(updateInset);
+    observer.observe(node);
+    if (footerRef.current) observer.observe(footerRef.current);
+    return () => observer.disconnect();
+  }, [showBottomPanels]);
+  const contentStyle = useMemo(
+    () =>
+      ({
+        '--web-shell-bottom-panel-inset': `${bottomPanelInset}px`,
+        '--web-shell-bottom-panel-height': `${bottomPanelHeight}px`,
+        '--web-shell-bottom-panel-gap': `${BOTTOM_PANEL_GAP_PX}px`,
+      }) as CSSProperties,
+    [bottomPanelHeight, bottomPanelInset],
+  );
   const backgroundTaskActivityKey = useMemo(
     () => getBackgroundTaskActivityKey(messages),
     [messages],
@@ -1181,7 +1237,6 @@ export function App({
   const messageListRef = useRef<MessageListHandle | null>(null);
   const editorRef = useRef<EditorHandle | null>(null);
   const notifiedComposerReadyRef = useRef<EditorHandle | null>(null);
-  const footerRef = useRef<HTMLDivElement>(null);
   const [canScrollMessageListToBottom, setCanScrollMessageListToBottom] =
     useState(false);
   const previousFooterRectRef = useRef<DOMRect | null>(null);
@@ -2684,6 +2739,19 @@ export function App({
     },
     [loadSidebarSession, reportError],
   );
+
+  // Listen for `qwen:open-session` events dispatched by the markdown renderer
+  // when a `qwen-session://<id>` link is clicked. Navigate to the session.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const sessionId = (e as CustomEvent<string>).detail;
+      if (typeof sessionId === 'string' && sessionId) {
+        handleOpenSessionFromOverview(sessionId);
+      }
+    };
+    window.addEventListener('qwen:open-session', handler);
+    return () => window.removeEventListener('qwen:open-session', handler);
+  }, [handleOpenSessionFromOverview]);
 
   useEffect(() => {
     if (
@@ -4953,6 +5021,7 @@ export function App({
                         details={todoDetails}
                       >
                         <div
+                          style={contentStyle}
                           className={[
                             styles.content,
                             showFloatingTodos ||
@@ -4980,6 +5049,7 @@ export function App({
                             showRetryHint={showRetryHint}
                             onRetryClick={handleRetry}
                             onBranchSession={handleBranchCurrentSession}
+                            bottomOverlayInset={bottomPanelInset}
                             welcomeHeader={
                               isChatEmptyState ? welcomeHeader : undefined
                             }
@@ -5003,11 +5073,15 @@ export function App({
                       </TodoContextsProvider>
                     </CompactModeContext.Provider>
 
-                    <div ref={footerRef} className={styles.footer}>
+                    <div
+                      ref={footerRef}
+                      style={contentStyle}
+                      className={styles.footer}
+                    >
                       {canScrollMessageListToBottom && (
                         <div
                           className={
-                            showFloatingTodos
+                            showBottomPanels
                               ? `${styles.scrollToBottomLayer} ${styles.scrollToBottomLayerWithTodos}`
                               : styles.scrollToBottomLayer
                           }
@@ -5034,9 +5108,15 @@ export function App({
                           </button>
                         </div>
                       )}
-                      {showFloatingTodos && (
-                        <div className={styles.bottomPanels}>
-                          <TodoPanel todos={floatingTodos} />
+                      {showBottomPanels && (
+                        <div
+                          ref={bottomPanelsRef}
+                          className={styles.bottomPanels}
+                        >
+                          <TodoPanel
+                            todos={showFloatingTodos ? floatingTodos : []}
+                            statusItems={floatingBottomStatusItems}
+                          />
                         </div>
                       )}
                       {/* Only render the outer session's approval on the chat
