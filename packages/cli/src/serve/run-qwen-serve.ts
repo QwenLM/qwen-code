@@ -461,6 +461,12 @@ export function extractContextFilename(value: unknown): string | undefined {
   return undefined;
 }
 
+function sessionArtifactsPersistenceAvailableFromSettings(
+  settings: { general?: { chatRecording?: unknown } } | undefined,
+): boolean {
+  return settings?.general?.chatRecording !== false;
+}
+
 /**
  * Per-workspace promise chain that serializes settings read-modify-write
  * cycles inside this process.
@@ -564,6 +570,9 @@ function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
   return {
     async start() {},
     async stop() {},
+    async restart() {
+      return { ...snapshot, channels: [] };
+    },
     killAllSync() {},
     snapshot: () => ({ ...snapshot, channels: [] }),
   };
@@ -837,6 +846,7 @@ function sessionIdleTimeoutMs(value: number | undefined): number {
 function currentServeFeaturesForRunQwenServe(
   opts: ServeOptions,
   sessionShellCommandEnabled: boolean,
+  sessionArtifactsPersistenceAvailable: boolean,
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
     requireAuth: opts.requireAuth === true,
@@ -851,8 +861,10 @@ function currentServeFeaturesForRunQwenServe(
       : {}),
     persistSettingAvailable: true,
     sessionShellCommandEnabled,
+    sessionArtifactsPersistenceAvailable,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
+    channelReloadAvailable: opts.channelSelection !== undefined,
     // Advertise the same WS feature flags as the runtime path (serve-features.ts)
     // so the bootstrap `/capabilities` window doesn't briefly under-report them.
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
@@ -869,6 +881,7 @@ function createBootstrapCapabilities(input: {
   boundWorkspace: string;
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
+  sessionArtifactsPersistenceAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
 }): CapabilitiesEnvelope {
   return {
@@ -881,6 +894,7 @@ function createBootstrapCapabilities(input: {
     features: currentServeFeaturesForRunQwenServe(
       input.opts,
       input.sessionShellCommandEnabled,
+      input.sessionArtifactsPersistenceAvailable,
     ),
     modelServices: [],
     workspaceCwd: input.boundWorkspace,
@@ -1056,6 +1070,7 @@ function createBootstrapServeApp(input: {
   daemonLog: DaemonLogger;
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
+  sessionArtifactsPersistenceAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   multiWorkspaceCapabilitiesRequireRuntime: boolean;
   getRuntimeError: () => string | undefined;
@@ -1072,6 +1087,7 @@ function createBootstrapServeApp(input: {
     daemonLog,
     qwenCodeVersion,
     sessionShellCommandEnabled,
+    sessionArtifactsPersistenceAvailable,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime,
     getRuntimeError,
@@ -1137,6 +1153,7 @@ function createBootstrapServeApp(input: {
         boundWorkspace,
         qwenCodeVersion,
         sessionShellCommandEnabled,
+        sessionArtifactsPersistenceAvailable,
         permissionPolicy,
       }),
     );
@@ -1218,6 +1235,7 @@ function createBootstrapServeApp(input: {
         features: currentServeFeaturesForRunQwenServe(
           opts,
           sessionShellCommandEnabled,
+          sessionArtifactsPersistenceAvailable,
         ),
       },
       runtime: {
@@ -1805,9 +1823,12 @@ export async function runQwenServe(
   let permissionPolicy: PermissionPolicy | undefined;
   let permissionConsensusQuorum: number | undefined;
   let bootSettings: ServeFastPathSettings | undefined;
+  let sessionArtifactsPersistenceAvailable = true;
   try {
     bootSettings =
       deps.bootSettings ?? loadServeFastPathSettings(boundWorkspace);
+    sessionArtifactsPersistenceAvailable =
+      sessionArtifactsPersistenceAvailableFromSettings(bootSettings);
     contextFilenameForInit = extractContextFilename(
       bootSettings.context?.fileName,
     );
@@ -2079,6 +2100,7 @@ export async function runQwenServe(
   let channelWorker: ChannelWorkerSupervisor =
     createDisabledChannelWorkerSupervisor();
   const getChannelWorkerSnapshot = () => channelWorker.snapshot();
+  const reloadChannelWorker = () => channelWorker.restart();
   const writeChannelWorkerPidfile = (
     snapshot = channelWorker.snapshot(),
     options: { clearWorkerPid?: boolean } = {},
@@ -3157,6 +3179,10 @@ export async function runQwenServe(
       primaryRuntimeEnv,
       daemonLog,
       getChannelWorkerSnapshot,
+      // Gate both the `channel_reload` capability and the reload route on the
+      // presence of this dep, so it is advertised only when a channel worker
+      // exists to reload.
+      ...(opts.channelSelection ? { reloadChannelWorker } : {}),
       getPerfSnapshot: () => ({
         eventLoop: currentDaemonEventLoopMonitor.snapshot(),
         promptQueueWait: {
@@ -3184,6 +3210,10 @@ export async function runQwenServe(
       persistDisabledTools: persistDisabledToolsFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
+      sessionArtifactsPersistenceAvailable:
+        sessionArtifactsPersistenceAvailableFromSettings(
+          runtimeBootSettings?.merged,
+        ),
       installAuthProvider: (req) =>
         withSettingsLock(
           boundWorkspace,
@@ -3261,6 +3291,7 @@ export async function runQwenServe(
     daemonLog,
     qwenCodeVersion: cliVersion,
     sessionShellCommandEnabled,
+    sessionArtifactsPersistenceAvailable,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime: workspaceInputs.length > 1,
     getRuntimeError: () => runtimeStartupError,
