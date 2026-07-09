@@ -102,6 +102,8 @@ Channel memory follows the channel access gates. Any message accepted by `sender
 
 In open groups, any accepted member can update shared channel memory for that group. Use `allowlist` or `pairing` policies when memory should be limited to trusted senders.
 
+Memory is keyed to the current chat or thread, so it is not injected into `single` session scope, where every chat shares one channel-wide agent session.
+
 ### Token Security
 
 Bot tokens should not be stored directly in `settings.json`. Instead, use environment variable references:
