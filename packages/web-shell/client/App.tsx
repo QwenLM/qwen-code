@@ -239,6 +239,18 @@ const MAX_TOASTS = 4;
 // active before giving up, so the scheduled-tasks UI can't stay stuck disabled
 // if the switch never completes.
 const BOUND_RUN_SWITCH_TIMEOUT_MS = 30_000;
+
+function availableSkillInfos(status: {
+  skills?: Array<{ status?: string; name: string; description?: string }>;
+}): SkillInfo[] {
+  return (status.skills ?? [])
+    .filter((skill) => skill.status === 'ok')
+    .map((skill) => ({
+      name: skill.name,
+      description: skill.description ?? '',
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 
@@ -1222,11 +1234,7 @@ export function App({
     workspaceActions
       .loadSkillsStatus()
       .then((status) => {
-        setLoadedSkills(
-          (status?.skills ?? [])
-            .map((s) => ({ name: s.name, description: s.description ?? '' }))
-            .sort((a, b) => a.name.localeCompare(b.name)),
-        );
+        setLoadedSkills(availableSkillInfos(status));
       })
       .catch(() => {});
   }, [connected, workspaceActions]);
@@ -2648,6 +2656,19 @@ export function App({
     [loadSidebarSession, reportError],
   );
 
+  // Listen for `qwen:open-session` events dispatched by the markdown renderer
+  // when a `qwen-session://<id>` link is clicked. Navigate to the session.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const sessionId = (e as CustomEvent<string>).detail;
+      if (typeof sessionId === 'string' && sessionId) {
+        handleOpenSessionFromOverview(sessionId);
+      }
+    };
+    window.addEventListener('qwen:open-session', handler);
+    return () => window.removeEventListener('qwen:open-session', handler);
+  }, [handleOpenSessionFromOverview]);
+
   useEffect(() => {
     if (
       sidebarSwitchingSessionId !== null &&
@@ -3377,12 +3398,7 @@ export function App({
               workspaceActions
                 .loadSkillsStatus()
                 .then((status) => {
-                  const skills = (status?.skills ?? [])
-                    .map((s) => ({
-                      name: s.name,
-                      description: s.description ?? '',
-                    }))
-                    .sort((a, b) => a.name.localeCompare(b.name));
+                  const skills = availableSkillInfos(status);
                   setLoadedSkills(skills);
                   if (skills.length === 0) {
                     store.dispatch([

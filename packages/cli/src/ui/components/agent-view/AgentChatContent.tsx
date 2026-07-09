@@ -30,7 +30,7 @@ import { theme } from '../../semantic-colors.js';
 import { GeminiRespondingSpinner } from '../GeminiRespondingSpinner.js';
 import { agentMessagesToHistoryItems } from './agentHistoryAdapter.js';
 import { AgentHeader } from './AgentHeader.js';
-import { buildThinkingFullTextMap } from '../../utils/historyUtils.js';
+import { buildThoughtHeadIdMap } from '../../utils/historyUtils.js';
 
 export interface AgentChatContentProps {
   /** The agent's AgentCore — the source of truth for transcript state. */
@@ -199,8 +199,8 @@ export const AgentChatContent = ({
   const committedItems = allItems.slice(0, splitIndex);
   const pendingItems = allItems.slice(splitIndex);
 
-  const thinkingFullTextByItem = useMemo(
-    () => buildThinkingFullTextMap(allItems),
+  const thoughtHeadIdByItem = useMemo(
+    () => buildThoughtHeadIdMap(allItems),
     [allItems],
   );
 
@@ -238,7 +238,7 @@ export const AgentChatContent = ({
               isPending={false}
               terminalWidth={terminalWidth}
               mainAreaWidth={contentWidth}
-              thinkingFullText={thinkingFullTextByItem.get(item)}
+              thoughtHeadId={thoughtHeadIdByItem.get(item)}
             />
           )),
         ]}

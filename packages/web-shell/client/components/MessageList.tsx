@@ -9,10 +9,13 @@ import {
   useCallback,
   useMemo,
   useState,
+  type CSSProperties,
   type ReactNode,
+  type FocusEvent as ReactFocusEvent,
   type MouseEvent as ReactMouseEvent,
   type MutableRefObject,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Message, ACPToolCall, TurnCollapseHead } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
@@ -1668,6 +1671,24 @@ const SESSION_TIMELINE_KIND_LABEL: Record<TurnTimelineNodeKind, string> = {
   none: 'turn',
 };
 
+type SessionTimelineTooltip = {
+  entry: SessionTimelineEntry;
+  top: number;
+  left: number;
+  clamped: boolean;
+  themeVars: CSSProperties;
+};
+
+const SESSION_TIMELINE_TOOLTIP_THEME_VARS = [
+  '--background',
+  '--foreground',
+  '--muted-foreground',
+  '--border',
+  '--font-sans',
+];
+
+const SESSION_TIMELINE_TOOLTIP_ID = 'session-timeline-detail-tooltip';
+
 const SessionTimeline = memo(function SessionTimeline({
   entries,
   currentTurnId,
@@ -1682,80 +1703,299 @@ const SessionTimeline = memo(function SessionTimeline({
   onSelect: (turnId: string) => void;
 }) {
   const { t } = useI18n();
+  const panelRef = useRef<HTMLElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const programmaticScrollRef = useRef(false);
+  const focusScrollGuardRef = useRef(false);
+  const focusScrollGuardFrameRef = useRef<number | null>(null);
+  const focusScrollGuardFallbackRef = useRef<number | null>(null);
+  const [tooltip, setTooltip] = useState<SessionTimelineTooltip | null>(null);
+
+  const currentIndex =
+    currentRange !== null
+      ? currentRange.currentIndex
+      : entries.findIndex((entry) => entry.id === currentTurnId);
+
+  const hideTooltip = useCallback(() => setTooltip(null), []);
+
+  const handleViewportScroll = useCallback(() => {
+    if (programmaticScrollRef.current || focusScrollGuardRef.current) return;
+    hideTooltip();
+  }, [hideTooltip]);
+
+  const buildTooltip = useCallback(
+    (entry: SessionTimelineEntry, el: HTMLElement) => {
+      const panel = panelRef.current;
+      if (!panel) return null;
+      const computedStyle = getComputedStyle(panel);
+      const rect = el.getBoundingClientRect();
+      return {
+        entry,
+        top: rect.top + rect.height / 2,
+        left: rect.right + 8,
+        clamped: false,
+        themeVars: Object.fromEntries(
+          SESSION_TIMELINE_TOOLTIP_THEME_VARS.map((name) => [
+            name,
+            computedStyle.getPropertyValue(name),
+          ]),
+        ) as CSSProperties,
+      };
+    },
+    [],
+  );
+
+  const findTooltipAnchor = useCallback((entry: SessionTimelineEntry) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return null;
+    const item = Array.from(
+      viewport.querySelectorAll<HTMLElement>(
+        '[data-testid="session-timeline-entry"]',
+      ),
+    ).find((node) => node.getAttribute('data-turn-id') === entry.id);
+    return item?.querySelector<HTMLButtonElement>('button') ?? null;
+  }, []);
+
+  const isTooltipAnchorVisible = useCallback((anchor: HTMLElement) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return false;
+    const viewportRect = viewport.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
+    return (
+      anchorRect.bottom >= viewportRect.top &&
+      anchorRect.top <= viewportRect.bottom
+    );
+  }, []);
+
+  const syncTooltip = useCallback(() => {
+    setTooltip((current) => {
+      if (!current) return null;
+      const anchor = findTooltipAnchor(current.entry);
+      if (!anchor || !isTooltipAnchorVisible(anchor)) return null;
+      return buildTooltip(current.entry, anchor);
+    });
+  }, [buildTooltip, findTooltipAnchor, isTooltipAnchorVisible]);
+
+  const showTooltip = useCallback(
+    (entry: SessionTimelineEntry, el: HTMLElement) => {
+      setTooltip(buildTooltip(entry, el));
+    },
+    [buildTooltip],
+  );
+
+  const guardFocusScroll = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    if (focusScrollGuardFrameRef.current !== null) {
+      window.cancelAnimationFrame(focusScrollGuardFrameRef.current);
+    }
+    if (focusScrollGuardFallbackRef.current !== null) {
+      window.clearTimeout(focusScrollGuardFallbackRef.current);
+    }
+    focusScrollGuardRef.current = true;
+    focusScrollGuardFrameRef.current = window.requestAnimationFrame(() => {
+      focusScrollGuardFrameRef.current = null;
+      focusScrollGuardRef.current = false;
+      syncTooltip();
+    });
+    focusScrollGuardFallbackRef.current = window.setTimeout(() => {
+      focusScrollGuardFallbackRef.current = null;
+      focusScrollGuardRef.current = false;
+    }, 100);
+  }, [syncTooltip]);
+
+  useLayoutEffect(() => {
+    if (hidden) return;
+    const viewport = viewportRef.current;
+    if (!viewport || currentIndex < 0) return;
+    const item = viewport.querySelector<HTMLElement>(
+      `[data-timeline-index="${currentIndex}"]`,
+    );
+    if (!item) return;
+    const itemCenter = item.offsetTop + item.offsetHeight / 2;
+    const maxScrollTop = viewport.scrollHeight - viewport.clientHeight;
+    const nextScrollTop = Math.max(
+      0,
+      Math.min(itemCenter - viewport.clientHeight / 2, maxScrollTop),
+    );
+    if (viewport.scrollTop === nextScrollTop) return;
+    programmaticScrollRef.current = true;
+    viewport.scrollTop = nextScrollTop;
+    const frame = window.requestAnimationFrame(() => {
+      programmaticScrollRef.current = false;
+      syncTooltip();
+    });
+    const fallback = window.setTimeout(() => {
+      programmaticScrollRef.current = false;
+    }, 100);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(fallback);
+      programmaticScrollRef.current = false;
+    };
+  }, [currentIndex, hidden, syncTooltip]);
+
+  useLayoutEffect(() => {
+    if (!tooltip || typeof window === 'undefined') return;
+    window.addEventListener('resize', syncTooltip);
+    return () => {
+      window.removeEventListener('resize', syncTooltip);
+    };
+  }, [syncTooltip, tooltip]);
+
+  useLayoutEffect(
+    () => () => {
+      if (focusScrollGuardFrameRef.current !== null) {
+        window.cancelAnimationFrame(focusScrollGuardFrameRef.current);
+      }
+      if (focusScrollGuardFallbackRef.current !== null) {
+        window.clearTimeout(focusScrollGuardFallbackRef.current);
+      }
+      focusScrollGuardRef.current = false;
+    },
+    [],
+  );
+
+  useLayoutEffect(() => {
+    if (!tooltip || tooltip.clamped) return;
+    const panel = panelRef.current;
+    const tooltipEl = tooltipRef.current;
+    if (!panel || !tooltipEl || typeof window === 'undefined') return;
+    const rect = tooltipEl.getBoundingClientRect();
+    const margin = 12;
+    let nextTop = tooltip.top;
+    if (rect.top < margin) {
+      nextTop += margin - rect.top;
+    } else if (rect.bottom > window.innerHeight - margin) {
+      nextTop -= rect.bottom - (window.innerHeight - margin);
+    }
+    if (nextTop === tooltip.top) return;
+    setTooltip((current) =>
+      current?.entry.id === tooltip.entry.id
+        ? { ...current, top: nextTop, clamped: true }
+        : current,
+    );
+  }, [tooltip]);
+
   if (hidden || entries.length === 0) return null;
 
   return (
     <div className={styles.sessionTimelineLayer} aria-hidden="false">
       <nav
+        ref={panelRef}
         className={styles.sessionTimelinePanel}
         aria-label={t('timeline.sessionTimeline')}
         data-testid="session-timeline"
+        onMouseLeave={hideTooltip}
       >
-        <ol className={styles.sessionTimelineList}>
-          {entries.map((entry, index) => {
-            const isInCurrentRange =
-              currentRange !== null &&
-              index >= currentRange.startIndex &&
-              index <= currentRange.endIndex;
-            const isCurrent =
-              currentRange !== null
-                ? index === currentRange.currentIndex
-                : entry.id === currentTurnId;
-            const nodeKinds = entry.nodeKinds.join(',');
-            const ariaLabel = [
-              `${t('timeline.turnPrefix', { index: index + 1 })}: ${entry.label}`,
-              isCurrent ? t('timeline.currentTurn') : null,
-            ]
-              .filter(Boolean)
-              .join('. ');
-            return (
-              <li
-                key={entry.id}
-                className={styles.sessionTimelineItem}
-                data-testid="session-timeline-entry"
-                data-turn-id={entry.id}
-                data-node-kinds={nodeKinds}
-                data-in-current-range={isInCurrentRange ? 'true' : undefined}
-              >
-                <button
-                  type="button"
-                  className={joinClassNames(
-                    styles.sessionTimelineButton,
-                    isInCurrentRange
-                      ? styles.sessionTimelineButtonInRange
-                      : undefined,
-                    isCurrent ? styles.sessionTimelineButtonCurrent : undefined,
-                  )}
-                  aria-current={isCurrent ? 'step' : undefined}
-                  aria-label={ariaLabel}
-                  onClick={() => onSelect(entry.id)}
+        <div
+          ref={viewportRef}
+          className={styles.sessionTimelineViewport}
+          data-testid="session-timeline-viewport"
+          onScroll={handleViewportScroll}
+        >
+          <ol className={styles.sessionTimelineList}>
+            {entries.map((entry, index) => {
+              const isInCurrentRange =
+                currentRange !== null &&
+                index >= currentRange.startIndex &&
+                index <= currentRange.endIndex;
+              const isCurrent =
+                currentRange !== null
+                  ? index === currentRange.currentIndex
+                  : entry.id === currentTurnId;
+              const nodeKinds = entry.nodeKinds.join(',');
+              const ariaLabel = [
+                `${t('timeline.turnPrefix', { index: index + 1 })}: ${entry.label}`,
+                isCurrent ? t('timeline.currentTurn') : null,
+              ]
+                .filter(Boolean)
+                .join('. ');
+              const revealTooltip = (
+                event:
+                  | ReactMouseEvent<HTMLButtonElement>
+                  | ReactFocusEvent<HTMLButtonElement>,
+              ) => showTooltip(entry, event.currentTarget);
+              const revealFocusedTooltip = (
+                event: ReactFocusEvent<HTMLButtonElement>,
+              ) => {
+                guardFocusScroll();
+                showTooltip(entry, event.currentTarget);
+              };
+              const describedByTooltip = tooltip?.entry.id === entry.id;
+              return (
+                <li
+                  key={entry.id}
+                  className={styles.sessionTimelineItem}
+                  data-testid="session-timeline-entry"
+                  data-turn-id={entry.id}
+                  data-timeline-index={index}
+                  data-node-kinds={nodeKinds}
+                  data-in-current-range={isInCurrentRange ? 'true' : undefined}
                 >
-                  <span className={styles.sessionTimelineTick} />
-                  <span
-                    className={styles.sessionTimelineDetails}
-                    data-testid="session-timeline-detail"
-                    data-title={entry.label}
-                    data-detail={entry.detail}
-                    data-scheduled-task={
-                      entry.isScheduledTask ? 'true' : undefined
+                  <button
+                    type="button"
+                    className={joinClassNames(
+                      styles.sessionTimelineButton,
+                      isInCurrentRange
+                        ? styles.sessionTimelineButtonInRange
+                        : undefined,
+                      isCurrent
+                        ? styles.sessionTimelineButtonCurrent
+                        : undefined,
+                    )}
+                    aria-current={isCurrent ? 'step' : undefined}
+                    aria-describedby={
+                      describedByTooltip
+                        ? SESSION_TIMELINE_TOOLTIP_ID
+                        : undefined
                     }
-                    aria-hidden="true"
+                    aria-label={ariaLabel}
+                    onClick={() => onSelect(entry.id)}
+                    onFocus={revealFocusedTooltip}
+                    onBlur={hideTooltip}
+                    onMouseEnter={revealTooltip}
+                    onMouseLeave={hideTooltip}
                   >
-                    <span className={styles.sessionTimelineDetailsTitle}>
-                      {entry.isScheduledTask && <TimelineClockIcon />}
-                      <span className={styles.sessionTimelineDetailsTitleText}>
-                        {entry.label}
-                      </span>
-                    </span>
-                    <span className={styles.sessionTimelineDetailsDetail}>
-                      {entry.detail}
-                    </span>
-                  </span>
-                </button>
-              </li>
-            );
-          })}
-        </ol>
+                    <span className={styles.sessionTimelineTick} />
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+        {tooltip &&
+          typeof document !== 'undefined' &&
+          createPortal(
+            <div
+              ref={tooltipRef}
+              className={styles.sessionTimelineDetails}
+              id={SESSION_TIMELINE_TOOLTIP_ID}
+              data-testid="session-timeline-detail"
+              data-title={tooltip.entry.label}
+              data-detail={tooltip.entry.detail}
+              data-scheduled-task={
+                tooltip.entry.isScheduledTask ? 'true' : undefined
+              }
+              role="tooltip"
+              style={{
+                ...tooltip.themeVars,
+                top: tooltip.top,
+                left: tooltip.left,
+              }}
+            >
+              <span className={styles.sessionTimelineDetailsTitle}>
+                {tooltip.entry.isScheduledTask && <TimelineClockIcon />}
+                <span className={styles.sessionTimelineDetailsTitleText}>
+                  {tooltip.entry.label}
+                </span>
+              </span>
+              <span className={styles.sessionTimelineDetailsDetail}>
+                {tooltip.entry.detail}
+              </span>
+            </div>,
+            document.body,
+          )}
       </nav>
     </div>
   );
