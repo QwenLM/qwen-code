@@ -288,7 +288,12 @@ export class QQChannel extends ChannelBase {
   private handleCronTextChunk(sessionId: string, text: string): void {
     const wasInCronFlow = this._inCronFlow > 0;
     setImmediate(() => {
-      if (!this._ready) return;
+      if (!this._ready) {
+        process.stderr.write(
+          `[QQ:${this.name}] Cron text chunk dropped (not ready): ${sanitizeLogText(text, 64)} for session ${sanitizeLogText(sessionId, 32)}\n`,
+        );
+        return;
+      }
       if (!wasInCronFlow) return;
       if (this.streamState.has(sessionId)) return;
       let entry = this.cronBuffer.get(sessionId);
@@ -317,7 +322,8 @@ export class QQChannel extends ChannelBase {
           if (target) {
             this.sendMessage(target.chatId, toFlush)
               .then(() => {
-                if (!entry!.buffer) this.cronBuffer.delete(sessionId);
+                if (!entry!.buffer && this.cronBuffer.get(sessionId) === entry)
+                  this.cronBuffer.delete(sessionId);
               })
               .catch((err) => {
                 const code = err instanceof DeliveryError ? err.code : null;
@@ -355,14 +361,21 @@ export class QQChannel extends ChannelBase {
                   this.sendMessage(retryTarget.chatId, toFlush)
                     .then(() => {
                       entry!.pendingRetry = '';
-                      if (!entry!.buffer) this.cronBuffer.delete(sessionId);
+                      if (
+                        !entry!.buffer &&
+                        this.cronBuffer.get(sessionId) === entry
+                      )
+                        this.cronBuffer.delete(sessionId);
                     })
                     .catch((retryErr) => {
                       process.stderr.write(
                         `[QQ:${this.name}] Cron flush retry failed: ${sanitizeLogText(retryErr instanceof Error ? retryErr.message : String(retryErr), 200)}\n`,
                       );
                       entry!.pendingRetry = '';
-                      if (!entry!.buffer) {
+                      if (
+                        !entry!.buffer &&
+                        this.cronBuffer.get(sessionId) === entry
+                      ) {
                         this.cronBuffer.delete(sessionId);
                       }
                     });
@@ -1810,6 +1823,7 @@ export class QQChannel extends ChannelBase {
    * Extracted to eliminate triplication in the READY handler.
    */
   private finalizeReady(): void {
+    if (!this.ws || this.disposed) return;
     this._ready = true;
     this.reconnectAttempts = 0;
     this.isReconnecting = false;
