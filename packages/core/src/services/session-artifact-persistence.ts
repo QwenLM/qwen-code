@@ -92,6 +92,7 @@ export interface PersistedSessionArtifact {
   toolCallId?: string;
   toolName?: string;
   hookEventName?: string;
+  clientId?: string;
 }
 
 export type SessionArtifactPersistedChangeAction =
@@ -192,6 +193,7 @@ export function rebuildSessionArtifactSnapshot(
   const stickyEphemeralIds = new Set<string>();
   const warnings: string[] = [];
   let sequence = 0;
+  let lastSnapshotSequence = 0;
   let sessionId = fallbackSessionId;
   let sawRecord = false;
 
@@ -203,6 +205,7 @@ export function rebuildSessionArtifactSnapshot(
       sawRecord = true;
       sessionId = payload.sessionId;
       sequence = Math.max(sequence, payload.sequence);
+      lastSnapshotSequence = payload.sequence;
       artifacts.clear();
       tombstonedIds.clear();
       stickyEphemeralIds.clear();
@@ -221,6 +224,12 @@ export function rebuildSessionArtifactSnapshot(
     if (!payload) continue;
     sawRecord = true;
     sessionId = payload.sessionId;
+    if (payload.sequence <= lastSnapshotSequence) {
+      warnings.push(
+        `skipped stale event sequence ${payload.sequence} at or before snapshot sequence ${lastSnapshotSequence}`,
+      );
+      continue;
+    }
     sequence = Math.max(sequence, payload.sequence);
     for (const change of payload.changes) {
       if (change.action === 'removed') {
@@ -333,7 +342,15 @@ export function remapSessionArtifactPayloadForFork(
             ),
           };
         }
-        return change;
+        return {
+          ...change,
+          artifactId: remapArtifactIdForFork(
+            change.artifactId,
+            sourceSessionId,
+            newSessionId,
+            remappedArtifactIds,
+          ),
+        };
       })
       .filter((change) => change !== undefined),
   } satisfies SessionArtifactEventRecordPayload;
@@ -382,6 +399,7 @@ export function normalizeSnapshotPayload(
   warnings: string[],
 ): SessionArtifactSnapshotRecordPayload | undefined {
   if (!isRecord(value)) {
+    warnings.push('skipped malformed snapshot record');
     return undefined;
   }
   if (value['v'] !== SESSION_ARTIFACT_PERSISTENCE_VERSION) {
@@ -390,9 +408,15 @@ export function normalizeSnapshotPayload(
     );
     return undefined;
   }
-  if (!Array.isArray(value['artifacts'])) return undefined;
+  if (!Array.isArray(value['artifacts'])) {
+    warnings.push('skipped snapshot record without artifacts array');
+    return undefined;
+  }
   const sessionId = getString(value, 'sessionId');
-  if (!sessionId) return undefined;
+  if (!sessionId) {
+    warnings.push('skipped snapshot record without sessionId');
+    return undefined;
+  }
   const rawArtifacts = value['artifacts'];
   if (rawArtifacts.length > MAX_PERSISTED_ARTIFACTS) {
     warnings.push(
@@ -425,6 +449,7 @@ export function normalizeEventPayload(
   warnings: string[],
 ): SessionArtifactEventRecordPayload | undefined {
   if (!isRecord(value)) {
+    warnings.push('skipped malformed event record');
     return undefined;
   }
   if (value['v'] !== SESSION_ARTIFACT_PERSISTENCE_VERSION) {
@@ -433,9 +458,15 @@ export function normalizeEventPayload(
     );
     return undefined;
   }
-  if (!Array.isArray(value['changes'])) return undefined;
+  if (!Array.isArray(value['changes'])) {
+    warnings.push('skipped event record without changes array');
+    return undefined;
+  }
   const sessionId = getString(value, 'sessionId', MAX_PERSISTED_ID_CHARS);
-  if (!sessionId) return undefined;
+  if (!sessionId) {
+    warnings.push('skipped event record without sessionId');
+    return undefined;
+  }
   const rawChanges = value['changes'];
   if (rawChanges.length > MAX_PERSISTED_EVENT_CHANGES) {
     warnings.push(
@@ -460,15 +491,22 @@ function normalizePersistedChange(
   value: unknown,
   warnings: string[],
 ): SessionArtifactPersistedChange | undefined {
-  if (!isRecord(value)) return undefined;
+  if (!isRecord(value)) {
+    warnings.push('skipped malformed artifact change');
+    return undefined;
+  }
   const action = value['action'];
   if (action !== 'created' && action !== 'updated' && action !== 'removed') {
+    warnings.push('skipped artifact change with invalid action');
     return undefined;
   }
   const artifact = normalizePersistedArtifact(value['artifact'], warnings);
   const artifactId =
     getString(value, 'artifactId', MAX_PERSISTED_ID_CHARS) ?? artifact?.id;
-  if (!artifactId) return undefined;
+  if (!artifactId) {
+    warnings.push('skipped artifact change without artifactId');
+    return undefined;
+  }
   const reason = value['reason'];
   return {
     action,
@@ -563,6 +601,7 @@ function normalizePersistedArtifact(
     'hookEventName',
     MAX_PERSISTED_FIELD_CHARS,
   );
+  const clientId = getString(value, 'clientId', MAX_PERSISTED_FIELD_CHARS);
   return {
     id,
     kind,
@@ -591,6 +630,7 @@ function normalizePersistedArtifact(
     ...(toolCallId ? { toolCallId } : {}),
     ...(toolName ? { toolName } : {}),
     ...(hookEventName ? { hookEventName } : {}),
+    ...(clientId ? { clientId } : {}),
   };
 }
 

@@ -216,6 +216,39 @@ describe('session artifact persistence records', () => {
     expect(snapshot?.sequence).toBe(3);
   });
 
+  it('skips stale events at or before the latest snapshot sequence', () => {
+    const first = artifact('s1', 'https://example.com/first');
+    const stale = artifact('s1', 'https://example.com/stale');
+
+    const snapshot = rebuildSessionArtifactSnapshot([
+      {
+        type: 'system',
+        subtype: 'session_artifact_snapshot',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: 's1',
+          sequence: 10,
+          recordedAt: '2026-07-04T00:00:00.000Z',
+          artifacts: [first],
+          tombstonedIds: [],
+          stickyEphemeralIds: [],
+        },
+      },
+      event({
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 's1',
+        sequence: 9,
+        recordedAt: '2026-07-04T00:00:01.000Z',
+        changes: [{ action: 'created', artifactId: stale.id, artifact: stale }],
+      }),
+    ]);
+
+    expect(snapshot?.artifacts).toEqual([first]);
+    expect(snapshot?.warnings).toContain(
+      'skipped stale event sequence 9 at or before snapshot sequence 10',
+    );
+  });
+
   it('warns when artifact records use an unsupported version', () => {
     const restored = rebuildSessionArtifactSnapshot([
       {
@@ -400,11 +433,11 @@ describe('session artifact persistence records', () => {
     expect(snapshot?.artifacts[0]).not.toHaveProperty('persistenceWarning');
   });
 
-  it('ignores legacy persisted client ids during restore normalization', () => {
+  it('preserves persisted client ids during restore normalization', () => {
     const restored = {
       ...artifact('s1', 'https://example.com/client-owned'),
       clientId: 'client-a',
-    } as PersistedSessionArtifact & { clientId: string };
+    } satisfies PersistedSessionArtifact;
 
     const snapshot = rebuildSessionArtifactSnapshot([
       event({
@@ -418,7 +451,7 @@ describe('session artifact persistence records', () => {
       }),
     ]);
 
-    expect(snapshot?.artifacts[0]).not.toHaveProperty('clientId');
+    expect(snapshot?.artifacts[0]).toHaveProperty('clientId', 'client-a');
   });
 
   it('preserves near-limit user metadata with workspace hash metadata', () => {
@@ -583,6 +616,35 @@ describe('session artifact persistence records', () => {
     ]);
   });
 
+  it('remaps forked non-removal changes that omit artifact metadata', () => {
+    const sourceId = stableSessionArtifactId(
+      'source-session',
+      'fork:source-session:metadata-less',
+    );
+
+    const remapped = remapSessionArtifactPayloadForFork(
+      {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 'source-session',
+        sequence: 7,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [{ action: 'updated', artifactId: sourceId }],
+      },
+      'source-session',
+      'forked-session',
+    ) as SessionArtifactEventRecordPayload;
+
+    expect(remapped.changes).toEqual([
+      {
+        action: 'updated',
+        artifactId: stableSessionArtifactId(
+          'forked-session',
+          `fork:source-session:${sourceId}`,
+        ),
+      },
+    ]);
+  });
+
   it('reuses remapped ids across separate forked event payloads', () => {
     const source = artifact(
       'source-session',
@@ -742,6 +804,34 @@ describe('session artifact persistence records', () => {
 
     expect(normalized?.changes).toHaveLength(800);
     expect(warnings).toContain('event change list truncated to 800');
+  });
+
+  it('warns when inbound artifact payloads are malformed', () => {
+    const warnings: string[] = [];
+
+    expect(
+      normalizeSnapshotPayload(
+        { v: SESSION_ARTIFACT_PERSISTENCE_VERSION },
+        warnings,
+      ),
+    ).toBeUndefined();
+    expect(
+      normalizeEventPayload(
+        {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: 'session-A',
+          sequence: 1,
+          recordedAt: '2026-07-04T00:00:00.000Z',
+          changes: [{ action: 'created' }],
+        },
+        warnings,
+      )?.changes,
+    ).toEqual([]);
+
+    expect(warnings).toContain(
+      'skipped snapshot record without artifacts array',
+    );
+    expect(warnings).toContain('skipped artifact change without artifactId');
   });
 
   it('drops overlong persisted string array items', () => {

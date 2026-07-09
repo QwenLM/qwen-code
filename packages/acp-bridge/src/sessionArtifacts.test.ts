@@ -403,14 +403,17 @@ describe('SessionArtifactStore', () => {
     expect(created.changes[0]?.artifact).toMatchObject({
       clientId: 'client-a',
     });
-    expect(events[0]?.changes[0]?.artifact).not.toHaveProperty('clientId');
+    expect(events[0]?.changes[0]?.artifact).toHaveProperty(
+      'clientId',
+      'client-a',
+    );
     expect(events[0]?.changes[0]?.artifact).not.toHaveProperty('restoreState');
     expect(events[0]?.changes[0]?.artifact).not.toHaveProperty(
       'persistenceWarning',
     );
   });
 
-  it('does not restore client ownership from legacy durable artifact records', async () => {
+  it('restores client ownership from durable artifact records', async () => {
     const owner = 'client-a';
     const sessionId = 's1-restored-client-owner';
     const url = 'https://example.com/owned-restored-artifact';
@@ -420,7 +423,7 @@ describe('SessionArtifactStore', () => {
       workspaceCwd: workspace,
     });
 
-    const legacyArtifact = {
+    const persistedArtifact = {
       id: artifactId,
       kind: 'link',
       storage: 'external_url',
@@ -433,28 +436,26 @@ describe('SessionArtifactStore', () => {
       createdAt: '2026-07-04T00:00:00.000Z',
       updatedAt: '2026-07-04T00:00:00.000Z',
       clientId: owner,
-    } as RebuiltSessionArtifactSnapshot['artifacts'][number] & {
-      clientId: string;
-    };
+    } satisfies RebuiltSessionArtifactSnapshot['artifacts'][number];
 
     await store.restore({
       v: 2,
       sessionId,
       sequence: 1,
-      artifacts: [legacyArtifact],
+      artifacts: [persistedArtifact],
       tombstonedIds: [],
       stickyEphemeralIds: [],
       warnings: [],
     } satisfies RebuiltSessionArtifactSnapshot);
 
     const listed = await store.list();
-    expect(listed.artifacts[0]).toMatchObject({ id: artifactId });
-    expect(listed.artifacts[0]).not.toHaveProperty('clientId');
+    expect(listed.artifacts[0]).toMatchObject({
+      id: artifactId,
+      clientId: owner,
+    });
     await expect(
       store.remove(artifactId, { clientId: 'client-b' }),
-    ).resolves.toMatchObject({
-      changes: [{ action: 'removed', artifactId }],
-    });
+    ).rejects.toMatchObject({ ownerClientId: owner });
   });
 
   it('rolls back received sequence when strict upsert persistence fails', async () => {
@@ -1785,6 +1786,18 @@ describe('SessionArtifactStore', () => {
           {
             title: 'Token value',
             url: 'https://example.com/report?data=sk-test-token-1234567890',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'url' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Path token',
+            url: 'https://example.com/files/sk-test-token-1234567890/report',
           },
         ],
         { strict: true },
@@ -3574,6 +3587,40 @@ describe('SessionArtifactStore', () => {
     });
 
     expect(warnings).toEqual([
+      'artifact snapshot restore failed; kept existing live artifacts',
+    ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: liveId,
+          title: 'Live',
+        },
+      ],
+    });
+  });
+
+  it('keeps live artifacts when an empty restore snapshot has warnings', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-empty-warning',
+      workspaceCwd: workspace,
+    });
+    const live = await store.upsertMany([
+      { title: 'Live', url: 'https://example.com/live-empty-warning' },
+    ]);
+    const liveId = live.changes[0]!.artifactId;
+
+    const warnings = await store.restore({
+      v: 2,
+      sessionId: 's11-restore-empty-warning',
+      sequence: 8,
+      artifacts: [],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: ['skipped malformed artifact change'],
+    });
+
+    expect(warnings).toEqual([
+      'skipped malformed artifact change',
       'artifact snapshot restore failed; kept existing live artifacts',
     ]);
     await expect(store.list()).resolves.toMatchObject({

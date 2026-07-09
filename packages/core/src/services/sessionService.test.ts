@@ -535,6 +535,87 @@ describe('SessionService', () => {
       ]);
     });
 
+    it('loads chained artifact side records attached to the active branch', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      const artifactId = stableSessionArtifactId(
+        sessionIdB,
+        'url:https://example.com/chained-report',
+      );
+      const createRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'artifact-create',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: sessionIdB,
+          sequence: 1,
+          recordedAt: '2026-07-06T00:00:00.000Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId,
+              artifact: {
+                id: artifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Chained report',
+                url: 'https://example.com/chained-report',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-06T00:00:00.000Z',
+                updatedAt: '2026-07-06T00:00:00.000Z',
+                persistedAt: '2026-07-06T00:00:00.000Z',
+              },
+            },
+          ],
+        },
+      };
+      const removeRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'artifact-remove',
+        parentUuid: 'artifact-create',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: sessionIdB,
+          sequence: 2,
+          recordedAt: '2026-07-06T00:00:01.000Z',
+          changes: [
+            {
+              action: 'removed',
+              artifactId,
+              reason: 'explicit',
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        createRecord,
+        removeRecord,
+        recordB2,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['b1', 'b2']);
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([]);
+      expect(loaded?.artifactSnapshot?.tombstonedIds).toContain(artifactId);
+    });
+
     it('does not treat trailing artifact side records as the conversation leaf', async () => {
       const now = Date.now();
       statSyncSpy.mockReturnValue({

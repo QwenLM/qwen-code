@@ -637,6 +637,19 @@ export class SessionArtifactStore {
         this.setLastRestoreWarnings(rollbackWarnings);
         return rollbackWarnings;
       }
+      if (
+        snapshot.artifacts.length === 0 &&
+        previousState.artifacts.size > 0 &&
+        baselineWarnings.length > 0
+      ) {
+        this.restoreState(previousState);
+        const rollbackWarnings = [
+          ...baselineWarnings,
+          `${RESTORE_FAILED_WARNING_PREFIX}; kept existing live artifacts`,
+        ];
+        this.setLastRestoreWarnings(rollbackWarnings);
+        return rollbackWarnings;
+      }
       for (const artifact of preservedLiveEphemeralArtifacts) {
         if (
           this.artifacts.has(artifact.id) ||
@@ -1145,6 +1158,8 @@ export class SessionArtifactStore {
       return false;
     }
     const tombstonedClientId = this.tombstonedClientIds.get(artifact.id);
+    // Tool/hook outputs are session-scoped and may be recreated by a later run
+    // with the same identity after an explicit deletion.
     if (artifact.source !== 'client') {
       return false;
     }
@@ -1795,6 +1810,7 @@ function persistedArtifactToInput(
     toolCallId: artifact.toolCallId,
     toolName: artifact.toolName,
     hookEventName: artifact.hookEventName,
+    clientId: artifact.clientId,
   };
 }
 
@@ -1857,6 +1873,7 @@ function toPersistedArtifact(
     ...(artifact.hookEventName
       ? { hookEventName: artifact.hookEventName }
       : {}),
+    ...(artifact.clientId ? { clientId: artifact.clientId } : {}),
   };
 }
 
@@ -2187,7 +2204,7 @@ function normalizeArtifactUrl(raw: unknown, allowFile: boolean): string {
   }
   if (hasSecretLikeUrlComponent(parsed)) {
     throw new SessionArtifactValidationError(
-      'url must not include secret-like query or fragment',
+      'url must not include secret-like components',
       'url',
     );
   }
@@ -2209,6 +2226,17 @@ function normalizeArtifactUrl(raw: unknown, allowFile: boolean): string {
 function hasSecretLikeUrlComponent(parsed: URL): boolean {
   for (const [key, value] of parsed.searchParams) {
     if (isSecretLikeUrlText(key) || isSecretLikeUrlValue(value)) {
+      return true;
+    }
+  }
+  for (const segment of parsed.pathname.split('/').filter(Boolean)) {
+    let decodedSegment = segment;
+    try {
+      decodedSegment = decodeURIComponent(segment);
+    } catch {
+      // Keep scanning the raw segment if URL parsing accepted malformed escape.
+    }
+    if (isSecretLikeUrlValue(decodedSegment)) {
       return true;
     }
   }
