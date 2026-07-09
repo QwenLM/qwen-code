@@ -2193,8 +2193,10 @@ export async function loadCliConfig(
       bareMode || safeMode
         ? false
         : (settings.memory?.autoSkillConfirm ?? true),
+    memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
     fastModel: settings.fastModel || undefined,
     visionModel: settings.visionModel || undefined,
+    visionBridgeTimeoutMs: settings.visionBridgeTimeoutMs,
     modelFallbacks: resolveModelFallbacks(
       argv.fallbackModel,
       settings.modelFallbacks,

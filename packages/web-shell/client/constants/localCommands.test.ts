@@ -41,10 +41,19 @@ describe('localizeBuiltinDescriptions (commands)', () => {
 
   it('leaves a custom command that shadows a built-in name untouched', () => {
     const commands: CommandInfo[] = [
-      { name: 'export', description: 'my project exporter' },
+      { name: 'export', description: 'my project exporter', source: 'custom' },
     ];
     expect(localizeBuiltinDescriptions(commands, zh)[0].description).toBe(
       'my project exporter',
+    );
+  });
+
+  it('translates a built-in name even when source is missing', () => {
+    const commands: CommandInfo[] = [
+      { name: 'export', description: 'Export conversation to a file' },
+    ];
+    expect(localizeBuiltinDescriptions(commands, zh)[0].description).toBe(
+      '将当前会话历史导出到文件',
     );
   });
 

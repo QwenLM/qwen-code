@@ -14,6 +14,7 @@ import {
   MultipleWorkspaceInputError,
   NestedWorkspaceInputError,
   resolveSingleWorkspaceInput,
+  resolveWorkspaceInputs,
 } from './workspace-inputs.js';
 
 let scratch: string | undefined;
@@ -76,7 +77,7 @@ describe('resolveSingleWorkspaceInput', () => {
     ).toThrow(NestedWorkspaceInputError);
   });
 
-  it('rejects distinct non-nested explicit workspaces while Phase 2a is gated', () => {
+  it('rejects distinct non-nested explicit workspaces for single-workspace callers', () => {
     const root = makeScratch();
     const primary = path.join(root, 'primary');
     const secondary = path.join(root, 'secondary');
@@ -88,7 +89,7 @@ describe('resolveSingleWorkspaceInput', () => {
     );
   });
 
-  it('keeps canonicalization failures on the gated multi-workspace error path', async () => {
+  it('lets single-workspace callers reject multiple inputs even if early canonicalization fails', async () => {
     const canonicalizationError = Object.assign(
       new Error('permission denied'),
       { code: 'EACCES' },
@@ -113,5 +114,34 @@ describe('resolveSingleWorkspaceInput', () => {
       vi.doUnmock('@qwen-code/acp-bridge/workspacePaths');
       vi.resetModules();
     }
+  });
+});
+
+describe('resolveWorkspaceInputs', () => {
+  it('keeps distinct non-nested explicit workspaces in input order', () => {
+    const root = makeScratch();
+    const primary = path.join(root, 'primary');
+    const secondary = path.join(root, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+
+    expect(resolveWorkspaceInputs([primary, secondary])).toEqual([
+      primary,
+      secondary,
+    ]);
+  });
+
+  it('still rejects duplicate and nested explicit workspaces', () => {
+    const root = makeScratch();
+    const parent = path.join(root, 'parent');
+    const child = path.join(parent, 'child');
+    fs.mkdirSync(child, { recursive: true });
+
+    expect(() => resolveWorkspaceInputs([parent, parent])).toThrow(
+      DuplicateWorkspaceInputError,
+    );
+    expect(() => resolveWorkspaceInputs([parent, child])).toThrow(
+      NestedWorkspaceInputError,
+    );
   });
 });

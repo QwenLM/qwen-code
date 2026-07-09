@@ -459,7 +459,6 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
       // assign to `never` here. At runtime (e.g. a newer daemon sending an
       // unknown role) it falls through as not-hideable — kept visible rather
       // than crashing the transcript or vanishing from a collapsed turn.
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const _exhaustive: never = item.message;
       return false;
     }
@@ -541,7 +540,6 @@ export function getTurnTimelineNode(
     case 'insight_error':
       return { kind: 'none', timestamp: message.timestamp };
     default: {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const _exhaustive: never = message;
       return { kind: 'none' };
     }
@@ -682,7 +680,6 @@ function timelineDetailSnippetForMessage(
     case 'insight_error':
       return '';
     default: {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const _exhaustive: never = message;
       return '';
     }
@@ -885,7 +882,6 @@ export function getSessionTimelineSignature(
         case 'insight_error':
           return base;
         default: {
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
           const _exhaustive: never = message;
           return base;
         }
@@ -3096,6 +3092,7 @@ export const MessageList = memo(
       <div
         ref={containerRef}
         className={styles.list}
+        data-web-shell-message-list
         onClickCapture={handleDisclosureClickCapture}
       >
         {showLoadingSkeleton && (
@@ -3126,6 +3123,7 @@ export const MessageList = memo(
                     visibleItems[virtualRow.index - headerOffset],
                   ),
                 )}
+                data-web-shell-message-row
                 style={{
                   position: 'absolute',
                   top: 0,
@@ -3147,6 +3145,7 @@ export const MessageList = memo(
                 key={key}
                 data-index={index}
                 className={getRowClassName(item)}
+                data-web-shell-message-row
               >
                 {renderVirtualItem(index)}
               </div>

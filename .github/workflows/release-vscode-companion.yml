@@ -314,7 +314,17 @@ jobs:
           echo "Publishing to Microsoft Marketplace..."
           for vsix in vsix-artifacts/*.vsix; do
             echo "Publishing: ${vsix}"
-            vsce publish --packagePath "${vsix}" --pat "${VSCE_PAT}" --skip-duplicate
+            for attempt in 1 2 3; do
+              if vsce publish --packagePath "${vsix}" --pat "${VSCE_PAT}" --skip-duplicate; then
+                break
+              fi
+              if [[ ${attempt} -eq 3 ]]; then
+                echo "Failed to publish ${vsix} after 3 attempts"
+                exit 1
+              fi
+              echo "Attempt ${attempt} failed, retrying in 15s..."
+              sleep 15
+            done
           done
 
       - name: 'Publish to OpenVSX'
@@ -325,11 +335,22 @@ jobs:
           echo "Publishing to OpenVSX..."
           for vsix in vsix-artifacts/*.vsix; do
             echo "Publishing: ${vsix}"
-            if [[ "${{ needs.prepare.outputs.is_preview }}" == "true" ]]; then
-              ovsx publish "${vsix}" --pat "${OVSX_TOKEN}" --pre-release
-            else
-              ovsx publish "${vsix}" --pat "${OVSX_TOKEN}"
-            fi
+            for attempt in 1 2 3; do
+              if [[ "${{ needs.prepare.outputs.is_preview }}" == "true" ]]; then
+                publish_cmd=(ovsx publish "${vsix}" --pat "${OVSX_TOKEN}" --pre-release --skip-duplicate)
+              else
+                publish_cmd=(ovsx publish "${vsix}" --pat "${OVSX_TOKEN}" --skip-duplicate)
+              fi
+              if "${publish_cmd[@]}"; then
+                break
+              fi
+              if [[ ${attempt} -eq 3 ]]; then
+                echo "Failed to publish ${vsix} after 3 attempts"
+                exit 1
+              fi
+              echo "Attempt ${attempt} failed, retrying in 15s..."
+              sleep 15
+            done
           done
 
       - name: 'Upload all VSIXes as release artifacts (dry run)'

@@ -107,6 +107,7 @@ import type {
   BridgeFreshSessionAdmissionContext,
   BridgeFreshSessionReservation,
   BridgeOptions,
+  BridgeSessionLifecycleEvent,
   BridgeTelemetry,
 } from './bridgeOptions.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
@@ -637,6 +638,20 @@ function isBridgeAutoMemoryTopic(
   );
 }
 
+function touchedScopesFromTopics(
+  topics: BridgeAutoMemoryTopic[],
+): Array<'user' | 'project'> {
+  const scopes = new Set<'user' | 'project'>();
+  for (const topic of topics) {
+    scopes.add(topic === 'user' || topic === 'feedback' ? 'user' : 'project');
+  }
+  return (['user', 'project'] as const).filter((scope) => scopes.has(scope));
+}
+
+function isBridgeMemoryScope(value: unknown): value is 'user' | 'project' {
+  return value === 'user' || value === 'project';
+}
+
 function parseWorkspaceMemoryForgetMatch(
   value: unknown,
 ): BridgeWorkspaceMemoryForgetMatch | null {
@@ -672,6 +687,7 @@ function parseWorkspaceMemoryForgetResult(
   const summary = record['summary'];
   const removedEntries = record['removedEntries'];
   const touchedTopics = record['touchedTopics'];
+  const touchedScopes = record['touchedScopes'];
   const parsedRemovedEntries = Array.isArray(removedEntries)
     ? removedEntries.map(parseWorkspaceMemoryForgetMatch)
     : [];
@@ -680,14 +696,22 @@ function parseWorkspaceMemoryForgetResult(
     !Array.isArray(removedEntries) ||
     parsedRemovedEntries.some((entry) => entry === null) ||
     !Array.isArray(touchedTopics) ||
-    !touchedTopics.every(isBridgeAutoMemoryTopic)
+    !touchedTopics.every(isBridgeAutoMemoryTopic) ||
+    (touchedScopes !== undefined &&
+      (!Array.isArray(touchedScopes) ||
+        !touchedScopes.every(isBridgeMemoryScope)))
   ) {
     throw new Error('Malformed workspace memory forget response');
   }
+  const parsedTouchedTopics = touchedTopics as BridgeAutoMemoryTopic[];
   return {
     ...(summary === undefined ? {} : { summary }),
     removedEntries: parsedRemovedEntries as BridgeWorkspaceMemoryForgetMatch[],
-    touchedTopics: touchedTopics as BridgeAutoMemoryTopic[],
+    touchedTopics: parsedTouchedTopics,
+    touchedScopes:
+      touchedScopes === undefined
+        ? touchedScopesFromTopics(parsedTouchedTopics)
+        : (touchedScopes as Array<'user' | 'project'>),
   };
 }
 
@@ -1109,6 +1133,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }`,
         'warn',
       );
+    }
+  };
+  const emitSessionLifecycle = (event: BridgeSessionLifecycleEvent): void => {
+    try {
+      opts.sessionLifecycle?.(event);
+    } catch (err) {
+      const message = `qwen serve: session lifecycle callback failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      opts.onDiagnosticLine?.(message, 'warn');
+      writeStderrLine(message);
     }
   };
   if (defaultSessionScope !== 'single' && defaultSessionScope !== 'thread') {
@@ -1817,6 +1852,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           }
           byId.delete(sid);
           telemetry.metrics?.sessionLifecycle('die');
+          emitSessionLifecycle({
+            type: 'removed',
+            sessionId: sid,
+            workspaceCwd: sessEntry.workspaceCwd,
+            reason: 'channel_closed',
+          });
           // Tombstone the id so any late `extNotification` from the
           // dying child can't leak into the early-event buffer for a
           // future load/resume of the same persisted session id.
@@ -2626,7 +2667,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     sessionId: string,
     workspaceCwd: string,
     events = createSessionEventBus(),
-    options: { drainEarlyEvents?: boolean } = {},
+    options: { drainEarlyEvents?: boolean; lifecycleReason?: string } = {},
   ): SessionEntry => {
     const entry: SessionEntry = {
       sessionId,
@@ -2656,6 +2697,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     byId.set(entry.sessionId, entry);
     touchActivity();
     telemetry.metrics?.sessionLifecycle('spawn');
+    emitSessionLifecycle({
+      type: 'registered',
+      sessionId: entry.sessionId,
+      workspaceCwd: entry.workspaceCwd,
+      reason: options.lifecycleReason ?? 'spawn',
+    });
     if (options.drainEarlyEvents !== false) {
       // Drain any guardrail events that fired during this session's
       // `newSession` handler (before this entry registered) onto the
@@ -3054,7 +3101,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         req.sessionId,
         workspaceKey,
         restoreEvents,
-        { drainEarlyEvents: replayUpdates.length === 0 },
+        {
+          drainEarlyEvents: replayUpdates.length === 0,
+          lifecycleReason: action,
+        },
       );
       releaseAdmissionOnce();
       entry.restoreState = state;
@@ -3106,9 +3156,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!registeredEntry) {
         restoreEvents.close();
         let removedRestoreEntry = false;
-        if (byId.get(req.sessionId)?.events === restoreEvents) {
+        const restoreEntry = byId.get(req.sessionId);
+        if (restoreEntry?.events === restoreEvents) {
           byId.delete(req.sessionId);
           ci?.sessionIds.delete(req.sessionId);
+          emitSessionLifecycle({
+            type: 'removed',
+            sessionId: req.sessionId,
+            workspaceCwd: restoreEntry.workspaceCwd,
+            reason: 'restore_failed',
+          });
           removedRestoreEntry = true;
         }
         if (removedRestoreEntry && ci && hasNoChannelWork(ci)) {
@@ -3207,6 +3264,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
     byId.delete(sessionId);
     telemetry.metrics?.sessionLifecycle('close');
+    emitSessionLifecycle({
+      type: 'removed',
+      sessionId,
+      workspaceCwd: entry.workspaceCwd,
+      reason,
+    });
     // Tombstone the closed sessionId so any late `extNotification`
     // from the (now-defunct) child can't seed the early-event buffer
     // and leak into a future load/resume of the same persisted id.
@@ -6133,6 +6196,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (defaultEntry === entry) defaultEntry = undefined;
       byId.delete(sessionId);
       telemetry.metrics?.sessionLifecycle('die');
+      emitSessionLifecycle({
+        type: 'removed',
+        sessionId,
+        workspaceCwd: entry.workspaceCwd,
+        reason: 'killed',
+      });
       // Detach from the channel. The channel dies only when its LAST
       // session leaves — other sessions on the same channel keep
       // running.
@@ -6259,8 +6328,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       cancelIdleTimer();
       stopSessionReaper();
       const channels = Array.from(aliveChannels);
+      const entries = Array.from(byId.values());
       defaultEntry = undefined;
       byId.clear();
+      for (const entry of entries) {
+        emitSessionLifecycle({
+          type: 'removed',
+          sessionId: entry.sessionId,
+          workspaceCwd: entry.workspaceCwd,
+          reason: 'kill_all',
+        });
+      }
       for (const info of channels) {
         try {
           info.channel.killSync();
@@ -6312,6 +6390,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // and the automatic publish wouldn't fire.
       for (const e of entries) {
         telemetry.metrics?.sessionLifecycle('die');
+        emitSessionLifecycle({
+          type: 'removed',
+          sessionId: e.sessionId,
+          workspaceCwd: e.workspaceCwd,
+          reason: 'daemon_shutdown',
+        });
         try {
           e.events.publish({
             type: 'session_died',
