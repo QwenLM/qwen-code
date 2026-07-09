@@ -2640,7 +2640,15 @@ describe('Session', () => {
       Object.assign(mockSettings.merged as Record<string, unknown>, {
         voiceModel: 'qwen3-asr-flash',
       });
-      transcribeVoiceAudioSpy.mockResolvedValue('   ');
+      transcribeVoiceAudioSpy.mockImplementation(
+        async (
+          _audio: unknown,
+          args: { onEgress?: () => void },
+        ): Promise<string> => {
+          args.onEgress?.();
+          return '   ';
+        },
+      );
 
       await session.prompt({
         sessionId: 'test-session-id',
@@ -2660,7 +2668,12 @@ describe('Session', () => {
         'the voice model returned no transcript',
       );
       expect(agentMessageChunks()).toContain(
-        'Converted 1 audio file(s) to text via qwen3-asr-flash. Your audio was sent to that model.',
+        'Sent 1 audio file(s) to qwen3-asr-flash for transcription, but no transcript was produced.',
+      );
+      expect(agentMessageChunks()).not.toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('Converted 1 audio file'),
+        ]),
       );
     });
 
@@ -2712,8 +2725,14 @@ describe('Session', () => {
       Object.assign(mockSettings.merged as Record<string, unknown>, {
         voiceModel: 'qwen3-asr-flash',
       });
-      transcribeVoiceAudioSpy.mockRejectedValue(
-        new Error('asr unavailable: Bearer sk-secret-token'),
+      transcribeVoiceAudioSpy.mockImplementation(
+        async (
+          _audio: unknown,
+          args: { onEgress?: () => void },
+        ): Promise<string> => {
+          args.onEgress?.();
+          throw new Error('asr unavailable: Bearer sk-secret-token');
+        },
       );
 
       await session.prompt({
@@ -2734,6 +2753,9 @@ describe('Session', () => {
       expect(textParts(sent).join('\n')).toMatch(/could not transcribe/i);
       expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
         expect.stringContaining('Bearer [REDACTED]'),
+      );
+      expect(agentMessageChunks()).toContain(
+        'Sent 1 audio file(s) to qwen3-asr-flash for transcription, but no transcript was produced.',
       );
     });
 

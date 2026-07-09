@@ -5771,6 +5771,7 @@ export class Session implements SessionContext {
 
     const converted: Part[] = [];
     let transcribedCount = 0;
+    let egressCount = 0;
     for (const part of parts) {
       if (!isAudioPart(part)) {
         converted.push(part);
@@ -5799,6 +5800,9 @@ export class Session implements SessionContext {
               settings: this.settings,
               voiceModel,
               abortSignal,
+              onEgress: () => {
+                egressCount += 1;
+              },
             },
           )
         ).trim();
@@ -5808,7 +5812,9 @@ export class Session implements SessionContext {
           return converted;
         }
 
-        transcribedCount += 1;
+        if (transcript.length > 0) {
+          transcribedCount += 1;
+        }
         converted.push({
           text:
             transcript.length > 0
@@ -5831,10 +5837,12 @@ export class Session implements SessionContext {
       }
     }
 
-    if (transcribedCount > 0) {
+    if (transcribedCount > 0 || egressCount > 0) {
       try {
         await this.messageEmitter.emitAgentMessage(
-          this.#formatVoiceBridgeNotice(voiceModel, transcribedCount),
+          transcribedCount > 0
+            ? this.#formatVoiceBridgeNotice(voiceModel, transcribedCount)
+            : this.#formatVoiceBridgeEgressNotice(voiceModel, egressCount),
         );
       } catch (error) {
         debugLogger.debug(
@@ -5848,6 +5856,10 @@ export class Session implements SessionContext {
 
   #formatVoiceBridgeNotice(modelId: string, convertedCount: number): string {
     return `Converted ${convertedCount} audio file(s) to text via ${modelId}. Your audio was sent to that model.`;
+  }
+
+  #formatVoiceBridgeEgressNotice(modelId: string, audioCount: number): string {
+    return `Sent ${audioCount} audio file(s) to ${modelId} for transcription, but no transcript was produced.`;
   }
 
   #formatVisionBridgeNotice(result: VisionBridgeResult): string {

@@ -72,6 +72,7 @@ interface TranscribeVoiceAudioArgs extends ResolveVoiceTranscriptionConfigArgs {
   fetchFn?: typeof fetch;
   lookupHost?: VoiceHostLookup;
   abortSignal?: AbortSignal;
+  onEgress?: () => void;
 }
 
 type VoiceHostLookup = (
@@ -502,6 +503,7 @@ async function transcribeViaQwenAsr(
     language?: string;
     keytermsContext?: string;
     abortSignal?: AbortSignal;
+    onEgress?: () => void;
   },
   fetchFn: typeof fetch,
 ): Promise<string> {
@@ -546,6 +548,7 @@ async function transcribeViaQwenAsr(
 
   let response: Response;
   try {
+    options.onEgress?.();
     response = await fetchFn(
       `${trimTrailingSlashes(voiceConfig.baseUrl)}/chat/completions`,
       {
@@ -624,7 +627,12 @@ export async function transcribeVoiceAudio(
       return transcribeViaQwenAsr(
         audio,
         voiceConfig,
-        { language, keytermsContext, abortSignal: args.abortSignal },
+        {
+          language,
+          keytermsContext,
+          abortSignal: args.abortSignal,
+          ...(args.onEgress ? { onEgress: args.onEgress } : {}),
+        },
         fetchFn,
       );
     case 'qwen-asr-realtime':
