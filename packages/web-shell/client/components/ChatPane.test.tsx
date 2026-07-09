@@ -28,17 +28,18 @@ const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
+const daemonActions = {
+  sendPrompt,
+  submitPermission,
+  cancel,
+  setApprovalMode,
+  setModel,
+  loadArtifacts,
+};
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
-  useActions: () => ({
-    sendPrompt,
-    submitPermission,
-    cancel,
-    setApprovalMode,
-    setModel,
-    loadArtifacts,
-  }),
+  useActions: () => daemonActions,
   useConnection: () => connectionState,
   usePromptStatus: () => 'idle',
   useStreamingState: () => streamingStateValue,
