@@ -71,7 +71,7 @@ jobs:
     # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
     # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
     # use the persistent ECS runner.
-    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -185,7 +185,7 @@ jobs:
     # so it stops queueing behind the hosted CI/e2e/macOS/Windows concurrency
     # cap while the ECS pool sits idle. Forks fall back to ubuntu-latest unless
     # they deliberately change this workflow in their own repo.
-    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
@@ -244,7 +244,7 @@ jobs:
           echo "stale agent state cleaned"
 
       - name: 'Checkout repo'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           token: '${{ secrets.GITHUB_TOKEN }}'
 
@@ -442,7 +442,7 @@ jobs:
 
       - name: 'Checkout PR merge ref'
         if: "steps.pr.outputs.decision == 'run'"
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           # Untrusted PR code — keep the token out of .git/config.
           persist-credentials: false

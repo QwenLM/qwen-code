@@ -960,7 +960,9 @@ export const useSlashCommandProcessor = (
           return {
             type: 'submit_prompt',
             content: mergedContent,
-            ...(firstModelOverride ? { modelOverride: firstModelOverride } : {}),
+            ...(firstModelOverride
+              ? { modelOverride: firstModelOverride }
+              : {}),
             ...(onCompleteCallbacks.length
               ? {
                   onComplete: async () => {

@@ -566,7 +566,12 @@ export type HistoryItemDoctor = HistoryItemBase & {
 };
 
 export type GoalStatusKind =
-  'set' | 'achieved' | 'cleared' | 'failed' | 'aborted' | 'checking';
+  | 'set'
+  | 'achieved'
+  | 'cleared'
+  | 'failed'
+  | 'aborted'
+  | 'checking';
 
 export const TERMINAL_GOAL_STATUS_KINDS = [
   'achieved',

@@ -311,7 +311,7 @@ export async function initializeI18n(
 export function resolveLanguageSetting(
   settingsLanguage?: string,
 ): SupportedLanguage | 'auto' {
-  return (
-    process.env['QWEN_CODE_LANG'] || settingsLanguage || 'auto'
-  ) as SupportedLanguage | 'auto';
+  return (process.env['QWEN_CODE_LANG'] || settingsLanguage || 'auto') as
+    | SupportedLanguage
+    | 'auto';
 }

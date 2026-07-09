@@ -519,11 +519,7 @@ export function buildPermissionRules(ctx: PermissionCheckContext): string[] {
       // Only serialize stable, identity-bearing params — not volatile content
       // like `prompt` or `query`, which would make rules invocation-specific
       // and could leak sensitive data into settings.json.
-      const stableParamKeys = new Set([
-        'model',
-        'subagent_type',
-        'skill',
-      ]);
+      const stableParamKeys = new Set(['model', 'subagent_type', 'skill']);
       if (ctx.toolParams) {
         for (const key of stableParamKeys) {
           const v = ctx.toolParams[key];
