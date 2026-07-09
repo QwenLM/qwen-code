@@ -1804,7 +1804,7 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).not.toContain('/global-only');
     });
 
-    it('natural remember rejects group memory writes', async () => {
+    it('natural remember saves group memory for accepted group messages', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue(''),
         appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
@@ -1825,12 +1825,16 @@ describe('ChannelBase', () => {
         }),
       );
 
-      expect(channelMemory.appendChannelMemory).not.toHaveBeenCalled();
-      expect(ch.sent).toEqual([
+      expect(channelMemory.appendChannelMemory).toHaveBeenCalledWith(
         {
+          channelName: 'test-chan',
           chatId: 'group-1',
-          text: 'Channel memory cannot be changed in group chats.',
+          threadId: undefined,
         },
+        '发布前跑 npm run build',
+      );
+      expect(ch.sent).toEqual([
+        { chatId: 'group-1', text: 'Channel memory updated.' },
       ]);
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
@@ -2175,21 +2179,33 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('natural memory management denies when allowedUsers is empty', async () => {
+    it('natural memory management follows open sender policy without allowedUsers', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue('Use staging.'),
         appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
         clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
       };
-      const ch = createChannel({ allowedUsers: [] }, { channelMemory });
+      const ch = createChannel(
+        { senderPolicy: 'open', allowedUsers: [] },
+        { channelMemory },
+      );
 
+      await ch.handleInbound(
+        envelope({ text: '记住：Use staging.', senderId: 'alice' }),
+      );
       await ch.handleInbound(envelope({ text: '查看记忆', senderId: 'alice' }));
 
-      expect(ch.sent).toEqual([
+      expect(channelMemory.appendChannelMemory).toHaveBeenCalledWith(
         {
+          channelName: 'test-chan',
           chatId: 'chat1',
-          text: 'Only authorized members can manage channel memory.',
+          threadId: undefined,
         },
+        'Use staging.',
+      );
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Channel memory updated.' },
+        { chatId: 'chat1', text: 'Use staging.' },
       ]);
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
@@ -2211,6 +2227,45 @@ describe('ChannelBase', () => {
 
       expect(ch.sent).toEqual([
         { chatId: 'chat1', text: 'Use staging by default.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural group remember follows open group access control', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        {
+          senderPolicy: 'open',
+          allowedUsers: [],
+          groupPolicy: 'open',
+        },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '记住：这个群默认讨论 qwen-code',
+          senderId: 'alice',
+          isGroup: true,
+          chatId: 'group-1',
+          isMentioned: true,
+        }),
+      );
+
+      expect(channelMemory.appendChannelMemory).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          chatId: 'group-1',
+          threadId: undefined,
+        },
+        '这个群默认讨论 qwen-code',
+      );
+      expect(ch.sent).toEqual([
+        { chatId: 'group-1', text: 'Channel memory updated.' },
       ]);
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
@@ -2310,7 +2365,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('natural group clear requests are rejected', async () => {
+    it('natural group clear uses the current group target and requires confirmation', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue(''),
         appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
@@ -2335,8 +2390,28 @@ describe('ChannelBase', () => {
       expect(ch.sent).toEqual([
         {
           chatId: 'group-1',
-          text: 'Channel memory cannot be changed in group chats.',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
         },
+      ]);
+
+      ch.sent = [];
+      await ch.handleInbound(
+        envelope({
+          text: '确认清空记忆',
+          senderId: 'alice',
+          isGroup: true,
+          chatId: 'group-1',
+          isMentioned: true,
+        }),
+      );
+
+      expect(channelMemory.clearChannelMemory).toHaveBeenCalledWith({
+        channelName: 'test-chan',
+        chatId: 'group-1',
+        threadId: undefined,
+      });
+      expect(ch.sent).toEqual([
+        { chatId: 'group-1', text: 'Channel memory cleared.' },
       ]);
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
@@ -5722,26 +5797,7 @@ describe('ChannelBase', () => {
       writeSpy.mockRestore();
     });
 
-    it('does not read channel memory for unauthorized senders', async () => {
-      const channelMemory = {
-        readChannelMemory: vi.fn().mockResolvedValue('Use staging.'),
-        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
-        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
-      };
-      const ch = createChannel(
-        { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
-        { channelMemory },
-      );
-
-      await ch.handleInbound(envelope({ text: 'ship it', senderId: 'bob' }));
-
-      expect(channelMemory.readChannelMemory).not.toHaveBeenCalled();
-      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-        .calls[0][1] as string;
-      expect(promptText).toBe('Use repo conventions.\n\nship it');
-    });
-
-    it('does not inject channel memory into shared open sessions', async () => {
+    it('injects channel memory for senders accepted by open sender policy', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue('Use staging.'),
         appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
@@ -5749,7 +5805,62 @@ describe('ChannelBase', () => {
       };
       const ch = createChannel(
         {
-          allowedUsers: ['boss'],
+          instructions: 'Use repo conventions.',
+          senderPolicy: 'open',
+          allowedUsers: [],
+        },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(envelope({ text: 'ship it', senderId: 'bob' }));
+
+      expect(channelMemory.readChannelMemory).toHaveBeenCalledWith({
+        channelName: 'test-chan',
+        chatId: 'chat1',
+        threadId: undefined,
+      });
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe(
+        [
+          'Channel memory for this chat:\nUse staging.',
+          'Use repo conventions.',
+          'ship it',
+        ].join('\n\n'),
+      );
+    });
+
+    it('does not inject channel memory for senders rejected by channel gates', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        {
+          instructions: 'Use repo conventions.',
+          senderPolicy: 'allowlist',
+          allowedUsers: ['alice'],
+        },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(envelope({ text: 'ship it', senderId: 'bob' }));
+
+      expect(channelMemory.readChannelMemory).not.toHaveBeenCalled();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([]);
+    });
+
+    it('injects channel memory into accepted shared open group sessions', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        {
+          allowedUsers: [],
           groupPolicy: 'open',
           sessionScope: 'thread',
           senderPolicy: 'open',
@@ -5768,10 +5879,16 @@ describe('ChannelBase', () => {
         }),
       );
 
-      expect(channelMemory.readChannelMemory).not.toHaveBeenCalled();
+      expect(channelMemory.readChannelMemory).toHaveBeenCalledWith({
+        channelName: 'test-chan',
+        chatId: 'group-1',
+        threadId: 'thread-1',
+      });
       const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[0][1] as string;
-      expect(promptText).toBe('[User 1] ship it');
+      expect(promptText).toBe(
+        'Channel memory for this chat:\nUse staging.\n\n[User 1] ship it',
+      );
     });
 
     it('sanitizes channel memory before injecting it into the prompt', async () => {

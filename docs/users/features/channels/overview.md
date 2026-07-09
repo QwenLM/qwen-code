@@ -89,7 +89,7 @@ Controls how conversation sessions are managed:
 
 ### Channel Memory
 
-Channel memory lets an authorized channel member save stable context for one chat or thread. Qwen Code injects that memory when a fresh channel session starts, including after `/clear`.
+Channel memory lets accepted channel senders save stable context for one chat or thread. Qwen Code injects that memory when a fresh channel session starts, including after `/clear`.
 
 Natural-language examples:
 
@@ -98,10 +98,9 @@ Natural-language examples:
 - `你现在都记住了什么` shows saved memory for the current chat or thread.
 - `把这个聊天的记忆清空` starts the clear flow; `确认清空记忆` confirms it.
 
-Group chats can show saved memory, but writes and clears are blocked to avoid
-turning shared memory into a prompt-injection path for other participants.
+Channel memory follows the channel access gates. Any message accepted by `senderPolicy`, `dmPolicy`, `groupPolicy`, group settings, pairing, and mention requirements can read, write, or clear memory for that chat or thread.
 
-Only users listed in `allowedUsers` can read, write, or clear channel memory. If `allowedUsers` is empty, channel memory commands are disabled for everyone.
+In open groups, any accepted member can update shared channel memory for that group. Use `allowlist` or `pairing` policies when memory should be limited to trusted senders.
 
 ### Token Security
 
