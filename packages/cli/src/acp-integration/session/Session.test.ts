@@ -8670,6 +8670,14 @@ describe('Session', () => {
         // A failed dispatch may already have sent the prompt, and running an
         // isolated task inside the bound session would defeat the isolation the
         // user asked for. Log and drop.
+        //
+        // The scheduler has already persisted this fire as a run, and
+        // `debugLogger.warn` writes nothing unless a debug log session is
+        // active — so the drop MUST also reach stderr, or a nightly task can
+        // fail forever while its history claims it ran.
+        const stderrWrite = vi
+          .spyOn(process.stderr, 'write')
+          .mockReturnValue(true);
         const spawner = vi.fn().mockRejectedValue(new Error('cap reached'));
         const scheduler = schedulerFiring({
           prompt: 'nightly report',
@@ -8692,6 +8700,10 @@ describe('Session', () => {
             expect.stringContaining('Isolated scheduled task dispatch failed'),
           ),
         );
+        const stderr = stderrWrite.mock.calls.map((c) => String(c[0])).join('');
+        expect(stderr).toContain('isolated scheduled task dispatch failed');
+        expect(stderr).toContain('cap reached');
+        stderrWrite.mockRestore();
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       });
 

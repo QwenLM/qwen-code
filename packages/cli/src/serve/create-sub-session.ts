@@ -52,6 +52,20 @@ const log = createDebugLogger('SUB_SESSION');
  * rejected (surfaced as the tool's error), never silently dropped. */
 export const MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER = 5;
 
+/**
+ * Ceiling on concurrent in-flight sub-sessions across ALL callers of this
+ * workspace's launcher.
+ *
+ * The per-caller cap is keyed on `callerSessionId`, and the daemon can only
+ * authenticate that id as "a session on this channel" — every session of a
+ * workspace shares ONE child process, so nothing at the transport can prove
+ * *which* of them issued the call. A child running attacker code could rotate
+ * ids to open a fresh bucket per launch, or charge them to a sibling. This
+ * bound does not depend on the id being honest: it holds whichever bucket the
+ * launch is charged to.
+ */
+export const MAX_CONCURRENT_SUB_SESSIONS_TOTAL = 20;
+
 /** Wall-clock ceiling for `first-turn`: a hung sub-session turn must not block
  * the caller forever. On timeout we return whatever text accumulated so far. */
 const FIRST_TURN_TIMEOUT_MS = 5 * 60_000;
@@ -88,6 +102,9 @@ export interface CreateSubSessionLauncherOptions {
   /** Per-request `first-turn` wall-clock timeout; defaults to
    * {@link FIRST_TURN_TIMEOUT_MS}. Exposed for tests. */
   firstTurnTimeoutMs?: number;
+  /** Sent-mode background-drain ceiling; defaults to
+   * {@link SENT_MODE_DRAIN_TIMEOUT_MS}. Exposed for tests. */
+  sentModeDrainTimeoutMs?: number;
 }
 
 /** A readable, control-char-free session name (the bridge's title guard rejects
@@ -231,6 +248,8 @@ export function createSubSessionLauncher(
 ): SubSessionLauncher {
   const { getBridge, boundWorkspace } = opts;
   const firstTurnTimeoutMs = opts.firstTurnTimeoutMs ?? FIRST_TURN_TIMEOUT_MS;
+  const sentModeDrainTimeoutMs =
+    opts.sentModeDrainTimeoutMs ?? SENT_MODE_DRAIN_TIMEOUT_MS;
   const inflight = new Map<string, number>();
   // Ids of the sub-sessions this launcher spawned — the depth-1 gate reads it.
   // Insertion-ordered and evicted FIFO past the cap so a long-lived daemon
@@ -242,10 +261,15 @@ export function createSubSessionLauncher(
   // prevents shutdown from waiting up to 5 min per in-flight session.
   const stopAc = new AbortController();
 
+  // Sum of `inflight`, tracked separately so the workspace-wide cap holds even
+  // when a caller opens a fresh bucket per launch.
+  let inflightTotal = 0;
+
   const release = (key: string): void => {
     const n = (inflight.get(key) ?? 1) - 1;
     if (n <= 0) inflight.delete(key);
     else inflight.set(key, n);
+    inflightTotal = Math.max(0, inflightTotal - 1);
   };
 
   const rememberSpawned = (sessionId: string): void => {
@@ -294,7 +318,16 @@ export function createSubSessionLauncher(
           `(cap ${MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER}); wait for one to finish.`,
       );
     }
+    // Forge-proof backstop: the per-caller cap above trusts `callerSessionId`,
+    // this one does not. See MAX_CONCURRENT_SUB_SESSIONS_TOTAL.
+    if (inflightTotal >= MAX_CONCURRENT_SUB_SESSIONS_TOTAL) {
+      throw new Error(
+        `Too many concurrent sub-sessions in this workspace ` +
+          `(cap ${MAX_CONCURRENT_SUB_SESSIONS_TOTAL}); wait for one to finish.`,
+      );
+    }
     inflight.set(key, current + 1);
+    inflightTotal += 1;
     // Per-acquire idempotent release: prevents double-free when an error
     // propagates through both the inner finally (first-turn path) and the
     // outer catch. Without this, each failure loosens the cap by one slot;
@@ -361,10 +394,14 @@ export function createSubSessionLauncher(
         // before the sub-session has done any work, letting a looping
         // isolated task exhaust the daemon's session pool.
         const drainAc = new AbortController();
-        const drainTimer = setTimeout(
-          () => drainAc.abort(),
-          SENT_MODE_DRAIN_TIMEOUT_MS,
-        );
+        // Recorded in the timer, not read off `drainAc.signal.aborted`: the
+        // `finally` below aborts that controller on every exit path, so the
+        // signal cannot tell a 30-minute hang from a clean drain.
+        let drainTimedOut = false;
+        const drainTimer = setTimeout(() => {
+          drainTimedOut = true;
+          drainAc.abort();
+        }, sentModeDrainTimeoutMs);
         if (typeof drainTimer.unref === 'function') drainTimer.unref();
         const drainSignal = AbortSignal.any([stopAc.signal, drainAc.signal]);
         void (async () => {
@@ -405,6 +442,18 @@ export function createSubSessionLauncher(
             }
           } finally {
             clearTimeout(drainTimer);
+            if (drainTimedOut) {
+              // The slot is about to be freed while the sub-session is very
+              // likely still running (`sendPrompt` has no abort seam), so it
+              // keeps burning a bridge session and model quota with nobody
+              // watching. `log.debug` is a no-op unless a debug log session is
+              // active — this has to reach stderr or it leaves no trace at all.
+              writeStderrLine(
+                `qwen serve: sub-session ${sessionId} drain timed out after ` +
+                  `${Math.round(sentModeDrainTimeoutMs / 60_000)}min; releasing its ` +
+                  `concurrency slot (the sub-session may still be running)`,
+              );
+            }
             drainAc.abort();
             // Use releaseOnce (not raw release) — if spawn succeeded but the
             // outer catch also fires release, using raw release would double-

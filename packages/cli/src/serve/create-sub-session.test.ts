@@ -4,12 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import {
+
+/** Captures the launcher's operator-facing stderr output. */
+const { stderrLines } = vi.hoisted(() => ({ stderrLines: [] as string[] }));
+vi.mock('../utils/stdioHelpers.js', () => ({
+  writeStderrLine: (line: string) => stderrLines.push(line),
+}));
+
+const {
   createSubSessionLauncher,
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
-} from './create-sub-session.js';
+  MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
+} = await import('./create-sub-session.js');
 
 type FakeEvent = { type: string; data: unknown };
 
@@ -127,6 +135,10 @@ function makeFakeBridge(opts?: {
 
 describe('sub-session launcher', () => {
   const WS = '/tmp/ws';
+
+  beforeEach(() => {
+    stderrLines.length = 0;
+  });
 
   it('sent: spawns a thread-scoped session, dispatches, returns the id (background subscribe holds slot)', async () => {
     const fake = makeFakeBridge();
@@ -434,6 +446,64 @@ describe('sub-session launcher', () => {
     });
     expect(res.stopReason).toBe('incomplete');
     expect(res.result).toContain('partial');
+  });
+
+  it('sent mode: a drain timeout reaches stderr before the slot is released', async () => {
+    // 30 min of model compute and a bridge session went nowhere. `log.debug` is
+    // a no-op unless a debug log session is active, so without this the hang
+    // leaves no trace anywhere.
+    const fake = makeFakeBridge({ events: () => [], blockAfterEvents: true });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      sentModeDrainTimeoutMs: 20,
+    });
+    await launcher.launch({
+      prompt: 'x',
+      completion: 'sent',
+      callerSessionId: 'c',
+    });
+    await vi.waitFor(() =>
+      expect(stderrLines.some((l) => /drain timed out/i.test(l))).toBe(true),
+    );
+    const line = stderrLines.find((l) => /drain timed out/i.test(l))!;
+    expect(line).toContain('sub-1');
+    expect(line).toMatch(/may still be running/i);
+    // The slot is freed, so a fresh launch from the same caller succeeds.
+    await launcher.launch({
+      prompt: 'y',
+      completion: 'sent',
+      callerSessionId: 'c',
+    });
+    launcher.stop();
+  });
+
+  it('caps concurrent sub-sessions workspace-wide, even across rotated caller ids', async () => {
+    // The per-caller cap trusts `callerSessionId`, which the bridge can only
+    // authenticate as "a session on this channel" — all of a workspace's
+    // sessions share one child process. A caller rotating ids never trips the
+    // per-caller bucket; this backstop does not depend on the id being honest.
+    const fake = makeFakeBridge({ events: () => [], blockAfterEvents: true });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+    for (let i = 0; i < MAX_CONCURRENT_SUB_SESSIONS_TOTAL; i++) {
+      await launcher.launch({
+        prompt: `p${i}`,
+        completion: 'sent',
+        callerSessionId: `rotated-${i}`, // a fresh bucket every time
+      });
+    }
+    await expect(
+      launcher.launch({
+        prompt: 'overflow',
+        completion: 'sent',
+        callerSessionId: 'rotated-fresh',
+      }),
+    ).rejects.toThrow(/workspace/i);
+    expect(fake.spawns).toHaveLength(MAX_CONCURRENT_SUB_SESSIONS_TOTAL);
+    launcher.stop();
   });
 
   it('refuses to spawn from a session it already spawned (depth-1 gate)', async () => {

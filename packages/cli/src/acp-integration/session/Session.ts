@@ -2937,9 +2937,18 @@ export class Session implements SessionContext {
         `Isolated scheduled task dispatched into sub-session ${sessionId} [session ${this.sessionId}]`,
       );
     } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      // Must reach stderr. `debugLogger.warn` writes nothing unless a debug log
+      // session is active, and the scheduler has already persisted this fire as
+      // a run — so a dropped dispatch would otherwise look like a successful
+      // one, with no trace anywhere. The daemon forwards child stderr.
+      writeStderrLine(
+        `qwen serve: isolated scheduled task dispatch failed — the fire was ` +
+          `dropped [session ${this.sessionId}]: ${detail}`,
+      );
       debugLogger.warn(
         `Isolated scheduled task dispatch failed — the fire was dropped ` +
-          `[session ${this.sessionId}]: ${err instanceof Error ? err.message : String(err)}`,
+          `[session ${this.sessionId}]: ${detail}`,
       );
     }
   }
