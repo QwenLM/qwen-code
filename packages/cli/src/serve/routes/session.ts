@@ -249,6 +249,14 @@ export function registerSessionRoutes(
     return runtime;
   };
 
+  const hasActivePersistedSessions = async (workspaceCwd: string) => {
+    const page = await new SessionService(workspaceCwd).listSessions({
+      archiveState: 'active',
+      size: 1,
+    });
+    return page.items.length > 0;
+  };
+
   const sendAmbiguousSessionOwner = (
     res: Response,
     route: string,
@@ -1755,8 +1763,8 @@ export function registerSessionRoutes(
         if (!runtime.primary && (archiveState === 'archived' || view)) {
           res.status(400).json({
             error:
-              'Non-primary workspace session listing is live-only in Phase 2a.',
-            code: 'non_primary_live_sessions_only',
+              'Non-primary workspace session listing only supports active recent view in this phase.',
+            code: 'non_primary_session_list_option_not_supported',
           });
           return;
         }
@@ -1767,9 +1775,18 @@ export function registerSessionRoutes(
           ...(view !== undefined ? { view } : {}),
           ...(group !== undefined ? { group } : {}),
         };
-        const result = runtime.primary
-          ? await listWorkspaceSessionsForResponse(runtime.bridge, key, options)
-          : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
+        const result =
+          runtime.primary || (await hasActivePersistedSessions(key))
+            ? await listWorkspaceSessionsForResponse(
+                runtime.bridge,
+                key,
+                options,
+              )
+            : listLiveWorkspaceSessionsForResponse(
+                runtime.bridge,
+                key,
+                options,
+              );
         res.status(200).json({
           sessions: result.sessions,
           ...(result.nextCursor != null
