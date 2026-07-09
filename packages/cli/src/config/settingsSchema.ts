@@ -1800,7 +1800,7 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Auto Skill',
         category: 'Memory',
         requiresRestart: false,
-        default: true,
+        default: false,
         description:
           'Enable background review for reusable project skills after tool-heavy sessions.',
         showInDialog: false,

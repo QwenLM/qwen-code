@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import type { Stats } from 'node:fs';
@@ -98,8 +99,8 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Returns 'ask' for paths outside the workspace/qwen-managed temp/userSkills
-   * directories, so that external file reads require user confirmation.
+   * Returns 'ask' for paths outside the workspace/temp/userSkills directories,
+   * so that external file reads require user confirmation.
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     const filePath = path.resolve(this.params.file_path);
@@ -114,6 +115,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       // are advertised to the model as polling targets via read_file.
       path.join(this.config.storage.getProjectDir(), 'subagents'),
       Storage.getGlobalTempDir(),
+      os.tmpdir(),
       ...this.config.storage.getUserSkillsDirs(),
       Storage.getUserExtensionsDir(),
     ];
@@ -489,7 +491,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
 
     const fileService = this.config.getFileService();
     if (fileService.shouldQwenIgnoreFile(params.file_path)) {
-      return `File path '${filePath}' is ignored by ${fileService.getQwenIgnoreFileDisplayForPath(params.file_path)} pattern(s).`;
+      return `File path '${filePath}' is ignored by .qwenignore pattern(s).`;
     }
 
     return null;
