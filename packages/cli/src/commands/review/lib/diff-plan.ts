@@ -21,6 +21,8 @@
 // for it. The chunks tile the diff exactly, so the orchestrator can assert
 // that every line was assigned to some agent.
 
+import { unquoteCStylePath } from '@qwen-code/qwen-code-core';
+
 /** A single `@@` hunk. All line numbers are 1-based and inclusive. */
 export interface DiffHunk {
   /** Range within the diff FILE (what `read_file` offset/limit addresses). */
@@ -127,13 +129,17 @@ const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
 /**
  * Strip git's path decoration: `b/src/x.ts` -> `src/x.ts`, and unquote the
- * C-style quoting git applies to paths with spaces or non-ASCII bytes.
+ * C-style quoting git applies to paths with control characters or non-ASCII
+ * bytes.
+ *
+ * Unquoting must decode octal escapes as **bytes** and UTF-8-decode them
+ * together: `\346\226\207` is one character (文), not three. Stripping the
+ * backslashes instead yields `346226207`, and every downstream use of the path
+ * — `git show`, the heaviness metrics, the filename an agent is told it is
+ * reviewing — then refers to a file that does not exist.
  */
 function cleanPath(raw: string): string {
-  let p = raw.trim();
-  if (p.startsWith('"') && p.endsWith('"') && p.length >= 2) {
-    p = p.slice(1, -1).replace(/\\(.)/g, '$1');
-  }
+  let p = unquoteCStylePath(raw.trim());
   if (p.startsWith('a/') || p.startsWith('b/')) p = p.slice(2);
   return p;
 }

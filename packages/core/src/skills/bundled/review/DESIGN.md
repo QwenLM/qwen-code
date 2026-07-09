@@ -269,7 +269,7 @@ Measured on PR #6457's real 211 000-char diff, driving the production `truncateA
 | Diff in a file, read whole (no chunk plan) | 25 015          | 10.5%        | —                                             |
 | Diff in a file + 19-chunk plan             | 210 900         | **100%**     | **20**                                        |
 
-Hunks are atomic — a chunk boundary inside one would cut a function in half. A hunk larger than the target is split only at a column-0 source line preceded by a blank line (a top-level declaration); a new file arrives as one enormous hunk (`events.test.ts` was a single 1535-line hunk) and would otherwise defeat the whole point.
+Chunk boundaries fall on hunk boundaries wherever they can, because a boundary inside a hunk risks cutting a function in half. A hunk larger than the target is the exception: it is split, but only at a column-0 source line preceded by a blank line — a top-level declaration. A brand-new file arrives as one enormous hunk (`events.test.ts` was a single 1535-line hunk), so treating hunks as strictly atomic would hand one agent a 50 000-char territory and defeat the whole point. When no such boundary exists the hunk stays whole and the chunk is flagged `oversized`.
 
 ## Why cross-repo uses lightweight mode
 

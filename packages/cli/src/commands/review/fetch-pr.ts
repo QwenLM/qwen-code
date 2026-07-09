@@ -427,7 +427,7 @@ export const fetchPrCommand: CommandModule = {
         type: 'number',
         default: DEFAULT_MAX_CHUNK_LINES,
         describe:
-          'Target size, in diff lines, of each review chunk. Hunks are never split.',
+          'Target size, in diff lines, of each review chunk. A chunk boundary falls on a hunk boundary; a hunk larger than this is split only at a top-level declaration, never inside a function.',
       }),
   handler: async (argv) => {
     await runFetchPr(argv as unknown as FetchPrArgs);

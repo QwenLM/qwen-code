@@ -128,6 +128,34 @@ describe('parseDiff', () => {
     );
   });
 
+  it('decodes a C-quoted non-ASCII path as bytes, not as characters', () => {
+    // Verbatim `git diff` output for a file named `sub/中文文件.ts`. Each
+    // `\NNN` is one UTF-8 byte; stripping the backslashes would yield
+    // `sub/344270255...ts`, and every later `git show` on that name fails.
+    const diff = [
+      'diff --git "a/sub/\\344\\270\\255\\346\\226\\207\\346\\226\\207\\344\\273\\266.ts" "b/sub/\\344\\270\\255\\346\\226\\207\\346\\226\\207\\344\\273\\266.ts"',
+      'index 7898192..de98044 100644',
+      '--- "a/sub/\\344\\270\\255\\346\\226\\207\\346\\226\\207\\344\\273\\266.ts"',
+      '+++ "b/sub/\\344\\270\\255\\346\\226\\207\\346\\226\\207\\344\\273\\266.ts"',
+      '@@ -1 +1,3 @@',
+      ' a',
+      '+b',
+      '+c',
+    ].join('\n');
+    expect(parseDiff(diff).files[0].path).toBe('sub/中文文件.ts');
+  });
+
+  it('decodes a C-quoted control character', () => {
+    const diff = [
+      'diff --git "a/sub/tab\\tname.ts" "b/sub/tab\\tname.ts"',
+      '--- "a/sub/tab\\tname.ts"',
+      '+++ "b/sub/tab\\tname.ts"',
+      '@@ -1 +1 @@',
+      '+x',
+    ].join('\n');
+    expect(parseDiff(diff).files[0].path).toBe('sub/tab\tname.ts');
+  });
+
   it('resolves a path containing a space from the +++ header', () => {
     // `diff --git a/my file b/my file` is genuinely ambiguous — git does not
     // quote spaces — so the `+++` line is the only reliable source.
