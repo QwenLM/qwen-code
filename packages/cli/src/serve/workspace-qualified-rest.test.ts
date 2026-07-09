@@ -481,6 +481,48 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
+  it('routes workspace-qualified status reads to the selected workspace', async () => {
+    const h = await makeHarness();
+    try {
+      for (const route of [
+        'mcp',
+        'skills',
+        'providers',
+        'env',
+        'preflight',
+        'hooks',
+      ]) {
+        const res = await request(h.app)
+          .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/${route}`)
+          .set('Host', host());
+        expect(res.status).toBe(200);
+        expect(res.body.workspaceCwd).toBe(h.secondaryCwd);
+      }
+
+      const tools = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/tools`)
+        .set('Host', host());
+      expect(tools.status).toBe(200);
+      expect(tools.body).toEqual({ v: 1, tools: [] });
+
+      const mcpTools = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/mcp/docs/tools`)
+        .set('Host', host());
+      expect(mcpTools.status).toBe(200);
+      expect(mcpTools.body).toEqual({ v: 1, tools: [] });
+
+      const mcpResources = await request(h.app)
+        .get(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/mcp/docs/resources`,
+        )
+        .set('Host', host());
+      expect(mcpResources.status).toBe(200);
+      expect(mcpResources.body).toEqual({ v: 1, resources: [] });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('routes workspace-qualified settings and rejects user scope or untrusted access', async () => {
     const h = await makeHarness({ token: 'secret' });
     try {
@@ -841,6 +883,34 @@ describe('workspace-qualified core REST', () => {
         (selected.body.agents as Array<{ name: string }>).map((a) => a.name),
       ).toContain('ws-agent');
 
+      const detail = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/agents/ws-agent`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(detail.status).toBe(200);
+      expect(detail.body).toMatchObject({
+        name: 'ws-agent',
+        description: 'secondary agent',
+        level: 'project',
+      });
+
+      const update = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/agents/ws-agent`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ description: 'updated secondary agent' });
+      expect(update.status).toBe(200);
+      expect(update.body).toMatchObject({
+        changed: true,
+        agent: {
+          name: 'ws-agent',
+          description: 'updated secondary agent',
+          level: 'project',
+        },
+      });
+
       const primary = await request(h.app)
         .get('/workspaces/same-as-path/agents')
         .set('Authorization', 'Bearer secret')
@@ -849,6 +919,14 @@ describe('workspace-qualified core REST', () => {
       expect(
         (primary.body.agents as Array<{ name: string }>).map((a) => a.name),
       ).not.toContain('ws-agent');
+
+      const deleted = await request(h.app)
+        .delete(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/agents/ws-agent`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(deleted.status).toBe(204);
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -904,6 +982,41 @@ describe('workspace-qualified core REST', () => {
       expect(update.status).toBe(400);
       expect(update.body.code).toBe(
         'global_scope_not_supported_for_workspace_route',
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('routes workspace-qualified memory reads and writes to the selected workspace', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const write = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({
+          scope: 'workspace',
+          mode: 'replace',
+          content: '# Secondary memory\n',
+        });
+      expect(write.status).toBe(200);
+      expect(write.body.filePath).toBe(path.join(h.secondaryCwd, 'QWEN.md'));
+      expect(write.body.changed).toBe(true);
+
+      const read = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(read.status).toBe(200);
+      expect(read.body.workspaceCwd).toBe(h.secondaryCwd);
+      expect(read.body.files).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: path.join(h.secondaryCwd, 'QWEN.md'),
+            scope: 'workspace',
+          }),
+        ]),
       );
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });

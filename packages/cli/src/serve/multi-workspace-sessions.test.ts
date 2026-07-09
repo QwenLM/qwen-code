@@ -1039,6 +1039,121 @@ describe('multi-workspace session dispatch', () => {
     );
   });
 
+  it('routes plural batch archive, unarchive, and delete to the selected workspace', async () => {
+    await withRuntimeDir(async () => {
+      const archiveId = '550e8400-e29b-41d4-a716-446655440120';
+      const deleteId = '550e8400-e29b-41d4-a716-446655440121';
+      await writeStoredSession({
+        sessionId: archiveId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:10:00.000Z',
+        prompt: 'secondary archive target',
+        mtime: new Date('2026-07-08T00:10:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: deleteId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:11:00.000Z',
+        prompt: 'secondary delete target',
+        mtime: new Date('2026-07-08T00:11:00.000Z'),
+      });
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        secondarySummaries: [],
+      });
+
+      const archived = await request(app)
+        .post('/workspaces/secondary-id/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [archiveId] })
+        .expect(200);
+      expect(archived.body).toMatchObject({
+        archived: [archiveId],
+        alreadyArchived: [],
+        notFound: [],
+        errors: [],
+      });
+
+      const unarchived = await request(app)
+        .post('/workspaces/secondary-id/sessions/unarchive')
+        .set('Host', host())
+        .send({ sessionIds: [archiveId] })
+        .expect(200);
+      expect(unarchived.body).toMatchObject({
+        unarchived: [archiveId],
+        alreadyActive: [],
+        notFound: [],
+        errors: [],
+      });
+
+      const deleted = await request(app)
+        .post('/workspaces/secondary-id/sessions/delete')
+        .set('Host', host())
+        .send({ sessionIds: [deleteId] })
+        .expect(200);
+      expect(deleted.body).toMatchObject({
+        removed: [deleteId],
+        notFound: [],
+        errors: [],
+      });
+      expect(primaryBridge.closeCalls).toEqual([]);
+      expect(secondaryBridge.closeCalls).toEqual([archiveId, deleteId]);
+    });
+  });
+
+  it('routes plural session group CRUD to the selected workspace', async () => {
+    await withRuntimeDir(async () => {
+      const { app } = makeHarness();
+
+      const created = await request(app)
+        .post('/workspaces/secondary-id/session-groups')
+        .set('Host', host())
+        .send({ name: 'Secondary Group', color: 'blue' })
+        .expect(201);
+      expect(created.body.group).toMatchObject({
+        name: 'Secondary Group',
+        color: 'blue',
+      });
+      const groupId = created.body.group.id as string;
+
+      const secondaryList = await request(app)
+        .get('/workspaces/secondary-id/session-groups')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        (secondaryList.body.groups as Array<{ id: string }>).map(
+          (group) => group.id,
+        ),
+      ).toContain(groupId);
+
+      const primaryList = await request(app)
+        .get('/workspaces/primary-id/session-groups')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        (primaryList.body.groups as Array<{ id: string }>).map(
+          (group) => group.id,
+        ),
+      ).not.toContain(groupId);
+
+      const updated = await request(app)
+        .patch(`/workspaces/secondary-id/session-groups/${groupId}`)
+        .set('Host', host())
+        .send({ name: 'Secondary Renamed', order: 10 })
+        .expect(200);
+      expect(updated.body.group).toMatchObject({
+        id: groupId,
+        name: 'Secondary Renamed',
+        order: 10,
+      });
+
+      const deleted = await request(app)
+        .delete(`/workspaces/secondary-id/session-groups/${groupId}`)
+        .set('Host', host())
+        .expect(200);
+      expect(deleted.body).toEqual({ deleted: true });
+    });
+  });
+
   it('pages live non-primary workspace sessions with a stable cursor', async () => {
     const { app } = makeHarness({
       secondarySummaries: [

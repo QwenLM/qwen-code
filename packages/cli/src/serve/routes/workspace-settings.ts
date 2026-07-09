@@ -324,6 +324,9 @@ export function registerWorkspaceQualifiedSettingsRoutes(
       req,
       res,
     );
+    // Legacy /workspace/settings remains primary-only and pre-trust for
+    // compatibility; plural workspace-qualified settings intentionally follow
+    // the Phase 3 core-route trust gate.
     if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
     try {
       const response = buildSettingsResponse(runtime.workspaceCwd, allowedKeys);
