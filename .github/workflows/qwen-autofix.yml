@@ -21,6 +21,7 @@ on:
   issues:
     types:
       - 'labeled'
+      - 'assigned'
   pull_request_review:
     types:
       - 'submitted'
@@ -88,6 +89,9 @@ jobs:
       ${{ github.repository == 'QwenLM/qwen-code' }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
+    concurrency:
+      group: 'qwen-autofix-route'
+      cancel-in-progress: true
     permissions:
       contents: 'read'
     outputs:
@@ -115,6 +119,7 @@ jobs:
           AUTOFIX_APPROVED_LABEL: 'autofix/approved'
           REPO: '${{ github.repository }}'
           SENDER_LOGIN: '${{ github.event.sender.login }}'
+          ASSIGNEE_LOGIN: '${{ github.event.assignee.login }}'
           SCHEDULE: '${{ github.event.schedule }}'
           PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
           PR_NUMBER_EVENT: '${{ github.event.pull_request.number }}'
@@ -196,33 +201,41 @@ jobs:
               fi
               if [[ "${EVENT_NAME}" == 'issues' ]]; then
                 DO_REVIEW=false
-                label_is_trigger=false
-                [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true
-                if [[ "${label_is_trigger}" != 'true' ]]; then
-                  echo "🧭 issue event ignored: trigger_label=false label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
+                # Assigned to the autofix bot → issue phase directly (bypasses
+                # label gates; the assignee itself is the trust signal).
+                if [[ "${ASSIGNEE_LOGIN}" == "${AUTOFIX_BOT}" && "${ISSUE_STATE}" == 'open' ]]; then
+                  DO_ISSUE=true
+                  ROUTE_ISSUE="${ISSUE_NUMBER}"
+                  echo "🧭 issue #${ISSUE_NUMBER} assigned to ${AUTOFIX_BOT} → issue phase"
                 else
-                  issue_is_bug="$(jq -r --arg label "${BUG_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
-                  issue_is_ready="$(jq -r --arg label "${READY_FOR_AGENT_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
-                  sender_permission=''
-                  sender_is_trusted=false
-                  if [[ -n "${SENDER_LOGIN}" ]]; then
-                    if ! sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>&1)"; then
-                      api_error="${sender_permission}"
-                      sender_permission=''
-                      api_error="${api_error//$'\r'/ }"
-                      api_error="${api_error//$'\n'/ }"
-                      echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error}"
-                    fi
-                    [[ "${sender_permission}" == 'write' || "${sender_permission}" == 'maintain' || "${sender_permission}" == 'admin' ]] && sender_is_trusted=true
-                  fi
-                  issue_is_approved="$(jq -r --arg label "${AUTOFIX_APPROVED_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
-                  if [[ "${ISSUE_STATE}" == 'open' && "${issue_is_ready}" == 'true' && "${issue_is_approved}" == 'true' && "${label_is_trigger}" == 'true' && "${sender_is_trusted}" == 'true' ]]; then
-                    DO_ISSUE=true
+                  label_is_trigger=false
+                  [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true
+                  if [[ "${label_is_trigger}" != 'true' ]]; then
+                    echo "🧭 issue event ignored: trigger_label=false label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
                   else
-                    if [[ "${ISSUE_STATE}" == 'open' && "${label_is_trigger}" == 'true' && "${sender_is_trusted}" == 'true' && "${issue_is_ready}" != "${issue_is_approved}" ]]; then
-                      echo "::notice::Issue #${ISSUE_NUMBER:-n/a} needs both ${READY_FOR_AGENT_LABEL} and ${AUTOFIX_APPROVED_LABEL} before autofix can run."
+                    issue_is_bug="$(jq -r --arg label "${BUG_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                    issue_is_ready="$(jq -r --arg label "${READY_FOR_AGENT_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                    sender_permission=''
+                    sender_is_trusted=false
+                    if [[ -n "${SENDER_LOGIN}" ]]; then
+                      if ! sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>&1)"; then
+                        api_error="${sender_permission}"
+                        sender_permission=''
+                        api_error="${api_error//$'\r'/ }"
+                        api_error="${api_error//$'\n'/ }"
+                        echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error}"
+                      fi
+                      [[ "${sender_permission}" == 'write' || "${sender_permission}" == 'maintain' || "${sender_permission}" == 'admin' ]] && sender_is_trusted=true
                     fi
-                    echo "🧭 issue event ignored: state_open=$([[ "${ISSUE_STATE}" == 'open' ]] && echo true || echo false) bug=${issue_is_bug} ready=${issue_is_ready} approved=${issue_is_approved} trigger_label=${label_is_trigger} sender_permission='${sender_permission:-none}' sender_trusted=${sender_is_trusted} label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
+                    issue_is_approved="$(jq -r --arg label "${AUTOFIX_APPROVED_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                    if [[ "${ISSUE_STATE}" == 'open' && "${issue_is_ready}" == 'true' && "${issue_is_approved}" == 'true' && "${label_is_trigger}" == 'true' && "${sender_is_trusted}" == 'true' ]]; then
+                      DO_ISSUE=true
+                    else
+                      if [[ "${ISSUE_STATE}" == 'open' && "${label_is_trigger}" == 'true' && "${sender_is_trusted}" == 'true' && "${issue_is_ready}" != "${issue_is_approved}" ]]; then
+                        echo "::notice::Issue #${ISSUE_NUMBER:-n/a} needs both ${READY_FOR_AGENT_LABEL} and ${AUTOFIX_APPROVED_LABEL} before autofix can run."
+                      fi
+                      echo "🧭 issue event ignored: state_open=$([[ "${ISSUE_STATE}" == 'open' ]] && echo true || echo false) bug=${issue_is_bug} ready=${issue_is_ready} approved=${issue_is_approved} trigger_label=${label_is_trigger} sender_permission='${sender_permission:-none}' sender_trusted=${sender_is_trusted} label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
+                    fi
                   fi
                 fi
               fi
@@ -259,7 +272,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 180
     concurrency:
-      group: 'qwen-autofix-issue'
+      group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'
       cancel-in-progress: false
     permissions:
       contents: 'read'
