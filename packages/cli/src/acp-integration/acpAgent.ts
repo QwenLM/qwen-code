@@ -6010,7 +6010,12 @@ class QwenAgent implements Agent {
             });
             const updates = liftSessionUpdateTimestamps(replay.updates);
             let nextCursor: string | undefined;
-            if (page.nextCursorState) {
+            // On a mid-page replay error the page is partial: records after the
+            // failed record are dropped and pendingToolCalls reflect partial
+            // state. Withhold nextCursor so the client cannot paginate forward
+            // past the dropped records with a corrupted cursor — the page is
+            // already flagged partial + replayError below.
+            if (page.nextCursorState && replay.replayError === undefined) {
               const nextCursorState: SessionTranscriptCursorState = {
                 ...page.nextCursorState,
                 replay: {

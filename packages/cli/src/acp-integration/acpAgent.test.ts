@@ -6511,6 +6511,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     ]);
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    vi.mocked(encodeSessionTranscriptCursor).mockClear();
 
     const result = (await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionTranscript,
@@ -6525,25 +6526,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     };
 
     expect(result.hasMore).toBe(true);
-    expect(result.nextCursor).toBeDefined();
+    // On a replay error the page is partial and must NOT hand back a cursor:
+    // continuing would drop the un-replayed records and carry corrupted
+    // pendingToolCalls forward into the next page.
+    expect(result.nextCursor).toBeUndefined();
     expect(result.partial).toBe(true);
     expect(result.replayError).toBe('Replay conversion failed for this page');
-    expect(vi.mocked(encodeSessionTranscriptCursor)).toHaveBeenCalledWith(
-      expect.objectContaining({
-        replay: {
-          pendingToolCalls: [
-            {
-              callId: 'call-started-before-error',
-              toolName: 'Read',
-              recordId: 'u1',
-              timestamp: 'start',
-            },
-          ],
-          cumulativeUsage: expect.any(Object),
-        },
-      }),
-      expect.any(String),
-    );
+    expect(vi.mocked(encodeSessionTranscriptCursor)).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
