@@ -329,7 +329,22 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   let diffText = '';
   if (mergeBaseSha) {
     try {
-      const buf = gitRaw('diff', `${mergeBaseSha}..${fetchedSha}`);
+      // Pin every knob that user config could turn: `color.diff=always` would
+      // inject ANSI escapes that make every `diff --git` line unrecognisable
+      // (the plan would come back with zero chunks); `diff.external` and
+      // textconv filters emit output that is not a unified diff at all;
+      // `diff.mnemonicPrefix` renames the `a/`/`b/` prefixes to `i/`/`w/`;
+      // `diff.context` changes how many lines each hunk carries.
+      const buf = gitRaw(
+        'diff',
+        '--no-ext-diff',
+        '--no-textconv',
+        '--no-color',
+        '--unified=3',
+        '--src-prefix=a/',
+        '--dst-prefix=b/',
+        `${mergeBaseSha}..${fetchedSha}`,
+      );
       writeFileSync(diffRel, buf);
       diffText = buf.toString('utf8');
       diffPath = diffRel;

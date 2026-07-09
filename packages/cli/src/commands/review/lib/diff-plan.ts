@@ -82,11 +82,14 @@ export interface DiffChunk {
   startLine: number;
   endLine: number;
   lines: number;
+  /** Characters in the range. Above ~25 000 a single `read_file` truncates. */
+  chars: number;
   /**
-   * True when this chunk is a single hunk that exceeds `maxChunkLines` and
-   * offered no safe interior boundary to split on. Such a chunk stands alone:
-   * cutting it anywhere else would slice a function in half, which is the
-   * failure mode chunking exists to prevent.
+   * True when this chunk is a single hunk that exceeds `maxChunkLines` or
+   * `MAX_CHUNK_CHARS` and offered no safe interior boundary to split on. Such
+   * a chunk stands alone: cutting it anywhere else would slice a function in
+   * half, which is the failure mode chunking exists to prevent. An oversized
+   * chunk may exceed one read's worth of characters, so its agent must page.
    */
   oversized: boolean;
   /** Which source files (and which of their lines) this chunk covers. */
@@ -128,9 +131,7 @@ export const MAX_CHUNK_CHARS = 20_000;
 const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
 /**
- * Strip git's path decoration: `b/src/x.ts` -> `src/x.ts`, and unquote the
- * C-style quoting git applies to paths with control characters or non-ASCII
- * bytes.
+ * Unquote a diff path token.
  *
  * Unquoting must decode octal escapes as **bytes** and UTF-8-decode them
  * together: `\346\226\207` is one character (文), not three. Stripping the
@@ -138,10 +139,83 @@ const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
  * — `git show`, the heaviness metrics, the filename an agent is told it is
  * reviewing — then refers to a file that does not exist.
  */
+function unquote(raw: string): string {
+  return unquoteCStylePath(raw.trim());
+}
+
+/** Drop git's `a/` / `b/` decoration. `fetch-pr` pins those prefixes. */
+function stripPrefix(p: string): string {
+  return p.startsWith('a/') || p.startsWith('b/') ? p.slice(2) : p;
+}
+
+/** Unquote then de-prefix a `diff --git` / `---` / `+++` path token. */
 function cleanPath(raw: string): string {
-  let p = unquoteCStylePath(raw.trim());
-  if (p.startsWith('a/') || p.startsWith('b/')) p = p.slice(2);
-  return p;
+  return stripPrefix(unquote(raw));
+}
+
+/** Read a C-quoted token starting at `i`; returns the token and the next index. */
+function readQuoted(s: string, i: number): [string, number] | null {
+  if (s[i] !== '"') return null;
+  let j = i + 1;
+  while (j < s.length) {
+    if (s[j] === '\\') {
+      j += 2;
+      continue;
+    }
+    if (s[j] === '"') return [s.slice(i, j + 1), j + 1];
+    j++;
+  }
+  return null;
+}
+
+/**
+ * Split the two path tokens out of a `diff --git <old> <new>` line.
+ *
+ * Git separates them with a space and does **not** quote a path merely because
+ * it contains one, so `diff --git a/my file b/my file` is genuinely ambiguous
+ * to a greedy regex — which lands on `space.png` for `a/img with space.png`.
+ * Usually the `---`/`+++` headers disambiguate, but a binary or mode-only
+ * section has neither.
+ *
+ * For the overwhelmingly common case — no rename, pinned `a/`/`b/` prefixes —
+ * both paths are the *same string*, so the split point is arithmetic rather
+ * than guessed: `a/P b/P` has length `2·|P| + 5`.
+ */
+function splitHeaderPaths(rest: string): [string, string] | null {
+  if (rest.startsWith('"')) {
+    const first = readQuoted(rest, 0);
+    if (!first || rest[first[1]] !== ' ') return null;
+    const after = first[1] + 1;
+    const second =
+      rest[after] === '"'
+        ? readQuoted(rest, after)
+        : ([rest.slice(after), rest.length] as [string, number]);
+    return second ? [first[0], second[0]] : null;
+  }
+  // Only the new side is quoted (e.g. a rename into a non-ASCII name).
+  const q = rest.indexOf(' "');
+  if (q > 0 && rest.endsWith('"')) return [rest.slice(0, q), rest.slice(q + 1)];
+
+  // Neither quoted: exploit `old === new` for a non-rename.
+  const n = rest.length;
+  if (n >= 5 && (n - 5) % 2 === 0) {
+    const len = (n - 5) / 2;
+    const old = rest.slice(0, 2 + len);
+    const neu = rest.slice(3 + len);
+    if (
+      old.startsWith('a/') &&
+      neu.startsWith('b/') &&
+      rest[2 + len] === ' ' &&
+      old.slice(2) === neu.slice(2)
+    ) {
+      return [old, neu];
+    }
+  }
+  // A rename whose two paths differ. `+++` / `rename to` will refine this;
+  // the last ` b/` is the best guess a header alone can offer.
+  const idx = rest.lastIndexOf(' b/');
+  if (idx > 0) return [rest.slice(0, idx), rest.slice(idx + 1)];
+  return null;
 }
 
 /**
@@ -191,11 +265,12 @@ export function parseDiff(diffText: string): {
     if (line.startsWith('diff --git ')) {
       closeFile(n - 1);
       oldPath = '';
-      // Path is refined below from `+++ b/...` / `--- a/...` when present;
-      // this is the fallback for mode-only and binary sections.
-      const m = /^diff --git (.+) (.+)$/.exec(line);
+      // Path is refined below from `+++ b/...` / `rename to ...` when
+      // present; this header parse is what mode-only and binary sections have
+      // to rely on, since they carry no `---`/`+++` at all.
+      const tokens = splitHeaderPaths(line.slice('diff --git '.length));
       cur = {
-        path: m ? cleanPath(m[2]) : '(unknown)',
+        path: tokens ? cleanPath(tokens[1]) : '(unknown)',
         kind: 'source', // refined once the real path is known, below
         diffStart: n,
         diffEnd: n,
@@ -213,6 +288,11 @@ export function parseDiff(diffText: string): {
       line.startsWith('GIT binary patch')
     ) {
       cur.binary = true;
+      continue;
+    }
+    // A rename states its new path outright, and without an `a/`/`b/` prefix.
+    if (line.startsWith('rename to ')) {
+      cur.path = unquote(line.slice('rename to '.length));
       continue;
     }
     // `diff --git a/x b/x` is ambiguous when a path contains a space (git only
@@ -289,7 +369,10 @@ function isSafeSplitPoint(lines: string[], n: number): boolean {
   const cur = lines[n - 1];
   const prev = lines[n - 2];
   if (cur === undefined || prev === undefined) return false;
-  if (!/^[+\- ]/.test(cur) || !/^[+\- ]/.test(prev)) return false;
+  // The segment must *start* on a line that exists in the post-change file:
+  // a `-` line is old-side only, so a boundary there does not correspond to a
+  // top-level declaration in the file an invariant agent will later read.
+  if (!/^[+ ]/.test(cur) || !/^[+\- ]/.test(prev)) return false;
   const content = cur.slice(1);
   if (content.length === 0 || /^\s/.test(content)) return false;
   return /^\s*$/.test(prev.slice(1));
@@ -436,6 +519,7 @@ export function planChunks(
   const flush = () => {
     if (cur) {
       cur.lines = cur.endLine - cur.startLine + 1;
+      cur.chars = charsIn(prefix, cur.startLine, cur.endLine);
       chunks.push(cur);
       cur = null;
     }
@@ -458,6 +542,7 @@ export function planChunks(
         startLine: u.start,
         endLine: u.end,
         lines: uLines,
+        chars: 0, // set in flush(), once the chunk's final range is known
         oversized:
           uLines > maxChunkLines ||
           charsIn(prefix, u.start, u.end) > MAX_CHUNK_CHARS,

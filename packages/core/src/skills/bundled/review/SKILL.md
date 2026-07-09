@@ -103,7 +103,7 @@ For **PR reviews**, `qwen review fetch-pr` (above) has already written the diff 
 
 - `diffPathAbsolute` — pass this to `read_file` (it rejects relative paths)
 - `diffLines`, `diffChars`, and `srcDiffLines` / `testDiffLines` / `generatedDiffLines`
-- `chunks[]` — contiguous, non-overlapping line ranges tiling the whole diff. Each entry has `id`, `startLine`, `endLine` (1-based, inclusive), and `files[]` naming the source files and new-side line ranges it covers.
+- `chunks[]` — contiguous, non-overlapping line ranges tiling the whole diff. Each entry has `id`, `startLine`, `endLine` (1-based, inclusive), `lines`, `chars`, an `oversized` flag, and `files[]` naming the source files and new-side line ranges it covers. A chunk with `oversized: true` may exceed what one `read_file` call returns.
 - `files[]` — per-file `kind` (`source` / `test` / `generated`), change counts, and the `heavy` flag
 
 A chunk is read with `read_file(file_path=diffPathAbsolute, offset=startLine - 1, limit=endLine - startLine + 1)` — `offset` is 0-based.
@@ -165,6 +165,7 @@ Ten agents all reading the same diff multiplies redundant reading of the early h
 **Chunk agents — one per entry in `chunks[]`.** Each is a `general-purpose` subagent whose prompt gives it:
 
 - `diffPathAbsolute`, its own `offset` (= `startLine - 1`) and `limit` (= `endLine - startLine + 1`), and its `files[]` list. Tell it to read exactly that range, and that the surrounding chunks belong to other agents.
+- **An instruction to page.** Ordinary chunks are sized to fit one un-truncated read, but a chunk whose `oversized` flag is set is a single hunk that offered no safe place to cut, and its `chars` can exceed one read's ~25 000. Tell the agent: if the read comes back with `isTruncated`, keep calling `read_file` with a larger `offset` until it has the whole range. An agent that returns a `Covered:` receipt for a range it only half read makes the coverage guarantee a lie — which is worse than not having one.
 - Permission to read the **full source files** it covers (via `read_file` on the worktree path) whenever a hunk's correctness depends on code outside the hunk. Diff context lines are three lines deep; state invariants are not. A source file over ~25 000 characters comes back with `isTruncated` set — page through it rather than reasoning from the first screenful.
 - The review focus: it owns **all** of Agents 1–6's dimensions (correctness, security, code quality, performance, test coverage, and the three adversarial personas) **for its territory only**.
 - Project-specific rules from Step 2 (if any).

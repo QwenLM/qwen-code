@@ -169,6 +169,41 @@ describe('parseDiff', () => {
     expect(parseDiff(diff).files[0].path).toBe('my file.ts');
   });
 
+  it('resolves a space-containing path in a binary section', () => {
+    // Verbatim `git diff` output. A binary section has no `---`/`+++` headers,
+    // so the `diff --git` line is the only source — and git does not quote a
+    // path merely for containing a space. A greedy `(.+) (.+)` lands on
+    // `space.png`. Both paths are identical, so the split is arithmetic.
+    const diff = [
+      'diff --git a/img with space.png b/img with space.png',
+      'index 1111111..2222222 100644',
+      'Binary files a/img with space.png and b/img with space.png differ',
+    ].join('\n');
+    const f = parseDiff(diff).files[0];
+    expect(f.path).toBe('img with space.png');
+    expect(f.binary).toBe(true);
+  });
+
+  it('resolves a space-containing path in a mode-only section', () => {
+    const diff = [
+      'diff --git a/mode file.sh b/mode file.sh',
+      'old mode 100644',
+      'new mode 100755',
+    ].join('\n');
+    expect(parseDiff(diff).files[0].path).toBe('mode file.sh');
+  });
+
+  it("takes a renamed file's new path from the rename header", () => {
+    // The two header paths differ here, so the arithmetic split does not apply.
+    const diff = [
+      'diff --git a/d/old.ts b/d/new name.ts',
+      'similarity index 100%',
+      'rename from d/old.ts',
+      'rename to d/new name.ts',
+    ].join('\n');
+    expect(parseDiff(diff).files[0].path).toBe('d/new name.ts');
+  });
+
   it('marks binary sections and gives them no hunks', () => {
     const diff = [
       'diff --git a/logo.png b/logo.png',
@@ -244,6 +279,44 @@ describe('planChunks', () => {
         fileRanges[i - 1].newStart,
       );
     }
+  });
+
+  it('never starts a chunk on a deleted line', () => {
+    // A `-` line exists only on the old side. Starting a territory there gives
+    // the agent a boundary that has no counterpart in the post-change file it
+    // will read. Here the only column-0-after-blank candidates are deletions.
+    const body: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      body.push(`-function gone${i}() {`);
+      for (let k = 0; k < 28; k++) body.push(`-  const x${k} = ${k};`);
+      body.push('-}');
+      body.push('-');
+    }
+    const diff = [
+      'diff --git a/src/x.ts b/src/x.ts',
+      '--- a/src/x.ts',
+      '+++ b/src/x.ts',
+      `@@ -1,${body.length} +0,0 @@`,
+      ...body,
+    ].join('\n');
+
+    const plan = buildDiffPlan(diff, 100);
+    expect(chunksCoverDiff(plan.chunks, plan.diffLines)).toBe(true);
+    const lines = diff.split('\n');
+    for (const c of plan.chunks.slice(1)) {
+      expect(lines[c.startLine - 1].startsWith('-')).toBe(false);
+    }
+    // With no new-side candidate the hunk stays whole rather than being cut.
+    expect(plan.chunks).toHaveLength(1);
+    expect(plan.chunks[0].oversized).toBe(true);
+  });
+
+  it('reports each chunk’s character count', () => {
+    const diff = fileSection('src/a.ts', [[1, 50]]).join('\n');
+    const plan = buildDiffPlan(diff, 400);
+    const lines = diff.split('\n');
+    const expected = lines.reduce((n, l) => n + l.length + 1, 0);
+    expect(plan.chunks[0].chars).toBe(expected);
   });
 
   it('leaves a hunk whole when it has no safe interior boundary', () => {
@@ -406,6 +479,7 @@ describe('chunksCoverDiff', () => {
             startLine: 1,
             endLine: 5,
             lines: 5,
+            chars: 0,
             oversized: false,
             files: [],
           },
@@ -414,6 +488,7 @@ describe('chunksCoverDiff', () => {
             startLine: 7,
             endLine: 9,
             lines: 3,
+            chars: 0,
             oversized: false,
             files: [],
           },
@@ -430,6 +505,7 @@ describe('chunksCoverDiff', () => {
         startLine: 1,
         endLine: 5,
         lines: 5,
+        chars: 0,
         oversized: false,
         files: [],
       },
@@ -438,6 +514,7 @@ describe('chunksCoverDiff', () => {
         startLine: 5,
         endLine: 9,
         lines: 5,
+        chars: 0,
         oversized: false,
         files: [],
       },
@@ -449,6 +526,7 @@ describe('chunksCoverDiff', () => {
         startLine: 1,
         endLine: 5,
         lines: 5,
+        chars: 0,
         oversized: false,
         files: [],
       },
