@@ -43,6 +43,7 @@ import { MessageType } from '../../ui/types.js';
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
+const transcribeVoiceAudioSpy = vi.hoisted(() => vi.fn());
 // Records every LoopTickResolver construction's deps so a test can assert what
 // Session computed (e.g. the home confinement root) without a private-field peek.
 const loopTickResolverDepsSpy = vi.hoisted(() => vi.fn());
@@ -83,6 +84,10 @@ vi.mock('../../nonInteractiveCliCommands.js', () => ({
   ],
   getAvailableCommands: vi.fn(),
   handleSlashCommand: vi.fn(),
+}));
+
+vi.mock('../../services/voice-transcriber.js', () => ({
+  transcribeVoiceAudio: transcribeVoiceAudioSpy,
 }));
 
 function chatRecord(overrides: Record<string, unknown>): ChatRecord {
@@ -355,6 +360,7 @@ describe('Session', () => {
 
   beforeEach(() => {
     runVisionBridgeSpy.mockReset();
+    transcribeVoiceAudioSpy.mockReset();
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;
     switchModelSpy = vi
@@ -2291,6 +2297,111 @@ describe('Session', () => {
       }
     });
 
+    it('routes ACP audio prompts through the voice bridge for text-only primary models', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      Object.assign(mockSettings.merged as Record<string, unknown>, {
+        voiceModel: 'qwen3-asr-flash',
+        env: { OPENAI_API_KEY: 'test-key' },
+      });
+      transcribeVoiceAudioSpy.mockResolvedValue(
+        'please review the latest diff',
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'caption before audio' },
+          {
+            type: 'audio',
+            mimeType: 'audio/ogg',
+            data: 'T2dnUw==',
+          },
+        ],
+      });
+
+      expect(transcribeVoiceAudioSpy).toHaveBeenCalledWith(
+        {
+          data: expect.any(Uint8Array),
+          mimeType: 'audio/ogg',
+        },
+        expect.objectContaining({
+          config: mockConfig,
+          settings: mockSettings,
+          voiceModel: 'qwen3-asr-flash',
+          abortSignal: expect.any(AbortSignal),
+        }),
+      );
+      const sent = firstSentMessage();
+      expect(textParts(sent).join('\n')).toContain(
+        'please review the latest diff',
+      );
+      expect(textParts(sent).join('\n')).toMatch(/untrusted/i);
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+    });
+
+    it('does not run the voice bridge when the primary model supports audio', async () => {
+      mockConfig.getEffectiveInputModalities = vi
+        .fn()
+        .mockReturnValue({ audio: true });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      Object.assign(mockSettings.merged as Record<string, unknown>, {
+        voiceModel: 'qwen3-asr-flash',
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'listen to this' },
+          {
+            type: 'audio',
+            mimeType: 'audio/wav',
+            data: 'UklGRg==',
+          },
+        ],
+      });
+
+      expect(transcribeVoiceAudioSpy).not.toHaveBeenCalled();
+      expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
+        true,
+      );
+    });
+
+    it('falls back to text-only parts when voice bridge transcription fails', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      Object.assign(mockSettings.merged as Record<string, unknown>, {
+        voiceModel: 'qwen3-asr-flash',
+      });
+      transcribeVoiceAudioSpy.mockRejectedValue(new Error('asr unavailable'));
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'caption before audio' },
+          {
+            type: 'audio',
+            mimeType: 'audio/ogg',
+            data: 'T2dnUw==',
+          },
+        ],
+      });
+
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(textParts(sent).join('\n')).toContain('caption before audio');
+      expect(textParts(sent).join('\n')).toMatch(/could not transcribe/i);
+      expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+        expect.stringContaining('voice bridge'),
+      );
+    });
+
     it('routes ACP image prompts through the vision bridge for text-only primary models', async () => {
       mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
       mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
@@ -4045,6 +4156,9 @@ describe('Session', () => {
           prompt: [{ type: 'text', text: 'read file' }],
         });
 
+        const audioFallbackPart = {
+          text: '[Voice bridge could not transcribe attached audio: no voice model is configured. The audio content is unavailable; do not assume or invent what it says.]',
+        };
         const midTurnParts: Part[] = [
           {
             text: '\n[User message received during tool execution]: please inspect this image',
@@ -4055,12 +4169,7 @@ describe('Session', () => {
               data: 'iVBORw0KGgo=',
             },
           },
-          {
-            inlineData: {
-              mimeType: 'audio/wav',
-              data: 'UklGRgAAAA==',
-            },
-          },
+          audioFallbackPart,
         ];
         const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
         expect(secondCall?.[1].message).toEqual(
