@@ -2056,16 +2056,27 @@ describe('SessionArtifactStore', () => {
   });
 
   it('marks a stored workspace artifact missing if it later escapes by symlink', async () => {
+    const persistence = {
+      recordEvent: vi.fn(),
+      recordSnapshot: vi.fn(),
+    };
     const store = new SessionArtifactStore({
       sessionId: 's7-symlink-refresh',
       workspaceCwd: workspace,
+      persistence,
     });
     const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
     try {
       await fs.writeFile(path.join(workspace, 'report.txt'), 'hello');
       await fs.writeFile(path.join(outside, 'secret.txt'), 'secret');
       await store.upsertMany(
-        [{ title: 'Report', workspacePath: 'report.txt' }],
+        [
+          {
+            title: 'Report',
+            workspacePath: 'report.txt',
+            retention: 'restorable',
+          },
+        ],
         { strict: true },
       );
 
@@ -2084,6 +2095,38 @@ describe('SessionArtifactStore', () => {
       });
       expect(artifact).not.toHaveProperty('workspacePath');
       expect(artifact).not.toHaveProperty('sizeBytes');
+
+      const snapshot = (
+        store as unknown as {
+          buildSnapshotPayload(
+            recordedAt: string,
+            sequence: number,
+          ): SessionArtifactSnapshotRecordPayload;
+        }
+      ).buildSnapshotPayload('2026-07-06T00:00:00.000Z', 1);
+      expect(snapshot.artifacts[0]).toMatchObject({
+        storage: 'workspace',
+        status: 'missing',
+        workspacePath: 'report.txt',
+      });
+
+      await fs.rm(path.join(workspace, 'report.txt'));
+      const restored = new SessionArtifactStore({
+        sessionId: 's7-symlink-refresh',
+        workspaceCwd: workspace,
+        persistence,
+      });
+      await restored.restore({
+        ...snapshot,
+        tombstonedIds: snapshot.tombstonedIds ?? [],
+        stickyEphemeralIds: snapshot.stickyEphemeralIds ?? [],
+        warnings: [],
+      });
+      expect((await restored.list()).artifacts[0]).toMatchObject({
+        storage: 'workspace',
+        status: 'missing',
+        workspacePath: 'report.txt',
+      });
     } finally {
       vi.useRealTimers();
       await fs.rm(outside, { recursive: true, force: true });

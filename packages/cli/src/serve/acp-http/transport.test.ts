@@ -401,6 +401,9 @@ class FakeBridge {
       }
     | undefined;
   lastArtifactListSessionId: string | undefined;
+  lastArtifactListContext:
+    | Parameters<HttpAcpBridge['getSessionArtifacts']>[1]
+    | undefined;
   lastRemovedArtifact:
     | {
         sessionId: string;
@@ -408,8 +411,12 @@ class FakeBridge {
         context: Parameters<HttpAcpBridge['removeSessionArtifact']>[2];
       }
     | undefined;
-  async getSessionArtifacts(sessionId: string) {
+  async getSessionArtifacts(
+    sessionId: string,
+    context: Parameters<HttpAcpBridge['getSessionArtifacts']>[1],
+  ) {
     this.lastArtifactListSessionId = sessionId;
+    this.lastArtifactListContext = context;
     return {
       v: 1,
       sessionId,
@@ -6042,6 +6049,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         },
       });
       expect(bridge.lastArtifactListSessionId).toBe('sess-1');
+      expect(bridge.lastArtifactListContext).toEqual({
+        clientId: 'client-1',
+        fromLoopback: true,
+      });
     });
 
     it('_qwen/session/artifacts/add forwards only public artifact fields', async () => {
@@ -6098,6 +6109,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(artifact).not.toHaveProperty('clientId');
       expect(artifact).not.toHaveProperty('toolName');
       expect(artifact).not.toHaveProperty('hookEventName');
+      expect(bridge.lastAddedArtifact?.context).toEqual({
+        clientId: 'client-1',
+        fromLoopback: true,
+      });
     });
 
     it('_qwen/session/artifacts/add maps artifact validation errors to invalid params', async () => {
@@ -6173,6 +6188,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(bridge.lastRemovedArtifact).toMatchObject({
         sessionId: 'sess-1',
         artifactId: 'artifact-1',
+        context: {
+          clientId: 'client-1',
+          fromLoopback: true,
+        },
       });
     });
 

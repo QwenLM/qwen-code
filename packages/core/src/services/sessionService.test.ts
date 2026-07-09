@@ -2721,6 +2721,71 @@ describe('SessionService', () => {
       ]);
     });
 
+    it('does not treat trailing artifact side records as the fork leaf', async () => {
+      const oldId = '73737373-7373-7373-7373-737373737373';
+      const newId = '83838383-8383-8383-8383-838383838383';
+      const { file, lines } = seedSession(oldId);
+      const url = 'https://example.com/trailing-forked';
+      const oldArtifactId = stableSessionArtifactId(oldId, `url:${url}`);
+      const artifactRecord = {
+        uuid: 'artifact-tail',
+        parentUuid: 'u2',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:01.500Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 1,
+          recordedAt: '2026-04-22T00:00:01.500Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId: oldArtifactId,
+              artifact: {
+                id: oldArtifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Trailing forked artifact',
+                url,
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-04-22T00:00:01.500Z',
+                updatedAt: '2026-04-22T00:00:01.500Z',
+                persistedAt: '2026-04-22T00:00:01.500Z',
+              },
+            },
+          ],
+        },
+      };
+      fs.writeFileSync(
+        file,
+        [...lines, artifactRecord]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const loaded = await service.loadSession(newId);
+
+      expect(result.copiedCount).toBe(3);
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['u1', 'u2']);
+      expect(loaded?.lastCompletedUuid).toBe('u2');
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([
+        expect.objectContaining({
+          id: stableSessionArtifactId(newId, `url:${url}`),
+          title: 'Trailing forked artifact',
+        }),
+      ]);
+    });
+
     it('does not resurrect artifacts removed by later side records when forking', async () => {
       const oldId = '72727272-7272-7272-7272-727272727272';
       const newId = '82828282-8282-8282-8282-828282828282';

@@ -217,6 +217,7 @@ interface NormalizedArtifact extends DaemonSessionArtifact {
 interface StoredArtifact extends NormalizedArtifact {
   insertSeq: number;
   durableTombstoneRequired?: boolean;
+  hideWorkspacePath?: boolean;
 }
 
 interface WorkspaceStatusExpected {
@@ -867,9 +868,7 @@ export class SessionArtifactStore {
     const artifacts = Array.from(this.artifacts.values())
       .filter((artifact) => artifact.retention !== 'ephemeral')
       .sort((a, b) => a.insertSeq - b.insertSeq)
-      .map((artifact) =>
-        toPersistedArtifact(toPublicArtifact(artifact), recordedAt),
-      );
+      .map((artifact) => toPersistedArtifact(artifact, recordedAt));
     const stickyEphemeralIds = Array.from(this.stickyEphemeralIds);
     return {
       v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
@@ -1241,7 +1240,7 @@ export class SessionArtifactStore {
       if (status.escaped) {
         artifact.status = 'missing';
         artifact.sizeBytes = undefined;
-        delete artifact.workspacePath;
+        artifact.hideWorkspacePath = true;
       }
       artifact.lastStatAt = options.now ?? Date.now();
     } catch (error) {
@@ -1457,6 +1456,12 @@ function mergeArtifact(
       publishedUpdate || existing.storage === 'published'
         ? undefined
         : (existing.workspacePath ?? incoming.workspacePath),
+    hideWorkspacePath:
+      publishedUpdate ||
+      existing.storage === 'published' ||
+      incoming.workspacePath
+        ? undefined
+        : existing.hideWorkspacePath,
     mimeType: publishedUpdate
       ? (incoming.mimeType ?? existing.mimeType)
       : existing.mimeType,
@@ -1490,6 +1495,7 @@ function mergeArtifact(
     next.title = incoming.title;
     next.description = incoming.description;
     delete next.workspacePath;
+    delete next.hideWorkspacePath;
   }
 
   const changed = !publicArtifactsEqual(
@@ -1711,6 +1717,8 @@ function removePriorChange(
 function toPublicArtifact(
   artifact: StoredArtifact | DaemonSessionArtifact,
 ): DaemonSessionArtifact {
+  const hideWorkspacePath =
+    'hideWorkspacePath' in artifact && artifact.hideWorkspacePath === true;
   const {
     id,
     kind,
@@ -1745,7 +1753,7 @@ function toPublicArtifact(
     status,
     title,
     ...(description ? { description } : {}),
-    ...(workspacePath ? { workspacePath } : {}),
+    ...(workspacePath && !hideWorkspacePath ? { workspacePath } : {}),
     ...(managedId ? { managedId } : {}),
     ...(url ? { url } : {}),
     ...(mimeType ? { mimeType } : {}),

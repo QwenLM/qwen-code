@@ -1466,7 +1466,13 @@ export class SessionService {
 
     // Copy only the active branch. Rewind leaves old records in the JSONL as
     // abandoned parentUuid branches; copying raw records would resurrect them.
-    const { messages: activeMessages } = this.reconstructHistory(records);
+    const leafUuid = this.lastConversationRecordUuid(records);
+    if (!leafUuid) {
+      throw new Error(`Source session not found or empty: ${sourceSessionId}`);
+    }
+    const { messages: activeMessages } = this.reconstructHistory(records, {
+      leafUuid,
+    });
     const sourceRecords = includeActiveSideArtifactRecords(
       records,
       activeMessages,
