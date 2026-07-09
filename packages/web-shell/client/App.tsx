@@ -424,7 +424,11 @@ export interface WebShellProps {
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
   renderWelcomeFooter?: WelcomeFooterRenderer;
-  /** Show renderWelcomeFooter between the welcome header and composer on mobile empty state. */
+  /**
+   * Show renderWelcomeFooter between the welcome header and composer on
+   * mobile empty state. Requires renderWelcomeFooter to be provided for the
+   * mobile CSS reordering to take effect.
+   */
   mobileWelcomeFooterMiddle?: boolean;
   /** Custom renderer for the inside of user chat bubbles. Defaults to plain text. */
   renderUserMessageContent?: UserMessageContentRenderer;
@@ -4679,7 +4683,6 @@ export function App({
                 hasMobileComposerBottom
                   ? styles.chatPaneWithMobileComposerBottom
                   : undefined,
-                hasWelcomeMiddle ? styles.chatPaneWithWelcomeMiddle : undefined,
               ]
                 .filter(Boolean)
                 .join(' ')}
@@ -4954,63 +4957,19 @@ export function App({
                         timeline={todoTimeline}
                         details={todoDetails}
                       >
-                        {showMobileWelcomeFooterMiddle ? (
-                          <div className={styles.mobileWelcomeGroup}>
-                            <div
-                              className={[
-                                styles.content,
-                                showFloatingTodos ||
-                                displayMessages.length > 0 ||
-                                pendingApproval
-                                  ? styles.contentHasMessages
-                                  : undefined,
-                              ]
-                                .filter(Boolean)
-                                .join(' ')}
-                            >
-                              <MessageList
-                                ref={messageListRef}
-                                messages={displayMessages}
-                                pendingApproval={pendingToolApproval}
-                                onShowContextDetail={handleShowContextDetail}
-                                loadingTranscript={connection.loadingTranscript}
-                                catchingUp={connection.catchingUp}
-                                isResponding={streamingState !== 'idle'}
-                                activeTurnStartedAt={activeTurnStartedAt}
-                                workspaceCwd={connection.workspaceCwd || ''}
-                                hideSessionTimeline={
-                                  effectiveChatWidthMode === 'wide'
-                                }
-                                showRetryHint={showRetryHint}
-                                onRetryClick={handleRetry}
-                                onBranchSession={handleBranchCurrentSession}
-                                welcomeHeader={welcomeHeader}
-                                centerWelcomeHeader
-                                tailContent={undefined}
-                                tailKey={undefined}
-                                onCanScrollToBottomChange={
-                                  handleCanScrollToBottomChange
-                                }
-                                virtualScrollThreshold={virtualScrollThreshold}
-                              />
-                            </div>
-                            <div className={styles.mobileWelcomeFooterMiddle}>
-                              {welcomeFooter}
-                            </div>
-                          </div>
-                        ) : (
-                          <div
-                            className={[
-                              styles.content,
-                              showFloatingTodos ||
-                              displayMessages.length > 0 ||
-                              pendingApproval
-                                ? styles.contentHasMessages
-                                : undefined,
-                            ]
-                              .filter(Boolean)
-                              .join(' ')}
-                          >
+                        {(() => {
+                          const contentClassName = [
+                            styles.content,
+                            showFloatingTodos ||
+                            displayMessages.length > 0 ||
+                            pendingApproval
+                              ? styles.contentHasMessages
+                              : undefined,
+                          ]
+                            .filter(Boolean)
+                            .join(' ');
+
+                          const messageList = (
                             <MessageList
                               ref={messageListRef}
                               messages={displayMessages}
@@ -5030,6 +4989,9 @@ export function App({
                               welcomeHeader={
                                 isChatEmptyState ? welcomeHeader : undefined
                               }
+                              centerWelcomeHeader={
+                                showMobileWelcomeFooterMiddle || undefined
+                              }
                               tailContent={undefined}
                               tailKey={undefined}
                               onCanScrollToBottomChange={
@@ -5037,7 +4999,11 @@ export function App({
                               }
                               virtualScrollThreshold={virtualScrollThreshold}
                             />
-                            {btwMessage?.role === 'btw' && (
+                          );
+
+                          const btwPanel =
+                            !showMobileWelcomeFooterMiddle &&
+                            btwMessage?.role === 'btw' ? (
                               <div className={styles.btwPanel}>
                                 <BtwMessage
                                   question={btwMessage.question}
@@ -5045,9 +5011,29 @@ export function App({
                                   isPending={btwMessage.isPending}
                                 />
                               </div>
-                            )}
-                          </div>
-                        )}
+                            ) : null;
+
+                          const contentArea = (
+                            <div className={contentClassName}>
+                              {messageList}
+                              {btwPanel}
+                            </div>
+                          );
+
+                          if (showMobileWelcomeFooterMiddle) {
+                            return (
+                              <div className={styles.mobileWelcomeGroup}>
+                                {contentArea}
+                                <div
+                                  className={styles.mobileWelcomeFooterMiddle}
+                                >
+                                  {welcomeFooter}
+                                </div>
+                              </div>
+                            );
+                          }
+                          return contentArea;
+                        })()}
                       </TodoContextsProvider>
                     </CompactModeContext.Provider>
 
