@@ -16,11 +16,19 @@ function getToolCallIds(tool: ACPToolCall): string[] {
   return Array.from(ids);
 }
 
+interface RecordArtifactReference {
+  turnId: string;
+  workspacePath?: string;
+  managedId?: string;
+  url?: string;
+}
+
 export function getArtifactsByTurn(
   messages: readonly Message[],
   artifacts: readonly DaemonSessionArtifact[],
 ): ReadonlyMap<string, readonly DaemonSessionArtifact[]> {
   const toolCallTurn = new Map<string, string>();
+  const recordArtifactReferences: RecordArtifactReference[] = [];
   let currentTurnId: string | null = null;
   for (const message of messages) {
     if (message.role === 'user' || message.role === 'user_shell') {
@@ -32,12 +40,20 @@ export function getArtifactsByTurn(
       for (const id of getToolCallIds(tool)) {
         toolCallTurn.set(id, currentTurnId);
       }
+      collectRecordArtifactReferences(
+        tool,
+        currentTurnId,
+        recordArtifactReferences,
+      );
     }
   }
 
   const byTurn = new Map<string, DaemonSessionArtifact[]>();
   for (const artifact of artifacts) {
-    const turnIds = getRecordArtifactTurnIds(messages, artifact);
+    const turnIds = getRecordArtifactTurnIds(
+      recordArtifactReferences,
+      artifact,
+    );
     if (turnIds.size === 0 && artifact.toolCallId) {
       const turnId = toolCallTurn.get(artifact.toolCallId);
       if (turnId) turnIds.add(turnId);
@@ -54,48 +70,47 @@ export function getArtifactsByTurn(
   return byTurn;
 }
 
+function collectRecordArtifactReferences(
+  tool: ACPToolCall,
+  turnId: string,
+  references: RecordArtifactReference[],
+) {
+  if (tool.toolName.toLowerCase() === 'record_artifact') {
+    references.push({
+      turnId,
+      workspacePath: getStringField(tool.args, 'workspacePath'),
+      managedId: getStringField(tool.args, 'managedId'),
+      url: getStringField(tool.args, 'url'),
+    });
+  }
+  for (const subTool of tool.subTools ?? []) {
+    collectRecordArtifactReferences(subTool, turnId, references);
+  }
+}
+
 function getRecordArtifactTurnIds(
-  messages: readonly Message[],
+  references: readonly RecordArtifactReference[],
   artifact: DaemonSessionArtifact,
 ) {
   const turnIds = new Set<string>();
-  let currentTurnId: string | null = null;
-  for (const message of messages) {
-    if (message.role === 'user' || message.role === 'user_shell') {
-      currentTurnId = message.id;
+  for (const reference of references) {
+    if (
+      reference.workspacePath &&
+      artifact.workspacePath &&
+      isSameWorkspacePath(reference.workspacePath, artifact.workspacePath)
+    ) {
+      turnIds.add(reference.turnId);
       continue;
     }
-    if (message.role !== 'tool_group' || !currentTurnId) continue;
-    for (const tool of message.tools) {
-      if (recordArtifactToolMatches(tool, artifact)) {
-        turnIds.add(currentTurnId);
-      }
+    if (reference.managedId && reference.managedId === artifact.managedId) {
+      turnIds.add(reference.turnId);
+      continue;
+    }
+    if (reference.url && reference.url === artifact.url) {
+      turnIds.add(reference.turnId);
     }
   }
   return turnIds;
-}
-
-function recordArtifactToolMatches(
-  tool: ACPToolCall,
-  artifact: DaemonSessionArtifact,
-): boolean {
-  if (tool.toolName.toLowerCase() === 'record_artifact') {
-    const workspacePath = getStringField(tool.args, 'workspacePath');
-    if (
-      workspacePath &&
-      artifact.workspacePath &&
-      isSameWorkspacePath(workspacePath, artifact.workspacePath)
-    ) {
-      return true;
-    }
-    const managedId = getStringField(tool.args, 'managedId');
-    if (managedId && managedId === artifact.managedId) return true;
-    const url = getStringField(tool.args, 'url');
-    if (url && url === artifact.url) return true;
-  }
-  return (tool.subTools ?? []).some((subTool) =>
-    recordArtifactToolMatches(subTool, artifact),
-  );
 }
 
 export function getFileChangesByTurn(
@@ -213,8 +228,8 @@ function getFileChange(
   if (!filePath) return null;
   const normalizedPath = normalizePath(filePath);
   const status = inferFileChangeStatus(tool);
-  const lineStats = getFileChangeLineStats(tool);
   const diffs = getFileChangeDiffs(tool);
+  const lineStats = getFileChangeLineStats(diffs);
   return {
     path: filePath,
     status,
@@ -224,8 +239,9 @@ function getFileChange(
       Array.from(artifactPaths).some((artifactPath) =>
         isSameWorkspacePath(normalizedPath, artifactPath),
       ),
-    additions: lineStats.additions,
-    deletions: lineStats.deletions,
+    ...(lineStats
+      ? { additions: lineStats.additions, deletions: lineStats.deletions }
+      : {}),
     diffs,
   };
 }
@@ -266,37 +282,16 @@ function inferFileChangeStatus(
   return 'modified';
 }
 
-function getFileChangeLineStats(tool: ACPToolCall): {
-  additions: number;
-  deletions: number;
-} {
-  const raw = getRawOutputRecord(tool);
-  const diffStat =
-    raw?.diffStat && typeof raw.diffStat === 'object'
-      ? (raw.diffStat as Record<string, unknown>)
-      : undefined;
-  if (diffStat) {
-    return {
-      additions: getNumberField(diffStat, 'model_added_lines'),
-      deletions: getNumberField(diffStat, 'model_removed_lines'),
-    };
-  }
-
-  let additions = 0;
-  let deletions = 0;
-  for (const content of tool.content ?? []) {
-    if (content.type !== 'diff') continue;
-    additions += countLines(content.newText);
-    deletions += countLines(content.oldText);
-  }
-  if (additions > 0 || deletions > 0) return { additions, deletions };
-  if (tool.toolName.toLowerCase() === 'write_file') {
-    return {
-      additions: countLines(getStringField(tool.args, 'content')),
-      deletions: 0,
-    };
-  }
-  return { additions: 0, deletions: 0 };
+function getFileChangeLineStats(diffs: TurnOutputFileChange['diffs']):
+  | {
+      additions: number;
+      deletions: number;
+    }
+  | undefined {
+  const fullDiff = getFinalFullContentDiff(diffs);
+  return fullDiff
+    ? countChangedLines(fullDiff.oldText, fullDiff.newText)
+    : undefined;
 }
 
 function getFileChangeDiffs(tool: ACPToolCall): TurnOutputFileChange['diffs'] {
@@ -338,14 +333,6 @@ function getRawOutputRecord(
     : undefined;
 }
 
-function getNumberField(
-  record: Record<string, unknown> | undefined,
-  key: string,
-) {
-  const value = record?.[key];
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
-}
-
 function getBooleanField(
   record: Record<string, unknown> | undefined,
   key: string,
@@ -372,11 +359,6 @@ function getScheduledTaskTitle(prompt: string) {
   return firstLine.length > 36 ? `${firstLine.slice(0, 36)}...` : firstLine;
 }
 
-function countLines(text: string | undefined) {
-  if (!text) return 0;
-  return text.replace(/\r?\n$/, '').split(/\r\n|\r|\n/).length;
-}
-
 function collectText(
   value: unknown,
   seen = new WeakSet<object>(),
@@ -401,31 +383,35 @@ function upsertFileChange(
   list: TurnOutputFileChange[],
   change: TurnOutputFileChange,
 ) {
+  const normalizedChangePath = normalizePath(change.path);
   const index = list.findIndex(
-    (existing) => normalizePath(existing.path) === normalizePath(change.path),
+    (existing) => normalizePath(existing.path) === normalizedChangePath,
   );
   if (index < 0) {
     list.push(change);
     return;
   }
   const existing = list[index]!;
+  const {
+    additions: _existingAdditions,
+    deletions: _existingDeletions,
+    ...existingWithoutLineStats
+  } = existing;
   const diffs = mergeFileDiffs(existing.diffs, change.diffs);
   const finalFullDiff = getFinalFullContentDiff(diffs);
   const lineStats = finalFullDiff
     ? countChangedLines(finalFullDiff.oldText, finalFullDiff.newText)
-    : {
-        additions: existing.additions + change.additions,
-        deletions: existing.deletions + change.deletions,
-      };
+    : undefined;
   list[index] = {
-    ...existing,
+    ...existingWithoutLineStats,
     status:
       existing.status === 'created' || change.status === 'created'
         ? 'created'
         : 'modified',
     isArtifact: existing.isArtifact || change.isArtifact,
-    additions: lineStats.additions,
-    deletions: lineStats.deletions,
+    ...(lineStats
+      ? { additions: lineStats.additions, deletions: lineStats.deletions }
+      : {}),
     diffs,
   };
 }
@@ -435,16 +421,10 @@ function mergeFileDiffs(
   nextDiffs: TurnOutputFileChange['diffs'],
 ): TurnOutputFileChange['diffs'] {
   const diffs = [...existingDiffs, ...nextDiffs];
-  const firstFullDiff = diffs.find((diff) => diff.fullContent);
-  if (!firstFullDiff) return diffs;
-  let lastFullDiff = firstFullDiff;
-  for (let index = diffs.length - 1; index >= 0; index--) {
-    const diff = diffs[index];
-    if (diff?.fullContent) {
-      lastFullDiff = diff;
-      break;
-    }
-  }
+  if (!diffs.every((diff) => diff.fullContent)) return diffs;
+  const firstFullDiff = diffs[0];
+  const lastFullDiff = diffs.at(-1);
+  if (!firstFullDiff || !lastFullDiff) return diffs;
   return [
     {
       oldText: firstFullDiff.oldText,

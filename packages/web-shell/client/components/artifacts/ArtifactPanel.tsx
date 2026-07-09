@@ -38,6 +38,7 @@ import {
   type TurnOutputFileDiff,
   type TurnOutputScheduledTask,
 } from './TurnOutputs';
+import { LineStats, sumLineStats } from './LineStats';
 import styles from './ArtifactPanel.module.css';
 
 const MIN_PANEL_WIDTH_FOR_DEFAULT_TREE = 740;
@@ -892,14 +893,7 @@ function ReviewChanges({
     return <div className={styles.empty}>No file changes to review.</div>;
   }
 
-  const totalAdditions = changes.reduce(
-    (total, change) => total + change.additions,
-    0,
-  );
-  const totalDeletions = changes.reduce(
-    (total, change) => total + change.deletions,
-    0,
-  );
+  const totals = sumLineStats(changes);
   const toggleDiff = (path: string) => {
     setExpandedPath((current) => (current === path ? null : path));
   };
@@ -909,7 +903,13 @@ function ReviewChanges({
       <div className={styles.reviewToolbar}>
         <div className={styles.reviewToolbarTitle}>
           <span>{t('turnOutputs.previousTurn')}</span>
-          <LineStats additions={totalAdditions} deletions={totalDeletions} />
+          <LineStats
+            additions={totals?.additions}
+            deletions={totals?.deletions}
+            className={styles.lineStats}
+            additionsClassName={styles.additions}
+            deletionsClassName={styles.deletions}
+          />
         </div>
         <div className={styles.reviewToolbarActions}>
           <button
@@ -1007,6 +1007,9 @@ function ReviewChanges({
                     <LineStats
                       additions={change.additions}
                       deletions={change.deletions}
+                      className={styles.lineStats}
+                      additionsClassName={styles.additions}
+                      deletionsClassName={styles.deletions}
                     />
                     <span
                       className={[
@@ -1275,21 +1278,6 @@ function TreeNode({
         </div>
       )}
     </div>
-  );
-}
-
-function LineStats({
-  additions,
-  deletions,
-}: {
-  additions: number;
-  deletions: number;
-}) {
-  return (
-    <span className={styles.lineStats}>
-      <span className={styles.additions}>+{additions}</span>
-      <span className={styles.deletions}>-{deletions}</span>
-    </span>
   );
 }
 
@@ -1673,11 +1661,16 @@ function HtmlArtifactPreview({
 
 function withArtifactPreviewCsp(html: string) {
   const csp =
-    '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data: blob:;">';
-  if (/<head[\s>]/i.test(html)) {
-    return html.replace(/<head([^>]*)>/i, `<head$1>${csp}`);
+    "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:;";
+  if (typeof DOMParser === 'undefined') {
+    return `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${csp}"></head><body>${html}</body></html>`;
   }
-  return `${csp}${html}`;
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const meta = doc.createElement('meta');
+  meta.httpEquiv = 'Content-Security-Policy';
+  meta.content = csp;
+  doc.head.prepend(meta);
+  return `<!doctype html>${doc.documentElement.outerHTML}`;
 }
 
 function FileArtifactPreview({ workspacePath }: { workspacePath: string }) {

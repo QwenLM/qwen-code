@@ -79,6 +79,7 @@ import type {
   TurnOutputOpenRequest,
   TurnOutputScheduledTask,
 } from './components/artifacts/TurnOutputs';
+import { TURN_OUTPUT_KINDS } from './components/artifacts/TurnOutputs';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -257,11 +258,6 @@ const DEFAULT_REVIEW_PANEL_WIDTH = 760;
 const MIN_ARTIFACT_PANEL_WIDTH = 320;
 const MIN_CHAT_PANE_WIDTH_WITH_ARTIFACT_PANEL = 500;
 const MAX_ARTIFACT_PANEL_SESSION_STATES = 20;
-const TURN_OUTPUT_KINDS: readonly TurnOutputKind[] = [
-  'file',
-  'artifact',
-  'scheduled_task',
-];
 interface ArtifactPanelSessionState {
   open: boolean;
   tabs: ArtifactPanelTab[];
@@ -1140,6 +1136,8 @@ export function App({
   const [activeArtifactPanelTabId, setActiveArtifactPanelTabId] = useState<
     string | null
   >(null);
+  const activeArtifactPanelTabIdRef = useRef(activeArtifactPanelTabId);
+  activeArtifactPanelTabIdRef.current = activeArtifactPanelTabId;
   const [reviewChanges, setReviewChanges] = useState<
     readonly TurnOutputFileChange[]
   >([]);
@@ -1243,7 +1241,9 @@ export function App({
   const openArtifactPanel = useCallback(
     (artifactId: string, previewContent?: string) => {
       if (!artifactId) return;
-      const artifact = artifacts.find((item) => item.id === artifactId);
+      const artifact = artifactPanelArtifacts.find(
+        (item) => item.id === artifactId,
+      );
       const tab: ArtifactPanelTab = {
         id: `artifact:${artifactId}`,
         kind: 'artifact',
@@ -1264,7 +1264,7 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [artifacts, getDefaultReviewPanelWidth],
+    [artifactPanelArtifacts, getDefaultReviewPanelWidth],
   );
   const openReviewPanel = useCallback(
     (changes: readonly TurnOutputFileChange[], selectedPath?: string) => {
@@ -1389,26 +1389,23 @@ export function App({
       observer.disconnect();
     };
   }, [artifactPanelOpen]);
-  const closeArtifactPanelTab = useCallback(
-    (tabId: string) => {
-      setArtifactPanelTabs((tabs) => {
-        const nextTabs = tabs.filter((tab) => tab.id !== tabId);
-        if (nextTabs.length === 0) {
-          setArtifactPanelOpen(false);
-          setActiveArtifactPanelTabId(null);
-          return nextTabs;
-        }
-        if (activeArtifactPanelTabId === tabId) {
-          const closedIndex = tabs.findIndex((tab) => tab.id === tabId);
-          const nextActive =
-            nextTabs[Math.min(closedIndex, nextTabs.length - 1)] ?? nextTabs[0];
-          setActiveArtifactPanelTabId(nextActive.id);
-        }
+  const closeArtifactPanelTab = useCallback((tabId: string) => {
+    setArtifactPanelTabs((tabs) => {
+      const nextTabs = tabs.filter((tab) => tab.id !== tabId);
+      if (nextTabs.length === 0) {
+        setArtifactPanelOpen(false);
+        setActiveArtifactPanelTabId(null);
         return nextTabs;
-      });
-    },
-    [activeArtifactPanelTabId],
-  );
+      }
+      if (activeArtifactPanelTabIdRef.current === tabId) {
+        const closedIndex = tabs.findIndex((tab) => tab.id === tabId);
+        const nextActive =
+          nextTabs[Math.min(closedIndex, nextTabs.length - 1)] ?? nextTabs[0];
+        setActiveArtifactPanelTabId(nextActive.id);
+      }
+      return nextTabs;
+    });
+  }, []);
   const handleArtifactPanelResizeStart = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
       event.preventDefault();

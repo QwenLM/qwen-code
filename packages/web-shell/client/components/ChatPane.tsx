@@ -36,6 +36,7 @@ import type {
   TurnOutputKind,
   TurnOutputOpenRequest,
 } from './artifacts/TurnOutputs';
+import { TURN_OUTPUT_KINDS } from './artifacts/TurnOutputs';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -52,12 +53,6 @@ const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
   'model',
   'voice',
 ];
-const TURN_OUTPUT_KINDS: readonly TurnOutputKind[] = [
-  'file',
-  'artifact',
-  'scheduled_task',
-];
-
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */
   title?: string;

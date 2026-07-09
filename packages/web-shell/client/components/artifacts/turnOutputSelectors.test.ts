@@ -131,6 +131,66 @@ describe('turnOutputSelectors', () => {
     ]);
   });
 
+  it('omits stats for repeated partial diffs without full content', () => {
+    const messages = [
+      userMessage('u1', 'edit file twice'),
+      toolGroup('tg1', [
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          content: [{ type: 'diff', oldText: 'one\n', newText: 'one\ntwo\n' }],
+        },
+        {
+          callId: 'edit-2',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          content: [{ type: 'diff', oldText: 'one\ntwo\n', newText: 'one\n' }],
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change?.additions).toBeUndefined();
+    expect(change?.deletions).toBeUndefined();
+    expect(change?.diffs).toEqual([
+      { oldText: 'one\n', newText: 'one\ntwo\n' },
+      { oldText: 'one\ntwo\n', newText: 'one\n' },
+    ]);
+  });
+
+  it('omits stats for unrelated partial diffs', () => {
+    const messages = [
+      userMessage('u1', 'edit file twice'),
+      toolGroup('tg1', [
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          content: [{ type: 'diff', oldText: 'one\n', newText: 'two\n' }],
+        },
+        {
+          callId: 'edit-2',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          content: [{ type: 'diff', oldText: 'three\n', newText: 'four\n' }],
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change?.additions).toBeUndefined();
+    expect(change?.deletions).toBeUndefined();
+    expect(change?.diffs).toEqual([
+      { oldText: 'one\n', newText: 'two\n' },
+      { oldText: 'three\n', newText: 'four\n' },
+    ]);
+  });
+
   it('does not match two different relative paths by suffix', () => {
     const messages = [
       userMessage('u1', 'edit file'),

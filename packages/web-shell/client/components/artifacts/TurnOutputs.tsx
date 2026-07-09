@@ -1,5 +1,5 @@
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
@@ -8,6 +8,7 @@ import {
   isSamePath,
   stripWorkspacePath,
 } from './artifactUtils';
+import { LineStats, sumLineStats } from './LineStats';
 import styles from './TurnOutputs.module.css';
 
 export interface TurnOutputFileChange {
@@ -15,8 +16,8 @@ export interface TurnOutputFileChange {
   status: 'created' | 'modified';
   toolCallId: string;
   isArtifact: boolean;
-  additions: number;
-  deletions: number;
+  additions?: number;
+  deletions?: number;
   diffs: TurnOutputFileDiff[];
 }
 
@@ -39,6 +40,12 @@ export interface TurnOutputScheduledTask {
 }
 
 export type TurnOutputKind = 'file' | 'artifact' | 'scheduled_task';
+
+export const TURN_OUTPUT_KINDS: readonly TurnOutputKind[] = [
+  'file',
+  'artifact',
+  'scheduled_task',
+];
 
 export type TurnOutputOpenRequest =
   | {
@@ -81,7 +88,7 @@ interface TurnOutputsProps {
   onOpenScheduledTask: (task: TurnOutputScheduledTask) => void;
 }
 
-export function TurnOutputs({
+function TurnOutputsComponent({
   turnId,
   changes,
   artifacts,
@@ -188,8 +195,11 @@ export function TurnOutputs({
                 {t('turnOutputs.filesEdited', { count: changes.length })}
               </div>
               <LineStats
-                additions={totals.additions}
-                deletions={totals.deletions}
+                additions={totals?.additions}
+                deletions={totals?.deletions}
+                className={styles.lineStats}
+                additionsClassName={styles.additions}
+                deletionsClassName={styles.deletions}
               />
               <button
                 type="button"
@@ -225,6 +235,9 @@ export function TurnOutputs({
                 <LineStats
                   additions={change.additions}
                   deletions={change.deletions}
+                  className={styles.lineStats}
+                  additionsClassName={styles.additions}
+                  deletionsClassName={styles.deletions}
                 />
               </button>
             ))}
@@ -429,30 +442,7 @@ function ChevronIcon({ open }: { open: boolean }) {
   );
 }
 
-function LineStats({
-  additions,
-  deletions,
-}: {
-  additions: number;
-  deletions: number;
-}) {
-  return (
-    <span className={styles.lineStats}>
-      <span className={styles.additions}>+{additions}</span>
-      <span className={styles.deletions}>-{deletions}</span>
-    </span>
-  );
-}
-
-function sumLineStats(changes: readonly TurnOutputFileChange[]) {
-  return changes.reduce(
-    (sum, change) => ({
-      additions: sum.additions + change.additions,
-      deletions: sum.deletions + change.deletions,
-    }),
-    { additions: 0, deletions: 0 },
-  );
-}
+export const TurnOutputs = memo(TurnOutputsComponent);
 
 function getArtifactPreviewContent(
   artifact: DaemonSessionArtifact,
