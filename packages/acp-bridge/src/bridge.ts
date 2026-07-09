@@ -6156,6 +6156,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const artifactSnapshotWarnings = shouldRecordArtifactSnapshot
         ? await entry.artifacts.recordSnapshot()
         : [];
+      const artifactWarnings = [
+        ...artifactRestoreWarnings,
+        ...artifactSnapshotWarnings,
+      ];
       for (const warning of artifactRestoreWarnings) {
         writeStderrLine(
           `[artifacts] session=${entry.sessionId} action=rewind_restore_warning warning=${JSON.stringify(
@@ -6185,6 +6189,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             targetTurnIndex,
             filesChanged,
             filesFailed,
+            ...(artifactWarnings.length > 0
+              ? { warnings: artifactWarnings }
+              : {}),
           },
           ...(originatorClientId ? { originatorClientId } : {}),
         });
@@ -6197,6 +6204,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         targetTurnIndex,
         filesChanged,
         filesFailed,
+        ...(artifactWarnings.length > 0 ? { warnings: artifactWarnings } : {}),
       };
     },
 

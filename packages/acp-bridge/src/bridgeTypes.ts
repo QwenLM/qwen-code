@@ -62,6 +62,7 @@ export interface RewindResponse {
   targetTurnIndex: number;
   filesChanged: string[];
   filesFailed: string[];
+  warnings?: string[];
 }
 
 export interface BridgeSpawnRequest {

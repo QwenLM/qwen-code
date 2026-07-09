@@ -145,6 +145,10 @@ export interface SessionArtifactChange {
   durableTombstoneRequired?: boolean;
 }
 
+type InternalSessionArtifactChange = SessionArtifactChange & {
+  removedClientId?: string;
+};
+
 export interface SessionArtifactsEnvelope {
   v: 1;
   sessionId: string;
@@ -389,7 +393,7 @@ export class SessionArtifactStore {
           const updated = mergeArtifact(existing, artifact);
           if (updated.changed) {
             if (updated.artifact.id !== existing.id) {
-              changes.push({
+              const removeChange: InternalSessionArtifactChange = {
                 action: 'removed',
                 artifactId: existing.id,
                 artifact: toPublicArtifact(existing),
@@ -397,7 +401,9 @@ export class SessionArtifactStore {
                 durableTombstoneRequired:
                   existing.durableTombstoneRequired ||
                   existing.persistedAt !== undefined,
-              });
+                removedClientId: existing.clientId,
+              };
+              changes.push(removeChange);
               this.artifacts.delete(existing.id);
             } else if (shouldRecordEphemeralUnpin(existing, artifact)) {
               changes.push({
@@ -572,9 +578,7 @@ export class SessionArtifactStore {
       // Tool/hook artifacts are session-scoped outputs and may be removed by
       // any caller that already passed session mutation auth.
       this.denyCrossClientMutation('remove', artifactId, existing, options);
-      const removeChange: SessionArtifactChange & {
-        durableTombstoneRequired?: boolean;
-      } = {
+      const removeChange: InternalSessionArtifactChange = {
         action: 'removed',
         artifactId,
         artifact: toPublicArtifact(existing),
@@ -584,6 +588,7 @@ export class SessionArtifactStore {
           existing.retention !== 'ephemeral'
             ? true
             : undefined,
+        removedClientId: existing.clientId,
       };
       const changes: SessionArtifactChange[] = [removeChange];
       const needsDurableTombstone =
@@ -1183,7 +1188,11 @@ export class SessionArtifactStore {
   private rememberTombstone(change: SessionArtifactChange): void {
     this.tombstonedIds.delete(change.artifactId);
     this.tombstonedIds.add(change.artifactId);
-    this.tombstonedClientIds.set(change.artifactId, change.artifact?.clientId);
+    this.tombstonedClientIds.set(
+      change.artifactId,
+      (change as InternalSessionArtifactChange).removedClientId ??
+        this.artifacts.get(change.artifactId)?.clientId,
+    );
     if (change.artifact) {
       this.markerArtifacts.set(
         change.artifactId,
@@ -2155,6 +2164,7 @@ function isDurablePersistenceChange(change: SessionArtifactChange): boolean {
 function stripDurableTombstoneMarkers(changes: SessionArtifactChange[]): void {
   for (const change of changes) {
     delete change.durableTombstoneRequired;
+    delete (change as InternalSessionArtifactChange).removedClientId;
   }
 }
 

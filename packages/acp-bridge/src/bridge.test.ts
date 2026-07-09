@@ -1879,6 +1879,65 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('surfaces rewind artifact snapshot persistence warnings', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/control/session/artifacts/persist') {
+              if (params['kind'] === 'snapshot') {
+                throw new Error('disk full');
+              }
+              return {};
+            }
+            expect(method).toBe('qwen/control/session/rewind');
+            return {
+              targetTurnIndex: 0,
+              filesChanged: [],
+              filesFailed: [],
+              artifactSnapshot: {
+                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                sessionId: SESS_A,
+                sequence: 0,
+                artifacts: [],
+                tombstonedIds: [],
+                stickyEphemeralIds: [],
+                warnings: [],
+              },
+            };
+          },
+        }).channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const rewoundEvent = (async () => {
+      for await (const event of bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      })) {
+        if (event.type === 'session_rewound') return event;
+      }
+      return undefined;
+    })();
+
+    await expect(
+      bridge.rewindSession(
+        session.sessionId,
+        { promptId: 'prompt-1' },
+        { clientId: session.clientId },
+      ),
+    ).resolves.toMatchObject({
+      targetTurnIndex: 0,
+      warnings: ['artifact snapshot not persisted'],
+    });
+    await expect(rewoundEvent).resolves.toMatchObject({
+      type: 'session_rewound',
+      data: { warnings: ['artifact snapshot not persisted'] },
+    });
+    abort.abort();
+
+    await bridge.shutdown();
+  });
+
   it('loads history replay from response metadata when requested', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {

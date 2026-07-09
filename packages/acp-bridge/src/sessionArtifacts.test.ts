@@ -393,6 +393,7 @@ describe('SessionArtifactStore', () => {
 
   it('keeps client ids live while omitting them from durable artifact records', async () => {
     const events: SessionArtifactEventRecordPayload[] = [];
+    const url = 'https://example.com/client';
     const store = new SessionArtifactStore({
       sessionId: 's1-client-id-durable',
       workspaceCwd: workspace,
@@ -408,7 +409,7 @@ describe('SessionArtifactStore', () => {
       [
         {
           title: 'Client artifact',
-          url: 'https://example.com/client',
+          url,
           source: 'client',
           clientId: 'client-a',
         },
@@ -438,6 +439,27 @@ describe('SessionArtifactStore', () => {
     expect(events[0]?.changes[0]?.artifact).not.toHaveProperty(
       'persistenceWarning',
     );
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Client artifact',
+            url,
+            source: 'client',
+            clientId: 'client-a',
+            retention: 'restorable',
+          },
+        ],
+        { strict: true },
+      ),
+    ).resolves.toMatchObject({
+      changes: [
+        {
+          action: 'created',
+          artifactId: created.changes[0]!.artifactId,
+        },
+      ],
+    });
   });
 
   it('drops legacy client ownership from restored durable artifact records', async () => {
