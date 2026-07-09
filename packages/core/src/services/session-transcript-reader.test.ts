@@ -264,6 +264,14 @@ describe('SessionTranscriptReader', () => {
     });
   });
 
+  it('rejects path-like session ids before building a transcript path', async () => {
+    const reader = new SessionTranscriptReader(workspaceDir);
+
+    await expect(reader.readPage('../escape')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   it('rejects tampered cursor snapshots before cache lookup', async () => {
     await writeRecords([
       record('u1', null, 'hello'),

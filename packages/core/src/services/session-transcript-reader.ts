@@ -115,9 +115,22 @@ const INDEX_CACHE_TTL_MS = 5 * 60 * 1000;
 const READ_CHUNK_SIZE = 64 * 1024;
 const CURSOR_HMAC_KEY_BYTES = 32;
 const CURSOR_HMAC_KEY_FILENAME = 'session-transcript-cursor-key';
+const SESSION_TRANSCRIPT_SESSION_ID_PATTERN = /^[0-9a-fA-F-]{32,36}$/;
 
 const indexCache = new Map<string, CacheEntry>();
 const cursorHmacKeys = new Map<string, Buffer>();
+
+function makeSessionTranscriptNotFoundError(
+  sessionId: string,
+): NodeJS.ErrnoException {
+  const error = new Error(
+    `ENOENT: no such file or directory, open '${sessionId}.jsonl'`,
+  ) as NodeJS.ErrnoException;
+  error.code = 'ENOENT';
+  error.errno = -2;
+  error.syscall = 'open';
+  return error;
+}
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -653,6 +666,9 @@ export class SessionTranscriptReader {
   }
 
   getSessionFilePath(sessionId: string): string {
+    if (!SESSION_TRANSCRIPT_SESSION_ID_PATTERN.test(sessionId)) {
+      throw makeSessionTranscriptNotFoundError(sessionId);
+    }
     return path.join(
       this.storage.getProjectDir(),
       'chats',
