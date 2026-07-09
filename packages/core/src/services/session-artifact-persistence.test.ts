@@ -766,6 +766,55 @@ describe('session artifact persistence records', () => {
     expect(remapped.artifacts[0]).not.toHaveProperty('persistenceWarning');
   });
 
+  it('drops unsafe snapshot marker artifacts before fork persistence', () => {
+    const unsafe = artifact(
+      'source-session',
+      'https://example.com/deleted-unsafe',
+      {
+        metadata: { apiKey: 'redacted' },
+      },
+    );
+    const safe = artifact(
+      'source-session',
+      'https://example.com/deleted-safe',
+      {
+        metadata: { label: 'safe' },
+      },
+    );
+
+    const remapped = remapSessionArtifactPayloadForFork(
+      {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 'source-session',
+        sequence: 7,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        artifacts: [],
+        tombstonedIds: [unsafe.id, safe.id],
+        markerArtifacts: [unsafe, safe],
+      },
+      'source-session',
+      'forked-session',
+    ) as SessionArtifactSnapshotRecordPayload;
+
+    const forkedSafeId = stableSessionArtifactId(
+      'forked-session',
+      'url:https://example.com/deleted-safe',
+    );
+    expect(remapped.tombstonedIds).toEqual([
+      stableSessionArtifactId(
+        'forked-session',
+        `fork:source-session:${unsafe.id}`,
+      ),
+      forkedSafeId,
+    ]);
+    expect(remapped.markerArtifacts).toEqual([
+      expect.objectContaining({
+        id: forkedSafeId,
+        metadata: { label: 'safe' },
+      }),
+    ]);
+  });
+
   it('falls back for snapshot marker ids without identity metadata', () => {
     const remapped = remapSessionArtifactPayloadForFork(
       {

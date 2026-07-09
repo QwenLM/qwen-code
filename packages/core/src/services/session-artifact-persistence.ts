@@ -22,6 +22,8 @@ const MAX_PERSISTED_URL_CHARS = 2048;
 const MAX_PERSISTED_MIME_CHARS = 120;
 const MAX_PERSISTED_FIELD_CHARS = 200;
 const MAX_PERSISTED_TIMESTAMP_CHARS = 64;
+const SECRET_TOKEN_VALUE_PATTERN =
+  /(?:^|\s)(?:bearer\s+\S{8,}|sk-[A-Za-z0-9_-]{12,}|(?:gh[pousr]|github_pat)_[A-Za-z0-9_/-]{12,}|[a-f0-9]{40,}|[A-Za-z0-9+/]{48,}={0,2})(?:$|\s)/i;
 
 export type SessionArtifactRetention = 'ephemeral' | 'restorable' | 'pinned';
 
@@ -320,6 +322,7 @@ export function remapSessionArtifactPayloadForFork(
     ]);
     const markerArtifacts = (snapshotMarkerArtifacts ?? [])
       .filter((artifact) => markerIds.has(artifact.id))
+      .filter((artifact) => isForkSafeMarkerArtifact(artifact))
       .map((artifact) => {
         const remapped = remapSessionArtifactForFork(
           artifact,
@@ -435,6 +438,90 @@ function remapSessionArtifactForFork(
   delete next.contentRef;
   delete next.expiresAt;
   return next;
+}
+
+function isForkSafeMarkerArtifact(artifact: PersistedSessionArtifact): boolean {
+  if (artifact.metadata && hasRestoreUnsafeMetadata(artifact.metadata)) {
+    return false;
+  }
+  if (artifact.url && hasRestoreUnsafeUrl(artifact.url)) {
+    return false;
+  }
+  return true;
+}
+
+function hasRestoreUnsafeMetadata(
+  metadata: Record<string, string | number | boolean | null>,
+): boolean {
+  for (const [key, value] of Object.entries(metadata)) {
+    if (!key || isSecretLikeText(key)) {
+      return true;
+    }
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      return true;
+    }
+    if (
+      typeof value === 'string' &&
+      !isReservedWorkspaceMetadataKey(key) &&
+      isSecretLikeMetadataValue(value)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasRestoreUnsafeUrl(value: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return true;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return true;
+  }
+  if (parsed.username || parsed.password) {
+    return true;
+  }
+  for (const [key, urlValue] of parsed.searchParams) {
+    if (isSecretLikeText(key) || isSecretLikeUrlValue(urlValue)) {
+      return true;
+    }
+  }
+  for (const segment of parsed.pathname.split('/').filter(Boolean)) {
+    let decodedSegment = segment;
+    try {
+      decodedSegment = decodeURIComponent(segment);
+    } catch {
+      // Keep scanning the raw segment if URL parsing accepted malformed escape.
+    }
+    if (isSecretLikeUrlValue(decodedSegment)) {
+      return true;
+    }
+  }
+  const fragment = parsed.hash.slice(1);
+  return (
+    fragment !== '' &&
+    (isSecretLikeText(fragment) || isSecretLikeUrlValue(fragment))
+  );
+}
+
+function isSecretLikeText(value: string): boolean {
+  const normalized = value.replace(/([a-z])([A-Z])/g, '$1-$2');
+  return /(?:^|[-_.])(token|secret|password|passwd|pwd|cookie|authorization|credential|signature|sig|api[-_]?key|access[-_]?key)(?:$|[-_.=&#])/i.test(
+    normalized,
+  );
+}
+
+function isSecretLikeUrlValue(value: string): boolean {
+  return SECRET_TOKEN_VALUE_PATTERN.test(value.trim());
+}
+
+function isSecretLikeMetadataValue(value: string): boolean {
+  return /^(?:bearer\s+\S{8,}|sk-[A-Za-z0-9_-]{12,}|(?:gh[pousr]|github_pat)_[A-Za-z0-9_/-]{12,})$/i.test(
+    value.trim(),
+  );
 }
 
 export function normalizeSnapshotPayload(
