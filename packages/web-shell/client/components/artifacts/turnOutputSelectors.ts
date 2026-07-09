@@ -363,7 +363,7 @@ function getFirstLine(text: string) {
 
 function getCronTaskId(text: string) {
   return text.match(
-    /\bScheduled\s+(?:(?:recurring job|one-shot task)\s+)?([a-z0-9_-]+)\b/i,
+    /\bScheduled\s+(?:recurring job|one-shot task)\s+([a-z0-9_-]+)\b/i,
   )?.[1];
 }
 

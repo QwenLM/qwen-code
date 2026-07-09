@@ -212,4 +212,26 @@ describe('turnOutputSelectors', () => {
       title: 'standup',
     });
   });
+
+  it('ignores unrelated scheduled output', () => {
+    const messages = [
+      userMessage('u1', 'schedule'),
+      toolGroup('tg1', [
+        {
+          callId: 'cron-call',
+          toolName: 'cron_create',
+          status: 'completed',
+          args: { cron: '0 9 * * *', prompt: 'standup', recurring: true },
+          rawOutput: {
+            llmContent: 'Scheduled cleanup completed.',
+          },
+        },
+      ]),
+    ];
+
+    expect(getScheduledTasksByTurn(messages).get('u1')?.[0]).toMatchObject({
+      id: 'cron-call',
+      title: 'standup',
+    });
+  });
 });
