@@ -213,6 +213,9 @@ function pickServeFastPathComparable(
   if (settings.env) {
     out.env = settings.env;
   }
+  if (settings.general?.chatRecording !== undefined) {
+    out.general = { chatRecording: settings.general.chatRecording };
+  }
   if (settings.advanced?.excludedEnvVars !== undefined) {
     out.advanced = {
       ...(out.advanced ?? {}),
@@ -1362,6 +1365,7 @@ describe('serve fast path environment bootstrap', () => {
             FAST_PATH_OVERLAP: 'workspace',
           },
           advanced: { runtimeOutputDir: '.workspace-runtime' },
+          general: { chatRecording: false },
           context: {
             fileName: 'WORKSPACE.md',
             fileFiltering: { customIgnoreFiles: ['.workspace-ignore'] },

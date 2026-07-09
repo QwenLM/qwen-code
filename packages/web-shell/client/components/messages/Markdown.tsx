@@ -536,6 +536,11 @@ function MarkdownPre({ children }: { children?: ReactNode }) {
   return <>{children}</>;
 }
 
+/** `qwen-session://<id>` links are intercepted and dispatched as a DOM event
+ * (`qwen:open-session`) so the app shell can navigate to the session without
+ * the markdown renderer needing to know about session management. */
+const QWEN_SESSION_SCHEME = /^qwen-session:\/\//i;
+
 function MarkdownLink({
   href,
   children,
@@ -543,6 +548,25 @@ function MarkdownLink({
   href?: string;
   children?: ReactNode;
 }) {
+  if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
+    const sessionId = href.trim().replace(QWEN_SESSION_SCHEME, '');
+    return (
+      <a
+        href="#"
+        role="button"
+        className={styles.link}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          window.dispatchEvent(
+            new CustomEvent('qwen:open-session', { detail: sessionId }),
+          );
+        }}
+      >
+        {children}
+      </a>
+    );
+  }
   const safeHref = isSafeHref(href) ? href : undefined;
   return (
     <a
