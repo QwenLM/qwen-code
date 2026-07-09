@@ -406,6 +406,43 @@ describe('sub-session launcher', () => {
     launcher.stop();
   });
 
+  it('refuses to spawn from a session it already spawned (depth-1 gate)', async () => {
+    // Every daemon session wires a spawner, sub-sessions included, and each
+    // gets its own cap-sized bucket. Without this gate one prompt fans out 5ⁿ.
+    const fake = makeFakeBridge({ events: (pid) => [turnComplete(pid)] });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    const first = await launcher.launch({
+      prompt: 'top level',
+      completion: 'sent',
+      callerSessionId: 'anchor',
+    });
+    expect(first.sessionId).toBe('sub-1');
+
+    // 'sub-1' is now a known sub-session — it may not spawn further ones.
+    await expect(
+      launcher.launch({
+        prompt: 'nested',
+        completion: 'sent',
+        callerSessionId: first.sessionId,
+      }),
+    ).rejects.toThrow(/nesting/i);
+    // Rejected before spawning: still exactly one session.
+    expect(fake.spawns).toHaveLength(1);
+
+    // A sibling top-level caller is unaffected.
+    const sibling = await launcher.launch({
+      prompt: 'other top level',
+      completion: 'sent',
+      callerSessionId: 'anchor-2',
+    });
+    expect(sibling.sessionId).toBe('sub-2');
+    launcher.stop();
+  });
+
   it('stop() mid-first-turn returns stopReason "shutdown"', async () => {
     const fake = makeFakeBridge({
       events: () => [chunk('partial')],

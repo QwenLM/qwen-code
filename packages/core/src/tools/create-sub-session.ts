@@ -39,6 +39,47 @@ const DAEMON_ONLY_MESSAGE =
   '(daemon mode). There is no session bridge in this environment, so a ' +
   'sub-session cannot be spawned.';
 
+/** Ceiling on the delegated prompt. Mirrors the scheduled-task REST route's
+ * `MAX_PROMPT_LENGTH`: both hand a model-authored prompt to a fresh session, so
+ * they cap it the same way. Rejected here (a clear tool error the model can act
+ * on) as well as at the bridge boundary, which cannot trust this side. */
+export const MAX_SUB_SESSION_PROMPT_CHARS = 100_000;
+
+/** Sentinel for "the caller's turn was cancelled while the spawn was in
+ * flight". A symbol, so it can never collide with a spawner result. */
+const CANCELLED = Symbol('create_sub_session:cancelled');
+
+/**
+ * Resolve as soon as EITHER the spawn settles or `signal` aborts.
+ *
+ * `Session.ts` awaits `invocation.execute(signal)` without racing the abort
+ * itself, so a tool that ignores its signal pins the caller's tool loop for as
+ * long as it runs — here, up to the daemon's 5-minute `first-turn` ceiling.
+ */
+async function raceCancellation<T>(
+  spawn: Promise<T>,
+  signal: AbortSignal,
+): Promise<T | typeof CANCELLED> {
+  // The losing branch's rejection still needs a handler, or Node reports an
+  // unhandled rejection once the cancel branch wins.
+  void spawn.catch(() => {});
+  if (signal.aborted) return CANCELLED;
+  return new Promise<T | typeof CANCELLED>((resolve, reject) => {
+    const onAbort = (): void => resolve(CANCELLED);
+    signal.addEventListener('abort', onAbort, { once: true });
+    spawn.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
 class CreateSubSessionInvocation extends BaseToolInvocation<
   CreateSubSessionParams,
   ToolResult
@@ -80,7 +121,7 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
     return 'ask';
   }
 
-  async execute(): Promise<ToolResult> {
+  async execute(signal: AbortSignal): Promise<ToolResult> {
     const spawner = this.config.getSubSessionSpawner();
     if (!spawner) {
       return {
@@ -94,12 +135,27 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
     const prompt = this.params.prompt.trim();
 
     try {
-      const res = await spawner({
-        prompt,
-        completion,
-        ...(this.params.model ? { model: this.params.model } : {}),
-        ...(this.params.name ? { name: this.params.name } : {}),
-      });
+      const res = await raceCancellation(
+        spawner({
+          prompt,
+          completion,
+          ...(this.params.model ? { model: this.params.model } : {}),
+          ...(this.params.name ? { name: this.params.name } : {}),
+        }),
+        signal,
+      );
+
+      if (res === CANCELLED) {
+        // Return the caller's turn to it immediately. The sub-session is NOT
+        // cancelled — `sendPrompt` has no abort seam — so it keeps running and
+        // keeps its concurrency slot until its own turn drains. Freeing the
+        // slot here would let the caller over-admit against a sub-session that
+        // is still consuming a bridge session and model quota.
+        const message =
+          'create_sub_session was cancelled. A sub-session may already have ' +
+          'been created; it runs independently and is not cancelled.';
+        return { llmContent: message, returnDisplay: 'Cancelled' };
+      }
 
       // Embed a clickable session link in the display output so the web shell
       // can render a "jump to session" button. The `qwen-session://` scheme is
@@ -218,6 +274,9 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
   ): string | null {
     if (!params.prompt || params.prompt.trim() === '') {
       return 'Parameter "prompt" must be a non-empty string.';
+    }
+    if (params.prompt.length > MAX_SUB_SESSION_PROMPT_CHARS) {
+      return `Parameter "prompt" exceeds the ${MAX_SUB_SESSION_PROMPT_CHARS}-character limit.`;
     }
     if (
       params.completion !== undefined &&

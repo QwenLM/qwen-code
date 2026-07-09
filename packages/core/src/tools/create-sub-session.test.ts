@@ -5,7 +5,10 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { CreateSubSessionTool } from './create-sub-session.js';
+import {
+  CreateSubSessionTool,
+  MAX_SUB_SESSION_PROMPT_CHARS,
+} from './create-sub-session.js';
 import type { Config, SubSessionSpawner } from '../config/config.js';
 
 function makeConfig(spawner?: SubSessionSpawner): Config {
@@ -94,5 +97,56 @@ describe('CreateSubSessionTool', () => {
       .build({ prompt: 'x' })
       .execute(new AbortController().signal);
     expect(res.error?.message).toContain('spawn boom');
+  });
+
+  it('returns as soon as the turn is cancelled, without waiting for the spawn', async () => {
+    // Session.ts awaits execute() without racing the abort, so a tool that
+    // ignores its signal pins the caller's tool loop until the daemon's
+    // 5-minute first-turn ceiling. This spawner never settles.
+    let rejectSpawn!: (err: Error) => void;
+    const spawner = vi.fn(
+      () =>
+        new Promise<{ sessionId: string }>((_, reject) => {
+          rejectSpawn = reject;
+        }),
+    );
+    const ac = new AbortController();
+    const tool = new CreateSubSessionTool(makeConfig(spawner));
+
+    const settled = tool.build({ prompt: 'x' }).execute(ac.signal);
+    ac.abort();
+    const res = await settled;
+
+    expect(res.returnDisplay).toBe('Cancelled');
+    expect(res.llmContent).toMatch(/cancelled/i);
+    // The sub-session is NOT cancelled — it has no abort seam — so the tool
+    // must say so rather than implying the work was undone.
+    expect(res.llmContent).toMatch(/runs independently|not cancelled/i);
+    // The abandoned spawn must not raise an unhandled rejection.
+    rejectSpawn(new Error('late failure nobody is listening for'));
+    await new Promise((r) => setTimeout(r, 0));
+  });
+
+  it('does not report cancellation when the spawn wins the race', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-7', result: 'done' }));
+    const ac = new AbortController();
+    const res = await new CreateSubSessionTool(makeConfig(spawner))
+      .build({ prompt: 'x' })
+      .execute(ac.signal);
+    expect(res.returnDisplay).not.toBe('Cancelled');
+    expect(res.llmContent).toContain('done');
+  });
+
+  it('rejects a prompt over the character limit before reaching the spawner', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-8' }));
+    const tool = new CreateSubSessionTool(makeConfig(spawner));
+    expect(() =>
+      tool.build({ prompt: 'x'.repeat(MAX_SUB_SESSION_PROMPT_CHARS + 1) }),
+    ).toThrow(new RegExp(`${MAX_SUB_SESSION_PROMPT_CHARS}`));
+    expect(spawner).not.toHaveBeenCalled();
+    // The boundary itself is accepted.
+    expect(() =>
+      tool.build({ prompt: 'x'.repeat(MAX_SUB_SESSION_PROMPT_CHARS) }),
+    ).not.toThrow();
   });
 });

@@ -69,6 +69,11 @@ const MAX_RESULT_CHARS = 32_000;
 /** Cap on the session display name (a label, not the full prompt). */
 const MAX_NAME_LENGTH = 60;
 
+/** How many spawned sub-session ids the depth-1 gate remembers. Far above any
+ * plausible live sub-session count (`maxSessions` defaults to 20), so eviction
+ * only ever discards long-reaped sessions. */
+const MAX_TRACKED_SPAWNED_SESSIONS = 1024;
+
 export interface SubSessionLauncher {
   /** The `onCreateSubSession` callback wired into the bridge. Returns a Promise
    * the child's tool awaits. */
@@ -217,6 +222,11 @@ export function createSubSessionLauncher(
   const { getBridge, boundWorkspace } = opts;
   const firstTurnTimeoutMs = opts.firstTurnTimeoutMs ?? FIRST_TURN_TIMEOUT_MS;
   const inflight = new Map<string, number>();
+  // Ids of the sub-sessions this launcher spawned — the depth-1 gate reads it.
+  // Insertion-ordered and evicted FIFO past the cap so a long-lived daemon
+  // can't accumulate ids forever; an evicted id belongs to a sub-session old
+  // enough to have been idle-reaped long ago.
+  const spawnedSessionIds = new Set<string>();
   // Shared AbortController — stop() aborts it, tearing down every active
   // subscription (first-turn awaits AND sent-mode background drains). This
   // prevents shutdown from waiting up to 5 min per in-flight session.
@@ -226,6 +236,15 @@ export function createSubSessionLauncher(
     const n = (inflight.get(key) ?? 1) - 1;
     if (n <= 0) inflight.delete(key);
     else inflight.set(key, n);
+  };
+
+  const rememberSpawned = (sessionId: string): void => {
+    spawnedSessionIds.add(sessionId);
+    while (spawnedSessionIds.size > MAX_TRACKED_SPAWNED_SESSIONS) {
+      const oldest = spawnedSessionIds.values().next().value;
+      if (oldest === undefined) break;
+      spawnedSessionIds.delete(oldest);
+    }
   };
 
   const launch = async (
@@ -239,6 +258,21 @@ export function createSubSessionLauncher(
     const bridge = getBridge();
     if (!bridge) {
       throw new Error('Session bridge is not available.');
+    }
+
+    // Depth-1 gate. Every daemon session wires a spawner, sub-sessions included,
+    // and each gets its own 5-slot bucket — so without this a sub-session can
+    // spawn 5 more, each of which spawns 5 more (5ⁿ), exhausting `maxSessions`
+    // from one prompt. `callerSessionId` is authenticated at the bridge
+    // (`ownsSession`), so it can't be forged to sidestep this.
+    if (
+      info.callerSessionId !== undefined &&
+      spawnedSessionIds.has(info.callerSessionId)
+    ) {
+      throw new Error(
+        'A sub-session cannot create further sub-sessions (nesting is capped ' +
+          'at one level).',
+      );
     }
 
     // Per-caller concurrency key. Without callerSessionId, each launch gets
@@ -277,6 +311,7 @@ export function createSubSessionLauncher(
       });
       spawnedSessionId = sub.sessionId;
       const sessionId = sub.sessionId;
+      rememberSpawned(sessionId);
 
       try {
         bridge.updateSessionMetadata(sessionId, {

@@ -48,6 +48,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { BridgeClient } from './bridgeClient.js';
+import {
+  MAX_SUB_SESSION_NAME_CHARS,
+  MAX_SUB_SESSION_PROMPT_CHARS,
+} from './bridgeOptions.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import type { MidTurnQueueEntry } from './bridgeTypes.js';
 import type { ClientMcpMessageSender } from './bridgeOptions.js';
@@ -736,6 +740,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
           stopReason?: string;
         }>)
       | undefined,
+    ownsSession?: (sessionId: string) => boolean,
   ) {
     return new BridgeClient(
       (() => undefined) as never, // resolveEntry
@@ -747,7 +752,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       undefined, // onModelPromoted
       undefined, // onModePromoted
       undefined, // clientMcpSender
-      undefined, // ownsSession
+      ownsSession as never, // ownsSession (undefined → defaults to () => true)
       undefined, // onTokenUsage
       onCreateSubSession,
     );
@@ -817,6 +822,73 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       client.extMethod(METHOD, { prompt: 'x', completion: 'weird' }),
     ).rejects.toThrow();
     expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects a callerSessionId this connection does not own', async () => {
+    // The key names the launcher's per-caller concurrency bucket. A child that
+    // can name any session evades its own cap (a fabricated id starts a fresh
+    // bucket at zero) and can burn a victim session's slots.
+    const onCreate = vi.fn(async () => ({ sessionId: 'sub-11' }));
+    const client = makeClientWithCreateSubSession(
+      onCreate,
+      (id) => id === 'mine',
+    );
+
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'x',
+        completion: 'sent',
+        callerSessionId: 'victim',
+      }),
+    ).rejects.toThrow(/callerSessionId/i);
+    expect(onCreate).not.toHaveBeenCalled();
+
+    // An owned id passes through untouched.
+    await client.extMethod(METHOD, {
+      prompt: 'x',
+      completion: 'sent',
+      callerSessionId: 'mine',
+    });
+    expect(onCreate).toHaveBeenCalledWith({
+      prompt: 'x',
+      completion: 'sent',
+      callerSessionId: 'mine',
+    });
+
+    // Omitting it stays legal (anonymous callers get their own bucket).
+    onCreate.mockClear();
+    await client.extMethod(METHOD, { prompt: 'x', completion: 'sent' });
+    expect(onCreate).toHaveBeenCalledWith({ prompt: 'x', completion: 'sent' });
+  });
+
+  it('rejects an over-long prompt and an over-long name', async () => {
+    const onCreate = vi.fn(async () => ({ sessionId: 'sub-12' }));
+    const client = makeClientWithCreateSubSession(onCreate);
+
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'x'.repeat(MAX_SUB_SESSION_PROMPT_CHARS + 1),
+        completion: 'sent',
+      }),
+    ).rejects.toThrow(new RegExp(`${MAX_SUB_SESSION_PROMPT_CHARS}`));
+
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'x',
+        completion: 'sent',
+        name: 'n'.repeat(MAX_SUB_SESSION_NAME_CHARS + 1),
+      }),
+    ).rejects.toThrow(new RegExp(`${MAX_SUB_SESSION_NAME_CHARS}`));
+
+    expect(onCreate).not.toHaveBeenCalled();
+
+    // Both boundaries are accepted.
+    await client.extMethod(METHOD, {
+      prompt: 'x'.repeat(MAX_SUB_SESSION_PROMPT_CHARS),
+      completion: 'sent',
+      name: 'n'.repeat(MAX_SUB_SESSION_NAME_CHARS),
+    });
+    expect(onCreate).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -31,6 +31,10 @@ import type {
   ClientMcpMessageSender,
   CreateSubSessionHandler,
 } from './bridgeOptions.js';
+import {
+  MAX_SUB_SESSION_NAME_CHARS,
+  MAX_SUB_SESSION_PROMPT_CHARS,
+} from './bridgeOptions.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 // Narrowed from the concrete `MultiClientPermissionMediator` to the
@@ -982,6 +986,16 @@ export class BridgeClient implements Client {
         '`prompt` must be a non-empty string',
       );
     }
+    // The child is a separate process; this is a trust boundary. Without a cap
+    // it can hand the daemon a multi-MB string to deserialize, copy for the
+    // display name, and dispatch into a new session. Same ceiling the
+    // scheduled-task REST route applies to the prompts it accepts.
+    if (prompt.length > MAX_SUB_SESSION_PROMPT_CHARS) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`prompt\` exceeds the ${MAX_SUB_SESSION_PROMPT_CHARS}-character limit`,
+      );
+    }
     const completion = params['completion'];
     if (completion !== 'sent' && completion !== 'first-turn') {
       throw RequestError.invalidParams(
@@ -989,9 +1003,31 @@ export class BridgeClient implements Client {
         "`completion` must be 'sent' or 'first-turn'",
       );
     }
-    const model = params['model'];
     const name = params['name'];
+    if (typeof name === 'string' && name.length > MAX_SUB_SESSION_NAME_CHARS) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`name\` exceeds the ${MAX_SUB_SESSION_NAME_CHARS}-character limit`,
+      );
+    }
+    // `callerSessionId` keys the launcher's per-caller concurrency bucket, so a
+    // child that can name any session it likes can both evade its own cap (a
+    // fresh fabricated id starts every bucket at zero) and exhaust a victim
+    // session's. The connection already knows which sessions it owns — check.
     const callerSessionId = params['callerSessionId'];
+    if (callerSessionId !== undefined) {
+      if (
+        typeof callerSessionId !== 'string' ||
+        callerSessionId.length === 0 ||
+        !this.ownsSession(callerSessionId)
+      ) {
+        throw RequestError.invalidParams(
+          undefined,
+          '`callerSessionId` must name a session owned by this connection',
+        );
+      }
+    }
+    const model = params['model'];
     const result = await this.onCreateSubSession({
       prompt,
       completion,
@@ -999,9 +1035,7 @@ export class BridgeClient implements Client {
         ? { model }
         : {}),
       ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
-      ...(typeof callerSessionId === 'string' && callerSessionId.length > 0
-        ? { callerSessionId }
-        : {}),
+      ...(typeof callerSessionId === 'string' ? { callerSessionId } : {}),
     });
     return {
       sessionId: result.sessionId,
