@@ -293,9 +293,10 @@ jobs:
       - name: 'Check triage response'
         if: 'success() || failure()'
         shell: 'bash'
+        env:
+          RESPONSE: '${{ steps.triage.outputs.summary }}'
         run: |-
           set -uo pipefail
-          RESPONSE="${{ steps.triage.outputs.summary }}"
           if [[ -z "${RESPONSE}" || "${RESPONSE}" == "null" ]]; then
             echo "::error title=Triage silent failure::Qwen Code exited without a response. Check the 'Run Qwen Triage' step stderr above for diagnostics."
             exit 1
