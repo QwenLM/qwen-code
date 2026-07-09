@@ -738,6 +738,12 @@ const EN: Messages = {
     'Runs accumulate in one session transcript.',
   'scheduledTasks.runMode.isolated.hint':
     'Each run gets a clean session context.',
+  'scheduledTasks.condition': 'Precondition (optional)',
+  'scheduledTasks.conditionPlaceholder':
+    'e.g. Check whether anything landed on main since yesterday. If nothing did, the task should not run.',
+  'scheduledTasks.condition.hint':
+    'Checked in this task’s own session before each run. The prompt only runs in a fresh session when the check says yes — otherwise the run is skipped.',
+  'scheduledTasks.condition.cardPrefix': 'If:',
   'sidebar.label': 'Workspace sidebar',
   'sidebar.toggleMenu': 'Toggle menu',
   'sidebar.newChat': 'New chat',
@@ -2425,6 +2431,12 @@ const ZH: Messages = {
   'scheduledTasks.runMode.isolated': '隔离（每次运行新建会话）',
   'scheduledTasks.runMode.shared.hint': '所有运行记录累积在同一个会话中。',
   'scheduledTasks.runMode.isolated.hint': '每次运行获得独立的会话上下文。',
+  'scheduledTasks.condition': '前置条件（可选）',
+  'scheduledTasks.conditionPlaceholder':
+    '例如：检查昨天以来 main 分支有没有新提交。如果没有，则本次不应执行。',
+  'scheduledTasks.condition.hint':
+    '每次触发前，先在本任务自己的会话中检查该条件。只有判定为“是”，才会新建会话执行命令；否则跳过本次运行。',
+  'scheduledTasks.condition.cardPrefix': '若：',
   'sidebar.label': '工作区侧边栏',
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',

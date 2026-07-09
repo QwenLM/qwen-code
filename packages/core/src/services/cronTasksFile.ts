@@ -99,6 +99,20 @@ export interface DurableCronTask {
    */
   runMode?: 'shared' | 'isolated';
   /**
+   * Optional PRECONDITION guarding each fire of an `isolated` task. When set,
+   * the bound session first runs this text as its own cron turn (a normal model
+   * turn, with tools, under the workspace's approval mode) and only dispatches
+   * {@link prompt} into a fresh sub-session when that turn's verdict is YES. Any
+   * other outcome — NO, an unparseable answer, a tool-loop error, a cancelled or
+   * timed-out turn — skips the fire (fail-closed).
+   *
+   * Only meaningful with `runMode: 'isolated'`; the REST route rejects a
+   * condition on a `'shared'` task, and the scheduler/session consult the field
+   * only on the isolated path. Absent = fire unconditionally, which is what
+   * every tool-created and pre-existing task keeps doing.
+   */
+  condition?: string;
+  /**
    * Bounded, newest-last history of recent fires (capped at MAX_TASK_RUNS).
    * Absent on tool-created tasks and on any task that has not fired yet.
    * Appended at the scheduler's persist sites via {@link appendCronRun}.
@@ -411,6 +425,12 @@ function isValidTask(value: unknown): value is DurableCronTask {
     (obj['runMode'] === undefined ||
       obj['runMode'] === 'shared' ||
       obj['runMode'] === 'isolated') &&
+    // A precondition must be a NON-EMPTY string: the fire path gates on a
+    // truthy `condition`, so an empty one would validate here and then be
+    // silently ignored — a task the user believes is guarded would fire
+    // unconditionally. Absent is the only way to say "no precondition".
+    (obj['condition'] === undefined ||
+      (typeof obj['condition'] === 'string' && obj['condition'].length > 0)) &&
     (obj['runs'] === undefined || isValidRuns(obj['runs']))
   );
 }

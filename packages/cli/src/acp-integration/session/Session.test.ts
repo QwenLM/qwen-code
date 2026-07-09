@@ -12,8 +12,10 @@ import * as path from 'node:path';
 import {
   computeInitialTurnFromHistory,
   fireSessionPermissionDeniedForAutoMode,
+  isCronConditionMet,
   resolveHomeLoopResolverRoots,
   Session,
+  wrapCronConditionPrompt,
 } from './Session.js';
 import type { Content, FunctionCall, Part } from '@google/genai';
 import type {
@@ -8828,6 +8830,7 @@ describe('Session', () => {
         cronExpr?: string;
         missed?: boolean;
         runMode?: 'shared' | 'isolated';
+        condition?: string;
       }) {
         return {
           size: 1,
@@ -8989,6 +8992,347 @@ describe('Session', () => {
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
         );
         expect(spawner).not.toHaveBeenCalled();
+      });
+
+      describe('preconditions', () => {
+        /** A fresh generator per `sendMessageStream` call — one shared generator
+         * is exhausted by the first consumer, so the second (cron) turn would
+         * silently see an empty stream. The last entry repeats. */
+        function streamsInOrder(
+          ...makeStreams: Array<() => AsyncGenerator<unknown>>
+        ) {
+          let call = 0;
+          return vi.fn().mockImplementation(() => {
+            const make = makeStreams[Math.min(call, makeStreams.length - 1)]!;
+            call++;
+            return Promise.resolve(make());
+          });
+        }
+
+        /** One CHUNK carrying the given assistant parts. */
+        function assistantTurn(
+          ...parts: Array<{ text: string; thought?: boolean }>
+        ) {
+          return () =>
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: { candidates: [{ content: { parts } }] },
+              },
+            ]);
+        }
+
+        /** Text the cron turn (call index 1) was asked to run. */
+        function cronTurnText(): string {
+          const call = (mockChat.sendMessageStream as ReturnType<typeof vi.fn>)
+            .mock.calls[1];
+          return (call![1].message as Array<{ text?: string }>)
+            .map((part) => part.text ?? '')
+            .join('');
+        }
+
+        function fireGuarded(
+          spawner: ReturnType<typeof vi.fn>,
+          verdict: () => AsyncGenerator<unknown>,
+          job: { missed?: boolean; runMode?: 'shared' | 'isolated' } = {},
+        ) {
+          const scheduler = schedulerFiring({
+            prompt: 'nightly report',
+            runMode: 'isolated',
+            condition: 'Has anything landed on main since yesterday?',
+            ...job,
+          });
+          mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+          mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+          mockConfig.getSubSessionSpawner = vi.fn().mockReturnValue(spawner);
+          mockChat.sendMessageStream = streamsInOrder(
+            () => createEmptyStream(),
+            verdict,
+          );
+          return session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+        }
+
+        it('evaluates the precondition in the bound session, then spawns on YES', async () => {
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          await fireGuarded(
+            spawner,
+            assistantTurn({ text: 'Two commits landed.\nDECISION: YES' }),
+          );
+
+          await vi.waitFor(() => expect(spawner).toHaveBeenCalledTimes(1));
+          // The command is dispatched verbatim, exactly as an unguarded
+          // isolated fire would be — a precondition changes WHETHER a fire
+          // runs, never HOW.
+          expect(spawner).toHaveBeenCalledWith({
+            prompt: 'nightly report',
+            completion: 'sent',
+          });
+          // The check itself ran here, as an ordinary cron turn.
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          expect(cronTurnText()).toContain(
+            'Has anything landed on main since yesterday?',
+          );
+          // The command must NOT be shown to the checking turn: a model handed
+          // the work it is judging tends to just do it, in the wrong session.
+          expect(cronTurnText()).not.toContain('nightly report');
+        });
+
+        it('skips the fire when the precondition says NO', async () => {
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          await fireGuarded(
+            spawner,
+            assistantTurn({ text: 'Nothing new.\nDECISION: NO' }),
+          );
+
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+          );
+          expect(spawner).not.toHaveBeenCalled();
+        });
+
+        it('skips the fire when the precondition turn produces no verdict', async () => {
+          // Fail-closed. A precondition exists to withhold an unattended run,
+          // so an answer nobody can parse must withhold it too.
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          await fireGuarded(
+            spawner,
+            assistantTurn({ text: 'Hard to say, the remote is unreachable.' }),
+          );
+
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+          );
+          expect(spawner).not.toHaveBeenCalled();
+        });
+
+        it('skips the fire when the precondition turn cannot even start', async () => {
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          await fireGuarded(spawner, () => {
+            throw new Error('model unreachable');
+          });
+
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+          );
+          expect(spawner).not.toHaveBeenCalled();
+        });
+
+        it('skips the fire when the precondition turn errors after saying YES', async () => {
+          // A turn that emits a verdict and THEN blows up (tool-loop crash,
+          // stream reset) has not decided anything: the model may never have
+          // seen the evidence that would have changed its mind. The verdict is
+          // parseable here, so only the turn's non-ok OUTCOME can hold the
+          // fire back.
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          await fireGuarded(spawner, () =>
+            (async function* () {
+              yield {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'DECISION: YES' }] } },
+                  ],
+                },
+              };
+              throw new Error('stream reset mid-turn');
+            })(),
+          );
+
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+          );
+          expect(spawner).not.toHaveBeenCalled();
+        });
+
+        it('reads the verdict off the answer, not the reasoning', async () => {
+          // A thought part is scratch work. The answer carries NO verdict, so
+          // the turn's only verdict LINE sits in the reasoning: were thoughts to
+          // reach the parser, the fire would be released. The verdict has to be
+          // line-anchored to pin this — a mid-sentence "DECISION: YES" is
+          // rejected by the parser anyway, and a verdict-bearing answer would
+          // let last-match-wins mask the leak whichever order the parts came in.
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          await fireGuarded(
+            spawner,
+            assistantTurn(
+              { text: 'Weighing it up.\nDECISION: YES\n', thought: true },
+              { text: 'Let me get back to you on that.' },
+            ),
+          );
+
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+          );
+          expect(spawner).not.toHaveBeenCalled();
+        });
+
+        it('reads the verdict off the final round, not a tool-loop intermediate', async () => {
+          // Round 1 announces YES on its way to a tool call; round 2 comes back
+          // undecided. Only the last round is the turn's answer — accumulating
+          // across rounds would let the stale YES release the fire.
+          const executeSpy = vi.fn().mockResolvedValue({
+            llmContent: 'log is empty',
+            returnDisplay: 'log is empty',
+          });
+          mockToolRegistry.getTool.mockReturnValue({
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/git.log' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Read file'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute: executeSpy,
+            }),
+          });
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          const scheduler = schedulerFiring({
+            prompt: 'nightly report',
+            runMode: 'isolated',
+            condition: 'Has anything landed on main since yesterday?',
+          });
+          mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+          mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+          mockConfig.getSubSessionSpawner = vi.fn().mockReturnValue(spawner);
+          mockChat.sendMessageStream = streamsInOrder(
+            () => createEmptyStream(), // the user's own turn
+            () =>
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    candidates: [
+                      {
+                        content: {
+                          parts: [{ text: 'Looks like it.\nDECISION: YES\n' }],
+                        },
+                      },
+                    ],
+                    functionCalls: [
+                      {
+                        id: 'call-1',
+                        name: 'read_file',
+                        args: { path: '/tmp/git.log' },
+                      },
+                    ],
+                  },
+                },
+              ]),
+            () =>
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    candidates: [
+                      {
+                        content: {
+                          parts: [{ text: 'The log is empty; I am not sure.' }],
+                        },
+                      },
+                    ],
+                  },
+                },
+              ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          await vi.waitFor(() => expect(executeSpy).toHaveBeenCalled());
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3),
+          );
+          expect(spawner).not.toHaveBeenCalled();
+        });
+
+        it('judges a missed conditional fire too, then keeps it in-session', async () => {
+          // `missed` keeps the in-session confirm-first path, but the guard
+          // still decides: a late fire must not run unconditionally.
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          await fireGuarded(spawner, assistantTurn({ text: 'DECISION: YES' }), {
+            missed: true,
+          });
+
+          // Turn 1 = user, turn 2 = precondition, turn 3 = the fire itself.
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3),
+          );
+          expect(spawner).not.toHaveBeenCalled();
+          const fireCall = (
+            mockChat.sendMessageStream as ReturnType<typeof vi.fn>
+          ).mock.calls[2];
+          const text = (fireCall![1].message as Array<{ text?: string }>)
+            .map((part) => part.text ?? '')
+            .join('');
+          expect(text).toContain('nightly report');
+        });
+
+        it('never evaluates a condition on a shared task', async () => {
+          // The REST route rejects the combination, but the fire path must not
+          // depend on that: a condition stranded on a shared task is inert, and
+          // the prompt runs directly.
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          await fireGuarded(spawner, assistantTurn({ text: 'DECISION: NO' }), {
+            runMode: 'shared',
+          });
+
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+          );
+          expect(spawner).not.toHaveBeenCalled();
+          expect(cronTurnText()).toContain('nightly report');
+          expect(cronTurnText()).not.toContain('PRECONDITION');
+        });
+      });
+    });
+
+    describe('cron precondition verdicts', () => {
+      it('reads YES / NO off the final verdict line', () => {
+        expect(isCronConditionMet('DECISION: YES')).toBe(true);
+        expect(isCronConditionMet('DECISION: NO')).toBe(false);
+        expect(isCronConditionMet('all good\nDECISION: yes')).toBe(true);
+        expect(isCronConditionMet('**DECISION: YES**')).toBe(true);
+        expect(isCronConditionMet('> DECISION: YES')).toBe(true);
+        expect(isCronConditionMet('- DECISION: YES')).toBe(true);
+      });
+
+      it('takes the LAST verdict, so a model may reason before concluding', () => {
+        expect(
+          isCronConditionMet('DECISION: NO would be wrong.\nDECISION: YES'),
+        ).toBe(true);
+        expect(
+          isCronConditionMet('First I thought DECISION: YES\nDECISION: NO'),
+        ).toBe(false);
+      });
+
+      it('fails closed on anything it cannot parse', () => {
+        expect(isCronConditionMet('')).toBe(false);
+        expect(isCronConditionMet('yes')).toBe(false);
+        expect(isCronConditionMet('DECISION: MAYBE')).toBe(false);
+        expect(isCronConditionMet('DECISION: YESTERDAY')).toBe(false);
+        // Mid-line, so it cannot be the model's own verdict line — this is what
+        // a file the check happened to read looks like when it is quoted back.
+        expect(isCronConditionMet('the file says DECISION: YES')).toBe(false);
+        // The verdict must be followed by a word boundary, so text running
+        // straight on from it is not a verdict either.
+        expect(isCronConditionMet('DECISION: YESand then some')).toBe(false);
+      });
+
+      it('asks for a verdict without leaking the command into the check', () => {
+        const wrapped = wrapCronConditionPrompt('anything new on main?');
+        expect(wrapped).toContain('anything new on main?');
+        expect(wrapped).toContain('DECISION: YES');
+        expect(wrapped).toContain('DECISION: NO');
+        expect(wrapped).toContain('Answer NO if');
       });
     });
 

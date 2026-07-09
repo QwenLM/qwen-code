@@ -179,6 +179,67 @@ describe('scheduled-tasks routes', () => {
     expect(res.body.code).toBe('invalid_run_mode');
   });
 
+  it('creates a guarded isolated task, persisting the trimmed condition', async () => {
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      runMode: 'isolated',
+      condition: '  anything new on main?  ',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.condition).toBe('anything new on main?');
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].condition).toBe('anything new on main?');
+  });
+
+  it('reports no condition when one is omitted or blank', async () => {
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      runMode: 'isolated',
+      condition: '   ',
+    });
+    expect(res.status).toBe(201);
+    // Whitespace-only trims to "no precondition" rather than persisting an
+    // empty string, which readCronTasks would reject on the next load.
+    expect(res.body.condition).toBeNull();
+  });
+
+  it('rejects a condition on a shared task, without minting a session', async () => {
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      condition: 'anything new?',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('condition_requires_isolated');
+    // Validation must precede the spawn, or a rejected create leaves an
+    // orphaned "⏰ …" session behind with no owning task.
+    expect(h.bridge.spawned).toHaveLength(0);
+  });
+
+  it('rejects an over-long condition on create', async () => {
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      runMode: 'isolated',
+      condition: 'x'.repeat(10_001),
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_condition');
+  });
+
+  it('rejects a non-string condition on create', async () => {
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      runMode: 'isolated',
+      condition: 42,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_condition');
+  });
+
   it('binds a created task to a freshly minted session', async () => {
     const res = await create({ cron: '0 9 * * *', prompt: 'p' });
     expect(res.status).toBe(201);
@@ -349,6 +410,134 @@ describe('scheduled-tasks routes', () => {
       .send({ runMode: 'per-run' });
     expect(bad.status).toBe(400);
     expect(bad.body.code).toBe('invalid_run_mode');
+  });
+
+  it('adds, replaces and clears a condition via PATCH', async () => {
+    const created = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      runMode: 'isolated',
+    });
+    const id = created.body.id as string;
+    expect(created.body.condition).toBeNull();
+
+    const added = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ condition: 'anything new?' });
+    expect(added.status).toBe(200);
+    expect(added.body.condition).toBe('anything new?');
+
+    const replaced = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ condition: 'anything new on main?' });
+    expect(replaced.status).toBe(200);
+    expect(replaced.body.condition).toBe('anything new on main?');
+
+    // `condition: null` clears it — the field is deleted, not stored as '',
+    // which readCronTasks would reject on the next load.
+    const cleared = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ condition: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.condition).toBeNull();
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].condition).toBeNull();
+  });
+
+  it('accepts a lone `condition: null` as a real patch, not an empty one', async () => {
+    const created = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      runMode: 'isolated',
+      condition: 'anything new?',
+    });
+    const id = created.body.id as string;
+    const cleared = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ condition: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.condition).toBeNull();
+  });
+
+  it('rejects a PATCH that would strand a condition on a shared task', async () => {
+    const guarded = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      runMode: 'isolated',
+      condition: 'anything new?',
+    });
+    const id = guarded.body.id as string;
+
+    // Switching to shared without dropping the condition would leave a task
+    // the user believes is guarded firing unconditionally. Reject, rather than
+    // silently discarding what they typed.
+    const stranded = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ runMode: 'shared' });
+    expect(stranded.status).toBe(400);
+    expect(stranded.body.code).toBe('condition_requires_isolated');
+    // Nothing was written.
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].runMode).toBe('isolated');
+    expect(list.body.tasks[0].condition).toBe('anything new?');
+
+    // Sent together, the switch is accepted — this is what the Web Shell does.
+    const together = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ runMode: 'shared', condition: null });
+    expect(together.status).toBe(200);
+    expect(together.body.runMode).toBe('shared');
+    expect(together.body.condition).toBeNull();
+  });
+
+  it('rejects adding a condition to a shared task via PATCH', async () => {
+    const created = await create({ cron: '0 9 * * *', prompt: 'p' });
+    const id = created.body.id as string;
+    const res = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ condition: 'anything new?' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('condition_requires_isolated');
+  });
+
+  it('still edits a hand-stranded task when the patch touches neither field', async () => {
+    // No writer produces `condition` on a shared task — only a hand-edited
+    // tasks file can. Such a task must stay editable: rejecting its
+    // enable/disable toggle would brick it behind an error about a field the
+    // request never mentioned.
+    const file = getCronFilePath(h.workspace);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(
+      file,
+      JSON.stringify([
+        {
+          id: 'stranded',
+          cron: '0 9 * * *',
+          prompt: 'p',
+          recurring: true,
+          createdAt: 1_700_000_000_000,
+          lastFiredAt: null,
+          condition: 'anything new?', // no runMode → 'shared'
+        },
+      ]),
+      'utf8',
+    );
+
+    const toggled = await request(h.app)
+      .patch('/scheduled-tasks/stranded')
+      .send({ enabled: false });
+    expect(toggled.status).toBe(200);
+    expect(toggled.body.enabled).toBe(false);
+    // The stranded condition is inert: the fire path only reads it on the
+    // isolated branch, and the view hides it.
+    expect(toggled.body.condition).toBeNull();
+
+    // But a patch that DOES touch the pairing is still rejected.
+    const guard = await request(h.app)
+      .patch('/scheduled-tasks/stranded')
+      .send({ runMode: 'shared' });
+    expect(guard.status).toBe(400);
+    expect(guard.body.code).toBe('condition_requires_isolated');
   });
 
   it('clears the name when patched to an empty string', async () => {

@@ -1220,6 +1220,43 @@ describe('CronScheduler', () => {
       });
     });
 
+    it('delivers the precondition on the job, and fires regardless of it', async () => {
+      // The scheduler ferries `condition` exactly as it ferries `runMode`: it
+      // never evaluates one. The fire IS delivered — Session.onFire is what
+      // withholds the dispatch — and the run is persisted at fire time, so a
+      // skipped run still shows up in history.
+      await writeCronTasks(tmpDir, [
+        {
+          ...diskTask('guard1'),
+          runMode: 'isolated',
+          condition: 'anything new on main?',
+        },
+      ]);
+      await scheduler.enableDurable('session-1');
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.condition).toBe('anything new on main?');
+      expect(fired[0]!.runMode).toBe('isolated');
+    });
+
+    it('omits condition from the job when the task has none', async () => {
+      await writeCronTasks(tmpDir, [
+        { ...diskTask('plain1'), runMode: 'isolated' },
+      ]);
+      await scheduler.enableDurable('session-1');
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.condition).toBeUndefined();
+    });
+
     // Settle + tear down a second scheduler sharing this tmpDir, so its
     // fire-and-forget writes don't race the afterEach rm.
     async function settle(s: CronScheduler): Promise<void> {

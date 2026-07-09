@@ -195,6 +195,37 @@ describe('cronTasksFile', () => {
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
     });
 
+    it('round-trips the optional condition field', async () => {
+      const guarded = makeTask({
+        id: 'guard',
+        runMode: 'isolated',
+        condition: 'anything new on main?',
+      });
+      await writeCronTasks(tmpDir, [guarded]);
+      expect(await readCronTasks(tmpDir)).toEqual([guarded]);
+    });
+
+    it('rejects a task whose condition is an empty string', async () => {
+      // The fire path gates on a truthy `condition`, so an empty one would be
+      // silently ignored: a task the user believes is guarded would fire on
+      // every tick. Absent is the only way to say "no precondition".
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), runMode: 'isolated', condition: '' }]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('rejects a task whose condition is not a string', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([
+          { ...makeTask(), runMode: 'isolated', condition: { any: true } },
+        ]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
     it('round-trips the optional runs history', async () => {
       const task = makeTask({
         lastFiredAt: 1718000300000,

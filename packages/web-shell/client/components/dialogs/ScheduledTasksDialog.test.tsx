@@ -27,6 +27,7 @@ interface MockTask {
   nextRunAt: number | null;
   sessionId: string | null;
   runMode?: 'shared' | 'isolated';
+  condition?: string | null;
   runs: Array<{
     at: number;
     kind?: 'scheduled' | 'catch-up';
@@ -126,6 +127,27 @@ function findFrequencySelect(): HTMLSelectElement | undefined {
   );
 }
 
+/** The form's textareas, in DOM order: prompt first, then the isolated-only
+ * precondition (absent while run mode is 'shared'). */
+function findTextareas(): HTMLTextAreaElement[] {
+  return Array.from(document.querySelectorAll('textarea'));
+}
+
+function findConditionTextarea(): HTMLTextAreaElement | undefined {
+  return findTextareas()[1];
+}
+
+/** Set a React controlled input's value: assign through the native setter so
+ * React's synthetic `input` listener sees a changed value and re-renders. */
+function setValue(el: HTMLTextAreaElement | HTMLInputElement, value: string) {
+  const proto = Object.getPrototypeOf(el) as object;
+  const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+  act(() => {
+    setter!.call(el, value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
@@ -178,6 +200,9 @@ describe('ScheduledTasksDialog editing', () => {
       name: 'Digest',
       // A task with no runMode prefills + saves as the default 'shared'.
       runMode: 'shared',
+      // A shared task never carries a precondition; null is sent explicitly so
+      // a mode switch clears any condition in the same request.
+      condition: null,
     });
     expect(actions.createScheduledTask).not.toHaveBeenCalled();
   });
@@ -241,6 +266,115 @@ describe('ScheduledTasksDialog run mode', () => {
     // transcript shows the model dispatching each run into a sub-session.
     click(findButton('View conversation (1)'));
     expect(onOpenSession).toHaveBeenCalledWith('anchor-1');
+  });
+});
+
+describe('ScheduledTasksDialog precondition', () => {
+  it('reveals the precondition field only for an isolated task', async () => {
+    await mount([]);
+    click(findButton('New scheduled task'));
+    // Shared: prompt only. The daemon rejects a condition on a shared task, so
+    // the field must not even be offered.
+    expect(findTextareas()).toHaveLength(1);
+
+    click(findRunModeRadio('isolated'));
+    expect(findTextareas()).toHaveLength(2);
+
+    click(findRunModeRadio('shared'));
+    expect(findTextareas()).toHaveLength(1);
+  });
+
+  it('creates a guarded isolated task with the typed condition', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    await mount([]);
+    click(findButton('New scheduled task'));
+    click(findRunModeRadio('isolated'));
+
+    setValue(findTextareas()[0]!, 'write the daily digest');
+    setValue(findConditionTextarea()!, '  anything new on main?  ');
+
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runMode: 'isolated',
+        prompt: 'write the daily digest',
+        condition: 'anything new on main?',
+      }),
+    );
+  });
+
+  it('prefills an existing condition and clears it when switching to shared', async () => {
+    await mount([
+      baseTask({
+        runMode: 'isolated',
+        sessionId: 'anchor-1',
+        condition: 'anything new on main?',
+      }),
+    ]);
+    click(document.querySelector('[aria-label="Edit"]'));
+    expect(findConditionTextarea()?.value).toBe('anything new on main?');
+
+    // Switching to shared must send `condition: null` in the SAME request —
+    // the daemon rejects a patch that would strand the condition.
+    click(findRunModeRadio('shared'));
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({ runMode: 'shared', condition: null }),
+    );
+  });
+
+  it('shows the condition on the task card', async () => {
+    await mount([
+      baseTask({ runMode: 'isolated', condition: 'anything new on main?' }),
+    ]);
+    const card = document.querySelector(
+      '[data-testid="scheduled-task-condition"]',
+    );
+    expect(card?.textContent).toContain('anything new on main?');
+  });
+
+  it('gates a guarded task’s "Run now" on the precondition', async () => {
+    const onRunPrompt = vi.fn();
+    await mount(
+      [
+        baseTask({
+          runMode: 'isolated',
+          sessionId: 'anchor-1',
+          condition: 'anything new on main?',
+        }),
+      ],
+      { onRunPrompt },
+    );
+    click(document.querySelector('[aria-label="Run now"]'));
+    await flush();
+
+    const [sent] = onRunPrompt.mock.calls[0] as [string, string | null];
+    // A manual run relays through the model (it is attended, so it can answer
+    // create_sub_session's permission prompt) — and it must check the guard
+    // first, or "Run now" would not reproduce a scheduled fire.
+    expect(sent).toContain('anything new on main?');
+    expect(sent).toContain('create_sub_session');
+    expect(sent).toContain('skipped because the precondition was not met');
+    // The command still rides along, so a YES verdict can dispatch it.
+    expect(sent).toContain('summarize the day');
+  });
+
+  it('does not mention a precondition for an unguarded isolated task', async () => {
+    const onRunPrompt = vi.fn();
+    await mount([baseTask({ runMode: 'isolated', sessionId: 'anchor-1' })], {
+      onRunPrompt,
+    });
+    click(document.querySelector('[aria-label="Run now"]'));
+    await flush();
+
+    const [sent] = onRunPrompt.mock.calls[0] as [string, string | null];
+    expect(sent).toContain('create_sub_session');
+    expect(sent).not.toContain('PRECONDITION');
   });
 });
 

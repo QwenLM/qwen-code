@@ -95,6 +95,13 @@ export interface CronJob {
    * the field. See {@link DurableCronTask.runMode}.
    */
   runMode?: 'shared' | 'isolated';
+  /**
+   * Precondition guarding an `isolated` fire. Carried from the task so `onFire`
+   * can evaluate it before dispatching. The scheduler never reads it — as with
+   * {@link runMode}, a fire is delivered either way and the consumer decides.
+   * See {@link DurableCronTask.condition}.
+   */
+  condition?: string;
   /** One-shot that was due while no owning session ran — fired late. */
   missed?: boolean;
 }
@@ -1513,6 +1520,7 @@ function durableTaskToJob(
     durable: true,
     ...(task.sessionId ? { boundSessionId: task.sessionId } : {}),
     ...(task.runMode ? { runMode: task.runMode } : {}),
+    ...(task.condition ? { condition: task.condition } : {}),
   };
 }
 
@@ -1526,6 +1534,7 @@ function jobToDurableTask(job: CronJob): DurableCronTask {
     lastFiredAt: job.lastFiredAt ?? null,
     ...(job.boundSessionId ? { sessionId: job.boundSessionId } : {}),
     ...(job.runMode ? { runMode: job.runMode } : {}),
+    ...(job.condition ? { condition: job.condition } : {}),
   };
 }
 
