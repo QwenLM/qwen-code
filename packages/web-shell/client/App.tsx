@@ -160,6 +160,7 @@ import {
   type TodoSnapshotDiff,
 } from './utils/todos';
 import { ThemeProvider } from './themeContext';
+import { InteractionBlockContext } from './interactionBlockContext';
 import {
   WebShellThemeId,
   THEME_SETTING_KEY,
@@ -1517,6 +1518,17 @@ export function App({
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
+  const [externalInteractionBlockCount, setExternalInteractionBlockCount] =
+    useState(0);
+  const registerInteractionBlocker = useCallback(() => {
+    let released = false;
+    setExternalInteractionBlockCount((count) => count + 1);
+    return () => {
+      if (released) return;
+      released = true;
+      setExternalInteractionBlockCount((count) => Math.max(0, count - 1));
+    };
+  }, []);
 
   // Refresh commands when extensions change (install/uninstall/update).
   const workspaceEventSignals = useWorkspaceEventSignals();
@@ -1802,6 +1814,7 @@ export function App({
     agentsDialogMode !== null ||
     showMemoryDialog ||
     showAuthDialog ||
+    externalInteractionBlockCount > 0 ||
     // The Settings / Daemon Status panel replaces the chat surface, so — like a
     // modal — it must suppress chat-only global shortcuts (Ctrl+L/O/Y, the
     // Shift+Tab mode cycle, the btw hotkey). Escape is intercepted earlier and
@@ -4934,54 +4947,58 @@ export function App({
                         timeline={todoTimeline}
                         details={todoDetails}
                       >
-                        <div
-                          className={[
-                            styles.content,
-                            showFloatingTodos ||
-                            displayMessages.length > 0 ||
-                            pendingApproval
-                              ? styles.contentHasMessages
-                              : undefined,
-                          ]
-                            .filter(Boolean)
-                            .join(' ')}
+                        <InteractionBlockContext.Provider
+                          value={registerInteractionBlocker}
                         >
-                          <MessageList
-                            ref={messageListRef}
-                            messages={displayMessages}
-                            pendingApproval={pendingToolApproval}
-                            onShowContextDetail={handleShowContextDetail}
-                            loadingTranscript={connection.loadingTranscript}
-                            catchingUp={connection.catchingUp}
-                            isResponding={streamingState !== 'idle'}
-                            activeTurnStartedAt={activeTurnStartedAt}
-                            workspaceCwd={connection.workspaceCwd || ''}
-                            hideSessionTimeline={
-                              effectiveChatWidthMode === 'wide'
-                            }
-                            showRetryHint={showRetryHint}
-                            onRetryClick={handleRetry}
-                            onBranchSession={handleBranchCurrentSession}
-                            welcomeHeader={
-                              isChatEmptyState ? welcomeHeader : undefined
-                            }
-                            tailContent={undefined}
-                            tailKey={undefined}
-                            onCanScrollToBottomChange={
-                              handleCanScrollToBottomChange
-                            }
-                            virtualScrollThreshold={virtualScrollThreshold}
-                          />
-                          {btwMessage?.role === 'btw' && (
-                            <div className={styles.btwPanel}>
-                              <BtwMessage
-                                question={btwMessage.question}
-                                answer={btwMessage.answer}
-                                isPending={btwMessage.isPending}
-                              />
-                            </div>
-                          )}
-                        </div>
+                          <div
+                            className={[
+                              styles.content,
+                              showFloatingTodos ||
+                              displayMessages.length > 0 ||
+                              pendingApproval
+                                ? styles.contentHasMessages
+                                : undefined,
+                            ]
+                              .filter(Boolean)
+                              .join(' ')}
+                          >
+                            <MessageList
+                              ref={messageListRef}
+                              messages={displayMessages}
+                              pendingApproval={pendingToolApproval}
+                              onShowContextDetail={handleShowContextDetail}
+                              loadingTranscript={connection.loadingTranscript}
+                              catchingUp={connection.catchingUp}
+                              isResponding={streamingState !== 'idle'}
+                              activeTurnStartedAt={activeTurnStartedAt}
+                              workspaceCwd={connection.workspaceCwd || ''}
+                              hideSessionTimeline={
+                                effectiveChatWidthMode === 'wide'
+                              }
+                              showRetryHint={showRetryHint}
+                              onRetryClick={handleRetry}
+                              onBranchSession={handleBranchCurrentSession}
+                              welcomeHeader={
+                                isChatEmptyState ? welcomeHeader : undefined
+                              }
+                              tailContent={undefined}
+                              tailKey={undefined}
+                              onCanScrollToBottomChange={
+                                handleCanScrollToBottomChange
+                              }
+                              virtualScrollThreshold={virtualScrollThreshold}
+                            />
+                            {btwMessage?.role === 'btw' && (
+                              <div className={styles.btwPanel}>
+                                <BtwMessage
+                                  question={btwMessage.question}
+                                  answer={btwMessage.answer}
+                                  isPending={btwMessage.isPending}
+                                />
+                              </div>
+                            )}
+                          </div>
+                        </InteractionBlockContext.Provider>
                       </TodoContextsProvider>
                     </CompactModeContext.Provider>
 

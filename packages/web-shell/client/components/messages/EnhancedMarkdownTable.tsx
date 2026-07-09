@@ -20,6 +20,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useI18n } from '../../i18n';
+import { useInteractionBlocker } from '../../interactionBlockContext';
 import { useTheme, WebShellThemeId } from '../../themeContext';
 import styles from './EnhancedMarkdownTable.module.css';
 
@@ -1172,6 +1173,7 @@ export function EnhancedTable({
 }) {
   const { t } = useI18n();
   const theme = useTheme();
+  const registerInteractionBlocker = useInteractionBlocker();
   const tableId = useId();
   const [sort, setSort] = useState<SortState | null>(null);
   const [filters, setFilters] = useState<Record<number, ColumnFilter>>({});
@@ -1498,6 +1500,7 @@ export function EnhancedTable({
     const row = visibleRows.find((item) => item.key === cellDialog.rowKey);
     return row?.cells[cellDialog.columnIndex] ?? null;
   }, [cellDialog, visibleRows]);
+  const currentCellDialogText = currentCellDialogCell?.text;
   const cellDialogThemeClass =
     theme === WebShellThemeId.Light ? styles.themeLight : styles.themeDark;
 
@@ -1564,6 +1567,16 @@ export function EnhancedTable({
       setCellDialog(null);
     }
   }, [cellDialog, detailRowKey, visibleRows]);
+
+  useEffect(() => {
+    if (!cellDialog) return;
+    return registerInteractionBlocker();
+  }, [cellDialog, registerInteractionBlocker]);
+
+  useEffect(() => {
+    if (!cellDialog) return;
+    resetCopiedCellDialog();
+  }, [cellDialog, currentCellDialogText, resetCopiedCellDialog]);
 
   useEffect(() => {
     if (!cellDialog) return;
@@ -1744,10 +1757,10 @@ export function EnhancedTable({
   };
 
   const copyCellDialogValue = () => {
-    if (currentCellDialogCell?.text == null || !navigator.clipboard) return;
+    if (currentCellDialogText == null || !navigator.clipboard) return;
     const copyGeneration = copiedCellDialogGenRef.current;
     void navigator.clipboard
-      .writeText(currentCellDialogCell.text)
+      .writeText(sanitizeForClipboard(currentCellDialogText))
       .then(() => {
         if (!mountedRef.current) return;
         if (copiedCellDialogGenRef.current !== copyGeneration) return;

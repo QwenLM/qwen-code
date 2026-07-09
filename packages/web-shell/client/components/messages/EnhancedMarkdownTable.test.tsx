@@ -726,6 +726,33 @@ describe('EnhancedMarkdownTable', () => {
     expect(document.body.textContent).toContain('Copied!');
   });
 
+  it('sanitizes the current cell value copied from the dialog', async () => {
+    const writeText = mockClipboard();
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Formula</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>=IMPORTXML(&quot;https://example.com&quot;)</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    doubleClick(dataCell(container, 0, 0));
+    await act(async () => {
+      textButton(document.body, 'Copy').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith(
+      '\'=IMPORTXML("https://example.com")',
+    );
+  });
+
   it('keeps the cell value dialog in sync with table updates', async () => {
     const writeText = mockClipboard();
     const container = document.createElement('div');
@@ -756,10 +783,17 @@ describe('EnhancedMarkdownTable', () => {
     render('Alpha');
     doubleClick(dataCell(container, 0, 0));
     expect(cellDialog()?.textContent).toContain('Alpha');
+    await act(async () => {
+      textButton(document.body, 'Copy').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(cellDialog()?.textContent).toContain('Copied!');
 
     render('Beta');
     expect(cellDialog()?.textContent).not.toContain('Alpha');
     expect(cellDialog()?.textContent).toContain('Beta');
+    expect(cellDialog()?.textContent).not.toContain('Copied!');
 
     await act(async () => {
       textButton(document.body, 'Copy').click();
