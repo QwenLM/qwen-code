@@ -64,6 +64,7 @@ import {
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
   AutonomousLoopTickResolver,
+  refreshMemoryAfterManagedWrite,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -2929,6 +2930,15 @@ export const useGeminiStream = (
         (t) =>
           !t.request.isClientInitiated &&
           !historyCallIdsWithResponse.has(t.request.callId),
+      );
+      await refreshMemoryAfterManagedWrite(
+        config,
+        completedAndReadyToSubmitTools.map((toolCall) => ({
+          toolName: toolCall.request.name,
+          args: toolCall.request.args as Record<string, unknown>,
+          status: toolCall.status,
+        })),
+        { logContext: 'interactive memory tool batch' },
       );
       const completedCallIds = new Set(
         completedAndReadyToSubmitTools.map(

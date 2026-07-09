@@ -7,7 +7,6 @@
 import {
   buildBareRememberPrompt,
   buildManagedRememberPrompt,
-  createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type {
@@ -16,8 +15,6 @@ import type {
   SlashCommandActionReturn,
 } from './types.js';
 import { CommandKind } from './types.js';
-
-const debugLogger = createDebugLogger('REMEMBER_COMMAND');
 
 export const rememberCommand: SlashCommand = {
   name: 'remember',
@@ -52,22 +49,6 @@ export const rememberCommand: SlashCommand = {
       return {
         type: 'submit_prompt',
         content: buildManagedRememberPrompt(fact, config.getProjectRoot()),
-        onComplete: async () => {
-          try {
-            await config.refreshHierarchicalMemory();
-          } catch (err) {
-            debugLogger.warn(
-              `remember onComplete: refreshHierarchicalMemory failed: ${err}`,
-            );
-          }
-          try {
-            await config.getGeminiClient()?.refreshSystemInstruction();
-          } catch (err) {
-            debugLogger.warn(
-              `remember onComplete: refreshSystemInstruction failed: ${err}`,
-            );
-          }
-        },
       };
     }
 

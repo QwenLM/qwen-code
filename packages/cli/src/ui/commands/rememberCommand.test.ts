@@ -29,18 +29,12 @@ describe('rememberCommand', () => {
     });
   });
 
-  it('routes to managed memory when available', async () => {
-    const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
-    const refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
+  it('routes to managed memory when available', () => {
     const context = createMockCommandContext({
       services: {
         config: {
           isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
           getProjectRoot: vi.fn().mockReturnValue('/tmp/test-project'),
-          refreshHierarchicalMemory,
-          getGeminiClient: vi.fn().mockReturnValue({
-            refreshSystemInstruction,
-          }),
         },
       },
     });
@@ -53,36 +47,9 @@ describe('rememberCommand', () => {
     expect((result as { content: string }).content).not.toContain(
       '<user-content>',
     );
-
-    await (result as { onComplete: () => Promise<void> }).onComplete();
-    expect(refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
-    expect(refreshSystemInstruction).toHaveBeenCalledTimes(1);
-  });
-
-  it('keeps refreshing system instruction when hierarchical memory refresh fails', async () => {
-    const refreshHierarchicalMemory = vi
-      .fn()
-      .mockRejectedValue(new Error('memory refresh failed'));
-    const refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
-    const context = createMockCommandContext({
-      services: {
-        config: {
-          isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
-          getProjectRoot: vi.fn().mockReturnValue('/tmp/test-project'),
-          refreshHierarchicalMemory,
-          getGeminiClient: vi.fn().mockReturnValue({
-            refreshSystemInstruction,
-          }),
-        },
-      },
-    });
-    const result = rememberCommand.action?.(context, 'user prefers dark mode');
-
-    await expect(
-      (result as { onComplete: () => Promise<void> }).onComplete(),
-    ).resolves.toBeUndefined();
-    expect(refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
-    expect(refreshSystemInstruction).toHaveBeenCalledTimes(1);
+    expect((result as { onComplete?: () => Promise<void> }).onComplete).toBe(
+      undefined,
+    );
   });
 
   it('falls back to QWEN.md in bare mode', () => {

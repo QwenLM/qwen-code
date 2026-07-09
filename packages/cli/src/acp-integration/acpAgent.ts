@@ -67,6 +67,7 @@ import {
   IMAGE_CAPABILITY,
   registerAcpEventLoopLagGauge,
   startEventLoopLagMonitor,
+  refreshMemoryInstruction,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -4694,6 +4695,28 @@ class QwenAgent implements Agent {
     return session;
   }
 
+  private async refreshLiveSessionMemoryInstructions(
+    logContext: string,
+  ): Promise<void> {
+    const sessions = [...this.sessions.values()];
+    if (sessions.length === 0) {
+      return;
+    }
+    const results = await Promise.allSettled(
+      sessions.map((session) =>
+        refreshMemoryInstruction(session.getConfig(), {
+          logContext: `${logContext} session ${session.getId()}`,
+        }),
+      ),
+    );
+    const failedCount = results.filter((r) => r.status === 'rejected').length;
+    if (failedCount > 0) {
+      debugLogger.warn(
+        `${logContext}: memory refresh failed for ${failedCount}/${results.length} live session(s)`,
+      );
+    }
+  }
+
   private buildSessionContextStatus(
     sessionId: string,
   ): ServeSessionContextStatus {
@@ -5816,18 +5839,9 @@ class QwenAgent implements Agent {
             contextMode,
             abortSignal: childSignal,
           });
-          try {
-            await this.config.refreshHierarchicalMemory();
-          } catch (err) {
-            debugLogger.warn(
-              `workspace memory remember: refreshHierarchicalMemory failed: ${err}`,
-            );
-          }
-          try {
-            await this.config.getGeminiClient()?.refreshSystemInstruction();
-          } catch (err) {
-            debugLogger.warn(
-              `workspace memory remember: refreshSystemInstruction failed: ${err}`,
+          if (result.filesTouched.length > 0) {
+            await this.refreshLiveSessionMemoryInstructions(
+              'workspace memory remember',
             );
           }
           return result as unknown as Record<string, unknown>;

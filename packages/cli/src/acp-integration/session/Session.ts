@@ -33,6 +33,7 @@ import type {
   LoopTickResult,
   ToolArtifact,
   VisionBridgeResult,
+  MemoryWriteCandidate,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -113,6 +114,7 @@ import {
   LoopDetectedEvent,
   LoopType,
   acquireSleepInhibitor,
+  refreshMemoryAfterManagedWrite,
   clearGoalTerminalObserver,
   setGoalTerminalObserver,
   sessionIdContext,
@@ -227,6 +229,7 @@ type RunToolResult = {
   stopAfterPermissionCancel: boolean;
   repeatedDuplicateProviderToolCall?: boolean;
   loopDetected?: boolean;
+  memoryWriteCandidates?: MemoryWriteCandidate[];
 };
 
 type DaemonToolLoopState = {
@@ -4023,6 +4026,17 @@ export class Session implements SessionContext {
         parts.push(await recordSkippedToolCall(remainingCall, message));
       }
     };
+    const memoryWriteCandidates: MemoryWriteCandidate[] = [];
+    const collectMemoryWriteCandidates = (result: RunToolResult): void => {
+      if (result.memoryWriteCandidates) {
+        memoryWriteCandidates.push(...result.memoryWriteCandidates);
+      }
+    };
+    const refreshMemoryIfNeeded = async (): Promise<void> => {
+      await refreshMemoryAfterManagedWrite(this.config, memoryWriteCandidates, {
+        logContext: `ACP session ${this.sessionId} memory tool batch`,
+      });
+    };
     // Bounded-concurrency runner: matches core's `runConcurrently`
     // behaviour (`coreToolScheduler.ts:1506`), capped by
     // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
@@ -4195,6 +4209,7 @@ export class Session implements SessionContext {
         let shouldStopForLoop = false;
         for (const r of results) {
           parts.push(...r.parts);
+          collectMemoryWriteCandidates(r);
           shouldStop ||= r.stopAfterPermissionCancel;
           shouldStopForLoop ||= r.loopDetected === true;
         }
@@ -4204,18 +4219,22 @@ export class Session implements SessionContext {
             batch.calls[batch.calls.length - 1],
             LOOP_DETECTED_SKIP_MESSAGE,
           );
+          await refreshMemoryIfNeeded();
           return {
             parts,
             stopAfterPermissionCancel: false,
             loopDetected: true,
+            memoryWriteCandidates,
           };
         }
         if (shouldStop) {
           await appendSkippedAfter(parts, batch.calls[batch.calls.length - 1]);
+          await refreshMemoryIfNeeded();
           return {
             parts,
             stopAfterPermissionCancel: true,
             repeatedDuplicateProviderToolCall: false,
+            memoryWriteCandidates,
           };
         }
       } else {
@@ -4229,29 +4248,36 @@ export class Session implements SessionContext {
             recordSkippedToolCall,
           );
           parts.push(...r.parts);
+          collectMemoryWriteCandidates(r);
           if (r.loopDetected) {
             await appendSkippedAfter(parts, fc, LOOP_DETECTED_SKIP_MESSAGE);
+            await refreshMemoryIfNeeded();
             return {
               parts,
               stopAfterPermissionCancel: false,
               loopDetected: true,
+              memoryWriteCandidates,
             };
           }
           if (r.stopAfterPermissionCancel) {
             await appendSkippedAfter(parts, fc);
+            await refreshMemoryIfNeeded();
             return {
               parts,
               stopAfterPermissionCancel: true,
               repeatedDuplicateProviderToolCall: false,
+              memoryWriteCandidates,
             };
           }
         }
       }
     }
+    await refreshMemoryIfNeeded();
     return {
       parts,
       stopAfterPermissionCancel: false,
       repeatedDuplicateProviderToolCall: false,
+      memoryWriteCandidates,
     };
   }
 
@@ -5209,6 +5235,16 @@ export class Session implements SessionContext {
           return {
             parts: responseParts,
             stopAfterPermissionCancel: nestedPermissionCancelled,
+            memoryWriteCandidates:
+              status === 'success'
+                ? [
+                    {
+                      toolName,
+                      args,
+                      status,
+                    },
+                  ]
+                : undefined,
           };
         } catch (e) {
           // Ensure cleanup on error
