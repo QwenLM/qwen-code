@@ -63,7 +63,7 @@ export class McpPromptLoader implements ICommandLoader {
                   return {
                     type: 'message',
                     messageType: 'info',
-                    content: `Prompt "${prompt.name}" has no arguments.`,
+                    content: `Prompt "${prompt.name}" has no declared arguments. Any text you provide will be forwarded as-is (e.g., /${prompt.name} some text sends { input: "some text" }).`,
                   };
                 }
 
