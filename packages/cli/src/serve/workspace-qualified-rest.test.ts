@@ -37,8 +37,24 @@ function host(): string {
 function makeBridge(): AcpSessionBridge {
   return {
     permissionPolicy: 'first-responder',
-    knownClientIds: () => new Set<string>(),
+    knownClientIds: () => new Set<string>(['client-1']),
     publishWorkspaceEvent: vi.fn(),
+    manageMcpServer: vi.fn(async (serverName, action, clientId) => ({
+      serverName,
+      action,
+      clientId,
+      ok: true,
+    })),
+    addRuntimeMcpServer: vi.fn(async (name, _config, clientId) => ({
+      name,
+      replaced: false,
+      originatorClientId: clientId,
+    })),
+    removeRuntimeMcpServer: vi.fn(async (name, clientId) => ({
+      name,
+      removed: true,
+      originatorClientId: clientId,
+    })),
     getWorkspaceToolsStatus: vi.fn(async () => ({ v: 1, tools: [] })),
     getWorkspaceMcpToolsStatus: vi.fn(async () => ({ v: 1, tools: [] })),
     getWorkspaceMcpResourcesStatus: vi.fn(async () => ({
@@ -78,6 +94,45 @@ function makeWorkspaceService(label: string): DaemonWorkspaceService {
       workspaceCwd: ctx.workspaceCwd,
       trusted: true,
       folderTrustEnabled: true,
+    })),
+    requestWorkspaceTrustChange: vi.fn(async (ctx, request) => ({
+      v: 1,
+      workspaceCwd: ctx.workspaceCwd,
+      requestedState: request.desiredState,
+      accepted: true,
+    })),
+    setWorkspacePermissionRules: vi.fn(async (ctx, request) => ({
+      v: 1,
+      workspaceCwd: ctx.workspaceCwd,
+      user: {
+        path: '/user/settings.json',
+        rules: { allow: [], ask: [], deny: [] },
+      },
+      workspace: {
+        path: `${ctx.workspaceCwd}/.qwen/settings.json`,
+        rules: {
+          allow: request.ruleType === 'allow' ? request.rules : [],
+          ask: request.ruleType === 'ask' ? request.rules : [],
+          deny: request.ruleType === 'deny' ? request.rules : [],
+        },
+      },
+    })),
+    setWorkspaceToolEnabled: vi.fn(async (_ctx, toolName, enabled) => ({
+      toolName,
+      enabled,
+    })),
+    initWorkspace: vi.fn(async (ctx) => ({
+      path: `${ctx.workspaceCwd}/QWEN.md`,
+      action: 'created' as const,
+    })),
+    restartMcpServer: vi.fn(async (_ctx, serverName) => ({
+      serverName,
+      restarted: true,
+    })),
+    reload: vi.fn(async (ctx) => ({
+      workspaceCwd: ctx.workspaceCwd,
+      env: { reloaded: false },
+      settings: { reloaded: true },
     })),
     getWorkspaceMcpStatus: vi.fn(async (ctx) => ({
       v: 1,
@@ -171,12 +226,13 @@ async function makeHarness(opts?: {
     clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
   };
 
+  const persistSetting = vi.fn(async () => {});
   const app = createServeApp(
     { ...baseOpts, workspace: primaryCwd, token: opts?.token },
     undefined,
     {
       workspaceRegistry: createWorkspaceRegistry([primary, secondary]),
-      persistSetting: vi.fn(async () => {}),
+      persistSetting,
     },
   );
 
@@ -186,6 +242,7 @@ async function makeHarness(opts?: {
     primaryCwd,
     secondaryCwd,
     secondaryId: secondary.workspaceId,
+    persistSetting,
   };
 }
 
@@ -228,12 +285,13 @@ async function makeWindowsSelectorHarness() {
     routeFileSystemFactory: windowsFsFactory,
     clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
   };
+  const persistSetting = vi.fn(async () => {});
   const app = createServeApp(
     { ...baseOpts, workspace: primaryCwd },
     undefined,
     {
       workspaceRegistry: createWorkspaceRegistry([primary, windowsRuntime]),
-      persistSetting: vi.fn(async () => {}),
+      persistSetting,
     },
   );
   return { app, scratch, windowsCwd };
@@ -375,6 +433,335 @@ describe('workspace-qualified core REST', () => {
       expect(mcp.body.code).toBe('untrusted_workspace');
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('routes workspace-qualified settings and rejects user scope or untrusted access', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const get = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/settings`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(get.status).toBe(200);
+
+      const post = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/settings`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({
+          scope: 'workspace',
+          key: 'general.cleanupPeriodDays',
+          value: 30,
+        });
+      expect(post.status).toBe(200);
+      expect(h.persistSetting).toHaveBeenCalledWith(
+        h.secondaryCwd,
+        expect.any(String),
+        'general.cleanupPeriodDays',
+        30,
+      );
+
+      const badScope = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/settings`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({
+          scope: 'user',
+          key: 'general.cleanupPeriodDays',
+          value: 30,
+        });
+      expect(badScope.status).toBe(400);
+      expect(badScope.body.code).toBe('invalid_scope');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+
+    const untrusted = await makeHarness({
+      secondaryTrusted: false,
+      token: 'secret',
+    });
+    try {
+      const res = await request(untrusted.app)
+        .get(
+          `/workspaces/${encodeURIComponent(untrusted.secondaryId)}/settings`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+    } finally {
+      await fsp.rm(untrusted.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('routes workspace-qualified permissions and rejects non-workspace scope', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const get = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/permissions`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(get.status).toBe(200);
+
+      const post = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/permissions`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'workspace', ruleType: 'allow', rules: ['Shell(ls)'] });
+      expect(post.status).toBe(200);
+      expect(post.body.workspace.rules.allow).toEqual(['Shell(ls)']);
+
+      const badScope = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/permissions`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'user', ruleType: 'allow', rules: ['Shell(ls)'] });
+      expect(badScope.status).toBe(400);
+      expect(badScope.body.code).toBe(
+        'global_scope_not_supported_for_workspace_route',
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+
+    const untrusted = await makeHarness({
+      secondaryTrusted: false,
+      token: 'secret',
+    });
+    try {
+      const res = await request(untrusted.app)
+        .get(
+          `/workspaces/${encodeURIComponent(untrusted.secondaryId)}/permissions`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+    } finally {
+      await fsp.rm(untrusted.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('allows workspace-qualified trust status and requests while untrusted', async () => {
+    const h = await makeHarness({ secondaryTrusted: false, token: 'secret' });
+    try {
+      const get = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/trust`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(get.status).toBe(200);
+      expect(get.body.workspaceCwd).toBe(h.secondaryCwd);
+
+      const post = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/trust/request`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ desiredState: 'trusted', reason: 'tests' });
+      expect(post.status).toBe(202);
+      expect(post.body.requestedState).toBe('trusted');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('routes workspace-qualified file writes and lets filesystem policy reject untrusted writes', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const res = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/file/write`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ path: 'created.txt', content: 'created', mode: 'create' });
+      expect(res.status).toBe(201);
+      expect(res.body.path).toBe('created.txt');
+      await expect(
+        fsp.readFile(path.join(h.secondaryCwd, 'created.txt'), 'utf8'),
+      ).resolves.toBe('created');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+
+    const untrusted = await makeHarness({
+      secondaryTrusted: false,
+      token: 'secret',
+    });
+    try {
+      const res = await request(untrusted.app)
+        .post(
+          `/workspaces/${encodeURIComponent(untrusted.secondaryId)}/file/write`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ path: 'blocked.txt', content: 'blocked', mode: 'create' });
+      expect(res.status).toBe(403);
+      expect(res.body.errorKind).toBe('untrusted_workspace');
+    } finally {
+      await fsp.rm(untrusted.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('routes workspace-qualified lifecycle mutations and trust-gates them', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const init = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/init`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ force: true });
+      expect(init.status).toBe(200);
+      expect(init.body.path).toBe(`${h.secondaryCwd}/QWEN.md`);
+
+      const reload = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/reload`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({});
+      expect(reload.status).toBe(200);
+      expect(reload.body.workspaceCwd).toBe(h.secondaryCwd);
+
+      const badForce = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/init`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ force: 'yes' });
+      expect(badForce.status).toBe(400);
+      expect(badForce.body.code).toBe('invalid_force_flag');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+
+    const untrusted = await makeHarness({
+      secondaryTrusted: false,
+      token: 'secret',
+    });
+    try {
+      const res = await request(untrusted.app)
+        .post(`/workspaces/${encodeURIComponent(untrusted.secondaryId)}/reload`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({});
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+    } finally {
+      await fsp.rm(untrusted.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('routes workspace-qualified MCP control through the selected runtime', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const restart = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/mcp/docs/restart`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({});
+      expect(restart.status).toBe(200);
+      expect(restart.body).toMatchObject({
+        serverName: 'docs',
+        restarted: true,
+      });
+
+      const enable = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/mcp/docs/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({});
+      expect(enable.status).toBe(200);
+      expect(enable.body).toMatchObject({
+        serverName: 'docs',
+        action: 'enable',
+        clientId: 'client-1',
+      });
+
+      const add = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/mcp/servers`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({ name: 'runtime', config: { command: 'node' } });
+      expect(add.status).toBe(200);
+      expect(add.body.name).toBe('runtime');
+
+      const remove = await request(h.app)
+        .delete(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/mcp/servers/runtime`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host());
+      expect(remove.status).toBe(200);
+      expect(remove.body.removed).toBe(true);
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+
+    const untrusted = await makeHarness({
+      secondaryTrusted: false,
+      token: 'secret',
+    });
+    try {
+      const res = await request(untrusted.app)
+        .post(
+          `/workspaces/${encodeURIComponent(untrusted.secondaryId)}/mcp/docs/restart`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({});
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+    } finally {
+      await fsp.rm(untrusted.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('routes workspace-qualified tool toggles and validates mutation bodies', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const enabled = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/tools/Bash/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ enabled: false });
+      expect(enabled.status).toBe(200);
+      expect(enabled.body).toEqual({ toolName: 'Bash', enabled: false });
+
+      const badBody = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/tools/Bash/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ enabled: 'no' });
+      expect(badBody.status).toBe(400);
+      expect(badBody.body.code).toBe('invalid_enabled_flag');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+
+    const untrusted = await makeHarness({
+      secondaryTrusted: false,
+      token: 'secret',
+    });
+    try {
+      const res = await request(untrusted.app)
+        .post(
+          `/workspaces/${encodeURIComponent(untrusted.secondaryId)}/tools/Bash/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ enabled: false });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+    } finally {
+      await fsp.rm(untrusted.scratch, { recursive: true, force: true });
     }
   });
 

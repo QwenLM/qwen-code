@@ -4367,6 +4367,71 @@ describe('DaemonClient', () => {
         ).rejects.toBeInstanceOf(DaemonHttpError);
       }
     });
+
+    it('workspaceById destructive session helpers use workspace-qualified routes', async () => {
+      const replies: Record<string, unknown> = {
+        '/sessions/delete': { removed: ['s-1'], notFound: [], errors: [] },
+        '/sessions/archive': {
+          archived: ['s-1'],
+          alreadyArchived: [],
+          notFound: [],
+          errors: [],
+        },
+        '/sessions/unarchive': {
+          unarchived: ['s-1'],
+          alreadyActive: [],
+          notFound: [],
+          errors: [],
+        },
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        const url = new URL(req.url);
+        const suffix = url.pathname.replace('/workspaces/workspace-id', '');
+        return jsonResponse(200, replies[suffix] ?? { unexpected: suffix });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const workspace = client.workspaceById('workspace-id');
+
+      await expect(
+        workspace.deleteSessionsData(['s-1'], 'client-1'),
+      ).resolves.toEqual(replies['/sessions/delete']);
+      await expect(
+        workspace.archiveSessionsData(['s-1'], 'client-2'),
+      ).resolves.toEqual(replies['/sessions/archive']);
+      await expect(
+        workspace.unarchiveSessionsData(['s-1'], 'client-3'),
+      ).resolves.toEqual(replies['/sessions/unarchive']);
+
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['POST', 'http://daemon/workspaces/workspace-id/sessions/delete'],
+        ['POST', 'http://daemon/workspaces/workspace-id/sessions/archive'],
+        ['POST', 'http://daemon/workspaces/workspace-id/sessions/unarchive'],
+      ]);
+      expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+        'client-1',
+        'client-2',
+        'client-3',
+      ]);
+      for (const call of calls) {
+        expect(JSON.parse(call.body!)).toEqual({ sessionIds: ['s-1'] });
+      }
+    });
+
+    it('workspaceByCwd deleteSessionGroup uses workspace-qualified group route', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { deleted: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.workspaceByCwd('/tmp/work space').deleteSessionGroup('group/1'),
+      ).resolves.toEqual({ deleted: true });
+
+      expect(calls[0]?.method).toBe('DELETE');
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Ftmp%2Fwork%20space/session-groups/group%2F1',
+      );
+    });
   });
 
   describe('addRuntimeMcpServer (T2.8 #4514)', () => {
