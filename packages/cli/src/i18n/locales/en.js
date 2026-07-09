@@ -199,6 +199,7 @@ export default {
   'toolDisplayName.CronList': 'toolDisplayName.CronList',
   'toolDisplayName.CronDelete': 'toolDisplayName.CronDelete',
   'toolDisplayName.LoopWakeup': 'toolDisplayName.LoopWakeup',
+  'toolDisplayName.CreateSubSession': 'toolDisplayName.CreateSubSession',
   'toolDisplayName.TaskCreate': 'toolDisplayName.TaskCreate',
   'toolDisplayName.TaskUpdate': 'toolDisplayName.TaskUpdate',
   'toolDisplayName.TaskList': 'toolDisplayName.TaskList',
@@ -2552,4 +2553,84 @@ export default {
   reqs: 'reqs',
   in: 'in',
   out: 'out',
+
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Check for Qwen Code updates and install if available',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Qwen Code update available! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'A new version of Qwen Code is available! {{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!':
+    'Qwen Code {{version}} is up to date!',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'Failed to check for updates. Please check your network or registry configuration.',
+  'Unable to check for updates: {{reason}}':
+    'Unable to check for updates: {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    'Update successful! The new version will be used on your next run.',
+  'Update downloaded. It will be applied after you exit this session.':
+    'Update downloaded. It will be applied after you exit this session.',
+  'Update failed: {{error}}': 'Update failed: {{error}}',
+  'Downloading update...': 'Downloading update...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.',
+  'Automatic update failed. Please try updating manually.':
+    'Automatic update failed. Please try updating manually.',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Automatic update failed: {{error}}. Re-run the installer to update manually.',
+  'Running from a local git clone. Please update with "git pull".':
+    'Running from a local git clone. Please update with "git pull".',
+  'Running via npx, update not applicable.':
+    'Running via npx, update not applicable.',
+  'Running via pnpx, update not applicable.':
+    'Running via pnpx, update not applicable.',
+  'Running via bunx, update not applicable.':
+    'Running via bunx, update not applicable.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Installed via Homebrew. Please update with "brew upgrade".',
+  "Locally installed. Please update via your project's package.json.":
+    "Locally installed. Please update via your project's package.json.",
+  'Update requires sudo. Please run:': 'Update requires sudo. Please run:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'Standalone install detected. Attempting to automatically update now...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'Standalone install detected. Please rerun the standalone installer to update:',
+  'Run the following to update:': 'Run the following to update:',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'Unable to auto-update this standalone installation. Please reinstall from:',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Manual update required. Please reinstall Qwen Code.',
+  '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
+    '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.',
+
+  // ============================================================================
+  // reload-plugins command
+  // ============================================================================
+  '{{count}} extension': '{{count}} extension',
+  '{{count}} extensions': '{{count}} extensions',
+  '{{count}} command': '{{count}} command',
+  '{{count}} commands': '{{count}} commands',
+  '{{count}} skill': '{{count}} skill',
+  '{{count}} skills': '{{count}} skills',
+  '{{count}} agent': '{{count}} agent',
+  '{{count}} agents': '{{count}} agents',
+  '{{count}} hook': '{{count}} hook',
+  '{{count}} hooks': '{{count}} hooks',
+  '{{count}} extension MCP server': '{{count}} extension MCP server',
+  '{{count}} extension MCP servers': '{{count}} extension MCP servers',
+  '{{count}} extension LSP server': '{{count}} extension LSP server',
+  '{{count}} extension LSP servers': '{{count}} extension LSP servers',
+  'Reload extension changes from disk': 'Reload extension changes from disk',
+  'Reloaded extensions: {{summary}}': 'Reloaded extensions: {{summary}}',
+  'Reload failed: {{message}}': 'Reload failed: {{message}}',
+  'Reload failed.': 'Reload failed.',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    'Extensions changed on disk. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    'Extension reload did not complete. Run /reload-plugins to try again.',
 };

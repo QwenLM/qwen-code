@@ -90,6 +90,23 @@ export type ToolHeaderExtraRenderer = (
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
 
+export interface UserMessageContentRenderInfo {
+  content: string;
+  images?: readonly { data: string; mimeType: string }[];
+}
+
+export type UserMessageContentRenderer = (
+  info: UserMessageContentRenderInfo,
+) => ReactNode;
+
+export interface WebShellBottomStatusItem {
+  id: string;
+  label: ReactNode;
+  title?: string;
+  ariaLabel?: string;
+  onClick?: () => void;
+}
+
 export type WebShellBuiltinComposerTagKind =
   | 'extension'
   | 'mcp'
@@ -277,6 +294,7 @@ export interface WebShellCustomization {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   renderWelcomeFooter?: WelcomeFooterRenderer;
+  renderUserMessageContent?: UserMessageContentRenderer;
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;

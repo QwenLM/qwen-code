@@ -105,6 +105,15 @@ const { WebShellSidebar } = await import('./WebShellSidebar');
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
 const noop = () => {};
+const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
+
+function setStoredSidebarWidth(width: number): void {
+  window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(width));
+}
+
+function pointerEvent(type: string, clientX: number): MouseEvent {
+  return new MouseEvent(type, { bubbles: true, clientX });
+}
 
 function renderSidebar(
   collapsed: boolean,
@@ -116,6 +125,7 @@ function renderSidebar(
     canOpenSessionsOverview: boolean;
     onOpenSplitView: () => void;
     canOpenSplitView: boolean;
+    onCollapsedChange: (collapsed: boolean) => void;
     onNewSession: () => Promise<boolean> | boolean;
     onLoadSession: (sessionId: string) => Promise<void> | void;
     onError: (error: unknown, message: string) => void;
@@ -153,6 +163,7 @@ function renderSidebar(
 
 beforeEach(() => {
   mockUseSessions.mockClear();
+  window.localStorage.clear();
   mockConnection.sessionId = null;
   mockConnection.capabilities = { qwenCodeVersion: '1.2.3', features: [] };
   for (const store of [mockActive, mockArchived]) {
@@ -196,11 +207,59 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar — version footer', () => {
+  it('shows the settings label and qwen-code version at full footer width', () => {
+    setStoredSidebarWidth(360);
+    const { container } = renderSidebar(false, {
+      canOpenSessionsOverview: true,
+      canOpenSplitView: true,
+    });
+    const settingsButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Settings"]',
+    );
+    const badge = container.querySelector('[title="Qwen Code v1.2.3"]');
+    expect(settingsButton).not.toBeNull();
+    expect(settingsButton?.textContent).toContain('Settings');
+    expect(badge).not.toBeNull();
+    expect(badge?.textContent).toBe('v1.2.3');
+  });
+
   it('shows the qwen-code version in the footer when expanded', () => {
     const { container } = renderSidebar(false);
     const badge = container.querySelector('[title="Qwen Code v1.2.3"]');
     expect(badge).not.toBeNull();
     expect(badge?.textContent).toBe('v1.2.3');
+  });
+
+  it('hides the settings label first while keeping the settings button accessible', () => {
+    setStoredSidebarWidth(260);
+    const { container } = renderSidebar(false, {
+      canOpenSessionsOverview: true,
+      canOpenSplitView: true,
+    });
+    const settingsButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Settings"]',
+    );
+    const badge = container.querySelector('[title="Qwen Code v1.2.3"]');
+    expect(settingsButton).not.toBeNull();
+    expect(settingsButton?.title).toBe('Settings');
+    expect(settingsButton?.textContent).not.toContain('Settings');
+    expect(settingsButton?.querySelector('svg')).not.toBeNull();
+    expect(badge).not.toBeNull();
+  });
+
+  it('hides the version at tight footer width', () => {
+    setStoredSidebarWidth(220);
+    const { container } = renderSidebar(false, {
+      canOpenSessionsOverview: true,
+      canOpenSplitView: true,
+    });
+    const settingsButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Settings"]',
+    );
+    expect(settingsButton).not.toBeNull();
+    expect(settingsButton?.textContent).not.toContain('Settings');
+    expect(container.querySelector('[title="Qwen Code v1.2.3"]')).toBeNull();
+    expect(container.textContent ?? '').not.toContain('v1.2.3');
   });
 
   it('renders a non-semver fallback (e.g. "unknown") without a bogus "v" prefix', () => {
@@ -222,6 +281,24 @@ describe('WebShellSidebar — version footer', () => {
     mockConnection.capabilities = undefined;
     const { container } = renderSidebar(false);
     expect(container.textContent ?? '').not.toMatch(/v\d/);
+  });
+});
+
+describe('WebShellSidebar — brand logo', () => {
+  it('renders the Qwen brand mark beside the new-chat button when expanded', () => {
+    const { container } = renderSidebar(false);
+    // Filled brand mark (shared with the favicon), not a stroked nav icon.
+    const mark = container.querySelector('svg path[fill="#6D44E8"]');
+    expect(mark).not.toBeNull();
+    // The mark and the new-chat button share the same top row.
+    const topRow = mark!.closest('div');
+    expect(topRow?.querySelector('[aria-label="New chat"]')).not.toBeNull();
+  });
+
+  it('hides the brand mark when collapsed (only the new-chat button remains)', () => {
+    const { container } = renderSidebar(true);
+    expect(container.querySelector('svg path[fill="#6D44E8"]')).toBeNull();
+    expect(container.querySelector('[aria-label="New chat"]')).not.toBeNull();
   });
 });
 
@@ -310,6 +387,42 @@ describe('WebShellSidebar — split view entry', () => {
       button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(onOpenSplitView).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('WebShellSidebar — resize behavior', () => {
+  it('persists normal drag widths without collapsing', () => {
+    setStoredSidebarWidth(260);
+    const onCollapsedChange = vi.fn();
+    const { container } = renderSidebar(false, { onCollapsedChange });
+    const handle = container.querySelector<HTMLElement>('[role="separator"]');
+    expect(handle).not.toBeNull();
+
+    act(() => {
+      handle!.dispatchEvent(pointerEvent('pointerdown', 260));
+      window.dispatchEvent(pointerEvent('pointermove', 230));
+      window.dispatchEvent(pointerEvent('pointerup', 230));
+    });
+
+    expect(onCollapsedChange).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)).toBe('230');
+  });
+
+  it('collapses when dragged past the compact threshold and restores the expanded width', () => {
+    setStoredSidebarWidth(260);
+    const onCollapsedChange = vi.fn();
+    const { container } = renderSidebar(false, { onCollapsedChange });
+    const handle = container.querySelector<HTMLElement>('[role="separator"]');
+    expect(handle).not.toBeNull();
+
+    act(() => {
+      handle!.dispatchEvent(pointerEvent('pointerdown', 260));
+      window.dispatchEvent(pointerEvent('pointermove', 130));
+    });
+
+    expect(onCollapsedChange).toHaveBeenCalledWith(true);
+    expect(onCollapsedChange).toHaveBeenCalledTimes(1);
+    expect(window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)).toBe('260');
   });
 });
 

@@ -228,28 +228,29 @@ Key implementation detail: Step 7 must use the owner/repo extracted from the URL
 
 **Decision:** Auto-discovery. Every project already defines its tool chain in CI config. Reading those files leverages existing knowledge without asking users to duplicate it. The LLM is capable of parsing YAML workflow files and extracting the relevant commands. Falls back gracefully: if no CI config exists, the build/test discovery is simply skipped and LLM agents still review the diff.
 
-## Why Suggestion-level findings go to an updatable issue comment instead of inline comments
+## Why Suggestion-level findings are posted as inline comments, like Critical
 
 **Considered:**
 
-- **All findings inline (original behavior):** both Critical and Suggestion high-confidence findings became per-line inline review comments. Strong per-line signal for both severities.
-- **Critical inline, Suggestion in the review `body`:** splits by severity, but the review body is a frozen artifact of one review submission — every new /review run appends a new review with its own body, so Suggestion lists still accumulate across runs (one body per review) and never converge.
-- **Critical inline, Suggestion in one updatable issue comment (chosen):** Critical stays per-line (real blockers pinned to code). Suggestion findings go to a single PR issue comment that is located by author + an embedded marker and PATCHed in place on every /review run, so the Suggestion list is one living view that refreshes rather than grows.
+- **Critical inline, Suggestion in the review `body`:** splits by severity, but the review body is a frozen artifact of one review submission — every new /review run appends a new review with its own body, so Suggestion lists accumulate across runs and never converge.
+- **Critical inline, Suggestion in one updatable issue comment:** Suggestion findings go to a single PR issue comment located by author + embedded marker and PATCHed in place on every run, so the list refreshes rather than grows. Shipped for a while; reverted for the reasons below.
+- **Both severities inline, distinguished by a `**[Critical]**`/`**[Suggestion]**` body prefix (chosen):** every high-confidence finding is pinned to its code line and carries a one-click ` ```suggestion ` block. Severity is communicated in the comment text, not by the channel it arrives on.
 
-**Decision:** Updatable issue comment. The root cause of "issues never converge" is not that Critical and Suggestion shared a severity bucket — it's that every /review run _re-emitted_ a new batch of inline comments with no concept of "this suggestion was already posted and is still open." Inline comments create a persistent conversation thread per line that the PR author (especially an agentic author iterating on the PR) feels obligated to resolve one-by-one, so the "Files changed" view grows noisier every round.
+**Decision:** Both inline. The updatable-summary design optimized for a convergence problem, but it paid for that with two costs that turned out to dominate:
 
-Routing Suggestion findings to one comment that is updated in place attacks both halves of that: (1) there is exactly one Suggestion list per PR at any time, refreshed rather than appended; (2) the deterministic locate-and-PATCH lives in a `qwen review post-suggestions` subcommand, so the LLM never re-posts a duplicate — the second run finds the marker and overwrites the first run's body.
+1. **A summary comment can never collapse.** GitHub marks an inline review thread **Outdated** and folds it away as soon as the author edits the line it is anchored to. So an addressed inline finding removes itself from the page. An issue comment has no such lifecycle — it sits in the PR conversation permanently, one extra comment whether or not its rows still apply. PATCHing it to "all suggestions addressed" replaces the content but not the comment. The very mechanism intended to prevent clutter _was_ the clutter.
+2. **A Markdown table cannot carry a one-click fix.** GitHub renders a ` ```suggestion ` fence as an applicable change only inside a review comment on a diff line; in an issue comment it degrades to a plain code block. Suggestion-level findings — mechanical, localized cleanups — are precisely the class that benefits most from one-click apply, so the split withheld the feature from the findings that most needed it. The table's cramped "Suggested fix" column also degraded badly as the suggestion count grew.
 
-Critical stays inline because blockers must be pinned to the exact code line and carry the strongest possible "fix this before merge" signal — convergence is not the priority there, correctness is.
+The convergence concern that motivated the summary is real but narrower than it looked: GitHub's Outdated-collapse handles every suggestion the author actually acts on, which is the common case. What remains is a suggestion the author declines and leaves untouched — its line does not change, so the thread stays open and a later run can post a near-duplicate. That residue is bounded by the presubmit Overlap check (`blockOnExistingComments`), which blocks submission when a new finding lands on the same `(path, line)` as a live Qwen comment on the same commit.
 
 **Trade-off:**
 
-- ✅ Exactly one Suggestion list per PR, refreshed on each /review. No growing pile of threads.
-- ✅ Agentic authors are no longer forced to walk a queue of Suggestion threads — they read one list, address what they accept, push, and the next run overwrites it.
-- ✅ Reuses the same "locate-by-author-and-update" pattern already used for triage comments, and the same `gh` wrapper the other subcommands use — no new platform primitive.
-- ❌ Suggestion findings are less visually prominent than inline comments: they appear in the PR conversation thread rather than pinned next to the code in "Files changed." Mitigated by keeping a `file:line` column in the summary table so each row stays directly actionable.
-- When an author fully addresses all suggestions and the next /review run finds zero new Suggestions, the stale summary is automatically replaced with a short "all addressed" message (rather than left as a frozen artifact). If no prior summary exists and there are no suggestions, the step is skipped entirely.
-- ❌ Pattern-aggregated Suggestion findings (the multi-occurrence `Pattern:` form) flatten into table rows — the aggregation is visible in the terminal output, which retains the full structured form, but the PR summary lists representative instances.
+- ✅ Suggestion findings regain one-click ` ```suggestion ` apply and sit next to the code in "Files changed."
+- ✅ Addressed findings self-collapse via GitHub's Outdated mechanism; no permanent extra comment on the PR page.
+- ✅ One posting path for both severities — the `comments` array — instead of a review submission plus a second issue-comment API call.
+- ❌ Suggestions now share the atomic `POST /pulls/{n}/reviews` call with Criticals. That call is all-or-nothing: one entry anchored to a line outside the diff 422s the whole review, so a mis-anchored Suggestion can suppress a Critical blocker. Previously Suggestions travelled on a separate, line-agnostic issue-comment call where a bad anchor was impossible. Step 7 mitigates with a 422 fallback rather than pre-validating every anchor up front: GitHub's 422 does not identify the offending entry, so the fallback has the model recheck each anchor against the diff, relocate failing Criticals into `body` (failing Suggestions are discarded — Suggestion text must stay off the `body` channel, which `qwen-autofix.yml` does not filter), and resubmit — degrading to an all-prose review of the blockers rather than posting nothing.
+- ❌ A declined suggestion on an unchanged line can be re-posted by a later run on a new commit: the presubmit Overlap check only compares against comments whose `commit_id` matches the commit under review, so prior comments are bucketed `stale` after any push. Closing this fully needs a resolve/minimize step (GraphQL `resolveReviewThread` / `minimizeComment`) that folds our own superseded threads before submitting a new review.
+- ❌ Pattern-aggregated Suggestion findings (the multi-occurrence `Pattern:` form) must pick a representative line to anchor to; the full structured aggregation remains visible in the terminal output.
 
 ## Rejected alternatives
 

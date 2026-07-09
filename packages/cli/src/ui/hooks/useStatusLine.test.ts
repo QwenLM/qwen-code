@@ -69,6 +69,10 @@ const mockConfig = {
   getTargetDir: vi.fn(() => '/test/dir'),
   getModel: vi.fn(() => 'test-model'),
   getModelDisplayName: vi.fn(() => 'Test Model'),
+  getModelsConfig: vi.fn(() => ({
+    getModelDisplayName: (model: string) =>
+      model === 'main-model' ? 'Main Model' : 'Test Model',
+  })),
   getCliVersion: vi.fn(() => '1.0.0'),
   getContentGeneratorConfig: vi.fn(getMockContentGeneratorConfig),
 };
@@ -191,6 +195,7 @@ describe('useStatusLine', () => {
     mockUIState.sessionStats.metrics.files.totalLinesRemoved = 0;
     mockVimMode.vimEnabled = false;
     mockVimMode.vimMode = 'INSERT';
+    mockConfig.getModelDisplayName.mockReturnValue('Test Model');
     mockConfig.getContentGeneratorConfig.mockReturnValue({
       contextWindowSize: 131072,
     });
@@ -212,6 +217,27 @@ describe('useStatusLine', () => {
       expect(child_process.exec).not.toHaveBeenCalled();
       expect(result.current.lines).toEqual([
         '\u279c dir \u00b7 git:(main) \u00b7 Test Model \u00b7 131.1k Context 0.1% used',
+      ]);
+    });
+
+    it('falls back to config model display name when the preset current model is empty', () => {
+      mockUIState.currentModel = '';
+
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual([
+        '\u279c dir \u00b7 git:(main) \u00b7 Test Model \u00b7 131.1k Context 0.1% used',
+      ]);
+    });
+
+    it('renders the session model when config is scoped to a fast subagent', () => {
+      mockUIState.currentModel = 'main-model';
+      mockConfig.getModelDisplayName.mockReturnValue('Fast Model');
+
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual([
+        '\u279c dir \u00b7 git:(main) \u00b7 Main Model \u00b7 131.1k Context 0.1% used',
       ]);
     });
 
@@ -714,6 +740,17 @@ describe('useStatusLine', () => {
 
       const input = JSON.parse(stdinWrittenData);
       expect(input.model.display_name).toBe('Test Model');
+    });
+
+    it('sends the session model when config is scoped to a fast subagent', () => {
+      mockUIState.currentModel = 'main-model';
+      mockConfig.getModelDisplayName.mockReturnValue('Fast Model');
+      setStatusLineConfig({ type: 'command', command: 'cat' });
+
+      renderHook(() => useStatusLine());
+
+      const input = JSON.parse(stdinWrittenData);
+      expect(input.model.display_name).toBe('Main Model');
     });
   });
 

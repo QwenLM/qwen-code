@@ -33,6 +33,7 @@ export const TOP_LEVEL_COMMANDS = [
   ],
   ['sessions <command>', 'Manage Qwen Code sessions'],
   ['fleet', 'Open Fleet View to manage active sessions'],
+  ['update', 'Check for Qwen Code updates and install if available'],
 ] as const;
 
 export const MCP_COMMANDS = [

@@ -140,6 +140,44 @@
   stroke-width: 1.5;
 }
 
+.topRow {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.topRow .newChatButton {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+
+.brandLogo {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+}
+
+.brandLogo svg {
+  width: 26px;
+  height: 26px;
+  display: block;
+}
+
+.collapsed .topRow {
+  width: 100%;
+  justify-content: center;
+}
+
+.collapsed .topRow .newChatButton {
+  flex: 0 0 auto;
+}
+
 .body {
   flex: 1 1 auto;
   min-height: 0;
@@ -907,6 +945,40 @@
 
 .footerButton {
   flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.footerButtonLabel {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.footerCompact,
+.footerTight {
+  gap: 4px;
+}
+
+.footerCompact .footerButton,
+.footerTight .footerButton {
+  width: 26px;
+  height: 28px;
+  flex: 0 0 26px;
+  justify-content: center;
+  padding: 0;
+}
+
+.footerCompact .footerButtonLabel,
+.footerTight .footerButtonLabel {
+  display: none;
+}
+
+.footerCompact .collapseButton,
+.footerTight .collapseButton {
+  width: 26px;
+  height: 28px;
 }
 
 .collapseButton {

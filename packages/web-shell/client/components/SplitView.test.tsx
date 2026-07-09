@@ -6,6 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
@@ -15,6 +16,9 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let connectionState: any;
 let sessionsState: any[];
+// Stable across renders (assigned once per test) so SplitView's reload effects,
+// which depend on `reload`'s identity, don't re-fire on every render.
+let reloadMock: ReturnType<typeof vi.fn>;
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   DaemonSessionProvider: (props: any) => (
@@ -23,7 +27,18 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     </div>
   ),
   useConnection: () => connectionState,
-  useSessions: () => ({ sessions: sessionsState }),
+  // Stateful, like the real hook: reload() re-renders with the CURRENT module
+  // store. This lets a test prove the picker renders sessions that appeared
+  // only after the reload — not merely that reload() was called.
+  useSessions: () => {
+    const [sessions, setSessions] = React.useState<any[]>(() => sessionsState);
+    const reload = React.useCallback(async () => {
+      reloadMock();
+      setSessions([...sessionsState]);
+      return sessionsState;
+    }, []);
+    return { sessions, reload };
+  },
 }));
 
 vi.mock('./ChatPane', () => ({
@@ -31,7 +46,7 @@ vi.mock('./ChatPane', () => ({
     // Let a test force a render crash to exercise the per-pane ErrorBoundary.
     if (props.title === 'BOOM') throw new Error('pane exploded');
     return (
-      <div data-testid="chat-pane" data-current={props.isCurrent ? 'yes' : 'no'}>
+      <div data-testid="chat-pane">
         <span data-testid="pane-title">{props.title}</span>
         {props.onClose && (
           <button data-testid="pane-close" onClick={props.onClose}>
@@ -60,6 +75,7 @@ beforeEach(() => {
     { sessionId: 's3', workspaceCwd: '/w', displayName: 'Three' },
     { sessionId: 's4', workspaceCwd: '/w', displayName: 'Four' },
   ];
+  reloadMock = vi.fn();
 });
 
 afterEach(() => {
@@ -86,14 +102,27 @@ function panes(): HTMLElement[] {
   return Array.from(container!.querySelectorAll('[data-testid="chat-pane"]'));
 }
 function titles(): string[] {
-  return Array.from(container!.querySelectorAll('[data-testid="pane-title"]')).map(
-    (el) => el.textContent ?? '',
+  return Array.from(
+    container!.querySelectorAll('[data-testid="pane-title"]'),
+  ).map((el) => el.textContent ?? '');
+}
+function pickerOptions(): string[] {
+  return Array.from(container!.querySelectorAll('[role="option"] button')).map(
+    (el) => (el.textContent ?? '').trim(),
+  );
+}
+function openPicker(): void {
+  const addButton = container!.querySelector(
+    'button[aria-haspopup="listbox"]',
+  ) as HTMLButtonElement;
+  act(() =>
+    addButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
   );
 }
 
 describe('SplitView', () => {
   it('renders one pane per initial session, each under its own provider', () => {
-    render({ initialSessionIds: ['s1', 's2'] });
+    render({ sessionIds: ['s1', 's2'] });
     expect(panes()).toHaveLength(2);
     expect(titles()).toEqual(['One', 'Two']);
     const providers = container!.querySelectorAll('[data-session]');
@@ -108,19 +137,72 @@ describe('SplitView', () => {
     expect(s2ClientId).toBe(`split-pane:${nonce}:s2`);
   });
 
-  it('seeds with the current session when no initial sessions are given', () => {
-    render({ initialSessionIds: [] });
+  it('seeds with the current session when no session ids are given', () => {
+    render();
     expect(titles()).toEqual(['Three']);
-    expect(panes()[0].getAttribute('data-current')).toBe('yes');
   });
 
   it('dedupes initial sessions', () => {
-    render({ initialSessionIds: ['s1', 's1', 's2'] });
+    render({ sessionIds: ['s1', 's1', 's2'] });
+    expect(titles()).toEqual(['One', 'Two']);
+  });
+
+  it('syncs panes when session ids change after mount', () => {
+    render({ sessionIds: ['s1'] });
+    expect(titles()).toEqual(['One']);
+
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView onExit={() => {}} sessionIds={['s1', 's2']} />
+        </I18nProvider>,
+      ),
+    );
+    expect(titles()).toEqual(['One', 'Two']);
+
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView onExit={() => {}} sessionIds={[]} />
+        </I18nProvider>,
+      ),
+    );
+    expect(panes()).toHaveLength(0);
+  });
+
+  it('requests pane changes without mutating local panes when controlled', () => {
+    const onPanesChange = vi.fn();
+    render({ sessionIds: ['s1'], onPanesChange });
+
+    openPicker();
+    const options = container!.querySelectorAll('[role="option"] button');
+    act(() =>
+      options[0].dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(onPanesChange).toHaveBeenCalledWith(['s1', 's2']);
+    expect(titles()).toEqual(['One']);
+
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView
+            onExit={() => {}}
+            sessionIds={['s1', 's2']}
+            onPanesChange={onPanesChange}
+          />
+        </I18nProvider>,
+      ),
+    );
+    expect(titles()).toEqual(['One', 'Two']);
+
+    const close = container!.querySelector('[data-testid="pane-close"]');
+    act(() => close!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(onPanesChange).toHaveBeenCalledWith(['s2']);
     expect(titles()).toEqual(['One', 'Two']);
   });
 
   it('adds a pane from the picker', () => {
-    render({ initialSessionIds: ['s1'] });
+    render();
     expect(panes()).toHaveLength(1);
     const addButton = container!.querySelector(
       'button[aria-haspopup="listbox"]',
@@ -128,7 +210,7 @@ describe('SplitView', () => {
     act(() =>
       addButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
     );
-    // Picker lists sessions not already shown (s2, s3, s4).
+    // Picker lists sessions not already shown (s1, s2, s4).
     const options = container!.querySelectorAll('[role="option"] button');
     expect(options).toHaveLength(3);
     act(() =>
@@ -138,7 +220,7 @@ describe('SplitView', () => {
   });
 
   it('closes the picker on Escape', () => {
-    render({ initialSessionIds: ['s1'] });
+    render({ sessionIds: ['s1'] });
     const addButton = container!.querySelector(
       'button[aria-haspopup="listbox"]',
     ) as HTMLButtonElement;
@@ -156,7 +238,7 @@ describe('SplitView', () => {
   });
 
   it('closes the picker on a click outside it', () => {
-    render({ initialSessionIds: ['s1'] });
+    render({ sessionIds: ['s1'] });
     const addButton = container!.querySelector(
       'button[aria-haspopup="listbox"]',
     ) as HTMLButtonElement;
@@ -175,7 +257,7 @@ describe('SplitView', () => {
   });
 
   it('keeps the picker open on a click inside it', () => {
-    render({ initialSessionIds: ['s1'] });
+    render({ sessionIds: ['s1'] });
     const addButton = container!.querySelector(
       'button[aria-haspopup="listbox"]',
     ) as HTMLButtonElement;
@@ -193,28 +275,33 @@ describe('SplitView', () => {
   });
 
   it('removes a pane via its close button', () => {
-    render({ initialSessionIds: ['s1', 's2'] });
+    render();
+    openPicker();
+    const options = container!.querySelectorAll('[role="option"] button');
+    act(() =>
+      options[0].dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(panes()).toHaveLength(2);
+
     const closes = container!.querySelectorAll('[data-testid="pane-close"]');
     act(() =>
       closes[0].dispatchEvent(new MouseEvent('click', { bubbles: true })),
     );
-    expect(titles()).toEqual(['Two']);
+    expect(titles()).toEqual(['One']);
   });
 
   it('auto-exits to the overview when the last pane is closed', () => {
     const onExit = vi.fn();
-    render({ initialSessionIds: ['s1'], onExit });
+    render({ onExit });
     expect(onExit).not.toHaveBeenCalled();
     const close = container!.querySelector('[data-testid="pane-close"]');
-    act(() =>
-      close!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
-    );
+    act(() => close!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(onExit).toHaveBeenCalledTimes(1);
   });
 
   it('exits via the back button', () => {
     const onExit = vi.fn();
-    render({ initialSessionIds: ['s1'], onExit });
+    render({ sessionIds: ['s1'], onExit });
     // The back button is the first toolbar button (aria-label from common.back).
     const back = container!.querySelector('header button') as HTMLButtonElement;
     act(() => back.dispatchEvent(new MouseEvent('click', { bubbles: true })));
@@ -227,7 +314,7 @@ describe('SplitView', () => {
       workspaceCwd: '/w',
       displayName: `Pane ${i}`,
     }));
-    render({ initialSessionIds: sessionsState.map((s) => s.sessionId) });
+    render({ sessionIds: sessionsState.map((s) => s.sessionId) });
     // Eight requested, but only six live panes mount.
     expect(panes()).toHaveLength(6);
   });
@@ -237,10 +324,85 @@ describe('SplitView', () => {
       { sessionId: 's1', workspaceCwd: '/w', displayName: 'BOOM' },
       { sessionId: 's2', workspaceCwd: '/w', displayName: 'Two' },
     ];
-    render({ initialSessionIds: ['s1', 's2'] });
+    render({ sessionIds: ['s1', 's2'] });
     // The crashing pane shows its error fallback; the healthy pane still renders.
     expect(container!.textContent).toContain('This session pane hit an error');
     expect(panes()).toHaveLength(1);
     expect(titles()).toEqual(['Two']);
+  });
+
+  it('reloads the session list when the picker opens (never a stale list)', () => {
+    render({ sessionIds: ['s1'] });
+    // `useSessions` only fetches on mount; nothing reloads until the user acts.
+    expect(reloadMock).not.toHaveBeenCalled();
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    act(() =>
+      addButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(reloadMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders the refreshed session list on reopen — not the entry snapshot', () => {
+    render({ sessionIds: ['s1'] });
+    // First open: the picker offers the sessions present at entry.
+    openPicker();
+    expect(pickerOptions()).toEqual(['Two', 'Three', 'Four']);
+    // A session is created elsewhere after the split was entered…
+    sessionsState = [
+      ...sessionsState,
+      { sessionId: 's5', workspaceCwd: '/w', displayName: 'Five' },
+    ];
+    // …reopening the picker reloads and the new session now appears. Without the
+    // reload-on-open the list would be frozen at the entry snapshot (no 'Five').
+    act(() =>
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      ),
+    );
+    openPicker();
+    expect(pickerOptions()).toEqual(['Two', 'Three', 'Four', 'Five']);
+  });
+
+  it('reloads the picker list when the parent bumps the reload token', () => {
+    render({ sessionIds: ['s1'], sessionListReloadToken: 0 });
+    // The initial token is not a change, so it does not trigger a reload.
+    expect(reloadMock).not.toHaveBeenCalled();
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView
+            onExit={() => {}}
+            sessionIds={['s1']}
+            sessionListReloadToken={1}
+          />
+        </I18nProvider>,
+      ),
+    );
+    expect(reloadMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('mirrors the live pane set up to the parent as panes change', () => {
+    const onPanesChange = vi.fn();
+    render({ onPanesChange });
+    // Reported on mount so the parent's seed reflects the actual panes…
+    expect(onPanesChange).toHaveBeenLastCalledWith(['s3']);
+    // …and after every add (so switching away and back restores it).
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    act(() =>
+      addButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    const options = container!.querySelectorAll('[role="option"] button');
+    act(() =>
+      options[0].dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(onPanesChange).toHaveBeenLastCalledWith(['s3', 's1']);
+    // …and after every remove.
+    const close = container!.querySelector('[data-testid="pane-close"]');
+    act(() => close!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(onPanesChange).toHaveBeenLastCalledWith(['s1']);
   });
 });

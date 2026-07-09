@@ -35,6 +35,12 @@ const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const SIDEBAR_DEFAULT_WIDTH = 260;
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 420;
+const SIDEBAR_FOOTER_COMPACT_WIDTH = 344;
+const SIDEBAR_FOOTER_TIGHT_WIDTH = 250;
+const SIDEBAR_DRAG_VISUAL_MIN_WIDTH = 200;
+const SIDEBAR_COLLAPSE_DRAG_THRESHOLD = 56;
+const SIDEBAR_COLLAPSE_DRAG_WIDTH =
+  SIDEBAR_DRAG_VISUAL_MIN_WIDTH - SIDEBAR_COLLAPSE_DRAG_THRESHOLD;
 const ACTIVE_SESSION_POLL_INTERVAL_MS = 2000;
 const IDLE_SESSION_POLL_INTERVAL_MS = 30_000;
 const DIALOG_SESSION_LABEL_MAX_LENGTH = 96;
@@ -170,6 +176,13 @@ function clampSidebarWidth(width: number): number {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width));
 }
 
+function clampSidebarVisualWidth(width: number): number {
+  return Math.min(
+    SIDEBAR_MAX_WIDTH,
+    Math.max(SIDEBAR_DRAG_VISUAL_MIN_WIDTH, width),
+  );
+}
+
 function readSidebarWidth(): number {
   if (typeof window === 'undefined') return SIDEBAR_DEFAULT_WIDTH;
   try {
@@ -198,6 +211,25 @@ function IconNewChat() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+/**
+ * Qwen brand mark. Same artwork as the browser-tab favicon in index.html and
+ * the QwenLM GitHub avatar; inlined as an SVG rather than hot-linked because
+ * the Web Shell CSP is `img-src 'self' data: blob:` (see web-shell-static.ts),
+ * which blocks remote images. The purple #6D44E8 fill is legible on both the
+ * light and dark sidebar backgrounds. Filled (not stroked) so it opts out of
+ * the shared `.navIcon svg` stroke styling.
+ */
+function IconQwenLogo() {
+  return (
+    <svg viewBox="0 0 141.38 140" aria-hidden="true">
+      <path
+        fill="#6D44E8"
+        d="m140.93 85-16.35-28.33-1.93-3.34 8.66-15a3.323 3.323 0 0 0 0-3.34l-9.62-16.67c-.3-.51-.72-.93-1.22-1.22s-1.07-.45-1.67-.45H82.23l-8.66-15a3.33 3.33 0 0 0-2.89-1.67H51.43c-.59 0-1.17.16-1.66.45-.5.29-.92.71-1.22 1.22L32.19 29.98l-1.92 3.33H12.96c-.59 0-1.17.16-1.66.45-.5.29-.93.71-1.22 1.22L.45 51.66a3.323 3.323 0 0 0 0 3.34l18.28 31.67-8.66 15a3.32 3.32 0 0 0 0 3.34l9.62 16.67c.3.51.72.93 1.22 1.22s1.07.45 1.67.45h36.56l8.66 15a3.35 3.35 0 0 0 2.89 1.67h19.25a3.34 3.34 0 0 0 2.89-1.67l18.28-31.67h17.32c.6 0 1.17-.16 1.67-.45s.92-.71 1.22-1.22l9.62-16.67a3.323 3.323 0 0 0 0-3.34ZM51.44 3.33 61.07 20l-9.63 16.66h76.98l-9.62 16.66H45.67l-11.54-20zM57.21 120H22.58l9.63-16.67h19.25l-38.5-66.67h19.25l9.62 16.67L68.78 100l-11.55 20Zm61.59-33.34-9.62-16.67-38.49 66.67-9.63-16.67 9.63-16.66 26.94-46.67h23.1l17.32 30z"
+      />
     </svg>
   );
 }
@@ -581,6 +613,9 @@ export function WebShellSidebar({
       ? `v${qwenCodeVersion}`
       : qwenCodeVersion
     : '';
+  const footerCompact =
+    !collapsed && sidebarWidth < SIDEBAR_FOOTER_COMPACT_WIDTH;
+  const footerTight = !collapsed && sidebarWidth < SIDEBAR_FOOTER_TIGHT_WIDTH;
   const sidebarStyle = {
     '--web-shell-sidebar-width': `${sidebarWidth}px`,
   } as CSSProperties;
@@ -1460,6 +1495,8 @@ export function WebShellSidebar({
       const startWidth = sidebarWidth;
       const previousCursor = document.body.style.cursor;
       const previousUserSelect = document.body.style.userSelect;
+      let collapsedByDrag = false;
+      let teardown: (updateState: boolean) => void = () => undefined;
       document.body.style.cursor = 'col-resize';
       document.body.style.userSelect = 'none';
       try {
@@ -1467,13 +1504,30 @@ export function WebShellSidebar({
       } catch {
         // Pointer capture is best-effort; window listeners still handle drag.
       }
-      const handlePointerMove = (moveEvent: PointerEvent) => {
-        const nextWidth = clampSidebarWidth(
-          startWidth + moveEvent.clientX - startX,
-        );
-        setSidebarWidth(nextWidth);
-      };
-      const teardown = (updateState: boolean) => {
+      function getRawWidth(clientX: number) {
+        return startWidth + clientX - startX;
+      }
+      function restoreExpandedWidth() {
+        const restoredWidth = clampSidebarWidth(startWidth);
+        setSidebarWidth(restoredWidth);
+        writeSidebarWidth(restoredWidth);
+      }
+      function collapseFromDrag() {
+        if (collapsedByDrag) return;
+        collapsedByDrag = true;
+        restoreExpandedWidth();
+        teardown(true);
+        onCollapsedChange(true);
+      }
+      function handlePointerMove(moveEvent: PointerEvent) {
+        const rawWidth = getRawWidth(moveEvent.clientX);
+        if (rawWidth <= SIDEBAR_COLLAPSE_DRAG_WIDTH) {
+          collapseFromDrag();
+          return;
+        }
+        setSidebarWidth(clampSidebarVisualWidth(rawWidth));
+      }
+      teardown = function resizeTeardown(updateState: boolean) {
         document.body.style.cursor = previousCursor;
         document.body.style.userSelect = previousUserSelect;
         window.removeEventListener('pointermove', handlePointerMove);
@@ -1484,17 +1538,20 @@ export function WebShellSidebar({
           setIsResizing(false);
         }
       };
-      const handlePointerUp = (upEvent: PointerEvent) => {
-        const nextWidth = clampSidebarWidth(
-          startWidth + upEvent.clientX - startX,
-        );
+      function handlePointerUp(upEvent: PointerEvent) {
+        const rawWidth = getRawWidth(upEvent.clientX);
+        if (rawWidth <= SIDEBAR_COLLAPSE_DRAG_WIDTH) {
+          collapseFromDrag();
+          return;
+        }
+        const nextWidth = clampSidebarWidth(rawWidth);
         setSidebarWidth(nextWidth);
         writeSidebarWidth(nextWidth);
         teardown(true);
-      };
-      const handlePointerCancel = () => {
+      }
+      function handlePointerCancel() {
         teardown(true);
-      };
+      }
       resizeTeardownRef.current = teardown;
       window.addEventListener('pointermove', handlePointerMove);
       window.addEventListener('pointerup', handlePointerUp, { once: true });
@@ -1502,7 +1559,7 @@ export function WebShellSidebar({
         once: true,
       });
     },
-    [collapsed, sidebarWidth],
+    [collapsed, onCollapsedChange, sidebarWidth],
   );
 
   const deleteCandidateLabel = deleteCandidate
@@ -2355,19 +2412,26 @@ export function WebShellSidebar({
           </div>
         </DialogShell>
       )}
-      <button
-        className={styles.newChatButton}
-        type="button"
-        title={t('sidebar.newChat')}
-        aria-label={t('sidebar.newChat')}
-        disabled={newSessionDisabled}
-        onClick={handleNewSession}
-      >
-        <span className={styles.navIcon}>
-          <IconNewChat />
-        </span>
-        {!collapsed && <span>{t('sidebar.newChat')}</span>}
-      </button>
+      <div className={styles.topRow}>
+        {!collapsed && (
+          <span className={styles.brandLogo} aria-hidden="true">
+            <IconQwenLogo />
+          </span>
+        )}
+        <button
+          className={styles.newChatButton}
+          type="button"
+          title={t('sidebar.newChat')}
+          aria-label={t('sidebar.newChat')}
+          disabled={newSessionDisabled}
+          onClick={handleNewSession}
+        >
+          <span className={styles.navIcon}>
+            <IconNewChat />
+          </span>
+          {!collapsed && <span>{t('sidebar.newChat')}</span>}
+        </button>
+      </div>
 
       <div className={styles.body}>
         {!collapsed && (
@@ -2480,7 +2544,13 @@ export function WebShellSidebar({
         </div>
       </div>
 
-      <div className={styles.footer}>
+      <div
+        className={cx(
+          styles.footer,
+          footerCompact && styles.footerCompact,
+          footerTight && styles.footerTight,
+        )}
+      >
         <button
           className={styles.footerButton}
           type="button"
@@ -2491,9 +2561,13 @@ export function WebShellSidebar({
           <span className={`${styles.navIcon} ${styles.settingsIcon}`}>
             <IconSettings />
           </span>
-          {!collapsed && <span>{t('sidebar.settings')}</span>}
+          {!collapsed && !footerCompact && (
+            <span className={styles.footerButtonLabel}>
+              {t('sidebar.settings')}
+            </span>
+          )}
         </button>
-        {!collapsed && versionLabel && (
+        {!collapsed && !footerTight && versionLabel && (
           <span className={styles.version} title={`Qwen Code ${versionLabel}`}>
             {versionLabel}
           </span>

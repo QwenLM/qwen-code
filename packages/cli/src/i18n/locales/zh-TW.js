@@ -190,6 +190,7 @@ export default {
   'toolDisplayName.CronList': '定時任務清單',
   'toolDisplayName.CronDelete': '刪除定時任務',
   'toolDisplayName.LoopWakeup': '循環喚醒',
+  'toolDisplayName.CreateSubSession': '建立子會話',
   'toolDisplayName.TaskCreate': '建立任務',
   'toolDisplayName.TaskUpdate': '更新任務',
   'toolDisplayName.TaskList': '任務列表',
@@ -2145,4 +2146,80 @@ export default {
   ' (not in model registry)': '（不在模型註冊表中）',
   'start server': '啟動伺服器',
   'No compression needed.': '無需壓縮。',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    '檢查 Qwen Code 更新並安裝（如果可用）',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Qwen Code 有可用更新！{{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Qwen Code 有新版本可用！{{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} 已是最新！',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    '檢查更新失敗。請檢查網路或 registry 設定。',
+  'Unable to check for updates: {{reason}}': '無法檢查更新：{{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    '更新成功！新版本將在下次執行時生效。',
+  'Update downloaded. It will be applied after you exit this session.':
+    '更新已下載。將在結束目前工作階段後套用。',
+  'Update failed: {{error}}': '更新失敗：{{error}}',
+  'Downloading update...': '正在下載更新...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    '更新成功！請重新啟動 Qwen Code 以使用新版本。重新啟動前切換模型提供商可能無法正常運作。',
+  'Automatic update failed. Please try updating manually.':
+    '自動更新失敗。請嘗試手動更新。',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    '自動更新失敗：{{error}}。請重新執行安裝程式以手動更新。',
+  'Running from a local git clone. Please update with "git pull".':
+    '正在從本機 Git 複製執行。請使用 "git pull" 更新。',
+  'Running via npx, update not applicable.': '正在透過 npx 執行，更新不適用。',
+  'Running via pnpx, update not applicable.':
+    '正在透過 pnpx 執行，更新不適用。',
+  'Running via bunx, update not applicable.':
+    '正在透過 bunx 執行，更新不適用。',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    '透過 Homebrew 安裝。請使用 "brew upgrade" 更新。',
+  "Locally installed. Please update via your project's package.json.":
+    '本機安裝。請透過專案的 package.json 更新。',
+  'Update requires sudo. Please run:': '更新需要 sudo。請執行：',
+  'Standalone install detected. Attempting to automatically update now...':
+    '偵測到獨立安裝。正在嘗試自動更新...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    '偵測到獨立安裝。請重新執行獨立安裝程式以更新：',
+  'Run the following to update:': '執行以下命令進行更新：',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    '無法自動更新此獨立安裝。請從以下位址重新安裝：',
+  'Manual update required. Please reinstall Qwen Code.':
+    '需要手動更新。請重新安裝 Qwen Code。',
+  '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
+    '⚠️ 歷史記錄缺口：此處之前的會話記錄已遺失（儲存中斷），且無法找回。',
+
+  // ============================================================================
+  // reload-plugins 命令
+  // ============================================================================
+  '{{count}} extension': '{{count}} 個擴充',
+  '{{count}} extensions': '{{count}} 個擴充',
+  '{{count}} command': '{{count}} 個指令',
+  '{{count}} commands': '{{count}} 個指令',
+  '{{count}} skill': '{{count}} 個技能',
+  '{{count}} skills': '{{count}} 個技能',
+  '{{count}} agent': '{{count}} 個代理',
+  '{{count}} agents': '{{count}} 個代理',
+  '{{count}} hook': '{{count}} 個鉤子',
+  '{{count}} hooks': '{{count}} 個鉤子',
+  '{{count}} extension MCP server': '{{count}} 個擴充 MCP 伺服器',
+  '{{count}} extension MCP servers': '{{count}} 個擴充 MCP 伺服器',
+  '{{count}} extension LSP server': '{{count}} 個擴充 LSP 伺服器',
+  '{{count}} extension LSP servers': '{{count}} 個擴充 LSP 伺服器',
+  'Reload extension changes from disk': '從磁碟重新載入擴充變更',
+  'Reloaded extensions: {{summary}}': '已重新載入擴充：{{summary}}',
+  'Reload failed: {{message}}': '重新載入失敗：{{message}}',
+  'Reload failed.': '重新載入失敗。',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    '磁碟上的擴充已變更。執行 /reload-plugins 來套用更新。',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    '擴充內容重新整理失敗：{{message}}。執行 /reload-plugins 來套用更新。',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    '擴充內容重新整理失敗。執行 /reload-plugins 來套用更新。',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    '擴充重新載入未完成。執行 /reload-plugins 重試。',
 };

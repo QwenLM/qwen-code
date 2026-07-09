@@ -2105,4 +2105,81 @@ export default {
   in: 'ein',
   out: 'aus',
   'In/Out': 'Ein/Aus',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Auf Qwen Code-Updates prüfen und installieren, falls verfügbar',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Qwen Code-Update verfügbar! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Eine neue Version von Qwen Code ist verfügbar! {{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} ist aktuell!',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'Suche nach Updates fehlgeschlagen. Bitte Netzwerk- oder Registry-Konfiguration prüfen.',
+  'Unable to check for updates: {{reason}}':
+    'Updates können nicht geprüft werden: {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    'Update erfolgreich! Die neue Version wird beim nächsten Start verwendet.',
+  'Update downloaded. It will be applied after you exit this session.':
+    'Update heruntergeladen. Es wird nach dem Beenden dieser Sitzung angewendet.',
+  'Update failed: {{error}}': 'Update fehlgeschlagen: {{error}}',
+  'Downloading update...': 'Update wird heruntergeladen...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Update erfolgreich! Bitte starten Sie Qwen Code neu, um die neue Version zu verwenden. Das Wechseln von Modellanbietern vor dem Neustart funktioniert möglicherweise nicht korrekt.',
+  'Automatic update failed. Please try updating manually.':
+    'Automatisches Update fehlgeschlagen. Bitte versuchen Sie, manuell zu aktualisieren.',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Automatisches Update fehlgeschlagen: {{error}}. Führen Sie das Installationsprogramm erneut aus, um manuell zu aktualisieren.',
+  'Running from a local git clone. Please update with "git pull".':
+    'Wird aus einem lokalen Git-Klon ausgeführt. Bitte mit "git pull" aktualisieren.',
+  'Running via npx, update not applicable.':
+    'Wird über npx ausgeführt, Update nicht anwendbar.',
+  'Running via pnpx, update not applicable.':
+    'Wird über pnpx ausgeführt, Update nicht anwendbar.',
+  'Running via bunx, update not applicable.':
+    'Wird über bunx ausgeführt, Update nicht anwendbar.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Über Homebrew installiert. Bitte mit "brew upgrade" aktualisieren.',
+  "Locally installed. Please update via your project's package.json.":
+    'Lokal installiert. Bitte über die package.json Ihres Projekts aktualisieren.',
+  'Update requires sudo. Please run:':
+    'Das Update erfordert sudo. Bitte ausführen:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'Standalone-Installation erkannt. Automatisches Update wird jetzt versucht...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'Standalone-Installation erkannt. Bitte führen Sie den Standalone-Installer zum Aktualisieren erneut aus:',
+  'Run the following to update:': 'Führen Sie Folgendes zum Aktualisieren aus:',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'Diese Standalone-Installation kann nicht automatisch aktualisiert werden. Bitte neu installieren von:',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Manuelles Update erforderlich. Bitte installieren Sie Qwen Code neu.',
+
+  // ============================================================================
+  // reload-plugins command
+  // ============================================================================
+  '{{count}} extension': '{{count}} extension',
+  '{{count}} extensions': '{{count}} extensions',
+  '{{count}} command': '{{count}} command',
+  '{{count}} commands': '{{count}} commands',
+  '{{count}} skill': '{{count}} skill',
+  '{{count}} skills': '{{count}} skills',
+  '{{count}} agent': '{{count}} agent',
+  '{{count}} agents': '{{count}} agents',
+  '{{count}} hook': '{{count}} hook',
+  '{{count}} hooks': '{{count}} hooks',
+  '{{count}} extension MCP server': '{{count}} extension MCP server',
+  '{{count}} extension MCP servers': '{{count}} extension MCP servers',
+  '{{count}} extension LSP server': '{{count}} extension LSP server',
+  '{{count}} extension LSP servers': '{{count}} extension LSP servers',
+  'Reload extension changes from disk': 'Reload extension changes from disk',
+  'Reloaded extensions: {{summary}}': 'Reloaded extensions: {{summary}}',
+  'Reload failed: {{message}}': 'Reload failed: {{message}}',
+  'Reload failed.': 'Reload failed.',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    'Extensions changed on disk. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    'Extension reload did not complete. Run /reload-plugins to try again.',
 };

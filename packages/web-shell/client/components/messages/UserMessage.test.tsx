@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { WebShellCustomizationProvider } from '../../customization';
 import { UserMessage } from './UserMessage';
 
 (
@@ -45,5 +46,22 @@ describe('UserMessage', () => {
     const img = container.querySelector('img');
     expect(img).not.toBeNull();
     expect(img!.getAttribute('src')).toBe('data:image/png;base64,abc');
+  });
+
+  it('uses a custom content renderer when provided', () => {
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          renderUserMessageContent: ({ content }) => (
+            <span data-testid="tag-chip">{content.slice(1)}</span>
+          ),
+        }}
+      >
+        <UserMessage content="@.husky/_/husky.sh xuyao" />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(container.querySelector('[data-testid="tag-chip"]')).not.toBeNull();
+    expect(container.textContent).toContain('.husky/_/husky.sh xuyao');
   });
 });

@@ -391,6 +391,11 @@
           "type": "boolean",
           "default": false
         },
+        "showScrollbar": {
+          "description": "Show the auto-hiding scrollbar in the in-app scrollable viewport (Virtualized History). The bar appears while scrolling and fades out when idle. Disable to hide it entirely.",
+          "type": "boolean",
+          "default": true
+        },
         "shellOutputMaxLines": {
           "description": "Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.",
           "type": "number",
@@ -564,6 +569,12 @@
       "description": "Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.",
       "type": "string",
       "default": ""
+    },
+    "visionBridgeTimeoutMs": {
+      "description": "Per-attempt timeout in milliseconds for the vision bridge image transcription call (a positive integer up to 2147483647). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
     },
     "modelFallbacks": {
       "description": "Ordered list of fallback model IDs (comma-separated, max 3) to try when the primary model hits capacity errors (429/503/529). Example: \"qwen-plus,qwen-turbo\". Set via CLI with --fallback-model.",
@@ -837,6 +848,11 @@
           "description": "Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately.",
           "type": "boolean",
           "default": true
+        },
+        "agentTimeoutMinutes": {
+          "description": "Max runtime in minutes for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (2–5 minutes); 0 disables the time limit. Useful for slow local models that need longer than the defaults.",
+          "type": "number",
+          "minimum": 0
         },
         "enableTeamMemory": {
           "description": "Enable a project memory tier shared with collaborators via the git-tracked `.qwen/team-memory/` directory. Off by default; writes to it are secret-scanned and reviewable in the git diff.",

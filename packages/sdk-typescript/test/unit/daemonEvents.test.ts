@@ -2650,6 +2650,100 @@ describe('PR 21 — auth device-flow events', () => {
   });
 
   describe('state_resync_required (#4175 F4 prereq, Ilya0527 issue #15)', () => {
+    it('recognizes history_truncated and records it without entering resync', () => {
+      const event = {
+        v: 1,
+        type: 'history_truncated',
+        data: {
+          reason: 'replay_window_exceeded',
+          truncatedEvents: 4,
+          retainedEvents: 2,
+          maxBytes: 512,
+          truncatedTurns: 2,
+          fullTranscriptAvailable: false,
+        },
+      } satisfies DaemonEvent;
+
+      const known = asKnownDaemonEvent(event);
+      expect(known?.type).toBe('history_truncated');
+
+      const state = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        event,
+      );
+      expect(state.awaitingResync).toBe(false);
+      expect(state.historyTruncatedCount).toBe(1);
+      expect(state.lastHistoryTruncated).toEqual(event.data);
+    });
+
+    it('rejects malformed history_truncated payloads', () => {
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: false,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: -1,
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: false,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: 4,
+            retainedEvents: 2.5,
+            maxBytes: 512,
+            fullTranscriptAvailable: false,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: 4,
+            retainedEvents: 2,
+            maxBytes: 512,
+            truncatedTurns: -1,
+            fullTranscriptAvailable: false,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'wrong_reason',
+            truncatedEvents: 4,
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: false,
+          },
+        }),
+      ).toBeUndefined();
+    });
+
     it('sets awaitingResync + records the resync data when daemon emits state_resync_required', () => {
       const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
         v: 1,

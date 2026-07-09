@@ -93,15 +93,58 @@ describe('RecordArtifactTool', () => {
     ).toThrow(/exactly one/);
   });
 
-  it('rejects workspace traversal and unsafe urls before reporting success', () => {
+  it('rejects workspace paths that escape the workspace', () => {
     const tool = new RecordArtifactTool();
 
-    expect(() =>
-      tool.build({
-        title: 'Escape',
-        workspacePath: '../secret.txt',
-      }),
-    ).toThrow(/workspacePath/);
+    for (const workspacePath of [
+      '../secret.txt',
+      '..\\secret.txt',
+      '..\\..\\secret.txt',
+      'reports\\..\\..\\secret.txt',
+      'reports/..\\..\\secret.txt',
+      'C:\\tmp\\report.html',
+      'C:/tmp/report.html',
+      'C:tmp\\report.html',
+      '\\\\server\\share\\report.html',
+      '\\tmp\\report.html',
+    ]) {
+      expect(() =>
+        tool.build({
+          title: 'Escape',
+          workspacePath,
+        }),
+      ).toThrow(/workspacePath/);
+    }
+  });
+
+  it('accepts safe workspace-relative artifact paths', async () => {
+    const tool = new RecordArtifactTool();
+
+    await expect(
+      tool
+        .build({
+          title: 'Safe report',
+          workspacePath: 'reports/summary.html',
+        })
+        .execute(signal),
+    ).resolves.toMatchObject({
+      artifacts: [{ workspacePath: 'reports/summary.html' }],
+    });
+
+    await expect(
+      tool
+        .build({
+          title: 'Windows-style relative report',
+          workspacePath: 'reports\\summary.html',
+        })
+        .execute(signal),
+    ).resolves.toMatchObject({
+      artifacts: [{ workspacePath: 'reports\\summary.html' }],
+    });
+  });
+
+  it('rejects unsafe urls before reporting success', () => {
+    const tool = new RecordArtifactTool();
 
     expect(() =>
       tool.build({

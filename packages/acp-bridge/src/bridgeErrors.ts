@@ -163,6 +163,16 @@ export class SessionLimitExceededError extends Error {
   }
 }
 
+export class TotalSessionLimitExceededError extends Error {
+  readonly limit: number;
+  readonly scope = 'total' as const;
+  constructor(limit: number) {
+    super(`Total session limit reached (${limit})`);
+    this.name = 'TotalSessionLimitExceededError';
+    this.limit = limit;
+  }
+}
+
 /**
  * Thrown by `sendPrompt` when a session already has too many accepted
  * prompts waiting or running. The REST route maps this to 503 with

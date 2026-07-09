@@ -47,7 +47,7 @@
 .backdrop {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: var(--web-shell-dialog-backdrop-z-index, 1000);
   display: flex;
   align-items: center;
   justify-content: center;

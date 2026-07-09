@@ -68,7 +68,7 @@ import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { SplitView } from './components/SplitView';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
-import { parseSplitSessionIds } from './utils/splitUrl';
+import { MAX_SPLIT_PANES, parseSplitSessionIds } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import { SettingsMessage } from './components/messages/SettingsMessage';
@@ -105,6 +105,7 @@ import {
 } from './utils/copyCommand';
 import { isEditableTarget } from './utils/dom';
 import { getModelDisplayName } from './utils/modelDisplay';
+import { isVisibleComposerModel } from './utils/composerModels';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
 import type { SkillInfo } from './completions/slashCompletion';
@@ -172,6 +173,7 @@ import {
   type WebShellComposerInput,
   type WebShellMarkdownCustomization,
   type ToolHeaderExtraRenderer,
+  type UserMessageContentRenderer,
   type WelcomeHeaderRenderer,
   type WelcomeFooterRenderer,
   type ComposerToolbarStartRenderer,
@@ -183,6 +185,7 @@ import {
   type WebShellTaskInfo,
   type WebShellAtProvider,
   type WebShellComposerTagIconMap,
+  type WebShellBottomStatusItem,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import styles from './App.module.css';
@@ -237,9 +240,20 @@ const MAX_TOASTS = 4;
 // active before giving up, so the scheduled-tasks UI can't stay stuck disabled
 // if the switch never completes.
 const BOUND_RUN_SWITCH_TIMEOUT_MS = 30_000;
+
+function availableSkillInfos(status: {
+  skills?: Array<{ status?: string; name: string; description?: string }>;
+}): SkillInfo[] {
+  return (status.skills ?? [])
+    .filter((skill) => skill.status === 'ok')
+    .map((skill) => ({
+      name: skill.name,
+      description: skill.description ?? '',
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
-const HIDDEN_COMPOSER_MODEL_IDS = new Set(['coder-model(qwen-oauth)']);
 
 /** Maps each ModelDialogMode to its i18n title key — single source of truth. */
 const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
@@ -248,10 +262,6 @@ const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
   voice: 'model.setVoice',
   vision: 'model.setVision',
 };
-
-function isVisibleComposerModel(model: { id: string }): boolean {
-  return !HIDDEN_COMPOSER_MODEL_IDS.has(model.id);
-}
 
 function normalizeHiddenCommand(command: string): string {
   return command.trim().replace(/^\/+/, '').toLowerCase();
@@ -352,6 +362,13 @@ export type SessionChangeEvent =
   | { type: 'submit'; sessionId: string; prompt: string; queued: boolean }
   | { type: 'turn_complete'; sessionId: string; error?: Error };
 
+export interface WebShellApi {
+  /** Open the in-window split view, matching the built-in sidebar button. */
+  openSplitView: () => void;
+  /** Open the Session Overview panel, matching the built-in sidebar button. */
+  openSessionOverview: () => void;
+}
+
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
   onSessionIdChange?: (sessionId: string | undefined) => void;
@@ -371,6 +388,12 @@ export interface WebShellProps {
   chatMaxWidth?: number;
   /** Optional workspace sidebar. Disabled by default. */
   sidebar?: boolean | WebShellSidebarOptions;
+  /** Session ids to control the split view; an empty array closes it. */
+  splitSessionIds?: readonly string[];
+  /** Called when the split pane list changes from inside WebShell. */
+  onSplitSessionIdsChange?: (sessionIds: string[]) => void;
+  /** Imperative handle for externally opening WebShell surfaces. */
+  shellRef?: React.Ref<WebShellApi>;
   /** Built-in composer toolbar actions to show. Defaults to all actions. */
   composerToolbarActions?: readonly ComposerToolbarAction[];
   /** Called when connection status changes (idle/connecting/connected/disconnected/error). */
@@ -401,6 +424,8 @@ export interface WebShellProps {
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
   renderWelcomeFooter?: WelcomeFooterRenderer;
+  /** Custom renderer for the inside of user chat bubbles. Defaults to plain text. */
+  renderUserMessageContent?: UserMessageContentRenderer;
   /** Custom renderer inserted before the built-in chat composer toolbar controls. */
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   /** Custom renderer inserted after the built-in composer toolbar controls. */
@@ -409,6 +434,8 @@ export interface WebShellProps {
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;
   /** Custom component for the footer area below the Editor. Replaces the built-in StatusBar. */
   renderFooter?: FooterRenderer;
+  /** Extra status items shown in the floating bottom panel beside the TODO summary. */
+  bottomStatusItems?: readonly WebShellBottomStatusItem[];
   /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
   compactThinking?: boolean;
   /** Auto-collapse completed turns to just the prompt and final answer, with a per-turn toggle. Defaults to true. */
@@ -465,7 +492,10 @@ const emptyComposerApi: WebShellComposerApi = {
   submit: () => {},
 };
 
+const EMPTY_BOTTOM_STATUS_ITEMS: readonly WebShellBottomStatusItem[] = [];
 const DEFAULT_CHAT_MAX_WIDTH = 1000;
+const BOTTOM_PANEL_GAP_PX = 6;
+const BOTTOM_PANEL_FALLBACK_INSET_PX = 40;
 type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
@@ -565,6 +595,25 @@ function assignComposerRef(
   (ref as React.MutableRefObject<WebShellComposerApi | null>).current = value;
 }
 
+function assignShellRef(
+  ref: React.Ref<WebShellApi> | undefined,
+  value: WebShellApi | null,
+): void {
+  if (!ref) return;
+  if (typeof ref === 'function') {
+    ref(value);
+    return;
+  }
+  (ref as React.MutableRefObject<WebShellApi | null>).current = value;
+}
+
+function areSessionIdsEqual(
+  a: readonly string[],
+  b: readonly string[],
+): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index]);
+}
+
 function getInitialLanguage(): WebShellLanguage {
   if (typeof window === 'undefined') return 'en';
   const params = new URLSearchParams(window.location.search);
@@ -594,12 +643,6 @@ function isAlreadyDispatched(error: unknown): error is AlreadyDispatchedError {
     error !== null &&
     (error as AlreadyDispatchedError)._alreadyDispatched === true
   );
-}
-
-function logSessionNoticesHook(notices: readonly DaemonSessionNotice[]): void {
-  if (notices.length > 0) {
-    console.info('[web-shell] useSessionNotices()', { notices });
-  }
 }
 
 function shouldToastNotice(notice: DaemonSessionNotice): boolean {
@@ -649,8 +692,14 @@ function getModelSwitchSummary(result: unknown): ModelSwitchSummary | null {
   };
 }
 
-function serializeModelSwitchSummary(summary: ModelSwitchSummary): string {
-  return `Using ${summary.isRuntime ? 'runtime ' : ''}model: ${summary.modelId}`;
+function serializeModelSwitchSummary(
+  summary: ModelSwitchSummary,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  return t('model.usingModel', {
+    isRuntime: summary.isRuntime ? 1 : 0,
+    modelId: summary.modelId,
+  });
 }
 
 function isEditToolPermission(request: PermissionRequest): boolean {
@@ -792,12 +841,17 @@ export function App({
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
+  renderUserMessageContent,
   renderComposerToolbarStart,
   renderComposerToolbarEnd,
   renderComposerToolbarRight,
   renderFooter,
+  bottomStatusItems,
   chatMaxWidth,
   sidebar,
+  splitSessionIds: externalSplitSessionIds,
+  onSplitSessionIdsChange,
+  shellRef,
   composerToolbarActions,
   compactThinking = false,
   collapseCompletedTurns = true,
@@ -903,6 +957,7 @@ export function App({
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
+      renderUserMessageContent,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
@@ -917,6 +972,7 @@ export function App({
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
+      renderUserMessageContent,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
@@ -1084,6 +1140,55 @@ export function App({
     setTodoPanelMode(nextTodoPanelMode);
   }
   const showFloatingTodos = nextTodoPanelMode !== 'hidden';
+  const floatingBottomStatusItems =
+    bottomStatusItems ?? EMPTY_BOTTOM_STATUS_ITEMS;
+  const showBottomPanels =
+    showFloatingTodos || floatingBottomStatusItems.length > 0;
+  const footerRef = useRef<HTMLDivElement>(null);
+  const bottomPanelsRef = useRef<HTMLDivElement>(null);
+  const [bottomPanelInset, setBottomPanelInset] = useState(0);
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(0);
+  useLayoutEffect(() => {
+    if (!showBottomPanels) {
+      setBottomPanelInset(0);
+      setBottomPanelHeight(0);
+      return;
+    }
+    const node = bottomPanelsRef.current;
+    if (!node) {
+      setBottomPanelInset(BOTTOM_PANEL_FALLBACK_INSET_PX);
+      setBottomPanelHeight(0);
+      return;
+    }
+    const updateInset = () => {
+      const footer = footerRef.current;
+      const panelRect = node.getBoundingClientRect();
+      const footerRect = footer?.getBoundingClientRect();
+      const panelHeight = Math.ceil(panelRect.height);
+      const overlapAboveFooter = footerRect
+        ? Math.max(0, footerRect.top - panelRect.top)
+        : panelHeight + BOTTOM_PANEL_GAP_PX;
+      setBottomPanelHeight(panelHeight);
+      setBottomPanelInset(
+        Math.max(BOTTOM_PANEL_FALLBACK_INSET_PX, Math.ceil(overlapAboveFooter)),
+      );
+    };
+    updateInset();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(updateInset);
+    observer.observe(node);
+    if (footerRef.current) observer.observe(footerRef.current);
+    return () => observer.disconnect();
+  }, [showBottomPanels]);
+  const contentStyle = useMemo(
+    () =>
+      ({
+        '--web-shell-bottom-panel-inset': `${bottomPanelInset}px`,
+        '--web-shell-bottom-panel-height': `${bottomPanelHeight}px`,
+        '--web-shell-bottom-panel-gap': `${BOTTOM_PANEL_GAP_PX}px`,
+      }) as CSSProperties,
+    [bottomPanelHeight, bottomPanelInset],
+  );
   const backgroundTaskActivityKey = useMemo(
     () => getBackgroundTaskActivityKey(messages),
     [messages],
@@ -1103,7 +1208,6 @@ export function App({
   const messageListRef = useRef<MessageListHandle | null>(null);
   const editorRef = useRef<EditorHandle | null>(null);
   const notifiedComposerReadyRef = useRef<EditorHandle | null>(null);
-  const footerRef = useRef<HTMLDivElement>(null);
   const [canScrollMessageListToBottom, setCanScrollMessageListToBottom] =
     useState(false);
   const previousFooterRectRef = useRef<DOMRect | null>(null);
@@ -1185,11 +1289,7 @@ export function App({
     workspaceActions
       .loadSkillsStatus()
       .then((status) => {
-        setLoadedSkills(
-          (status?.skills ?? [])
-            .map((s) => ({ name: s.name, description: s.description ?? '' }))
-            .sort((a, b) => a.name.localeCompare(b.name)),
-        );
+        setLoadedSkills(availableSkillInfos(status));
       })
       .catch(() => {});
   }, [connected, workspaceActions]);
@@ -1238,29 +1338,121 @@ export function App({
     setActivePanel(null);
     setMainView('scheduledTasks');
   }, []);
-  // Open the in-window split view showing 2+ sessions side by side. Seeds with
-  // the given sessions (e.g. the overview selection); SplitView falls back to
-  // the current session when the list is empty.
-  const openSplitView = useCallback((sessionIds?: string[]) => {
-    setActivePanel(null);
-    setSplitSessionIds(sessionIds ?? []);
-    setMainView('split');
-  }, []);
+  // Open the in-window split view showing 2+ sessions side by side. `splitSessionIds`
+  // is the live pane set — SplitView mirrors add/remove back into it via
+  // onPanesChange — so it must be preserved across entries, not blindly reset.
+  const openSplitView = useCallback(
+    (sessionIds?: readonly string[]) => {
+      setActivePanel(null);
+      setSplitSessionIds((prev) => {
+        // An explicit selection (the overview, or a `?split=` URL) replaces the
+        // split with exactly those sessions.
+        const requested = Array.from(
+          new Set((sessionIds ?? []).filter(Boolean)),
+        ).slice(0, MAX_SPLIT_PANES);
+        if (requested.length > 0) return requested;
+        // No selection (the toolbar "Open Split View" button): restore the split
+        // the user already had so switching away and back doesn't clear it; fall
+        // back to the current session when there is nothing to restore.
+        if (prev.length > 0) return prev;
+        return connection.sessionId ? [connection.sessionId] : [];
+      });
+      setMainView('split');
+    },
+    [connection.sessionId],
+  );
+  const externalSplitSignature = useMemo(() => {
+    const requested = Array.from(
+      new Set((externalSplitSessionIds ?? []).filter(Boolean)),
+    ).slice(0, MAX_SPLIT_PANES);
+    return requested.join('\0');
+  }, [externalSplitSessionIds]);
+  const externalSplitControlled = externalSplitSessionIds !== undefined;
+  const onSplitSessionIdsChangeRef = useRef(onSplitSessionIdsChange);
+  onSplitSessionIdsChangeRef.current = onSplitSessionIdsChange;
+  const requestOpenSplitView = useCallback(() => {
+    if (!externalSplitControlled) {
+      openSplitView();
+      return;
+    }
+    const requested =
+      splitSessionIds.length > 0
+        ? splitSessionIds
+        : connection.sessionId
+          ? [connection.sessionId]
+          : [];
+    onSplitSessionIdsChangeRef.current?.(requested);
+  }, [
+    connection.sessionId,
+    externalSplitControlled,
+    openSplitView,
+    splitSessionIds,
+  ]);
+  const shellApi = useMemo<WebShellApi>(
+    () => ({
+      openSplitView: () => requestOpenSplitView(),
+      openSessionOverview: () => openPanel('sessions'),
+    }),
+    [openPanel, requestOpenSplitView],
+  );
+  useEffect(() => {
+    assignShellRef(shellRef, shellApi);
+  }, [shellApi, shellRef]);
+  useEffect(
+    () => () => {
+      assignShellRef(shellRef, null);
+    },
+    [shellRef],
+  );
+  useEffect(() => {
+    if (!externalSplitControlled) return;
+    const requested = externalSplitSignature
+      ? externalSplitSignature.split('\0')
+      : [];
+    setSplitSessionIds((prev) =>
+      areSessionIdsEqual(prev, requested) ? prev : requested,
+    );
+    if (requested.length > 0) {
+      setActivePanel((prev) => (prev === null ? prev : null));
+      setMainView((prev) => (prev === 'split' ? prev : 'split'));
+    } else {
+      setMainView((prev) => (prev === 'split' ? 'chat' : prev));
+    }
+  }, [externalSplitControlled, externalSplitSignature]);
+  const handleSplitPanesChange = useCallback(
+    (sessionIds: string[]) => {
+      if (!externalSplitControlled) {
+        setSplitSessionIds(sessionIds);
+      }
+      onSplitSessionIdsChangeRef.current?.(sessionIds);
+    },
+    [externalSplitControlled],
+  );
+  const notifyControlledSplitClose = useCallback(() => {
+    if (externalSplitControlled) {
+      onSplitSessionIdsChangeRef.current?.([]);
+    }
+  }, [externalSplitControlled]);
   // Stable so SplitView's onExit-dependent effect (auto-exit on last pane
   // close) doesn't re-fire on every App re-render. Back from the split returns
   // to the Session Overview — the hub the split is launched from.
-  const handleSplitExit = useCallback(() => openPanel('sessions'), [openPanel]);
+  const handleSplitExit = useCallback(() => {
+    notifyControlledSplitClose();
+    openPanel('sessions');
+  }, [notifyControlledSplitClose, openPanel]);
   // A `?split=a,b` URL (opened in a new tab from the overview) enters the split
   // view with those sessions on load. Consume the param once so a later reload
   // or exit doesn't force the split back on.
   useEffect(() => {
     const ids = parseSplitSessionIds(window.location.search);
     if (ids.length === 0) return;
-    openSplitView(ids);
     const url = new URL(window.location.href);
     url.searchParams.delete('split');
     window.history.replaceState(null, '', url);
-  }, [openSplitView]);
+    if (!externalSplitControlled) {
+      openSplitView(ids);
+    }
+  }, [externalSplitControlled, openSplitView]);
   // If the viewport shrinks below the large-screen breakpoint, close the Session
   // Overview panel and the split view — both are large-screen-only surfaces
   // whose entry points are hidden on small screens, so leaving them up would
@@ -1273,10 +1465,11 @@ export function App({
       setActivePanel(null);
     }
     if (!isLargeScreen && mainView === 'split') {
+      notifyControlledSplitClose();
       setMainView('chat');
       focusComposerAfterSplitCloseRef.current = true;
     }
-  }, [isLargeScreen, activePanel, mainView]);
+  }, [isLargeScreen, activePanel, mainView, notifyControlledSplitClose]);
   // Land focus on the composer after a shrink-driven split close so keyboard
   // users aren't dropped onto <body> — but not when the chat now shows an
   // approval overlay (it owns the keyboard) or a panel (its Back self-focuses).
@@ -1681,11 +1874,9 @@ export function App({
     (error: unknown, fallback: string) => {
       if (isAbortError(error)) return;
       if (isDaemonTurnError(error)) {
-        console.debug('[web-shell] turn error rendered in transcript', error);
         return;
       }
       if (isAlreadyDispatched(error)) {
-        console.debug('[web-shell] error already handled by notice', error);
         return;
       }
       const message = formatError(error, fallback);
@@ -1777,13 +1968,10 @@ export function App({
   );
 
   useEffect(() => {
-    logSessionNoticesHook(notices);
     for (const notice of notices) {
       if (shouldToastNotice(notice)) {
         pushToast(toastToneFromNotice(notice), notice.message);
-      } else if (notice.category === 'lifecycle') {
-        console.debug('[web-shell] daemon notice', notice);
-      } else {
+      } else if (notice.category !== 'lifecycle') {
         console.warn('[web-shell] daemon notice', notice);
       }
       dismissNotice(notice.id);
@@ -2523,6 +2711,19 @@ export function App({
     [loadSidebarSession, reportError],
   );
 
+  // Listen for `qwen:open-session` events dispatched by the markdown renderer
+  // when a `qwen-session://<id>` link is clicked. Navigate to the session.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const sessionId = (e as CustomEvent<string>).detail;
+      if (typeof sessionId === 'string' && sessionId) {
+        handleOpenSessionFromOverview(sessionId);
+      }
+    };
+    window.addEventListener('qwen:open-session', handler);
+    return () => window.removeEventListener('qwen:open-session', handler);
+  }, [handleOpenSessionFromOverview]);
+
   useEffect(() => {
     if (
       sidebarSwitchingSessionId !== null &&
@@ -3252,12 +3453,7 @@ export function App({
               workspaceActions
                 .loadSkillsStatus()
                 .then((status) => {
-                  const skills = (status?.skills ?? [])
-                    .map((s) => ({
-                      name: s.name,
-                      description: s.description ?? '',
-                    }))
-                    .sort((a, b) => a.name.localeCompare(b.name));
+                  const skills = availableSkillInfos(status);
                   setLoadedSkills(skills);
                   if (skills.length === 0) {
                     store.dispatch([
@@ -4000,7 +4196,7 @@ export function App({
           if (summary) {
             store.dispatch({
               type: 'debug',
-              text: serializeModelSwitchSummary(summary),
+              text: serializeModelSwitchSummary(summary, t),
               source: 'model_switch_summary',
               data: summary,
             });
@@ -4093,7 +4289,6 @@ export function App({
   };
 
   const commands = useMemo(() => {
-    const skillNames = new Set(connection.skills ?? []);
     return localizeBuiltinDescriptions(
       mergeCommands(connection.commands ?? [], getLocalCommands(t)),
       t,
@@ -4102,17 +4297,15 @@ export function App({
         (command) => !hiddenCommands.has(normalizeHiddenCommand(command.name)),
       )
       .map((command) => {
-        if (!skillNames.has(command.name)) return command;
         const skillKey = skillDescriptionKey(command.name);
+        if (!skillKey) return command;
         return {
           ...command,
           displayCategory: 'skill' as const,
-          description: skillKey
-            ? t(skillKey)
-            : command.description || t('skills.run'),
+          description: t(skillKey),
         };
       });
-  }, [connection.commands, connection.skills, hiddenCommands, t]);
+  }, [connection.commands, hiddenCommands, t]);
 
   const welcomeHeaderProps = useMemo(
     () => ({
@@ -4537,29 +4730,38 @@ export function App({
                   : styles.chatPane
               }
             >
-              {sidebarOptions.enabled && (
-                <button
-                  type="button"
-                  className={styles.hamburgerButton}
-                  onClick={() => setMobileDrawerOpen((open) => !open)}
-                  aria-label={t('sidebar.toggleMenu')}
-                  aria-expanded={mobileDrawerOpen}
-                >
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden="true"
+              {sidebarOptions.enabled &&
+                !activePanel &&
+                mainView === 'chat' && (
+                  <button
+                    type="button"
+                    className={[
+                      styles.hamburgerButton,
+                      isChatEmptyState
+                        ? styles.hamburgerButtonFloating
+                        : undefined,
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
+                    onClick={() => setMobileDrawerOpen((open) => !open)}
+                    aria-label={t('sidebar.toggleMenu')}
+                    aria-expanded={mobileDrawerOpen}
                   >
-                    <line x1="3" y1="6" x2="21" y2="6" />
-                    <line x1="3" y1="12" x2="21" y2="12" />
-                    <line x1="3" y1="18" x2="21" y2="18" />
-                  </svg>
-                </button>
-              )}
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <line x1="3" y1="6" x2="21" y2="6" />
+                      <line x1="3" y1="12" x2="21" y2="12" />
+                      <line x1="3" y1="18" x2="21" y2="18" />
+                    </svg>
+                  </button>
+                )}
               {activePanel && (
                 <section
                   className={styles.panelHost}
@@ -4728,7 +4930,15 @@ export function App({
                   <WebShellCustomizationProvider value={customization}>
                     <CompactModeContext.Provider value={compactMode}>
                       <SplitView
-                        initialSessionIds={splitSessionIds}
+                        sessionIds={splitSessionIds}
+                        // Mirror live pane add/remove back up so switching away
+                        // and re-entering restores the same panes. Keep this
+                        // callback stable to avoid looping SplitView's reporting
+                        // effect.
+                        onPanesChange={handleSplitPanesChange}
+                        // Refresh the "add pane" picker when the session list
+                        // changes elsewhere, matching the sidebar.
+                        sessionListReloadToken={sessionListReloadToken}
                         // Back returns to the Session Overview (the hub the split
                         // is launched from), not the single-session chat.
                         onExit={handleSplitExit}
@@ -4782,6 +4992,7 @@ export function App({
                         details={todoDetails}
                       >
                         <div
+                          style={contentStyle}
                           className={[
                             styles.content,
                             showFloatingTodos ||
@@ -4809,6 +5020,7 @@ export function App({
                             showRetryHint={showRetryHint}
                             onRetryClick={handleRetry}
                             onBranchSession={handleBranchCurrentSession}
+                            bottomOverlayInset={bottomPanelInset}
                             welcomeHeader={
                               isChatEmptyState ? welcomeHeader : undefined
                             }
@@ -4832,11 +5044,15 @@ export function App({
                       </TodoContextsProvider>
                     </CompactModeContext.Provider>
 
-                    <div ref={footerRef} className={styles.footer}>
+                    <div
+                      ref={footerRef}
+                      style={contentStyle}
+                      className={styles.footer}
+                    >
                       {canScrollMessageListToBottom && (
                         <div
                           className={
-                            showFloatingTodos
+                            showBottomPanels
                               ? `${styles.scrollToBottomLayer} ${styles.scrollToBottomLayerWithTodos}`
                               : styles.scrollToBottomLayer
                           }
@@ -4863,9 +5079,15 @@ export function App({
                           </button>
                         </div>
                       )}
-                      {showFloatingTodos && (
-                        <div className={styles.bottomPanels}>
-                          <TodoPanel todos={floatingTodos} />
+                      {showBottomPanels && (
+                        <div
+                          ref={bottomPanelsRef}
+                          className={styles.bottomPanels}
+                        >
+                          <TodoPanel
+                            todos={showFloatingTodos ? floatingTodos : []}
+                            statusItems={floatingBottomStatusItems}
+                          />
                         </div>
                       )}
                       {/* Only render the outer session's approval on the chat
