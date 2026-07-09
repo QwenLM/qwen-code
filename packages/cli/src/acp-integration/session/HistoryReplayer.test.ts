@@ -374,6 +374,74 @@ describe('HistoryReplayer', () => {
       });
     });
 
+    it('should carry dangling function calls across replay pages', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-missing',
+                name: 'run_shell_command',
+                args: { command: 'sleep 10' },
+              },
+            },
+          ],
+        },
+      };
+
+      const firstPage = await replayer.replayPage([record], {
+        finalizeDangling: false,
+      });
+      expect(firstPage.pendingToolCalls).toEqual([
+        {
+          callId: 'call-missing',
+          toolName: 'run_shell_command',
+          recordId: record.uuid,
+          timestamp: record.timestamp,
+        },
+      ]);
+      expect(sentUpdates().map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+      ]);
+
+      sendUpdateSpy.mockClear();
+      sentUpdateContexts = [];
+      const lastPage = await replayer.replayPage([], {
+        pendingToolCalls: firstPage.pendingToolCalls,
+        finalizeDangling: true,
+      });
+
+      expect(lastPage.pendingToolCalls).toEqual([]);
+      expect(sentUpdates().map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call_update',
+      ]);
+      expect(sentUpdates()[0]).toMatchObject({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-missing',
+        status: 'failed',
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: MISSING_TOOL_RESULT_MESSAGE,
+            },
+          },
+        ],
+        _meta: {
+          toolName: 'run_shell_command',
+          provenance: 'builtin',
+          timestamp: toEpochMs(record.timestamp),
+        },
+      });
+      expect(sentUpdateContexts[0]).toEqual({
+        activeRecordId: record.uuid,
+        activeRecordTimestamp: record.timestamp,
+      });
+    });
+
     it('should not synthesize missing-result failures for calls without source ids', async () => {
       const records: ChatRecord[] = [
         {
