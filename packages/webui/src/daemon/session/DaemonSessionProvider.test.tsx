@@ -5402,21 +5402,21 @@ describe('DaemonSessionProvider', () => {
       modelServices: [],
       workspaceCwd: '/mock-workspace',
     });
+    let promptStarted = false;
     const heartbeat = vi.fn(async () => {
+      if (!promptStarted) return { ok: true };
       throw Object.assign(new Error('session gone'), { status: 410 });
     });
     const session = createMockSession({
       heartbeat,
-      submitPrompt: vi.fn(
-        (_req: unknown, signal?: AbortSignal) =>
-          new Promise<NonBlockingPromptAccepted>((_resolve, reject) => {
-            signal?.addEventListener(
-              'abort',
-              () => reject(createAbortError()),
-              { once: true },
-            );
-          }),
-      ),
+      submitPrompt: vi.fn((_req: unknown, signal?: AbortSignal) => {
+        promptStarted = true;
+        return new Promise<NonBlockingPromptAccepted>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(createAbortError()), {
+            once: true,
+          });
+        });
+      }),
       events: createIdleEvents(),
     });
     sdkMocks.sessions.push(session);
