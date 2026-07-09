@@ -729,6 +729,33 @@ describe('MessageList — turn collapse (DOM)', () => {
     }
   });
 
+  it('keeps timeline details when focus scrolls the timeline viewport', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+    const c = mount(simpleTurns(4));
+    await nextFrame();
+
+    const firstEntryButton = c.querySelector<HTMLButtonElement>(
+      '[data-turn-id="u1"] button',
+    );
+    const viewport = c.querySelector<HTMLElement>(
+      '[data-testid="session-timeline-viewport"]',
+    );
+    expect(firstEntryButton).not.toBeNull();
+    expect(viewport).not.toBeNull();
+    focusIn(firstEntryButton!);
+    expect(
+      document.querySelector('[data-testid="session-timeline-detail"]'),
+    ).not.toBeNull();
+
+    act(() => viewport!.dispatchEvent(new Event('scroll', { bubbles: true })));
+
+    expect(
+      document.querySelector('[data-testid="session-timeline-detail"]'),
+    ).not.toBeNull();
+    expect(firstEntryButton?.hasAttribute('aria-describedby')).toBe(true);
+    rectSpy.mockRestore();
+  });
+
   it('hides timeline details when the user scrolls the timeline viewport', async () => {
     const rectSpy = mockMessageListWidth(1200);
     const c = mount(simpleTurns(4));
@@ -747,6 +774,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       document.querySelector('[data-testid="session-timeline-detail"]'),
     ).not.toBeNull();
 
+    await nextFrame();
     act(() => viewport!.dispatchEvent(new Event('scroll', { bubbles: true })));
 
     expect(

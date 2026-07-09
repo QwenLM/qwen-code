@@ -1711,6 +1711,9 @@ const SessionTimeline = memo(function SessionTimeline({
   const viewportRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const programmaticScrollRef = useRef(false);
+  const focusScrollGuardRef = useRef(false);
+  const focusScrollGuardFrameRef = useRef<number | null>(null);
+  const focusScrollGuardFallbackRef = useRef<number | null>(null);
   const [tooltip, setTooltip] = useState<SessionTimelineTooltip | null>(null);
 
   const currentIndex =
@@ -1721,7 +1724,7 @@ const SessionTimeline = memo(function SessionTimeline({
   const hideTooltip = useCallback(() => setTooltip(null), []);
 
   const handleViewportScroll = useCallback(() => {
-    if (programmaticScrollRef.current) return;
+    if (programmaticScrollRef.current || focusScrollGuardRef.current) return;
     hideTooltip();
   }, [hideTooltip]);
 
@@ -1785,6 +1788,26 @@ const SessionTimeline = memo(function SessionTimeline({
     [buildTooltip],
   );
 
+  const guardFocusScroll = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    if (focusScrollGuardFrameRef.current !== null) {
+      window.cancelAnimationFrame(focusScrollGuardFrameRef.current);
+    }
+    if (focusScrollGuardFallbackRef.current !== null) {
+      window.clearTimeout(focusScrollGuardFallbackRef.current);
+    }
+    focusScrollGuardRef.current = true;
+    focusScrollGuardFrameRef.current = window.requestAnimationFrame(() => {
+      focusScrollGuardFrameRef.current = null;
+      focusScrollGuardRef.current = false;
+      syncTooltip();
+    });
+    focusScrollGuardFallbackRef.current = window.setTimeout(() => {
+      focusScrollGuardFallbackRef.current = null;
+      focusScrollGuardRef.current = false;
+    }, 100);
+  }, [syncTooltip]);
+
   useLayoutEffect(() => {
     if (hidden) return;
     const viewport = viewportRef.current;
@@ -1823,6 +1846,19 @@ const SessionTimeline = memo(function SessionTimeline({
       window.removeEventListener('resize', syncTooltip);
     };
   }, [syncTooltip, tooltip]);
+
+  useLayoutEffect(
+    () => () => {
+      if (focusScrollGuardFrameRef.current !== null) {
+        window.cancelAnimationFrame(focusScrollGuardFrameRef.current);
+      }
+      if (focusScrollGuardFallbackRef.current !== null) {
+        window.clearTimeout(focusScrollGuardFallbackRef.current);
+      }
+      focusScrollGuardRef.current = false;
+    },
+    [],
+  );
 
   useLayoutEffect(() => {
     if (!tooltip || tooltip.clamped) return;
@@ -1884,6 +1920,12 @@ const SessionTimeline = memo(function SessionTimeline({
                   | ReactMouseEvent<HTMLButtonElement>
                   | ReactFocusEvent<HTMLButtonElement>,
               ) => showTooltip(entry, event.currentTarget);
+              const revealFocusedTooltip = (
+                event: ReactFocusEvent<HTMLButtonElement>,
+              ) => {
+                guardFocusScroll();
+                showTooltip(entry, event.currentTarget);
+              };
               const describedByTooltip = tooltip?.entry.id === entry.id;
               return (
                 <li
@@ -1914,7 +1956,7 @@ const SessionTimeline = memo(function SessionTimeline({
                     }
                     aria-label={ariaLabel}
                     onClick={() => onSelect(entry.id)}
-                    onFocus={revealTooltip}
+                    onFocus={revealFocusedTooltip}
                     onBlur={hideTooltip}
                     onMouseEnter={revealTooltip}
                     onMouseLeave={hideTooltip}
