@@ -1731,16 +1731,22 @@ function FileArtifactPreview({
     const host = hostRef.current;
     if (!host || content === null) return;
     host.replaceChildren();
-    const view = new EditorView({
-      doc: content,
-      extensions: [
-        basicSetup,
-        EditorView.editable.of(false),
-        EditorState.readOnly.of(true),
-        EditorView.lineWrapping,
-      ],
-      parent: host,
-    });
+    let view: EditorView;
+    try {
+      view = new EditorView({
+        doc: content,
+        extensions: [
+          basicSetup,
+          EditorView.editable.of(false),
+          EditorState.readOnly.of(true),
+          EditorView.lineWrapping,
+        ],
+        parent: host,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      return undefined;
+    }
     return () => view.destroy();
   }, [content]);
 

@@ -126,7 +126,11 @@ function TurnOutputsComponent({
     onReviewChanges(changes, selectedPath);
   };
   const openArtifact = (artifact: DaemonSessionArtifact) => {
-    const previewContent = getArtifactPreviewContent(artifact, changes);
+    const previewContent = getArtifactPreviewContent(
+      artifact,
+      changes,
+      workspaceCwd,
+    );
     if (onOpenRequest) {
       onOpenRequest({
         id: `artifact:${artifact.id}`,
@@ -444,13 +448,14 @@ function ChevronIcon({ open }: { open: boolean }) {
 
 export const TurnOutputs = memo(TurnOutputsComponent);
 
-function getArtifactPreviewContent(
+export function getArtifactPreviewContent(
   artifact: DaemonSessionArtifact,
   changes: readonly TurnOutputFileChange[],
+  workspaceCwd?: string,
 ) {
   if (artifact.kind !== 'html' || !artifact.workspacePath) return undefined;
   const change = changes.find((item) =>
-    isSamePath(item.path, artifact.workspacePath),
+    isSamePath(item.path, artifact.workspacePath, workspaceCwd),
   );
   if (!change) return undefined;
   for (let index = change.diffs.length - 1; index >= 0; index--) {

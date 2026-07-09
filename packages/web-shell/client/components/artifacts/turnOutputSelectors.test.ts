@@ -190,6 +190,37 @@ describe('turnOutputSelectors', () => {
     ]);
   });
 
+  it('uses stats from a final full-content diff after earlier partial diffs', () => {
+    const messages = [
+      userMessage('u1', 'edit then rewrite file'),
+      toolGroup('tg1', [
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          content: [{ type: 'diff', oldText: 'one\n', newText: 'two\n' }],
+        },
+        {
+          callId: 'write-1',
+          toolName: 'write_file',
+          status: 'completed',
+          args: { file_path: 'src/app.ts', content: 'two\nthree\n' },
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change).toMatchObject({
+      additions: 2,
+      deletions: 0,
+    });
+    expect(change?.diffs).toEqual([
+      { oldText: 'one\n', newText: 'two\n' },
+      { oldText: '', newText: 'two\nthree\n', fullContent: true },
+    ]);
+  });
+
   it('omits stats for large full-content diffs', () => {
     const oldContent = Array.from({ length: 1001 }, (_, index) => `${index}`)
       .join('\n')

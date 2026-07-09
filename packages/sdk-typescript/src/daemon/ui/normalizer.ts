@@ -1141,11 +1141,7 @@ function normalizeArtifactChanged(
   const action = getString(change, 'action');
   const artifactId = getString(change, 'artifactId');
   if (!action || !artifactId) {
-    return fallbackDebug(
-      event,
-      base,
-      'artifact_changed: missing action or artifactId',
-    );
+    return fallbackDebug(event, base, 'missing action or artifactId');
   }
   return [
     {

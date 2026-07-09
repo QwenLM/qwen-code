@@ -449,7 +449,8 @@ function mergeFileDiffs(
 }
 
 function getFinalFullContentDiff(diffs: TurnOutputFileChange['diffs']) {
-  return diffs.length === 1 && diffs[0]?.fullContent ? diffs[0] : undefined;
+  const finalDiff = diffs.at(-1);
+  return finalDiff?.fullContent ? finalDiff : undefined;
 }
 
 function countChangedLines(oldText: string, newText: string) {

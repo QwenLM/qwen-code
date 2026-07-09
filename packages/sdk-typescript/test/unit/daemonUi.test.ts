@@ -6710,7 +6710,7 @@ describe('daemon UI normalizer — artifact events', () => {
     expect(events).toEqual([
       expect.objectContaining({
         type: 'debug',
-        text: 'artifact_changed: artifact_changed: missing action or artifactId',
+        text: 'artifact_changed: missing action or artifactId',
       }),
     ]);
   });
