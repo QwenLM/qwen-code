@@ -250,11 +250,15 @@ export function registerSessionRoutes(
   };
 
   const hasActivePersistedSessions = async (workspaceCwd: string) => {
-    const page = await new SessionService(workspaceCwd).listSessions({
-      archiveState: 'active',
-      size: 1,
-    });
-    return page.items.length > 0;
+    try {
+      const page = await new SessionService(workspaceCwd).listSessions({
+        archiveState: 'active',
+        size: 1,
+      });
+      return page.items.length > 0;
+    } catch {
+      return false;
+    }
   };
 
   const sendAmbiguousSessionOwner = (

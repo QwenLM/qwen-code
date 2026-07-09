@@ -932,6 +932,37 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
+  it('falls back to live-only listing when persisted probing fails', async () => {
+    await withRuntimeDir(async () => {
+      const chatsDir = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+      );
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.chmod(chatsDir, 0o000);
+      try {
+        const { app } = makeHarness({
+          secondarySummaries: [
+            makeSummary('secondary-live-fallback', SECONDARY_CWD),
+          ],
+        });
+
+        const res = await request(app)
+          .get('/workspace/secondary-id/sessions')
+          .set('Host', host())
+          .expect(200);
+        expect(res.body.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: 'secondary-live-fallback',
+            workspaceCwd: SECONDARY_CWD,
+          }),
+        ]);
+      } finally {
+        await fsp.chmod(chatsDir, 0o700);
+      }
+    });
+  });
+
   it('preserves the legacy invalid workspace selector message', async () => {
     const { app } = makeHarness();
 
