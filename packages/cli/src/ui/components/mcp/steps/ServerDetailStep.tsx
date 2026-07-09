@@ -113,7 +113,7 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
 
     // 受门控但未审批的 server 显示"审批"按钮，让用户可以在 /mcp 中直接审批
     // 而不必等待启动时的弹窗。
-    if (awaitingApproval) {
+    if (awaitingApproval && onApprove) {
       result.push({
         key: 'approve',
         label: t('Approve'),
@@ -147,7 +147,7 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
     }
 
     return result;
-  }, [server, onViewResources, awaitingApproval]);
+  }, [server, onViewResources, onApprove, awaitingApproval]);
 
   useKeypress(
     (key) => {
