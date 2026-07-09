@@ -186,7 +186,31 @@ describe('channel webhook routes', () => {
     },
   );
 
-  it('rate limits by channel and source', async () => {
+  it('rate limits pre-auth attempts with a bounded key', async () => {
+    const rateLimiter = {
+      checkRate: vi.fn(() => true),
+    };
+    const h = appHarness({ rateLimiter });
+
+    const res = await request(h.app)
+      .post('/channels/random-channel/webhooks/random-source')
+      .set('x-qwen-webhook-secret', 'wrong')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        payload: {},
+      });
+
+    expect(res.status).toBe(401);
+    expect(rateLimiter.checkRate).toHaveBeenCalledTimes(1);
+    expect(rateLimiter.checkRate).toHaveBeenCalledWith(
+      'webhook:preauth',
+      'mutation',
+    );
+  });
+
+  it('rate limits authenticated requests by channel and source', async () => {
     const rateLimiter = {
       checkRate: vi.fn(() => true),
     };
@@ -203,8 +227,38 @@ describe('channel webhook routes', () => {
       });
 
     expect(res.status).toBe(202);
-    expect(rateLimiter.checkRate).toHaveBeenCalledWith(
+    expect(rateLimiter.checkRate).toHaveBeenNthCalledWith(
+      1,
+      'webhook:preauth',
+      'mutation',
+    );
+    expect(rateLimiter.checkRate).toHaveBeenNthCalledWith(
+      2,
       'webhook:dingtalk-main:github-ci',
+      'mutation',
+    );
+  });
+
+  it('does not spend configured-source quota for bad secrets', async () => {
+    const rateLimiter = {
+      checkRate: vi.fn(() => true),
+    };
+    const h = appHarness({ rateLimiter });
+
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'wrong')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        payload: {},
+      });
+
+    expect(res.status).toBe(401);
+    expect(rateLimiter.checkRate).toHaveBeenCalledTimes(1);
+    expect(rateLimiter.checkRate).toHaveBeenCalledWith(
+      'webhook:preauth',
       'mutation',
     );
   });

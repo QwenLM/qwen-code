@@ -7839,7 +7839,7 @@ describe('ACP WebSocket transport security', () => {
     expect(bridge.runtimeMcpAdds).toHaveLength(0);
     expect(bridge.runtimeMcpRemoves).toHaveLength(0);
     expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
-      'qwen serve: set QWEN_CDP_MCP_COMMAND to enable browser automation MCP (chrome-devtools-mcp is no longer bundled)',
+      'qwen serve: set QWEN_CDP_MCP_COMMAND to enable browser automation MCP (no adapter is bundled)',
     );
 
     ws.close();
@@ -7856,7 +7856,7 @@ describe('ACP WebSocket transport security', () => {
     await yieldImmediate();
     expect(bridge.runtimeMcpAdds).toHaveLength(0);
     expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
-      'qwen serve: set QWEN_CDP_MCP_COMMAND to enable browser automation MCP (chrome-devtools-mcp is no longer bundled)',
+      'qwen serve: set QWEN_CDP_MCP_COMMAND to enable browser automation MCP (no adapter is bundled)',
     );
 
     ws.close();

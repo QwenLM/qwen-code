@@ -526,6 +526,30 @@ describe('parseChannelConfig', () => {
     );
   });
 
+  it('does not treat resolved uppercase secret values as env names', async () => {
+    delete process.env['ABC123'];
+
+    const config = await parseChannelConfig('dingtalk-main', {
+      type: 'bare',
+      token: 'token',
+      webhooks: {
+        sources: {
+          'github-ci': {
+            secretEnv: 'ABC123',
+            targets: {
+              default: {
+                chatId: 'group-1',
+                senderId: 'webhook:github-ci',
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(config.webhooks?.sources['github-ci']?.secret).toBe('ABC123');
+  });
+
   it('rejects webhook secretEnv refs when the environment variable is unset', async () => {
     delete process.env['QWEN_MISSING_WEBHOOK_SECRET'];
 

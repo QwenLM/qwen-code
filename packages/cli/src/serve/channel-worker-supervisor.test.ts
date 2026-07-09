@@ -387,6 +387,39 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
+  it('waits for the worker webhook drain window before force killing on stop', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChild(false);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const stopped = supervisor.stop();
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(child.kill).not.toHaveBeenCalledWith('SIGKILL');
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    await stopped;
+  });
+
   it('notifies when a ready worker exits unexpectedly', async () => {
     const child = new FakeChild();
     const onExit = vi.fn();
@@ -1761,7 +1794,7 @@ describe('createChannelWorkerSupervisor', () => {
 
     const stopped = supervisor.stop();
     await Promise.resolve();
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(10_000);
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
     await vi.advanceTimersByTimeAsync(2_000);
     await stopped;
@@ -1959,7 +1992,7 @@ describe('createChannelWorkerSupervisor', () => {
     const stopped = supervisor.stop();
     await Promise.resolve();
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(10_000);
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
     await vi.advanceTimersByTimeAsync(2_000);
     await stopped;

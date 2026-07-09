@@ -104,6 +104,8 @@ import {
   profileCheckpoint,
 } from '../utils/startupProfiler.js';
 import type { ServiceInfo } from '../commands/channel/pidfile.js';
+import { sanitizeLogText } from '@qwen-code/channel-base';
+import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 
 // Reverse MCP channel; enabled only by explicit option or env opt-in.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
@@ -886,6 +888,7 @@ function currentServeFeaturesForRunQwenServe(
     // so the bootstrap `/capabilities` window doesn't briefly under-report them.
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
+    browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts),
   });
 }
 
@@ -1439,8 +1442,8 @@ function readDeferredWebhookSecret(
     )?.sources[source]?.secret;
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    process.stderr.write(
-      `[webhook-secret] failed to read deferred webhook secret for ${channelName}/${source}: ${reason}\n`,
+    writeStderrLine(
+      `[webhook-secret] failed to read deferred webhook secret for ${sanitizeLogText(channelName, 128)}/${sanitizeLogText(source, 128)}: ${sanitizeLogText(reason, 512)}`,
     );
     return undefined;
   }

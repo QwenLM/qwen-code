@@ -74,6 +74,17 @@ export function registerChannelWebhookRoutes(
         return;
       }
 
+      if (
+        deps.rateLimiter &&
+        !deps.rateLimiter.checkRate(
+          `webhook:${channelName}:${source}`,
+          'mutation',
+        )
+      ) {
+        sendWebhookRateLimitExceeded(res);
+        return;
+      }
+
       const locals = res.locals as {
         channelWebhook?: {
           channelName: string;
@@ -173,8 +184,7 @@ function createWebhookRateLimitMiddleware(
       next();
       return;
     }
-    const key = `webhook:${req.params['channelName'] ?? 'unknown'}:${req.params['source'] ?? 'unknown'}`;
-    if (deps.rateLimiter.checkRate(key, 'mutation')) {
+    if (deps.rateLimiter.checkRate('webhook:preauth', 'mutation')) {
       next();
       return;
     }

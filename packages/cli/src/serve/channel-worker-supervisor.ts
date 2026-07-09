@@ -23,6 +23,7 @@ import {
 
 const DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_CHANNEL_WORKER_HEARTBEAT_TIMEOUT_MS = 45_000;
+const CHANNEL_WORKER_STOP_GRACE_MS = 10_000;
 const MAX_WORKER_LOG_LINE_LENGTH = 4096;
 const MAX_WORKER_LOG_BUFFER_LENGTH = 64 * 1024;
 const MAX_WORKER_LOG_DISCARDED_REMAINDER_LENGTH = MAX_WORKER_LOG_BUFFER_LENGTH;
@@ -891,7 +892,7 @@ export function createChannelWorkerSupervisor(
         snapshot = { ...snapshot, state: 'stopped' };
         return;
       }
-      const exited = waitForExit(child, 5_000);
+      const exited = waitForExit(child, CHANNEL_WORKER_STOP_GRACE_MS);
       stopping = true;
       child.kill('SIGTERM');
       if (!(await exited)) {

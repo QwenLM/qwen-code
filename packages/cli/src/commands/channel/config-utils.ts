@@ -259,14 +259,13 @@ function normalizeSecretEnvRef(secretEnv: string): string {
 }
 
 function resolveWebhookSecretEnv(secretEnv: string): string {
-  try {
-    return resolveEnvVars(normalizeSecretEnvRef(secretEnv));
-  } catch (err) {
-    if (!secretEnv.startsWith('$') && !ENV_VAR_NAME_PATTERN.test(secretEnv)) {
-      return secretEnv;
-    }
-    throw err;
+  if (secretEnv.startsWith('$')) {
+    return resolveConfigEnvVar(secretEnv, 'available');
   }
+  if (ENV_VAR_NAME_PATTERN.test(secretEnv) && secretEnv.includes('_')) {
+    return resolveConfigEnvVar(normalizeSecretEnvRef(secretEnv), 'available');
+  }
+  return secretEnv;
 }
 
 function parseWebhookConfig(

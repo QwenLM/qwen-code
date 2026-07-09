@@ -262,6 +262,37 @@ describe('TextTokenizer', () => {
     });
   });
 
+  describe('ASCII/non-ASCII boundary', () => {
+    it('should treat DEL (U+007F) as ASCII and U+0080 as non-ASCII', async () => {
+      // '\x7F' = 1 ASCII char: 1 / 4 = 0.25 -> ceil = 1
+      expect(await tokenizer.calculateTokens('\x7F')).toBe(1);
+      // '\u0080' = 1 non-ASCII char: 1 * 1.1 = 1.1 -> ceil = 2
+      expect(await tokenizer.calculateTokens('\u0080')).toBe(2);
+    });
+
+    it('should count pure-ASCII text of any length as ceil(length / 4)', async () => {
+      for (const len of [1, 3, 4, 5, 4096, 4097]) {
+        const text = 'a'.repeat(len);
+        expect(await tokenizer.calculateTokens(text)).toBe(Math.ceil(len / 4));
+      }
+    });
+
+    it('should stay consistent when a single non-ASCII char joins long ASCII text', async () => {
+      const ascii = 'x'.repeat(1000);
+      // 1000 / 4 = 250
+      expect(await tokenizer.calculateTokens(ascii)).toBe(250);
+      // 1000 / 4 + 1 * 1.1 = 251.1 -> ceil = 252, wherever the char sits
+      expect(await tokenizer.calculateTokens(ascii + '中')).toBe(252);
+      expect(await tokenizer.calculateTokens('中' + ascii)).toBe(252);
+    });
+
+    it('should count surrogate pairs as two non-ASCII units within mixed text', async () => {
+      const text = 'abcd🚀'; // 4 ASCII + 2 UTF-16 units
+      // 4 / 4 + 2 * 1.1 = 3.2 -> ceil = 4
+      expect(await tokenizer.calculateTokens(text)).toBe(4);
+    });
+  });
+
   describe('large inputs', () => {
     it('should handle very long text', async () => {
       const longText = 'a'.repeat(200000); // 200k characters
