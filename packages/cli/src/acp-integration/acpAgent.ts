@@ -4222,8 +4222,16 @@ class QwenAgent implements Agent {
 
     try {
       const disabled = config.getDisabledSkillNames();
-      await config.getExtensionManager().refreshCache();
-      await skillManager.refreshCache();
+      try {
+        await config.getExtensionManager().refreshCache();
+      } catch (error) {
+        debugLogger.warn('Extension cache refresh failed:', error);
+      }
+      try {
+        await skillManager.refreshCache();
+      } catch (error) {
+        debugLogger.warn('Skill cache refresh failed:', error);
+      }
       const skills = await skillManager.listSkills();
       const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
       const skillsByKey = new Map(
@@ -7315,17 +7323,23 @@ class QwenAgent implements Agent {
         const sessionId = params['sessionId'] as string;
         const session = this.sessionOrThrow(sessionId);
         const extensionManager = session.getConfig().getExtensionManager();
-        await extensionManager.refreshCache();
         const skillManager = session.getConfig().getSkillManager();
-        try {
-          await skillManager?.refreshCache();
-        } catch (err) {
-          debugLogger.warn(
-            `Skill refresh failed after extension refresh for session ${sessionId}: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
+        await Promise.all([
+          extensionManager.refreshCache().catch((err: unknown) => {
+            debugLogger.warn(
+              `Extension refresh failed for session ${sessionId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }),
+          skillManager?.refreshCache().catch((err: unknown) => {
+            debugLogger.warn(
+              `Skill refresh failed after extension refresh for session ${sessionId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }),
+        ]);
         try {
           await extensionManager.refreshTools();
         } catch (err) {

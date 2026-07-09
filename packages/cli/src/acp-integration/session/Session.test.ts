@@ -1763,12 +1763,16 @@ describe('Session', () => {
           (call) => call.update.sessionUpdate === 'available_commands_update',
         ) as {
         update: {
+          availableCommands: Array<{ name: string }>;
           _meta?: {
             availableSkills: string[];
             availableSkillDetails: Array<{ name: string }>;
           };
         };
       };
+      expect(
+        update.update.availableCommands.map((command) => command.name),
+      ).not.toContain('disabled-extension-skill');
       expect(update.update._meta).toBeUndefined();
     });
 

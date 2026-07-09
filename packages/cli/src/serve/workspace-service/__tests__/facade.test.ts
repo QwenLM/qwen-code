@@ -1327,12 +1327,22 @@ describe('createDaemonWorkspaceService', () => {
       );
 
       const result = await svc.preheatAcpChild(makeCtx(), { timeoutMs: 1 });
+      const retry = await svc.preheatAcpChild(makeCtx(), { timeoutMs: 1 });
 
       expect(result).toMatchObject({
         ready: false,
         channelLive: false,
         reason: 'timeout',
       });
+      expect(retry).toMatchObject({
+        ready: false,
+        channelLive: false,
+        reason: 'timeout',
+      });
+      expect(preheatAcpChild).toHaveBeenCalledTimes(2);
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'qwen serve: ACP preheat timed out after 1ms',
+      );
     });
 
     it('returns error when preheat fails before the deadline', async () => {

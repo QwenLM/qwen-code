@@ -329,6 +329,12 @@ export function createDaemonWorkspaceService(
           'ACP preheat',
         );
       } catch (err) {
+        if (err instanceof TimeoutError) {
+          inFlightAcpPreheat = undefined;
+          writeStderrLine(
+            `qwen serve: ACP preheat timed out after ${opts?.timeoutMs ?? 5_000}ms`,
+          );
+        }
         const live = channelLive();
         const message = err instanceof Error ? err.message : String(err);
         return finish({

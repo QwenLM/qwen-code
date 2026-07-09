@@ -25,6 +25,17 @@ export function inactiveExtensionSkillRefs(config: Config): Set<string> {
   return refs;
 }
 
+export function inactiveExtensionSkillNames(config: Config): Set<string> {
+  const names = new Set<string>();
+  for (const extension of config.getExtensions()) {
+    if (extension.isActive) continue;
+    for (const skill of extension.skills ?? []) {
+      names.add(skill.name.toLowerCase());
+    }
+  }
+  return names;
+}
+
 export function isInactiveExtensionSkill(
   skill: Pick<SkillConfig, 'extensionName' | 'level' | 'name'>,
   inactiveSkillRefs: Set<string>,

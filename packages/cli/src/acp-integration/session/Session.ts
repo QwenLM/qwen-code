@@ -134,6 +134,7 @@ import { MID_TURN_QUEUE_DRAIN_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 import {
+  inactiveExtensionSkillNames,
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
 } from '../extension-skills.js';
@@ -742,10 +743,27 @@ export async function buildAvailableCommandsSnapshot(
   );
   const disabledSkillNames = config.getDisabledSkillNames();
   const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
+  const inactiveSkillNames = inactiveExtensionSkillNames(config);
 
   const visibleSlashCommands = slashCommands.filter((cmd) => {
     if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
-    return !disabledSkillNames.has(cmd.skillDetail.name.toLowerCase());
+    const skillName = cmd.skillDetail.name.toLowerCase();
+    const isInactiveExtensionCommand =
+      cmd.skillDetail.level === 'extension' &&
+      (isInactiveExtensionSkill(
+        {
+          name: cmd.skillDetail.name,
+          level: 'extension',
+          extensionName:
+            'extensionName' in cmd.skillDetail &&
+            typeof cmd.skillDetail.extensionName === 'string'
+              ? cmd.skillDetail.extensionName
+              : undefined,
+        },
+        inactiveSkillRefs,
+      ) ||
+        inactiveSkillNames.has(skillName));
+    return !disabledSkillNames.has(skillName) && !isInactiveExtensionCommand;
   });
 
   const availableCommands: AvailableCommand[] = visibleSlashCommands.map(
