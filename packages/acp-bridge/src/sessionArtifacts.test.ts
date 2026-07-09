@@ -2831,20 +2831,31 @@ describe('SessionArtifactStore', () => {
     const artifactId = created.changes[0]!.artifactId;
 
     failWrites = true;
-    await expect(
-      store.upsertMany([
-        {
-          title: 'Pinned durable',
-          url,
-          retention: 'ephemeral',
-        },
-      ]),
-    ).resolves.toMatchObject({
-      changes: [],
-      warnings: [
-        'artifact durable removal not persisted; live changes rolled back',
-      ],
-    });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await expect(
+        store.upsertMany([
+          {
+            title: 'Pinned durable',
+            url,
+            retention: 'ephemeral',
+          },
+        ]),
+      ).resolves.toMatchObject({
+        changes: [],
+        warnings: [
+          'artifact durable removal not persisted; live changes rolled back',
+        ],
+      });
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('upsert_rollback');
+      expect(logged).toContain(artifactId);
+      expect(logged).toContain('disk full');
+    } finally {
+      stderr.mockRestore();
+    }
 
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [
@@ -4174,6 +4185,33 @@ describe('SessionArtifactStore', () => {
           title: 'Fresh',
         }),
       ],
+    });
+  });
+
+  it('applies empty rebuilt snapshots when only stale event warnings are present', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-empty-stale-event-warning',
+      workspaceCwd: workspace,
+    });
+    await store.upsertMany([
+      { title: 'Live', url: 'https://example.com/restore-empty-stale-live' },
+    ]);
+
+    const staleWarning =
+      'skipped stale event sequence 1 at or before snapshot sequence 10';
+    const warnings = await store.restore({
+      v: 2,
+      sessionId: 's11-restore-empty-stale-event-warning',
+      sequence: 10,
+      artifacts: [],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [staleWarning],
+    });
+
+    expect(warnings).toEqual([staleWarning]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [],
     });
   });
 

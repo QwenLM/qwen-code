@@ -440,6 +440,13 @@ export class SessionArtifactStore {
               .map((change) => change.artifactId);
             const warning =
               'artifact durable removal not persisted; live changes rolled back';
+            writeStderrLine(
+              `[artifacts] session=${this.sessionId} action=upsert_rollback warning=${JSON.stringify(
+                warning,
+              )} artifactIds=${JSON.stringify(artifactIds)} error=${JSON.stringify(
+                error instanceof Error ? error.message : String(error),
+              )}`,
+            );
             return {
               v: 1,
               sessionId: this.sessionId,
@@ -756,19 +763,6 @@ export class SessionArtifactStore {
           restoredCount === 0
             ? `${RESTORE_FAILED_WARNING_PREFIX}; kept existing live artifacts`
             : `${RESTORE_PARTIAL_FAILED_WARNING_PREFIX}; kept existing live artifacts`,
-        ];
-        this.setLastRestoreWarnings(rollbackWarnings);
-        return rollbackWarnings;
-      }
-      if (
-        snapshot.artifacts.length === 0 &&
-        previousState.artifacts.size > 0 &&
-        baselineWarnings.some(isArtifactSnapshotCompletenessWarning)
-      ) {
-        this.restoreState(previousState);
-        const rollbackWarnings = [
-          ...baselineWarnings,
-          `${RESTORE_FAILED_WARNING_PREFIX}; kept existing live artifacts`,
         ];
         this.setLastRestoreWarnings(rollbackWarnings);
         return rollbackWarnings;
