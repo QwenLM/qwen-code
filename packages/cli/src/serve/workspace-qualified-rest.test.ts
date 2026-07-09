@@ -1023,6 +1023,26 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
+  it('rejects global and user scope on workspace-qualified memory routes', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      for (const scope of ['global', 'user']) {
+        const res = await request(h.app)
+          .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory`)
+          .set('Authorization', 'Bearer secret')
+          .set('Host', host())
+          .send({ scope, mode: 'replace', content: '# ignored\n' });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe(
+          'global_scope_not_supported_for_workspace_route',
+        );
+      }
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('returns typed memory write errors on workspace-qualified routes', async () => {
     const h = await makeHarness({ token: 'secret' });
     try {
