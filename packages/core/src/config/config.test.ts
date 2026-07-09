@@ -3491,7 +3491,8 @@ describe('Server Config (config.ts)', () => {
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     const options = lastCall?.at(-1) as
-      LoadServerHierarchicalMemoryOptions | undefined;
+      | LoadServerHierarchicalMemoryOptions
+      | undefined;
     expect(options?.onInstructionsLoaded).toEqual(expect.any(Function));
 
     await options?.onInstructionsLoaded?.({
@@ -5326,6 +5327,62 @@ describe('setApprovalMode with folder trust', () => {
     });
   });
 
+  describe('todos directory config', () => {
+    it('should use configured todosDirectory for todo directory path', () => {
+      const config = new Config({
+        ...baseParams,
+        todosDirectory: './project-todos',
+      });
+
+      expect(config.getTodosDir()).toBe(
+        path.join(path.resolve(baseParams.targetDir), 'project-todos'),
+      );
+    });
+
+    it('should reject configured todosDirectory outside targetDir', () => {
+      expect(
+        () =>
+          new Config({
+            ...baseParams,
+            todosDirectory: '../project-todos',
+          }),
+      ).toThrow('todosDirectory must resolve within the project root');
+    });
+
+    it('should reject configured todosDirectory symlink outside targetDir', () => {
+      const targetDir = path.resolve(baseParams.targetDir);
+      const todosDir = path.join(targetDir, 'project-todos');
+      const outsideTodosDir = path.resolve(
+        path.dirname(targetDir),
+        'outside-todos',
+      );
+      vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) => {
+        const resolvedPath = pathToResolve.toString();
+        if (resolvedPath === targetDir) {
+          return targetDir;
+        }
+        if (resolvedPath === todosDir) {
+          return outsideTodosDir;
+        }
+        return resolvedPath;
+      });
+
+      try {
+        expect(
+          () =>
+            new Config({
+              ...baseParams,
+              todosDirectory: './project-todos',
+            }),
+        ).toThrow('todosDirectory must resolve within the project root');
+      } finally {
+        vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) =>
+          pathToResolve.toString(),
+        );
+      }
+    });
+  });
+
   describe('registerCoreTools', () => {
     beforeEach(() => {
       vi.clearAllMocks();
@@ -5835,8 +5892,9 @@ describe('Model Switching and Config Updates', () => {
     }
 
     it('resolves getters to the runtime view inside the frame, instance fields outside', async () => {
-      const { runWithRuntimeContentGenerator } =
-        await import('../agents/runtime/agent-context.js');
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
       const config = new Config(baseParams);
       const parentGenerator = {
         generateContentStream: vi.fn(),
@@ -5883,8 +5941,9 @@ describe('Model Switching and Config Updates', () => {
     });
 
     it('falls back to the parent model id when the runtime view config has no model', async () => {
-      const { runWithRuntimeContentGenerator } =
-        await import('../agents/runtime/agent-context.js');
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
       const config = new Config(baseParams);
       setInstanceFields(
         config,

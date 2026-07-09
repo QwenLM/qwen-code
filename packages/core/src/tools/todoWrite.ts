@@ -257,6 +257,30 @@ function isConfiguredTodoDir(todoDir: string): boolean {
   return path.resolve(todoDir) !== path.resolve(Storage.getTodosDir());
 }
 
+function isConfig(value: unknown): value is Config {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { getTodosDir?: unknown }).getTodosDir === 'function'
+  );
+}
+
+function getTodoDirectoryContext(source?: string | Config): {
+  todoDir: string;
+  projectRoot?: string;
+} {
+  if (isConfig(source)) {
+    return {
+      todoDir: source.getTodosDir(),
+      projectRoot: source.getTargetDir?.(),
+    };
+  }
+
+  return {
+    todoDir: source ?? Storage.getTodosDir(),
+  };
+}
+
 function assertTodoPathWithinAllowedDirectory(
   todoDir: string,
   todoFilePath: string,
@@ -328,10 +352,19 @@ async function writeTodosToFile(
   };
 
   const contents = JSON.stringify(data, null, 2);
-  assertTodoPathWithinAllowedDirectory(todoDir, todoFilePath, projectRoot);
   await atomicWriteFile(todoFilePath, contents, {
     encoding: 'utf-8',
   });
+  try {
+    assertTodoPathWithinAllowedDirectory(todoDir, todoFilePath, projectRoot);
+  } catch (err) {
+    try {
+      await fs.unlink(todoFilePath);
+    } catch {
+      // Ignore rollback errors; the containment check already failed.
+    }
+    throw err;
+  }
 }
 
 function createBlockedTodoResult(
@@ -571,18 +604,42 @@ Todo list modification failed with error: ${errorMessage}. You may need to retry
  * Utility function to read todos for a specific session (useful for session recovery)
  */
 export async function readTodosForSession(
+  config: Config,
   sessionId?: string,
-  todoDir?: string,
+): Promise<TodoItem[]>;
+export async function readTodosForSession(
+  sessionId?: string,
+  todoDirOrConfig?: string | Config,
+): Promise<TodoItem[]>;
+export async function readTodosForSession(
+  sessionIdOrConfig?: string | Config,
+  todoDirOrSessionId?: string | Config,
 ): Promise<TodoItem[]> {
-  return readTodosFromFile(todoDir ?? Storage.getTodosDir(), sessionId);
+  let sessionId: string | undefined;
+  let source: string | Config | undefined;
+
+  if (isConfig(sessionIdOrConfig)) {
+    sessionId =
+      typeof todoDirOrSessionId === 'string' ? todoDirOrSessionId : undefined;
+    source = sessionIdOrConfig;
+  } else {
+    sessionId = sessionIdOrConfig;
+    source = todoDirOrSessionId;
+  }
+
+  const { todoDir, projectRoot } = getTodoDirectoryContext(source);
+  return readTodosFromFile(todoDir, sessionId, projectRoot);
 }
 
 /**
  * Utility function to list all todo files in the todos directory
  */
-export async function listTodoSessions(todoDir?: string): Promise<string[]> {
+export async function listTodoSessions(
+  todoDirOrConfig?: string | Config,
+): Promise<string[]> {
   try {
-    const resolvedTodoDir = todoDir ?? Storage.getTodosDir();
+    const { todoDir: resolvedTodoDir } =
+      getTodoDirectoryContext(todoDirOrConfig);
     const files = await fs.readdir(resolvedTodoDir);
     return files
       .filter((file: string) => file.endsWith('.json'))

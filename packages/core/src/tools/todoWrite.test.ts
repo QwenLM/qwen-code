@@ -927,6 +927,30 @@ describe('TodoWriteTool – runtime output directory', () => {
     expect(result).toEqual(todos);
   });
 
+  it('should read todos for a session from config todos directory', async () => {
+    const configuredTodoDir = path.join(os.tmpdir(), 'qwen-configured-todos');
+    const todos: TodoItem[] = [
+      { id: '1', content: 'Existing task', status: 'pending' },
+    ];
+    mockFs.readFile.mockResolvedValue(
+      JSON.stringify({
+        todos,
+        sessionId: 'configured-session',
+      }),
+    );
+    mockConfig = {
+      getTodosDir: () => configuredTodoDir,
+    } as Config;
+
+    const result = await readTodosForSession(mockConfig, 'configured-session');
+
+    expect(mockFs.readFile).toHaveBeenCalledWith(
+      path.join(configuredTodoDir, 'configured-session.json'),
+      'utf-8',
+    );
+    expect(result).toEqual(todos);
+  });
+
   it('should reject a configured todosDirectory that escapes targetDir before writing', async () => {
     const projectRoot = path.resolve('workspace', 'project');
     const outsideTodoDir = path.resolve(projectRoot, '..', 'outside-todos');
@@ -984,6 +1008,57 @@ describe('TodoWriteTool – runtime output directory', () => {
     expect(mockAtomicWrite).not.toHaveBeenCalled();
   });
 
+  it('should remove todo file when post-write containment check fails', async () => {
+    const projectRoot = path.resolve('workspace', 'project');
+    const todoDir = path.join(projectRoot, '.qwen', 'todos');
+    const todoFilePath = path.join(todoDir, 'configured-session.json');
+    const outsideTodoFilePath = path.resolve(
+      projectRoot,
+      '..',
+      'outside-todos',
+      'configured-session.json',
+    );
+    let writeCompleted = false;
+    mockRealpathSync.mockImplementation((pathToResolve: PathLike) => {
+      const resolvedPath = pathToResolve.toString();
+      if (writeCompleted && resolvedPath === todoFilePath) {
+        return outsideTodoFilePath;
+      }
+      return resolvedPath;
+    });
+    mockConfig = {
+      getSessionId: () => 'configured-session',
+      getHookSystem: () => undefined,
+      getTodosDir: () => todoDir,
+      getTargetDir: () => projectRoot,
+    } as Config;
+    tool = new TodoWriteTool(mockConfig);
+    const params: TodoWriteParams = {
+      todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
+    };
+    const enoentError = new Error('ENOENT') as Error & { code: string };
+    enoentError.code = 'ENOENT';
+    mockFs.readFile.mockRejectedValue(enoentError);
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.unlink.mockResolvedValue(undefined);
+    mockAtomicWrite.mockImplementation(async () => {
+      writeCompleted = true;
+    });
+
+    const invocation = tool.build(params);
+    const result = await invocation.execute(mockAbortSignal);
+
+    expect(result.returnDisplay).toContain(
+      'todosDirectory must resolve within the project root',
+    );
+    expect(mockAtomicWrite).toHaveBeenCalledWith(
+      todoFilePath,
+      expect.any(String),
+      { encoding: 'utf-8' },
+    );
+    expect(mockFs.unlink).toHaveBeenCalledWith(todoFilePath);
+  });
+
   it('should check file existence in custom runtime dir for getDescription', () => {
     const customRuntimeDir = path.resolve('custom', 'runtime');
     Storage.setRuntimeBaseDir(customRuntimeDir);
@@ -1026,6 +1101,23 @@ describe('TodoWriteTool – runtime output directory', () => {
     ] as never);
 
     const sessions = await listTodoSessions(configuredTodoDir);
+
+    expect(mockFs.readdir).toHaveBeenCalledWith(configuredTodoDir);
+    expect(sessions).toEqual(['configured', 'other']);
+  });
+
+  it('should list todo sessions from config todos directory', async () => {
+    const configuredTodoDir = path.join(os.tmpdir(), 'qwen-configured-todos');
+    mockFs.readdir.mockResolvedValue([
+      'configured.json',
+      'other.json',
+      'README.md',
+    ] as never);
+    mockConfig = {
+      getTodosDir: () => configuredTodoDir,
+    } as Config;
+
+    const sessions = await listTodoSessions(mockConfig);
 
     expect(mockFs.readdir).toHaveBeenCalledWith(configuredTodoDir);
     expect(sessions).toEqual(['configured', 'other']);
