@@ -10748,9 +10748,10 @@ describe('createServeApp', () => {
     async function writeTranscriptSession(
       sessionId: string,
       state: 'active' | 'archived' = 'active',
+      workspaceCwd = wsDir,
     ): Promise<void> {
       const chatsDir = path.join(
-        new Storage(wsDir).getProjectDir(),
+        new Storage(workspaceCwd).getProjectDir(),
         'chats',
         ...(state === 'archived' ? ['archive'] : []),
       );
@@ -10764,7 +10765,7 @@ describe('createServeApp', () => {
           timestamp: '2026-05-28T12:00:00.000Z',
           type: 'user',
           message: { role: 'user', parts: [{ text: 'hello transcript' }] },
-          cwd: wsDir,
+          cwd: workspaceCwd,
           version: '1.0.0',
         }) + '\n',
       );
@@ -10817,6 +10818,50 @@ describe('createServeApp', () => {
       ]);
       expect(bridge.loadCalls).toHaveLength(0);
       expect(bridge.resumeCalls).toHaveLength(0);
+    });
+
+    it('routes inactive active transcript pages through the owning workspace runtime', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-abababababab';
+      const secondaryDir = path.join(runtimeDir, 'secondary-workspace');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      await writeTranscriptSession(sid, 'active', secondaryWs);
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        sessionTranscriptImpl: async (req) => ({
+          v: 1,
+          sessionId: req.sessionId,
+          events: [],
+          hasMore: false,
+        }),
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(secondaryBridge.sessionTranscriptCalls).toEqual([
+        { sessionId: sid },
+      ]);
     });
 
     it('rejects archived sessions before touching the bridge', async () => {

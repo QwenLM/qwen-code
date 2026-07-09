@@ -2851,8 +2851,18 @@ function parseAcpSessionListCursor(
   return parsedCursor;
 }
 
+interface TranscriptReplayConfigCacheEntry {
+  settings: LoadedSettings;
+  config?: Config;
+  pending?: Promise<Config>;
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
+  private readonly transcriptReplayConfigCache = new Map<
+    string,
+    TranscriptReplayConfigCacheEntry
+  >();
   private clientCapabilities: ClientCapabilities | undefined;
   // CPU-usage delta baseline for the daemon's `workspaceResource` extMethod
   // (Daemon Status child-resource chart). The daemon polls this at a fixed
@@ -3020,6 +3030,7 @@ class QwenAgent implements Agent {
       session.dispose();
     }
     this.sessions.clear();
+    this.disposeTranscriptReplayConfigs();
   }
 
   constructor(
@@ -5844,13 +5855,7 @@ class QwenAgent implements Agent {
               ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
               ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
             });
-            const config = await this.newSessionConfig(
-              cwd,
-              [],
-              settings,
-              undefined,
-              false,
-            );
+            const config = await this.getTranscriptReplayConfig(cwd, settings);
             const replayState = parseTranscriptReplayState(page.replay);
             const replay = await collectHistoryReplayUpdatesPage({
               sessionId,
@@ -8200,6 +8205,71 @@ class QwenAgent implements Agent {
   private buildClientMcpSender(sessionId?: string): SendSdkMcpMessage {
     return (serverName: string, message: JSONRPCMessage) =>
       deliverClientMcpMessage(this.connection, serverName, message, sessionId);
+  }
+
+  private disposeTranscriptReplayConfig(config: Config): void {
+    try {
+      void Promise.resolve(config.getToolRegistry()?.stop()).catch((err) => {
+        debugLogger.debug(
+          `Transcript replay config tool registry stop failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
+    } catch (err) {
+      debugLogger.debug(
+        `Transcript replay config tool registry stop failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  private disposeTranscriptReplayConfigs(): void {
+    for (const entry of this.transcriptReplayConfigCache.values()) {
+      if (entry.config) {
+        this.disposeTranscriptReplayConfig(entry.config);
+      }
+    }
+    this.transcriptReplayConfigCache.clear();
+  }
+
+  private async getTranscriptReplayConfig(
+    cwd: string,
+    settings: LoadedSettings,
+  ): Promise<Config> {
+    const key = path.resolve(cwd);
+    const cached = this.transcriptReplayConfigCache.get(key);
+    if (cached?.settings === settings) {
+      if (cached.config) {
+        return cached.config;
+      }
+      if (cached.pending) {
+        return cached.pending;
+      }
+    } else if (cached?.config) {
+      this.disposeTranscriptReplayConfig(cached.config);
+    }
+
+    const entry: TranscriptReplayConfigCacheEntry = { settings };
+    const pending = this.newSessionConfig(cwd, [], settings, undefined, false);
+    entry.pending = pending;
+    this.transcriptReplayConfigCache.set(key, entry);
+    try {
+      const config = await pending;
+      const current = this.transcriptReplayConfigCache.get(key);
+      if (current !== entry) {
+        return config;
+      }
+      entry.config = config;
+      entry.pending = undefined;
+      return config;
+    } catch (error) {
+      if (this.transcriptReplayConfigCache.get(key) === entry) {
+        this.transcriptReplayConfigCache.delete(key);
+      }
+      throw error;
+    }
   }
 
   private async newSessionConfig(

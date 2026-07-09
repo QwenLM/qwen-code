@@ -320,6 +320,39 @@ export function registerSessionRoutes(
       workspaceIds,
     });
   };
+
+  const sendUntrustedSessionOwner = (
+    res: Response,
+    route: string,
+    sessionId: string,
+    runtime: WorkspaceRuntime,
+  ): void => {
+    logSessionRoutingFailure(route, 'untrusted_workspace', {
+      sessionId,
+      workspaceId: runtime.workspaceId,
+      workspaceCwd: runtime.workspaceCwd,
+    });
+    res.status(403).json({
+      error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
+      code: 'untrusted_workspace',
+      sessionId,
+      workspaceId: runtime.workspaceId,
+      workspaceCwd: runtime.workspaceCwd,
+    });
+  };
+
+  const assertTrustedSessionOwner = (
+    res: Response,
+    route: string,
+    sessionId: string,
+    runtime: WorkspaceRuntime,
+  ): boolean => {
+    if (runtime.primary || runtime.trusted) {
+      return true;
+    }
+    sendUntrustedSessionOwner(res, route, sessionId, runtime);
+    return false;
+  };
   const inFlightRestoreOwners = new Map<
     string,
     { workspaceCwd: string; count: number }
@@ -535,6 +568,74 @@ export function registerSessionRoutes(
         sendBridgeError(res, err, { route, sessionId });
       }
     };
+
+  const resolveTranscriptSessionRuntime = async (
+    res: Response,
+    route: string,
+    sessionId: string,
+  ): Promise<WorkspaceRuntime | undefined> => {
+    const activeInRuntime = async (
+      runtime: WorkspaceRuntime,
+    ): Promise<boolean> => {
+      const location = await assertSessionLoadable(
+        runtime.workspaceCwd,
+        sessionId,
+      );
+      return location === 'active';
+    };
+
+    if (workspaceRegistry.list().length === 1) {
+      const runtime = workspaceRegistry.primary;
+      if (await activeInRuntime(runtime)) {
+        return runtime;
+      }
+      throw new SessionNotFoundError(sessionId);
+    }
+
+    const liveOwner = workspaceRegistry.resolveLiveSessionOwner(sessionId);
+    if (liveOwner.kind === 'ambiguous') {
+      sendAmbiguousSessionOwner(res, route, sessionId, liveOwner.runtimes);
+      return undefined;
+    }
+    if (liveOwner.kind === 'found') {
+      if (
+        !assertTrustedSessionOwner(res, route, sessionId, liveOwner.runtime)
+      ) {
+        return undefined;
+      }
+      if (await activeInRuntime(liveOwner.runtime)) {
+        return liveOwner.runtime;
+      }
+      throw new SessionNotFoundError(sessionId);
+    }
+
+    const activeRuntimes: WorkspaceRuntime[] = [];
+    let loadError: unknown;
+    for (const runtime of workspaceRegistry.list()) {
+      try {
+        if (await activeInRuntime(runtime)) {
+          activeRuntimes.push(runtime);
+        }
+      } catch (err) {
+        loadError ??= err;
+      }
+    }
+    if (activeRuntimes.length === 1) {
+      const runtime = activeRuntimes[0]!;
+      if (!assertTrustedSessionOwner(res, route, sessionId, runtime)) {
+        return undefined;
+      }
+      return runtime;
+    }
+    if (activeRuntimes.length > 1) {
+      sendAmbiguousSessionOwner(res, route, sessionId, activeRuntimes);
+      return undefined;
+    }
+    if (loadError !== undefined) {
+      throw loadError;
+    }
+    throw new SessionNotFoundError(sessionId);
+  };
 
   const parseSessionIdsBody = (
     req: Request,
@@ -979,6 +1080,7 @@ export function registerSessionRoutes(
   });
 
   app.get('/session/:id/transcript', async (req, res) => {
+    const route = 'GET /session/:id/transcript';
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;
     const limit = parseTranscriptLimitQuery(req.query['limit'], res);
@@ -990,24 +1092,24 @@ export function registerSessionRoutes(
       const result = await archiveCoordinator.runSharedMany(
         [sessionId],
         async () => {
-          const location = await assertSessionLoadable(
-            boundWorkspace,
+          const runtime = await resolveTranscriptSessionRuntime(
+            res,
+            route,
             sessionId,
           );
-          if (location !== 'active') {
-            throw new SessionNotFoundError(sessionId);
-          }
-          return bridge.getSessionTranscriptPage({
+          if (!runtime) return undefined;
+          return runtime.bridge.getSessionTranscriptPage({
             sessionId,
             ...(limit !== undefined ? { limit } : {}),
             ...(cursor !== undefined ? { cursor } : {}),
           });
         },
       );
+      if (result === undefined) return;
       res.status(200).set('Cache-Control', 'no-store').json(result);
     } catch (err) {
       sendBridgeError(res, err, {
-        route: 'GET /session/:id/transcript',
+        route,
         sessionId,
       });
     }

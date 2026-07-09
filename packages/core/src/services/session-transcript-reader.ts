@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import { Storage } from '../config/storage.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import type { ChatRecord } from './chatRecordingService.js';
 
@@ -116,6 +117,8 @@ const READ_CHUNK_SIZE = 64 * 1024;
 const CURSOR_HMAC_KEY_BYTES = 32;
 const CURSOR_HMAC_KEY_FILENAME = 'session-transcript-cursor-key';
 const SESSION_TRANSCRIPT_SESSION_ID_PATTERN = /^[0-9a-fA-F-]{32,36}$/;
+
+const debugLogger = createDebugLogger('SESSION_TRANSCRIPT');
 
 const indexCache = new Map<string, CacheEntry>();
 const cursorHmacKeys = new Map<string, Buffer>();
@@ -287,6 +290,7 @@ export function decodeSessionTranscriptCursor(
       typeof parsed['lastUpdated'] !== 'string' ||
       typeof parsed['mac'] !== 'string'
     ) {
+      debugLogger.debug('cursor decode failed: invalid payload shape');
       throw new InvalidSessionTranscriptCursorError();
     }
     const state = {
@@ -304,13 +308,26 @@ export function decodeSessionTranscriptCursor(
       ...(parsed['replay'] !== undefined ? { replay: parsed['replay'] } : {}),
     };
     if (!hasValidCursorMac(cursorPayload(state), parsed['mac'], workspaceCwd)) {
+      debugLogger.debug(
+        `cursor decode failed: mac mismatch session=${state.sessionId} ` +
+          `position=${state.position} snapshotSize=${state.snapshotSize}`,
+      );
       throw new InvalidSessionTranscriptCursorError();
     }
+    debugLogger.debug(
+      `cursor decoded session=${state.sessionId} position=${state.position} ` +
+        `snapshotSize=${state.snapshotSize}`,
+    );
     return state;
   } catch (error) {
     if (error instanceof InvalidSessionTranscriptCursorError) {
       throw error;
     }
+    debugLogger.debug(
+      `cursor decode failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
     throw new InvalidSessionTranscriptCursorError();
   }
 }
@@ -352,12 +369,14 @@ function pruneCache(now = Date.now()): void {
   for (const [key, entry] of indexCache) {
     if (entry.expiresAt <= now) {
       indexCache.delete(key);
+      debugLogger.debug(`index cache expired ${key}`);
     }
   }
   while (indexCache.size > INDEX_CACHE_MAX_ENTRIES) {
     const oldest = indexCache.keys().next().value;
     if (typeof oldest !== 'string') break;
     indexCache.delete(oldest);
+    debugLogger.debug(`index cache evicted LRU ${oldest}`);
   }
 }
 
@@ -457,7 +476,25 @@ async function readSegmentRecords(
     .parseLineTolerant<ChatRecord>(line, filePath)
     .filter((record) => isChatRecord(record));
   const record = records[segment.fragmentIndex];
-  return record?.uuid === uuid ? [record] : [];
+  if (!record) {
+    debugLogger.debug(
+      `segment read anomaly: no fragment session=${path.basename(
+        filePath,
+        '.jsonl',
+      )} uuid=${uuid} offset=${segment.offset} fragment=${segment.fragmentIndex}`,
+    );
+    return [];
+  }
+  if (record.uuid !== uuid) {
+    debugLogger.debug(
+      `segment read anomaly: uuid mismatch session=${path.basename(
+        filePath,
+        '.jsonl',
+      )} expected=${uuid} actual=${record.uuid} offset=${segment.offset}`,
+    );
+    return [];
+  }
+  return [record];
 }
 
 function aggregateRecords(records: ChatRecord[]): ChatRecord {
@@ -535,12 +572,19 @@ async function buildIndex(params: {
   const { filePath, fileIdentity, snapshotSize, lastUpdated } = params;
   const sessionId = path.basename(filePath, '.jsonl');
   if (snapshotSize > SESSION_TRANSCRIPT_MAX_INDEX_BYTES) {
+    debugLogger.warn(
+      `index rejected: snapshot too large session=${sessionId} ` +
+        `snapshotSize=${snapshotSize} max=${SESSION_TRANSCRIPT_MAX_INDEX_BYTES}`,
+    );
     throw new SessionTranscriptTooLargeError(
       sessionId,
       snapshotSize,
       SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
     );
   }
+  debugLogger.debug(
+    `index build start session=${sessionId} snapshotSize=${snapshotSize}`,
+  );
   const byUuid = new Map<string, UuidIndexEntry>();
   let sequence = 0;
   let leafUuid: string | undefined;
@@ -581,6 +625,9 @@ async function buildIndex(params: {
   );
 
   if (!leafUuid || !startTime) {
+    debugLogger.warn(
+      `index build failed: no transcript records session=${sessionId}`,
+    );
     throw new SessionTranscriptSnapshotUnavailableError(sessionId);
   }
 
@@ -591,17 +638,37 @@ async function buildIndex(params: {
   while (currentUuid && !visited.has(currentUuid)) {
     visited.add(currentUuid);
     const entry = byUuid.get(currentUuid);
-    if (!entry) break;
+    if (!entry) {
+      debugLogger.debug(
+        `active chain terminated: missing uuid session=${sessionId} ` +
+          `uuid=${currentUuid}`,
+      );
+      break;
+    }
     activeUuids.push(currentUuid);
     const parentUuid = entry.parentUuid;
     if (!parentUuid) break;
     if (!byUuid.has(parentUuid)) {
       gaps.push({ childUuid: currentUuid, missingParentUuid: parentUuid });
+      debugLogger.debug(
+        `active chain gap session=${sessionId} child=${currentUuid} ` +
+          `missingParent=${parentUuid}`,
+      );
       break;
     }
     currentUuid = parentUuid;
   }
+  if (currentUuid && visited.has(currentUuid)) {
+    debugLogger.debug(
+      `active chain terminated: cycle session=${sessionId} uuid=${currentUuid}`,
+    );
+  }
   activeUuids.reverse();
+
+  debugLogger.debug(
+    `index build complete session=${sessionId} records=${byUuid.size} ` +
+      `active=${activeUuids.length} gaps=${gaps.length}`,
+  );
 
   return {
     filePath,
@@ -633,12 +700,15 @@ async function getCachedIndex(params: {
   if (cached?.value && cached.expiresAt > now) {
     indexCache.delete(key);
     indexCache.set(key, cached);
+    debugLogger.debug(`index cache hit ${key}`);
     return cached.value;
   }
   if (cached?.pending && cached.expiresAt > now) {
+    debugLogger.debug(`index cache pending hit ${key}`);
     return cached.pending;
   }
 
+  debugLogger.debug(`index cache miss ${key}`);
   const pending = buildIndex(params);
   indexCache.set(key, {
     pending,
@@ -654,6 +724,11 @@ async function getCachedIndex(params: {
     return value;
   } catch (error) {
     indexCache.delete(key);
+    debugLogger.debug(
+      `index cache build failed ${key}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
     throw error;
   }
 }
@@ -667,6 +742,7 @@ export class SessionTranscriptReader {
 
   getSessionFilePath(sessionId: string): string {
     if (!SESSION_TRANSCRIPT_SESSION_ID_PATTERN.test(sessionId)) {
+      debugLogger.debug(`invalid session id for transcript read: ${sessionId}`);
       throw makeSessionTranscriptNotFoundError(sessionId);
     }
     return path.join(
@@ -686,6 +762,9 @@ export class SessionTranscriptReader {
         ? decodeSessionTranscriptCursor(options.cursor, this.workspaceCwd)
         : undefined;
     if (cursor && cursor.sessionId !== sessionId) {
+      debugLogger.debug(
+        `cursor session mismatch requested=${sessionId} cursor=${cursor.sessionId}`,
+      );
       throw new InvalidSessionTranscriptCursorError();
     }
 
@@ -698,6 +777,12 @@ export class SessionTranscriptReader {
       stats.size < snapshotSize ||
       !sameFileIdentity(currentIdentity, fileIdentity)
     ) {
+      debugLogger.warn(
+        `snapshot unavailable session=${sessionId} ` +
+          `currentSize=${stats.size} cursorSize=${snapshotSize} ` +
+          `currentIdentity=${currentIdentity.dev}:${currentIdentity.ino} ` +
+          `cursorIdentity=${fileIdentity.dev}:${fileIdentity.ino}`,
+      );
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
 
@@ -708,11 +793,19 @@ export class SessionTranscriptReader {
       lastUpdated: cursor?.lastUpdated ?? new Date(stats.mtimeMs).toISOString(),
     });
     if (cursor && cursor.leafUuid !== index.leafUuid) {
+      debugLogger.warn(
+        `snapshot unavailable: leaf changed session=${sessionId} ` +
+          `cursorLeaf=${cursor.leafUuid} indexLeaf=${index.leafUuid}`,
+      );
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
 
     const position = cursor?.position ?? 0;
     if (position > index.activeUuids.length) {
+      debugLogger.debug(
+        `cursor position out of range session=${sessionId} ` +
+          `position=${position} active=${index.activeUuids.length}`,
+      );
       throw new InvalidSessionTranscriptCursorError();
     }
     const nextPosition = Math.min(position + limit, index.activeUuids.length);
@@ -731,6 +824,12 @@ export class SessionTranscriptReader {
           lastUpdated: index.lastUpdated,
         }
       : undefined;
+
+    debugLogger.debug(
+      `read page session=${sessionId} position=${position} ` +
+        `nextPosition=${nextPosition} records=${records.length} ` +
+        `hasMore=${hasMore}`,
+    );
 
     return {
       sessionId,

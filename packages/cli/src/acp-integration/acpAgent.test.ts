@@ -5371,6 +5371,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     );
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    const loadCliConfigCallsBefore = vi.mocked(loadCliConfig).mock.calls.length;
 
     const result = (await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionTranscript,
@@ -5388,9 +5389,21 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       nextCursor?: string;
       hasMore: boolean;
     };
+    const second = (await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      {
+        sessionId: VALID_SESSION_ID,
+        cursor: 'cursor-2',
+        limit: 2,
+      },
+    )) as { hasMore: boolean };
 
     expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {
       cursor: 'cursor-1',
+      limit: 2,
+    });
+    expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {
+      cursor: 'cursor-2',
       limit: 2,
     });
     expect(result.events).toEqual([
@@ -5406,11 +5419,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ]);
     expect(result.events[0]).not.toHaveProperty('id');
     expect(result.hasMore).toBe(true);
+    expect(second.hasMore).toBe(true);
     expect(result.nextCursor).toBeDefined();
     expect(mockHistoryReplayPage).toHaveBeenCalledWith(
       expect.anything(),
       [{ uuid: 'u1' }],
       expect.objectContaining({ gaps }),
+    );
+    expect(vi.mocked(loadCliConfig).mock.calls.length).toBe(
+      loadCliConfigCallsBefore + 1,
     );
     const transcriptConfigArgv = vi
       .mocked(loadCliConfig)
