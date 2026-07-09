@@ -23,6 +23,7 @@ import {
   type WebShellComposerTag,
   type WebShellComposerTagIconMap,
   type WebShellAtProvider,
+  type WebShellBuiltinAtProvidersConfig,
 } from '../customization';
 import {
   useComposerCore,
@@ -98,6 +99,7 @@ interface ChatEditorProps {
   sessionName?: string;
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
+  builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   atProviders?: readonly WebShellAtProvider[];
   composerTagIcons?: WebShellComposerTagIconMap;
 }
@@ -919,9 +921,19 @@ export const ChatEditor = memo(
       sessionName,
       composerInput,
       composerInputVersion,
+      builtinAtProviders,
       atProviders,
       composerTagIcons,
     } = props;
+
+    const {
+      renderComposerToolbarStart: ToolbarStart,
+      renderComposerToolbarEnd: ToolbarEnd,
+      renderComposerToolbarRight: ToolbarRight,
+      renderComposerTag,
+      renderComposerTagTooltip,
+      onComposerTagClick,
+    } = useWebShellCustomization();
 
     const core = useComposerCore({
       onSubmit,
@@ -943,17 +955,16 @@ export const ChatEditor = memo(
       sessionName,
       composerInput,
       composerInputVersion,
+      builtinAtProviders,
       atProviders,
       composerTagIcons,
+      renderComposerTag,
+      renderComposerTagTooltip,
+      onComposerTagClick,
       editorTheme: CHAT_EDITOR_THEME,
     });
 
     const { t } = useI18n();
-    const {
-      renderComposerToolbarStart: ToolbarStart,
-      renderComposerToolbarEnd: ToolbarEnd,
-      renderComposerToolbarRight: ToolbarRight,
-    } = useWebShellCustomization();
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
 
@@ -1269,10 +1280,19 @@ export const ChatEditor = memo(
     } = core.searchState;
 
     const renderComposerTagContent = (tag: WebShellComposerTag) => {
+      const custom = renderComposerTag?.({
+        tag,
+        placement: 'composer',
+        readonly: false,
+      });
+      if (custom !== undefined && custom !== null) {
+        return custom;
+      }
       const rawTagLabel = getComposerTagLabel(tag);
       const tagValue = getComposerTagValue(tag);
       const tagLabel = tag.kind ? '' : rawTagLabel;
-      const iconUrl = getComposerTagIconUrl(tag.kind, composerTagIcons);
+      const iconUrl =
+        tag.icon ?? getComposerTagIconUrl(tag.kind, composerTagIcons);
       if (!tagLabel && !tagValue) {
         return <span className={styles.tagLabel}>{tag.id}</span>;
       }
@@ -1371,37 +1391,79 @@ export const ChatEditor = memo(
           <div className={styles.content}>
             {core.composerTags.length > 0 && (
               <div className={styles.tags}>
-                {core.composerTags.map((tag) => (
-                  <span key={tag.id} className={styles.tag}>
-                    {renderComposerTagContent(tag)}
-                    {tag.removable !== false && (
-                      <button
-                        type="button"
-                        className={styles.tagRemove}
-                        aria-label={`Remove ${getComposerTagDisplay(tag)}`}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          core.removeTopTag(tag.id);
-                          core.viewRef.current?.focus();
-                        }}
-                        onKeyDown={(event) => {
-                          if (
-                            event.key !== 'Backspace' &&
-                            event.key !== 'Delete'
-                          ) {
-                            return;
-                          }
-                          event.preventDefault();
-                          core.removeTopTag(tag.id);
-                          core.viewRef.current?.focus();
-                        }}
-                      >
-                        ×
-                      </button>
-                    )}
-                  </span>
-                ))}
+                {core.composerTags.map((tag) => {
+                  const tagInfo = {
+                    tag,
+                    placement: 'composer' as const,
+                    readonly: false,
+                  };
+                  const tooltip = renderComposerTagTooltip?.(tagInfo);
+                  return (
+                    <span
+                      key={tag.id}
+                      className={styles.tag}
+                      role={onComposerTagClick ? 'button' : undefined}
+                      tabIndex={onComposerTagClick ? 0 : undefined}
+                      onClick={(event) => {
+                        if (!onComposerTagClick) return;
+                        event.stopPropagation();
+                        onComposerTagClick({
+                          ...tagInfo,
+                          anchorRect:
+                            event.currentTarget.getBoundingClientRect(),
+                        });
+                      }}
+                      onKeyDown={(event) => {
+                        if (!onComposerTagClick) return;
+                        if (event.key !== 'Enter' && event.key !== ' ') return;
+                        event.preventDefault();
+                        onComposerTagClick({
+                          ...tagInfo,
+                          anchorRect:
+                            event.currentTarget.getBoundingClientRect(),
+                        });
+                      }}
+                    >
+                      {renderComposerTagContent(tag)}
+                      {tag.removable !== false && (
+                        <button
+                          type="button"
+                          className={styles.tagRemove}
+                          aria-label={`Remove ${getComposerTagDisplay(tag)}`}
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            core.removeTopTag(tag.id);
+                            core.viewRef.current?.focus();
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.stopPropagation();
+                              return;
+                            }
+                            if (
+                              event.key !== 'Backspace' &&
+                              event.key !== 'Delete'
+                            ) {
+                              return;
+                            }
+                            event.preventDefault();
+                            event.stopPropagation();
+                            core.removeTopTag(tag.id);
+                            core.viewRef.current?.focus();
+                          }}
+                        >
+                          ×
+                        </button>
+                      )}
+                      {tooltip !== undefined && tooltip !== null && (
+                        <span className={styles.tagTooltip} role="tooltip">
+                          {tooltip}
+                        </span>
+                      )}
+                    </span>
+                  );
+                })}
               </div>
             )}
             {core.pastedImages.length > 0 && (
@@ -1449,6 +1511,7 @@ export const ChatEditor = memo(
                   return Boolean(result);
                 }}
                 onSearch={core.updateAtSearch}
+                onSelectTab={core.selectAtTab}
               />
             )}
             <div className={styles.editorArea}>

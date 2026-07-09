@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  useCallback,
+  type ReactNode,
+} from 'react';
+import { createRoot, type Root } from 'react-dom/client';
 import {
   Decoration,
   EditorView,
@@ -55,12 +62,15 @@ import { isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
 import { getComposerTagIconUrl } from '../components/composerTagIcons';
 import type {
+  ComposerTagClickHandler,
+  ComposerTagRenderer,
   WebShellComposerApi,
   WebShellComposerInput,
   WebShellComposerTag,
   WebShellComposerTagIconMap,
   WebShellComposerTagOptions,
   WebShellComposerTextOptions,
+  WebShellBuiltinAtProvidersConfig,
   WebShellAtProvider,
 } from '../customization';
 
@@ -508,6 +518,50 @@ export function buildComposerPrompt(
   return `${tagText}\n\n${text}`;
 }
 
+export interface WebShellComposerTagPlacement {
+  start: number;
+  end: number;
+  tag: WebShellComposerTag;
+}
+
+export function buildComposerPromptWithInlineTagPlacements(
+  text: string,
+  topTags: readonly WebShellComposerTag[],
+  inlineTags: readonly WebShellComposerTagPlacement[],
+): string {
+  return buildComposerPrompt(
+    replaceInlineTagPlacements(text, inlineTags),
+    topTags,
+  );
+}
+
+export function replaceInlineTagPlacements(
+  text: string,
+  inlineTags: readonly WebShellComposerTagPlacement[],
+): string {
+  const placements = inlineTags
+    .filter(
+      (placement) =>
+        placement.start >= 0 &&
+        placement.end > placement.start &&
+        placement.end <= text.length,
+    )
+    .slice()
+    .sort((left, right) => left.start - right.start);
+  if (placements.length === 0) return text;
+
+  let cursor = 0;
+  const parts: string[] = [];
+  for (const placement of placements) {
+    if (placement.start < cursor) continue;
+    parts.push(text.slice(cursor, placement.start));
+    parts.push(serializeComposerTag(placement.tag));
+    cursor = placement.end;
+  }
+  parts.push(text.slice(cursor));
+  return parts.join('');
+}
+
 // ---- Inline tag CodeMirror extension (shared) ----
 
 interface InlineTagRange {
@@ -520,11 +574,21 @@ interface InlineTagDecorationSpec {
   tag: InlineComposerTag;
 }
 
-type InlineComposerTag = WebShellComposerTag & { iconUrl?: string };
+type InlineComposerTag = WebShellComposerTag & {
+  iconUrl?: string;
+  renderContent?: ComposerTagRenderer;
+  tooltip?: ReactNode;
+  tooltipText?: string;
+  onClick?: ComposerTagClickHandler;
+};
 
 function toPublicComposerTag(tag: InlineComposerTag): WebShellComposerTag {
   const publicTag = { ...tag };
   delete publicTag.iconUrl;
+  delete publicTag.renderContent;
+  delete publicTag.tooltip;
+  delete publicTag.tooltipText;
+  delete publicTag.onClick;
   return publicTag;
 }
 
@@ -537,6 +601,9 @@ export const removeInlineTagEffect = StateEffect.define<{
 export const clearInlineTagsEffect = StateEffect.define<void>();
 
 class ComposerTagWidget extends WidgetType {
+  private contentRoot: Root | null = null;
+  private tooltipRoot: Root | null = null;
+
   constructor(private readonly tag: InlineComposerTag) {
     super();
   }
@@ -547,22 +614,73 @@ class ComposerTagWidget extends WidgetType {
       this.tag.label === other.tag.label &&
       this.tag.value === other.tag.value &&
       this.tag.kind === other.tag.kind &&
+      this.tag.icon === other.tag.icon &&
       this.tag.serialized === other.tag.serialized &&
       this.tag.removable === other.tag.removable &&
-      this.tag.iconUrl === other.tag.iconUrl
+      this.tag.iconUrl === other.tag.iconUrl &&
+      this.tag.renderContent === other.tag.renderContent &&
+      this.tag.tooltip === other.tag.tooltip &&
+      this.tag.tooltipText === other.tag.tooltipText &&
+      this.tag.onClick === other.tag.onClick
     );
   }
 
   toDOM(view: EditorView): HTMLElement {
     const chip = document.createElement('span');
+    const publicTag = toPublicComposerTag(this.tag);
     chip.style.cssText =
-      'display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border);border-radius:4px;background:var(--secondary);color:var(--foreground);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
+      'position:relative;display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border);border-radius:4px;background:var(--secondary);color:var(--foreground);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
+    if (this.tag.tooltipText) chip.title = this.tag.tooltipText;
+    if (this.tag.onClick) {
+      chip.setAttribute('role', 'button');
+      chip.tabIndex = 0;
+      chip.style.cursor = 'pointer';
+      chip.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      chip.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      chip.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.tag.onClick?.({
+          tag: publicTag,
+          placement: 'composer',
+          readonly: false,
+          anchorRect: chip.getBoundingClientRect(),
+        });
+      });
+      chip.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        this.tag.onClick?.({
+          tag: publicTag,
+          placement: 'composer',
+          readonly: false,
+          anchorRect: chip.getBoundingClientRect(),
+        });
+      });
+    }
     const rawTagLabel = getComposerTagLabel(this.tag);
     const tagValue = getComposerTagValue(this.tag);
     const tagLabel = this.tag.kind ? '' : rawTagLabel;
     const iconUrl = this.tag.iconUrl ?? getComposerTagIconUrl(this.tag.kind);
+    const customContent = this.tag.renderContent?.({
+      tag: publicTag,
+      placement: 'composer',
+      readonly: false,
+    });
 
-    if (iconUrl) {
+    if (customContent !== undefined && customContent !== null) {
+      const content = document.createElement('span');
+      content.style.cssText =
+        'display:inline-flex;align-items:center;min-width:0;max-width:100%;';
+      this.contentRoot = createRoot(content);
+      this.contentRoot.render(customContent);
+      chip.appendChild(content);
+    } else if (iconUrl) {
       const icon = document.createElement('span');
       icon.style.cssText =
         'display:block;width:12px;height:12px;flex:0 0 auto;margin-left:7px;background:currentColor;mask:var(--composer-tag-icon-url) center / contain no-repeat;-webkit-mask:var(--composer-tag-icon-url) center / contain no-repeat;';
@@ -570,6 +688,26 @@ class ComposerTagWidget extends WidgetType {
       chip.appendChild(icon);
     }
 
+    if (customContent === undefined || customContent === null) {
+      this.appendDefaultContent(chip, tagLabel, tagValue);
+    }
+
+    if (this.tag.tooltip !== undefined && this.tag.tooltip !== null) {
+      this.appendTooltip(chip, this.tag.tooltip);
+    }
+
+    if (this.tag.removable !== false) {
+      this.appendRemoveButton(chip, view);
+    }
+
+    return chip;
+  }
+
+  private appendDefaultContent(
+    chip: HTMLElement,
+    tagLabel: string,
+    tagValue: string,
+  ) {
     if (tagLabel) {
       const label = document.createElement('span');
       label.style.cssText =
@@ -591,49 +729,82 @@ class ComposerTagWidget extends WidgetType {
       fallback.textContent = this.tag.id;
       chip.appendChild(fallback);
     }
+  }
 
-    if (this.tag.removable !== false) {
-      const remove = document.createElement('button');
-      remove.type = 'button';
-      remove.setAttribute(
-        'aria-label',
-        `Remove ${getComposerTagDisplay(this.tag)}`,
-      );
-      remove.style.cssText =
-        'flex:0 0 auto;width:22px;height:22px;padding:0;border:0;background:transparent;color:var(--muted-foreground);font:inherit;line-height:22px;cursor:pointer;';
-      remove.textContent = '×';
-      remove.addEventListener('mousedown', (event) => event.preventDefault());
-      remove.addEventListener('click', (event) => {
+  private appendTooltip(chip: HTMLElement, tooltip: ReactNode) {
+    const tooltipElement = document.createElement('span');
+    tooltipElement.setAttribute('role', 'tooltip');
+    tooltipElement.style.cssText =
+      'position:absolute;z-index:calc(var(--web-shell-tooltip-z-index,1000) + 1);top:calc(100% + 6px);left:0;display:none;min-width:160px;max-width:min(320px,80vw);padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--background);box-shadow:0 8px 24px rgba(0,0,0,0.18);color:var(--foreground);font-family:var(--font-sans,system-ui,sans-serif);font-size:12px;line-height:1.5;white-space:normal;';
+    const show = () => {
+      tooltipElement.style.display = 'block';
+    };
+    const hide = () => {
+      tooltipElement.style.display = 'none';
+    };
+    chip.addEventListener('mouseenter', show);
+    chip.addEventListener('mouseleave', hide);
+    chip.addEventListener('focusin', show);
+    chip.addEventListener('focusout', hide);
+    this.tooltipRoot = createRoot(tooltipElement);
+    this.tooltipRoot.render(tooltip);
+    chip.appendChild(tooltipElement);
+  }
+
+  private appendRemoveButton(chip: HTMLElement, view: EditorView) {
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.setAttribute(
+      'aria-label',
+      `Remove ${getComposerTagDisplay(this.tag)}`,
+    );
+    remove.style.cssText =
+      'flex:0 0 auto;width:22px;height:22px;padding:0;border:0;background:transparent;color:var(--muted-foreground);font:inherit;line-height:22px;cursor:pointer;';
+    remove.textContent = '×';
+    remove.addEventListener('mousedown', (event) => event.preventDefault());
+    remove.addEventListener('keydown', (event) => {
+      if (
+        event.key === 'Enter' ||
+        event.key === ' ' ||
+        event.key === 'Backspace' ||
+        event.key === 'Delete'
+      ) {
         event.stopPropagation();
-        const changes: Array<{ from: number; to: number; insert: string }> = [];
-        view.state
-          .field(inlineComposerTagField)
-          .between(0, view.state.doc.length, (from, to, value) => {
-            const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
-            if (tag?.id === this.tag.id && tag.removable !== false) {
-              changes.push({ from, to, insert: '' });
-            }
-          });
-        if (changes.length === 0) return;
-        view.dispatch({
-          changes,
-          effects: removeInlineTagEffect.of({
-            predicate: (tag) => tag.id === this.tag.id,
-          }),
-          scrollIntoView: true,
+      }
+    });
+    remove.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const changes: Array<{ from: number; to: number; insert: string }> = [];
+      view.state
+        .field(inlineComposerTagField)
+        .between(0, view.state.doc.length, (from, to, value) => {
+          const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
+          if (tag?.id === this.tag.id && tag.removable !== false) {
+            changes.push({ from, to, insert: '' });
+          }
         });
-        view.focus();
+      if (changes.length === 0) return;
+      view.dispatch({
+        changes,
+        effects: removeInlineTagEffect.of({
+          predicate: (tag) => tag.id === this.tag.id,
+        }),
+        scrollIntoView: true,
       });
-      remove.addEventListener('mouseenter', () => {
-        remove.style.color = 'var(--error-color)';
-      });
-      remove.addEventListener('mouseleave', () => {
-        remove.style.color = 'var(--muted-foreground)';
-      });
-      chip.appendChild(remove);
-    }
+      view.focus();
+    });
+    remove.addEventListener('mouseenter', () => {
+      remove.style.color = 'var(--error-color)';
+    });
+    remove.addEventListener('mouseleave', () => {
+      remove.style.color = 'var(--muted-foreground)';
+    });
+    chip.appendChild(remove);
+  }
 
-    return chip;
+  destroy() {
+    this.contentRoot?.unmount();
+    this.tooltipRoot?.unmount();
   }
 
   ignoreEvent(): boolean {
@@ -688,6 +859,25 @@ export function getInlineComposerTags(view: EditorView): WebShellComposerTag[] {
       if (tag) tags.push(toPublicComposerTag(tag));
     });
   return tags;
+}
+
+function getInlineComposerTagPlacements(
+  view: EditorView,
+): WebShellComposerTagPlacement[] {
+  const placements: WebShellComposerTagPlacement[] = [];
+  view.state
+    .field(inlineComposerTagField)
+    .between(0, view.state.doc.length, (from, to, value) => {
+      const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
+      if (tag) {
+        placements.push({
+          start: from,
+          end: to,
+          tag: toPublicComposerTag(tag),
+        });
+      }
+    });
+  return placements;
 }
 
 // ---- EditorHandle type (shared) ----
@@ -817,8 +1007,12 @@ export interface UseComposerCoreOptions {
   sessionName?: string;
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
+  builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   atProviders?: readonly WebShellAtProvider[];
   composerTagIcons?: WebShellComposerTagIconMap;
+  renderComposerTag?: ComposerTagRenderer;
+  renderComposerTagTooltip?: ComposerTagRenderer;
+  onComposerTagClick?: ComposerTagClickHandler;
   /** CodeMirror theme extension for the editor view. Each variant provides its own. */
   editorTheme: Parameters<typeof EditorView.theme>[0];
 }
@@ -934,6 +1128,7 @@ export interface UseComposerCoreReturn {
   enterAtCategory: (index?: number) => boolean;
   backAtCategories: () => false | 'items' | 'categories';
   updateAtSearch: (query: string) => boolean;
+  selectAtTab: (tabId: string) => boolean;
 }
 
 export function useComposerCore(
@@ -959,8 +1154,12 @@ export function useComposerCore(
     sessionName,
     composerInput,
     composerInputVersion,
+    builtinAtProviders,
     atProviders,
     composerTagIcons,
+    renderComposerTag,
+    renderComposerTagTooltip,
+    onComposerTagClick,
     editorTheme,
   } = options;
 
@@ -1002,13 +1201,39 @@ export function useComposerCore(
   workspaceActionsRef.current = workspace?.actions;
   const composerTagIconsRef = useRef(composerTagIcons);
   composerTagIconsRef.current = composerTagIcons;
+  const renderComposerTagRef = useRef(renderComposerTag);
+  renderComposerTagRef.current = renderComposerTag;
+  const renderComposerTagTooltipRef = useRef(renderComposerTagTooltip);
+  renderComposerTagTooltipRef.current = renderComposerTagTooltip;
+  const onComposerTagClickRef = useRef(onComposerTagClick);
+  onComposerTagClickRef.current = onComposerTagClick;
   const resolveComposerTagIcon = useCallback(
     (tag: WebShellComposerTag): InlineComposerTag => {
-      const iconUrl = getComposerTagIconUrl(
-        tag.kind,
-        composerTagIconsRef.current,
-      );
-      return iconUrl ? { ...tag, iconUrl } : tag;
+      const iconUrl =
+        tag.icon ??
+        getComposerTagIconUrl(tag.kind, composerTagIconsRef.current);
+      const info = {
+        tag,
+        placement: 'composer' as const,
+        readonly: false,
+      };
+      const tooltip = renderComposerTagTooltipRef.current?.(info);
+      const tooltipText =
+        typeof tooltip === 'string' || typeof tooltip === 'number'
+          ? String(tooltip)
+          : undefined;
+      return {
+        ...tag,
+        ...(iconUrl ? { iconUrl } : {}),
+        ...(renderComposerTagRef.current
+          ? { renderContent: renderComposerTagRef.current }
+          : {}),
+        ...(tooltip !== undefined && tooltip !== null ? { tooltip } : {}),
+        ...(tooltipText ? { tooltipText } : {}),
+        ...(onComposerTagClickRef.current
+          ? { onClick: onComposerTagClickRef.current }
+          : {}),
+      };
     },
     [],
   );
@@ -1020,6 +1245,7 @@ export function useComposerCore(
     disabledRef,
     shellModeRef,
     workspaceActionsRef,
+    builtinProviders: builtinAtProviders,
     providers: atProviders,
     createInlineTagEffect: (range) =>
       addInlineTagEffect.of({
@@ -1049,7 +1275,13 @@ export function useComposerCore(
       });
     if (effects.length === 1) return;
     view.dispatch({ effects });
-  }, [composerTagIcons, resolveComposerTagIcon]);
+  }, [
+    composerTagIcons,
+    onComposerTagClick,
+    renderComposerTag,
+    renderComposerTagTooltip,
+    resolveComposerTagIcon,
+  ]);
 
   const toggleShellMode = useCallback(() => {
     if (followupStateRef.current?.isVisible) {
@@ -1437,18 +1669,37 @@ export function useComposerCore(
       textOverride?: string,
       tagsOverride?: readonly WebShellComposerTag[],
     ) => {
+      const inlineTags =
+        tagsOverride === undefined ? getInlineComposerTagPlacements(view) : [];
       const editorText = view.state.doc.toString();
       const followup = followupStateRef.current;
       const followupCompletion =
-        textOverride === undefined && followup?.isVisible
+        textOverride === undefined &&
+        inlineTags.length === 0 &&
+        followup?.isVisible
           ? getFollowupCompletion(editorText, followup.suggestion)
           : null;
-      const rawText = (textOverride ?? followupCompletion ?? editorText).trim();
+      const sourceText = textOverride ?? followupCompletion ?? editorText;
+      const leadingTrimLength =
+        sourceText.length - sourceText.trimStart().length;
+      const rawText = sourceText.trim();
+      const normalizedInlineTags =
+        textOverride === undefined && followupCompletion === null
+          ? inlineTags.map((placement) => ({
+              ...placement,
+              start: placement.start - leadingTrimLength,
+              end: placement.end - leadingTrimLength,
+            }))
+          : [];
       const tags = tagsOverride ?? composerTagsRef.current;
       if (!rawText && tags.length === 0) return true;
+      const textWithInlineTags =
+        tagsOverride === undefined
+          ? replaceInlineTagPlacements(rawText, normalizedInlineTags)
+          : rawText;
       const text = expandLargePastePlaceholders(
         pendingPastesRef.current,
-        rawText,
+        textWithInlineTags,
       );
       const prompt = buildComposerPrompt(text, tags);
       const images = pastedImagesRef.current;
@@ -1574,10 +1825,13 @@ export function useComposerCore(
           }
           if (completionStatus(view.state) === 'active') return false;
           const followup = followupStateRef.current;
-          const followupCompletion = getFollowupCompletion(
-            view.state.doc.toString(),
-            followup?.suggestion,
-          );
+          const hasInlineTags = getInlineComposerTags(view).length > 0;
+          const followupCompletion = hasInlineTags
+            ? null
+            : getFollowupCompletion(
+                view.state.doc.toString(),
+                followup?.suggestion,
+              );
           if (followup?.isVisible && followupCompletion) {
             onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
             return submitText(view, followupCompletion);
@@ -2858,5 +3112,6 @@ export function useComposerCore(
     enterAtCategory: atMenu.enterCategory,
     backAtCategories: atMenu.backToCategories,
     updateAtSearch: atMenu.updateSearch,
+    selectAtTab: atMenu.selectTab,
   };
 }

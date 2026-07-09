@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildComposerPrompt,
+  buildComposerPromptWithInlineTagPlacements,
   createLargePastePlaceholder,
   expandLargePastePlaceholders,
   getComposerTagDisplay,
@@ -10,6 +11,7 @@ import {
   isLargePaste,
   normalizePastedText,
   prunePendingPastes,
+  replaceInlineTagPlacements,
   serializeComposerTag,
 } from './useComposerCore';
 
@@ -140,5 +142,43 @@ describe('composer tag serialization', () => {
       'src/a.ts',
     );
     expect(buildComposerPrompt('do it', [])).toBe('do it');
+  });
+
+  it('keeps inline tags at their editor positions', () => {
+    expect(
+      buildComposerPromptWithInlineTagPlacements(
+        'explain @orders now',
+        [{ id: 'top', serialized: '<top />' }],
+        [
+          {
+            start: 8,
+            end: 15,
+            tag: { id: 'table', value: 'orders', serialized: '<table />' },
+          },
+        ],
+      ),
+    ).toBe('<top />\n\nexplain <table /> now');
+  });
+
+  it('replaces inline tags before expanding large paste placeholders', () => {
+    const pending = new Map<string, string>();
+    const paste = createLargePastePlaceholder(
+      pending,
+      1,
+      'expanded pasted content that is longer than the placeholder',
+    );
+    const text = `${paste.placeholderText} explain @orders`;
+    const tagStart = text.indexOf('@orders');
+    const withInlineTags = replaceInlineTagPlacements(text, [
+      {
+        start: tagStart,
+        end: tagStart + '@orders'.length,
+        tag: { id: 'table', value: 'orders', serialized: '<table />' },
+      },
+    ]);
+
+    expect(expandLargePastePlaceholders(pending, withInlineTags)).toBe(
+      'expanded pasted content that is longer than the placeholder explain <table />',
+    );
   });
 });
