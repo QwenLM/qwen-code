@@ -261,6 +261,17 @@ export function registerSessionRoutes(
     }
   };
 
+  const isNumericSessionCursor = (cursor: string): boolean => {
+    const trimmed = cursor.trim();
+    if (trimmed === '') return false;
+    const parsed = Number(trimmed);
+    return (
+      Number.isFinite(parsed) &&
+      parsed >= 0 &&
+      parsed <= Number.MAX_SAFE_INTEGER
+    );
+  };
+
   const sendAmbiguousSessionOwner = (
     res: Response,
     route: string,
@@ -1779,18 +1790,14 @@ export function registerSessionRoutes(
           ...(view !== undefined ? { view } : {}),
           ...(group !== undefined ? { group } : {}),
         };
-        const result =
-          runtime.primary || (await hasActivePersistedSessions(key))
-            ? await listWorkspaceSessionsForResponse(
-                runtime.bridge,
-                key,
-                options,
-              )
-            : listLiveWorkspaceSessionsForResponse(
-                runtime.bridge,
-                key,
-                options,
-              );
+        const usePersisted =
+          runtime.primary ||
+          (cursor !== undefined && cursor !== ''
+            ? isNumericSessionCursor(cursor)
+            : await hasActivePersistedSessions(key));
+        const result = usePersisted
+          ? await listWorkspaceSessionsForResponse(runtime.bridge, key, options)
+          : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
         res.status(200).json({
           sessions: result.sessions,
           ...(result.nextCursor != null

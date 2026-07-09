@@ -1042,4 +1042,56 @@ describe('multi-workspace session dispatch', () => {
     ).toEqual(['secondary-c']);
     expect(second.body.nextCursor).toBeUndefined();
   });
+
+  it('keeps live cursor pagination stable when persisted sessions appear mid-page', async () => {
+    await withRuntimeDir(async () => {
+      const { app } = makeHarness({
+        secondarySummaries: [
+          makeSummary('secondary-b', SECONDARY_CWD, {
+            updatedAt: '2026-07-08T00:03:00.000Z',
+          }),
+          makeSummary('secondary-a', SECONDARY_CWD, {
+            updatedAt: '2026-07-08T00:03:00.000Z',
+          }),
+          makeSummary('secondary-c', SECONDARY_CWD, {
+            updatedAt: '2026-07-08T00:02:00.000Z',
+          }),
+        ],
+      });
+
+      const first = await request(app)
+        .get('/workspace/secondary-id/sessions?size=2')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        first.body.sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        ),
+      ).toEqual(['secondary-a', 'secondary-b']);
+      expect(first.body.nextCursor).toEqual(expect.any(String));
+
+      await writeStoredSession({
+        sessionId: '550e8400-e29b-41d4-a716-446655440107',
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:04:00.000Z',
+        prompt: 'secondary persisted appeared mid-page',
+        mtime: new Date('2026-07-08T00:04:00.000Z'),
+      });
+
+      const second = await request(app)
+        .get(
+          `/workspace/secondary-id/sessions?size=2&cursor=${encodeURIComponent(
+            first.body.nextCursor as string,
+          )}`,
+        )
+        .set('Host', host())
+        .expect(200);
+      expect(
+        second.body.sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        ),
+      ).toEqual(['secondary-c']);
+      expect(second.body.nextCursor).toBeUndefined();
+    });
+  });
 });
