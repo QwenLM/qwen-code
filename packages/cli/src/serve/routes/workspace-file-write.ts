@@ -19,6 +19,7 @@ import {
 } from './workspace-file-read.js';
 import {
   getWorkspaceRouteContext,
+  requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
   setWorkspaceRouteContext,
 } from '../workspace-route-runtime.js';
@@ -332,6 +333,7 @@ export function registerWorkspaceQualifiedFileWriteRoutes(
       res,
     );
     if (!runtime) return false;
+    if (!requireTrustedWorkspaceRuntime(runtime, res)) return false;
     setWorkspaceRouteContext(req, {
       runtime,
       routePrefix: 'POST /workspaces/:workspace',

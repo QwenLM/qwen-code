@@ -565,7 +565,7 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
-  it('routes workspace-qualified file writes and lets filesystem policy reject untrusted writes', async () => {
+  it('routes workspace-qualified file writes and trust-gates untrusted writes', async () => {
     const h = await makeHarness({ token: 'secret' });
     try {
       const res = await request(h.app)
@@ -595,7 +595,7 @@ describe('workspace-qualified core REST', () => {
         .set('Host', host())
         .send({ path: 'blocked.txt', content: 'blocked', mode: 'create' });
       expect(res.status).toBe(403);
-      expect(res.body.errorKind).toBe('untrusted_workspace');
+      expect(res.body.code).toBe('untrusted_workspace');
     } finally {
       await fsp.rm(untrusted.scratch, { recursive: true, force: true });
     }
