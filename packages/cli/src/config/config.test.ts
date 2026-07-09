@@ -997,6 +997,26 @@ describe('loadCliConfig', () => {
     ]);
   });
 
+  it('enables debug file logging for --debug when QWEN_DEBUG_LOG_FILE is unset', async () => {
+    delete process.env['QWEN_DEBUG_LOG_FILE'];
+    process.argv = ['node', 'script.js', '--debug'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(process.env['QWEN_DEBUG_LOG_FILE']).toBe('1');
+  });
+
+  it('leaves debug file logging unset outside --debug mode', async () => {
+    delete process.env['QWEN_DEBUG_LOG_FILE'];
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(process.env['QWEN_DEBUG_LOG_FILE']).toBeUndefined();
+  });
+
   it('should use configured context file name when settings.context.fileName is set', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

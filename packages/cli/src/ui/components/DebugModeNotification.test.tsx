@@ -24,7 +24,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   isDebugLoggingDegraded: () => false,
   isDebugLogFileEnabled: () => {
     const value = process.env['QWEN_DEBUG_LOG_FILE'];
-    if (value === undefined) return true;
+    if (value === undefined) return false;
     const normalized = value.trim().toLowerCase();
     return !['', '0', 'false', 'off', 'no'].includes(normalized);
   },
@@ -54,8 +54,8 @@ describe('DebugModeNotification', () => {
     );
   }
 
-  it('shows the debug log path when file logging is enabled by default', () => {
-    delete process.env['QWEN_DEBUG_LOG_FILE'];
+  it('shows the debug log path when file logging is enabled', () => {
+    process.env['QWEN_DEBUG_LOG_FILE'] = '1';
 
     const { lastFrame } = renderNotification();
 
