@@ -306,6 +306,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_hooks',
   'workspace_extensions',
   'session_branch',
+  'workspace_qualified_rest_core',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -350,6 +351,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'session_hooks' &&
       f !== 'workspace_extensions' &&
       f !== 'session_branch' &&
+      f !== 'workspace_qualified_rest_core' &&
       f !== 'voice_transcribe',
   ),
   'workspace_settings',
@@ -382,6 +384,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_reload',
   'channel_reload',
   'multi_workspace_sessions',
+  'workspace_qualified_rest_core',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
   'browser_automation_mcp',
@@ -6464,6 +6467,7 @@ describe('createServeApp', () => {
 
         expect(res.status).toBe(400);
         expect(res.body.code).toBe('workspace_mismatch');
+        expect(res.body.boundWorkspace).toBe(process.cwd());
         expect(res.body.requestedWorkspace).toBe(missingCwd);
         expect(bridge.loadCalls).toHaveLength(0);
         expect(bridge.resumeCalls).toHaveLength(0);
@@ -8315,6 +8319,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('workspace_mismatch');
       expect(res.body.boundWorkspace).toBe(WS_BOUND);
+      expect(res.body.requestedWorkspace).toBe(WS_DIFFERENT);
       expect(bridge.listCalls).toHaveLength(0);
     });
 
