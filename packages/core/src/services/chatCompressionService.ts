@@ -50,14 +50,10 @@ const debugLogger = createDebugLogger('COMPRESSION');
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
 
 /**
- * Default proportional auto-compaction threshold. Under the ceiling semantics
- * of computeThresholds it is the *preferred* trigger and an upper bound on how
- * high the trigger can sit: on large windows (> ~220K) it governs, so
- * compaction fires at ~85% of the window and never crowds the ceiling. On
- * smaller windows the absolute "room to compress" ceiling (effectiveWindow −
- * AUTOCOMPACT_BUFFER) is lower and takes over. It also stays the small-window
- * safety net — when the window is so small the ceiling degenerates (≤ 0), the
- * proportional value keeps the trigger usable.
+ * Default proportional auto-compaction threshold — the preferred trigger and an
+ * upper bound on how high it can sit. See computeThresholds for how it combines
+ * with the absolute ceiling (it governs large windows; the ceiling governs
+ * smaller ones).
  */
 export const DEFAULT_PCT = 0.85;
 
@@ -151,18 +147,12 @@ export interface CompactionThresholds {
  *   warn = max(0, auto - WARN_BUFFER)
  *   hard = min(window, max(effectiveWindow - HARD_BUFFER, auto + HARD_BUFFER))
  *
- * Consequences:
- *   - Large windows (> ~220K): the proportional term is the lower of the two,
- *     so auto sits at ~pct of the window — generous headroom, never crowding
- *     the ceiling (a 1M window compacts at ~85%, not ~97%).
- *   - Small/mid windows (≤ ~220K): the ceiling is lower and governs, leaving
- *     room for the summary. This matches claude-code (autoCompact.ts), whose
- *     default trigger is the absolute ceiling and whose percentage override is
- *     likewise combined via Math.min.
- *   - Degenerate windows (≤ SUMMARY_RESERVE + AUTOCOMPACT_BUFFER, ceiling ≤ 0):
- *     the proportional value is the floor so the trigger stays usable.
- *
- * `pct` defaults to DEFAULT_PCT when not provided.
+ * So large windows compact at ~pct (never crowding the ceiling), smaller
+ * windows compact at the ceiling (leaving room for the summary), and a window
+ * too small for even the ceiling (≤ SUMMARY_RESERVE + AUTOCOMPACT_BUFFER) falls
+ * back to the proportional value as a floor. This mirrors claude-code
+ * (autoCompact.ts), which combines its percentage override with the absolute
+ * ceiling via Math.min. `pct` defaults to DEFAULT_PCT.
  *
  * Pure function — no I/O, no shared state — safe to call repeatedly.
  */
@@ -194,13 +184,12 @@ export function computeThresholds(
   // the same way, relative to the auto threshold).
   const warn = Math.max(0, auto - WARN_BUFFER);
 
-  const rawHard = effectiveWindow - HARD_BUFFER;
-  // Guarantee hard >= auto so compaction doesn't wait until the last moment.
-  // The `auto + HARD_BUFFER` branch keeps hard above auto on degenerate small
-  // windows, where auto falls back to the proportional floor and can exceed
-  // effectiveWindow - HARD_BUFFER. Clamp to the window so hard never exceeds
-  // the actual limit.
-  const hard = Math.min(window, Math.max(rawHard, auto + HARD_BUFFER));
+  // hard is the last-ditch force-compaction point: the window edge (hardEdge),
+  // but never below auto + HARD_BUFFER so it stays a distinct tier above auto on
+  // degenerate small windows (where auto is the proportional floor and can
+  // exceed hardEdge). Clamp to the window so hard never exceeds the actual limit.
+  const hardEdge = effectiveWindow - HARD_BUFFER;
+  const hard = Math.min(window, Math.max(hardEdge, auto + HARD_BUFFER));
 
   return { warn, auto, hard, effectiveWindow };
 }
