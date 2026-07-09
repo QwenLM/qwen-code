@@ -422,6 +422,12 @@ describe('workspace-qualified core REST', () => {
         .set('Host', host());
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('workspace_mismatch');
+      expect(res.body.boundWorkspace).toBeUndefined();
+      expect(res.body.requestedWorkspace).toBeUndefined();
+      expect(JSON.stringify(res.body)).not.toContain(h.primaryCwd);
+      expect(JSON.stringify(res.body)).not.toContain(
+        path.join(h.scratch, 'nope'),
+      );
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }

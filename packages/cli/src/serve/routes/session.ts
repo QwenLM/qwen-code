@@ -149,26 +149,13 @@ export function registerSessionRoutes(
     });
   };
 
-  const sendWorkspaceMismatch = (
-    res: Response,
-    requestedWorkspace: string,
-  ): void => {
+  const sendWorkspaceMismatch = (res: Response): void => {
     const runtimes = workspaceRegistry.list();
-    if (runtimes.length > 1) {
-      res.status(400).json({
-        error: `Workspace mismatch: daemon is bound to ${runtimes.length} workspaces; none matched the requested workspace.`,
-        code: 'workspace_mismatch',
-        boundWorkspace,
-        workspaceCount: runtimes.length,
-        requestedWorkspace,
-      });
-      return;
-    }
     res.status(400).json({
-      error: `Workspace mismatch: daemon is bound to "${boundWorkspace}"`,
+      error:
+        'Workspace mismatch: the requested workspace is not registered with this daemon.',
       code: 'workspace_mismatch',
-      boundWorkspace,
-      requestedWorkspace,
+      workspaceCount: runtimes.length,
     });
   };
 
@@ -186,7 +173,7 @@ export function registerSessionRoutes(
         logSessionRoutingFailure('POST /session', 'workspace_mismatch', {
           requestedWorkspace: cwd,
         });
-        sendWorkspaceMismatch(res, cwd);
+        sendWorkspaceMismatch(res);
         return undefined;
       }
       sendBridgeError(res, err, { route: 'POST /session' });
@@ -206,7 +193,7 @@ export function registerSessionRoutes(
       logSessionRoutingFailure('POST /session', 'workspace_mismatch', {
         requestedWorkspace: key,
       });
-      sendWorkspaceMismatch(res, key);
+      sendWorkspaceMismatch(res);
       return undefined;
     }
     if (!runtime.primary && !runtime.trusted) {
@@ -238,12 +225,12 @@ export function registerSessionRoutes(
     try {
       key = canonicalizeWorkspace(workspaceParam);
     } catch {
-      sendWorkspaceMismatch(res, workspaceParam);
+      sendWorkspaceMismatch(res);
       return null;
     }
     const runtime = workspaceRegistry.getByWorkspaceCwd(key);
     if (!runtime) {
-      sendWorkspaceMismatch(res, key);
+      sendWorkspaceMismatch(res);
       return null;
     }
     return runtime;
@@ -402,7 +389,7 @@ export function registerSessionRoutes(
         logSessionRoutingFailure(route, 'workspace_mismatch', {
           requestedWorkspace: cwd,
         });
-        sendWorkspaceMismatch(res, cwd);
+        sendWorkspaceMismatch(res);
         return undefined;
       }
       sendBridgeError(res, err, { route, sessionId });
@@ -416,7 +403,7 @@ export function registerSessionRoutes(
       logSessionRoutingFailure(route, 'workspace_mismatch', {
         requestedWorkspace: key,
       });
-      sendWorkspaceMismatch(res, key);
+      sendWorkspaceMismatch(res);
       return undefined;
     }
     if (!runtime.primary && !runtime.trusted) {
@@ -567,12 +554,7 @@ export function registerSessionRoutes(
     }
     const key = canonicalizeWorkspace(workspaceCwd);
     if (key !== boundWorkspace) {
-      res.status(400).json({
-        error: `Workspace mismatch: daemon is bound to "${boundWorkspace}"`,
-        code: 'workspace_mismatch',
-        boundWorkspace,
-        requestedWorkspace: key,
-      });
+      sendWorkspaceMismatch(res);
       return null;
     }
     return key;

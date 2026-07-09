@@ -489,6 +489,10 @@ describe('multi-workspace session dispatch', () => {
     expect(unknownRes.status).toBe(400);
     expect(unknownRes.body.code).toBe('workspace_mismatch');
     expect(unknownRes.body.workspaceCount).toBe(2);
+    expect(unknownRes.body.boundWorkspace).toBeUndefined();
+    expect(unknownRes.body.requestedWorkspace).toBeUndefined();
+    expect(JSON.stringify(unknownRes.body)).not.toContain(PRIMARY_CWD);
+    expect(JSON.stringify(unknownRes.body)).not.toContain(UNKNOWN_CWD);
     expect(unknown.primaryBridge.spawnCalls).toEqual([]);
     expect(unknown.secondaryBridge.spawnCalls).toEqual([]);
 
@@ -727,6 +731,10 @@ describe('multi-workspace session dispatch', () => {
     expect(unknownRes.status).toBe(400);
     expect(unknownRes.body.code).toBe('workspace_mismatch');
     expect(unknownRes.body.workspaceCount).toBe(2);
+    expect(unknownRes.body.boundWorkspace).toBeUndefined();
+    expect(unknownRes.body.requestedWorkspace).toBeUndefined();
+    expect(JSON.stringify(unknownRes.body)).not.toContain(PRIMARY_CWD);
+    expect(JSON.stringify(unknownRes.body)).not.toContain(UNKNOWN_CWD);
     expect(unknown.primaryBridge.restoreCalls).toEqual([]);
     expect(unknown.secondaryBridge.restoreCalls).toEqual([]);
 
@@ -857,6 +865,10 @@ describe('multi-workspace session dispatch', () => {
     expect(unknown.status).toBe(400);
     expect(unknown.body.code).toBe('workspace_mismatch');
     expect(unknown.body.workspaceCount).toBe(2);
+    expect(unknown.body.boundWorkspace).toBeUndefined();
+    expect(unknown.body.requestedWorkspace).toBeUndefined();
+    expect(JSON.stringify(unknown.body)).not.toContain(PRIMARY_CWD);
+    expect(JSON.stringify(unknown.body)).not.toContain(UNKNOWN_CWD);
   });
 
   it('lists active persisted non-primary sessions by encoded workspace cwd', async () => {
