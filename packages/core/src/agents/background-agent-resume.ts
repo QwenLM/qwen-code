@@ -25,6 +25,7 @@ import {
   attachJsonlTranscriptWriter,
 } from './agent-transcript.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import { buildOrderedUuidChain } from '../utils/conversation-chain.js';
 import { getInitialChatHistory } from '../utils/environmentContext.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
@@ -211,29 +212,22 @@ function reconstructHistory(
 ): ChatRecord[] {
   if (records.length === 0) return [];
 
-  const recordsByUuid = new Map<string, ChatRecord[]>();
+  // First record per uuid (preserves the historical `?.[0]` selection — this
+  // path does not aggregate duplicate-uuid records).
+  const firstByUuid = new Map<string, ChatRecord>();
   for (const record of records) {
-    const existing = recordsByUuid.get(record.uuid) ?? [];
-    existing.push(record);
-    recordsByUuid.set(record.uuid, existing);
+    if (!firstByUuid.has(record.uuid)) firstByUuid.set(record.uuid, record);
   }
 
-  let currentUuid: string | null =
-    leafUuid ?? records[records.length - 1]!.uuid;
-  const uuidChain: string[] = [];
-  const visited = new Set<string>();
+  // Gap detection is intentionally OFF here. Unlike the interactive `/resume`
+  // (sessionService) and ACP replay (HistoryReplayer) paths, this background
+  // transcript recovery has no surface to render a gap marker on, so detecting
+  // gaps only to drop them would be an inconsistent half-measure. The walk
+  // truncates at a broken parent link either way; here it just truncates.
+  const { uuids } = buildOrderedUuidChain(records, { leafUuid });
 
-  while (currentUuid && !visited.has(currentUuid)) {
-    visited.add(currentUuid);
-    uuidChain.push(currentUuid);
-    const recordsForUuid = recordsByUuid.get(currentUuid);
-    if (!recordsForUuid?.length) break;
-    currentUuid = recordsForUuid[0]!.parentUuid;
-  }
-
-  uuidChain.reverse();
-  return uuidChain
-    .map((uuid) => recordsByUuid.get(uuid)?.[0])
+  return uuids
+    .map((uuid) => firstByUuid.get(uuid))
     .filter((record): record is ChatRecord => !!record);
 }
 

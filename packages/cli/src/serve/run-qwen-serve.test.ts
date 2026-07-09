@@ -23,6 +23,7 @@ import {
   validatePolicyConfig,
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
+import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
@@ -1345,6 +1346,7 @@ describe('runQwenServe runtime startup failures', () => {
   async function readBrowserMcpFeatureFlagsForEnv(
     raw: string | undefined,
     origin = 'chrome-extension://qwen-test-extension',
+    cdpMcpCommand?: string,
   ) {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-fail-')),
@@ -1353,12 +1355,18 @@ describe('runQwenServe runtime startup failures', () => {
       process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
     const originalCdpTunnelOverWs =
       process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
+    const originalCdpMcpCommand = process.env['QWEN_CDP_MCP_COMMAND'];
     if (raw === undefined) {
       delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
       delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
     } else {
       process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'] = raw;
       process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = raw;
+    }
+    if (cdpMcpCommand === undefined) {
+      delete process.env['QWEN_CDP_MCP_COMMAND'];
+    } else {
+      process.env['QWEN_CDP_MCP_COMMAND'] = cdpMcpCommand;
     }
     vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
       throw new Error('runtime boom');
@@ -1395,6 +1403,11 @@ describe('runQwenServe runtime startup failures', () => {
         delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
       } else {
         process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = originalCdpTunnelOverWs;
+      }
+      if (originalCdpMcpCommand === undefined) {
+        delete process.env['QWEN_CDP_MCP_COMMAND'];
+      } else {
+        process.env['QWEN_CDP_MCP_COMMAND'] = originalCdpMcpCommand;
       }
       await handle.close();
     }
@@ -1476,6 +1489,41 @@ describe('runQwenServe runtime startup failures', () => {
 
     expect(features).toContain('cdp_tunnel_over_ws');
     expect(features).not.toContain('client_mcp_over_ws');
+    expect(features).not.toContain('browser_automation_mcp');
+  });
+
+  it('advertises browser automation MCP when the external CDP adapter command is set', async () => {
+    const features = await readBrowserMcpFeatureFlagsForEnv(
+      undefined,
+      'chrome-extension://qwen-test-extension',
+      '/opt/qwen-cdp-mcp-adapter',
+    );
+
+    expect(features).toContain('cdp_tunnel_over_ws');
+    expect(features).toContain('browser_automation_mcp');
+    expect(features).not.toContain('client_mcp_over_ws');
+  });
+
+  it('does not advertise browser automation MCP without an active CDP tunnel', async () => {
+    const features = await readBrowserMcpFeatureFlagsForEnv(
+      undefined,
+      'https://example.com',
+      '/opt/qwen-cdp-mcp-adapter',
+    );
+
+    expect(features).not.toContain('browser_automation_mcp');
+  });
+
+  it('does not enable browser automation MCP on bearer-protected endpoints', () => {
+    expect(
+      isBrowserAutomationMcpAvailable(
+        {
+          cdpTunnelOverWs: true,
+          token: 'secret-token',
+        },
+        {},
+      ),
+    ).toBe(false);
   });
 
   it('forwards auto-enabled CDP tunnel state to the ACP child env', async () => {
@@ -4495,11 +4543,12 @@ describe('runQwenServe channel worker supervisor', () => {
     );
     const listenError = new Error('listen failed') as NodeJS.ErrnoException;
     listenError.code = 'EADDRINUSE';
-    const fakeServer = createServer();
     vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
       listen: vi.fn(() => {
-        setImmediate(() => fakeServer.emit('error', listenError));
-        return fakeServer;
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
       }),
     } as unknown as express.Application);
     const worker = makeWorker({
@@ -4533,6 +4582,180 @@ describe('runQwenServe channel worker supervisor', () => {
       servePid: process.pid,
     });
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+  });
+
+  it('retries the next port on EADDRINUSE and succeeds', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-retry-')),
+    );
+    const portsAttempted: number[] = [];
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port, _host, cb) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        if (portsAttempted.length === 1) {
+          const err = new Error('address in use') as NodeJS.ErrnoException;
+          err.code = 'EADDRINUSE';
+          setImmediate(() => srv.emit('error', err));
+        } else {
+          srv.listen(0, '127.0.0.1', () => {
+            setImmediate(() => {
+              srv.emit('listening');
+              if (typeof cb === 'function') cb();
+            });
+          });
+        }
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    const handle = await runQwenServe(
+      {
+        port: 4170,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      stderrSpy.mockRestore();
+      expect(portsAttempted).toEqual([4170, 4171]);
+      expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(handle.url).not.toContain(':4170');
+      expect(
+        stderrWrites.some((w) =>
+          w.includes('port 4170 is in use, trying 4171'),
+        ),
+      ).toBe(true);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not retry on non-EADDRINUSE listen errors', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-no-retry-')),
+    );
+    const portsAttempted: number[] = [];
+    const listenError = new Error('permission denied') as NodeJS.ErrnoException;
+    listenError.code = 'EACCES';
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port, _host, _cb) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    await expect(
+      runQwenServe(
+        {
+          port: 4170,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      ),
+    ).rejects.toBe(listenError);
+
+    expect(portsAttempted).toEqual([4170]);
+  });
+
+  it('rejects after exhausting all port retry attempts', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-exhaust-')),
+    );
+    const portsAttempted: number[] = [];
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    const listenError = new Error('address in use') as NodeJS.ErrnoException;
+    listenError.code = 'EADDRINUSE';
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    await expect(
+      runQwenServe(
+        {
+          port: 4170,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      ),
+    ).rejects.toBe(listenError);
+
+    stderrSpy.mockRestore();
+    expect(portsAttempted).toEqual(
+      Array.from({ length: 10 }, (_, i) => 4170 + i),
+    );
+    expect(
+      stderrWrites.some((w) => w.includes('all ports 4170–4179 are in use')),
+    ).toBe(true);
+  });
+
+  it('does not retry EADDRINUSE when port is 0 (ephemeral)', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port0-no-retry-')),
+    );
+    const portsAttempted: number[] = [];
+    const listenError = new Error('address in use') as NodeJS.ErrnoException;
+    listenError.code = 'EADDRINUSE';
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    await expect(
+      runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      ),
+    ).rejects.toBe(listenError);
+
+    expect(portsAttempted).toEqual([0]);
   });
 
   it('does not remove the channel pidfile reservation for handled uncaught exceptions', async () => {

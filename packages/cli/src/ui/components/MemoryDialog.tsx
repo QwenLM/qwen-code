@@ -9,12 +9,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import {
   getAllGeminiMdFilenames,
   Storage,
   getAutoMemoryRoot,
   getAutoMemoryProjectStateDir,
+  getUserAutoMemoryRoot,
+  AUTO_MEMORY_INDEX_FILENAME,
 } from '@qwen-code/qwen-code-core';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -26,7 +28,9 @@ import { theme } from '../semantic-colors.js';
 import { formatRelativeTime } from '../utils/formatters.js';
 import { t } from '../../i18n/index.js';
 
-type MemoryDialogTarget = 'project' | 'global' | 'managed';
+type MemoryDialogTarget = 'project' | 'global';
+type MemoryDialogAction = 'file' | 'folder';
+const DISPLAY_ENV_VARS = ['DISPLAY', 'WAYLAND_DISPLAY', 'MIR_SOCKET'] as const;
 
 interface MemoryDialogProps {
   onClose: () => void;
@@ -35,6 +39,7 @@ interface MemoryDialogProps {
 interface DialogItem {
   label: string;
   value: MemoryDialogTarget;
+  action: MemoryDialogAction;
   description?: string;
 }
 
@@ -55,7 +60,7 @@ async function resolvePreferredMemoryFile(
   return path.join(dir, fallbackFilename);
 }
 
-function openFolderPath(folderPath: string): void {
+async function openFolderPath(folderPath: string): Promise<void> {
   let command = 'xdg-open';
 
   switch (process.platform) {
@@ -70,21 +75,27 @@ function openFolderPath(folderPath: string): void {
       break;
   }
 
-  const needsShell =
-    process.platform === 'win32' &&
-    (command.endsWith('.cmd') || command.endsWith('.bat'));
-
-  const result = spawnSync(command, [folderPath], {
-    stdio: 'inherit',
-    shell: needsShell,
+  const child = spawn(command, [folderPath], {
+    detached: true,
+    stdio: 'ignore',
   });
 
-  if (result.error) {
-    throw result.error;
+  child.unref();
+
+  await new Promise<void>((resolve, reject) => {
+    child.once('error', reject);
+    // Exit codes are intentionally not observed: the folder opener is
+    // fire-and-forget, and waiting for exit can block until the file manager
+    // closes.
+    child.once('spawn', () => resolve());
+  });
+}
+
+function shouldOpenFolderPath(): boolean {
+  if (process.platform === 'darwin' || process.platform === 'win32') {
+    return true;
   }
-  if (typeof result.status === 'number' && result.status !== 0) {
-    throw new Error(`Folder opener exited with status ${result.status}`);
-  }
+  return DISPLAY_ENV_VARS.some((key) => Boolean(process.env[key]));
 }
 
 async function ensureFileExists(filePath: string): Promise<void> {
@@ -155,17 +166,40 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
     () => getAutoMemoryRoot(config.getProjectRoot()),
     [config],
   );
+  const managedUserMemoryPath = useMemo(() => getUserAutoMemoryRoot(), []);
 
   const memoryStatePath = useMemo(
     () => getAutoMemoryProjectStateDir(config.getProjectRoot()),
     [config],
   );
 
-  const items = useMemo<DialogItem[]>(
-    () => [
+  const items = useMemo<DialogItem[]>(() => {
+    if (config.isManagedMemoryAvailable()) {
+      return [
+        {
+          label: t('User memory'),
+          value: 'global',
+          action: 'folder',
+          description: t('Saved in {{path}}', {
+            path: formatDisplayPath(managedUserMemoryPath),
+          }),
+        },
+        {
+          label: t('Project memory'),
+          value: 'project',
+          action: 'folder',
+          description: t('Saved in {{path}}', {
+            path: formatDisplayPath(managedMemoryPath),
+          }),
+        },
+      ];
+    }
+
+    return [
       {
         label: t('User memory'),
         value: 'global',
+        action: 'file',
         description: t('Saved in {{path}}', {
           path: formatDisplayPath(globalMemoryPath),
         }),
@@ -173,19 +207,21 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
       {
         label: t('Project memory'),
         value: 'project',
+        action: 'file',
         description: t('Saved in {{path}}', {
           path:
             path.relative(config.getWorkingDir(), projectMemoryPath) ||
             path.basename(projectMemoryPath),
         }),
       },
-      {
-        label: t('Open auto-memory folder'),
-        value: 'managed',
-      },
-    ],
-    [config, globalMemoryPath, projectMemoryPath],
-  );
+    ];
+  }, [
+    config,
+    globalMemoryPath,
+    managedMemoryPath,
+    managedUserMemoryPath,
+    projectMemoryPath,
+  ]);
 
   // Load lastDreamAt from meta.json
   useEffect(() => {
@@ -219,8 +255,21 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
   }, [lastDreamAt]);
 
   const resolveTargetPath = useCallback(
-    async (target: MemoryDialogTarget): Promise<string> => {
-      switch (target) {
+    async (item: DialogItem): Promise<string> => {
+      if (item.action === 'folder') {
+        switch (item.value) {
+          case 'global':
+            return managedUserMemoryPath;
+          case 'project':
+            return managedMemoryPath;
+          default: {
+            const _exhaustive: never = item.value;
+            return _exhaustive;
+          }
+        }
+      }
+
+      switch (item.value) {
         case 'project':
           return resolvePreferredMemoryFile(
             config.getWorkingDir(),
@@ -231,23 +280,29 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
             Storage.getGlobalQwenDir(),
             getAllGeminiMdFilenames()[0] ?? 'QWEN.md',
           );
-        case 'managed':
-          return managedMemoryPath;
-        default:
-          return managedMemoryPath;
+        default: {
+          const _exhaustive: never = item.value;
+          return _exhaustive;
+        }
       }
     },
-    [config, managedMemoryPath],
+    [config, managedMemoryPath, managedUserMemoryPath],
   );
 
   const handleSelect = useCallback(
-    async (target: MemoryDialogTarget) => {
+    async (item: DialogItem) => {
       try {
         setError(null);
-        const targetPath = await resolveTargetPath(target);
-        if (target === 'managed') {
+        const targetPath = await resolveTargetPath(item);
+        if (item.action === 'folder') {
           await fs.mkdir(targetPath, { recursive: true });
-          openFolderPath(targetPath);
+          if (shouldOpenFolderPath()) {
+            await openFolderPath(targetPath);
+          } else {
+            const indexPath = path.join(targetPath, AUTO_MEMORY_INDEX_FILENAME);
+            await ensureFileExists(indexPath);
+            await launchEditor(indexPath);
+          }
         } else {
           await ensureFileExists(targetPath);
           await launchEditor(targetPath);
@@ -395,15 +450,18 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
       }
 
       if (key.name === 'return') {
-        void handleSelect(items[highlightedIndex]?.value ?? 'project');
+        const selectedItem = items[highlightedIndex] ?? items[0];
+        if (selectedItem) {
+          void handleSelect(selectedItem);
+        }
         return;
       }
 
-      if (key.sequence && /^[1-3]$/.test(key.sequence)) {
+      if (key.sequence && /^[1-9]$/.test(key.sequence)) {
         const nextIndex = Number(key.sequence) - 1;
         if (items[nextIndex]) {
           setHighlightedIndex(nextIndex);
-          void handleSelect(items[nextIndex].value);
+          void handleSelect(items[nextIndex]);
         }
       }
     },
@@ -483,7 +541,7 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
           const isSelected =
             focusedSection === 'list' && index === highlightedIndex;
           return (
-            <Box key={item.value} flexDirection="row">
+            <Box key={`${item.value}-${item.action}`} flexDirection="row">
               <Text color={isSelected ? theme.status.success : undefined}>
                 {isSelected ? '› ' : '  '}
                 {index + 1}. {item.label}

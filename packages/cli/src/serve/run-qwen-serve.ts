@@ -107,6 +107,7 @@ import {
 } from '../utils/startupProfiler.js';
 import type { ServiceInfo } from '../commands/channel/pidfile.js';
 import { findCliEntryPath } from '../commands/channel/cli-entry-path.js';
+import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 
 // Reverse MCP channel; enabled only by explicit option or env opt-in.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
@@ -198,6 +199,8 @@ function isNonNegativeIntegerMs(value: number): boolean {
 }
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
+
+const MAX_PORT_ATTEMPTS = 10;
 
 function assertTimerDelayInRange(name: string, value: number): void {
   if (value > MAX_TIMEOUT_MS) {
@@ -797,6 +800,8 @@ async function loadServeRuntimeModules() {
     createTotalSessionAdmissionController:
       totalSessionAdmissionModule.createTotalSessionAdmissionController,
     createWorkspaceRegistry: workspaceRegistryModule.createWorkspaceRegistry,
+    createWorkspaceSessionOwnerIndex:
+      workspaceRegistryModule.createWorkspaceSessionOwnerIndex,
   };
 }
 
@@ -849,6 +854,10 @@ function currentServeFeaturesForRunQwenServe(
     // so the bootstrap `/capabilities` window doesn't briefly under-report them.
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
+    browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
+      opts,
+      process.env,
+    ),
   });
 }
 
@@ -2454,6 +2463,7 @@ export async function runQwenServe(
               : [],
       },
     );
+    const sessionOwnerIndex = runtime.createWorkspaceSessionOwnerIndex();
     const persistDisabledToolsFn = (
       workspace: string,
       toolName: string,
@@ -2534,6 +2544,7 @@ export async function runQwenServe(
         clientMcpSender: clientMcpSenderRegistry.lookup,
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
+        sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
         ...(opts.maxPendingPromptsPerSession !== undefined
           ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
           : {}),
@@ -2801,6 +2812,7 @@ export async function runQwenServe(
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
+        sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
         ...(opts.maxPendingPromptsPerSession !== undefined
           ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
           : {}),
@@ -2931,7 +2943,9 @@ export async function runQwenServe(
     }
 
     const workspaceRegistry: WorkspaceRegistry =
-      runtime.createWorkspaceRegistry(workspaceRuntimes);
+      runtime.createWorkspaceRegistry(workspaceRuntimes, {
+        sessionOwnerIndex,
+      });
 
     core.registerDaemonGaugeCallbacks({
       sessionCount: () =>
@@ -3897,11 +3911,11 @@ export async function runQwenServe(
       process.on('uncaughtExceptionMonitor', onUncaughtExceptionMonitor);
 
       // Swap the boot-error listener for a runtime-error one
-      // before resolving. `server.once('error', reject)` at the
-      // bottom only catches errors BEFORE listening; post-listen
-      // errors (EMFILE after FD exhaustion, runtime errors on the
-      // listener) would be unhandled and crash the daemon. Use a
-      // persistent listener that logs to stderr instead.
+      // before resolving. `tryListen`'s `server.once('error', ...)`
+      // only catches errors BEFORE listening; post-listen errors
+      // (EMFILE after FD exhaustion, runtime errors on the listener)
+      // would be unhandled and crash the daemon. Use a persistent
+      // listener that logs to stderr instead.
       server.removeAllListeners('error');
       server.on('error', (err) => {
         daemonLog.error('server error', err instanceof Error ? err : null);
@@ -3948,8 +3962,8 @@ export async function runQwenServe(
       }
     };
     let server: Server;
+    let httpsServer: https.Server | undefined;
     if (tlsOptions) {
-      let httpsServer: https.Server;
       try {
         httpsServer = https.createServer(tlsOptions, app);
       } catch (err) {
@@ -3966,13 +3980,53 @@ export async function runQwenServe(
         );
         return;
       }
-      server = httpsServer.listen(opts.port, listenHostname, onListening);
-    } else {
-      server = app.listen(opts.port, listenHostname, onListening);
     }
-    server.once('error', (err) => {
-      removeCurrentServePidfile();
-      reject(err);
-    });
+
+    const tryListen = (attemptPort: number, attempt: number): void => {
+      try {
+        if (httpsServer) {
+          // server.listen(port, host, cb) registers `cb` as a one-time
+          // `listening` listener. On failed attempts (EADDRINUSE),
+          // `listening` never fires so the listener accumulates. Clear
+          // stale listeners before each retry.
+          httpsServer.removeAllListeners('listening');
+          server = httpsServer.listen(attemptPort, listenHostname, onListening);
+        } else {
+          server = app.listen(attemptPort, listenHostname, onListening);
+        }
+      } catch (err) {
+        // Synchronous listen failure (e.g. invalid address) — not
+        // recoverable via port bump.
+        removeCurrentServePidfile();
+        reject(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
+
+      server.once('error', (err: NodeJS.ErrnoException) => {
+        server.close();
+        const nextPort = attemptPort + 1;
+        if (
+          err.code === 'EADDRINUSE' &&
+          opts.port !== 0 &&
+          nextPort <= 65535 &&
+          attempt < MAX_PORT_ATTEMPTS - 1
+        ) {
+          writeStderrLine(
+            `qwen serve: port ${attemptPort} is in use, trying ${nextPort}...`,
+          );
+          tryListen(nextPort, attempt + 1);
+        } else {
+          if (err.code === 'EADDRINUSE' && attempt > 0) {
+            writeStderrLine(
+              `qwen serve: all ports ${opts.port}–${attemptPort} are in use`,
+            );
+          }
+          removeCurrentServePidfile();
+          reject(err);
+        }
+      });
+    };
+
+    tryListen(opts.port, 0);
   });
 }

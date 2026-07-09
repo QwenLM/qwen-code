@@ -327,6 +327,15 @@ export function validateSettingValue(
       if (def.maximum !== undefined && value > def.maximum)
         return `Value must be <= ${def.maximum}`;
       break;
+    case 'integer':
+      if (typeof value !== 'number' || !Number.isFinite(value))
+        return 'Value must be a finite integer';
+      if (!Number.isInteger(value)) return 'Value must be an integer';
+      if (def.minimum !== undefined && value < def.minimum)
+        return `Value must be >= ${def.minimum}`;
+      if (def.maximum !== undefined && value > def.maximum)
+        return `Value must be <= ${def.maximum}`;
+      break;
     case 'string':
       if (typeof value !== 'string') return 'Value must be a string';
       if (value.length > MAX_SETTING_STRING_VALUE_LENGTH)

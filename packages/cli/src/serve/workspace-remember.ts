@@ -15,7 +15,12 @@ import type {
   BridgeWorkspaceMemoryRememberContextMode,
   BridgeWorkspaceMemoryRememberResult,
 } from './acp-session-bridge.js';
-import { extractRememberErrorCode } from './workspace-remember-errors.js';
+import {
+  createWorkspaceMemoryExtractionErrorLogger,
+  shouldSuppressRememberErrorDetails,
+  workspaceMemoryFailureCode,
+  workspaceMemoryFailureDiagnostics,
+} from './workspace-remember-errors.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
 import {
   formatWorkspaceMemoryDreamSummary,
@@ -43,6 +48,7 @@ interface WorkspaceMemoryTaskBaseSnapshot {
   error?: {
     code: string;
     message: string;
+    details?: string;
   };
 }
 
@@ -178,6 +184,25 @@ export function publicErrorStatus(code: string): number {
   if (code === 'managed_memory_unavailable') return 409;
   return 500;
 }
+
+function createTaskError(
+  code: string,
+  kind: WorkspaceMemoryTaskKind,
+  details?: string,
+): WorkspaceMemoryTaskBaseSnapshot['error'] {
+  const error: WorkspaceMemoryTaskBaseSnapshot['error'] = {
+    code,
+    message: publicErrorMessage(code, kind),
+  };
+  if (shouldSuppressRememberErrorDetails(code)) return error;
+  return {
+    ...error,
+    ...(details ? { details } : {}),
+  };
+}
+
+const logWorkspaceMemoryExtractionError =
+  createWorkspaceMemoryExtractionErrorLogger(debugLogger);
 
 export class WorkspaceRememberTaskLane {
   private static readonly MAX_TASKS = 1000;
@@ -331,17 +356,23 @@ export class WorkspaceRememberTaskLane {
         };
         task.updatedAt = nowIso();
       } catch (err) {
-        const code = extractRememberErrorCode(err);
-        debugLogger.error(
-          'Workspace memory remember task failed:',
-          { taskId: task.taskId },
+        const code = workspaceMemoryFailureCode(
           err,
+          'remember_failed',
+          logWorkspaceMemoryExtractionError,
         );
-        task.status = 'failed';
-        task.error = {
+        const diagnostics = workspaceMemoryFailureDiagnostics(
+          err,
+          logWorkspaceMemoryExtractionError,
+        );
+        debugLogger.error('Workspace memory remember task failed:', {
+          taskId: task.taskId,
           code,
-          message: publicErrorMessage(code, task.kind),
-        };
+          details: diagnostics.debugDetails,
+          ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
+        });
+        task.status = 'failed';
+        task.error = createTaskError(code, task.kind, diagnostics.details);
         task.updatedAt = nowIso();
       }
       try {
@@ -397,17 +428,23 @@ export class WorkspaceRememberTaskLane {
         };
         task.updatedAt = nowIso();
       } catch (err) {
-        const code = extractRememberErrorCode(err, 'forget_failed');
-        debugLogger.error(
-          'Workspace memory forget task failed:',
-          { taskId: task.taskId },
+        const code = workspaceMemoryFailureCode(
           err,
+          'forget_failed',
+          logWorkspaceMemoryExtractionError,
         );
-        task.status = 'failed';
-        task.error = {
+        const diagnostics = workspaceMemoryFailureDiagnostics(
+          err,
+          logWorkspaceMemoryExtractionError,
+        );
+        debugLogger.error('Workspace memory forget task failed:', {
+          taskId: task.taskId,
           code,
-          message: publicErrorMessage(code, task.kind),
-        };
+          details: diagnostics.debugDetails,
+          ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
+        });
+        task.status = 'failed';
+        task.error = createTaskError(code, task.kind, diagnostics.details);
         task.updatedAt = nowIso();
       }
       try {
@@ -459,17 +496,23 @@ export class WorkspaceRememberTaskLane {
         };
         task.updatedAt = nowIso();
       } catch (err) {
-        const code = extractRememberErrorCode(err, 'dream_failed');
-        debugLogger.error(
-          'Workspace memory dream task failed:',
-          { taskId: task.taskId },
+        const code = workspaceMemoryFailureCode(
           err,
+          'dream_failed',
+          logWorkspaceMemoryExtractionError,
         );
-        task.status = 'failed';
-        task.error = {
+        const diagnostics = workspaceMemoryFailureDiagnostics(
+          err,
+          logWorkspaceMemoryExtractionError,
+        );
+        debugLogger.error('Workspace memory dream task failed:', {
+          taskId: task.taskId,
           code,
-          message: publicErrorMessage(code, task.kind),
-        };
+          details: diagnostics.debugDetails,
+          ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
+        });
+        task.status = 'failed';
+        task.error = createTaskError(code, task.kind, diagnostics.details);
         task.updatedAt = nowIso();
       }
       try {
@@ -610,7 +653,11 @@ export function mountWorkspaceMemoryRememberRoutes(
           ...(originatorClientId ? { originatorClientId } : {}),
         });
       } catch (err) {
-        const code = extractRememberErrorCode(err);
+        const code = workspaceMemoryFailureCode(
+          err,
+          'remember_failed',
+          logWorkspaceMemoryExtractionError,
+        );
         res.status(publicErrorStatus(code)).json({
           error: publicErrorMessage(code, 'remember'),
           code,
@@ -678,7 +725,11 @@ export function mountWorkspaceMemoryRememberRoutes(
         });
         res.status(202).json(task);
       } catch (err) {
-        const code = extractRememberErrorCode(err, 'forget_failed');
+        const code = workspaceMemoryFailureCode(
+          err,
+          'forget_failed',
+          logWorkspaceMemoryExtractionError,
+        );
         res.status(publicErrorStatus(code)).json({
           error: publicErrorMessage(code, 'forget'),
           code,
@@ -723,7 +774,11 @@ export function mountWorkspaceMemoryRememberRoutes(
         });
         res.status(202).json(task);
       } catch (err) {
-        const code = extractRememberErrorCode(err, 'dream_failed');
+        const code = workspaceMemoryFailureCode(
+          err,
+          'dream_failed',
+          logWorkspaceMemoryExtractionError,
+        );
         res.status(publicErrorStatus(code)).json({
           error: publicErrorMessage(code, 'dream'),
           code,

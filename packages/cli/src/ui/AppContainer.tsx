@@ -166,6 +166,7 @@ import {
 } from './utils/workflow-keyword.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
+import { ExtensionRefreshState } from '../config/extension-refresh-state.js';
 import { useFocus } from './hooks/useFocus.js';
 import { useAwaySummary } from './hooks/useAwaySummary.js';
 import { useBracketedPaste } from './hooks/useBracketedPaste.js';
@@ -424,6 +425,7 @@ interface AppContainerProps {
   startupWarnings?: string[];
   version: string;
   initializationResult: InitializationResult;
+  extensionRefreshState?: ExtensionRefreshState;
 }
 
 /**
@@ -440,6 +442,10 @@ const SHELL_HEIGHT_PADDING = 10;
 
 export const AppContainer = (props: AppContainerProps) => {
   const { settings, config, initializationResult } = props;
+  const extensionRefreshState = useMemo(
+    () => props.extensionRefreshState ?? new ExtensionRefreshState(),
+    [props.extensionRefreshState],
+  );
   const historyManager = useHistory();
   // `useHistory()` returns a fresh memoized object whenever `history` changes,
   // so depending on `historyManager` directly inside event-handler callbacks
@@ -1505,6 +1511,7 @@ export const AppContainer = (props: AppContainerProps) => {
     logger,
     historyManager.updateItem,
     setSessionName,
+    extensionRefreshState,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
