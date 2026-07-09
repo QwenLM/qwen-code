@@ -587,3 +587,62 @@ describe('goalTerminalEventToHistoryItem', () => {
     ).toBe('two tests still fail');
   });
 });
+
+describe('parseGoalStatusItem keeps oversized cards so ordering survives', () => {
+  beforeEach(() => __resetActiveGoalStoreForTests());
+  afterEach(() => __resetActiveGoalStoreForTests());
+
+  const oversized = 'x'.repeat(MAX_GOAL_LENGTH + 1);
+
+  it('parses an oversized card rather than dropping it', () => {
+    // Rejecting at parse time looks like a tidy shared gate, but the scanners
+    // below decide on the LAST goal card. Dropping one silently promotes the
+    // card before it.
+    expect(
+      parseGoalStatusItem({
+        type: 'goal_status',
+        kind: 'cleared',
+        condition: oversized,
+      }),
+    ).toMatchObject({ kind: 'cleared' });
+  });
+
+  it('lets an oversized cleared card still cancel an earlier goal', () => {
+    // If parse dropped the `cleared` card, findGoalToRestore would walk past it
+    // to `set` and resurrect a goal the user explicitly cleared — the exact bug
+    // persisting `cleared` exists to prevent.
+    const items = collectGoalStatusItemsFromRecords([
+      slashCommandRecord([
+        { type: 'goal_status', kind: 'set', condition: 'goal A' },
+      ]),
+      slashCommandRecord([
+        { type: 'goal_status', kind: 'cleared', condition: oversized },
+      ]),
+    ]);
+
+    expect(findGoalToRestore(items)).toBeNull();
+    expect(restoreGoalFromHistory(items, makeConfig())).toEqual({
+      restored: false,
+    });
+    expect(getActiveGoal('sess-1')).toBeUndefined();
+  });
+
+  it('fails closed on an oversized set card instead of restoring an older goal', () => {
+    const items = collectGoalStatusItemsFromRecords([
+      slashCommandRecord([
+        { type: 'goal_status', kind: 'set', condition: 'goal A' },
+      ]),
+      slashCommandRecord([
+        { type: 'goal_status', kind: 'set', condition: oversized },
+      ]),
+    ]);
+
+    // The newest card wins the scan, and the length gate then refuses it. Goal
+    // A must NOT come back to life.
+    expect(findGoalToRestore(items)?.condition).toBe(oversized);
+    expect(restoreGoalFromHistory(items, makeConfig())).toEqual({
+      restored: false,
+    });
+    expect(getActiveGoal('sess-1')).toBeUndefined();
+  });
+});

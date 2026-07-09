@@ -23,7 +23,11 @@ import {
   formatHistoryGapNotice,
   indexGapsByChild,
 } from '../../ui/utils/history-gap-notice.js';
-import { parseGoalStatusItem } from '../../ui/utils/restoreGoal.js';
+import {
+  MAX_GOAL_LENGTH,
+  parseGoalStatusItem,
+} from '../../ui/utils/restoreGoal.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 export const MISSING_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
@@ -397,7 +401,15 @@ export class HistoryReplayer {
     for (const item of payload.outputHistoryItems) {
       const goalStatus = parseGoalStatusItem(item);
       if (goalStatus) {
-        if (goalStatus.kind !== 'checking') {
+        if (goalStatus.condition.length > MAX_GOAL_LENGTH) {
+          // A transcript is a file: a corrupted or hand-edited condition would
+          // otherwise ride out to every client inside `_meta.goalStatus`.
+          // `restoreGoalFromHistory` refuses the same card, so skipping it here
+          // keeps the card and the hook consistent — neither survives.
+          writeStderrLine(
+            `qwen: skipping replay of a goal card whose condition exceeds ${MAX_GOAL_LENGTH} characters (got ${goalStatus.condition.length}).`,
+          );
+        } else if (goalStatus.kind !== 'checking') {
           const { type: _type, ...status } = goalStatus;
           await this.messageEmitter.emitGoalStatus(status);
         }

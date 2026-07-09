@@ -5,6 +5,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStderrLine: vi.fn(),
+}));
+
 import {
   HistoryReplayer,
   MISSING_TOOL_RESULT_MESSAGE,
@@ -883,6 +888,32 @@ describe('HistoryReplayer', () => {
       ]);
 
       expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
+    });
+
+    it('refuses to replay a goal card whose condition exceeds the cap', async () => {
+      // A transcript is a file: a corrupted or hand-edited condition would
+      // otherwise ride out to every client inside `_meta.goalStatus`.
+      // `restoreGoalFromHistory` refuses the same card, so neither the card nor
+      // the hook survives — they stay consistent.
+      await replayer.replay([
+        goalRecord({
+          type: 'goal_status',
+          kind: 'set',
+          condition: 'x'.repeat(4001),
+        }),
+      ]);
+
+      expect(goalStatuses()).toEqual([]);
+      expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
+    it('replays a goal card sitting exactly at the cap', async () => {
+      const condition = 'x'.repeat(4000);
+      await replayer.replay([
+        goalRecord({ type: 'goal_status', kind: 'set', condition }),
+      ]);
+
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition }]);
     });
 
     it('does not fall through to the plain-text path for goal cards', async () => {
