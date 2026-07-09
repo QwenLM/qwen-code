@@ -151,7 +151,11 @@ describe('deriveSessionCards', () => {
     ];
     const status = [statusSession('s-appr', { pendingPermissionCount: 1 })];
     const cards = deriveSessionCards(sessions, status, 's-run');
-    expect(cards.map((c) => c.sessionId)).toEqual(['s-appr', 's-run', 's-idle']);
+    expect(cards.map((c) => c.sessionId)).toEqual([
+      's-appr',
+      's-run',
+      's-idle',
+    ]);
     expect(cards.map((c) => c.status)).toEqual([
       'needsApproval',
       'running',
@@ -214,7 +218,9 @@ describe('SessionOverviewPanel', () => {
       session('s-appr', { displayName: 'Charlie' }),
     ];
     statusState.report = {
-      full: { sessions: [statusSession('s-appr', { pendingPermissionCount: 1 })] },
+      full: {
+        sessions: [statusSession('s-appr', { pendingPermissionCount: 1 })],
+      },
     };
     render();
     expect(cardLabels()).toEqual(['Charlie', 'Alpha', 'Bravo']);
@@ -243,7 +249,9 @@ describe('SessionOverviewPanel', () => {
       session('s-appr', { displayName: 'Charlie' }),
     ];
     statusState.report = {
-      full: { sessions: [statusSession('s-appr', { pendingPermissionCount: 1 })] },
+      full: {
+        sessions: [statusSession('s-appr', { pendingPermissionCount: 1 })],
+      },
     };
     render();
     const selectAll = container!.querySelector(
@@ -284,7 +292,9 @@ describe('SessionOverviewPanel', () => {
       session('s-appr', { displayName: 'Charlie' }),
     ];
     statusState.report = {
-      full: { sessions: [statusSession('s-appr', { pendingPermissionCount: 1 })] },
+      full: {
+        sessions: [statusSession('s-appr', { pendingPermissionCount: 1 })],
+      },
     };
     const onOpenSplit = vi.fn();
     render({ onOpenSplit });
