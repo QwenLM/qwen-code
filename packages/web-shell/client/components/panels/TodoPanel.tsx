@@ -72,7 +72,11 @@ export const TodoPanel = memo(function TodoPanel({
             className={`${styles.item} ${getStatusClass(todo.status)}`}
           >
             <span className={styles.icon} aria-hidden="true">
-              {getTodoStatusIcon(todo.status)}
+              {todo.status === 'in_progress' ? (
+                <span className={styles.loadingIcon} />
+              ) : (
+                getTodoStatusIcon(todo.status)
+              )}
             </span>
             <span className={styles.content} title={todo.content}>
               {todo.content}

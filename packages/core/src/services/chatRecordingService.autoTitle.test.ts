@@ -364,16 +364,14 @@ describe('ChatRecordingService - auto-title trigger', () => {
     expect(svc.getCurrentCustomTitle()).toBe('Auto-generated title');
     expect(svc.getCurrentTitleSource()).toBe('auto');
 
-    // finalize() was called by the constructor — drain the queued async
-    // write before inspecting the mock.
+    await svc.flush();
+    expect(findCustomTitleRecord()).toBeUndefined();
+
+    svc.recordUserMessage([{ text: 'resume work' }]);
     await svc.flush();
 
-    // The re-appended record must carry titleSource: 'auto', not 'manual'.
-    const finalizeRecord = vi
-      .mocked(jsonl.writeLine)
-      .mock.calls.map((c) => c[1] as ChatRecord)
-      .find((r) => r.type === 'system' && r.subtype === 'custom_title');
-    expect(finalizeRecord?.systemPayload).toEqual({
+    const reanchoredRecord = findCustomTitleRecord();
+    expect(reanchoredRecord?.systemPayload).toEqual({
       customTitle: 'Auto-generated title',
       titleSource: 'auto',
     });
@@ -404,12 +402,13 @@ describe('ChatRecordingService - auto-title trigger', () => {
     expect(svc.getCurrentCustomTitle()).toBe('User chose this');
     expect(svc.getCurrentTitleSource()).toBe('manual');
     await svc.flush();
+    expect(findCustomTitleRecord()).toBeUndefined();
 
-    const finalizeRecord = vi
-      .mocked(jsonl.writeLine)
-      .mock.calls.map((c) => c[1] as ChatRecord)
-      .find((r) => r.type === 'system' && r.subtype === 'custom_title');
-    expect(finalizeRecord?.systemPayload).toEqual({
+    svc.recordUserMessage([{ text: 'resume work' }]);
+    await svc.flush();
+
+    const reanchoredRecord = findCustomTitleRecord();
+    expect(reanchoredRecord?.systemPayload).toEqual({
       customTitle: 'User chose this',
       titleSource: 'manual',
     });
@@ -438,13 +437,14 @@ describe('ChatRecordingService - auto-title trigger', () => {
     // `titleSource: 'manual'` we can't actually verify.
     expect(svc.getCurrentTitleSource()).toBeUndefined();
     await svc.flush();
+    expect(findCustomTitleRecord()).toBeUndefined();
 
-    const finalizeRecord = vi
-      .mocked(jsonl.writeLine)
-      .mock.calls.map((c) => c[1] as ChatRecord)
-      .find((r) => r.type === 'system' && r.subtype === 'custom_title');
+    svc.recordUserMessage([{ text: 'resume work' }]);
+    await svc.flush();
+
+    const reanchoredRecord = findCustomTitleRecord();
     // Payload must NOT contain a titleSource field when source is unknown.
-    expect(finalizeRecord?.systemPayload).toEqual({
+    expect(reanchoredRecord?.systemPayload).toEqual({
       customTitle: 'Legacy title',
     });
   });

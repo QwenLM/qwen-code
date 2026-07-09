@@ -16,6 +16,7 @@ import {
   type DaemonWorkspaceActions,
   type DaemonWorkspaceContextValue,
 } from './DaemonWorkspaceProvider.js';
+import { useDaemonSessions } from './hooks/useDaemonSessions.js';
 
 const sdkMocks = vi.hoisted(() => {
   const capabilities = vi.fn();
@@ -24,6 +25,8 @@ const sdkMocks = vi.hoisted(() => {
   const workspaceMcpResources = vi.fn();
   const restartMcpServer = vi.fn();
   const workspaceSkills = vi.fn();
+  const workspaceAcpStatus = vi.fn();
+  const workspaceAcpPreheat = vi.fn();
   const workspaceTools = vi.fn();
   const setWorkspaceToolEnabled = vi.fn();
   const workspaceMemory = vi.fn();
@@ -34,8 +37,9 @@ const sdkMocks = vi.hoisted(() => {
   const createWorkspaceAgent = vi.fn();
   const deleteWorkspaceAgent = vi.fn();
   const workspaceProviders = vi.fn();
-  const listWorkspaceSessions = vi.fn();
+  const listWorkspaceSessionsPage = vi.fn();
   const deleteSessionsData = vi.fn();
+  const exportSession = vi.fn();
   const daemonStatus = vi.fn();
 
   class MockDaemonClient {
@@ -47,6 +51,8 @@ const sdkMocks = vi.hoisted(() => {
     workspaceMcpResources = workspaceMcpResources;
     restartMcpServer = restartMcpServer;
     workspaceSkills = workspaceSkills;
+    workspaceAcpStatus = workspaceAcpStatus;
+    workspaceAcpPreheat = workspaceAcpPreheat;
     workspaceTools = workspaceTools;
     setWorkspaceToolEnabled = setWorkspaceToolEnabled;
     workspaceMemory = workspaceMemory;
@@ -57,8 +63,9 @@ const sdkMocks = vi.hoisted(() => {
     createWorkspaceAgent = createWorkspaceAgent;
     deleteWorkspaceAgent = deleteWorkspaceAgent;
     workspaceProviders = workspaceProviders;
-    listWorkspaceSessions = listWorkspaceSessions;
+    listWorkspaceSessionsPage = listWorkspaceSessionsPage;
     deleteSessionsData = deleteSessionsData;
+    exportSession = exportSession;
     daemonStatus = daemonStatus;
     dispose = vi.fn();
   }
@@ -71,6 +78,8 @@ const sdkMocks = vi.hoisted(() => {
     workspaceMcpResources,
     restartMcpServer,
     workspaceSkills,
+    workspaceAcpStatus,
+    workspaceAcpPreheat,
     workspaceTools,
     setWorkspaceToolEnabled,
     workspaceMemory,
@@ -81,8 +90,9 @@ const sdkMocks = vi.hoisted(() => {
     createWorkspaceAgent,
     deleteWorkspaceAgent,
     workspaceProviders,
-    listWorkspaceSessions,
+    listWorkspaceSessionsPage,
     deleteSessionsData,
+    exportSession,
     daemonStatus,
     reset() {
       capabilities.mockReset();
@@ -117,6 +127,14 @@ const sdkMocks = vi.hoisted(() => {
         workspaceCwd: '/mock-workspace',
         initialized: true,
         skills: [],
+      });
+      workspaceAcpStatus.mockReset();
+      workspaceAcpStatus.mockResolvedValue({ channelLive: true });
+      workspaceAcpPreheat.mockReset();
+      workspaceAcpPreheat.mockResolvedValue({
+        ready: true,
+        channelLive: true,
+        durationMs: 1,
       });
       workspaceTools.mockReset();
       workspaceTools.mockResolvedValue({
@@ -158,13 +176,20 @@ const sdkMocks = vi.hoisted(() => {
         initialized: true,
         providers: [],
       });
-      listWorkspaceSessions.mockReset();
-      listWorkspaceSessions.mockResolvedValue({ sessions: [] });
+      listWorkspaceSessionsPage.mockReset();
+      listWorkspaceSessionsPage.mockResolvedValue({ sessions: [] });
       deleteSessionsData.mockReset();
       deleteSessionsData.mockResolvedValue({
         removed: [],
         notFound: [],
         errors: [],
+      });
+      exportSession.mockReset();
+      exportSession.mockResolvedValue({
+        content: '<html>export</html>',
+        filename: 'session.html',
+        mimeType: 'text/html',
+        format: 'html',
       });
       daemonStatus.mockReset();
       daemonStatus.mockResolvedValue({
@@ -560,6 +585,147 @@ describe('DaemonWorkspaceProvider', () => {
       's-2',
       's-3',
     ]);
+  });
+
+  it('actions.exportSession calls client.exportSession for a session', async () => {
+    let actions: DaemonWorkspaceActions | undefined;
+
+    function Harness() {
+      const workspace = useOptionalDaemonWorkspace();
+      actions = workspace?.actions;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    if (!actions) throw new Error('actions not defined');
+
+    const workspaceActions = actions as DaemonWorkspaceActions & {
+      exportSession(
+        sessionId: string,
+        format?: 'html',
+      ): Promise<{
+        content: string;
+        filename: string;
+        mimeType: string;
+        format: string;
+      }>;
+    };
+    let result:
+      | {
+          content: string;
+          filename: string;
+          mimeType: string;
+          format: string;
+        }
+      | undefined;
+    await act(async () => {
+      result = await workspaceActions.exportSession('session-123', 'html');
+    });
+
+    expect(result).toEqual({
+      content: '<html>export</html>',
+      filename: 'session.html',
+      mimeType: 'text/html',
+      format: 'html',
+    });
+    expect(sdkMocks.exportSession).toHaveBeenCalledWith('session-123', {
+      format: 'html',
+    });
+  });
+
+  it('useDaemonSessions exposes exportSession', async () => {
+    let exportSession:
+      | ReturnType<typeof useDaemonSessions>['exportSession']
+      | undefined;
+
+    function Harness() {
+      exportSession = useDaemonSessions({
+        autoLoad: false,
+      }).exportSession;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    if (!exportSession) throw new Error('exportSession not defined');
+    const runExportSession = exportSession;
+
+    await act(async () => {
+      await runExportSession('session-456', 'jsonl');
+    });
+
+    expect(sdkMocks.exportSession).toHaveBeenCalledWith('session-456', {
+      format: 'jsonl',
+    });
+  });
+
+  it('useDaemonSessions exposes session list page metadata', async () => {
+    const session = {
+      sessionId: 'session-123',
+      workspaceCwd: '/mock-workspace',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      displayName: 'Session 123',
+      clientCount: 0,
+      hasActivePrompt: false,
+    };
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValueOnce({
+      sessions: [session],
+      nextCursor: 'next-page',
+      liveMergeFailed: true,
+      truncated: true,
+    });
+    let result: ReturnType<typeof useDaemonSessions> | undefined;
+
+    function Harness() {
+      result = useDaemonSessions({
+        autoLoad: true,
+        view: 'organized',
+        group: 'all',
+        cursor: 'cursor-1',
+        pageSize: 10,
+      });
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledWith(
+      '/mock-workspace',
+      {
+        pageSize: 10,
+        cursor: 'cursor-1',
+        view: 'organized',
+        group: 'all',
+      },
+    );
+    expect(result?.data).toEqual([session]);
+    expect(result?.sessions).toEqual([session]);
+    expect(result?.nextCursor).toBe('next-page');
+    expect(result?.liveMergeFailed).toBe(true);
+    expect(result?.truncated).toBe(true);
+
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValueOnce({
+      sessions: [session],
+      nextCursor: 'after-reload',
+    });
+    let reloaded:
+      | Awaited<ReturnType<ReturnType<typeof useDaemonSessions>['reload']>>
+      | undefined;
+    await act(async () => {
+      reloaded = await result?.reload();
+    });
+    expect(reloaded).toEqual([session]);
   });
 
   it('actions.loadDaemonStatus forwards the detail level to client.daemonStatus', async () => {

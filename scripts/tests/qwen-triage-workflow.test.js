@@ -60,6 +60,16 @@ describe('qwen-triage tmux workflow', () => {
     );
   });
 
+  it('requires open issues or PRs for comment-triggered triage', () => {
+    const authorizeJob = job('authorize');
+    const triageJob = job('triage');
+    const tmuxJob = job('tmux-testing');
+
+    expect(authorizeJob).toContain("github.event.issue.state == 'open'");
+    expect(triageJob).toContain("github.event.issue.state == 'open'");
+    expect(tmuxJob).toContain("github.event.issue.state == 'open'");
+  });
+
   it('escapes embedded tmux artifacts without bash pattern replacement ampersands', () => {
     const postStep = step('Post tmux result comment');
 

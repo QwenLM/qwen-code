@@ -1,8 +1,7 @@
 .panel {
-  background: var(--muted);
-  border: 1px solid var(--border);
+  background: var(--secondary);
+  border: 0.5px solid var(--border);
   border-radius: var(--radius);
-  padding: 8px 12px;
   width: 100%;
   min-width: 0;
   max-width: 100%;

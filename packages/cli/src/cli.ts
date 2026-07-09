@@ -47,6 +47,14 @@ export const MCP_COMMANDS = [
 const TOP_LEVEL_HELP_OPTIONS = [
   ['model', { alias: 'm', type: 'string', description: 'Model' }],
   [
+    'fallback-model',
+    {
+      type: 'array',
+      description:
+        'Fallback model(s) for capacity errors, repeatable or comma-separated (max 3)',
+    },
+  ],
+  [
     'prompt',
     {
       alias: 'p',
@@ -110,6 +118,7 @@ const TOP_LEVEL_HELP_OPTIONS = [
 const VALUE_FLAGS = new Set([
   '--model',
   '-m',
+  '--fallback-model',
   '--prompt',
   '-p',
   '--prompt-interactive',

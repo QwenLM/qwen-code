@@ -81,7 +81,7 @@ Commands for managing AI tools and models.
 | `/mcp`            | List configured MCP servers and tools                                            | `/mcp`, `/mcp desc`, `/mcp nodesc`, `/mcp schema`                                                         |
 | `/import-config`  | Import MCP servers from Claude configs                                           | `/import-config all`, `/import-config claude-code`, `/import-config claude-desktop --scope user\|project` |
 | `/tools`          | Display currently available tool list                                            | `/tools`, `/tools desc`                                                                                   |
-| `/skills`         | List and run available skills                                                    | `/skills`, `/skills <name>`                                                                               |
+| `/skills`         | Open the Skills panel to browse, search, toggle, and launch skills               | `/skills`, `/<skill-name>`                                                                                |
 | `/plan`           | Switch to plan mode or exit plan mode                                            | `/plan`, `/plan <task>`, `/plan exit`                                                                     |
 | `/approval-mode`  | Change the tool-approval mode (current session only)                             | `/approval-mode`, `/approval-mode auto-edit`                                                              |
 | → `plan`          | Analysis only, no execution (secure review)                                      | `/approval-mode plan`                                                                                     |
@@ -104,6 +104,7 @@ Commands for managing AI tools and models.
 | `/forget`         | Remove matching entries from auto-memory                                         | `/forget <query>`                                                                                         |
 | `/dream`          | Manually run auto-memory consolidation                                           | `/dream`                                                                                                  |
 | `/hooks`          | Manage Qwen Code hooks                                                           | `/hooks`, `/hooks list`                                                                                   |
+| `/reload-plugins` | Reload extension changes (commands, skills, agents, hooks, MCP/LSP servers) from disk | `/reload-plugins`                                                                                   |
 | `/permissions`    | Manage permission rules                                                          | `/permissions`                                                                                            |
 | `/agents`         | Manage subagents                                                                 | `/agents manage`, `/agents create`                                                                        |
 | `/arena`          | Manage Arena sessions                                                            | `/arena start`, `/arena stop`, `/arena status`, `/arena select` (alias `choose`)                          |
@@ -123,7 +124,7 @@ Commands for managing AI tools and models.
 
 > [!note]
 >
-> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. When disabled they won't appear and will report an unknown command.
+> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. When disabled they won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
 
 ### 1.5 Built-in Skills
 

@@ -100,6 +100,17 @@ describe('SettingsUtils', () => {
         description: 'A number field with a maximum.',
         showInDialog: true,
       },
+      integerWithBounds: {
+        type: 'integer',
+        label: 'Integer With Bounds',
+        category: 'Basic',
+        requiresRestart: false,
+        default: 1,
+        minimum: 1,
+        maximum: 10,
+        description: 'An integer field with bounds.',
+        showInDialog: true,
+      },
       advanced: {
         type: 'object',
         label: 'Advanced',
@@ -254,6 +265,21 @@ describe('SettingsUtils', () => {
         const definition = getSettingDefinition('numberWithMaximum');
         expect(definition).toBeDefined();
 
+        expect(validateSettingValue(definition!, 11)).toBe(
+          'Value must be <= 10',
+        );
+      });
+
+      it('validates integer settings', () => {
+        const definition = getSettingDefinition('integerWithBounds');
+        expect(definition).toBeDefined();
+
+        expect(validateSettingValue(definition!, 1)).toBeUndefined();
+        expect(validateSettingValue(definition!, 10)).toBeUndefined();
+        expect(validateSettingValue(definition!, 1.5)).toBe(
+          'Value must be an integer',
+        );
+        expect(validateSettingValue(definition!, 0)).toBe('Value must be >= 1');
         expect(validateSettingValue(definition!, 11)).toBe(
           'Value must be <= 10',
         );

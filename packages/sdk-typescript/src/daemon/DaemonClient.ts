@@ -34,10 +34,22 @@ import type {
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionArchiveState,
+  DaemonSessionExportFormat,
+  DaemonSessionExportResult,
+  DaemonSessionGroup,
+  DaemonSessionGroupCatalog,
+  DaemonSessionGroupInput,
+  DaemonSessionGroupUpdate,
   DaemonSessionLspStatus,
+  DaemonSessionListPage,
+  DaemonSessionListPageOptions,
+  DaemonSessionOrganizationResult,
+  DaemonSessionOrganizationUpdate,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
+  DaemonUsageDashboard,
+  DaemonUsageRange,
   DaemonStatusReport,
   DaemonStatusReportDetail,
   DaemonSessionTaskStatus,
@@ -58,6 +70,8 @@ import type {
   DaemonWorkspaceMemoryStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceAcpStatusResult,
+  DaemonWorkspaceAcpPreheatResult,
   DaemonWorkspaceSkillsStatus,
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
@@ -196,6 +210,7 @@ const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 const MCP_RESTART_DEFAULT_TIMEOUT_MS =
   MCP_RESTART_SERVER_DEADLINE_MS + MCP_RESTART_CLIENT_HEADROOM_MS;
 const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
+const urlEncode = encodeURIComponent;
 
 function normalizePermissionRuleInput(rule: string): string {
   const trimmed = rule.trim();
@@ -309,13 +324,14 @@ export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
 
 export interface CreateSessionRequest {
   /**
-   * Workspace path the daemon must be bound to. When
+   * Workspace path the daemon must have registered. When
    * omitted, the SDK sends no `cwd` field and the daemon route falls
-   * back to its boot-time `boundWorkspace`. Pass `caps.workspaceCwd`
-   * to be explicit, or omit it for the daemon-knows-best path. A
-   * non-empty `workspaceCwd` that doesn't canonicalize to the
-   * daemon's bound path yields a `400 workspace_mismatch`
-   * `DaemonHttpError`.
+   * back to its primary workspace. Pass `caps.workspaceCwd` to be
+   * explicit, pass a trusted `caps.workspaces[].cwd` when
+   * `multi_workspace_sessions` is advertised, or omit it for the
+   * daemon-knows-best path. A non-empty `workspaceCwd` that doesn't
+   * canonicalize to a registered workspace yields a
+   * `400 workspace_mismatch` `DaemonHttpError`.
    */
   workspaceCwd?: string;
   modelServiceId?: string;
@@ -339,8 +355,8 @@ export interface CreateSessionRequest {
 
 export interface RestoreSessionRequest {
   /**
-   * Workspace path the daemon must be bound to. Omit to let the daemon use
-   * its advertised bound workspace, mirroring `createOrAttachSession`.
+   * Workspace path the daemon must have registered. Omit to let the daemon use
+   * its advertised primary workspace, mirroring `createOrAttachSession`.
    */
   workspaceCwd?: string;
 }
@@ -693,6 +709,28 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Aggregate local token-usage dashboard (`GET /usage/dashboard`): the
+   * selected range's flattened totals plus a trailing per-day heatmap, read
+   * from the durable local usage history (global, cross-project). `range`
+   * scopes the summary (default `today`); `heatmapDays` sets the heatmap
+   * window (default ~6 months, server-clamped to 1..366).
+   */
+  async usageDashboard(
+    opts: { range?: DaemonUsageRange; heatmapDays?: number } = {},
+  ): Promise<DaemonUsageDashboard> {
+    const params = new URLSearchParams();
+    if (opts.range !== undefined) params.set('range', opts.range);
+    if (opts.heatmapDays !== undefined) {
+      params.set('heatmapDays', String(opts.heatmapDays));
+    }
+    const query = params.toString();
+    return await this.jsonRequest<DaemonUsageDashboard>(
+      `/usage/dashboard${query ? `?${query}` : ''}`,
+      'GET /usage/dashboard',
+    );
+  }
+
   async workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/mcp`,
@@ -708,7 +746,7 @@ export class DaemonClient {
     serverName: string,
   ): Promise<DaemonWorkspaceMcpToolsStatus> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/tools`,
+      `${this.baseUrl}/workspace/mcp/${urlEncode(serverName)}/tools`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) {
@@ -723,7 +761,7 @@ export class DaemonClient {
     serverName: string,
   ): Promise<DaemonWorkspaceMcpResourcesStatus> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/resources`,
+      `${this.baseUrl}/workspace/mcp/${urlEncode(serverName)}/resources`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) {
@@ -746,6 +784,40 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /workspace/skills');
         }
         return (await res.json()) as DaemonWorkspaceSkillsStatus;
+      },
+    );
+  }
+
+  async workspaceAcpPreheat(
+    timeoutMs?: number,
+  ): Promise<DaemonWorkspaceAcpPreheatResult> {
+    const serverBudgetMs = timeoutMs ?? 5_000;
+    const suffix =
+      timeoutMs !== undefined
+        ? `?timeoutMs=${encodeURIComponent(timeoutMs)}`
+        : '';
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/acp/preheat${suffix}`,
+      { method: 'POST', headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/acp/preheat');
+        }
+        return (await res.json()) as DaemonWorkspaceAcpPreheatResult;
+      },
+      serverBudgetMs + 2_000,
+    );
+  }
+
+  async workspaceAcpStatus(): Promise<DaemonWorkspaceAcpStatusResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/acp/status`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/acp/status');
+        }
+        return (await res.json()) as DaemonWorkspaceAcpStatusResult;
       },
     );
   }
@@ -776,7 +848,7 @@ export class DaemonClient {
 
   async sessionHooks(sessionId: string): Promise<DaemonSessionHooksStatus> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/hooks`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/hooks`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok)
@@ -808,7 +880,7 @@ export class DaemonClient {
     operationId: string,
   ): Promise<ExtensionOperationStatus> {
     return await this.jsonRequest<ExtensionOperationStatus>(
-      `/workspace/extensions/operations/${encodeURIComponent(operationId)}`,
+      `/workspace/extensions/operations/${urlEncode(operationId)}`,
       'GET /workspace/extensions/operations/:operationId',
     );
   }
@@ -839,7 +911,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<ExtensionMutationResponse> {
     return await this.jsonRequest<ExtensionMutationResponse>(
-      `/workspace/extensions/${encodeURIComponent(name)}/enable`,
+      `/workspace/extensions/${urlEncode(name)}/enable`,
       'POST /workspace/extensions/:name/enable',
       { method: 'POST', body: params, clientId },
     );
@@ -851,7 +923,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<ExtensionMutationResponse> {
     return await this.jsonRequest<ExtensionMutationResponse>(
-      `/workspace/extensions/${encodeURIComponent(name)}/disable`,
+      `/workspace/extensions/${urlEncode(name)}/disable`,
       'POST /workspace/extensions/:name/disable',
       { method: 'POST', body: params, clientId },
     );
@@ -862,7 +934,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<ExtensionMutationResponse> {
     return await this.jsonRequest<ExtensionMutationResponse>(
-      `/workspace/extensions/${encodeURIComponent(name)}/update`,
+      `/workspace/extensions/${urlEncode(name)}/update`,
       'POST /workspace/extensions/:name/update',
       { method: 'POST', body: {}, clientId },
     );
@@ -873,7 +945,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<ExtensionMutationResponse> {
     return await this.jsonRequest<ExtensionMutationResponse>(
-      `/workspace/extensions/${encodeURIComponent(name)}`,
+      `/workspace/extensions/${urlEncode(name)}`,
       'DELETE /workspace/extensions/:name',
       { method: 'DELETE', clientId },
     );
@@ -1089,7 +1161,7 @@ export class DaemonClient {
     opts?: { clientId?: string },
   ): Promise<DaemonWorkspaceMemoryRememberTask> {
     return await this.jsonRequest(
-      `${WORKSPACE_MEMORY_REMEMBER_PATH}/${encodeURIComponent(taskId)}`,
+      `${WORKSPACE_MEMORY_REMEMBER_PATH}/${urlEncode(taskId)}`,
       `GET ${WORKSPACE_MEMORY_REMEMBER_PATH}/:taskId`,
       { clientId: opts?.clientId },
     );
@@ -1115,7 +1187,7 @@ export class DaemonClient {
     opts?: { clientId?: string },
   ): Promise<DaemonWorkspaceMemoryForgetTask> {
     return await this.jsonRequest(
-      `${WORKSPACE_MEMORY_FORGET_PATH}/${encodeURIComponent(taskId)}`,
+      `${WORKSPACE_MEMORY_FORGET_PATH}/${urlEncode(taskId)}`,
       `GET ${WORKSPACE_MEMORY_FORGET_PATH}/:taskId`,
       { clientId: opts?.clientId },
     );
@@ -1140,7 +1212,7 @@ export class DaemonClient {
     opts?: { clientId?: string },
   ): Promise<DaemonWorkspaceMemoryDreamTask> {
     return await this.jsonRequest(
-      `${WORKSPACE_MEMORY_DREAM_PATH}/${encodeURIComponent(taskId)}`,
+      `${WORKSPACE_MEMORY_DREAM_PATH}/${urlEncode(taskId)}`,
       `GET ${WORKSPACE_MEMORY_DREAM_PATH}/:taskId`,
       { clientId: opts?.clientId },
     );
@@ -1211,7 +1283,7 @@ export class DaemonClient {
     agentType: string,
   ): Promise<DaemonWorkspaceAgentDetail> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}`,
+      `${this.baseUrl}/workspace/agents/${urlEncode(agentType)}`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) {
@@ -1240,8 +1312,8 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonAgentMutationResult> {
     const url = opts.scope
-      ? `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}?scope=${encodeURIComponent(opts.scope)}`
-      : `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}`;
+      ? `${this.baseUrl}/workspace/agents/${urlEncode(agentType)}?scope=${urlEncode(opts.scope)}`
+      : `${this.baseUrl}/workspace/agents/${urlEncode(agentType)}`;
     return await this.fetchWithTimeout(
       url,
       {
@@ -1273,8 +1345,8 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<void> {
     const url = opts.scope
-      ? `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}?scope=${encodeURIComponent(opts.scope)}`
-      : `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}`;
+      ? `${this.baseUrl}/workspace/agents/${urlEncode(agentType)}?scope=${urlEncode(opts.scope)}`
+      : `${this.baseUrl}/workspace/agents/${urlEncode(agentType)}`;
     return await this.fetchWithTimeout(
       url,
       {
@@ -1359,7 +1431,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonSession> {
     // Omitting `cwd` lets the daemon fall back to its
-    // bound workspace. JSON.stringify strips `undefined` values, so
+    // primary workspace. JSON.stringify strips `undefined` values, so
     // `cwd: undefined` becomes "no `cwd` key" on the wire — and the
     // server then takes the documented fallback path.
     //
@@ -1407,6 +1479,14 @@ export class DaemonClient {
       archiveState?: DaemonSessionArchiveState;
     },
   ): Promise<DaemonSessionSummary[]> {
+    const page = await this.listWorkspaceSessionsPage(workspaceCwd, options);
+    return page.sessions;
+  }
+
+  async listWorkspaceSessionsPage(
+    workspaceCwd: string,
+    options?: DaemonSessionListPageOptions,
+  ): Promise<DaemonSessionListPage> {
     const requestedPageSize =
       options?.pageSize ?? DEFAULT_SESSION_LIST_PAGE_SIZE;
     const pageSize = Math.max(
@@ -1421,16 +1501,79 @@ export class DaemonClient {
       ),
     );
     const query = new URLSearchParams({ size: String(pageSize) });
+    if (options?.cursor !== undefined) {
+      query.set('cursor', options.cursor);
+    }
     if (options?.archiveState !== undefined) {
       query.set('archiveState', options.archiveState);
     }
-    const body = await this.jsonRequest<{
-      sessions: DaemonSessionSummary[];
-    }>(
-      `/workspace/${encodeURIComponent(workspaceCwd)}/sessions?${query.toString()}`,
+    if (options?.view !== undefined) {
+      query.set('view', options.view);
+    }
+    if (options?.group !== undefined) {
+      query.set('group', options.group);
+    }
+    return await this.jsonRequest<DaemonSessionListPage>(
+      `/workspace/${urlEncode(workspaceCwd)}/sessions?${query.toString()}`,
       'GET /workspace/sessions',
     );
-    return body.sessions;
+  }
+
+  async listSessionGroups(
+    workspaceCwd: string,
+  ): Promise<DaemonSessionGroupCatalog> {
+    return await this.jsonRequest<DaemonSessionGroupCatalog>(
+      `/workspace/${urlEncode(workspaceCwd)}/session-groups`,
+      'GET /workspace/session-groups',
+    );
+  }
+
+  async createSessionGroup(
+    workspaceCwd: string,
+    input: DaemonSessionGroupInput,
+  ): Promise<DaemonSessionGroup> {
+    const body = await this.jsonRequest<{ group: DaemonSessionGroup }>(
+      `/workspace/${urlEncode(workspaceCwd)}/session-groups`,
+      'POST /workspace/session-groups',
+      { method: 'POST', body: input },
+    );
+    return body.group;
+  }
+
+  async updateSessionGroup(
+    workspaceCwd: string,
+    groupId: string,
+    update: DaemonSessionGroupUpdate,
+  ): Promise<DaemonSessionGroup> {
+    const body = await this.jsonRequest<{ group: DaemonSessionGroup }>(
+      `/workspace/${urlEncode(workspaceCwd)}/session-groups/${urlEncode(groupId)}`,
+      'PATCH /workspace/session-groups/:groupId',
+      { method: 'PATCH', body: update },
+    );
+    return body.group;
+  }
+
+  async deleteSessionGroup(
+    workspaceCwd: string,
+    groupId: string,
+  ): Promise<{ deleted: boolean }> {
+    return await this.jsonRequest<{ deleted: boolean }>(
+      `/workspace/${urlEncode(workspaceCwd)}/session-groups/${urlEncode(groupId)}`,
+      'DELETE /workspace/session-groups/:groupId',
+      { method: 'DELETE' },
+    );
+  }
+
+  async updateSessionOrganization(
+    sessionId: string,
+    update: DaemonSessionOrganizationUpdate,
+    clientId?: string,
+  ): Promise<DaemonSessionOrganizationResult> {
+    return await this.jsonRequest<DaemonSessionOrganizationResult>(
+      `/session/${urlEncode(sessionId)}/organization`,
+      'PATCH /session/:id/organization',
+      { method: 'PATCH', body: update, clientId },
+    );
   }
 
   async loadSession(
@@ -1439,6 +1582,40 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
     return this.restoreSession('load', sessionId, req, clientId);
+  }
+
+  async exportSession(
+    sessionId: string,
+    opts: {
+      format?: DaemonSessionExportFormat;
+      clientId?: string;
+    } = {},
+  ): Promise<DaemonSessionExportResult> {
+    const format = opts.format ?? 'html';
+    const query = opts.format ? `?format=${urlEncode(opts.format)}` : '';
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/export${query}`,
+      { headers: this.headers({}, opts.clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/export');
+        }
+        const content = await res.text();
+        const mimeType = res.headers.get('content-type') ?? '';
+        const filename =
+          /filename="([^"]+)"/i.exec(
+            res.headers.get('content-disposition') ?? '',
+          )?.[1] ?? `export.${format}`;
+        return {
+          content,
+          filename,
+          mimeType,
+          format,
+        };
+      },
+      undefined,
+      'rest',
+    );
   }
 
   async resumeSession(
@@ -1455,7 +1632,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonBranchedSession> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/branch`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/branch`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -1476,7 +1653,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonForkSessionResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/fork`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/fork`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -1496,7 +1673,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonSessionContextStatus> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/context`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/context`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) {
@@ -1516,7 +1693,7 @@ export class DaemonClient {
     if (opts.detail === true) params.set('detail', 'true');
     const query = params.toString();
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/context-usage${
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/context-usage${
         query ? `?${query}` : ''
       }`,
       { headers: this.headers({}, clientId) },
@@ -1534,7 +1711,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonSessionSupportedCommandsStatus> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/supported-commands`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/supported-commands`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) {
@@ -1553,7 +1730,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonSessionTasksStatus> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/tasks`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) {
@@ -1569,7 +1746,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonSessionLspStatus> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/lsp`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/lsp`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) {
@@ -1587,7 +1764,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<{ cancelled: boolean }> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(taskId)}/cancel`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks/${urlEncode(taskId)}/cancel`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -1610,7 +1787,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<{ cleared: boolean; condition?: string }> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/goal/clear`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/goal/clear`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -1630,7 +1807,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonSessionStatsStatus> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/stats`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/stats`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) {
@@ -1655,7 +1832,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/${action}`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/${action}`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -1691,7 +1868,7 @@ export class DaemonClient {
     opts?: { persist?: boolean; clientId?: string },
   ): Promise<DaemonApprovalModeResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/approval-mode`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/approval-mode`,
       {
         method: 'POST',
         headers: this.headers(
@@ -1716,7 +1893,7 @@ export class DaemonClient {
     sessionId: string,
   ): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/rewind/snapshots`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/rewind/snapshots`,
       { method: 'GET', headers: this.headers() },
       async (res) => {
         if (!res.ok) {
@@ -1736,7 +1913,7 @@ export class DaemonClient {
     opts?: { clientId?: string; rewindFiles?: boolean },
   ): Promise<DaemonRewindResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/rewind`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/rewind`,
       {
         method: 'POST',
         headers: this.headers(
@@ -1790,7 +1967,7 @@ export class DaemonClient {
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<DaemonSessionRecapResult> {
     const res = await this.transport.fetch(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/recap`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/recap`,
       {
         method: 'POST',
         headers: this.headers(
@@ -1811,7 +1988,7 @@ export class DaemonClient {
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<DaemonSessionBtwResult> {
     const res = await this.transport.fetch(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/btw`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/btw`,
       {
         method: 'POST',
         headers: this.headers(
@@ -1842,7 +2019,7 @@ export class DaemonClient {
     // The helper composes any caller `signal` (the turn-scoped abort) WITH its
     // timeout controller, so the mid-turn-settle abort still propagates.
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/mid-turn-message`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/mid-turn-message`,
       {
         method: 'POST',
         headers: this.headers(
@@ -1875,7 +2052,7 @@ export class DaemonClient {
     opts?: { clientId?: string },
   ): Promise<DaemonPendingPromptsResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/pending-prompts`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/pending-prompts`,
       {
         method: 'GET',
         headers: this.headers({}, opts?.clientId),
@@ -1901,7 +2078,7 @@ export class DaemonClient {
     opts?: { clientId?: string },
   ): Promise<DaemonRemovePendingPromptResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/pending-prompts/${encodeURIComponent(promptId)}`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/pending-prompts/${urlEncode(promptId)}`,
       {
         method: 'DELETE',
         headers: this.headers({}, opts?.clientId),
@@ -1931,7 +2108,7 @@ export class DaemonClient {
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<DaemonShellCommandResult> {
     const res = await this.transport.fetch(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/shell`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/shell`,
       {
         method: 'POST',
         headers: this.headers(
@@ -1967,7 +2144,7 @@ export class DaemonClient {
     opts?: { clientId?: string },
   ): Promise<DaemonToolToggleResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/tools/${encodeURIComponent(toolName)}/enable`,
+      `${this.baseUrl}/workspace/tools/${urlEncode(toolName)}/enable`,
       {
         method: 'POST',
         headers: this.headers(
@@ -2219,9 +2396,9 @@ export class DaemonClient {
     const query =
       opts?.entryIndex === undefined
         ? ''
-        : `?entryIndex=${encodeURIComponent(String(opts.entryIndex))}`;
+        : `?entryIndex=${urlEncode(String(opts.entryIndex))}`;
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/restart${query}`,
+      `${this.baseUrl}/workspace/mcp/${urlEncode(serverName)}/restart${query}`,
       {
         method: 'POST',
         headers: this.headers(
@@ -2273,7 +2450,7 @@ export class DaemonClient {
     opts?: { clientId?: string; timeoutMs?: number },
   ): Promise<DaemonMcpManageResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/${encodeURIComponent(action)}`,
+      `${this.baseUrl}/workspace/mcp/${urlEncode(serverName)}/${urlEncode(action)}`,
       {
         method: 'POST',
         headers: this.headers(
@@ -2340,7 +2517,7 @@ export class DaemonClient {
     opts?: { clientId?: string; timeoutMs?: number },
   ): Promise<DaemonRuntimeMcpRemoveResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/mcp/servers/${encodeURIComponent(name)}`,
+      `${this.baseUrl}/workspace/mcp/servers/${urlEncode(name)}`,
       {
         method: 'DELETE',
         headers: this.headers({}, opts?.clientId),
@@ -2421,7 +2598,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<SetModelResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/model`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/model`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -2442,7 +2619,7 @@ export class DaemonClient {
     opts?: { syncOutputLanguage?: boolean; clientId?: string },
   ): Promise<SetSessionLanguageResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/language`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/language`,
       {
         method: 'POST',
         headers: this.headers(
@@ -2485,7 +2662,7 @@ export class DaemonClient {
     let releaseOnExit = true;
     try {
       const res = await this.transport.fetch(
-        `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/prompt`,
+        `${this.baseUrl}/session/${urlEncode(sessionId)}/prompt`,
         {
           method: 'POST',
           headers: this.headers(
@@ -2551,7 +2728,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<NonBlockingPromptAccepted | PromptResult> {
     const res = await this.transport.fetch(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/prompt`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/prompt`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -2620,7 +2797,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<HeartbeatResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/heartbeat`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/heartbeat`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -2637,7 +2814,7 @@ export class DaemonClient {
 
   async cancel(sessionId: string, clientId?: string): Promise<void> {
     await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/cancel`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/cancel`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -2689,7 +2866,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<boolean> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/permission/${encodeURIComponent(requestId)}`,
+      `${this.baseUrl}/permission/${urlEncode(requestId)}`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -2736,7 +2913,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<boolean> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestId)}`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/permission/${urlEncode(requestId)}`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -2775,7 +2952,7 @@ export class DaemonClient {
    */
   async closeSession(sessionId: string, clientId?: string): Promise<void> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}`,
       {
         method: 'DELETE',
         headers: this.headers({}, clientId),
@@ -2797,7 +2974,7 @@ export class DaemonClient {
   async detachSession(sessionId: string, clientId?: string): Promise<void> {
     if (!clientId) return;
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/detach`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/detach`,
       {
         method: 'POST',
         headers: this.headers({}, clientId),
@@ -2930,7 +3107,7 @@ export class DaemonClient {
     // that runs only after the body is already settled (or the
     // daemon-side `fetchTimeoutMs` fires, which can be 30s+).
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/auth/device-flow/${encodeURIComponent(deviceFlowId)}`,
+      `${this.baseUrl}/workspace/auth/device-flow/${urlEncode(deviceFlowId)}`,
       { headers: this.headers({}, opts.clientId), signal: opts.signal },
       async (res) => {
         if (!res.ok) {
@@ -2954,7 +3131,7 @@ export class DaemonClient {
     opts: { clientId?: string } = {},
   ): Promise<void> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/auth/device-flow/${encodeURIComponent(deviceFlowId)}`,
+      `${this.baseUrl}/workspace/auth/device-flow/${urlEncode(deviceFlowId)}`,
       {
         method: 'DELETE',
         headers: this.headers({}, opts.clientId),
@@ -3042,7 +3219,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonSessionArtifactsEnvelope> {
     return await this.jsonRequest<DaemonSessionArtifactsEnvelope>(
-      `/session/${encodeURIComponent(sessionId)}/artifacts`,
+      `/session/${urlEncode(sessionId)}/artifacts`,
       'GET /session/:id/artifacts',
       { clientId },
     );
@@ -3054,7 +3231,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonSessionArtifactMutationResult> {
     return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
-      `/session/${encodeURIComponent(sessionId)}/artifacts`,
+      `/session/${urlEncode(sessionId)}/artifacts`,
       'POST /session/:id/artifacts',
       {
         method: 'POST',
@@ -3070,7 +3247,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonSessionArtifactMutationResult> {
     return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
-      `/session/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`,
+      `/session/${urlEncode(sessionId)}/artifacts/${urlEncode(artifactId)}`,
       'DELETE /session/:id/artifacts/:artifactId',
       {
         method: 'DELETE',
@@ -3091,7 +3268,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<SessionMetadataResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/metadata`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/metadata`,
       {
         method: 'PATCH',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),

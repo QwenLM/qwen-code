@@ -277,6 +277,8 @@ describe('qwen serve — capabilities envelope', () => {
       'session_close',
       'session_archive',
       'session_metadata',
+      'session_organization',
+      'session_export',
       'mcp_guardrails',
       'workspace_mcp_manage',
       'mcp_guardrail_events',
@@ -618,7 +620,7 @@ describe('qwen serve — POST /session/:id/continue', () => {
 describe('qwen serve — prompt clientId admission', () => {
   // Validates the three real-daemon behaviors that DaemonSessionClient's
   // clientId self-heal relies on (see
-  // docs/superpowers/specs/2026-06-24-daemon-clientid-self-heal-design.md).
+  // docs/design/2026-06-24-daemon-clientid-self-heal-design.md).
   // Model-free: prompt admission (where invalid_client_id is decided) runs
   // before any model call, so promptNonBlocking returns 202 on acceptance
   // without reaching the (unreachable, fake) model.

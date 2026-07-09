@@ -112,7 +112,7 @@ async function makeHarness(
   const events: BridgeEvent[] = [];
   const bridgeEvents: BridgeEvent[] = [];
   const fsFactory = createWorkspaceFileSystemFactory({
-    boundWorkspace: workspace,
+    boundWorkspaces: [workspace],
     trusted: opts.trusted ?? true,
     emit: (event) => events.push(event),
   });

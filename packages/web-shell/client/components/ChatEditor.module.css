@@ -178,6 +178,10 @@
   display: contents;
 }
 
+.atPortalLayer {
+  display: contents;
+}
+
 .slashPanel {
   position: fixed;
   z-index: var(--web-shell-popover-z-index, 1000);
@@ -229,6 +233,7 @@
   overflow-x: hidden;
   overflow-y: auto;
   border-radius: 6px;
+  scroll-padding-bottom: 12px;
   scrollbar-color: var(--chat-editor-border-color) transparent;
   scrollbar-width: thin;
 }
@@ -370,6 +375,190 @@
   white-space: nowrap;
 }
 
+.atPanel {
+  position: fixed;
+  z-index: var(--web-shell-popover-z-index, 1000);
+  --at-anchor-width: 620px;
+  display: flex;
+  width: min(360px, calc(var(--at-anchor-width) - 32px), calc(100vw - 24px));
+  max-height: min(300px, 42vh);
+  box-sizing: border-box;
+  flex-direction: column;
+  padding: 6px;
+  overflow: hidden;
+  border: 1px solid var(--chat-editor-border-color);
+  border-radius: 8px;
+  background: var(--background);
+  box-shadow:
+    0 2px 4px -2px rgba(0, 0, 0, 0.1),
+    0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  color: var(--chat-editor-text-primary);
+  cursor: default;
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.atPanelHeaderWrap {
+  flex: 0 0 auto;
+  padding: 3px 4px 7px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--chat-editor-border-color);
+}
+
+.atPanelHeader {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.atBackButton {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.atBackButton:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.atPanelTitle {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.atSearchInput {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 5px 7px;
+  border: 1px solid var(--chat-editor-border-color);
+  border-radius: 6px;
+  outline: none;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.atSearchInput::placeholder {
+  color: var(--muted-foreground);
+}
+
+.atList {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-radius: 6px;
+  scroll-padding-bottom: 6px;
+  scrollbar-color: var(--chat-editor-border-color) transparent;
+  scrollbar-width: thin;
+}
+
+.atList::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.atList::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.atList::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: var(--chat-editor-border-color);
+}
+
+.atItem {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    'label trailing'
+    'description trailing';
+  column-gap: 8px;
+  row-gap: 1px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.atItem:hover,
+.atItemActive {
+  background: var(--accent);
+}
+
+.atItemSingleLine {
+  grid-template-areas: 'label trailing';
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+
+.atItemLabel {
+  grid-area: label;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 13px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.atItemDescription {
+  grid-area: description;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.atItemTrailing {
+  grid-area: trailing;
+  color: var(--muted-foreground);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.atEmpty {
+  padding: 10px 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
 @container (max-width: 699px) {
   .slashPanel {
     left: 12px;
@@ -411,6 +600,22 @@
 
 .tagLabel,
 .tagValue {
+  color: var(--chat-editor-text-primary);
+}
+
+.tagIcon {
+  display: block;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  margin-left: 7px;
+  background: currentColor;
+  mask: var(--composer-tag-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--composer-tag-icon-url) center / contain no-repeat;
+}
+
+.tagLabel,
+.tagValue {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -422,10 +627,15 @@
   color: var(--chat-editor-accent-color);
 }
 
+.tagIcon + .tagLabel {
+  padding-left: 0.5ch;
+}
+
 .tagValue {
   max-width: 32ch;
   padding: 3px 0 3px 0.5ch;
-  color: var(--chat-editor-text-secondary);
+  color: var(--foreground, #e4e4e4);
+  opacity: 1;
 }
 
 .tagRemove {

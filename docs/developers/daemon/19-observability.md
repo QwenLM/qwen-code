@@ -92,7 +92,7 @@ The first signal triggers graceful shutdown (see [`02-serve-runtime.md`](./02-se
 
 A **second** SIGTERM/SIGINT intentionally triggers `bridge.killAllSync()` + `process.exit(1)`.
 
-### 9. Is the daemon event loop or ACP pipe overloaded?
+### 9. Is the daemon event loop, prompt queue, or ACP pipe overloaded?
 
 `GET /daemon/status` may include `runtime.perf` when the production daemon runtime injects the perf snapshot provider:
 
@@ -101,6 +101,7 @@ A **second** SIGTERM/SIGINT intentionally triggers `bridge.killAllSync()` + `pro
   "runtime": {
     "perf": {
       "eventLoop": { "meanMs": 1.2, "p50Ms": 1.0, "p99Ms": 9.5, "maxMs": 25 },
+      "promptQueueWait": { "count": 3, "meanMs": 12.5, "maxMs": 35, "lastMs": 4 },
       "pipe": {
         "inbound": { "count": 42, "totalBytes": 100000, "maxBytes": 12000 },
         "outbound": { "count": 41, "totalBytes": 90000, "maxBytes": 11000 }
@@ -110,12 +111,13 @@ A **second** SIGTERM/SIGINT intentionally triggers `bridge.killAllSync()` + `pro
 }
 ```
 
-The status payload is daemon-only. ACP child event loop lag is intentionally not aggregated into `/daemon/status`; it is visible through OTel gauge `qwen-code.acp.event_loop.lag` and through stderr stall lines forwarded into daemon logs.
+The status payload is daemon-only. `promptQueueWait` summarizes prompt FIFO queue wait samples observed in the daemon process. ACP child event loop lag is intentionally not aggregated into `/daemon/status`; it is visible through OTel gauge `qwen-code.acp.event_loop.lag` and through stderr stall lines forwarded into daemon logs.
 
 New OTel metric names:
 
 - `qwen-code.daemon.event_loop.lag`, gauge in milliseconds with `stat=mean|p50|p99|max`.
 - `qwen-code.acp.event_loop.lag`, gauge in milliseconds with `stat=mean|p50|p99|max`.
+- `qwen-code.daemon.prompt.queue_wait`, histogram in milliseconds.
 - `qwen-code.daemon.pipe.message_bytes`, histogram in bytes with `direction=inbound|outbound`.
 
 ## Flow

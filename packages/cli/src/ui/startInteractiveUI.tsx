@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
+import type { ExtensionRefreshState } from '../config/extension-refresh-state.js';
 import { DualOutputBridge } from '../dualOutput/DualOutputBridge.js';
 import { DualOutputContext } from '../dualOutput/DualOutputContext.js';
 import { RemoteInputWatcher } from '../remoteInput/RemoteInputWatcher.js';
@@ -36,6 +37,7 @@ import { registerCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
 import { profileCheckpoint } from '../utils/startupProfiler.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { startPostRenderPrefetches } from '../startup/startup-prefetch.js';
 import {
   computeWindowTitle,
   writeTerminalTitle,
@@ -45,12 +47,19 @@ import { t } from '../i18n/index.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
+export interface StartInteractiveUIOptions {
+  postRenderConnectIde?: boolean;
+  postRenderInitializeTelemetry?: boolean;
+  extensionRefreshState?: ExtensionRefreshState;
+}
+
 export async function startInteractiveUI(
   config: Config,
   settings: LoadedSettings,
   startupWarnings: string[],
   workspaceRoot: string = process.cwd(),
   initializationResult: InitializationResult,
+  options: StartInteractiveUIOptions = {},
 ) {
   const version = await getCliVersion();
   setWindowTitle(settings, basename(workspaceRoot));
@@ -161,6 +170,7 @@ export async function startInteractiveUI(
                         startupWarnings={startupWarnings}
                         version={version}
                         initializationResult={initializationResult}
+                        extensionRefreshState={options.extensionRefreshState}
                       />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
@@ -222,6 +232,12 @@ export async function startInteractiveUI(
         });
       });
   }
+  startPostRenderPrefetches(config, settings, {
+    connectIde: options.postRenderConnectIde ?? false,
+    initializeTelemetry:
+      options.postRenderInitializeTelemetry ??
+      config.isTelemetryInitializationDeferred(),
+  });
 
   registerCleanup(async () => {
     remoteInputWatcher?.shutdown();

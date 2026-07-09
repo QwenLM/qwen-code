@@ -1,9 +1,10 @@
+/* Scrolling is delegated to the DialogShell body (one scroll container, not
+   two), so this grows to its content and the shell — including fullscreen —
+   controls the height. */
 .dialog {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  max-height: 70vh;
-  overflow-y: auto;
   font-size: 13px;
   color: var(--foreground);
 }
@@ -77,10 +78,51 @@
   background: color-mix(in srgb, var(--muted-foreground) 14%, transparent);
 }
 
+.tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+.tab {
+  min-height: 32px;
+  padding: 6px 14px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 500;
+}
+
+.tab:hover {
+  color: var(--foreground);
+}
+
+/* Active tab: underline in the accent color, matching the dashboard's chart
+   accents; carries the selected state that `aria-selected` announces. */
+.tabActive {
+  color: var(--foreground);
+  border-bottom-color: var(--primary);
+}
+
+/* Overview config cards: wider track so a wide panel shows ~3 roomy columns
+   instead of 4 cramped ones (still collapses to 2 on a narrow viewport). The
+   metrics tab overrides this with .chartsGrid below. */
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
   gap: 12px;
+}
+
+/* The metrics tab renders in a full-height, extra-wide panel (not the old 70vh
+   dialog), so give the 11 time-series charts a wider track than the dense
+   overview cards — legible ~2–3-column trends instead of a squeezed 4-up. */
+.chartsGrid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 460px), 1fr));
+  gap: 16px;
 }
 
 .card {

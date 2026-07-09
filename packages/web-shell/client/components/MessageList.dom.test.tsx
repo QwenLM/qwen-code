@@ -4,6 +4,8 @@ import { act, createRef, type RefObject } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { Message } from '../adapters/types';
 import { I18nProvider } from '../i18n';
+import flashStyles from './MessageLocateFlash.module.css';
+import styles from './MessageList.module.css';
 
 // Mock the App context and the heavy row children so this test exercises only
 // MessageList's own collapse + deferred-scroll logic, not the whole render tree.
@@ -17,15 +19,18 @@ vi.mock('./MessageItem', async () => {
     MessageItem: ({
       message,
       showAssistantActions,
+      isLocateFlashing,
     }: {
       message: Message;
       showAssistantActions?: boolean;
+      isLocateFlashing?: boolean;
     }) =>
       React.createElement(
         'div',
         {
           'data-testid': `msg-${message.id}`,
           'data-assistant-actions': String(Boolean(showAssistantActions)),
+          'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
         },
         message.role === 'thinking'
           ? React.createElement('button', {
@@ -36,11 +41,40 @@ vi.mock('./MessageItem', async () => {
       ),
   };
 });
-vi.mock('./messages/tools/ParallelAgentsGroup', () => ({
-  ParallelAgentsGroup: () => null,
-}));
+vi.mock('./messages/tools/ParallelAgentsGroup', async () => {
+  const React = await import('react');
+  return {
+    ParallelAgentsGroup: () =>
+      React.createElement('div', { 'data-testid': 'parallel-agents' }),
+  };
+});
 vi.mock('./messages/ToolApproval', () => ({ ToolApproval: () => null }));
 vi.mock('./messages/AskUserQuestion', () => ({ AskUserQuestion: () => null }));
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: ({
+    count,
+    enabled,
+    getItemKey,
+  }: {
+    count: number;
+    enabled: boolean;
+    getItemKey: (index: number) => string | number;
+  }) => {
+    const virtualItems = enabled
+      ? Array.from({ length: Math.min(count, 5) }, (_, index) => ({
+          key: getItemKey(index),
+          index,
+          start: index * 80,
+        }))
+      : [];
+    return {
+      getVirtualItems: () => virtualItems,
+      getTotalSize: () => (enabled ? count * 80 : 0),
+      measureElement: () => {},
+      scrollToIndex: () => {},
+    };
+  },
+}));
 
 const { MessageList } = await import('./MessageList');
 type MessageListHandle = import('./MessageList').MessageListHandle;
@@ -101,11 +135,24 @@ const userShellMsg = (
   id,
   role: 'user_shell',
   command: 'npm test',
+  output: '',
 });
 const toolMsg = (id: string): ToolGroupMessage => ({
   id,
   role: 'tool_group',
   tools: [{ callId: `call-${id}`, toolName: 'Read', status: 'completed' }],
+});
+const agentMsg = (id: string): ToolGroupMessage => ({
+  id,
+  role: 'tool_group',
+  tools: [
+    {
+      callId: `call-${id}`,
+      toolName: 'Task',
+      status: 'completed',
+      args: { subagent_type: 'explore' },
+    },
+  ],
 });
 const asstMsg = (id: string): AssistantMessage => ({
   id,
@@ -148,7 +195,6 @@ function mount(
           loadingTranscript={opts.loadingTranscript}
           catchingUp={opts.catchingUp}
           isResponding={opts.isResponding}
-          shellOutputMaxLines={50}
           onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
         />
       </I18nProvider>,
@@ -179,7 +225,6 @@ function renderInto(
           loadingTranscript={opts.loadingTranscript}
           catchingUp={opts.catchingUp}
           isResponding={opts.isResponding}
-          shellOutputMaxLines={50}
           onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
         />
       </I18nProvider>,
@@ -312,6 +357,15 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(isCollapsed(c, 'g1')).toBe(true);
   });
 
+  it('renders virtual scroll rows with sizer and row width classes', () => {
+    const c = mount(simpleTurns(110));
+
+    expect(c.querySelector(`.${styles.virtualSizer}`)).not.toBeNull();
+    expect(c.querySelectorAll(`.${styles.virtualRow}`).length).toBeGreaterThan(
+      0,
+    );
+  });
+
   it('renders the session timeline in the left gutter without expanding turns', async () => {
     const rectSpy = mockMessageListWidth(1200);
     const c = mount([
@@ -368,6 +422,33 @@ describe('MessageList — turn collapse (DOM)', () => {
     rectSpy.mockRestore();
   });
 
+  it('renders scheduled task marker when source is present', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+    const c = mount([
+      // Source propagation is owned by the metadata adapter PR; this test covers
+      // the timeline rendering contract once that source is present.
+      { ...userMsg('u1'), source: 'cron', content: 'scheduled tracking task' },
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+      userMsg('u3'),
+      asstMsg('a3'),
+      userMsg('u4'),
+      asstMsg('a4'),
+    ]);
+    await nextFrame();
+
+    const scheduledDetail = c.querySelector(
+      '[data-turn-id="u1"] [data-testid="session-timeline-detail"]',
+    );
+    expect(scheduledDetail?.getAttribute('data-scheduled-task')).toBe('true');
+    expect(
+      scheduledDetail?.querySelector(`.${styles.sessionTimelineDetailsIcon}`),
+    ).not.toBeNull();
+    expect(scheduledDetail?.textContent).toContain('scheduled tracking task');
+    rectSpy.mockRestore();
+  });
+
   it('hides the session timeline until there are at least four turns', async () => {
     const rectSpy = mockMessageListWidth(1200);
     const c = mount(simpleTurns(3));
@@ -396,8 +477,43 @@ describe('MessageList — turn collapse (DOM)', () => {
     });
 
     expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
+    await nextFrame();
+
+    const targetMessage = c.querySelector('[data-testid="msg-u2"]');
+    expect(targetMessage?.getAttribute('data-locate-flashing')).toBe('true');
+    expect(targetMessage?.closest('[data-index]')?.className).not.toMatch(
+      /flash/i,
+    );
     scrollIntoView.mockRestore();
     rectSpy.mockRestore();
+  });
+
+  it('flashes grouped parallel agents inside the row when locating a tool', async () => {
+    const scrollIntoView = vi
+      .spyOn(Element.prototype, 'scrollIntoView')
+      .mockImplementation(() => {});
+    const ref = createRef<MessageListHandle>();
+    const c = mount(
+      [userMsg('u1'), agentMsg('g1'), agentMsg('g2'), asstMsg('a1')],
+      ref,
+    );
+
+    let found = false;
+    act(() => {
+      found = ref.current!.scrollToMessage('g1', 'call-g1');
+    });
+    await nextFrame();
+
+    expect(found).toBe(true);
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
+    const parallelAgents = c.querySelector('[data-testid="parallel-agents"]');
+    expect(parallelAgents?.parentElement?.className).toContain(
+      flashStyles.flash,
+    );
+    expect(parallelAgents?.closest('[data-index]')?.className).not.toMatch(
+      /flash/i,
+    );
+    scrollIntoView.mockRestore();
   });
 
   it('hides the session timeline when the message list is narrow', async () => {

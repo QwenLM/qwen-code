@@ -29,6 +29,7 @@ import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { useSharedNow } from '../hooks/useSharedNow';
 import { toolContainsCallId } from './messages/toolFormatting';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
+import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 
 interface MessageListProps {
@@ -48,7 +49,6 @@ interface MessageListProps {
   tailContent?: ReactNode;
   tailKey?: string;
   virtualScrollThreshold?: number;
-  shellOutputMaxLines: number;
   activeTurnStartedAt?: number;
   /**
    * When true, scroll the tail content into view the moment it first appears
@@ -114,6 +114,11 @@ export type DisplayItem =
       timestamp?: number;
     };
 
+interface LocateFlashTarget {
+  messageId: string;
+  callId?: string;
+}
+
 export type TurnTimelineNodeKind =
   | 'thought'
   | 'commentary'
@@ -135,6 +140,7 @@ export interface SessionTimelineEntry {
   detail: string;
   timestamp?: number;
   nodeKinds: TurnTimelineNodeKind[];
+  isScheduledTask?: boolean;
 }
 
 export interface SessionTimelineRange {
@@ -450,7 +456,6 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
       // assign to `never` here. At runtime (e.g. a newer daemon sending an
       // unknown role) it falls through as not-hideable — kept visible rather
       // than crashing the transcript or vanishing from a collapsed turn.
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const _exhaustive: never = item.message;
       return false;
     }
@@ -469,12 +474,15 @@ function isMidTurnInjectedDebugMessage(message: {
   );
 }
 
-export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
+export function getTurnTimelineNode(
+  item: DisplayItem,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): TurnTimelineNode {
   if (item.type === 'parallel_agents') {
     return {
       kind: 'agents',
       timestamp: item.timestamp,
-      label: 'Parallel agents',
+      label: t ? t('timeline.parallelAgents') : 'Parallel agents',
     };
   }
   if (item.type !== 'message') return { kind: 'none' };
@@ -485,7 +493,7 @@ export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
       return {
         kind: 'thought',
         timestamp: message.timestamp,
-        label: 'Thinking',
+        label: t ? t('timeline.thinking') : 'Thinking',
       };
     case 'assistant':
       if (item.turnCollapse)
@@ -495,28 +503,30 @@ export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
       return {
         kind: 'commentary',
         timestamp: message.timestamp,
-        label: 'Assistant update',
+        label: t ? t('timeline.assistantUpdate') : 'Assistant update',
       };
     case 'tool_group': {
       const count = message.tools.length;
       return {
         kind: 'tool',
         timestamp: message.timestamp,
-        label: `${count} tool call${count === 1 ? '' : 's'}`,
+        label: t
+          ? t('timeline.toolCalls', { count })
+          : `${count} tool call${count === 1 ? '' : 's'}`,
       };
     }
     case 'plan':
       return {
         kind: 'plan',
         timestamp: message.timestamp,
-        label: 'Plan update',
+        label: t ? t('timeline.planUpdate') : 'Plan update',
       };
     case 'system':
       return isMidTurnInjectedDebugMessage(message)
         ? {
             kind: 'status',
             timestamp: message.timestamp,
-            label: 'Status update',
+            label: t ? t('timeline.statusUpdate') : 'Status update',
           }
         : { kind: 'none', timestamp: message.timestamp };
     case 'user':
@@ -527,7 +537,6 @@ export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
     case 'insight_error':
       return { kind: 'none', timestamp: message.timestamp };
     default: {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const _exhaustive: never = message;
       return { kind: 'none' };
     }
@@ -607,7 +616,10 @@ function stripBalancedTimelineMarker(raw: string, marker: string): string {
   return result;
 }
 
-function timelineLabelForTurn(message: Message): string {
+function timelineLabelForTurn(
+  message: Message,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
   const raw =
     message.role === 'user'
       ? message.content
@@ -615,8 +627,18 @@ function timelineLabelForTurn(message: Message): string {
         ? message.command
         : '';
   const compact = compactTimelineText(raw, 32);
-  if (!compact) return 'User turn';
+  if (!compact) return t ? t('timeline.userTurn') : 'User turn';
   return compact;
+}
+
+function isScheduledTaskMessage(message: {
+  role: Message['role'];
+  source?: string;
+}): boolean {
+  return (
+    message.role === 'user' &&
+    (message.source === 'cron' || message.source === 'loop')
+  );
 }
 
 // Collapse and timeline turns start at chat prompts and shell prompts; new-chat
@@ -625,19 +647,24 @@ function isTurnStartMessage(message: Message): boolean {
   return message.role === 'user' || message.role === 'user_shell';
 }
 
-function timelineDetailSnippetForMessage(message: Message): string {
+function timelineDetailSnippetForMessage(
+  message: Message,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
   switch (message.role) {
     case 'thinking':
       // Thinking content may include private model reasoning; keep details label-only.
-      return SESSION_TIMELINE_KIND_LABEL.thought;
+      return t ? t('timeline.kind.thought') : 'thinking';
     case 'assistant':
       return compactTimelineText(message.content, 120, { stripMarkdown: true });
     case 'tool_group': {
       const count = message.tools.length;
-      return `${count} tool call${count === 1 ? '' : 's'}`;
+      return t
+        ? t('timeline.toolCalls', { count })
+        : `${count} tool call${count === 1 ? '' : 's'}`;
     }
     case 'plan':
-      return 'plan update';
+      return t ? t('timeline.planDetail') : 'plan update';
     case 'system':
       return isMidTurnInjectedDebugMessage(message)
         ? compactTimelineText(message.content, 120, { stripMarkdown: true })
@@ -650,26 +677,39 @@ function timelineDetailSnippetForMessage(message: Message): string {
     case 'insight_error':
       return '';
     default: {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const _exhaustive: never = message;
       return '';
     }
   }
 }
 
-function timelineDetailSnippetForItem(item: DisplayItem): string {
+function timelineDetailSnippetForItem(
+  item: DisplayItem,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
   if (item.type === 'parallel_agents') {
     const count = item.agents.length;
-    return `${count} parallel agent${count === 1 ? '' : 's'}`;
+    return t
+      ? t('timeline.parallelAgentsDetail', { count })
+      : `${count} parallel agent${count === 1 ? '' : 's'}`;
   }
   if (item.type !== 'message') return '';
-  return timelineDetailSnippetForMessage(item.message);
+  return timelineDetailSnippetForMessage(item.message, t);
+}
+
+function getKindLabel(
+  kind: TurnTimelineNodeKind,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  if (!t) return SESSION_TIMELINE_KIND_LABEL[kind];
+  return t(`timeline.kind.${kind}`);
 }
 
 function timelineDetailForTurn(
   turnItems: readonly DisplayItem[],
   finalAssistantId: string | null,
   nodeKinds: readonly TurnTimelineNodeKind[],
+  t?: (key: string, vars?: Record<string, string | number>) => string,
 ): string {
   if (finalAssistantId !== null) {
     for (const item of turnItems) {
@@ -695,22 +735,21 @@ function timelineDetailForTurn(
     ) {
       continue;
     }
-    const snippet = timelineDetailSnippetForItem(item);
+    const snippet = timelineDetailSnippetForItem(item, t);
     if (snippet) snippets.push(snippet);
   }
 
   const detail = compactTimelineText(snippets.join(' · '), 180);
   if (detail) return detail;
   if (nodeKinds.length > 0) {
-    return nodeKinds
-      .map((kind) => SESSION_TIMELINE_KIND_LABEL[kind])
-      .join(' · ');
+    return nodeKinds.map((kind) => getKindLabel(kind, t)).join(' · ');
   }
-  return 'No activity';
+  return t ? t('timeline.noActivity') : 'No activity';
 }
 
 export function getSessionTimelineEntries(
   messages: readonly Message[],
+  t?: (key: string, vars?: Record<string, string | number>) => string,
 ): SessionTimelineEntry[] {
   const entries: SessionTimelineEntry[] = [];
   let turnStart: Message | null = null;
@@ -744,7 +783,7 @@ export function getSessionTimelineEntries(
       ) {
         continue;
       }
-      const node = getTurnTimelineNode(item);
+      const node = getTurnTimelineNode(item, t);
       if (node.kind !== 'none' && !nodeKinds.includes(node.kind)) {
         nodeKinds.push(node.kind);
       }
@@ -752,10 +791,16 @@ export function getSessionTimelineEntries(
 
     entries.push({
       id: turnStart.id,
-      label: timelineLabelForTurn(turnStart),
-      detail: timelineDetailForTurn(timelineItems, finalAssistantId, nodeKinds),
+      label: timelineLabelForTurn(turnStart, t),
+      detail: timelineDetailForTurn(
+        timelineItems,
+        finalAssistantId,
+        nodeKinds,
+        t,
+      ),
       timestamp: turnStart.timestamp,
       nodeKinds,
+      ...(isScheduledTaskMessage(turnStart) ? { isScheduledTask: true } : {}),
     });
   };
 
@@ -773,6 +818,20 @@ export function getSessionTimelineEntries(
   pushTurn();
 
   return entries;
+}
+
+function TimelineClockIcon() {
+  return (
+    <svg
+      className={styles.sessionTimelineDetailsIcon}
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <circle cx="8" cy="8" r="6.25" />
+      <path d="M8 4.5v4l-2.5 2" />
+    </svg>
+  );
 }
 
 function toolTimelineSignature(tool: ACPToolCall): string {
@@ -820,7 +879,6 @@ export function getSessionTimelineSignature(
         case 'insight_error':
           return base;
         default: {
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
           const _exhaustive: never = message;
           return base;
         }
@@ -896,6 +954,14 @@ function terminalTurnTimestamp(item: DisplayItem): number | undefined {
     item.message.source === 'turn_error'
     ? item.message.timestamp
     : undefined;
+}
+
+function isTurnErrorItem(item: DisplayItem): boolean {
+  return (
+    item.type === 'message' &&
+    item.message.role === 'system' &&
+    item.message.source === 'turn_error'
+  );
 }
 
 function assistantContentTimestamp(item: DisplayItem): number | undefined {
@@ -1112,11 +1178,15 @@ export function applyTurnCollapse(
     let toolCallCount = 0;
     let thinkingCount = 0;
     let hasUsage = false;
+    let hasTurnError = false;
     for (let i = start + 1; i <= end; i++) {
       const item = items[i]!;
       const isStep = isHideableStep(item, i === answerIdx);
       if (isStep) {
         hiddenCount++;
+      }
+      if (isTurnErrorItem(item)) {
+        hasTurnError = true;
       }
       toolCallCount += itemToolCallCount(item);
       if (item.type === 'message' && item.message.role === 'thinking') {
@@ -1166,15 +1236,17 @@ export function applyTurnCollapse(
     }
 
     // A turn with foldable steps gets a chevron and defaults to expanded while
-    // streaming, collapsed once complete. A step-less turn (e.g. a plain "hi"
+    // streaming, when the turn errored, or when there is no final answer;
+    // otherwise it collapses once complete. A step-less turn (e.g. a plain "hi"
     // reply) has nothing to fold, so it stays expanded and shows a chevron-less
     // metrics line. An explicit user toggle always wins.
+    const shouldStayOpen = isActiveTurn || hasTurnError || answerIdx < 0;
     const expanded =
       hiddenCount === 0
         ? true
         : overrides.has(turnId)
           ? (overrides.get(turnId) as boolean)
-          : isActiveTurn;
+          : shouldStayOpen;
     const collapsed = !expanded;
     let turnContentGroupIndex = 0;
     const pushTurnContentGroup = (groupItems: DisplayItem[]) => {
@@ -1307,6 +1379,33 @@ export function findDisplayItemIndex(
     }
   }
   return -1;
+}
+
+function displayItemMatchesLocateTarget(
+  item: DisplayItem,
+  target: LocateFlashTarget | null,
+): boolean {
+  if (!target) return false;
+  const callId = target.callId;
+  if (item.type === 'message') {
+    if (item.message.id === target.messageId) return true;
+    return (
+      !!callId &&
+      item.message.role === 'tool_group' &&
+      item.message.tools.some((tool) => toolContainsCallId(tool, callId))
+    );
+  }
+  if (item.type === 'parallel_agents') {
+    return (
+      !!callId && item.agents.some((agent) => toolContainsCallId(agent, callId))
+    );
+  }
+  if (item.type === 'turn_content') {
+    return item.items.some((child) =>
+      displayItemMatchesLocateTarget(child, target),
+    );
+  }
+  return false;
 }
 
 export interface MessageListHandle {
@@ -1582,13 +1681,14 @@ const SessionTimeline = memo(function SessionTimeline({
   hidden: boolean;
   onSelect: (turnId: string) => void;
 }) {
+  const { t } = useI18n();
   if (hidden || entries.length === 0) return null;
 
   return (
     <div className={styles.sessionTimelineLayer} aria-hidden="false">
       <nav
         className={styles.sessionTimelinePanel}
-        aria-label="Session timeline"
+        aria-label={t('timeline.sessionTimeline')}
         data-testid="session-timeline"
       >
         <ol className={styles.sessionTimelineList}>
@@ -1603,8 +1703,8 @@ const SessionTimeline = memo(function SessionTimeline({
                 : entry.id === currentTurnId;
             const nodeKinds = entry.nodeKinds.join(',');
             const ariaLabel = [
-              `Turn ${index + 1}: ${entry.label}`,
-              isCurrent ? 'Current turn' : null,
+              `${t('timeline.turnPrefix', { index: index + 1 })}: ${entry.label}`,
+              isCurrent ? t('timeline.currentTurn') : null,
             ]
               .filter(Boolean)
               .join('. ');
@@ -1636,8 +1736,21 @@ const SessionTimeline = memo(function SessionTimeline({
                     data-testid="session-timeline-detail"
                     data-title={entry.label}
                     data-detail={entry.detail}
+                    data-scheduled-task={
+                      entry.isScheduledTask ? 'true' : undefined
+                    }
                     aria-hidden="true"
-                  />
+                  >
+                    <span className={styles.sessionTimelineDetailsTitle}>
+                      {entry.isScheduledTask && <TimelineClockIcon />}
+                      <span className={styles.sessionTimelineDetailsTitleText}>
+                        {entry.label}
+                      </span>
+                    </span>
+                    <span className={styles.sessionTimelineDetailsDetail}>
+                      {entry.detail}
+                    </span>
+                  </span>
                 </button>
               </li>
             );
@@ -1712,7 +1825,6 @@ export const MessageList = memo(
       tailContent,
       tailKey = 'tail',
       virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
-      shellOutputMaxLines,
       autoScrollTailIntoView = false,
       hideSessionTimeline = false,
       showRetryHint = false,
@@ -1739,6 +1851,7 @@ export const MessageList = memo(
       useState(false);
     const sessionTimelineCache = useRef<{
       signature: string;
+      t: typeof t;
       entries: SessionTimelineEntry[];
     } | null>(null);
     // Signature + entries are O(transcript text); only pay for them while the
@@ -1746,14 +1859,18 @@ export const MessageList = memo(
     const sessionTimelineEntries = useMemo(() => {
       if (!isSessionTimelineVisible) return EMPTY_SESSION_TIMELINE_ENTRIES;
       const signature = getSessionTimelineSignature(mergedMessages);
-      if (sessionTimelineCache.current?.signature !== signature) {
+      if (
+        sessionTimelineCache.current?.signature !== signature ||
+        sessionTimelineCache.current?.t !== t
+      ) {
         sessionTimelineCache.current = {
           signature,
-          entries: getSessionTimelineEntries(mergedMessages),
+          t,
+          entries: getSessionTimelineEntries(mergedMessages, t),
         };
       }
       return sessionTimelineCache.current.entries;
-    }, [isSessionTimelineVisible, mergedMessages]);
+    }, [isSessionTimelineVisible, mergedMessages, t]);
     const sessionTimelineEntryIndexById = useMemo(
       () =>
         new Map(
@@ -2245,17 +2362,19 @@ export const MessageList = memo(
     ]);
 
     // Imperative scroll-to-message (e.g. the floating TodoPanel's "show in
-    // transcript" button) with a brief highlight on the target row.
-    const [flashKey, setFlashKey] = useState<string | null>(null);
+    // transcript" button) with a brief highlight on the target message.
+    const [flashTarget, setFlashTarget] = useState<LocateFlashTarget | null>(
+      null,
+    );
     useEffect(() => {
-      if (!flashKey) return;
-      const timer = setTimeout(() => setFlashKey(null), 1600);
+      if (!flashTarget) return;
+      const timer = setTimeout(() => setFlashTarget(null), 1600);
       return () => clearTimeout(timer);
-    }, [flashKey]);
+    }, [flashTarget]);
 
-    // Scroll a visible row to center and flash it.
+    // Scroll a visible row to center and flash the target message inside it.
     const performScrollToRow = useCallback(
-      (rowIndex: number) => {
+      (rowIndex: number, target: LocateFlashTarget) => {
         // Explicit navigation away from the tail — pause follow so the
         // auto-scroll driver doesn't yank the viewport straight back down,
         // and engage the same cooldown scrollToBottom uses so the scroll
@@ -2284,14 +2403,12 @@ export const MessageList = memo(
             scheduleScrollOverflowReport();
           }
         }, 150);
-        const key = getItemKey(rowIndex);
-        setFlashKey(null);
-        requestAnimationFrame(() => setFlashKey(key));
+        setFlashTarget(null);
+        requestAnimationFrame(() => setFlashTarget(target));
       },
       [
         useVirtualScroll,
         virtualizer,
-        getItemKey,
         setShouldFollow,
         scheduleSessionTimelineRangeUpdate,
         scheduleScrollOverflowReport,
@@ -2302,7 +2419,7 @@ export const MessageList = memo(
       visibleItems: readonly DisplayItem[];
       displayItems: readonly DisplayItem[];
       headerOffset: number;
-      performScrollToRow: (rowIndex: number) => void;
+      performScrollToRow: (rowIndex: number, target: LocateFlashTarget) => void;
     }>({
       visibleItems: [],
       displayItems: [],
@@ -2318,10 +2435,7 @@ export const MessageList = memo(
 
     // A scroll target that currently sits inside a collapsed turn: expand the
     // turn, then finish the scroll once its rows materialize in `visibleItems`.
-    const pendingScrollRef = useRef<{
-      messageId: string;
-      callId?: string;
-    } | null>(null);
+    const pendingScrollRef = useRef<LocateFlashTarget | null>(null);
 
     const scrollToMessage = useCallback(
       (messageId: string, callId?: string): boolean => {
@@ -2345,7 +2459,10 @@ export const MessageList = memo(
             return true;
           }
           pendingScrollRef.current = null;
-          performScrollToRow(visibleIndex + headerOffset);
+          performScrollToRow(visibleIndex + headerOffset, {
+            messageId,
+            callId,
+          });
           return true;
         }
         // Not on screen — it may be folded inside a collapsed turn. Locate it
@@ -2383,7 +2500,7 @@ export const MessageList = memo(
       );
       if (idx < 0) return;
       pendingScrollRef.current = null;
-      performScrollToRow(idx + headerOffset);
+      performScrollToRow(idx + headerOffset, pending);
     }, [visibleItems, headerOffset, performScrollToRow]);
 
     // Rules 2 & 3: detect scroll direction to toggle follow mode.
@@ -2596,10 +2713,18 @@ export const MessageList = memo(
           if (displayItem.type === 'parallel_agents') {
             return (
               <MessageTimestamp timestamp={displayItem.timestamp}>
-                <ParallelAgentsGroup
-                  agents={displayItem.agents}
-                  pendingApproval={pendingApproval}
-                />
+                <div
+                  className={
+                    displayItemMatchesLocateTarget(displayItem, flashTarget)
+                      ? flashStyles.flash
+                      : undefined
+                  }
+                >
+                  <ParallelAgentsGroup
+                    agents={displayItem.agents}
+                    pendingApproval={pendingApproval}
+                  />
+                </div>
               </MessageTimestamp>
             );
           }
@@ -2646,7 +2771,10 @@ export const MessageList = memo(
                 displayItem.message.role === 'assistant' &&
                 displayItem.message.id === lastCompletedAssistantId
               }
-              shellOutputMaxLines={shellOutputMaxLines}
+              isLocateFlashing={displayItemMatchesLocateTarget(
+                displayItem,
+                flashTarget,
+              )}
             />
           );
         };
@@ -2675,24 +2803,21 @@ export const MessageList = memo(
         onShowContextDetail,
         headerOffset,
         visibleItems,
+        flashTarget,
         finalAssistantIdsByTurn,
         lastCompletedAssistantId,
         workspaceCwd,
         showRetryHint,
         onRetryClick,
         onBranchSession,
-        shellOutputMaxLines,
         handleToggleCollapse,
       ],
     );
 
     const getRowClassName = useCallback(
-      (key: string, item?: DisplayItem): string | undefined =>
-        joinClassNames(
-          flashKey === key ? styles.rowFlash : undefined,
-          item ? getChatRowClassName(item) : undefined,
-        ),
-      [flashKey],
+      (item?: DisplayItem): string | undefined =>
+        item ? getChatRowClassName(item) : undefined,
+      [],
     );
 
     // ── Single auto-scroll driver (rules 1, 5, 6) ──────────────────────
@@ -2727,6 +2852,7 @@ export const MessageList = memo(
       <div
         ref={containerRef}
         className={styles.list}
+        data-web-shell-message-list
         onClickCapture={handleDisclosureClickCapture}
       >
         {showLoadingSkeleton && (
@@ -2741,10 +2867,9 @@ export const MessageList = memo(
         />
         {useVirtualScroll ? (
           <div
+            className={styles.virtualSizer}
             style={{
               height: totalVirtualSize,
-              width: '100%',
-              position: 'relative',
             }}
           >
             {virtualItems.map((virtualRow) => (
@@ -2752,15 +2877,18 @@ export const MessageList = memo(
                 key={virtualRow.key}
                 data-index={virtualRow.index}
                 ref={virtualizer.measureElement}
-                className={getRowClassName(
-                  String(virtualRow.key),
-                  visibleItems[virtualRow.index - headerOffset],
+                className={joinClassNames(
+                  styles.virtualRow,
+                  getRowClassName(
+                    visibleItems[virtualRow.index - headerOffset],
+                  ),
                 )}
+                data-web-shell-message-row
                 style={{
                   position: 'absolute',
                   top: 0,
                   left: 0,
-                  width: '100%',
+                  right: 0,
                   transform: `translateY(${virtualRow.start}px)`,
                 }}
               >
@@ -2776,7 +2904,8 @@ export const MessageList = memo(
               <div
                 key={key}
                 data-index={index}
-                className={getRowClassName(key, item)}
+                className={getRowClassName(item)}
+                data-web-shell-message-row
               >
                 {renderVirtualItem(index)}
               </div>

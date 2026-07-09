@@ -32,6 +32,7 @@ const mockSessionServiceInstance = vi.hoisted(() => ({
 const mockSessionServiceCtor = vi.hoisted(() =>
   vi.fn(() => mockSessionServiceInstance),
 );
+const mockConfigConstructorParams = vi.hoisted(() => vi.fn());
 
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
@@ -169,8 +170,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   SkillManagerMock.prototype.listSkills = vi.fn().mockResolvedValue([]);
   SkillManagerMock.prototype.addChangeListener = vi.fn();
   SkillManagerMock.prototype.removeChangeListener = vi.fn();
+  class ConfigWithParamCapture extends actualServer.Config {
+    constructor(...args: ConstructorParameters<typeof actualServer.Config>) {
+      mockConfigConstructorParams(args[0]);
+      super(...args);
+    }
+  }
   return {
     ...actualServer,
+    Config: ConfigWithParamCapture,
     NativeLspService: vi
       .fn()
       .mockImplementation(() => createNativeLspServiceInstance()),
@@ -918,6 +926,72 @@ describe('parseArguments', () => {
     const argv = await parseArguments();
     expect(argv.bare).toBe(true);
   });
+
+  describe('--fallback-model flag', () => {
+    it('parses a single fallback model', async () => {
+      process.argv = ['node', 'script.js', '--fallback-model', 'qwen-plus'];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toEqual(['qwen-plus']);
+    });
+
+    it('parses repeated --fallback-model flags', async () => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--fallback-model',
+        'qwen-plus',
+        '--fallback-model',
+        'qwen-turbo',
+      ];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('splits comma-separated values in a single flag', async () => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--fallback-model',
+        'qwen-plus,qwen-turbo',
+      ];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('combines repeated flags with comma-separated values', async () => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--fallback-model',
+        'qwen-plus,qwen-turbo',
+        '--fallback-model',
+        'qwen-max',
+      ];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toEqual([
+        'qwen-plus',
+        'qwen-turbo',
+        'qwen-max',
+      ]);
+    });
+
+    it('trims whitespace around comma-separated values', async () => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--fallback-model',
+        ' qwen-plus , qwen-turbo ',
+      ];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('defaults to undefined when not provided', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toBeUndefined();
+    });
+  });
 });
 
 describe('loadCliConfig', () => {
@@ -1003,6 +1077,44 @@ describe('loadCliConfig', () => {
     expect(config.getOutputFormat()).toBe('stream-json');
     expect(config.getInputFormat()).toBe('stream-json');
     expect(config.getIncludePartialMessages()).toBe(true);
+  });
+
+  it('should prefer CLI fallback models over settings fallback models', async () => {
+    process.argv = ['node', 'script.js', '--fallback-model', 'cli-a,cli-b'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({ modelFallbacks: 'settings-a' }, argv);
+
+    expect(config.getModelFallbacks()).toEqual(['cli-a', 'cli-b']);
+  });
+
+  it('should use settings fallback models when the CLI flag is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { modelFallbacks: ' settings-a , settings-b ' },
+      argv,
+    );
+
+    expect(config.getModelFallbacks()).toEqual(['settings-a', 'settings-b']);
+  });
+
+  it('passes agents.maxParallelAgents from settings to core config', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { agents: { maxParallelAgents: 2 } },
+      argv,
+    );
+
+    expect(config.getAgentsSettings().maxParallelAgents).toBe(2);
+  });
+
+  it('should ignore blank settings fallback models', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({ modelFallbacks: '   ' }, argv);
+
+    expect(config.getModelFallbacks()).toEqual([]);
   });
 
   it('should enable runtime sleep prevention by default', async () => {
@@ -1492,6 +1604,7 @@ describe('loadCliConfig', () => {
 
 describe('loadCliConfig telemetry', () => {
   const originalArgv = process.argv;
+  const originalIsTTY = process.stdin.isTTY;
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -1501,6 +1614,7 @@ describe('loadCliConfig telemetry', () => {
 
   afterEach(() => {
     process.argv = originalArgv;
+    process.stdin.isTTY = originalIsTTY;
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
@@ -1519,6 +1633,41 @@ describe('loadCliConfig telemetry', () => {
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryEnabled()).toBe(true);
+  });
+
+  it('should initialize telemetry before prompt-interactive startup', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '-i',
+      'hello from prompt-interactive',
+      '--telemetry',
+    ];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        question: 'hello from prompt-interactive',
+        deferTelemetryInitialization: false,
+      }),
+    );
+  });
+
+  it('should defer telemetry for ordinary interactive startup', async () => {
+    process.argv = ['node', 'script.js', '--telemetry'];
+    process.stdin.isTTY = true;
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        question: '',
+        deferTelemetryInitialization: true,
+      }),
+    );
   });
 
   it('should set telemetry to false when --no-telemetry flag is present', async () => {
@@ -2879,6 +3028,72 @@ describe('loadCliConfig safe mode', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
 
     expect(config.getDisabledTools().size).toBe(0);
+  });
+
+  it('should pass settings.tools.visible into visibleTools', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        visible: ['web_fetch', 'monitor'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools()).toEqual(new Set(['web_fetch', 'monitor']));
+  });
+
+  it('should default visibleTools to empty when settings.tools.visible is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools().size).toBe(0);
+  });
+
+  it('should ignore settings-sourced visibleTools in safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        visible: ['web_fetch'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools().size).toBe(0);
+  });
+
+  it('should ignore settings-sourced visibleTools in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        visible: ['web_fetch'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools().size).toBe(0);
+  });
+
+  it('should normalise settings.tools.visible entries (trim, dedupe, filter)', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        visible: [
+          '  web_fetch  ',
+          'web_fetch',
+          '',
+          'monitor',
+        ] as unknown as string[],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools()).toEqual(new Set(['web_fetch', 'monitor']));
   });
 
   it('should respect safe mode via QWEN_CODE_SAFE_MODE env var', async () => {

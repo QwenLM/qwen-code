@@ -18,6 +18,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolResult,
   ChatRecord,
+  HistoryGap,
   AgentEventEmitter,
   StopHookOutput,
   HookExecutionRequest,
@@ -132,6 +133,10 @@ import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/b
 import { MID_TURN_QUEUE_DRAIN_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
+import {
+  inactiveExtensionSkillRefs,
+  isInactiveExtensionSkill,
+} from '../extension-skills.js';
 
 import { RequestError } from '@agentclientprotocol/sdk';
 import type {
@@ -179,6 +184,11 @@ import {
   matchExtensionByRef,
   parseExtensionRef,
 } from '../../utils/extension-mention.js';
+import {
+  buildMcpServerContextText,
+  matchMcpServerByRef,
+  parseMcpServerRef,
+} from '../../utils/mcp-server-mention.js';
 
 // Import modular session components
 import type {
@@ -230,7 +240,6 @@ type DaemonToolLoopState = {
   loopDetected: boolean;
 };
 
-const DAEMON_TURN_TOOL_CALL_CAP = 100;
 const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
 
 const PERMISSION_CANCEL_SKIP_MESSAGE =
@@ -272,7 +281,12 @@ function recordDaemonToolCalls(
   if (!loopState || loopState.loopDetected)
     return loopState?.loopDetected ?? false;
   loopState.totalToolCalls += count;
-  if (loopState.totalToolCalls <= DAEMON_TURN_TOOL_CALL_CAP) return false;
+  // Same per-turn cap as the core LoopDetectionService (getMaxToolCallsPerTurn
+  // resolves model.maxToolCallsPerTurn to an effective value, Infinity when
+  // disabled). Unlike core there is no in-session disable check — that flag is
+  // only set by the interactive loop-detection dialog, which has no ACP
+  // equivalent.
+  if (loopState.totalToolCalls <= config.getMaxToolCallsPerTurn()) return false;
   return recordDaemonLoopDetected(
     config,
     promptId,
@@ -688,6 +702,20 @@ function collectExtensionMentionRefs(
   }
 }
 
+function collectMcpServerMentionRefs(
+  text: string,
+  mentions: Map<string, string>,
+): void {
+  for (const match of text.matchAll(AT_TOKEN_RE)) {
+    const pathName = match[1];
+    if (!pathName) continue;
+    const ref = parseMcpServerRef(pathName);
+    if (ref) {
+      mentions.set(ref.name.toLowerCase(), ref.name);
+    }
+  }
+}
+
 export interface AvailableCommandsSnapshot {
   availableCommands: AvailableCommand[];
   availableSkills?: string[];
@@ -713,10 +741,26 @@ export async function buildAvailableCommandsSnapshot(
     settings,
   );
   const disabledSkillNames = config.getDisabledSkillNames();
+  const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
 
   const visibleSlashCommands = slashCommands.filter((cmd) => {
     if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
-    return !disabledSkillNames.has(cmd.skillDetail.name.toLowerCase());
+    const skillName = cmd.skillDetail.name.toLowerCase();
+    const isInactiveExtensionCommand =
+      cmd.skillDetail.level === 'extension' &&
+      isInactiveExtensionSkill(
+        {
+          name: cmd.skillDetail.name,
+          level: 'extension',
+          extensionName:
+            'extensionName' in cmd.skillDetail &&
+            typeof cmd.skillDetail.extensionName === 'string'
+              ? cmd.skillDetail.extensionName
+              : undefined,
+        },
+        inactiveSkillRefs,
+      );
+    return !disabledSkillNames.has(skillName) && !isInactiveExtensionCommand;
   });
 
   const availableCommands: AvailableCommand[] = visibleSlashCommands.map(
@@ -759,7 +803,9 @@ export async function buildAvailableCommandsSnapshot(
     const skillManager = config.getSkillManager();
     if (skillManager) {
       const skills = (await skillManager.listSkills()).filter(
-        (skill) => !disabledSkillNames.has(skill.name.toLowerCase()),
+        (skill) =>
+          !disabledSkillNames.has(skill.name.toLowerCase()) &&
+          !isInactiveExtensionSkill(skill, inactiveSkillRefs),
       );
       availableSkills = skills.map((skill) => skill.name);
       for (const skill of skills) {
@@ -782,6 +828,9 @@ export async function buildAvailableCommandsSnapshot(
       continue;
     }
     const existing = skillDetailsByName.get(command.skillDetail.name);
+    if (command.skillDetail.level === 'extension' && !existing) {
+      continue;
+    }
     skillDetailsByName.set(command.skillDetail.name, {
       ...existing,
       ...command.skillDetail,
@@ -1045,12 +1094,19 @@ export class Session implements SessionContext {
    * Replays conversation history to the client using modular components.
    * Delegates to HistoryReplayer for consistent event emission.
    */
-  async replayHistory(records: ChatRecord[]): Promise<void> {
+  primeTurnFromHistory(records: ChatRecord[]): void {
     this.turn = Math.max(
       this.turn,
       computeInitialTurnFromHistory(records, this.config.getSessionId()),
     );
-    await this.historyReplayer.replay(records);
+  }
+
+  async replayHistory(
+    records: ChatRecord[],
+    gaps?: HistoryGap[],
+  ): Promise<void> {
+    this.primeTurnFromHistory(records);
+    await this.historyReplayer.replay(records, gaps);
   }
 
   rewindToTurn(
@@ -1124,7 +1180,9 @@ export class Session implements SessionContext {
 
   getRewindableUserTurnCount(): number {
     const apiHistory = this.captureHistorySnapshot();
-    const startIndex = getStartupContextLength(apiHistory);
+    const startIndex = getStartupContextLength(apiHistory, {
+      includeCompressed: true,
+    });
     let count = 0;
 
     for (let i = startIndex; i < apiHistory.length; i++) {
@@ -1160,7 +1218,9 @@ export class Session implements SessionContext {
     apiHistory: Content[],
     targetTurnIndex: number,
   ): number {
-    const startIndex = getStartupContextLength(apiHistory);
+    const startIndex = getStartupContextLength(apiHistory, {
+      includeCompressed: true,
+    });
 
     if (targetTurnIndex === 0) {
       return startIndex;
@@ -1855,6 +1915,9 @@ export class Session implements SessionContext {
                     ) {
                       functionCalls.push(...resp.value.functionCalls);
                     }
+                    if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                      functionCalls.length = 0;
+                    }
                   }
                 } catch (error) {
                   // Restore the stripped orphan if the send threw before
@@ -2173,6 +2236,9 @@ export class Session implements SessionContext {
                 resp.value.functionCalls
               ) {
                 functionCalls.push(...resp.value.functionCalls);
+              }
+              if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                functionCalls.length = 0;
               }
             }
           } catch (error) {
@@ -3091,6 +3157,9 @@ export class Session implements SessionContext {
                   ) {
                     functionCalls.push(...resp.value.functionCalls);
                   }
+                  if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                    functionCalls.length = 0;
+                  }
                 }
 
                 if (usageMetadata) {
@@ -3399,6 +3468,9 @@ export class Session implements SessionContext {
                 resp.value.functionCalls
               ) {
                 functionCalls.push(...resp.value.functionCalls);
+              }
+              if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                functionCalls.length = 0;
               }
             }
 
@@ -5403,6 +5475,7 @@ export class Session implements SessionContext {
 
     const embeddedContext: EmbeddedResourceResource[] = [];
     const extensionMentions = new Map<string, string>();
+    const mcpServerMentions = new Map<string, string>();
     const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
       this.config,
     );
@@ -5411,6 +5484,7 @@ export class Session implements SessionContext {
       switch (part.type) {
         case 'text':
           collectExtensionMentionRefs(part.text, extensionMentions);
+          collectMcpServerMentionRefs(part.text, mcpServerMentions);
           return { text: part.text };
         case 'image':
           if (preserveUnsupportedImageForBridge) {
@@ -5463,18 +5537,21 @@ export class Session implements SessionContext {
       extensionMentions,
       abortSignal,
     );
+    const mcpServerParts =
+      this.#resolveMcpServerMentionParts(mcpServerMentions);
 
     if (
       atPathCommandParts.length === 0 &&
       embeddedContext.length === 0 &&
-      extensionParts.length === 0
+      extensionParts.length === 0 &&
+      mcpServerParts.length === 0
     ) {
       return this.#applyVisionBridgeIfNeeded(parts, abortSignal);
     }
 
     if (atPathCommandParts.length === 0 && embeddedContext.length === 0) {
       return this.#applyVisionBridgeIfNeeded(
-        [...parts, ...extensionParts],
+        [...parts, ...extensionParts, ...mcpServerParts],
         abortSignal,
       );
     }
@@ -5523,6 +5600,7 @@ export class Session implements SessionContext {
       // Add initial query text first
       processedQueryParts.push({ text: initialQueryText });
       processedQueryParts.push(...extensionParts);
+      processedQueryParts.push(...mcpServerParts);
 
       // Then add content parts (preserving binary files as inlineData)
       for (const part of contentParts) {
@@ -5537,6 +5615,7 @@ export class Session implements SessionContext {
     } else {
       processedQueryParts.push({ text: initialQueryText.trim() });
       processedQueryParts.push(...extensionParts);
+      processedQueryParts.push(...mcpServerParts);
     }
 
     // Process embedded context from resource blocks
@@ -5678,6 +5757,30 @@ export class Session implements SessionContext {
       extensionParts.push({ text: context.text });
     }
     return extensionParts;
+  }
+
+  #resolveMcpServerMentionParts(
+    mcpServerMentions: Map<string, string>,
+  ): Part[] {
+    if (mcpServerMentions.size === 0) return [];
+    const servers = this.config.getMcpServers?.() ?? {};
+    if (Object.keys(servers).length === 0) return [];
+
+    const parts: Part[] = [];
+    for (const name of mcpServerMentions.values()) {
+      const matched = matchMcpServerByRef(name, servers);
+      if (!matched) {
+        this.debug(
+          `MCP server "${name}" not found among configured MCP servers. ` +
+            `Available: ${Object.keys(servers).join(', ') || '(none)'}`,
+        );
+        continue;
+      }
+      parts.push({
+        text: buildMcpServerContextText(this.config, matched.serverName),
+      });
+    }
+    return parts;
   }
 
   debug(msg: string): void {

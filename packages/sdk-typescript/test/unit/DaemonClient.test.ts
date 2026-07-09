@@ -13,6 +13,7 @@ import {
   composeAbortSignals,
   normalizePendingPromptLimit,
 } from '../../src/daemon/DaemonClient.js';
+import type { DaemonTransport } from '../../src/daemon/DaemonTransport.js';
 import {
   DaemonCapabilityMissingError,
   isDaemonContentHash,
@@ -36,6 +37,14 @@ function jsonResponse(status: number, body: unknown): Response {
     status,
     headers: { 'content-type': 'application/json' },
   });
+}
+
+function textResponse(
+  status: number,
+  body: string,
+  headers: Record<string, string> = {},
+): Response {
+  return new Response(body, { status, headers });
 }
 
 function sseResponse(frames: string): Response {
@@ -213,6 +222,38 @@ describe('DaemonClient', () => {
         features: ['health', 'capabilities'],
         modelServices: [],
         workspaceCwd: '/work/bound',
+      };
+      const { fetch } = recordingFetch(() => jsonResponse(200, envelope));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.capabilities()).resolves.toEqual(envelope);
+    });
+
+    it('preserves multi-workspace capabilities metadata', async () => {
+      const envelope: DaemonCapabilities = {
+        v: 1,
+        mode: 'http-bridge',
+        features: ['health', 'capabilities', 'multi_workspace_sessions'],
+        limits: {
+          maxPendingPromptsPerSession: 5,
+          maxSessionsPerWorkspace: 20,
+          maxTotalSessions: null,
+        },
+        modelServices: [],
+        workspaceCwd: '/work/primary',
+        workspaces: [
+          {
+            id: 'primary-id',
+            cwd: '/work/primary',
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: 'secondary-id',
+            cwd: '/work/secondary',
+            primary: false,
+            trusted: true,
+          },
+        ],
       };
       const { fetch } = recordingFetch(() => jsonResponse(200, envelope));
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
@@ -520,10 +561,22 @@ describe('DaemonClient', () => {
           },
         ],
       };
+      const preheat = {
+        ready: true,
+        channelLive: true,
+        durationMs: 12,
+      };
+      const acpStatus = { channelLive: true };
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/workspace/mcp')) return jsonResponse(200, mcp);
         if (req.url.endsWith('/workspace/skills')) {
           return jsonResponse(200, skills);
+        }
+        if (req.url.endsWith('/workspace/acp/preheat?timeoutMs=1234')) {
+          return jsonResponse(200, preheat);
+        }
+        if (req.url.endsWith('/workspace/acp/status')) {
+          return jsonResponse(200, acpStatus);
         }
         if (req.url.endsWith('/workspace/providers')) {
           return jsonResponse(200, providers);
@@ -534,12 +587,53 @@ describe('DaemonClient', () => {
 
       await expect(client.workspaceMcp()).resolves.toEqual(mcp);
       await expect(client.workspaceSkills()).resolves.toEqual(skills);
+      await expect(client.workspaceAcpPreheat(1234)).resolves.toEqual(preheat);
+      await expect(client.workspaceAcpStatus()).resolves.toEqual(acpStatus);
       await expect(client.workspaceProviders()).resolves.toEqual(providers);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/workspace/mcp'],
         ['GET', 'http://daemon/workspace/skills'],
+        ['POST', 'http://daemon/workspace/acp/preheat?timeoutMs=1234'],
+        ['GET', 'http://daemon/workspace/acp/status'],
         ['GET', 'http://daemon/workspace/providers'],
       ]);
+    });
+
+    it('lets ACP preheat wait longer than the client default timeout', async () => {
+      let resolveResponse: ((value: Response) => void) | undefined;
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveResponse = resolve;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1,
+      });
+
+      const inflight = client.workspaceAcpPreheat(50);
+      setTimeout(() => {
+        resolveResponse?.(
+          jsonResponse(200, {
+            ready: true,
+            channelLive: true,
+            durationMs: 5,
+          }),
+        );
+      }, 5);
+
+      await expect(inflight).resolves.toMatchObject({
+        ready: true,
+        channelLive: true,
+      });
     });
 
     it('GETs /workspace/preflight and returns the preflight envelope unchanged', async () => {
@@ -742,6 +836,124 @@ describe('DaemonClient', () => {
         'client-1',
         'client-1',
       ]);
+    });
+  });
+
+  describe('exportSession', () => {
+    it('GETs the default HTML export and parses attachment metadata', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        textResponse(200, '<html>export</html>', {
+          'content-type': 'text/html; charset=utf-8',
+          'content-disposition':
+            'attachment; filename="qwen-code-export-2026.html"',
+        }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch,
+      });
+      const exportClient = client as DaemonClient & {
+        exportSession(
+          sessionId: string,
+          opts?: { format?: 'html' },
+        ): Promise<{
+          content: string;
+          filename: string;
+          mimeType: string;
+          format: string;
+        }>;
+      };
+
+      const result = await exportClient.exportSession('with/slash');
+
+      expect(result).toEqual({
+        content: '<html>export</html>',
+        filename: 'qwen-code-export-2026.html',
+        mimeType: 'text/html; charset=utf-8',
+        format: 'html',
+      });
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/session/with%2Fslash/export',
+        method: 'GET',
+        headers: { authorization: 'Bearer secret' },
+      });
+    });
+
+    it('passes the requested export format', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        textResponse(200, '# export', {
+          'content-type': 'text/markdown; charset=utf-8',
+          'content-disposition': 'attachment; filename="session.md"',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const exportClient = client as DaemonClient & {
+        exportSession(
+          sessionId: string,
+          opts: { format: 'md' },
+        ): Promise<{ format: string }>;
+      };
+
+      await exportClient.exportSession('s-1', { format: 'md' });
+
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/export?format=md');
+    });
+
+    it('throws DaemonHttpError on non-2xx', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, {
+          error: 'Invalid export format',
+          code: 'invalid_export_format',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const exportClient = client as DaemonClient & {
+        exportSession(sessionId: string): Promise<unknown>;
+      };
+
+      await expect(exportClient.exportSession('s-1')).rejects.toBeInstanceOf(
+        DaemonHttpError,
+      );
+    });
+
+    it('uses direct REST fetch even when an ACP transport is configured', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        textResponse(200, '{}', {
+          'content-type': 'application/json',
+          'content-disposition': 'attachment; filename="session.json"',
+        }),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'transport should not be used' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+      const exportClient = client as DaemonClient & {
+        exportSession(
+          sessionId: string,
+          opts: { format: 'json' },
+        ): Promise<{ content: string }>;
+      };
+
+      await expect(
+        exportClient.exportSession('s-1', { format: 'json' }),
+      ).resolves.toMatchObject({ content: '{}' });
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/s-1/export?format=json',
+      );
     });
   });
 
@@ -2037,6 +2249,151 @@ describe('DaemonClient', () => {
       await expect(
         client.listWorkspaceSessions('relative'),
       ).rejects.toMatchObject({ status: 400 });
+    });
+
+    it('returns the session list page envelope for organized views', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessions: [
+            {
+              sessionId: 's-1',
+              workspaceCwd: '/work/a',
+              isPinned: true,
+              groupId: 'g-1',
+            },
+          ],
+          nextCursor: 'next',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const page = await client.listWorkspaceSessionsPage('/work/a', {
+        view: 'organized',
+        group: 'g-1',
+        pageSize: 50,
+        cursor: 'cur',
+      });
+
+      expect(page.nextCursor).toBe('next');
+      expect(page.sessions[0]).toMatchObject({
+        sessionId: 's-1',
+        isPinned: true,
+        groupId: 'g-1',
+      });
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=50&cursor=cur&view=organized&group=g-1',
+      );
+    });
+
+    it('manages session groups and session organization', async () => {
+      const { fetch, calls } = recordingFetch((request) => {
+        if (
+          request.url.endsWith('/workspace/%2Fwork%2Fa/session-groups') &&
+          request.method === 'GET'
+        ) {
+          return jsonResponse(200, {
+            groups: [],
+            colorOptions: [
+              'red',
+              'orange',
+              'yellow',
+              'green',
+              'blue',
+              'purple',
+            ],
+          });
+        }
+        if (
+          request.url.endsWith('/workspace/%2Fwork%2Fa/session-groups') &&
+          request.method === 'POST'
+        ) {
+          return jsonResponse(201, {
+            group: {
+              id: 'g-1',
+              name: 'Frontend',
+              color: 'blue',
+              order: 0,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+          });
+        }
+        if (
+          request.url.endsWith('/workspace/%2Fwork%2Fa/session-groups/g-1') &&
+          request.method === 'PATCH'
+        ) {
+          return jsonResponse(200, {
+            group: {
+              id: 'g-1',
+              name: 'UI',
+              color: 'green',
+              order: 1,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-02T00:00:00.000Z',
+            },
+          });
+        }
+        if (
+          request.url.endsWith('/workspace/%2Fwork%2Fa/session-groups/g-1') &&
+          request.method === 'DELETE'
+        ) {
+          return jsonResponse(200, { deleted: true });
+        }
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          isPinned: true,
+          groupId: 'g-1',
+        });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const catalog = await client.listSessionGroups('/work/a');
+      const group = await client.createSessionGroup('/work/a', {
+        name: 'Frontend',
+        color: 'blue',
+      });
+      const updated = await client.updateSessionGroup('/work/a', group.id, {
+        name: 'UI',
+        color: 'green',
+        order: 1,
+      });
+      const deleted = await client.deleteSessionGroup('/work/a', group.id);
+      const organization = await client.updateSessionOrganization('s-1', {
+        isPinned: true,
+        groupId: group.id,
+      });
+
+      expect(catalog.colorOptions).toContain('purple');
+      expect(group.id).toBe('g-1');
+      expect(updated).toMatchObject({ id: 'g-1', name: 'UI', color: 'green' });
+      expect(deleted).toEqual({ deleted: true });
+      expect(organization).toEqual({
+        sessionId: 's-1',
+        isPinned: true,
+        groupId: 'g-1',
+      });
+      expect(calls[0]?.method).toBe('GET');
+      expect(calls[1]?.method).toBe('POST');
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        name: 'Frontend',
+        color: 'blue',
+      });
+      expect(calls[2]?.url).toBe(
+        'http://daemon/workspace/%2Fwork%2Fa/session-groups/g-1',
+      );
+      expect(calls[2]?.method).toBe('PATCH');
+      expect(JSON.parse(calls[2]!.body!)).toEqual({
+        name: 'UI',
+        color: 'green',
+        order: 1,
+      });
+      expect(calls[3]?.method).toBe('DELETE');
+      expect(calls[4]?.url).toBe('http://daemon/session/s-1/organization');
+      expect(calls[4]?.method).toBe('PATCH');
+      expect(JSON.parse(calls[4]!.body!)).toEqual({
+        isPinned: true,
+        groupId: 'g-1',
+      });
     });
   });
 
@@ -3670,6 +4027,7 @@ describe('DaemonClient', () => {
           summary: 'forgot',
           removedEntries: [],
           touchedTopics: ['project' as const],
+          touchedScopes: ['project' as const],
         },
       };
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));

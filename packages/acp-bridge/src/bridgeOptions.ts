@@ -33,6 +33,39 @@ export type DiagnosticLineSink = (
   level?: 'info' | 'warn' | 'error',
 ) => void;
 
+export interface BridgeFreshSessionAdmissionContext {
+  readonly operation: 'spawn' | 'load' | 'resume' | 'branch';
+  readonly workspaceCwd: string;
+  readonly sessionId?: string;
+  readonly sourceSessionId?: string;
+}
+
+export interface BridgeFreshSessionReservation {
+  release(): void;
+}
+
+export type BridgeFreshSessionAdmission = (
+  context: BridgeFreshSessionAdmissionContext,
+) => BridgeFreshSessionReservation | undefined;
+
+export type BridgeSessionLifecycleEvent =
+  | {
+      readonly type: 'registered';
+      readonly sessionId: string;
+      readonly workspaceCwd: string;
+      readonly reason: string;
+    }
+  | {
+      readonly type: 'removed';
+      readonly sessionId: string;
+      readonly workspaceCwd: string;
+      readonly reason: string;
+    };
+
+export type BridgeSessionLifecycle = (
+  event: BridgeSessionLifecycleEvent,
+) => void;
+
 /**
  * Optional injection seam for daemon-host-specific status cells —
  * `process.env` snapshots and the daemon-side preflight checks
@@ -148,6 +181,19 @@ export interface BridgeOptions {
    */
   maxSessions?: number;
   /**
+   * Host-level admission hook for fresh session creation across runtimes.
+   * Must be synchronous so callers can reserve before any async child or ACP
+   * side effect starts. Attaches bypass this hook.
+   */
+  freshSessionAdmission?: BridgeFreshSessionAdmission;
+  /**
+   * Host-level live session owner callback. The bridge emits registration
+   * only after a live entry is installed, and removal when that live entry is
+   * removed. Callback failures are diagnostic only and do not fail session
+   * lifecycle operations.
+   */
+  sessionLifecycle?: BridgeSessionLifecycle;
+  /**
    * Per-session SSE replay ring depth. Sets `ringSize` on every
    * `new EventBus(...)` the bridge constructs (both fresh sessions
    * and restored sessions). Defaults to `DEFAULT_RING_SIZE` (8000,
@@ -163,6 +209,14 @@ export interface BridgeOptions {
    * `ringSize × average-event-size` held until the session ends.
    */
   eventRingSize?: number;
+  /**
+   * Per-session cap, in serialized bytes, for the in-memory compacted replay
+   * snapshot returned by `session/load` late attach. This bounds daemon heap
+   * retained for historical replay; the current unfinished live turn remains in
+   * `liveJournal` until its turn boundary. Defaults to 4 MiB. Must be a
+   * positive safe integer; there is no unlimited sentinel.
+   */
+  compactedReplayMaxBytes?: number;
   /**
    * Per-`requestPermission` wall clock. After this many ms with
    * no client vote, the agent's permission promise resolves as
@@ -398,6 +452,4 @@ export interface BridgeOptions {
  */
 export type ClientMcpMessageSender = (
   serverName: string,
-) =>
-  | ((payload: unknown) => Promise<unknown>)
-  | undefined;
+) => ((payload: unknown) => Promise<unknown>) | undefined;

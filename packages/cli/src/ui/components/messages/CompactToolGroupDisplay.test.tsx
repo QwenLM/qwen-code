@@ -123,7 +123,7 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     );
     const frame = lastFrame()!;
     // CATEGORY_ORDER: search → read → list → ...
-    expect(frame).toContain('Searched 1 pattern');
+    expect(frame).toContain('Searched search pattern');
     expect(frame).toContain('read 2 files');
   });
 
@@ -145,7 +145,7 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     const { lastFrame } = render(
       <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
     );
-    expect(lastFrame()).toContain('Ran 1 command');
+    expect(lastFrame()).toContain('Ran ls -la');
   });
 });
 
@@ -166,12 +166,12 @@ describe('buildToolSummary', () => {
     expect(buildToolSummary([], false)).toBe('');
   });
 
-  it('single tool uses count format', () => {
-    expect(buildToolSummary([make({})], false)).toBe('Read 1 file');
+  it('single tool uses description format', () => {
+    expect(buildToolSummary([make({})], false)).toBe('Read a.ts');
   });
 
   it('single tool uses progressive verb when active', () => {
-    expect(buildToolSummary([make({})], true)).toBe('Reading 1 file');
+    expect(buildToolSummary([make({})], true)).toBe('Reading a.ts');
   });
 
   it('multiple same-type tools use count', () => {
@@ -191,7 +191,7 @@ describe('buildToolSummary', () => {
     ];
     // CATEGORY_ORDER: search → read → list → command → edit
     expect(buildToolSummary(tools, false)).toBe(
-      'Read 1 file, ran 1 command, edited 1 file',
+      'Read a.ts, ran npm test, edited b.ts',
     );
   });
 
@@ -201,14 +201,77 @@ describe('buildToolSummary', () => {
       make({ callId: 'c2', name: 'Shell', description: 'ls' }),
     ];
     const result = buildToolSummary(tools, false);
-    expect(result).toBe('Read 1 file, ran 1 command');
+    expect(result).toBe('Read a.ts, ran ls');
   });
 
   it('unknown tool names fall to other category', () => {
     const tools = [
       make({ callId: 'c1', name: 'UnknownTool', description: 'something' }),
     ];
-    expect(buildToolSummary(tools, false)).toBe('Used 1 tool');
+    expect(buildToolSummary(tools, false)).toBe('Used something');
+  });
+
+  it('falls back to count format when description is empty', () => {
+    const tools = [make({ callId: 'c1', name: 'ReadFile', description: '' })];
+    expect(buildToolSummary(tools, false)).toBe('Read 1 file');
+  });
+
+  it('falls back to count format when description is undefined', () => {
+    const tools = [
+      make({
+        callId: 'c1',
+        name: 'ReadFile',
+        description: undefined as unknown as string,
+      }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Read 1 file');
+  });
+
+  it('falls back to count format when description is JSON (error args)', () => {
+    const tools = [
+      make({
+        callId: 'c1',
+        name: 'ReadFile',
+        description: '{"file_path":"/tmp/test.txt"}',
+      }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Read 1 file');
+  });
+
+  it('falls back to count format when description starts with array bracket', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'Shell', description: '["ls", "-la"]' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Ran 1 command');
+  });
+
+  it('strips ANSI CSI escape sequences from description', () => {
+    const tools = [
+      make({
+        callId: 'c1',
+        name: 'ReadFile',
+        description: '\x1b[32ma.ts\x1b[0m',
+      }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Read a.ts');
+  });
+
+  it('strips non-CSI ANSI sequences (charset, OSC) from description', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'Shell', description: '\x1b(Bls -la\x1b[0m' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Ran ls -la');
+  });
+
+  it('replaces embedded newlines with spaces in description', () => {
+    const tools = [
+      make({
+        callId: 'c1',
+        name: 'Shell',
+        description: 'echo hello\nworld',
+      }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Ran echo hello world');
   });
 
   it('mixed group with count per category', () => {
@@ -217,7 +280,7 @@ describe('buildToolSummary', () => {
       make({ callId: 'c2', name: 'ReadFile', description: 'b.ts' }),
       make({ callId: 'c3', name: 'Shell', description: 'npm test' }),
     ];
-    expect(buildToolSummary(tools, false)).toBe('Read 2 files, ran 1 command');
+    expect(buildToolSummary(tools, false)).toBe('Read 2 files, ran npm test');
   });
 
   it('legacy display names map to correct categories', () => {
@@ -226,7 +289,7 @@ describe('buildToolSummary', () => {
       make({ callId: 'c2', name: 'ReadFolder', description: '/src' }),
     ];
     expect(buildToolSummary(tools, false)).toBe(
-      'Searched 1 pattern, listed 1 directory',
+      'Searched pattern, listed /src',
     );
   });
 });

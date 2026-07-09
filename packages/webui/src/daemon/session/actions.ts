@@ -81,10 +81,19 @@ export function getConnectionAfterSessionClear(
     delete next.displayName;
     delete next.tokenUsage;
     delete next.tokenCount;
-    delete next.commands;
-    delete next.skills;
+    // Drop the session-scoped raw snapshots (both carry the cleared
+    // sessionId), which also makes the effect's canReuseSessionMetadata
+    // check refetch fresh data for the next session.
     delete next.supportedCommands;
     delete next.context;
+    // Keep `commands`/`skills`: they are workspace-scoped (skills, custom,
+    // MCP-prompt and workflow slash commands all live at the workspace/config
+    // level, not the session), so they stay valid after the session is
+    // cleared. Clearing starts a fresh deferred session that is not created
+    // until the first prompt (#6066); preserving these keeps skill-backed
+    // slash commands like /review autocompleting in that window — the same
+    // guarantee #6153 added for the initial deferred connect. The next
+    // session's available_commands_update refreshes them once it lands.
   }
   return {
     ...next,
@@ -92,6 +101,8 @@ export function getConnectionAfterSessionClear(
     loadingTranscript: undefined,
     catchingUp: undefined,
     error: undefined,
+    errorStatus: undefined,
+    missingSession: false,
   };
 }
 
@@ -220,6 +231,8 @@ export function createDaemonSessionActions({
       clientId: undefined,
       displayName: undefined,
       error: undefined,
+      errorStatus: undefined,
+      missingSession: false,
       loadingTranscript: true,
       catchingUp: undefined,
     }));
@@ -285,6 +298,9 @@ export function createDaemonSessionActions({
           promptRequest as Parameters<typeof session.submitPrompt>[0],
           ctrl.signal,
         );
+        // The prompt is admitted to the session here — signal it before we wait
+        // out the (possibly long) turn, so an admission-only caller can proceed.
+        options?.onAdmitted?.();
         return await waitForAcceptedPromptCompletion(
           activePromptsRef.current,
           settledPromptsRef.current,
@@ -608,6 +624,8 @@ export function createDaemonSessionActions({
           ...(nextSession.clientId ? { clientId: nextSession.clientId } : {}),
           workspaceCwd: nextSession.workspaceCwd,
           error: undefined,
+          errorStatus: undefined,
+          missingSession: false,
         }));
         return nextSession;
       } catch (error) {
@@ -652,6 +670,12 @@ export function createDaemonSessionActions({
     async newSession() {
       manualSessionClearRef.current = false;
       clearActiveSessionState();
+      setConnection((current) => ({
+        ...current,
+        missingSession: false,
+        error: undefined,
+        errorStatus: undefined,
+      }));
       setNewSessionNonce((nonce) => nonce + 1);
     },
 

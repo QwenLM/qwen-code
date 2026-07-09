@@ -1226,6 +1226,7 @@ export default {
   'Size:': '大小：',
   '{{count}} bytes': '{{count}} 位元組',
   'Reference in chat': '在對話中引用',
+  'MCP server': 'MCP 伺服器',
   'MCP resource server': 'MCP 資源伺服器',
   '{{count}} invalid tools': '{{count}} 個無效工具',
   invalid: '無效',
@@ -1261,8 +1262,8 @@ export default {
     '切換此會話的模型（--fast 可設置建議模型）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
     '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，[model-id] 可立即切換）',
-  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
-    '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，--vision 可設置視覺橋接模型，[model-id] 可立即切換，或用 [model-id] [prompt] 在另一個模型上執行一次性提示；內聯提示按原文發送，不展開 @file）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    '切換此會話的模型（--fast 建議模型，--voice 語音轉寫模型，--vision 視覺橋接模型，--project 持久化到專案設定，--global 持久化到使用者設定，[model-id] 立即切換，或用 [model-id] [prompt] 在另一個模型上執行一次性提示；內聯提示按原文發送，不展開 @file）',
   "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
     "此模式不支援內聯一次性覆寫——請先執行 '/model {{model}}'，再發送你的提示。",
   "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
@@ -1275,6 +1276,10 @@ export default {
   'Set the model for voice transcription': '設定語音轉寫模型',
   'Set the image-capable model used to transcribe images for a text-only main model':
     '設定用於為純文字主模型轉寫圖像的圖像能力模型',
+  'Persist the model selection to the project settings (workspace scope)':
+    '將模型選擇持久化到專案設定（工作區）',
+  'Persist the model selection to the user settings (global scope)':
+    '將模型選擇持久化到使用者設定（全域）',
   'Select Fast Model': '選擇快速模型',
   'Select Vision Model': '選擇視覺模型',
   'Select Voice Model': '選擇語音模型',
@@ -1468,6 +1473,8 @@ export default {
   'Invalid QWEN_DEFAULT_AUTH_TYPE value: "{{value}}". Valid values are: {{validValues}}':
     '無效的 QWEN_DEFAULT_AUTH_TYPE 值："{{value}}"。有效值為：{{validValues}}',
   'Select Model': '選擇模型',
+  ' (this project)': '（當前專案）',
+  ' (global)': '（全域）',
   'API Key': 'API Key',
   '(default)': '(默認)',
   '(not set)': '(未設置)',
@@ -2182,4 +2189,36 @@ export default {
     '無法自動更新此獨立安裝。請從以下位址重新安裝：',
   'Manual update required. Please reinstall Qwen Code.':
     '需要手動更新。請重新安裝 Qwen Code。',
+  '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
+    '⚠️ 歷史記錄缺口：此處之前的會話記錄已遺失（儲存中斷），且無法找回。',
+
+  // ============================================================================
+  // reload-plugins 命令
+  // ============================================================================
+  '{{count}} extension': '{{count}} 個擴充',
+  '{{count}} extensions': '{{count}} 個擴充',
+  '{{count}} command': '{{count}} 個指令',
+  '{{count}} commands': '{{count}} 個指令',
+  '{{count}} skill': '{{count}} 個技能',
+  '{{count}} skills': '{{count}} 個技能',
+  '{{count}} agent': '{{count}} 個代理',
+  '{{count}} agents': '{{count}} 個代理',
+  '{{count}} hook': '{{count}} 個鉤子',
+  '{{count}} hooks': '{{count}} 個鉤子',
+  '{{count}} extension MCP server': '{{count}} 個擴充 MCP 伺服器',
+  '{{count}} extension MCP servers': '{{count}} 個擴充 MCP 伺服器',
+  '{{count}} extension LSP server': '{{count}} 個擴充 LSP 伺服器',
+  '{{count}} extension LSP servers': '{{count}} 個擴充 LSP 伺服器',
+  'Reload extension changes from disk': '從磁碟重新載入擴充變更',
+  'Reloaded extensions: {{summary}}': '已重新載入擴充：{{summary}}',
+  'Reload failed: {{message}}': '重新載入失敗：{{message}}',
+  'Reload failed.': '重新載入失敗。',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    '磁碟上的擴充已變更。執行 /reload-plugins 來套用更新。',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    '擴充內容重新整理失敗：{{message}}。執行 /reload-plugins 來套用更新。',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    '擴充內容重新整理失敗。執行 /reload-plugins 來套用更新。',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    '擴充重新載入未完成。執行 /reload-plugins 重試。',
 };

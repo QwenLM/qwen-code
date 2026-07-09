@@ -88,7 +88,7 @@ export function buildPermissionCheckContext(
           ? toolParams['server_name']
           : undefined;
 
-  return { toolName, command, cwd, filePath, domain, specifier };
+  return { toolName, command, cwd, filePath, domain, specifier, toolParams };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

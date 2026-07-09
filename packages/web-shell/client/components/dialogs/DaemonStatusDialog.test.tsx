@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonMetricsSeriesBucket } from '@qwen-code/webui/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -129,6 +130,50 @@ const fullReport = {
   },
 };
 
+// A full metrics bucket (typed, so a dropped field is a compile error) for the
+// Metrics-tab tests.
+function makeBucket(t: number): DaemonMetricsSeriesBucket {
+  return {
+    t,
+    activeSessions: 1,
+    activePrompts: 0,
+    queuedPrompts: 0,
+    requests: 5,
+    errors: 0,
+    latencyP50Ms: 2,
+    latencyP95Ms: 8,
+    promptsCompleted: 0,
+    promptQueueWaitP95Ms: 0,
+    promptDurationP95Ms: 0,
+    llmApiP50Ms: 0,
+    llmApiP95Ms: 0,
+    cpuPercent: 1,
+    rssBytes: 200 * 1024 * 1024,
+    heapUsedBytes: 50 * 1024 * 1024,
+    eventLoopLagP99Ms: 3,
+    pipeInBytes: 0,
+    pipeOutBytes: 0,
+    sseConnections: 1,
+    wsConnections: 0,
+    acpConnections: 2,
+    rateLimitRejected: 0,
+    tokensIn: 0,
+    tokensOut: 0,
+    childCpuPercent: 0,
+    childRssBytes: 0,
+  };
+}
+
+function summaryWithSeries(count: number) {
+  const series = Array.from({ length: count }, (_, i) =>
+    makeBucket(1000 + i * 5000),
+  );
+  return {
+    ...summaryReport,
+    runtime: { ...summaryReport.runtime, metrics: { series } },
+  };
+}
+
 type HookState = {
   report: unknown;
   loading: boolean;
@@ -191,6 +236,19 @@ function topBadgeText(): string | undefined {
     );
 }
 
+// Diagnostics (sessions / workspace / auth) live under their own tab now;
+// reveal it before asserting on that content.
+function openDiagnostics(): void {
+  // Diagnostics is the last tab; match by role so this works in any locale
+  // (the label is "Diagnostics" / "诊断").
+  const tabs = container!.querySelectorAll('[role="tab"]');
+  const btn = tabs[tabs.length - 1];
+  if (!btn) throw new Error('Diagnostics tab not found');
+  act(() => {
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+}
+
 beforeEach(() => {
   summaryState = { report: summaryReport, loading: false, error: undefined };
   fullState = { report: fullReport, loading: false, error: undefined };
@@ -250,16 +308,18 @@ describe('DaemonStatusDialog', () => {
       error: undefined,
     };
     mount('zh-CN');
+    openDiagnostics();
     const text = container!.textContent ?? '';
     // The section badge is translated ("不可用"), not the raw wire value.
     expect(text).toContain('不可用');
     expect(text).not.toContain('unavailable');
   });
 
-  it('fetches both summary and full detail and renders diagnostics with no toggle', () => {
+  it('fetches both summary and full detail; diagnostics live under the Diagnostics tab', () => {
     mount();
     // Both detail levels are requested up front; there is no user-facing
-    // summary/full switch to reason about.
+    // summary/full switch to reason about (the tabs are Overview / Metrics /
+    // Diagnostics, not a detail selector).
     expect(seenDetails).toContain('summary');
     expect(seenDetails).toContain('full');
     const buttonLabels = Array.from(container!.querySelectorAll('button')).map(
@@ -267,7 +327,12 @@ describe('DaemonStatusDialog', () => {
     );
     expect(buttonLabels).not.toContain('Summary');
     expect(buttonLabels).not.toContain('Full');
-    // Detail sections render immediately alongside the summary cards.
+    // Diagnostics content is on its own tab — the default (Overview) panel does
+    // not render it, so the full report is fetched but parked until the tab is
+    // opened.
+    expect(container!.textContent ?? '').not.toContain('Workspace Diagnostics');
+    openDiagnostics();
+    // Now the detail sections render.
     const text = container!.textContent ?? '';
     expect(text).toContain('My session');
     expect(text).toContain('preflight exploded');
@@ -277,6 +342,113 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('mcp');
     expect(text).toContain('OK');
     expect(text).toContain('servers: 2');
+  });
+
+  it('renders charts on the Metrics tab from the series and hides Overview', () => {
+    summaryState = {
+      report: summaryWithSeries(2),
+      loading: false,
+      error: undefined,
+    };
+    mount();
+    // Overview is the default tab.
+    expect(container!.textContent ?? '').toContain('4242'); // pid (Overview)
+    const metricsTab = container!.querySelector('#daemon-tab-metrics')!;
+    act(() => {
+      metricsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const text = container!.textContent ?? '';
+    // Chart cards render (spot-check i18n'd titles across the set)...
+    expect(text).toContain('Concurrency');
+    expect(text).toContain('LLM API latency');
+    expect(text).toContain('Token burn');
+    // ...one SvgLineChart per card...
+    expect(
+      container!.querySelectorAll('svg[role="img"]').length,
+    ).toBeGreaterThanOrEqual(10);
+    // ...and the panels are mutually exclusive: Overview content is gone.
+    expect(text).not.toContain('4242');
+  });
+
+  it('shows the collecting-metrics placeholder when the series is empty', () => {
+    // summaryReport carries no runtime.metrics.
+    mount();
+    const metricsTab = container!.querySelector('#daemon-tab-metrics')!;
+    act(() => {
+      metricsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(container!.textContent ?? '').toContain('Collecting metrics');
+  });
+
+  it('formats large legend values via the compact-count, percent, and KB branches', () => {
+    const big = makeBucket(1000);
+    big.requests = 15000; // formatCount ≥10k branch → "15k"
+    big.cpuPercent = 120; // formatPercent ≥100 branch → "120%" (no decimal)
+    big.pipeInBytes = 5 * 1024; // formatBytes sub-MB branch → "5.0 KB"
+    summaryState = {
+      report: {
+        ...summaryReport,
+        runtime: { ...summaryReport.runtime, metrics: { series: [big] } },
+      },
+      loading: false,
+      error: undefined,
+    };
+    mount();
+    const metricsTab = container!.querySelector('#daemon-tab-metrics')!;
+    act(() => {
+      metricsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const text = container!.textContent ?? '';
+    expect(text).toContain('15k');
+    expect(text).toContain('120%');
+    expect(text).toContain('5.0 KB');
+  });
+
+  it('moves between tabs with arrow / Home / End keys (roving tabindex)', () => {
+    mount();
+    const tabs = container!.querySelectorAll('[role="tab"]');
+    expect(tabs).toHaveLength(4);
+    // Overview active by default; ArrowRight advances to the next tab (Usage).
+    act(() => {
+      tabs[0].dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowRight',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(tabs[1].getAttribute('aria-selected')).toBe('true');
+    expect(tabs[0].getAttribute('aria-selected')).toBe('false');
+    // Roving tabindex: only the active tab stays in the tab order.
+    expect(tabs[1].getAttribute('tabindex')).toBe('0');
+    expect(tabs[0].getAttribute('tabindex')).toBe('-1');
+    // End jumps to the last tab, Home back to the first (with wrap-around via
+    // the modulo also covered: ArrowLeft from the first tab would land on End).
+    act(() => {
+      tabs[1].dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'End',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(tabs[3].getAttribute('aria-selected')).toBe('true');
+    act(() => {
+      tabs[3].dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Home',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(tabs[0].getAttribute('aria-selected')).toBe('true');
+    // Each tab points at its panel for assistive tech.
+    expect(tabs[0].getAttribute('aria-controls')).toBe(
+      'daemon-tabpanel-overview',
+    );
   });
 
   it('auto-refresh reloads only the cheap summary, never the full report', async () => {
@@ -379,16 +551,19 @@ describe('DaemonStatusDialog', () => {
   it('falls back to the summary rollup badge while diagnostics are still loading', () => {
     fullState = { report: undefined, loading: true, error: undefined };
     mount();
-    const text = container!.textContent ?? '';
+    let text = container!.textContent ?? '';
     // Top cards come from the summary and render right away...
     expect(text).toContain('4242');
-    // ...while the detail sections show a loading placeholder.
-    expect(text).toContain('Loading diagnostics');
-    expect(text).not.toContain('Workspace Diagnostics');
     // Before the full report lands the badge reflects the summary rollup, and
     // the full-only preflight issue is not shown yet.
     expect(topBadgeText()).toBe('Warning');
     expect(text).not.toContain('preflight failed: node version too old');
+    // ...while the detail sections (under the Diagnostics tab) show a loading
+    // placeholder rather than the report.
+    openDiagnostics();
+    text = container!.textContent ?? '';
+    expect(text).toContain('Loading diagnostics');
+    expect(text).not.toContain('Workspace Diagnostics');
   });
 
   it('shows the load error when no report is available', () => {
@@ -412,16 +587,18 @@ describe('DaemonStatusDialog', () => {
       error: new Error('full boom'),
     };
     mount();
-    const text = container!.textContent ?? '';
+    let text = container!.textContent ?? '';
     // Live summary cards still render...
     expect(text).toContain('4242');
     expect(text).toContain('http-bridge');
     // ...the toolbar does NOT show the summary-failure banner...
     expect(text).not.toContain('Failed to load daemon status');
-    // ...and the failure is confined to the diagnostics section.
-    expect(text).toContain('Failed to load diagnostics');
     // With no full report, the badge falls back to the summary rollup.
     expect(topBadgeText()).toBe('Warning');
+    // ...and the failure is confined to the diagnostics section (its tab).
+    openDiagnostics();
+    text = container!.textContent ?? '';
+    expect(text).toContain('Failed to load diagnostics');
   });
 
   it('renders the ACP-disabled branch when the transport is off', () => {
@@ -537,12 +714,16 @@ describe('DaemonStatusDialog', () => {
       error: undefined,
     };
     mount();
-    const text = container!.textContent ?? '';
-    expect(text).toContain('No active sessions'); // empty sessions placeholder
+    let text = container!.textContent ?? '';
+    // Overview placeholders: acp disabled, rate-limit disabled, empty caps.
     expect(text).toContain('ACP transport disabled'); // acp.enabled === false
     // rate-limit disabled and empty capabilities both render "disabled"/"none".
     expect(text).toContain('disabled');
     expect(text).toContain('none');
+    // The empty-sessions placeholder lives under the Diagnostics tab.
+    openDiagnostics();
+    text = container!.textContent ?? '';
+    expect(text).toContain('No active sessions');
   });
 
   it('shows the toolbar failure banner when a poll fails but data is present', () => {
@@ -575,6 +756,7 @@ describe('DaemonStatusDialog', () => {
       error: undefined,
     };
     mount();
+    openDiagnostics();
     expect(container!.textContent ?? '').toContain(
       'No workspace diagnostics reported',
     );
@@ -620,12 +802,15 @@ describe('DaemonStatusDialog', () => {
       error: undefined,
     };
     mount();
-    const text = container!.textContent ?? '';
-    // Summary cards stay live; only the detail region shows its own fallback.
+    let text = container!.textContent ?? '';
+    // Summary cards stay live...
     expect(text).toContain('4242');
-    expect(text).toContain('Failed to load diagnostics');
     // The whole-dialog (outer) fallback did NOT trigger.
     expect(text).not.toContain('Failed to load daemon status');
+    // ...only the detail region (its tab) shows its own boundary fallback.
+    openDiagnostics();
+    text = container!.textContent ?? '';
+    expect(text).toContain('Failed to load diagnostics');
     errorSpy.mockRestore();
   });
 
@@ -638,6 +823,7 @@ describe('DaemonStatusDialog', () => {
       error: undefined,
     };
     mount();
+    openDiagnostics();
     const text = container!.textContent ?? '';
     expect(text).toContain('Failed to load diagnostics');
     expect(text).not.toContain('Loading diagnostics');
@@ -721,6 +907,7 @@ describe('DaemonStatusDialog', () => {
       error: undefined,
     };
     mount();
+    openDiagnostics();
     expect(container!.textContent ?? '').toContain('sess-no-name-9');
   });
 
@@ -754,6 +941,7 @@ describe('DaemonStatusDialog', () => {
       error: undefined,
     };
     mount();
+    openDiagnostics();
     const text = container!.textContent ?? '';
     // The warning cell is named with its message...
     expect(text).toContain('auth');

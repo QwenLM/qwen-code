@@ -43,6 +43,14 @@ gh label list --repo "$REPO" --limit 200
   `refactor(scope):`, `refactor(scope)!:`, case-insensitive). Review it as usual,
   but escalate to the maintainer in place of approval. See `references/pr-workflow.md`
   Stage 3 for the deterministic check.
+- **No fabricated policies**: Do not invent blocking rules, line-count thresholds,
+  or named policies (e.g. "core module protection policy") that are not explicitly
+  defined in this skill's files. If a concern about scale or scope arises, raise it
+  as a question in the Stage 1 comment — never as a block or CHANGES_REQUESTED.
+  The escalation criteria are those defined in `references/pr-workflow.md`
+  (Stage 0, Stage 1b, and Stage 1c). Escalation means notifying the
+  maintainer, not rejecting the PR, except where Stage 0 Tier 1 explicitly
+  prescribes a `CHANGES_REQUESTED` review for large core refactors.
 
 ## Duplicate Guard
 

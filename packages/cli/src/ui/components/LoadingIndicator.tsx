@@ -90,8 +90,12 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
   const showTokens = !isNarrow && outputTokens > 0;
   const tokenArrow = isReceivingContent ? '↓' : '↑';
 
+  // Fixed one-decimal width below the minute mark so the 0.5s-resolution
+  // ticks ("1s" vs "1.5s") don't shift the rest of the status line (#6402).
   const timeStr =
-    elapsedTime < 60 ? `${elapsedTime}s` : formatDuration(elapsedTime * 1000);
+    elapsedTime < 60
+      ? `${elapsedTime.toFixed(1)}s`
+      : formatDuration(elapsedTime * 1000);
 
   const tokenStr = showTokens
     ? ` · ${tokenArrow} ${formatTokenCount(outputTokens)} tokens`

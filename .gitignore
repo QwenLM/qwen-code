@@ -76,6 +76,8 @@ bundle
 # Test report files
 junit.xml
 packages/*/coverage/
+packages/web-shell/client/e2e/playwright-report/
+packages/web-shell/client/e2e/test-results/
 
 # PR body draft
 pr_body.md
@@ -127,4 +129,6 @@ tmp/
 .venv
 .codegraph
 .qwen/computer-use/installed.json
+# Auto-generated computer-use marker can also appear under nested packages.
+**/.qwen/computer-use/
 .playwright-mcp/
