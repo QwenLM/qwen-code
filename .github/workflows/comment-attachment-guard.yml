@@ -36,6 +36,13 @@ jobs:
               /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|sh|bat|ps1|node|dylib|so)(?:$|[\s)"'\]>?#/&;.,!:])/i;
             const linkPattern =
               /https?:\/\/[^\s)"'<>\]]+|\[[^\]]+\]\([^)]+\)/gi;
+            const highRiskTarget = (url) => {
+              if (!/^https?:\/\//i.test(url)) {
+                return url;
+              }
+              const parsedUrl = new URL(url);
+              return `${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`;
+            };
 
             const { comment, sender } = context.payload;
             const association = comment.author_association ?? '';
@@ -55,7 +62,7 @@ jobs:
             const hasHighRiskLink = linkSnippets.some((snippet) => {
               const mdMatch = snippet.match(/^\[[^\]]+\]\((.+)\)$/);
               const url = mdMatch ? mdMatch[1] : snippet;
-              return highRiskExtension.test(url);
+              return highRiskExtension.test(highRiskTarget(url));
             });
             if (hasHighRiskLink) {
               reasons.push('high-risk file extension in a link or attachment');

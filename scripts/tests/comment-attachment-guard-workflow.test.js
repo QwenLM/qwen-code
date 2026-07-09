@@ -26,7 +26,16 @@ describe('comment attachment guard workflow', () => {
 
   it('checks markdown link URLs instead of display text', () => {
     expect(workflow).toContain('const url = mdMatch ? mdMatch[1] : snippet;');
-    expect(workflow).toContain('return highRiskExtension.test(url);');
+    expect(workflow).toContain(
+      'return highRiskExtension.test(highRiskTarget(url));',
+    );
+  });
+
+  it('checks URL paths instead of country-code TLD hosts', () => {
+    expect(workflow).toContain('const parsedUrl = new URL(url);');
+    expect(workflow).toContain(
+      '${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}',
+    );
   });
 
   it('keeps diagnostics when deletion or summary writing fails', () => {
