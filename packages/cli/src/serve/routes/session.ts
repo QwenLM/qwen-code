@@ -168,6 +168,17 @@ function parseTranscriptCursorQuery(
   return rawCursor;
 }
 
+function transcriptSnapshotUnavailableError(sessionId: string): Error & {
+  data: { errorKind: 'transcript_snapshot_unavailable'; sessionId: string };
+} {
+  return Object.assign(new Error('Transcript snapshot is unavailable'), {
+    data: {
+      errorKind: 'transcript_snapshot_unavailable' as const,
+      sessionId,
+    },
+  });
+}
+
 export function registerSessionRoutes(
   app: Application,
   deps: RegisterSessionRoutesDeps,
@@ -573,6 +584,7 @@ export function registerSessionRoutes(
     res: Response,
     route: string,
     sessionId: string,
+    hasCursor: boolean,
   ): Promise<WorkspaceRuntime | undefined> => {
     const activeInRuntime = async (
       runtime: WorkspaceRuntime,
@@ -583,13 +595,19 @@ export function registerSessionRoutes(
       );
       return location === 'active';
     };
+    const throwMissingActiveTranscript = (): never => {
+      if (hasCursor) {
+        throw transcriptSnapshotUnavailableError(sessionId);
+      }
+      throw new SessionNotFoundError(sessionId);
+    };
 
     if (workspaceRegistry.list().length === 1) {
       const runtime = workspaceRegistry.primary;
       if (await activeInRuntime(runtime)) {
         return runtime;
       }
-      throw new SessionNotFoundError(sessionId);
+      return throwMissingActiveTranscript();
     }
 
     const liveOwner = workspaceRegistry.resolveLiveSessionOwner(sessionId);
@@ -606,7 +624,7 @@ export function registerSessionRoutes(
       if (await activeInRuntime(liveOwner.runtime)) {
         return liveOwner.runtime;
       }
-      throw new SessionNotFoundError(sessionId);
+      return throwMissingActiveTranscript();
     }
 
     const activeRuntimes: WorkspaceRuntime[] = [];
@@ -634,7 +652,7 @@ export function registerSessionRoutes(
     if (loadError !== undefined) {
       throw loadError;
     }
-    throw new SessionNotFoundError(sessionId);
+    return throwMissingActiveTranscript();
   };
 
   const parseSessionIdsBody = (
@@ -1096,6 +1114,7 @@ export function registerSessionRoutes(
             res,
             route,
             sessionId,
+            cursor !== undefined,
           );
           if (!runtime) return undefined;
           return runtime.bridge.getSessionTranscriptPage({

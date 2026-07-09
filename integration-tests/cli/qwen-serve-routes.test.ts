@@ -17,7 +17,13 @@
  * `qwen-serve-streaming.test.ts`, backed by the local fake OpenAI server.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +33,7 @@ import {
   DaemonHttpError,
   type DaemonSessionSummary,
 } from '@qwen-code/sdk';
+import { Storage, type ChatRecord } from '@qwen-code/qwen-code-core';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Match the rest of the integration suite: prefer the bundled CLI
@@ -47,6 +54,47 @@ let homeDir = '';
 let port = 0;
 let base = '';
 let client: DaemonClient;
+
+function writePersistedTranscript(
+  sessionId: string,
+  records: ChatRecord[],
+): void {
+  const qwenHome = path.join(homeDir, '.qwen');
+  const projectDir = Storage.runWithRuntimeBaseDir(qwenHome, REPO_ROOT, () =>
+    new Storage(REPO_ROOT).getProjectDir(),
+  );
+  const chatsDir = path.join(projectDir, 'chats');
+  mkdirSync(chatsDir, { recursive: true });
+  writeFileSync(
+    path.join(chatsDir, `${sessionId}.jsonl`),
+    records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+    'utf8',
+  );
+}
+
+function chatRecord(
+  sessionId: string,
+  uuid: string,
+  parentUuid: string | null,
+  text: string,
+): ChatRecord {
+  const assistant = uuid.startsWith('a');
+  return {
+    uuid,
+    parentUuid,
+    sessionId,
+    timestamp: assistant
+      ? '2026-07-08T00:00:01.000Z'
+      : '2026-07-08T00:00:00.000Z',
+    type: assistant ? 'assistant' : 'user',
+    cwd: REPO_ROOT,
+    version: '1.0.0',
+    message: {
+      role: assistant ? 'model' : 'user',
+      parts: [{ text }],
+    },
+  };
+}
 
 beforeAll(async () => {
   homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-routes-home-'));
@@ -312,6 +360,41 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_reload',
       'voice_transcribe',
     ]);
+  });
+});
+
+describe('qwen serve — transcript paging route', () => {
+  it('serves persisted transcript pages through the SDK helper', async () => {
+    const sessionId = '99999999-aaaa-bbbb-cccc-111111111111';
+    writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u1', null, 'hello persisted transcript'),
+      chatRecord(sessionId, 'a1', 'u1', 'hello from replay'),
+    ]);
+
+    const first = await client.getSessionTranscriptPage(sessionId, {
+      limit: 1,
+    });
+    expect(first.sessionId).toBe(sessionId);
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursor).toBeDefined();
+    expect(first.events.length).toBeGreaterThan(0);
+    expect(first.events.every((event) => event.type === 'session_update')).toBe(
+      true,
+    );
+    expect(first.events.some((event) => 'id' in event)).toBe(false);
+
+    const second = await client.getSessionTranscriptPage(sessionId, {
+      cursor: first.nextCursor!,
+      limit: 1,
+    });
+    expect(second.sessionId).toBe(sessionId);
+    expect(second.hasMore).toBe(false);
+    expect(second.nextCursor).toBeUndefined();
+    expect(second.events.length).toBeGreaterThan(0);
+    expect(
+      second.events.every((event) => event.type === 'session_update'),
+    ).toBe(true);
+    expect(second.events.some((event) => 'id' in event)).toBe(false);
   });
 });
 

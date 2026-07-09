@@ -1365,9 +1365,9 @@ To protect daemon memory and latency, snapshots above the transcript indexing ca
 **Errors:**
 
 - `400` — invalid `limit`, `cursor`, or session id shape.
-- `404` — active persisted session id does not exist.
+- `404` — active persisted session id does not exist on the first page request.
 - `409` — `session_archived`, `session_archiving`, or `session_conflict` from the same loadability checks as `/load`.
-- `409` — transcript snapshot is unavailable because the file was deleted, truncated, replaced, or archived after the cursor was issued.
+- `409` — transcript snapshot is unavailable because the file was deleted, truncated, replaced, or archived after the cursor was issued; this also applies when preflight can no longer find the active file for a cursor request.
 - `413` — `transcript_too_large` when the frozen transcript snapshot exceeds the daemon indexing cap.
 
 ### `POST /session/:id/resume`

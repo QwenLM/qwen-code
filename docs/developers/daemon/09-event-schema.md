@@ -40,7 +40,7 @@ Grouped by domain.
 | `history_truncated`     | `POST /session/:id/load` returns a bounded replay snapshot after older in-memory replay entries were dropped. Prepended to `compactedReplay` and **has no `id`**.                                                                    | `reason: 'replay_window_exceeded'`, `truncatedEvents: number`, `retainedEvents: number`, `maxBytes: number`, `truncatedTurns?: number`, `fullTranscriptAvailable: boolean`. This is a status marker, not a resync request; clients render it and continue applying retained replay.                                            |
 | `replay_complete`       | Id-less sentinel emitted after the `Last-Event-ID` replay loop finishes, for both clean replay and ring-evicted paths, even when `data.replayedCount === 0`. **No `id`**                                                             | `replayedCount: number`; lets consumers remove catch-up UI deterministically without a timeout.                                                                                                                                                                                                                                |
 
-Current daemons emit `fullTranscriptAvailable: true` when `/session/:id/transcript` can be used to page the persisted transcript.
+`fullTranscriptAvailable` is a boolean capability flag, not a literal `true` type. Current daemons emit `true` when `/session/:id/transcript` can be used to page the persisted transcript; older or constrained daemons may emit `false`, and clients should keep rendering the bounded replay normally.
 
 ### Permissions (F3 + base)
 

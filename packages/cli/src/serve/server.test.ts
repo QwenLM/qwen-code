@@ -10898,6 +10898,26 @@ describe('createServeApp', () => {
       expect(bridge.sessionTranscriptCalls).toHaveLength(0);
     });
 
+    it('returns 409 when a cursor page no longer has an active transcript file', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-bdbdbdbdbdbd';
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript?cursor=stale`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'transcript_snapshot_unavailable',
+        sessionId: sid,
+      });
+      expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+    });
+
     it('rejects invalid transcript limit before touching the bridge', async () => {
       const sid = '55555555-bbbb-cccc-dddd-cccccccccccc';
       const bridge = fakeBridge();
