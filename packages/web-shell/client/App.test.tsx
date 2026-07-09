@@ -30,6 +30,7 @@ type ChatEditorTestProps = {
     images?: undefined,
     commitAccepted?: () => void,
   ) => boolean | void;
+  skills?: Array<{ name: string; description: string }>;
   isPreparing?: boolean;
   dialogOpen?: boolean;
 };
@@ -615,6 +616,30 @@ afterEach(() => {
 });
 
 describe('App session callbacks', () => {
+  it('filters disabled skills from the web-shell skills list', async () => {
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          name: 'enabled-skill',
+          description: 'Enabled',
+          status: 'ok',
+        },
+        {
+          name: 'disabled-extension-skill',
+          description: 'Disabled',
+          status: 'disabled',
+        },
+      ],
+    });
+
+    renderApp();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'enabled-skill', description: 'Enabled' },
+    ]);
+  });
+
   it.each([404, 410])(
     'shows a missing-session empty state with a new-session action for %d',
     async (status) => {

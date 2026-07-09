@@ -9,6 +9,7 @@ import { SUPPORTED_LANGUAGES } from '../../i18n/index.js';
 import { hasConfiguredBatchVoiceTranscriptionModel } from '../../services/voice-service.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getAdvertisedServeFeatures } from '../capabilities.js';
+import { isBrowserAutomationMcpAvailable } from '../cdp-mcp-command.js';
 import type { ServeOptions } from '../types.js';
 
 // Keep in sync with acp-bridge bridge.ts and SDK DaemonClient.ts.
@@ -40,7 +41,9 @@ interface CreateServeFeaturesDeps {
   opts: ServeOptions;
   boundWorkspace: string;
   persistSettingAvailable: boolean;
+  sessionArtifactsPersistenceAvailable: boolean;
   reloadAvailable: boolean;
+  channelReloadAvailable: boolean;
   sessionShellCommandEnabled: boolean;
   multiWorkspaceSessionsEnabled: boolean;
 }
@@ -58,7 +61,9 @@ export function createServeFeatures(
     opts,
     boundWorkspace,
     persistSettingAvailable,
+    sessionArtifactsPersistenceAvailable,
     reloadAvailable,
+    channelReloadAvailable,
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
   } = deps;
@@ -89,11 +94,17 @@ export function createServeFeatures(
           : {}),
         persistSettingAvailable,
         sessionShellCommandEnabled,
+        sessionArtifactsPersistenceAvailable,
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
+        channelReloadAvailable,
         multiWorkspaceSessionsEnabled,
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
+        browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
+          opts,
+          process.env,
+        ),
         voiceTranscriptionAvailable: getCachedVoiceTranscriptionAvailable(),
         // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
         // on). A configured token no longer suppresses it — the browser carries

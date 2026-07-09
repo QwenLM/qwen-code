@@ -12,14 +12,14 @@ import {
 } from './backgroundWorkUtils.js';
 
 function createMockConfig(overrides?: {
-  hasUnfinalizedTasks?: boolean;
+  hasRunningTasks?: boolean;
   runningMonitors?: unknown[];
   hasRunningEntries?: boolean;
   hasRunningWorkflows?: boolean;
 }): Config {
   return {
     getBackgroundTaskRegistry: () => ({
-      hasUnfinalizedTasks: () => overrides?.hasUnfinalizedTasks ?? false,
+      hasRunningTasks: () => overrides?.hasRunningTasks ?? false,
       reset: vi.fn(),
     }),
     getMonitorRegistry: () => ({
@@ -42,11 +42,13 @@ describe('hasBlockingBackgroundWork', () => {
     expect(hasBlockingBackgroundWork(createMockConfig())).toBe(false);
   });
 
-  it('returns true when background tasks are unfinalized', () => {
+  // #5949: the gate keys off hasRunningTasks(), NOT hasUnfinalizedTasks()
+  // — a cancelled task whose finalize callback hasn't fired yet must not
+  // block /clear or session resume (both abort-and-reset right after the
+  // gate, suppressing the pending notification anyway).
+  it('returns true when background tasks are still running', () => {
     expect(
-      hasBlockingBackgroundWork(
-        createMockConfig({ hasUnfinalizedTasks: true }),
-      ),
+      hasBlockingBackgroundWork(createMockConfig({ hasRunningTasks: true })),
     ).toBe(true);
   });
 
@@ -75,10 +77,10 @@ describe('hasBlockingBackgroundWork', () => {
     ).toBe(true);
   });
 
-  it('short-circuits: does not check monitors or shells when tasks are unfinalized', () => {
+  it('short-circuits: does not check monitors or shells when tasks are running', () => {
     const config = {
       getBackgroundTaskRegistry: () => ({
-        hasUnfinalizedTasks: () => true,
+        hasRunningTasks: () => true,
         reset: vi.fn(),
       }),
       getMonitorRegistry: () => {
@@ -95,7 +97,7 @@ describe('hasBlockingBackgroundWork', () => {
   it('short-circuits: does not check shells when monitors are running', () => {
     const config = {
       getBackgroundTaskRegistry: () => ({
-        hasUnfinalizedTasks: () => false,
+        hasRunningTasks: () => false,
         reset: vi.fn(),
       }),
       getMonitorRegistry: () => ({

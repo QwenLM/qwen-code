@@ -114,6 +114,22 @@ Attaches to existing sessions are NOT counted toward the cap, so an idle daemon'
 
 Fired when a `session/load` is issued for an id that already has a `session/resume` in flight (or vice versa). Wait at least `Retry-After` seconds and retry — the underlying restore completes within `initTimeoutMs` (default 10s). Same-action races (`load` vs `load`, `resume` vs `resume`) coalesce instead of erroring.
 
+`SessionWorkspaceConflictError` — emitted by `POST /session/:id/load` and `POST /session/:id/resume` when the requested `cwd` targets one registered workspace but the same session id is already live or being restored by another runtime — returns `409` with:
+
+```json
+{
+  "error": "Session \"<sid>\" is already live or restoring in another workspace runtime.",
+  "code": "session_workspace_conflict",
+  "sessionId": "<sid>",
+  "workspaceCwd": "/requested/workspace",
+  "workspaceId": "requested-workspace-id",
+  "liveWorkspaceCwd": "/live/owner/workspace",
+  "liveWorkspaceId": "live-owner-workspace-id"
+}
+```
+
+Clients should retry with the owning workspace or wait for the in-flight restore to finish before restoring the id into a different workspace. Same-workspace restore races continue to use the bridge's `restore_in_progress` / coalescing behavior.
+
 `SessionArchivedError` is emitted when a caller tries to load or resume a session whose JSONL is under `chats/archive/`:
 
 ```json
@@ -170,7 +186,9 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'permission_mediation', 'prompt_absolute_deadline', 'writer_idle_timeout',
  'non_blocking_prompt', 'session_language', 'session_rewind',
  'workspace_hooks', 'session_hooks', 'workspace_extensions',
- 'session_branch', 'rate_limit', 'workspace_reload']
+ 'session_branch', 'rate_limit', 'workspace_reload',
+ 'multi_workspace_sessions', 'workspace_qualified_rest_core',
+ 'client_mcp_over_ws', 'cdp_tunnel_over_ws', 'browser_automation_mcp']
 ```
 
 > Conditional tags appear only when their matching deployment toggle is on (see the table below). F3's `permission_mediation` tag is always-on and carries `modes: ['first-responder', 'designated', 'consensus', 'local-only']` so SDK clients can introspect the build-supported set; the runtime-active strategy is at `body.policy.permission`.
@@ -191,6 +209,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived.
 
+`workspace_qualified_rest_core` advertises plural core REST routes under `/workspaces/:workspace/...`. The selector resolves as exact workspace id first, then as a URL-encoded absolute cwd after canonicalization. On single-workspace daemons, `workspaces[]` is absent unless `multi_workspace_sessions` is also advertised, so clients use `capabilities.workspaceCwd` as the cwd selector. Trust status and trust request routes are available for registered untrusted workspaces; file read routes follow the existing filesystem read policy. File write routes and all other plural core routes require a trusted workspace and return `403 { code: "untrusted_workspace" }` when the selected runtime is untrusted. This plural trust gate is intentionally stricter than some legacy primary-workspace read routes, which keep their existing compatibility behavior and are not drop-in replacements. This tag covers the core file, status, settings, permissions, trust, lifecycle, MCP control, tool toggle, memory, workspace agent CRUD, and session storage surfaces. It does not cover auth, voice, extensions, ACP/WebSocket transport, or channel-worker routing.
+
 `session_lsp` advertises `GET /session/:id/lsp`, the read-only structured LSP status snapshot for daemon clients. Older daemons return `404`; pre-flight this tag before exposing remote LSP status.
 
 `session_status` advertises `GET /session/:id/status`, the live bridge summary for a single session by id (`clientCount` / `hasActivePrompt` and the core fields). Older daemons return `404`; pre-flight this tag before polling a single session's status instead of scanning the full session list.
@@ -210,6 +230,10 @@ The write tag means the route contract exists; it does not mean the current
 deployment is open for anonymous mutation. Write/edit are strict mutation
 routes and require a configured bearer token even on loopback.
 
+When `workspace_qualified_rest_core` is advertised, the same file surface is also available at `/workspaces/:workspace/file`, `/workspaces/:workspace/file/bytes`, `/workspaces/:workspace/stat`, `/workspaces/:workspace/list`, `/workspaces/:workspace/glob`, `/workspaces/:workspace/file/write`, and `/workspaces/:workspace/file/edit`.
+
+The same tag also exposes workspace-qualified project-agent CRUD at `/workspaces/:workspace/agents` and `/workspaces/:workspace/agents/:agentType`. These plural routes only read or mutate project-level agents for the selected workspace; `global` and `user` scope requests return `400 { code: "global_scope_not_supported_for_workspace_route" }`. Workspace-less `/workspace/agents` routes retain their existing primary-workspace behavior and remain the only REST surface for user-level agent scope.
+
 `daemon_status` advertises `GET /daemon/status`, the consolidated read-only
 operator diagnostic snapshot documented below.
 
@@ -227,6 +251,9 @@ operator diagnostic snapshot documented below.
 | `session_shell_command`    | session shell execution is explicitly enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `rate_limit`               | `--rate-limit` / `QWEN_SERVE_RATE_LIMIT=1` / `ServeOptions.rateLimit` is enabled.                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `workspace_reload`         | workspace reload support is available in the embedded route configuration.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `client_mcp_over_ws`       | the daemon accepts client-hosted MCP servers over the ACP WebSocket. This is an explicit opt-in, not required for the CDP tunnel path.                                                                                                                                                                                                                                                                                                                                                                          |
+| `cdp_tunnel_over_ws`       | the daemon exposes the reverse `/cdp` WebSocket tunnel, either by explicit opt-in or because a Chrome extension origin is allowed. This only means the tunnel exists; it does not mean Chrome DevTools MCP tools are registered.                                                                                                                                                                                                                                                                                |
+| `browser_automation_mcp`   | ACP HTTP is enabled, `cdp_tunnel_over_ws` is active, no bearer token blocks `/cdp`, and `QWEN_CDP_MCP_COMMAND` names an external stdio MCP adapter. The main CLI package does not bundle a browser automation adapter; without this tag, Chrome extension side-panel chat may still work, but console/network/screenshot/click tools are not registered by default.                                                                                                                                             |
 
 `mcp_guardrails` is **not** in this conditional table — it's an always-on tag, advertised whenever the binary supports the new `/workspace/mcp` budget fields, regardless of whether the operator configured a budget. Operators who haven't set `--mcp-client-budget` still get the new fields (with `budgetMode: 'off'`, `budgets: []`).
 
@@ -415,7 +442,13 @@ the daemon log path; `full` may include it for authenticated operators.
     "supported": ["v1"]
   },
   "mode": "http-bridge",
-  "features": ["health", "daemon_status", "capabilities", "multi_workspace_sessions", "..."],
+  "features": [
+    "health",
+    "daemon_status",
+    "capabilities",
+    "multi_workspace_sessions",
+    "..."
+  ],
   "limits": {
     "maxPendingPromptsPerSession": 5,
     "maxSessionsPerWorkspace": 20,
@@ -457,7 +490,7 @@ do not mutate state, and do not change the serve protocol version. Workspace
 status routes intentionally do **not** start the ACP child process just because
 a client polls a GET route: if the daemon is idle, they return
 `initialized: false` with an empty snapshot. Session status routes require a
-live session and use the standard `404 SessionNotFoundError` shape for unknown
+live session and return `404 { code: "session_not_found", ... }` for unknown
 ids.
 
 Capability tags:
@@ -1258,9 +1291,9 @@ Request:
 }
 ```
 
-| Field | Required | Notes                                                                                                                                                                                                                                |
-| ----- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `cwd` | no       | Same canonicalization + `workspace_mismatch` rules as `POST /session`. Omit to inherit `/capabilities.workspaceCwd`. `mcpServers` is intentionally NOT accepted here — daemon-wide MCP is settings-driven (matches `POST /session`). |
+| Field | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ----- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `cwd` | no       | Same canonicalization + `workspace_mismatch` rules as `POST /session`. Omit to inherit `/capabilities.workspaceCwd`. When `features` contains `multi_workspace_sessions`, callers may pass any trusted registered `workspaces[].cwd`; untrusted non-primary workspaces return `403 untrusted_workspace`. `mcpServers` is intentionally NOT accepted here — daemon-wide MCP is settings-driven (matches `POST /session`). |
 
 Response:
 
@@ -1287,8 +1320,10 @@ Response:
 
 - `404` — persisted session id doesn't exist (`SessionNotFoundError`).
 - `400` — `workspace_mismatch` (same shape as `POST /session`).
+- `403` — `untrusted_workspace` when `cwd` targets an untrusted non-primary workspace.
 - `503` — `session_limit_exceeded` (counts against `--max-sessions`; in-flight restores are accounted for too).
 - `409` — `restore_in_progress` (a `session/resume` for the same id is already in flight). `Retry-After: 5`. Same-action races (two concurrent `session/load` for the same id) coalesce — exactly one returns `attached: false`, the rest return `attached: true` with the same `state`.
+- `409` — `session_workspace_conflict` when the same session id is already live or being restored by another workspace runtime.
 - `409` — `session_archived` when the id exists only under `chats/archive/`; call `POST /sessions/unarchive` before `load` or `resume`.
 - `409` — `session_archiving` when archive or unarchive is in flight for the same id. `Retry-After: 5`.
 - `409` — `session_conflict` when the id exists in both `chats/` and `chats/archive/`; delete the session with `POST /sessions/delete` before loading.
@@ -1303,14 +1338,17 @@ Use `/load` when the client has no history rendered (cold reconnect, picker → 
 
 > ⚠️ **Why is `unstable_session_resume` still advertised?** The daemon's HTTP route and `session_resume` capability are stable for v1, but the bridge still calls ACP's `connection.unstable_resumeSession`. The old tag remains only so SDKs that shipped before `session_resume` can keep working.
 
-### `GET /workspace/:id/sessions`
+### `GET /workspace/:id/sessions` and `GET /workspaces/:workspace/sessions`
 
-List persisted sessions whose canonical workspace matches `:id` (URL-encoded absolute cwd). The default list is active sessions from `chats/`; pass `archiveState=archived` to list archived sessions from `chats/archive/`. `archiveState=all` is not supported in v1. The default response and numeric `cursor` semantics are unchanged by `session_organization`.
+List sessions whose canonical workspace matches `:id` or `:workspace`. The path parameter first resolves as an exact workspace id and then as a URL-encoded absolute cwd. `GET /workspaces/:workspace/sessions` has the same response shape but follows the plural core trust gate. Primary workspaces include the existing persisted/live merge: the default list is active sessions from `chats/`; pass `archiveState=archived` to list archived sessions from `chats/archive/`. Trusted non-primary workspaces include active persisted sessions from their own `chats/` store and merge matching live summaries without duplicates; if no active persisted sessions exist, the route preserves the previous live-only cursor behavior. Non-primary workspaces still reject archived, organized, or grouped queries. Untrusted workspaces on plural routes return `403 { code: "untrusted_workspace" }`; legacy primary routes keep their existing compatibility behavior. `archiveState=all` is not supported in v1. Primary and persisted-backed lists keep the existing numeric `cursor` semantics; the no-persisted non-primary live fallback keeps its existing opaque live cursor.
 
 ```bash
 curl http://127.0.0.1:4170/workspace/$(jq -rn --arg c "$PWD" '$c|@uri')/sessions
 curl http://127.0.0.1:4170/workspace/$(jq -rn --arg c "$PWD" '$c|@uri')/sessions?archiveState=archived
+curl http://127.0.0.1:4170/workspaces/<workspace-id>/sessions
 ```
+
+When `workspace_qualified_rest_core` is advertised, workspace-scoped session batch operations and group CRUD are available under `/workspaces/:workspace/sessions/{delete,archive,unarchive}` and `/workspaces/:workspace/session-groups`. Workspace-less batch routes remain primary-workspace-only for compatibility.
 
 Query parameters:
 

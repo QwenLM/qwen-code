@@ -9,11 +9,15 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import {
+  acquireLock,
   rollbackStandaloneUpdate,
   ensureBinWrapper,
   ensurePathInShellRc,
+  cleanupFirstTimeMigrationArtifacts,
   performStandaloneUpdate,
   isSafeTarEntryPath,
+  isSafeTarEntry,
+  isSafeTarLinkTarget,
 } from './standalone-update.js';
 
 describe('standalone-update', () => {
@@ -143,7 +147,7 @@ describe('standalone-update', () => {
         const wrapperPath = path.join(tempDir, '.local', 'bin', 'qwen');
         expect(fs.existsSync(wrapperPath)).toBe(true);
         const content = fs.readFileSync(wrapperPath, 'utf-8');
-        expect(content).toContain('#!/bin/sh');
+        expect(content).toContain('#!/usr/bin/env sh');
         expect(content).toContain(standaloneDir);
         const mode = fs.statSync(wrapperPath).mode;
         expect(mode & 0o111).toBeGreaterThan(0);
@@ -162,6 +166,66 @@ describe('standalone-update', () => {
       const content = fs.readFileSync(wrapperPath, 'utf-8');
       expect(content).toContain('@echo off');
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'escapes single quotes in Unix wrapper paths',
+      () => {
+        const libDir = path.join(tempDir, "o'brien", '.local', 'lib');
+        const standaloneDir = path.join(libDir, 'qwen-code');
+        fs.mkdirSync(standaloneDir, { recursive: true });
+
+        const origHome = process.env['HOME'];
+        const origShell = process.env['SHELL'];
+        process.env['HOME'] = tempDir;
+        process.env['SHELL'] = '/bin/zsh';
+        try {
+          ensureBinWrapper(standaloneDir, 'linux-x64');
+        } finally {
+          process.env['HOME'] = origHome;
+          process.env['SHELL'] = origShell;
+        }
+
+        const wrapperPath = path.join(
+          tempDir,
+          "o'brien",
+          '.local',
+          'bin',
+          'qwen',
+        );
+        const content = fs.readFileSync(wrapperPath, 'utf-8');
+        expect(content).toContain("o'\\''brien");
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'allows shell metacharacters in single-quoted Unix wrapper paths',
+      () => {
+        const libDir = path.join(tempDir, 'with$dollar', '.local', 'lib');
+        const standaloneDir = path.join(libDir, 'qwen-code');
+        fs.mkdirSync(standaloneDir, { recursive: true });
+
+        const origHome = process.env['HOME'];
+        const origShell = process.env['SHELL'];
+        process.env['HOME'] = tempDir;
+        process.env['SHELL'] = '/bin/zsh';
+        try {
+          ensureBinWrapper(standaloneDir, 'linux-x64');
+        } finally {
+          process.env['HOME'] = origHome;
+          process.env['SHELL'] = origShell;
+        }
+
+        const wrapperPath = path.join(
+          tempDir,
+          'with$dollar',
+          '.local',
+          'bin',
+          'qwen',
+        );
+        const content = fs.readFileSync(wrapperPath, 'utf-8');
+        expect(content).toContain('with$dollar');
+      },
+    );
 
     it.skipIf(process.platform === 'win32')(
       'does not overwrite existing wrapper',
@@ -189,6 +253,19 @@ describe('standalone-update', () => {
           process.env['HOME'] = origHome;
           process.env['SHELL'] = origShell;
         }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'throws when wrapper creation fails safety validation',
+      () => {
+        const libDir = path.join(tempDir, 'bad\npath', '.local', 'lib');
+        const standaloneDir = path.join(libDir, 'qwen-code');
+        fs.mkdirSync(standaloneDir, { recursive: true });
+
+        expect(() => ensureBinWrapper(standaloneDir, 'linux-x64')).toThrow(
+          'Failed to create bin wrapper',
+        );
       },
     );
   });
@@ -259,6 +336,30 @@ describe('standalone-update', () => {
       // Clean up lock
       fs.unlinkSync(lockPath);
     });
+
+    it('rejects a stale lock when a Windows deferred swap is pending', async () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const parentDir = path.dirname(standaloneDir);
+      fs.mkdirSync(standaloneDir, { recursive: true });
+      fs.mkdirSync(`${standaloneDir}.new`);
+      fs.writeFileSync(
+        path.join(standaloneDir, 'manifest.json'),
+        JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          target: 'win-x64',
+        }),
+      );
+
+      const lockPath = path.join(parentDir, '.qwen-update.lock');
+      fs.writeFileSync(lockPath, '999999999');
+
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.0.0'),
+      ).rejects.toThrow('A previous update left a pending swap');
+
+      expect(fs.existsSync(lockPath)).toBe(true);
+      expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+    });
   });
 
   describe('isSafeTarEntryPath', () => {
@@ -266,6 +367,7 @@ describe('standalone-update', () => {
       expect(isSafeTarEntryPath('qwen-code/release..notes.md')).toBe(true);
       expect(isSafeTarEntryPath('qwen-code/node/lib/foo..bar')).toBe(true);
       expect(isSafeTarEntryPath('qwen-code/.../file.txt')).toBe(true);
+      expect(isSafeTarEntryPath('./qwen-code/bin/qwen')).toBe(true);
     });
 
     it('rejects parent-directory segments and absolute paths', () => {
@@ -278,6 +380,141 @@ describe('standalone-update', () => {
       );
       expect(isSafeTarEntryPath('')).toBe(false);
     });
+  });
+
+  describe('isSafeTarLinkTarget', () => {
+    it('allows relative link targets inside the extraction directory', () => {
+      const dest = path.join(tempDir, 'extract');
+      expect(
+        isSafeTarLinkTarget('qwen-code/bin/qwen', '../lib/cli.js', dest),
+      ).toBe(true);
+      expect(isSafeTarLinkTarget('qwen-code/bin/qwen', './qwen', dest)).toBe(
+        true,
+      );
+    });
+
+    it('allows symlink targets in child directories starting with two dots', () => {
+      const dest = path.join(tempDir, 'extract');
+      expect(
+        isSafeTarLinkTarget('qwen-code/bin/qwen', '../..hidden/tool', dest),
+      ).toBe(true);
+    });
+
+    it('rejects symlink targets outside the extraction directory', () => {
+      const dest = path.join(tempDir, 'extract');
+      expect(
+        isSafeTarLinkTarget('qwen-code/bin/qwen', '../../../etc/passwd', dest),
+      ).toBe(false);
+      expect(
+        isSafeTarLinkTarget('qwen-code/bin/qwen', '/etc/passwd', dest),
+      ).toBe(false);
+      expect(
+        isSafeTarLinkTarget(
+          'qwen-code/bin/qwen',
+          'C:\\Windows\\System32',
+          dest,
+        ),
+      ).toBe(false);
+    });
+
+    it('rejects symlink targets outside the archive root that will be installed', () => {
+      const dest = path.join(tempDir, 'extract');
+      expect(
+        isSafeTarLinkTarget('qwen-code/bin/qwen', '../../shared/node', dest),
+      ).toBe(false);
+      expect(
+        isSafeTarLinkTarget('./qwen-code/bin/qwen', '../../shared/node', dest),
+      ).toBe(false);
+    });
+  });
+
+  describe('isSafeTarEntry', () => {
+    it('rejects hardlinks outright', () => {
+      const dest = path.join(tempDir, 'extract');
+      expect(
+        isSafeTarEntry(
+          'qwen-code/bin/qwen',
+          { type: 'Link', linkpath: '../poc.txt' },
+          dest,
+        ),
+      ).toBe(false);
+    });
+
+    it('allows safe regular entries and safe symlinks', () => {
+      const dest = path.join(tempDir, 'extract');
+      expect(isSafeTarEntry('qwen-code/bin/qwen', { type: 'File' }, dest)).toBe(
+        true,
+      );
+      expect(isSafeTarEntry('qwen-code/lib', { type: 'Directory' }, dest)).toBe(
+        true,
+      );
+      expect(
+        isSafeTarEntry(
+          'qwen-code/bin/qwen',
+          { type: 'SymbolicLink', linkpath: '../lib/cli.js' },
+          dest,
+        ),
+      ).toBe(true);
+    });
+
+    it('accepts fs stats entries from tar filter typing', () => {
+      const dest = path.join(tempDir, 'extract');
+      const filePath = path.join(tempDir, 'entry.txt');
+      fs.writeFileSync(filePath, 'entry');
+
+      expect(
+        isSafeTarEntry('qwen-code/bin/qwen', fs.statSync(filePath), dest),
+      ).toBe(true);
+    });
+
+    it('rejects special archive entry types', () => {
+      const dest = path.join(tempDir, 'extract');
+      for (const type of [
+        'BlockDevice',
+        'CharacterDevice',
+        'FIFO',
+        'ContiguousFile',
+      ]) {
+        expect(isSafeTarEntry('qwen-code/bin/qwen', { type }, dest)).toBe(
+          false,
+        );
+      }
+    });
+  });
+
+  describe('cleanupFirstTimeMigrationArtifacts', () => {
+    it.skipIf(process.platform === 'win32')(
+      'removes the wrapper and PATH block created during a failed migration',
+      () => {
+        const originalHome = process.env['HOME'];
+        const originalShell = process.env['SHELL'];
+        const home = path.join(tempDir, 'home');
+        process.env['HOME'] = home;
+        process.env['SHELL'] = '/bin/bash';
+
+        try {
+          const standaloneDir = path.join(home, '.local', 'lib', 'qwen-code');
+          const artifacts = ensureBinWrapper(standaloneDir, 'linux-x64');
+          const wrapperPath = path.join(home, '.local', 'bin', 'qwen');
+          const bashrc = path.join(home, '.bashrc');
+
+          expect(fs.existsSync(wrapperPath)).toBe(true);
+          expect(fs.readFileSync(bashrc, 'utf-8')).toContain(
+            '# Qwen Code PATH block begin',
+          );
+
+          cleanupFirstTimeMigrationArtifacts(artifacts);
+
+          expect(fs.existsSync(wrapperPath)).toBe(false);
+          expect(fs.readFileSync(bashrc, 'utf-8')).not.toContain(
+            '# Qwen Code PATH block begin',
+          );
+        } finally {
+          process.env['HOME'] = originalHome;
+          process.env['SHELL'] = originalShell;
+        }
+      },
+    );
   });
 
   describe('rollbackStandaloneUpdate — concurrent lock protection', () => {
@@ -318,6 +555,43 @@ describe('standalone-update', () => {
     });
   });
 
+  describe('acquireLock deferred marker handling', () => {
+    it('rejects lock takeover while a deferred bat process is alive', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.writeFileSync(lockPath, '999999999');
+      fs.writeFileSync(`${standaloneDir}.deferred`, String(process.pid));
+
+      expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+        'A previous update is still being applied',
+      );
+      expect(fs.existsSync(lockPath)).toBe(true);
+      expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
+    });
+
+    it('cleans a stale deferred marker before taking over a dead lock', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.writeFileSync(lockPath, '999999999');
+      fs.writeFileSync(`${standaloneDir}.deferred`, '999999998');
+
+      expect(acquireLock(lockPath, standaloneDir)).toBe(true);
+      expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(false);
+      expect(fs.readFileSync(lockPath, 'utf-8')).toBe(String(process.pid));
+    });
+
+    it('cleans an unparseable deferred marker before taking over a dead lock', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.writeFileSync(lockPath, '999999999');
+      fs.writeFileSync(`${standaloneDir}.deferred`, 'not-a-pid');
+
+      expect(acquireLock(lockPath, standaloneDir)).toBe(true);
+      expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(false);
+      expect(fs.readFileSync(lockPath, 'utf-8')).toBe(String(process.pid));
+    });
+  });
+
   describe.skipIf(process.platform === 'win32')('ensurePathInShellRc', () => {
     it('appends PATH export to zshrc when SHELL is zsh', () => {
       const binDir = path.join(tempDir, 'bin');
@@ -332,15 +606,41 @@ describe('standalone-update', () => {
       try {
         ensurePathInShellRc(binDir);
         const content = fs.readFileSync(zshrc, 'utf-8');
-        expect(content).toContain('# Added by Qwen Code standalone installer');
-        expect(content).toContain(`export PATH="${binDir}:$PATH"`);
+        expect(content).toContain('# Qwen Code PATH block begin');
+        expect(content).toContain('# Qwen Code PATH block end');
+        // Uses single-quoted paths matching install-qwen-standalone.sh shell_quote
+        expect(content).toContain(`export PATH='${binDir}':$PATH`);
       } finally {
         process.env['SHELL'] = origShell;
         process.env['HOME'] = origHome;
       }
     });
 
-    it('skips if marker already in rc file', () => {
+    it('skips if block markers already in rc file', () => {
+      const binDir = path.join(tempDir, 'bin');
+      const zshrc = path.join(tempDir, '.zshrc');
+      fs.writeFileSync(
+        zshrc,
+        `# Qwen Code PATH block begin\nexport PATH='${binDir}':$PATH\n# Qwen Code PATH block end\n`,
+      );
+
+      const origShell = process.env['SHELL'];
+      const origHome = process.env['HOME'];
+      process.env['SHELL'] = '/bin/zsh';
+      process.env['HOME'] = tempDir;
+
+      try {
+        ensurePathInShellRc(binDir);
+        const content = fs.readFileSync(zshrc, 'utf-8');
+        const matches = content.match(/# Qwen Code PATH block begin/g);
+        expect(matches).toHaveLength(1);
+      } finally {
+        process.env['SHELL'] = origShell;
+        process.env['HOME'] = origHome;
+      }
+    });
+
+    it('skips if legacy marker already in rc file', () => {
       const binDir = path.join(tempDir, 'bin');
       const zshrc = path.join(tempDir, '.zshrc');
       fs.writeFileSync(
@@ -356,17 +656,62 @@ describe('standalone-update', () => {
       try {
         ensurePathInShellRc(binDir);
         const content = fs.readFileSync(zshrc, 'utf-8');
-        const matches = content.match(
-          /# Added by Qwen Code standalone installer/g,
-        );
+        const matches = content.match(/export PATH/g);
         expect(matches).toHaveLength(1);
+        expect(content).not.toContain('# Qwen Code PATH block begin');
       } finally {
         process.env['SHELL'] = origShell;
         process.env['HOME'] = origHome;
       }
     });
 
-    it('appends fish_add_path for fish shell', () => {
+    it('uses .bashrc before .bash_profile for bash shells', () => {
+      const binDir = path.join(tempDir, 'bin');
+      const bashrc = path.join(tempDir, '.bashrc');
+      const profile = path.join(tempDir, '.bash_profile');
+      fs.writeFileSync(bashrc, '# bashrc\n');
+      fs.writeFileSync(profile, '# profile\n');
+
+      const origShell = process.env['SHELL'];
+      const origHome = process.env['HOME'];
+      process.env['SHELL'] = '/bin/bash';
+      process.env['HOME'] = tempDir;
+
+      try {
+        ensurePathInShellRc(binDir);
+        expect(fs.readFileSync(bashrc, 'utf-8')).toContain(
+          '# Qwen Code PATH block begin',
+        );
+        expect(fs.readFileSync(profile, 'utf-8')).toBe('# profile\n');
+      } finally {
+        process.env['SHELL'] = origShell;
+        process.env['HOME'] = origHome;
+      }
+    });
+
+    it('falls back to .bash_profile for bash when .bashrc is absent', () => {
+      const binDir = path.join(tempDir, 'bin');
+      const profile = path.join(tempDir, '.bash_profile');
+      fs.writeFileSync(profile, '# profile\n');
+
+      const origShell = process.env['SHELL'];
+      const origHome = process.env['HOME'];
+      process.env['SHELL'] = '/bin/bash';
+      process.env['HOME'] = tempDir;
+
+      try {
+        ensurePathInShellRc(binDir);
+        expect(fs.readFileSync(profile, 'utf-8')).toContain(
+          '# Qwen Code PATH block begin',
+        );
+        expect(fs.existsSync(path.join(tempDir, '.bashrc'))).toBe(false);
+      } finally {
+        process.env['SHELL'] = origShell;
+        process.env['HOME'] = origHome;
+      }
+    });
+
+    it('appends set -gx PATH for fish shell (matching install script)', () => {
       const binDir = path.join(tempDir, 'bin');
       const fishDir = path.join(tempDir, '.config', 'fish');
       const fishConfig = path.join(fishDir, 'config.fish');
@@ -379,7 +724,10 @@ describe('standalone-update', () => {
       try {
         ensurePathInShellRc(binDir);
         const content = fs.readFileSync(fishConfig, 'utf-8');
-        expect(content).toContain('fish_add_path');
+        // Matches install-qwen-standalone.sh's maybe_update_shell_path fish branch
+        expect(content).toContain('set -gx PATH');
+        expect(content).toContain('# Qwen Code PATH block begin');
+        expect(content).toContain('# Qwen Code PATH block end');
         expect(content).toContain(binDir);
       } finally {
         process.env['SHELL'] = origShell;
@@ -387,8 +735,99 @@ describe('standalone-update', () => {
       }
     });
 
-    it('rejects binDir with shell metacharacters', () => {
+    it('escapes single quotes in fish PATH entries', () => {
+      const binDir = path.join(tempDir, "o'brien", 'bin');
+      const fishDir = path.join(tempDir, '.config', 'fish');
+      const fishConfig = path.join(fishDir, 'config.fish');
+      fs.mkdirSync(fishDir, { recursive: true });
+      fs.writeFileSync(fishConfig, '# existing config\n');
+      const origShell = process.env['SHELL'];
+      const origHome = process.env['HOME'];
+      process.env['SHELL'] = '/usr/bin/fish';
+      process.env['HOME'] = tempDir;
+      try {
+        ensurePathInShellRc(binDir);
+        const content = fs.readFileSync(fishConfig, 'utf-8');
+        expect(content).toContain("set -gx PATH '");
+        expect(content).toContain("o'\\''brien");
+      } finally {
+        process.env['SHELL'] = origShell;
+        process.env['HOME'] = origHome;
+      }
+    });
+
+    it('creates fish config parent directories before appending PATH', () => {
+      const binDir = path.join(tempDir, 'bin');
+      const fishConfig = path.join(tempDir, '.config', 'fish', 'config.fish');
+      const origShell = process.env['SHELL'];
+      const origHome = process.env['HOME'];
+      process.env['SHELL'] = '/usr/bin/fish';
+      process.env['HOME'] = tempDir;
+      try {
+        expect(fs.existsSync(path.dirname(fishConfig))).toBe(false);
+        ensurePathInShellRc(binDir);
+        const content = fs.readFileSync(fishConfig, 'utf-8');
+        expect(content).toContain('set -gx PATH');
+        expect(content).toContain(binDir);
+      } finally {
+        process.env['SHELL'] = origShell;
+        process.env['HOME'] = origHome;
+      }
+    });
+
+    it('allows shell metacharacters in single-quoted PATH entries', () => {
       const binDir = path.join(tempDir, 'bin$(evil)');
+      const zshrc = path.join(tempDir, '.zshrc');
+      fs.writeFileSync(zshrc, '# existing config\n');
+      const origShell = process.env['SHELL'];
+      const origHome = process.env['HOME'];
+      process.env['SHELL'] = '/bin/zsh';
+      process.env['HOME'] = tempDir;
+      try {
+        ensurePathInShellRc(binDir);
+        expect(fs.readFileSync(zshrc, 'utf-8')).toContain(
+          `export PATH='${binDir}':$PATH`,
+        );
+      } finally {
+        process.env['SHELL'] = origShell;
+        process.env['HOME'] = origHome;
+      }
+    });
+
+    it('rejects binDir with newlines', () => {
+      const binDir = path.join(tempDir, 'bin\nevil');
+      const origShell = process.env['SHELL'];
+      const origHome = process.env['HOME'];
+      process.env['SHELL'] = '/bin/zsh';
+      process.env['HOME'] = tempDir;
+      try {
+        expect(() => ensurePathInShellRc(binDir)).toThrow(
+          'unsafe for shell embedding',
+        );
+      } finally {
+        process.env['SHELL'] = origShell;
+        process.env['HOME'] = origHome;
+      }
+    });
+
+    it('rejects binDir with null bytes', () => {
+      const binDir = path.join(tempDir, 'bin\0evil');
+      const origShell = process.env['SHELL'];
+      const origHome = process.env['HOME'];
+      process.env['SHELL'] = '/bin/zsh';
+      process.env['HOME'] = tempDir;
+      try {
+        expect(() => ensurePathInShellRc(binDir)).toThrow(
+          'unsafe for shell embedding',
+        );
+      } finally {
+        process.env['SHELL'] = origShell;
+        process.env['HOME'] = origHome;
+      }
+    });
+
+    it('rejects binDir with carriage returns', () => {
+      const binDir = path.join(tempDir, 'bin\revil');
       const origShell = process.env['SHELL'];
       const origHome = process.env['HOME'];
       process.env['SHELL'] = '/bin/zsh';

@@ -58,6 +58,8 @@ export type {
   BridgeFreshSessionAdmission,
   BridgeFreshSessionAdmissionContext,
   BridgeFreshSessionReservation,
+  BridgeSessionLifecycle,
+  BridgeSessionLifecycleEvent,
   BridgeOptions,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge/bridgeOptions';
@@ -128,4 +130,7 @@ export {
   canonicalizeWorkspace,
 } from '@qwen-code/acp-bridge/workspacePaths';
 
-export { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
+export {
+  SessionArtifactAuthorizationError,
+  SessionArtifactValidationError,
+} from '@qwen-code/acp-bridge/sessionArtifacts';
