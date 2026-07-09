@@ -11,9 +11,21 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
+  SessionArtifactAuthorizationError,
   SessionArtifactStore,
   SessionArtifactValidationError,
 } from './sessionArtifacts.js';
+import {
+  stableSessionArtifactId,
+  type RebuiltSessionArtifactSnapshot,
+  type SessionArtifactEventRecordPayload,
+  type SessionArtifactSnapshotRecordPayload,
+} from '@qwen-code/qwen-code-core';
+
+vi.mock('@xterm/headless', () => ({
+  Terminal: class Terminal {},
+  default: { Terminal: class Terminal {} },
+}));
 
 describe('SessionArtifactStore', () => {
   let workspace: string;
@@ -74,6 +86,127 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('keeps live removal when durable tombstone persistence fails', async () => {
+    let failWrites = false;
+    const store = new SessionArtifactStore({
+      sessionId: 's1-remove-live-first',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          if (failWrites) {
+            throw new Error('disk full');
+          }
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Delete me', url: 'https://example.com/delete-me' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+
+    failWrites = true;
+    await expect(store.remove(artifactId)).resolves.toMatchObject({
+      changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
+      warnings: ['artifact removal not persisted; live removal kept'],
+    });
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+  });
+
+  it('gets artifacts and refreshes stale workspace status', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-get',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'hello');
+    const created = await store.upsertMany([
+      { title: 'Report', workspacePath: 'report.txt' },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+
+    await expect(store.get(artifactId)).resolves.toMatchObject({
+      id: artifactId,
+      title: 'Report',
+      status: 'available',
+      sizeBytes: 5,
+      metadata: {
+        'qwen.workspace.sha256': createHash('sha256')
+          .update('hello')
+          .digest('hex'),
+        'qwen.workspace.mtimeMs': expect.any(Number),
+      },
+    });
+    await expect(store.get('missing')).resolves.toBeUndefined();
+
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'HELLO');
+    await fs.utimes(
+      path.join(workspace, 'report.txt'),
+      new Date('2026-07-06T00:00:00.000Z'),
+      new Date('2026-07-06T00:00:00.000Z'),
+    );
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const changed = await store.get(artifactId);
+    expect(changed).toMatchObject({ id: artifactId, status: 'changed' });
+    expect(changed).toMatchObject({ sizeBytes: 5 });
+
+    await fs.rm(path.join(workspace, 'report.txt'));
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const missing = await store.get(artifactId);
+    expect(missing).toMatchObject({ id: artifactId, status: 'missing' });
+    expect(missing).not.toHaveProperty('sizeBytes');
+  });
+
+  it('does not count injected workspace hash metadata against the user metadata limit', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-workspace-metadata-budget',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'budget.txt'), 'budget');
+    const metadata = { payload: 'x'.repeat(4096) };
+    while (Buffer.byteLength(JSON.stringify(metadata), 'utf8') > 4096) {
+      metadata.payload = metadata.payload.slice(0, -1);
+    }
+
+    const created = await store.upsertMany(
+      [{ title: 'Budget', workspacePath: 'budget.txt', metadata }],
+      { strict: true },
+    );
+
+    expect(created.changes[0]?.artifact).toMatchObject({
+      metadata: {
+        payload: metadata.payload,
+        'qwen.workspace.sha256': createHash('sha256')
+          .update('budget')
+          .digest('hex'),
+        'qwen.workspace.mtimeMs': expect.any(Number),
+      },
+    });
+  });
+
+  it('strips user-supplied reserved workspace metadata when the file is missing', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-reserved-metadata',
+      workspaceCwd: workspace,
+    });
+
+    const result = await store.upsertMany([
+      {
+        title: 'Missing workspace artifact',
+        workspacePath: 'missing.txt',
+        metadata: {
+          'qwen.workspace.sha256': 'a'.repeat(64),
+          'qwen.workspace.mtimeMs': 123,
+          keep: true,
+        },
+      },
+    ]);
+
+    expect(result.changes[0]?.artifact?.metadata).toEqual({ keep: true });
+    expect(result.changes[0]?.artifact?.status).toBe('missing');
+  });
+
   it('prevents one client from removing another client retained artifact', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1-client-owner',
@@ -96,10 +229,10 @@ describe('SessionArtifactStore', () => {
     try {
       await expect(
         store.remove(artifactId, { clientId: 'client-b' }),
-      ).resolves.toMatchObject({ changes: [] });
-      await expect(store.remove(artifactId)).resolves.toMatchObject({
-        changes: [],
-      });
+      ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
+      await expect(store.remove(artifactId)).rejects.toBeInstanceOf(
+        SessionArtifactAuthorizationError,
+      );
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('remove_denied');
       expect(logged).toContain('client-a');
@@ -117,6 +250,281 @@ describe('SessionArtifactStore', () => {
     ).resolves.toMatchObject({
       changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
     });
+  });
+
+  it('prevents one client from upserting another client retained artifact', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-client-upsert-owner',
+      workspaceCwd: workspace,
+    });
+
+    const created = await store.upsertMany([
+      {
+        title: 'Client A link',
+        source: 'client',
+        clientId: 'client-a',
+        url: 'https://example.com/client-owned',
+        metadata: { owner: 'a' },
+      },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Client B rewrite',
+            source: 'client',
+            clientId: 'client-b',
+            url: 'https://example.com/client-owned',
+            metadata: { owner: 'b' },
+            retention: 'restorable',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: artifactId,
+          title: 'Client A link',
+          clientId: 'client-a',
+          metadata: { owner: 'a' },
+          retention: 'ephemeral',
+        },
+      ],
+    });
+  });
+
+  it('ignores explicit client retention flags from non-client sources', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-client-retained-source',
+      workspaceCwd: workspace,
+    });
+
+    const created = await store.upsertMany([
+      {
+        title: 'Tool retained',
+        source: 'tool',
+        clientRetained: true,
+        url: 'https://example.com/tool-retained',
+      },
+    ]);
+
+    expect(created.changes[0]?.artifact).toMatchObject({
+      source: 'tool',
+      clientRetained: false,
+    });
+  });
+
+  it('skips cross-client upsert conflicts without dropping the batch', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-client-upsert-owner-batch',
+      workspaceCwd: workspace,
+    });
+
+    const owned = await store.upsertMany([
+      {
+        title: 'Client A link',
+        source: 'client',
+        clientId: 'client-a',
+        url: 'https://example.com/client-owned-batch',
+        metadata: { owner: 'a' },
+      },
+    ]);
+    const ownedId = owned.changes[0]!.artifactId;
+
+    const result = await store.upsertMany([
+      {
+        title: 'Client B rewrite',
+        source: 'client',
+        clientId: 'client-b',
+        url: 'https://example.com/client-owned-batch',
+        metadata: { owner: 'b' },
+        retention: 'restorable',
+      },
+      {
+        title: 'Tool output',
+        url: 'https://example.com/tool-output',
+      },
+    ]);
+
+    expect(result.warnings).toEqual([
+      `artifact ${ownedId} is owned by a different client`,
+    ]);
+    expect(result.changes).toMatchObject([
+      {
+        action: 'created',
+        artifact: { title: 'Tool output' },
+      },
+    ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: ownedId,
+          title: 'Client A link',
+          clientId: 'client-a',
+          metadata: { owner: 'a' },
+        },
+        {
+          title: 'Tool output',
+        },
+      ],
+    });
+  });
+
+  it('keeps client ids live without writing them into durable artifact records', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's1-client-id-durable',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'Client artifact',
+          url: 'https://example.com/client',
+          source: 'client',
+          clientId: 'client-a',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(created.changes[0]?.artifact).toMatchObject({
+      clientId: 'client-a',
+    });
+    expect(events[0]?.changes[0]?.artifact).not.toHaveProperty('clientId');
+    expect(events[0]?.changes[0]?.artifact).not.toHaveProperty('restoreState');
+    expect(events[0]?.changes[0]?.artifact).not.toHaveProperty(
+      'persistenceWarning',
+    );
+  });
+
+  it('does not restore client ownership from legacy durable artifact records', async () => {
+    const owner = 'client-a';
+    const sessionId = 's1-restored-client-owner';
+    const url = 'https://example.com/owned-restored-artifact';
+    const artifactId = stableSessionArtifactId(sessionId, `url:${url}`);
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+
+    const legacyArtifact = {
+      id: artifactId,
+      kind: 'link',
+      storage: 'external_url',
+      source: 'client',
+      status: 'available',
+      title: 'Owned restored artifact',
+      url,
+      retention: 'restorable',
+      clientRetained: true,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+      clientId: owner,
+    } as RebuiltSessionArtifactSnapshot['artifacts'][number] & {
+      clientId: string;
+    };
+
+    await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [legacyArtifact],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    } satisfies RebuiltSessionArtifactSnapshot);
+
+    const listed = await store.list();
+    expect(listed.artifacts[0]).toMatchObject({ id: artifactId });
+    expect(listed.artifacts[0]).not.toHaveProperty('clientId');
+    await expect(
+      store.remove(artifactId, { clientId: 'client-b' }),
+    ).resolves.toMatchObject({
+      changes: [{ action: 'removed', artifactId }],
+    });
+  });
+
+  it('rolls back received sequence when strict upsert persistence fails', async () => {
+    let fail = false;
+    const store = new SessionArtifactStore({
+      sessionId: 's1-upsert-sequence-rollback',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          if (fail) throw new Error('persist failed');
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const sequenceState = store as unknown as { receivedSeq: number };
+
+    await store.upsertMany(
+      [{ title: 'First', url: 'https://example.com/first' }],
+      { strict: true },
+    );
+    expect(sequenceState.receivedSeq).toBe(1);
+
+    fail = true;
+    await expect(
+      store.upsertMany(
+        [{ title: 'Second', url: 'https://example.com/second' }],
+        { strict: true },
+      ),
+    ).rejects.toThrow('persist failed');
+    expect(sequenceState.receivedSeq).toBe(1);
+
+    fail = false;
+    await store.upsertMany(
+      [{ title: 'Third', url: 'https://example.com/third' }],
+      { strict: true },
+    );
+    expect(sequenceState.receivedSeq).toBe(2);
+  });
+
+  it('does not consume persistence sequence when strict event writes fail', async () => {
+    let fail = false;
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's1-persistence-sequence-rollback',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          if (fail) throw new Error('persist failed');
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+
+    fail = true;
+    await expect(
+      store.upsertMany(
+        [{ title: 'First', url: 'https://example.com/sequence-first' }],
+        { strict: true },
+      ),
+    ).rejects.toThrow('persist failed');
+
+    fail = false;
+    await store.upsertMany(
+      [{ title: 'Second', url: 'https://example.com/sequence-second' }],
+      { strict: true },
+    );
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ sequence: 1 });
   });
 
   it('serializes concurrent store operations', async () => {
@@ -204,8 +612,12 @@ describe('SessionArtifactStore', () => {
       { trustedPublisher: true },
     );
 
-    expect(upgraded.changes).toHaveLength(1);
+    expect(upgraded.changes).toHaveLength(2);
     expect(upgraded.changes[0]).toMatchObject({
+      action: 'removed',
+      reason: 'explicit',
+    });
+    expect(upgraded.changes[1]).toMatchObject({
       action: 'updated',
       artifact: {
         title: 'Published',
@@ -213,7 +625,7 @@ describe('SessionArtifactStore', () => {
         managedId: 'managed-1',
       },
     });
-    expect(upgraded.changes[0]?.artifact).not.toHaveProperty('workspacePath');
+    expect(upgraded.changes[1]?.artifact).not.toHaveProperty('workspacePath');
   });
 
   it('uses managedId as identity when published artifacts also include a url', async () => {
@@ -320,11 +732,15 @@ describe('SessionArtifactStore', () => {
       { strict: true, trustedPublisher: true },
     );
 
-    const publishedId = upgraded.changes[0]?.artifact?.id;
+    const publishedId = upgraded.changes[1]?.artifact?.id;
     expect(publishedId).toBeDefined();
     expect(publishedId).not.toBe(created.changes[0]?.artifactId);
-    expect(upgraded.changes).toHaveLength(1);
+    expect(upgraded.changes).toHaveLength(2);
     expect(upgraded.changes[0]).toMatchObject({
+      action: 'removed',
+      reason: 'explicit',
+    });
+    expect(upgraded.changes[1]).toMatchObject({
       action: 'updated',
       artifactId: publishedId,
       artifact: {
@@ -334,7 +750,7 @@ describe('SessionArtifactStore', () => {
         url: artifactUrl,
       },
     });
-    expect(upgraded.changes[0]?.artifact).not.toHaveProperty('workspacePath');
+    expect(upgraded.changes[1]?.artifact).not.toHaveProperty('workspacePath');
     expect((await store.list()).artifacts).toMatchObject([{ id: publishedId }]);
 
     const republished = await store.upsertMany(
@@ -391,7 +807,7 @@ describe('SessionArtifactStore', () => {
       ],
       { strict: true, trustedPublisher: true },
     );
-    const publishedId = upgraded.changes[0]?.artifactId;
+    const publishedId = upgraded.changes[1]?.artifactId;
 
     const repeated = await store.upsertMany(
       [{ title: 'Draft again', workspacePath: 'reports/dashboard.html' }],
@@ -551,6 +967,37 @@ describe('SessionArtifactStore', () => {
     ).toEqual([second.changes[0]?.artifactId, overflow.changes[0]?.artifactId]);
   });
 
+  it('writes eviction removals to durable persistence', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's3-durable-eviction',
+      workspaceCwd: workspace,
+      maxArtifacts: 1,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const first = await store.upsertMany(
+      [{ title: 'First', url: 'https://example.com/first' }],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [{ title: 'Second', url: 'https://example.com/second' }],
+      { strict: true },
+    );
+
+    expect(events.at(-1)?.changes).toContainEqual(
+      expect.objectContaining({
+        action: 'removed',
+        artifactId: first.changes[0]?.artifactId,
+        reason: 'eviction',
+      }),
+    );
+  });
+
   it('drops newest artifacts created in the same batch when no older eviction candidate exists', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's3-same-batch-overflow',
@@ -594,6 +1041,41 @@ describe('SessionArtifactStore', () => {
         strict: true,
       }),
     ).rejects.toMatchObject({ field: 'workspacePath' });
+  });
+
+  it('normalizes workspace paths against the resolved workspace cwd', async () => {
+    const symlinkWorkspace = `${workspace}-link`;
+    await fs.symlink(workspace, symlinkWorkspace, 'dir');
+    try {
+      const store = new SessionArtifactStore({
+        sessionId: 's4-symlink-workspace',
+        workspaceCwd: symlinkWorkspace,
+      });
+      await fs.writeFile(path.join(workspace, 'via-link.txt'), 'hello');
+
+      await expect(
+        store.upsertMany(
+          [
+            {
+              title: 'Via link',
+              workspacePath: `../${path.basename(workspace)}/via-link.txt`,
+            },
+          ],
+          { strict: true },
+        ),
+      ).resolves.toMatchObject({
+        changes: [
+          {
+            artifact: {
+              workspacePath: 'via-link.txt',
+              status: 'available',
+            },
+          },
+        ],
+      });
+    } finally {
+      await fs.rm(symlinkWorkspace, { force: true });
+    }
   });
 
   it('accepts workspace entries whose names start with two dots', async () => {
@@ -772,6 +1254,43 @@ describe('SessionArtifactStore', () => {
     }
   });
 
+  it('does not count injected workspace hash metadata against the merge limit', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-workspace-metadata-merge-budget',
+      workspaceCwd: workspace,
+    });
+    const workspacePath = 'merge-budget.txt';
+    const metadata = { payload: 'x'.repeat(4096) };
+    while (Buffer.byteLength(JSON.stringify(metadata), 'utf8') > 4096) {
+      metadata.payload = metadata.payload.slice(0, -1);
+    }
+    await fs.writeFile(path.join(workspace, workspacePath), 'before');
+    const oldSha = createHash('sha256').update('before').digest('hex');
+
+    await store.upsertMany([{ title: 'Budget', workspacePath, metadata }], {
+      strict: true,
+    });
+    await fs.writeFile(path.join(workspace, workspacePath), 'after');
+    const newSha = createHash('sha256').update('after').digest('hex');
+
+    const updated = await store.upsertMany(
+      [{ title: 'Budget update', workspacePath }],
+      { strict: true },
+    );
+
+    expect(updated.changes[0]?.artifact).toMatchObject({
+      metadata: {
+        payload: metadata.payload,
+        'qwen.workspace.sha256': newSha,
+        'qwen.workspace.mtimeMs': expect.any(Number),
+      },
+      status: 'available',
+    });
+    expect(updated.changes[0]?.artifact?.metadata).not.toMatchObject({
+      'qwen.workspace.sha256': oldSha,
+    });
+  });
+
   it('does not merge client metadata into a published tool artifact', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's5-published-metadata-source',
@@ -853,6 +1372,100 @@ describe('SessionArtifactStore', () => {
     expect(result.changes[0]?.artifact?.metadata).not.toHaveProperty('hookKey');
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [{ title: 'Tool title' }],
+    });
+  });
+
+  it('keeps strongest retention when coalescing duplicate identities', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-coalesce-retention',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+
+    const result = await store.upsertMany(
+      [
+        {
+          title: 'Ephemeral',
+          url: 'https://example.com/retention',
+          retention: 'ephemeral',
+        },
+        {
+          title: 'Restorable',
+          url: 'https://example.com/retention',
+          retention: 'restorable',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(result.changes).toHaveLength(1);
+    expect(result.changes[0]?.artifact).toMatchObject({
+      title: 'Ephemeral',
+      retention: 'restorable',
+    });
+  });
+
+  it('keeps explicit ephemeral retention while coalescing implicit duplicates', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-coalesce-explicit-ephemeral',
+      workspaceCwd: workspace,
+    });
+    const url = 'https://example.com/coalesce-ephemeral';
+
+    const result = await store.upsertMany([
+      {
+        title: 'Ephemeral',
+        source: 'client',
+        clientId: 'client-1',
+        url,
+        retention: 'ephemeral',
+      },
+      {
+        title: 'Implicit duplicate',
+        source: 'client',
+        clientId: 'client-1',
+        url,
+        metadata: { refreshed: true },
+      },
+    ]);
+
+    expect(result.changes[0]?.artifact).toMatchObject({
+      url,
+      retention: 'ephemeral',
+    });
+  });
+
+  it('keeps explicit ephemeral retention across implicit updates', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-update-explicit-ephemeral',
+      workspaceCwd: workspace,
+    });
+    const url = 'https://example.com/update-ephemeral';
+
+    await store.upsertMany([
+      {
+        title: 'Ephemeral',
+        source: 'client',
+        clientId: 'client-1',
+        url,
+        retention: 'ephemeral',
+      },
+    ]);
+    await store.upsertMany([
+      {
+        title: 'Implicit update',
+        source: 'client',
+        clientId: 'client-1',
+        url,
+        metadata: { refreshed: true },
+      },
+    ]);
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ url, retention: 'ephemeral' }],
     });
   });
 
@@ -1118,6 +1731,61 @@ describe('SessionArtifactStore', () => {
     ).rejects.toMatchObject({ field: 'url' });
   });
 
+  it('rejects external urls with secret-like query or fragment', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-url-secrets',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Signed link',
+            url: 'https://example.com/report?access_token=abc',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'url' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Fragment token',
+            url: 'https://example.com/report#access_token=abc',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'url' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Camel token',
+            url: 'https://example.com/report?accessToken=abc',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'url' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Token value',
+            url: 'https://example.com/report?data=sk-test-token-1234567890',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'url' });
+  });
+
   it('accepts line whitespace in descriptions but not titles', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's5-line-whitespace',
@@ -1181,6 +1849,37 @@ describe('SessionArtifactStore', () => {
     ]);
 
     expect(repeated.changes).toEqual([]);
+  });
+
+  it('filters prototype metadata keys without changing object prototype', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-prototype-metadata',
+      workspaceCwd: workspace,
+    });
+    const metadata = JSON.parse(
+      '{"__proto__":null,"constructor":"blocked","prototype":"blocked","safe":"ok"}',
+    ) as Record<string, string | number | boolean | null>;
+
+    const created = await store.upsertMany([
+      {
+        title: 'Link',
+        url: 'https://example.com/prototype-metadata',
+        metadata,
+      },
+    ]);
+    const normalized = created.changes[0]?.artifact?.metadata;
+
+    expect(normalized).toEqual({ safe: 'ok' });
+    expect(Object.getPrototypeOf(normalized)).toBe(Object.prototype);
+    expect(Object.prototype.hasOwnProperty.call(normalized, '__proto__')).toBe(
+      false,
+    );
+    expect(
+      Object.prototype.hasOwnProperty.call(normalized, 'constructor'),
+    ).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(normalized, 'prototype')).toBe(
+      false,
+    );
   });
 
   it('rejects non-finite metadata numbers', async () => {
@@ -1281,7 +1980,7 @@ describe('SessionArtifactStore', () => {
     ).rejects.toMatchObject({ field: 'workspacePath' });
   });
 
-  it('rejects dangling symlinks that point outside the workspace', async () => {
+  it('rejects absolute dangling symlinks that point outside the workspace', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's6-dangling-symlink',
       workspaceCwd: workspace,
@@ -1357,16 +2056,27 @@ describe('SessionArtifactStore', () => {
   });
 
   it('marks a stored workspace artifact missing if it later escapes by symlink', async () => {
+    const persistence = {
+      recordEvent: vi.fn(),
+      recordSnapshot: vi.fn(),
+    };
     const store = new SessionArtifactStore({
       sessionId: 's7-symlink-refresh',
       workspaceCwd: workspace,
+      persistence,
     });
     const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
     try {
       await fs.writeFile(path.join(workspace, 'report.txt'), 'hello');
       await fs.writeFile(path.join(outside, 'secret.txt'), 'secret');
       await store.upsertMany(
-        [{ title: 'Report', workspacePath: 'report.txt' }],
+        [
+          {
+            title: 'Report',
+            workspacePath: 'report.txt',
+            retention: 'restorable',
+          },
+        ],
         { strict: true },
       );
 
@@ -1385,6 +2095,38 @@ describe('SessionArtifactStore', () => {
       });
       expect(artifact).not.toHaveProperty('workspacePath');
       expect(artifact).not.toHaveProperty('sizeBytes');
+
+      const snapshot = (
+        store as unknown as {
+          buildSnapshotPayload(
+            recordedAt: string,
+            sequence: number,
+          ): SessionArtifactSnapshotRecordPayload;
+        }
+      ).buildSnapshotPayload('2026-07-06T00:00:00.000Z', 1);
+      expect(snapshot.artifacts[0]).toMatchObject({
+        storage: 'workspace',
+        status: 'missing',
+        workspacePath: 'report.txt',
+      });
+
+      await fs.rm(path.join(workspace, 'report.txt'));
+      const restored = new SessionArtifactStore({
+        sessionId: 's7-symlink-refresh',
+        workspaceCwd: workspace,
+        persistence,
+      });
+      await restored.restore({
+        ...snapshot,
+        tombstonedIds: snapshot.tombstonedIds ?? [],
+        stickyEphemeralIds: snapshot.stickyEphemeralIds ?? [],
+        warnings: [],
+      });
+      expect((await restored.list()).artifacts[0]).toMatchObject({
+        storage: 'workspace',
+        status: 'missing',
+        workspacePath: 'report.txt',
+      });
     } finally {
       vi.useRealTimers();
       await fs.rm(outside, { recursive: true, force: true });
@@ -1535,6 +2277,87 @@ describe('SessionArtifactStore', () => {
     } finally {
       realpathSpy.mockRestore();
     }
+  });
+
+  it('marks workspace artifacts missing when the file is swapped before open', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-open-swap',
+      workspaceCwd: workspace,
+    });
+    const target = path.join(workspace, 'swap.txt');
+    const replacement = path.join(workspace, 'swap-replacement.txt');
+    await fs.writeFile(target, 'before');
+    const created = await store.upsertMany([
+      { title: 'Swap', workspacePath: 'swap.txt' },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+    const realTarget = await fs.realpath(target);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const originalLstat = fs.lstat.bind(fs);
+    let swapped = false;
+    const lstatSpy = vi.spyOn(fs, 'lstat').mockImplementation(async (entry) => {
+      const stat = await originalLstat(entry);
+      if (!swapped && String(entry) === realTarget) {
+        swapped = true;
+        await fs.writeFile(replacement, 'after');
+        await fs.rename(replacement, target);
+      }
+      return stat;
+    });
+
+    try {
+      const artifact = await store.get(artifactId);
+      expect(artifact).toMatchObject({ id: artifactId, status: 'missing' });
+      expect(artifact).not.toHaveProperty('workspacePath');
+    } finally {
+      lstatSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects workspace paths that become symlinks before open', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-open-nofollow',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'loop.txt'), 'content');
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation(async (entry) => {
+      if (String(entry).endsWith('loop.txt')) {
+        throw Object.assign(new Error('too many symbolic links'), {
+          code: 'ELOOP',
+        });
+      }
+      throw new Error('unexpected open');
+    });
+
+    try {
+      await expect(
+        store.upsertMany([{ title: 'Loop', workspacePath: 'loop.txt' }], {
+          strict: true,
+        }),
+      ).rejects.toMatchObject({ field: 'workspacePath' });
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it('rejects relative dangling symlinks that point outside the workspace', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-dangling-symlink',
+      workspaceCwd: workspace,
+    });
+    await fs.symlink(
+      '../outside-missing.txt',
+      path.join(workspace, 'dangling'),
+    );
+
+    await expect(
+      store.upsertMany([{ title: 'Dangling', workspacePath: 'dangling' }], {
+        strict: true,
+      }),
+    ).rejects.toMatchObject({ field: 'workspacePath' });
   });
 
   it('uses cached workspace status while the refresh ttl is fresh', async () => {
@@ -1698,5 +2521,1338 @@ describe('SessionArtifactStore', () => {
         artifact: expect.objectContaining({ title: 'Third' }),
       }),
     );
+  });
+
+  it('records durable artifact events through the persistence hook', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's11-persist',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+
+    const created = await store.upsertMany(
+      [{ title: 'Durable', url: 'https://example.com/durable' }],
+      { strict: true },
+    );
+
+    expect(created.changes[0]?.artifact).toMatchObject({
+      retention: 'restorable',
+      restoreState: 'live',
+    });
+    expect(created.changes[0]?.artifact?.persistedAt).toBeDefined();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      sessionId: 's11-persist',
+      sequence: 1,
+      changes: [
+        {
+          action: 'created',
+          artifact: expect.objectContaining({
+            title: 'Durable',
+            retention: 'restorable',
+          }),
+        },
+      ],
+    });
+
+    const artifactId = created.changes[0]!.artifactId;
+    await store.remove(artifactId);
+
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({
+      sequence: 2,
+      changes: [
+        {
+          action: 'removed',
+          artifactId,
+          reason: 'explicit',
+        },
+      ],
+    });
+  });
+
+  it('records periodic snapshots after durable artifact events', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's11-snapshot',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+
+    for (let index = 0; index < 50; index++) {
+      await store.upsertMany(
+        [
+          {
+            title: `Durable ${index}`,
+            url: `https://example.com/durable-${index}`,
+          },
+        ],
+        { strict: true },
+      );
+    }
+
+    expect(events).toHaveLength(50);
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]).toMatchObject({
+      sessionId: 's11-snapshot',
+      sequence: 51,
+      artifacts: expect.arrayContaining([
+        expect.objectContaining({
+          title: 'Durable 0',
+          retention: 'restorable',
+        }),
+        expect.objectContaining({
+          title: 'Durable 49',
+          retention: 'restorable',
+        }),
+      ]),
+    });
+    expect(snapshots[0]?.artifacts).toHaveLength(50);
+
+    await store.upsertMany(
+      [{ title: 'Durable 50', url: 'https://example.com/durable-50' }],
+      { strict: true },
+    );
+
+    expect(events).toHaveLength(51);
+    expect(snapshots).toHaveLength(1);
+    expect(events[50]).toMatchObject({ sequence: 52 });
+  });
+
+  it('backs off snapshot retries after a write failure and resets after success', async () => {
+    let snapshotAttempts = 0;
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's11-snapshot-failure',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          snapshotAttempts++;
+          if (snapshotAttempts === 1) {
+            throw new Error('disk full');
+          }
+          snapshots.push(payload);
+        },
+      },
+    });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+
+    try {
+      for (let index = 0; index < 50; index++) {
+        await store.upsertMany(
+          [
+            {
+              title: `Durable ${index}`,
+              url: `https://example.com/snapshot-failure-${index}`,
+            },
+          ],
+          { strict: true },
+        );
+      }
+      expect(snapshotAttempts).toBe(1);
+      expect(snapshots).toHaveLength(0);
+
+      await store.upsertMany(
+        [
+          {
+            title: 'Durable after failure',
+            url: 'https://example.com/snapshot-after-failure',
+          },
+        ],
+        { strict: true },
+      );
+      expect(snapshotAttempts).toBe(1);
+      expect(snapshots).toHaveLength(0);
+
+      for (let index = 51; index < 100; index++) {
+        await store.upsertMany(
+          [
+            {
+              title: `Durable retry ${index}`,
+              url: `https://example.com/snapshot-retry-${index}`,
+            },
+          ],
+          { strict: true },
+        );
+      }
+      expect(snapshotAttempts).toBe(2);
+      expect(snapshots).toHaveLength(1);
+      expect(snapshots[0]).toMatchObject({ sequence: 101 });
+
+      for (let index = 100; index < 149; index++) {
+        await store.upsertMany(
+          [
+            {
+              title: `Durable reset ${index}`,
+              url: `https://example.com/snapshot-reset-${index}`,
+            },
+          ],
+          { strict: true },
+        );
+      }
+      expect(snapshotAttempts).toBe(2);
+
+      await store.upsertMany(
+        [
+          {
+            title: 'Durable after reset',
+            url: 'https://example.com/snapshot-after-reset',
+          },
+        ],
+        { strict: true },
+      );
+      expect(snapshotAttempts).toBe(3);
+      expect(snapshots).toHaveLength(2);
+      expect(snapshots[1]).toMatchObject({ sequence: 152 });
+
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('snapshot_failed');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('keeps explicit tombstones in periodic snapshots', async () => {
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's11-tombstone-snapshot',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Deleted', url: 'https://example.com/deleted' }],
+      { strict: true },
+    );
+    const deletedId = created.changes[0]!.artifactId;
+    await store.remove(deletedId);
+    for (let index = 0; index < 48; index++) {
+      await store.upsertMany(
+        [
+          {
+            title: `Durable ${index}`,
+            url: `https://example.com/tombstone-${index}`,
+          },
+        ],
+        { strict: true },
+      );
+    }
+
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]).toMatchObject({
+      tombstonedIds: [deletedId],
+      stickyEphemeralIds: [],
+    });
+    expect(
+      snapshots[0]?.artifacts.some((artifact) => artifact.id === deletedId),
+    ).toBe(false);
+
+    const rerun = await store.upsertMany([
+      { title: 'Deleted', url: 'https://example.com/deleted' },
+    ]);
+    expect(rerun.changes).toMatchObject([
+      {
+        action: 'created',
+        artifactId: deletedId,
+        artifact: { source: 'tool' },
+      },
+    ]);
+  });
+
+  it('logs when tombstone LRU eviction drops the oldest id', async () => {
+    const sessionId = 's11-tombstone-lru-log';
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      for (let index = 0; index < 501; index++) {
+        const url = `https://example.com/tombstone-lru-${index}`;
+        const created = await store.upsertMany(
+          [{ title: `Deleted ${index}`, url }],
+          { strict: true },
+        );
+        await store.remove(created.changes[0]!.artifactId);
+      }
+
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('action=tombstone_evicted');
+      expect(logged).toContain('limit=500');
+      expect(logged).toContain(
+        stableSessionArtifactId(
+          sessionId,
+          'url:https://example.com/tombstone-lru-0',
+        ),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('allows tool reruns to supersede restored delete tombstones', async () => {
+    const sessionId = 's11-restored-tombstone';
+    const input = {
+      title: 'Old tool result',
+      url: 'https://example.com/tombstoned',
+    };
+    const seed = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    const artifactId = (await seed.upsertMany([input])).changes[0]!.artifactId;
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+
+    await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [],
+      tombstonedIds: [artifactId],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+    const rerun = await store.upsertMany([input]);
+    expect(rerun.changes).toMatchObject([
+      {
+        action: 'created',
+        artifactId,
+        artifact: { source: 'tool' },
+      },
+    ]);
+  });
+
+  it('keeps stale client upserts suppressed by restored tombstones', async () => {
+    const sessionId = 's11-restored-client-tombstone';
+    const input = {
+      title: 'Old client result',
+      source: 'client' as const,
+      clientId: 'client-a',
+      url: 'https://example.com/tombstoned-client',
+    };
+    const seed = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    const artifactId = (await seed.upsertMany([input])).changes[0]!.artifactId;
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+
+    await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [],
+      tombstonedIds: [artifactId],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+    const suppressed = await store.upsertMany([input]);
+    expect(suppressed.changes).toEqual([]);
+  });
+
+  it('keeps restore warnings visible on the artifact list', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-warnings',
+      workspaceCwd: workspace,
+    });
+
+    await store.restore({
+      v: 2,
+      sessionId: 's11-restore-warnings',
+      sequence: 1,
+      artifacts: [],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: ['skipped corrupt artifact record'],
+    });
+
+    await expect(store.list()).resolves.toMatchObject({
+      warnings: ['skipped corrupt artifact record'],
+    });
+  });
+
+  it('keeps live artifacts when rewind restore has no snapshot', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-empty-rewind',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+
+    const durable = await store.upsertMany(
+      [{ title: 'Durable', url: 'https://example.com/durable-rewind' }],
+      { strict: true },
+    );
+    const ephemeral = await store.upsertMany([
+      {
+        title: 'Live only',
+        url: 'https://example.com/live-only-rewind',
+        retention: 'ephemeral',
+      },
+    ]);
+
+    await expect(
+      store.restore(undefined, { preserveLiveEphemeral: true }),
+    ).resolves.toEqual([]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: durable.changes[0]?.artifactId,
+          title: 'Durable',
+          retention: 'restorable',
+        },
+        {
+          id: ephemeral.changes[0]?.artifactId,
+          title: 'Live only',
+          retention: 'ephemeral',
+        },
+      ],
+    });
+  });
+
+  it('resets durable event snapshot cadence after restore', async () => {
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-snapshot-cadence',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+
+    for (let index = 0; index < 49; index++) {
+      await store.upsertMany(
+        [
+          {
+            title: `Before restore ${index}`,
+            url: `https://example.com/before-restore-${index}`,
+          },
+        ],
+        { strict: true },
+      );
+    }
+    expect(snapshots).toHaveLength(0);
+
+    await store.restore({
+      v: 2,
+      sessionId: 's11-restore-snapshot-cadence',
+      sequence: 100,
+      artifacts: [],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+    await store.upsertMany(
+      [
+        {
+          title: 'After restore',
+          url: 'https://example.com/after-restore',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(snapshots).toHaveLength(0);
+  });
+
+  it('keeps restored sticky markers for non-restored ephemeral artifacts in snapshots', async () => {
+    const sessionId = 's11-sticky-non-restored-snapshot';
+    const stickyId = stableSessionArtifactId(
+      sessionId,
+      'url:https://example.com/sticky-ephemeral',
+    );
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+
+    await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [],
+      tombstonedIds: [],
+      stickyEphemeralIds: [stickyId],
+      warnings: [],
+    });
+    for (let index = 0; index < 50; index++) {
+      await store.upsertMany(
+        [
+          {
+            title: `Durable ${index}`,
+            url: `https://example.com/sticky-snapshot-${index}`,
+          },
+        ],
+        { strict: true },
+      );
+    }
+
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]?.stickyEphemeralIds).toContain(stickyId);
+  });
+
+  it('keeps restored sticky markers after live eviction removes an artifact', async () => {
+    const sourceEvents: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-eviction-sticky',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          sourceEvents.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await source.upsertMany(
+      [{ title: 'Sticky', url: 'https://example.com/sticky' }],
+      { strict: true },
+    );
+    const evictedArtifact = sourceEvents[0]!.changes[0]!.artifact!;
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const restored = new SessionArtifactStore({
+      sessionId: 's11-eviction-sticky',
+      workspaceCwd: workspace,
+      maxArtifacts: 1,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+    await restored.restore({
+      v: 2,
+      sessionId: 's11-eviction-sticky',
+      sequence: 1,
+      artifacts: [evictedArtifact],
+      tombstonedIds: [],
+      stickyEphemeralIds: [evictedArtifact.id],
+      warnings: [],
+    });
+
+    for (let index = 0; index < 50; index++) {
+      await restored.upsertMany(
+        [
+          {
+            title: `Replacement ${index}`,
+            url: `https://example.com/replacement-${index}`,
+          },
+        ],
+        { strict: true },
+      );
+    }
+
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]?.stickyEphemeralIds).toContain(evictedArtifact.id);
+  });
+
+  it('applies sticky ephemeral markers while restoring durable artifacts', async () => {
+    const sourceEvents: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-restore-sticky',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          sourceEvents.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await source.upsertMany(
+      [{ title: 'Sticky', url: 'https://example.com/sticky-restore' }],
+      { strict: true },
+    );
+    const artifact = sourceEvents[0]!.changes[0]!.artifact!;
+    const restored = new SessionArtifactStore({
+      sessionId: 's11-restore-sticky',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      restored.restore({
+        v: 2,
+        sessionId: 's11-restore-sticky',
+        sequence: 1,
+        artifacts: [artifact],
+        tombstonedIds: [],
+        stickyEphemeralIds: [artifact.id],
+        warnings: [],
+      }),
+    ).resolves.toEqual([]);
+
+    await expect(restored.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: artifact.id,
+          retention: 'ephemeral',
+          persistenceWarning: 'sticky_override_active',
+        },
+      ],
+    });
+  });
+
+  it('warns when restored pinned artifacts are downgraded', async () => {
+    const sessionId = 's11-restore-pinned';
+    const url = 'https://example.com/restored-pinned';
+    const artifactId = stableSessionArtifactId(sessionId, `url:${url}`);
+    const restored = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      restored.restore({
+        v: 2,
+        sessionId,
+        sequence: 1,
+        artifacts: [
+          {
+            id: artifactId,
+            kind: 'link',
+            storage: 'external_url',
+            source: 'client',
+            status: 'available',
+            title: 'Pinned',
+            url,
+            retention: 'pinned',
+            clientRetained: true,
+            createdAt: '2026-07-04T00:00:00.000Z',
+            updatedAt: '2026-07-04T00:00:00.000Z',
+          },
+        ],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      }),
+    ).resolves.toEqual([
+      `pinned artifact ${artifactId} downgraded to restorable; runtime does not support pinned retention`,
+    ]);
+
+    await expect(restored.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: artifactId,
+          retention: 'restorable',
+        },
+      ],
+    });
+  });
+
+  it('does not mark restored ephemeral artifacts as sticky without a sticky marker', async () => {
+    const sessionId = 's11-restore-ephemeral';
+    const url = 'https://example.com/restored-ephemeral';
+    const artifactId = stableSessionArtifactId(sessionId, `url:${url}`);
+    const restored = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      restored.restore({
+        v: 2,
+        sessionId,
+        sequence: 1,
+        artifacts: [
+          {
+            id: artifactId,
+            kind: 'link',
+            storage: 'external_url',
+            source: 'client',
+            status: 'available',
+            title: 'Ephemeral',
+            url,
+            retention: 'ephemeral',
+            clientRetained: false,
+            createdAt: '2026-07-04T00:00:00.000Z',
+            updatedAt: '2026-07-04T00:00:00.000Z',
+          },
+        ],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      }),
+    ).resolves.toEqual([]);
+
+    await expect(restored.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: artifactId,
+          retention: 'ephemeral',
+        },
+      ],
+    });
+    expect((await restored.list()).artifacts[0]).not.toHaveProperty(
+      'persistenceWarning',
+    );
+  });
+
+  it('downgrades non-strict durable artifacts when persistence is unavailable', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-unavailable',
+      workspaceCwd: workspace,
+    });
+
+    const result = await store.upsertMany([
+      {
+        title: 'Requested durable',
+        url: 'https://example.com/durable',
+        retention: 'restorable',
+      },
+    ]);
+
+    expect(result.warnings).toEqual([
+      'artifact persistence unavailable; durable artifacts kept ephemeral',
+    ]);
+    expect(result.changes[0]?.artifact).toMatchObject({
+      retention: 'ephemeral',
+      persistenceWarning: 'persistence_unavailable',
+    });
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          retention: 'ephemeral',
+          persistenceWarning: 'persistence_unavailable',
+        }),
+      ],
+    });
+  });
+
+  it('rolls back strict mutations when persistence fails', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-rollback',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          throw new Error('disk full');
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+
+    await expect(
+      store.upsertMany(
+        [{ title: 'Rollback', url: 'https://example.com/rollback' }],
+        { strict: true },
+      ),
+    ).rejects.toThrow('disk full');
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+  });
+
+  it('keeps explicit removal live when tombstone persistence fails', async () => {
+    let calls = 0;
+    const store = new SessionArtifactStore({
+      sessionId: 's11-remove-live-first',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          calls++;
+          if (calls > 1) {
+            throw new Error('disk full');
+          }
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Sensitive', url: 'https://example.com/sensitive' }],
+      { strict: true },
+    );
+
+    await expect(
+      store.remove(created.changes[0]!.artifactId),
+    ).resolves.toMatchObject({
+      changes: [
+        {
+          action: 'removed',
+          artifactId: created.changes[0]?.artifactId,
+          reason: 'explicit',
+        },
+      ],
+      warnings: ['artifact removal not persisted; live removal kept'],
+    });
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+  });
+
+  it('writes a tombstone when deleting a downgraded durable artifact', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    let failNext = false;
+    const store = new SessionArtifactStore({
+      sessionId: 's11-downgraded-tombstone',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          if (failNext) {
+            failNext = false;
+            throw new Error('disk full');
+          }
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Durable', url: 'https://example.com/downgraded' }],
+      { strict: true },
+    );
+
+    failNext = true;
+    const downgraded = await store.upsertMany([
+      {
+        title: 'Durable',
+        url: 'https://example.com/downgraded',
+        metadata: { phase: 'updated' },
+      },
+    ]);
+    expect(downgraded.changes[0]?.artifact).toMatchObject({
+      retention: 'ephemeral',
+      persistenceWarning: 'persistence_unavailable',
+    });
+
+    await store.remove(created.changes[0]!.artifactId);
+
+    expect(events.at(-1)?.changes).toEqual([
+      expect.objectContaining({
+        action: 'removed',
+        artifactId: created.changes[0]?.artifactId,
+        reason: 'explicit',
+      }),
+    ]);
+  });
+
+  it('writes an eviction tombstone when evicting a downgraded durable artifact', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    let failNext = false;
+    const store = new SessionArtifactStore({
+      sessionId: 's11-downgraded-eviction-tombstone',
+      workspaceCwd: workspace,
+      maxArtifacts: 1,
+      persistence: {
+        recordEvent: async (payload) => {
+          if (failNext) {
+            failNext = false;
+            throw new Error('disk full');
+          }
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Durable', url: 'https://example.com/downgraded-eviction' }],
+      { strict: true },
+    );
+
+    failNext = true;
+    await store.upsertMany([
+      {
+        title: 'Durable',
+        url: 'https://example.com/downgraded-eviction',
+        metadata: { phase: 'updated' },
+      },
+    ]);
+
+    await store.upsertMany(
+      [{ title: 'Overflow', url: 'https://example.com/overflow' }],
+      { strict: true },
+    );
+
+    expect(events.at(-1)?.changes).toContainEqual(
+      expect.objectContaining({
+        action: 'removed',
+        artifactId: created.changes[0]?.artifactId,
+        reason: 'eviction',
+      }),
+    );
+  });
+
+  it('restores rebuilt durable artifacts as metadata-only restored entries', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-restore',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await source.upsertMany(
+      [{ title: 'Restored', url: 'https://example.com/restored' }],
+      { strict: true },
+    );
+    const persisted = events[0]!.changes[0]!.artifact!;
+    const snapshot: RebuiltSessionArtifactSnapshot = {
+      v: 2,
+      sessionId: 's11-restore',
+      sequence: 1,
+      artifacts: [persisted],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    };
+
+    const restored = new SessionArtifactStore({
+      sessionId: 's11-restore',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          throw new Error('restore must not write records');
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+
+    await expect(restored.restore(snapshot)).resolves.toEqual([]);
+    await expect(restored.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          id: persisted.id,
+          title: 'Restored',
+          retention: 'restorable',
+          restoreState: 'restored',
+        }),
+      ],
+    });
+  });
+
+  it('restores workspace artifacts with stat-only content checks', async () => {
+    const workspacePath = 'restore-stat-only.txt';
+    const content = 'same content';
+    await fs.writeFile(path.join(workspace, workspacePath), content);
+    const stat = await fs.stat(path.join(workspace, workspacePath));
+    const id = stableSessionArtifactId(
+      's11-restore-workspace-stat-only',
+      `workspace:${workspacePath}`,
+    );
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-workspace-stat-only',
+      workspaceCwd: workspace,
+    });
+
+    await store.restore({
+      v: 2,
+      sessionId: 's11-restore-workspace-stat-only',
+      sequence: 1,
+      artifacts: [
+        {
+          id,
+          kind: 'file',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'Restored workspace file',
+          workspacePath,
+          sizeBytes: stat.size,
+          metadata: {
+            'qwen.workspace.sha256': createHash('sha256')
+              .update(content)
+              .digest('hex'),
+            'qwen.workspace.mtimeMs': stat.mtimeMs - 1,
+          },
+          retention: 'restorable',
+          clientRetained: false,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+          persistedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id,
+          status: 'changed',
+          persistenceWarning: 'metadata_only_restore',
+        },
+      ],
+    });
+  });
+
+  it('keeps live artifacts when a non-empty restore snapshot fully fails', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-fail-closed',
+      workspaceCwd: workspace,
+    });
+    const live = await store.upsertMany([
+      { title: 'Live', url: 'https://example.com/live' },
+    ]);
+    const liveId = live.changes[0]!.artifactId;
+
+    const warnings = await store.restore({
+      v: 2,
+      sessionId: 's11-restore-fail-closed',
+      sequence: 8,
+      artifacts: [
+        {
+          id: 'bad-id',
+          kind: 'link',
+          storage: 'external_url',
+          source: 'client',
+          status: 'available',
+          title: 'Bad',
+          url: 'https://example.com/bad',
+          retention: 'restorable',
+          clientRetained: false,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+
+    expect(warnings).toEqual([
+      'artifact snapshot restore failed; kept existing live artifacts',
+    ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: liveId,
+          title: 'Live',
+        },
+      ],
+    });
+  });
+
+  it('keeps live artifacts when a non-empty restore snapshot partially fails', async () => {
+    const sourceEvents: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-restore-partial',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          sourceEvents.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await source.upsertMany(
+      [
+        { title: 'Good', url: 'https://example.com/restore-good' },
+        { title: 'Bad', url: 'https://example.com/restore-bad' },
+      ],
+      { strict: true },
+    );
+    const good = sourceEvents[0]!.changes[0]!.artifact!;
+    const bad = {
+      ...sourceEvents[0]!.changes[1]!.artifact!,
+      id: 'bad-id',
+    };
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-partial',
+      workspaceCwd: workspace,
+    });
+    const live = await store.upsertMany([
+      { title: 'Live', url: 'https://example.com/live-partial' },
+    ]);
+    const liveId = live.changes[0]!.artifactId;
+
+    const warnings = await store.restore({
+      v: 2,
+      sessionId: 's11-restore-partial',
+      sequence: 8,
+      artifacts: [good, bad],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+
+    expect(warnings).toEqual([
+      'artifact snapshot restore partially failed; restored 1/2 artifacts; kept existing live artifacts',
+    ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: liveId,
+          title: 'Live',
+        },
+      ],
+    });
+  });
+
+  it('does not trust persisted published file urls during restore', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-published-file',
+      workspaceCwd: workspace,
+    });
+    const live = await store.upsertMany([
+      { title: 'Live', url: 'https://example.com/live' },
+    ]);
+    const liveId = live.changes[0]!.artifactId;
+
+    const warnings = await store.restore({
+      v: 2,
+      sessionId: 's11-restore-published-file',
+      sequence: 8,
+      artifacts: [
+        {
+          id: 'tampered-published-file',
+          kind: 'link',
+          storage: 'published',
+          source: 'client',
+          status: 'available',
+          title: 'Tampered',
+          url: 'file:///tmp/secret.html',
+          retention: 'restorable',
+          clientRetained: false,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+
+    expect(warnings).toEqual([
+      'artifact snapshot restore failed; kept existing live artifacts',
+    ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: liveId,
+          title: 'Live',
+        },
+      ],
+    });
+  });
+
+  it('prunes over-limit restored artifacts and records eviction tombstones', async () => {
+    const sourceEvents: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-restore-prune',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          sourceEvents.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await source.upsertMany(
+      [
+        { title: 'One', url: 'https://example.com/one' },
+        { title: 'Two', url: 'https://example.com/two' },
+      ],
+      { strict: true },
+    );
+    const prunedEvents: SessionArtifactEventRecordPayload[] = [];
+    const restored = new SessionArtifactStore({
+      sessionId: 's11-restore-prune',
+      workspaceCwd: workspace,
+      maxArtifacts: 1,
+      persistence: {
+        recordEvent: async (payload) => {
+          prunedEvents.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const snapshot: RebuiltSessionArtifactSnapshot = {
+      v: 2,
+      sessionId: 's11-restore-prune',
+      sequence: 1,
+      artifacts: sourceEvents[0]!.changes.map((change) => change.artifact!),
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    };
+
+    await expect(restored.restore(snapshot)).resolves.toContain(
+      'restored artifact list pruned to live limit',
+    );
+
+    await expect(restored.list()).resolves.toMatchObject({
+      artifacts: [{ title: 'Two' }],
+    });
+    expect(prunedEvents[0]?.changes).toContainEqual(
+      expect.objectContaining({
+        action: 'removed',
+        artifactId: sourceEvents[0]?.changes[0]?.artifactId,
+        reason: 'eviction',
+      }),
+    );
+  });
+
+  it('downgrades legacy pinned content refs to metadata-only restore', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-restore-legacy-pinned',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await source.upsertMany(
+      [{ title: 'Legacy pinned', url: 'https://example.com/legacy-pinned' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+    const persisted = {
+      ...events[0]!.changes[0]!.artifact!,
+      retention: 'pinned' as const,
+      contentRef: {
+        kind: 'managed_copy' as const,
+        contentId: `${'e'.repeat(64)}-${'f'.repeat(16)}`,
+        sha256: 'e'.repeat(64),
+        sizeBytes: 12,
+        createdAt: '2026-07-04T00:00:00.000Z',
+      },
+      expiresAt: '2026-08-01T00:00:00.000Z',
+    };
+    const snapshot: RebuiltSessionArtifactSnapshot = {
+      v: 2,
+      sessionId: 's11-restore-legacy-pinned',
+      sequence: 2,
+      artifacts: [persisted],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    };
+    const restored = new SessionArtifactStore({
+      sessionId: 's11-restore-legacy-pinned',
+      workspaceCwd: workspace,
+    });
+
+    await expect(restored.restore(snapshot)).resolves.toEqual([
+      `pinned artifact ${artifactId} downgraded to restorable; runtime does not support pinned retention`,
+    ]);
+
+    await expect(restored.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          id: artifactId,
+          retention: 'restorable',
+          restoreState: 'restored',
+          status: 'available',
+        }),
+      ],
+    });
+    const restoredArtifact = (await restored.list()).artifacts[0];
+    expect(restoredArtifact).not.toHaveProperty('contentRef');
+    expect(restoredArtifact).not.toHaveProperty('expiresAt');
+  });
+
+  it('restores workspace metadata near the user budget without replacing the persisted hash', async () => {
+    const sessionId = 's11-restore-workspace-baseline';
+    const workspacePath = 'baseline.txt';
+    await fs.writeFile(path.join(workspace, workspacePath), 'HELLO');
+    const persistedSha = createHash('sha256').update('hello').digest('hex');
+    const metadata = {
+      payload: 'x'.repeat(4096),
+      'qwen.workspace.sha256': persistedSha,
+      'qwen.workspace.mtimeMs': 0,
+    };
+    while (
+      Buffer.byteLength(JSON.stringify({ payload: metadata.payload }), 'utf8') >
+      4096
+    ) {
+      metadata.payload = metadata.payload.slice(0, -1);
+    }
+    const artifactId = stableSessionArtifactId(
+      sessionId,
+      `workspace:${workspacePath}`,
+    );
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.restore({
+        v: 2,
+        sessionId,
+        sequence: 1,
+        artifacts: [
+          {
+            id: artifactId,
+            kind: 'file',
+            storage: 'workspace',
+            source: 'tool',
+            status: 'available',
+            title: 'Baseline',
+            workspacePath,
+            sizeBytes: 5,
+            metadata,
+            retention: 'restorable',
+            clientRetained: false,
+            createdAt: '2026-07-04T00:00:00.000Z',
+            updatedAt: '2026-07-04T00:00:00.000Z',
+          },
+        ],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      }),
+    ).resolves.toEqual([]);
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: artifactId,
+          status: 'changed',
+          metadata: {
+            payload: metadata.payload,
+            'qwen.workspace.sha256': persistedSha,
+            'qwen.workspace.mtimeMs': 0,
+          },
+        },
+      ],
+    });
   });
 });

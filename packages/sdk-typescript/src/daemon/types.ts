@@ -465,6 +465,7 @@ export interface DaemonSessionState {
 /** Returned from `POST /session/:id/load` and `POST /session/:id/resume`. */
 export interface DaemonRestoredSession extends DaemonSession {
   state: DaemonSessionState;
+  artifactWarnings?: string[];
   /** Compacted events for completed turns (load only). */
   compactedReplay?: DaemonEvent[];
   /** Raw events since last turn boundary — current incomplete turn (load only). */
@@ -641,10 +642,36 @@ export type KnownDaemonSessionArtifactSource = 'tool' | 'hook' | 'client';
 export type DaemonSessionArtifactSource =
   OpenStringUnion<KnownDaemonSessionArtifactSource>;
 
-export type KnownDaemonSessionArtifactStatus = 'available' | 'missing';
+export type KnownDaemonSessionArtifactStatus =
+  | 'available'
+  | 'missing'
+  | 'changed';
 
 export type DaemonSessionArtifactStatus =
   OpenStringUnion<KnownDaemonSessionArtifactStatus>;
+
+export type KnownDaemonSessionArtifactRetention = 'ephemeral' | 'restorable';
+
+export type DaemonSessionArtifactRetention =
+  OpenStringUnion<KnownDaemonSessionArtifactRetention>;
+
+export type KnownDaemonSessionArtifactRestoreState =
+  | 'live'
+  | 'restored'
+  | 'unverified'
+  | 'blocked';
+
+export type DaemonSessionArtifactRestoreState =
+  OpenStringUnion<KnownDaemonSessionArtifactRestoreState>;
+
+export type KnownDaemonSessionArtifactPersistenceWarning =
+  | 'persistence_unavailable'
+  | 'metadata_only_restore'
+  | 'restore_validation_failed'
+  | 'sticky_override_active';
+
+export type DaemonSessionArtifactPersistenceWarning =
+  OpenStringUnion<KnownDaemonSessionArtifactPersistenceWarning>;
 
 export interface DaemonSessionArtifactInput {
   kind?: KnownDaemonSessionArtifactKind;
@@ -657,6 +684,8 @@ export interface DaemonSessionArtifactInput {
   mimeType?: string;
   sizeBytes?: number;
   metadata?: Record<string, string | number | boolean | null>;
+  retention?: KnownDaemonSessionArtifactRetention;
+  clientRetained?: boolean;
 }
 
 export interface DaemonSessionArtifact {
@@ -673,6 +702,10 @@ export interface DaemonSessionArtifact {
   mimeType?: string;
   sizeBytes?: number;
   metadata?: Record<string, string | number | boolean | null>;
+  retention: DaemonSessionArtifactRetention;
+  restoreState?: DaemonSessionArtifactRestoreState;
+  persistenceWarning?: DaemonSessionArtifactPersistenceWarning;
+  persistedAt?: string;
   clientRetained: boolean;
   createdAt: string;
   updatedAt: string;
@@ -689,7 +722,10 @@ export type KnownDaemonSessionArtifactChangeAction =
 export type DaemonSessionArtifactChangeAction =
   OpenStringUnion<KnownDaemonSessionArtifactChangeAction>;
 
-export type KnownDaemonSessionArtifactRemovalReason = 'eviction' | 'explicit';
+export type KnownDaemonSessionArtifactRemovalReason =
+  | 'eviction'
+  | 'explicit'
+  | 'unpin_to_ephemeral';
 export type DaemonSessionArtifactRemovalReason =
   OpenStringUnion<KnownDaemonSessionArtifactRemovalReason>;
 
@@ -708,12 +744,14 @@ export interface DaemonSessionArtifactsEnvelope {
   limits: {
     maxArtifacts: number;
   };
+  warnings?: string[];
 }
 
 export interface DaemonSessionArtifactMutationResult {
   v: 1;
   sessionId: string;
   changes: DaemonSessionArtifactChange[];
+  warnings?: string[];
 }
 
 export type DaemonStatus =

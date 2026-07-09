@@ -848,6 +848,7 @@ function currentServeFeaturesForRunQwenServe(
       : {}),
     persistSettingAvailable: true,
     sessionShellCommandEnabled,
+    sessionArtifactsPersistenceAvailable: true,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
     // Advertise the same WS feature flags as the runtime path (serve-features.ts)

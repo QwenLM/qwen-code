@@ -39,6 +39,12 @@ import {
   readLastJsonStringFieldsSync,
 } from '../utils/sessionStorageUtils.js';
 import { getUsageOutputTokenCountForPromptEstimate } from './tokenEstimation.js';
+import {
+  isSessionArtifactRecord,
+  rebuildSessionArtifactSnapshot,
+  remapSessionArtifactPayloadForFork,
+  type RebuiltSessionArtifactSnapshot,
+} from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
 
 const debugLogger = createDebugLogger('SESSION');
@@ -183,6 +189,8 @@ export interface ResumedSessionData {
   lastCompletedUuid: string | null;
   /** Deserialized file history snapshots for resume (enables /rewind across sessions) */
   fileHistorySnapshots?: FileHistorySnapshot[];
+  /** Persisted session artifact metadata reconstructed from JSONL records. */
+  artifactSnapshot?: RebuiltSessionArtifactSnapshot;
   /**
    * Breaks in the persisted parentUuid chain that were detected during
    * reconstruction (an earlier segment of history was physically lost and could
@@ -976,6 +984,16 @@ export class SessionService {
     return { messages, gaps };
   }
 
+  private lastConversationRecordUuid(records: ChatRecord[]): string | null {
+    for (let index = records.length - 1; index >= 0; index--) {
+      const record = records[index];
+      if (record && !isSessionArtifactRecord(record)) {
+        return record.uuid;
+      }
+    }
+    return null;
+  }
+
   /**
    * Loads a session by its session ID.
    * Reconstructs the full conversation from tree-structured records.
@@ -1007,7 +1025,13 @@ export class SessionService {
     }
 
     // Reconstruct linear history
+    const leafUuid = this.lastConversationRecordUuid(records);
+    if (!leafUuid) {
+      return;
+    }
+
     const { messages, gaps } = this.reconstructHistory(records, {
+      leafUuid,
       detectGaps: true,
     });
     if (messages.length === 0) {
@@ -1073,6 +1097,14 @@ export class SessionService {
       fileHistorySnapshots.length > MAX_SNAPSHOTS
         ? fileHistorySnapshots.slice(-MAX_SNAPSHOTS)
         : fileHistorySnapshots;
+    const activeBranchRecords = includeActiveSideArtifactRecords(
+      records,
+      messages,
+    );
+    const artifactSnapshot = rebuildSessionArtifactSnapshot(
+      activeBranchRecords,
+      firstRecord.sessionId,
+    );
 
     return {
       conversation,
@@ -1080,6 +1112,7 @@ export class SessionService {
       lastCompletedUuid: lastMessage.uuid,
       fileHistorySnapshots:
         cappedSnapshots.length > 0 ? cappedSnapshots : undefined,
+      ...(artifactSnapshot ? { artifactSnapshot } : {}),
       historyGaps: gaps.length > 0 ? gaps : undefined,
     };
   }
@@ -1433,8 +1466,17 @@ export class SessionService {
 
     // Copy only the active branch. Rewind leaves old records in the JSONL as
     // abandoned parentUuid branches; copying raw records would resurrect them.
-    // detectGaps stays off here so a fork copies exactly the active branch.
-    const { messages: sourceRecords } = this.reconstructHistory(records);
+    const leafUuid = this.lastConversationRecordUuid(records);
+    if (!leafUuid) {
+      throw new Error(`Source session not found or empty: ${sourceSessionId}`);
+    }
+    const { messages: activeMessages } = this.reconstructHistory(records, {
+      leafUuid,
+    });
+    const sourceRecords = includeActiveSideArtifactRecords(
+      records,
+      activeMessages,
+    );
     if (sourceRecords.length === 0) {
       throw new Error(`Source session not found or empty: ${sourceSessionId}`);
     }
@@ -1443,27 +1485,29 @@ export class SessionService {
     // clean linear descendant. `forkedFrom` captures the origin of each
     // message.
     let prevUuid: string | null = null;
+    const remappedArtifactIds = new Map<string, string>();
     const forked: ChatRecord[] = sourceRecords.map((record) => {
-      const systemPayload =
-        record.type === 'system' && record.subtype === 'file_history_snapshot'
-          ? remapFileHistorySnapshotPayload(
-              record.systemPayload,
-              sourceSessionId,
-              newSessionId,
-            )
-          : record.systemPayload;
+      const isArtifactRecord = isSessionArtifactRecord(record);
+      const systemPayload = remapSystemPayloadForFork(
+        record,
+        sourceSessionId,
+        newSessionId,
+        remappedArtifactIds,
+      );
       const next: ChatRecord = {
         ...record,
         sessionId: newSessionId,
         cwd: this.projectRoot,
         systemPayload,
-        parentUuid: prevUuid,
+        parentUuid: isArtifactRecord ? record.parentUuid : prevUuid,
         forkedFrom: {
           sessionId: sourceSessionId,
           messageUuid: record.uuid,
         },
       };
-      prevUuid = record.uuid;
+      if (!isArtifactRecord) {
+        prevUuid = record.uuid;
+      }
       return next;
     });
 
@@ -1935,6 +1979,68 @@ function remapFileHistorySnapshotPayload(
   } catch {
     return payload;
   }
+}
+
+function remapSystemPayloadForFork(
+  record: ChatRecord,
+  sourceSessionId: string,
+  newSessionId: string,
+  remappedArtifactIds: Map<string, string>,
+): ChatRecord['systemPayload'] {
+  if (record.type !== 'system') return record.systemPayload;
+  if (record.subtype === 'file_history_snapshot') {
+    return remapFileHistorySnapshotPayload(
+      record.systemPayload,
+      sourceSessionId,
+      newSessionId,
+    );
+  }
+  if (
+    record.subtype === 'session_artifact_event' ||
+    record.subtype === 'session_artifact_snapshot'
+  ) {
+    return remapSessionArtifactPayloadForFork(
+      record.systemPayload,
+      sourceSessionId,
+      newSessionId,
+      remappedArtifactIds,
+    ) as ChatRecord['systemPayload'];
+  }
+  return record.systemPayload;
+}
+
+function includeActiveSideArtifactRecords(
+  records: ChatRecord[],
+  activeRecords: ChatRecord[],
+): ChatRecord[] {
+  const activeByUuid = new Map(
+    activeRecords.map((record) => [record.uuid, record]),
+  );
+  const activeUuids = new Set(activeByUuid.keys());
+  const firstActiveUuid = activeRecords[0]?.uuid;
+  const firstActiveIndex =
+    firstActiveUuid === undefined
+      ? -1
+      : records.findIndex((record) => record.uuid === firstActiveUuid);
+  const selected: ChatRecord[] = [];
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index]!;
+    const activeRecord = activeByUuid.get(record.uuid);
+    if (activeRecord) {
+      selected.push(activeRecord);
+      activeByUuid.delete(record.uuid);
+      continue;
+    }
+    if (!isSessionArtifactRecord(record)) {
+      continue;
+    }
+    if (record.parentUuid !== null && activeUuids.has(record.parentUuid)) {
+      selected.push(record);
+    } else if (record.parentUuid === null && index < firstActiveIndex) {
+      selected.push(record);
+    }
+  }
+  return selected;
 }
 
 function collectFileHistorySnapshotPromptIds(

@@ -90,6 +90,7 @@ export function createServeFeatures(
           : {}),
         persistSettingAvailable,
         sessionShellCommandEnabled,
+        sessionArtifactsPersistenceAvailable: true,
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
         multiWorkspaceSessionsEnabled,
