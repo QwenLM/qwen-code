@@ -2763,6 +2763,94 @@ describe('SessionArtifactStore', () => {
     expect(events[50]).toMatchObject({ sequence: 52 });
   });
 
+  it('snapshots the post-delete state for strict durable removals', async () => {
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's11-delete-snapshot-state',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+
+    const target = await store.upsertMany(
+      [
+        {
+          title: 'Delete target',
+          url: 'https://example.com/delete-target',
+        },
+      ],
+      { strict: true },
+    );
+    const targetId = target.changes[0]!.artifactId;
+    for (let index = 0; index < 48; index++) {
+      await store.upsertMany(
+        [
+          {
+            title: `Keeper ${index}`,
+            url: `https://example.com/delete-keeper-${index}`,
+          },
+        ],
+        { strict: true },
+      );
+    }
+
+    await store.remove(targetId);
+
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]?.tombstonedIds).toContain(targetId);
+    expect(snapshots[0]?.artifacts).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: targetId })]),
+    );
+  });
+
+  it('keeps durable artifacts when explicit unpin persistence fails', async () => {
+    let failWrites = false;
+    const store = new SessionArtifactStore({
+      sessionId: 's11-unpin-failure',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          if (failWrites) {
+            throw new Error('disk full');
+          }
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const url = 'https://example.com/unpin-failure';
+    const created = await store.upsertMany([{ title: 'Pinned durable', url }], {
+      strict: true,
+    });
+    const artifactId = created.changes[0]!.artifactId;
+
+    failWrites = true;
+    await expect(
+      store.upsertMany([
+        {
+          title: 'Pinned durable',
+          url,
+          retention: 'ephemeral',
+        },
+      ]),
+    ).resolves.toMatchObject({
+      changes: [],
+      warnings: ['artifact retention change not persisted; live artifact kept'],
+    });
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          id: artifactId,
+          retention: 'restorable',
+        }),
+      ],
+    });
+  });
+
   it('backs off snapshot retries after a write failure and resets after success', async () => {
     let snapshotAttempts = 0;
     const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
@@ -3854,7 +3942,7 @@ describe('SessionArtifactStore', () => {
     });
   });
 
-  it('keeps live artifacts when a non-empty restore snapshot partially fails', async () => {
+  it('keeps successfully restored artifacts when one snapshot artifact is invalid', async () => {
     const sourceEvents: SessionArtifactEventRecordPayload[] = [];
     const source = new SessionArtifactStore({
       sessionId: 's11-restore-partial',
@@ -3882,10 +3970,9 @@ describe('SessionArtifactStore', () => {
       sessionId: 's11-restore-partial',
       workspaceCwd: workspace,
     });
-    const live = await store.upsertMany([
+    await store.upsertMany([
       { title: 'Live', url: 'https://example.com/live-partial' },
     ]);
-    const liveId = live.changes[0]!.artifactId;
 
     const warnings = await store.restore({
       v: 2,
@@ -3897,14 +3984,12 @@ describe('SessionArtifactStore', () => {
       warnings: [],
     });
 
-    expect(warnings).toEqual([
-      'artifact snapshot restore partially failed; restored 1/2 artifacts; kept existing live artifacts',
-    ]);
+    expect(warnings).toEqual(['skipped artifact with mismatched id bad-id']);
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [
         {
-          id: liveId,
-          title: 'Live',
+          id: good.id,
+          title: 'Good',
         },
       ],
     });
@@ -3959,6 +4044,54 @@ describe('SessionArtifactStore', () => {
           id: liveId,
           title: 'Live',
         },
+      ],
+    });
+  });
+
+  it('applies rebuilt snapshots when only stale event warnings are present', async () => {
+    const sourceEvents: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-restore-stale-event-warning',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          sourceEvents.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await source.upsertMany(
+      [{ title: 'Fresh', url: 'https://example.com/restore-stale-fresh' }],
+      { strict: true },
+    );
+    const fresh = sourceEvents[0]!.changes[0]!.artifact!;
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-stale-event-warning',
+      workspaceCwd: workspace,
+    });
+    await store.upsertMany([
+      { title: 'Live', url: 'https://example.com/restore-stale-live' },
+    ]);
+
+    const staleWarning =
+      'skipped stale event sequence 1 at or before snapshot sequence 10';
+    const warnings = await store.restore({
+      v: 2,
+      sessionId: 's11-restore-stale-event-warning',
+      sequence: 10,
+      artifacts: [fresh],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [staleWarning],
+    });
+
+    expect(warnings).toEqual([staleWarning]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          id: fresh.id,
+          title: 'Fresh',
+        }),
       ],
     });
   });

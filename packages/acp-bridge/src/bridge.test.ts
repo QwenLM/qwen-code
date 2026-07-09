@@ -1646,17 +1646,7 @@ describe('createAcpSessionBridge', () => {
         ],
       }),
     );
-    expect(persistedSnapshots).toEqual([
-      expect.objectContaining({
-        sessionId: session.sessionId,
-        artifacts: [
-          expect.objectContaining({
-            id: durable.changes[0]?.artifactId,
-            title: 'Durable artifact',
-          }),
-        ],
-      }),
-    ]);
+    expect(persistedSnapshots).toEqual([]);
 
     await bridge.shutdown();
   });

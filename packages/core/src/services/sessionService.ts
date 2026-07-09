@@ -2022,44 +2022,57 @@ function includeActiveSideArtifactRecords(
     firstActiveUuid === undefined
       ? -1
       : records.findIndex((record) => record.uuid === firstActiveUuid);
-  const nextConversationUuidByIndex = new Map<number, string>();
-  let nextConversationUuid: string | undefined;
+  const nextActiveUuidByIndex = new Map<number, string>();
+  const nextBlockingUuidByIndex = new Map<number, string>();
+  let nextActiveUuid: string | undefined;
+  let nextBlockingUuid: string | undefined;
   for (let index = records.length - 1; index >= 0; index--) {
-    if (nextConversationUuid !== undefined) {
-      nextConversationUuidByIndex.set(index, nextConversationUuid);
+    if (nextActiveUuid !== undefined) {
+      nextActiveUuidByIndex.set(index, nextActiveUuid);
     }
-    if (!isSessionArtifactRecord(records[index]!)) {
-      nextConversationUuid = records[index]!.uuid;
+    if (nextBlockingUuid !== undefined) {
+      nextBlockingUuidByIndex.set(index, nextBlockingUuid);
+    }
+    if (activeUuids.has(records[index]!.uuid)) {
+      nextActiveUuid = records[index]!.uuid;
+      nextBlockingUuid = undefined;
+    } else if (
+      !isSessionArtifactRecord(records[index]!) &&
+      !isTailNeutralSideRecord(records[index]!)
+    ) {
+      nextBlockingUuid = records[index]!.uuid;
     }
   }
   const selected: ChatRecord[] = [];
   const includedSideArtifactUuids = new Set<string>();
-  let previousConversationUuid: string | undefined;
+  let previousActiveUuid: string | undefined;
   for (let index = 0; index < records.length; index++) {
     const record = records[index]!;
     const activeRecord = activeByUuid.get(record.uuid);
     if (activeRecord) {
       selected.push(activeRecord);
       activeByUuid.delete(record.uuid);
-      previousConversationUuid = record.uuid;
+      previousActiveUuid = record.uuid;
       continue;
     }
     if (!isSessionArtifactRecord(record)) {
-      previousConversationUuid = record.uuid;
       continue;
     }
-    const nextUuid = nextConversationUuidByIndex.get(index);
+    const nextUuid = nextActiveUuidByIndex.get(index);
+    const hasBlockingRecordBeforeNextActive =
+      nextBlockingUuidByIndex.has(index);
     const isInActiveSegment =
-      nextUuid !== undefined
+      !hasBlockingRecordBeforeNextActive &&
+      (nextUuid !== undefined
         ? activeUuids.has(nextUuid)
-        : previousConversationUuid !== undefined &&
-          activeUuids.has(previousConversationUuid);
+        : previousActiveUuid !== undefined &&
+          activeUuids.has(previousActiveUuid));
     if (
       record.parentUuid !== null &&
       (activeUuids.has(record.parentUuid) ||
         includedSideArtifactUuids.has(record.parentUuid)) &&
       isInActiveSegment &&
-      (record.parentUuid === previousConversationUuid ||
+      (record.parentUuid === previousActiveUuid ||
         includedSideArtifactUuids.has(record.parentUuid))
     ) {
       selected.push(record);
@@ -2074,6 +2087,10 @@ function includeActiveSideArtifactRecords(
     }
   }
   return selected;
+}
+
+function isTailNeutralSideRecord(record: ChatRecord): boolean {
+  return record.type === 'system' && record.subtype === 'custom_title';
 }
 
 function collectFileHistorySnapshotPromptIds(

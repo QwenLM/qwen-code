@@ -422,10 +422,41 @@ export class SessionArtifactStore {
           ...(await this.evictOverflow(createdIds, changes, persistenceStrict)),
         );
 
-        const persistenceWarnings = await this.persistChanges(
-          changes,
-          persistenceStrict,
+        const hasStrictDurableTransition = changes.some(
+          shouldCommitBeforeDurablePersistence,
         );
+        let persistenceWarnings: string[];
+        if (hasStrictDurableTransition && !persistenceStrict) {
+          try {
+            persistenceWarnings = await this.persistChanges(changes, true);
+          } catch (error) {
+            this.restoreState(before);
+            const artifactIds = changes
+              .filter(shouldCommitBeforeDurablePersistence)
+              .map((change) => change.artifactId);
+            const warning =
+              'artifact retention change not persisted; live artifact kept';
+            return {
+              v: 1,
+              sessionId: this.sessionId,
+              changes: [],
+              warnings: [warning],
+              warningDetails: [
+                persistenceFailureDetail({
+                  message: warning,
+                  operation: 'upsert',
+                  artifactIds,
+                  error,
+                }),
+              ],
+            };
+          }
+        } else {
+          persistenceWarnings = await this.persistChanges(
+            changes,
+            persistenceStrict,
+          );
+        }
         warnings.push(...persistenceWarnings);
         warningDetails.push(
           ...detailsForPersistenceWarnings(
@@ -547,9 +578,12 @@ export class SessionArtifactStore {
       const needsDurableTombstone =
         removeChange.durableTombstoneRequired === true;
       if (needsDurableTombstone) {
+        const before = this.cloneState();
+        this.artifacts.delete(artifactId);
         try {
           await this.persistChanges(changes, true);
         } catch (error) {
+          this.restoreState(before);
           const warning = 'artifact removal not persisted; live artifact kept';
           return {
             v: 1,
@@ -567,7 +601,9 @@ export class SessionArtifactStore {
           };
         }
       }
-      this.artifacts.delete(artifactId);
+      if (!needsDurableTombstone) {
+        this.artifacts.delete(artifactId);
+      }
       const warnings = needsDurableTombstone
         ? []
         : await this.persistChanges(changes, false);
@@ -687,17 +723,11 @@ export class SessionArtifactStore {
           );
         }
       }
-      if (
-        snapshot.artifacts.length > 0 &&
-        restoredCount < snapshot.artifacts.length &&
-        warnings.length > baselineWarnings.length
-      ) {
+      if (snapshot.artifacts.length > 0 && restoredCount === 0) {
         this.restoreState(previousState);
         const rollbackWarnings = [
           ...baselineWarnings,
-          restoredCount === 0
-            ? `${RESTORE_FAILED_WARNING_PREFIX}; kept existing live artifacts`
-            : `${RESTORE_PARTIAL_FAILED_WARNING_PREFIX}; restored ${restoredCount}/${snapshot.artifacts.length} artifacts; kept existing live artifacts`,
+          `${RESTORE_FAILED_WARNING_PREFIX}; kept existing live artifacts`,
         ];
         this.setLastRestoreWarnings(rollbackWarnings);
         return rollbackWarnings;
@@ -719,7 +749,7 @@ export class SessionArtifactStore {
       if (
         snapshot.artifacts.length === 0 &&
         previousState.artifacts.size > 0 &&
-        baselineWarnings.length > 0
+        baselineWarnings.some(isArtifactSnapshotCompletenessWarning)
       ) {
         this.restoreState(previousState);
         const rollbackWarnings = [
@@ -1986,8 +2016,19 @@ function isFileArtifactUrl(raw: unknown): boolean {
 }
 
 function isArtifactSnapshotCompletenessWarning(warning: string): boolean {
+  if (warning.startsWith('skipped stale event sequence ')) return false;
   return (
     warning.startsWith('skipped ') || warning.includes(' list truncated to ')
+  );
+}
+
+function shouldCommitBeforeDurablePersistence(
+  change: SessionArtifactChange,
+): boolean {
+  return (
+    change.action === 'removed' &&
+    change.reason === 'unpin_to_ephemeral' &&
+    change.durableTombstoneRequired === true
   );
 }
 
