@@ -1295,6 +1295,7 @@ const EN: Messages = {
     `The condition is limited to ${v?.max ?? 4000} characters.`,
   'goals.error.clearKeyword': (v) =>
     `"${v?.word ?? ''}" clears a goal rather than setting one. Describe the condition to work toward.`,
+  'goals.error.createFailed': 'Failed to start the goal',
   'goals.error.clearFailed': 'Failed to clear the goal',
   'memory.add': 'Add',
   'memory.add.desc': 'Write a durable memory',
@@ -2971,6 +2972,7 @@ const ZH: Messages = {
   'goals.error.tooLong': (v) => `目标条件最多 ${v?.max ?? 4000} 个字符。`,
   'goals.error.clearKeyword': (v) =>
     `“${v?.word ?? ''}”是清除目标的指令，不是一个条件。请描述要达成的条件。`,
+  'goals.error.createFailed': '启动目标失败',
   'goals.error.clearFailed': '清除目标失败',
   'memory.add': '添加',
   'memory.add.desc': '写入一条持久 memory',

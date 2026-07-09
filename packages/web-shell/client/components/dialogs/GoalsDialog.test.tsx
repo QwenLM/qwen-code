@@ -343,6 +343,35 @@ describe('GoalsDialog', () => {
     vi.useRealTimers();
   });
 
+  it('routes a creation failure to a toast when the page closed mid-flight', async () => {
+    const onError = vi.fn();
+    let reject: ((e: Error) => void) | undefined;
+    const onCreateGoal = vi.fn(
+      () =>
+        new Promise<void>((_resolve, rj) => {
+          reject = rj;
+        }),
+    );
+    await mount([], { onCreateGoal, onError });
+
+    click(findButton('New goal'));
+    setTextarea('ship it');
+    click(findButton('Set goal'));
+    await flush();
+
+    // Navigating away unmounts the page while the prompt is still in flight;
+    // an inline form error would never be seen.
+    act(() => root?.unmount());
+    root = null;
+
+    await act(async () => {
+      reject?.(new Error('daemon says no'));
+      await Promise.resolve();
+    });
+
+    expect(onError).toHaveBeenCalled();
+  });
+
   it('renders the load error and keeps the list usable', async () => {
     actions.listGoals.mockRejectedValue(new Error('daemon unreachable'));
     container = document.createElement('div');

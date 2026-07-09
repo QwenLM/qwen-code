@@ -141,12 +141,17 @@ export function GoalsDialog({
       if (!mountedRef.current) return;
       resetForm();
     } catch (err) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current) {
+        // The page closed while the prompt was in flight, so the inline form
+        // error has nowhere to render. Toast rather than swallow it.
+        onError(err, t('goals.error.createFailed'));
+        return;
+      }
       setFormError(err instanceof Error ? err.message : String(err));
     } finally {
       if (mountedRef.current) setSubmitting(false);
     }
-  }, [condition, onCreateGoal, resetForm, t]);
+  }, [condition, onCreateGoal, onError, resetForm, t]);
 
   const handleClear = useCallback(
     async (goal: DaemonGoal) => {

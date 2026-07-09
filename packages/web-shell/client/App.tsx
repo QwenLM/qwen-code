@@ -4885,22 +4885,21 @@ export function App({
                         // the first turn, so it has to travel the prompt path.
                         // Start a FRESH session so the goal loop doesn't take
                         // over the conversation the user was already having.
-                        setMainView('chat');
                         const created = await createNewSession();
                         // createNewSession already surfaced the failure; don't
                         // drop the goal into the wrong (still-current) session.
                         if (!created) return;
                         onSessionIdChange?.(undefined);
-                        try {
-                          await sendPrompt(`/goal ${condition}`, undefined, {
-                            clearComposerOnPromptStart: true,
-                          });
-                        } catch (error: unknown) {
-                          // The Goals page has already unmounted, so its inline
-                          // form error would never be seen. Toast instead, or the
-                          // goal silently fails to start in the new session.
-                          reportError(error, 'Failed to start the goal');
-                        }
+                        // Switch to the chat only once the prompt is admitted.
+                        // Switching first unmounts the Goals page, and a later
+                        // rejection would then have nowhere to render: the user
+                        // would land in an empty session with no explanation.
+                        // Letting this reject keeps the error in the form the
+                        // user is looking at.
+                        await sendPrompt(`/goal ${condition}`, undefined, {
+                          clearComposerOnPromptStart: true,
+                        });
+                        setMainView('chat');
                       }}
                       onOpenSession={(sessionId) => {
                         // The goal's session transcript IS its history.

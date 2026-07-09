@@ -16,8 +16,6 @@ import {
   type GoalTerminalKind,
   type SlashCommandRecordPayload,
 } from '@qwen-code/qwen-code-core';
-
-const debugLogger = createDebugLogger('GOAL_RESTORE');
 import {
   isGoalStatusKind,
   isTerminalGoalStatusKind,
@@ -25,6 +23,15 @@ import {
   type HistoryItemGoalStatus,
   type HistoryItemWithoutId,
 } from '../types.js';
+
+const debugLogger = createDebugLogger('GOAL_RESTORE');
+
+/**
+ * Cap on a goal condition, enforced both when `/goal` sets one and when a
+ * transcript restores one. Lives here rather than in `goalCommand.ts` because
+ * that module already imports this one; the reverse would be a cycle.
+ */
+export const MAX_GOAL_LENGTH = 4000;
 
 /**
  * Finds the most recent `goal_status` history item. Returns the active
@@ -197,9 +204,9 @@ export function installGoalTerminalObserver(args: {
  * On session resume, restores the active /goal hook if the transcript ended
  * with an unsatisfied goal. Idempotent — safe to call on a fresh session.
  *
- * Re-runs the same trust/policy gates as `/goal`; if a gate now fails, we
- * silently skip restoration rather than re-register a goal the user can no
- * longer cancel.
+ * Re-runs the same trust/policy/length gates as `/goal`; if a gate now fails,
+ * we skip restoration rather than re-register a goal the user can no longer
+ * cancel.
  */
 export function restoreGoalFromHistory(
   history: readonly HistoryItemWithoutId[],
@@ -227,6 +234,17 @@ export function restoreGoalFromHistory(
     return { restored: false };
   }
   if (!config.getHookSystem()) {
+    unregisterGoalHook(config, sessionId);
+    return { restored: false };
+  }
+  // `/goal` caps the condition at set time, but a transcript is a file: a
+  // corrupted or hand-edited `condition` would otherwise be re-registered
+  // unbounded and then embedded verbatim in every judge call and continuation
+  // prompt for the rest of the session.
+  if (restorable.condition.length > MAX_GOAL_LENGTH) {
+    debugLogger.warn(
+      `Refusing to restore a goal whose condition exceeds ${MAX_GOAL_LENGTH} characters (got ${restorable.condition.length}).`,
+    );
     unregisterGoalHook(config, sessionId);
     return { restored: false };
   }

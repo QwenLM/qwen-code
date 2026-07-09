@@ -19,6 +19,7 @@ import {
   collectGoalStatusItemsFromRecords,
   findGoalToRestore,
   findLastTerminalGoal,
+  MAX_GOAL_LENGTH,
   parseGoalStatusItem,
   restoreGoalFromHistory,
 } from './restoreGoal.js';
@@ -497,5 +498,47 @@ describe('collectGoalStatusItemsFromRecords', () => {
       kind: 'achieved',
       condition: 'goal A',
     });
+  });
+});
+
+describe('restoreGoalFromHistory condition cap', () => {
+  beforeEach(() => __resetActiveGoalStoreForTests());
+  afterEach(() => __resetActiveGoalStoreForTests());
+
+  it('restores a condition exactly at the cap', () => {
+    const cfg = makeConfig();
+    const condition = 'x'.repeat(MAX_GOAL_LENGTH);
+    expect(restoreGoalFromHistory([goalItem({ condition })], cfg)).toEqual({
+      restored: true,
+      condition,
+    });
+  });
+
+  it('refuses a transcript whose condition exceeds the cap', () => {
+    // `/goal` caps the condition at set time, but a transcript is a file on
+    // disk: a corrupted or hand-edited one must not re-register an unbounded
+    // condition that then rides along in every judge call.
+    const cfg = makeConfig();
+    const condition = 'x'.repeat(MAX_GOAL_LENGTH + 1);
+    expect(restoreGoalFromHistory([goalItem({ condition })], cfg)).toEqual({
+      restored: false,
+    });
+    expect(getActiveGoal('sess-1')).toBeUndefined();
+  });
+
+  it('drops a stale in-memory goal when the transcript condition is oversized', () => {
+    setActiveGoal('sess-1', {
+      condition: 'stale goal',
+      iterations: 0,
+      setAt: 100,
+      tokensAtStart: 0,
+      hookId: 'stale-hook',
+    });
+    const cfg = makeConfig();
+    restoreGoalFromHistory(
+      [goalItem({ condition: 'x'.repeat(MAX_GOAL_LENGTH + 1) })],
+      cfg,
+    );
+    expect(getActiveGoal('sess-1')).toBeUndefined();
   });
 });

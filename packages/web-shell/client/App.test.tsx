@@ -2129,6 +2129,52 @@ describe('App /goal command', () => {
     );
   });
 
+  it('keeps the Goals page open when the goal prompt is rejected', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+    mockSessionActions.sendPrompt.mockRejectedValueOnce(
+      new Error('daemon says no'),
+    );
+
+    await act(async () => {
+      await expect(onCreateGoal('all tests pass')).rejects.toThrow(
+        'daemon says no',
+      );
+    });
+
+    // Switching to the chat first would unmount the page, leaving the rejection
+    // with nowhere to render: the user would land in an empty session with no
+    // explanation.
+    expect(
+      container.querySelector('[data-testid="goals-page"]'),
+    ).not.toBeNull();
+  });
+
+  it('switches to the chat view only after the goal prompt is admitted', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+
+    await act(async () => {
+      await onCreateGoal('all tests pass');
+    });
+
+    expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
+  });
+
   it('does not drop the goal into the current session when the new session fails', async () => {
     const { container } = renderApp();
     await flush();

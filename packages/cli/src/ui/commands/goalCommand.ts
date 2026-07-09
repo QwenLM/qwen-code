@@ -20,7 +20,10 @@ import {
   type GoalTerminalEvent,
 } from '@qwen-code/qwen-code-core';
 import { MessageType, type HistoryItemGoalStatus } from '../types.js';
-import { installGoalTerminalObserver } from '../utils/restoreGoal.js';
+import {
+  installGoalTerminalObserver,
+  MAX_GOAL_LENGTH,
+} from '../utils/restoreGoal.js';
 import { formatDuration } from '../utils/formatters.js';
 import { t } from '../../i18n/index.js';
 
@@ -33,8 +36,6 @@ const CLEAR_KEYWORDS = new Set([
   'none',
   'cancel',
 ]);
-
-const MAX_GOAL_LENGTH = 4000;
 
 // Keep the surrounding `"…"` quote structure intact: collapse newlines so the
 // condition stays on one line, and downgrade embedded double-quotes to single
