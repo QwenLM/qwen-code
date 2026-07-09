@@ -95,6 +95,35 @@ describe('debugLogger', () => {
       );
     });
 
+    it('writes debug log by default when QWEN_DEBUG_LOG_FILE is unset', async () => {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+
+      const logger = createDebugLogger();
+      logger.info('default log');
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.appendFile).toHaveBeenCalledWith(
+        Storage.getDebugLogPath('test-session-123'),
+        '2026-01-24T10:30:00.000Z [INFO] default log\n',
+        'utf8',
+      );
+    });
+
+    it.each(['', ' ', '0', 'false', 'off', 'no'])(
+      'does not write debug log when QWEN_DEBUG_LOG_FILE is %j',
+      async (value) => {
+        process.env['QWEN_DEBUG_LOG_FILE'] = value;
+
+        const logger = createDebugLogger();
+        logger.info('disabled log');
+
+        await vi.runAllTimersAsync();
+
+        expect(fs.appendFile).not.toHaveBeenCalled();
+      },
+    );
+
     it('writes log with tag when provided', async () => {
       const logger = createDebugLogger('STARTUP');
       logger.info('Server started');
@@ -314,6 +343,20 @@ describe('debugLogger', () => {
       await vi.runAllTimersAsync();
 
       expect(fs.unlink).toHaveBeenCalledWith(expectedLatestPath);
+      expect(fs.symlink).toHaveBeenCalledWith(
+        '92ec0176-d354-4147-848b-5cd2d80609c4.txt',
+        expectedLatestPath,
+      );
+    });
+
+    it('creates latest symlink by default when QWEN_DEBUG_LOG_FILE is unset', async () => {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+      vi.clearAllMocks();
+      resetDebugLoggingState();
+      setDebugLogSession(uuidSession);
+
+      await vi.runAllTimersAsync();
+
       expect(fs.symlink).toHaveBeenCalledWith(
         '92ec0176-d354-4147-848b-5cd2d80609c4.txt',
         expectedLatestPath,
