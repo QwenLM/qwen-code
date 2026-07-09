@@ -29,6 +29,8 @@ interface SessionRowProps {
   leading?: ReactNode;
   /** Trailing slot in the title row, e.g. a status badge. */
   trailing?: ReactNode;
+  /** Test-only selector for the resume dialog's session options. */
+  resumeSelector?: boolean;
   onClick: () => void;
   /**
    * Pointer moved over the row (real movement — see useListboxKeyboard). This
@@ -56,6 +58,7 @@ export function SessionRow({
   ariaSelected,
   leading,
   trailing,
+  resumeSelector,
   onClick,
   onActivate,
 }: SessionRowProps) {
@@ -78,6 +81,8 @@ export function SessionRow({
         disabled ? 'disabled' : undefined,
       )}
       title={current ? currentLabel : undefined}
+      data-web-shell-resume-session={resumeSelector ? '' : undefined}
+      data-session-id={resumeSelector ? session.sessionId : undefined}
       onClick={onClick}
       onMouseMove={onActivate}
     >
