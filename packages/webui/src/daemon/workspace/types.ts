@@ -189,11 +189,11 @@ export interface DaemonScheduledTask {
    * task's run history. Null for unbound tool-created/legacy tasks. */
   sessionId: string | null;
   /** How each fire runs. `'shared'` (default) runs in the bound session so runs
-   * accumulate in one transcript; `'isolated'` wraps the prompt so the model
-   * dispatches each fire into a fresh sub-session via `create_sub_session`
-   * (the anchor session transcript records only the dispatch confirmation).
-   * Normalized (never undefined). Note: `runs[].sessionId` always records the
-   * anchor (bound) session — the sub-session id is not surfaced here. */
+   * accumulate in one transcript; `'isolated'` dispatches each scheduled fire
+   * into a fresh sub-session daemon-side, so the bound session's transcript
+   * stays empty. Normalized (never undefined). Note: `runs[].sessionId` always
+   * records the anchor (bound) session — the sub-session id is not surfaced
+   * here. */
   runMode: 'shared' | 'isolated';
   /** Bounded, newest-last history of recent fires. Empty for tasks that have
    * not fired (and, by nature, for one-shots — they are deleted on fire). */

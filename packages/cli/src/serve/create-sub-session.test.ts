@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   createSubSessionLauncher,
@@ -36,6 +36,10 @@ function makeFakeBridge(opts?: {
   events?: (promptId: string) => FakeEvent[];
   blockAfterEvents?: boolean;
   sendPromptRejects?: string;
+  /** How the orphan-cleanup `closeSession` fails, if at all. A real bridge can
+   * throw synchronously (e.g. an unknown session id hits an assertion before
+   * the first await), which must not clobber the launch error. */
+  closeSessionFails?: 'sync' | 'async';
 }) {
   const spawns: Array<{
     workspaceCwd: string;
@@ -45,6 +49,7 @@ function makeFakeBridge(opts?: {
   const prompts: Array<{ sessionId: string; promptId?: string; text: string }> =
     [];
   const names: Array<{ sessionId: string; displayName?: string }> = [];
+  const closes: string[] = [];
   let subscribeCalls = 0;
   let capturedPromptId = '';
   let n = 0;
@@ -84,6 +89,16 @@ function makeFakeBridge(opts?: {
       // Never resolves — the first-turn result comes from the event stream.
       return new Promise(() => {});
     },
+    closeSession: (sessionId: string) => {
+      closes.push(sessionId);
+      if (opts?.closeSessionFails === 'sync') {
+        throw new Error('closeSession exploded');
+      }
+      if (opts?.closeSessionFails === 'async') {
+        return Promise.reject(new Error('closeSession rejected'));
+      }
+      return Promise.resolve();
+    },
     async *subscribeEvents(_sessionId: string, o?: { signal?: AbortSignal }) {
       subscribeCalls++;
       const evs = opts?.events ? opts.events(capturedPromptId) : [];
@@ -105,6 +120,7 @@ function makeFakeBridge(opts?: {
     spawns,
     prompts,
     names,
+    closes,
     subscribeCalls: () => subscribeCalls,
   };
 }
@@ -294,37 +310,100 @@ describe('sub-session launcher', () => {
         callerSessionId: 'c',
       }),
     ).rejects.toThrow(/dispatch failed.*API 429/i);
+    // The session was already spawned when the dispatch failed — close it so it
+    // doesn't linger in the bridge's pool while launch() reports failure.
+    expect(fake.closes).toEqual(['sub-1']);
   });
 
-  it('sent mode: holds concurrency slots until drain completes', async () => {
+  it('first-turn: a throwing closeSession does not mask the launch error', async () => {
+    // Orphan cleanup runs inside the launcher's catch block. A synchronous
+    // throw there would escape and replace the real failure ('API 429') with
+    // the cleanup failure — the caller would be told the wrong thing.
+    for (const closeSessionFails of ['sync', 'async'] as const) {
+      const fake = makeFakeBridge({
+        sendPromptRejects: 'API 429 rate limit',
+        events: () => [],
+        blockAfterEvents: true,
+        closeSessionFails,
+      });
+      const launcher = createSubSessionLauncher({
+        getBridge: () => fake.bridge,
+        boundWorkspace: WS,
+        firstTurnTimeoutMs: 60_000,
+      });
+      await expect(
+        launcher.launch({
+          prompt: 'x',
+          completion: 'first-turn',
+          callerSessionId: 'c',
+        }),
+      ).rejects.toThrow(/dispatch failed.*API 429/i);
+      expect(fake.closes).toEqual(['sub-1']);
+    }
+  });
+
+  it('sent mode: holds the concurrency slot while the drain is still running', async () => {
+    // No turn_complete and a stream that blocks: every drain stays in flight,
+    // so every slot stays held. Releasing at drain *start* instead of drain
+    // *end* would silently admit the overflow launch below — that is exactly
+    // the "cap is a no-op for sent mode" bug this guards.
+    const fake = makeFakeBridge({ events: () => [], blockAfterEvents: true });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+    for (let i = 0; i < MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER; i++) {
+      await launcher.launch({
+        prompt: `p${i}`,
+        completion: 'sent',
+        callerSessionId: 'same-caller',
+      });
+    }
+    await expect(
+      launcher.launch({
+        prompt: 'overflow',
+        completion: 'sent',
+        callerSessionId: 'same-caller',
+      }),
+    ).rejects.toThrow(/cap/i);
+    // Rejected before spawning — exactly cap sessions exist.
+    expect(fake.spawns).toHaveLength(MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER);
+    launcher.stop(); // unblock the drains so the test leaves nothing pending
+  });
+
+  it('sent mode: releases the slot once the drain sees turn_complete', async () => {
+    // blockAfterEvents keeps the stream open past the scripted events, so the
+    // ONLY way a drain can end is by matching its own turn_complete promptId.
     const fake = makeFakeBridge({
       events: (pid) => [turnComplete(pid)],
-      blockAfterEvents: false, // events emit immediately
+      blockAfterEvents: true,
     });
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
     });
-    // Launch cap-count sent runs — they should succeed and release slots.
-    const results = await Promise.all(
-      Array.from({ length: MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER }, (_, i) =>
-        launcher.launch({
-          prompt: `p${i}`,
-          completion: 'sent',
-          callerSessionId: 'same-caller',
-        }),
+    for (let i = 0; i < MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER; i++) {
+      await launcher.launch({
+        prompt: `p${i}`,
+        completion: 'sent',
+        callerSessionId: 'same-caller',
+      });
+    }
+    // Drains are fire-and-forget; let them observe turn_complete and release.
+    await vi.waitFor(() =>
+      expect(fake.subscribeCalls()).toBe(
+        MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
       ),
     );
-    expect(results).toHaveLength(MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER);
-    // Drain runs are fire-and-forget; let microtasks flush.
-    await new Promise((r) => setTimeout(r, 0));
-    // After drains complete, a fresh launch should succeed (slots released).
+    await new Promise((r) => setTimeout(r, 10));
+    // All slots freed — a launch beyond the cap now succeeds.
     const fresh = await launcher.launch({
       prompt: 'after-drain',
       completion: 'sent',
       callerSessionId: 'same-caller',
     });
     expect(fresh.sessionId).toBeTruthy();
+    launcher.stop();
   });
 
   it('stop() mid-first-turn returns stopReason "shutdown"', async () => {

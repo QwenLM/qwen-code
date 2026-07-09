@@ -33,6 +33,7 @@ import type {
   LoopTickResult,
   ToolArtifact,
   VisionBridgeResult,
+  SubSessionSpawner,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -211,23 +212,6 @@ const debugLogger = createDebugLogger('SESSION');
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
-
-/**
- * Wraps an `isolated` scheduled task's prompt so the model dispatches it into a
- * fresh sub-session (via the `create_sub_session` tool) instead of running it in
- * this shared bound session. Whether/how the sub-session is spawned is the
- * model's decision — this only carries the instruction.
- */
-function wrapIsolatedTaskPrompt(prompt: string): string {
-  return (
-    'This scheduled task is configured to run in an ISOLATED session. Use the ' +
-    '`create_sub_session` tool with completion "sent" to run the task below in ' +
-    'a fresh sub-session — do NOT perform the task yourself in this session. ' +
-    'After dispatching it, reply with a one-line confirmation.\n\n' +
-    '--- Task ---\n' +
-    prompt
-  );
-}
 
 function maskApiKeyForDisplay(apiKey: string | undefined): string {
   const trimmed = apiKey?.trim() ?? '';
@@ -975,10 +959,13 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Wire the `create_sub_session` tool's spawner to the daemon over the ACP
-   * `extMethod` request channel. ONLY the ACP/daemon session does this, so the
-   * tool is inert (reports daemon-only) in interactive TUI / headless, where no
-   * bridge exists. The request runs while the caller's turn is suspended in the
+   * Wire the sub-session spawner to the daemon over the ACP `extMethod` request
+   * channel. Two callers: the `create_sub_session` tool (model-initiated) and
+   * `#dispatchIsolatedCronFire` (scheduler-initiated). ONLY the ACP/daemon
+   * session wires it, so the tool is inert (reports daemon-only) in interactive
+   * TUI / headless, where no bridge exists.
+   *
+   * A tool-initiated request runs while the caller's turn is suspended in the
    * tool await — safe because the ACP channel supports concurrent bidirectional
    * in-flight requests and prompts serialize per-session, not per-child.
    */
@@ -2873,23 +2860,59 @@ export class Session implements SessionContext {
       }) => {
         if (this.cronDisabledByTokenLimit) return;
         if (job.missed && detectAutonomousSentinel(job.prompt)) return;
-        // An `isolated` scheduled task should run in a FRESH sub-session rather
-        // than accumulating in this (shared) bound session. Instead of a
-        // dedicated daemon path, we relay it through the model: wrap the prompt
-        // so the model dispatches it via the `create_sub_session` tool. The
-        // model decides the trigger; this session just carries the instruction.
-        // Excludes `missed` so a missed one-shot keeps its confirm-first path.
-        const prompt =
-          !job.missed && job.runMode === 'isolated'
-            ? wrapIsolatedTaskPrompt(job.prompt)
-            : job.prompt;
+        // An `isolated` task gets a FRESH sub-session per fire instead of
+        // accumulating in this bound session. Dispatch it straight to the
+        // daemon rather than asking the model to call `create_sub_session`:
+        // that tool's permission is 'ask', and under the default approval mode
+        // an unattended fire has nobody to answer the prompt — the call would
+        // hang until the daemon's permission timeout cancels it. A `missed`
+        // one-shot keeps the in-session confirm-first path.
+        if (!job.missed && job.runMode === 'isolated') {
+          const spawner = this.config.getSubSessionSpawner();
+          if (spawner) {
+            void this.#dispatchIsolatedCronFire(spawner, job.prompt);
+            return;
+          }
+          // Defensive: an isolated task can only be created through the daemon's
+          // REST route, which binds it to a session that always has a spawner
+          // (and a bound task fires nowhere else). Should that ever change, run
+          // the fire in-session — losing the task is worse than losing isolation.
+        }
         this.cronQueue.push({
-          prompt,
+          prompt: job.prompt,
           source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
         });
         void this.#drainCronQueue();
       },
     );
+  }
+
+  /**
+   * Runs one `isolated` scheduled fire in a fresh sub-session. Fire-and-forget:
+   * `'sent'` resolves once the prompt is dispatched, and the daemon-side
+   * launcher holds a concurrency slot until that sub-session's turn drains.
+   *
+   * A dispatch failure (concurrency cap reached, bridge gone, daemon shutting
+   * down) is logged and the fire is dropped. It deliberately does NOT fall back
+   * to an in-session run: the prompt may already have been dispatched, and
+   * silently running an isolated task inside the bound session would defeat the
+   * isolation the user asked for.
+   */
+  async #dispatchIsolatedCronFire(
+    spawner: SubSessionSpawner,
+    prompt: string,
+  ): Promise<void> {
+    try {
+      const { sessionId } = await spawner({ prompt, completion: 'sent' });
+      debugLogger.info(
+        `Isolated scheduled task dispatched into sub-session ${sessionId} [session ${this.sessionId}]`,
+      );
+    } catch (err) {
+      debugLogger.warn(
+        `Isolated scheduled task dispatch failed — the fire was dropped ` +
+          `[session ${this.sessionId}]: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**

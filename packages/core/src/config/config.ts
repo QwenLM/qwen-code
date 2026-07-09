@@ -1453,10 +1453,11 @@ export interface SubSessionSpawnResult {
 }
 
 /**
- * Injected capability that spawns a sub-session on behalf of the
- * `create_sub_session` tool. Wired ONLY by the daemon/ACP session layer
- * (`Session.ts` → `this.client.extMethod`); absent in interactive TUI / headless
- * (no bridge), which is precisely the tool's daemon-only gate.
+ * Injected capability that spawns a sub-session. Used by the `create_sub_session`
+ * tool and by the ACP session's `isolated` scheduled-task dispatch. Wired ONLY by
+ * the daemon/ACP session layer (`Session.ts` → `this.client.extMethod`); absent in
+ * interactive TUI / headless (no bridge), which is precisely the tool's
+ * daemon-only gate.
  */
 export type SubSessionSpawner = (
   req: SubSessionSpawnRequest,

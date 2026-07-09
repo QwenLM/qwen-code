@@ -90,12 +90,12 @@ export interface DurableCronTask {
   /**
    * How each scheduled fire runs. Absent or `'shared'` = the #6389 model: the
    * task fires inside its single bound {@link sessionId} session and every run
-   * accumulates in that one transcript. `'isolated'` = the fire still lands in
-   * the bound session, but its prompt is wrapped so the model dispatches the
-   * work into a FRESH sub-session (via the `create_sub_session` tool) instead of
-   * running it inline — giving each run a clean context. Absent defaults to
-   * `'shared'` so tool-created and legacy tasks are unchanged. Purely a UI/
-   * behavior toggle; the scheduler treats both modes identically.
+   * accumulates in that one transcript. `'isolated'` = the owning session
+   * dispatches each fire straight into a FRESH sub-session (its own clean
+   * context and transcript) and never runs the prompt inline. Absent defaults to
+   * `'shared'` so tool-created and legacy tasks are unchanged. The scheduler
+   * treats both modes identically — it only carries the field to `onFire`, which
+   * is where the routing happens.
    */
   runMode?: 'shared' | 'isolated';
   /**

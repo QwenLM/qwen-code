@@ -5,12 +5,13 @@
  */
 
 /**
- * Daemon-host handler for the `create_sub_session` tool.
+ * Daemon-host handler for sub-session spawn requests.
  *
- * A tool running inside a child's agent turn sends a `create-sub-session`
- * `extMethod` request UP to the daemon (see `BridgeOptions.onCreateSubSession`);
- * this handler spawns a FRESH top-level sub-session and runs the prompt in it
- * (`spawnOrAttach` thread scope → `sendPrompt`) and RETURNS a result.
+ * A child sends a `create-sub-session` `extMethod` request UP to the daemon (see
+ * `BridgeOptions.onCreateSubSession`) — either from the `create_sub_session` tool
+ * inside an agent turn, or from the ACP session's `isolated` scheduled-task
+ * dispatch. This handler spawns a FRESH top-level sub-session, runs the prompt in
+ * it (`spawnOrAttach` thread scope → `sendPrompt`), and RETURNS a result.
  *
  * Completion modes:
  *  - `'sent'`      — dispatch the prompt and return `{ sessionId }` immediately;
@@ -410,9 +411,19 @@ export function createSubSessionLauncher(
       // synchronously), close the orphaned session so it doesn't leak a slot
       // in the bridge's session pool while this launch reports failure.
       if (spawnedSessionId !== undefined) {
-        // closeSession is async — the surrounding try/catch only catches sync
-        // throws, so attach .catch() to prevent unhandled rejection.
-        void bridge.closeSession(spawnedSessionId).catch(() => {});
+        // Both guards are load-bearing. `.catch()` swallows the async
+        // rejection; the try/catch contains a SYNCHRONOUS throw. We are already
+        // inside the catch block, so an escaping throw here would replace `err`
+        // — the real launch failure — with the cleanup failure.
+        try {
+          void bridge.closeSession(spawnedSessionId).catch(() => {});
+        } catch (closeErr) {
+          log.debug(
+            'sub-session: closeSession threw',
+            spawnedSessionId,
+            closeErr,
+          );
+        }
       }
       writeStderrLine(
         `qwen serve: create_sub_session failed: ${err instanceof Error ? err.message : String(err)}`,

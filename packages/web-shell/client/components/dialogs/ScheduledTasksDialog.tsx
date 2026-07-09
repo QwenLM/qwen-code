@@ -26,8 +26,13 @@ import {
 import styles from './ScheduledTasksDialog.module.css';
 
 /** Wrap a prompt for "Run now" on an isolated task — instructs the model to
- * dispatch via `create_sub_session` rather than running inline. Mirrors the
- * server-side `wrapIsolatedTaskPrompt` in Session.ts. */
+ * dispatch via `create_sub_session` rather than running inline.
+ *
+ * Only the MANUAL run relays through the model. A scheduled fire is dispatched
+ * daemon-side (`Session.#dispatchIsolatedCronFire`) because it is unattended:
+ * `create_sub_session` asks for permission, and nobody would be there to answer.
+ * A manual run is attended by definition — the user is looking at this dialog —
+ * so the tool's permission gate can do its job. */
 function wrapIsolatedRunPrompt(prompt: string): string {
   return (
     'This scheduled task is configured to run in an ISOLATED session. Use the ' +

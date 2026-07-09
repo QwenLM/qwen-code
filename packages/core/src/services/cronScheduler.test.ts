@@ -1192,10 +1192,11 @@ describe('CronScheduler', () => {
     });
 
     it('delivers runMode on the job so the Session layer can route isolated fires', async () => {
-      // Isolated tasks fire in-session like any other durable task; the runMode
-      // ride-along is what lets Session.onFire wrap the prompt to dispatch it
-      // into a fresh sub-session (via the create_sub_session tool). The scheduler
-      // itself persists a run normally — no special isolated persist path.
+      // Isolated tasks fire through the same onFire channel as any other durable
+      // task; the runMode ride-along is what lets Session.onFire dispatch the
+      // prompt into a fresh sub-session instead of running it in the bound
+      // session. The scheduler itself persists a run normally — no special
+      // isolated persist path.
       await writeCronTasks(tmpDir, [
         { ...diskTask('iso1'), runMode: 'isolated' },
       ]);
