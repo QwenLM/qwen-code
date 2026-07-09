@@ -20,15 +20,12 @@
  *    unrestricted shell-tool access — see the WARNING on
  *    `SCRUBBED_CHILD_ENV_KEYS` in `spawnChannel.ts`.
  *
- * 2. The shell-tool subprocess (`shellExecutionService.ts`) passes the BROAD
- *    set produced by {@link collectSensitiveShellEnvKeys}. The shell
- *    subprocess is where the model's own commands run — including auto-allowed
- *    read-only commands like `printenv`/`env`. Inheriting the daemon's env
- *    verbatim lets `printenv QWEN_SERVER_TOKEN` exfiltrate the daemon bearer
- *    token (and any provider key) straight into the tool result. So every
- *    secret-semantic var is stripped here regardless of whether the ACP child
- *    needs it; the shell subprocess is model-controlled and should never have
- *    relied on inherited secrets.
+ * 2. Shell/MCP/tool subprocesses pass the narrow set produced by
+ *    {@link collectSensitiveShellEnvKeys}. These children must not inherit
+ *    daemon-internal Qwen secrets such as `QWEN_SERVER_TOKEN`, but user-managed
+ *    credentials like `GH_TOKEN`, `AWS_ACCESS_KEY_ID`, or `NPM_TOKEN` are part
+ *    of normal shell and MCP workflows and must remain available unless a
+ *    caller explicitly overrides/deletes them.
  */
 
 /**
@@ -73,31 +70,16 @@ export function scrubChildEnv(
 }
 
 /**
- * Pattern matching secret-semantic env-var names. Substring matching is
- * intentional — it catches both the suffix form (`OPENAI_API_KEY`,
- * `ANTHROPIC_API_KEY`, `DASHSCOPE_API_KEY`) and the prefix/middle form used
- * by custom providers (`QWEN_CUSTOM_API_KEY_<id>`). The `_TOKEN$` alternative
- * is anchored to the end so it catches `*_TOKEN` (`QWEN_SERVER_TOKEN`,
- * `GITHUB_TOKEN`, `AWS_SESSION_TOKEN`, …) without matching non-secret names
- * that merely contain "token" as a substring. `_PASSWORD` and `_PRIVATE_KEY`
- * cover the remaining common secret-bearing suffixes (`DB_PASSWORD`,
- * `GITLAB_DB_PASSWORD`, `SSH_PRIVATE_KEY`, `GCP_SERVICE_ACCOUNT_PRIVATE_KEY`,
- * …). `_ACCESS_KEY_ID` covers the AWS access-key-ID form
- * (`AWS_ACCESS_KEY_ID`, `GOOGLE_ACCESS_KEY_ID`); the matching secret access
- * key (`AWS_SECRET_ACCESS_KEY`) is already caught by `_SECRET`.
- *
- * Over-matching is safe here because the shell subprocess is model-controlled:
- * a benign var that happens to match a secret pattern simply isn't inherited,
- * and the model can pass it explicitly if a command genuinely needs it. The
- * daemon's own provider keys are never legitimately needed by a model-run
- * shell command.
+ * Narrow denylist for daemon/internal Qwen env vars. Do not add broad
+ * credential-name patterns here: user-managed credentials are expected to flow
+ * through shell and MCP subprocesses by default.
  */
-const SENSITIVE_ENV_KEY_PATTERN =
-  /(?:_API_KEY|_SECRET|_CREDENTIAL|_TOKEN$|_PASSWORD|_PRIVATE_KEY|_ACCESS_KEY_ID)/i;
+const INTERNAL_QWEN_ENV_KEY_PATTERN =
+  /^(?:QWEN_SERVER_TOKEN|QWEN_CODE_SIMPLE|QWEN_CUSTOM_API_KEY_.+)$/;
 
 /**
- * Collect the set of env-var names present in `env` that match the
- * secret-semantic pattern above. Returns exact key names so the result can be
+ * Collect the set of env-var names present in `env` that match the internal
+ * Qwen denylist above. Returns exact key names so the result can be
  * handed to {@link scrubChildEnv} (which takes a `ReadonlySet<string>` of
  * exact keys, shared with the ACP-child path).
  */
@@ -106,7 +88,7 @@ export function collectSensitiveShellEnvKeys(
 ): Set<string> {
   const keys = new Set<string>();
   for (const key of Object.keys(env)) {
-    if (SENSITIVE_ENV_KEY_PATTERN.test(key)) keys.add(key);
+    if (INTERNAL_QWEN_ENV_KEY_PATTERN.test(key)) keys.add(key);
   }
   return keys;
 }

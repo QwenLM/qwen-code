@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BLOCKED_ENV_VARS, createSanitizedEnv, createScriptRuntimeEnv } from './sandbox-env.ts';
+import { createSanitizedEnv, createScriptRuntimeEnv } from './sandbox-env.ts';
 
 describe('sandbox-env', () => {
   const createdDirs: string[] = [];
@@ -13,21 +13,40 @@ describe('sandbox-env', () => {
     }
   });
 
-  it('strips all blocked credential vars', () => {
+  it('strips Qwen internal vars and keeps user credentials', () => {
     const base: NodeJS.ProcessEnv = {
       SAFE_VAR: 'ok',
+      QWEN_SERVER_TOKEN: 'daemon-bearer',
+      LLM_API_KEY: 'llm-key',
+      QWEN_API_KEY: 'qwen-key',
+      AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE',
+      AWS_SECRET_ACCESS_KEY: 'aws-secret',
+      AWS_SESSION_TOKEN: 'aws-session',
+      GITHUB_TOKEN: 'gh-token',
+      GH_TOKEN: 'gh-token',
+      GOOGLE_API_KEY: 'google-key',
+      STRIPE_SECRET_KEY: 'stripe-key',
+      NPM_TOKEN: 'npm-token',
+      DB_PASSWORD: 'db-password',
+      SSH_PRIVATE_KEY: 'private-key',
     };
-
-    for (const key of BLOCKED_ENV_VARS) {
-      base[key] = `${key.toLowerCase()}-secret`;
-    }
 
     const sanitized = createSanitizedEnv(base);
 
     expect(sanitized.SAFE_VAR).toBe('ok');
-    for (const key of BLOCKED_ENV_VARS) {
-      expect(sanitized[key]).toBeUndefined();
-    }
+    expect(sanitized.QWEN_SERVER_TOKEN).toBeUndefined();
+    expect(sanitized.LLM_API_KEY).toBe('llm-key');
+    expect(sanitized.QWEN_API_KEY).toBe('qwen-key');
+    expect(sanitized.AWS_ACCESS_KEY_ID).toBe('AKIAEXAMPLE');
+    expect(sanitized.AWS_SECRET_ACCESS_KEY).toBe('aws-secret');
+    expect(sanitized.AWS_SESSION_TOKEN).toBe('aws-session');
+    expect(sanitized.GITHUB_TOKEN).toBe('gh-token');
+    expect(sanitized.GH_TOKEN).toBe('gh-token');
+    expect(sanitized.GOOGLE_API_KEY).toBe('google-key');
+    expect(sanitized.STRIPE_SECRET_KEY).toBe('stripe-key');
+    expect(sanitized.NPM_TOKEN).toBe('npm-token');
+    expect(sanitized.DB_PASSWORD).toBe('db-password');
+    expect(sanitized.SSH_PRIVATE_KEY).toBe('private-key');
   });
 
   it('sets python/uv cache and temp dirs inside data directory', () => {
@@ -43,7 +62,7 @@ describe('sandbox-env', () => {
     });
 
     expect(env.SAFE_VAR).toBe('ok');
-    expect(env.QWEN_API_KEY).toBeUndefined();
+    expect(env.QWEN_API_KEY).toBe('secret');
 
     expect(env.TMPDIR).toBe(join(dataDir, '.tmp'));
     expect(env.TMP).toBe(join(dataDir, '.tmp'));

@@ -62,6 +62,12 @@ export {
   multiBlockResponse,
 } from './response.ts';
 
+export {
+  collectSensitiveChildEnvKeys,
+  createSanitizedChildEnv,
+  scrubChildEnv,
+} from './runtime/child-env-scrub.ts';
+
 // Source helpers
 export {
   getSourcePath,

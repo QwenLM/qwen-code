@@ -11,138 +11,26 @@ import {
 } from './child-env-scrub.js';
 
 describe('collectSensitiveShellEnvKeys', () => {
-  it('collects *_API_KEY (suffix form)', () => {
+  it('collects Qwen daemon/internal keys only', () => {
     const keys = collectSensitiveShellEnvKeys({
+      QWEN_SERVER_TOKEN: 'bearer',
+      QWEN_CODE_SIMPLE: '1',
       OPENAI_API_KEY: 'sk-1',
-      ANTHROPIC_API_KEY: 'sk-ant',
-      DASHSCOPE_API_KEY: 'ds',
-      GOOGLE_API_KEY: 'g',
+      AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE',
+      GITHUB_TOKEN: 'ghp',
+      GH_TOKEN: 'gh',
+      NPM_TOKEN: 'npm',
+      DB_PASSWORD: 'pw',
     });
-    expect(keys).toEqual(
-      new Set([
-        'OPENAI_API_KEY',
-        'ANTHROPIC_API_KEY',
-        'DASHSCOPE_API_KEY',
-        'GOOGLE_API_KEY',
-      ]),
-    );
+    expect(keys).toEqual(new Set(['QWEN_SERVER_TOKEN', 'QWEN_CODE_SIMPLE']));
   });
 
-  it('collects the custom-provider prefix form QWEN_CUSTOM_API_KEY_<id>', () => {
-    // custom-provider.ts derives QWEN_CUSTOM_API_KEY_<12hex> env keys;
-    // these hold provider API tokens and must be stripped from the shell
-    // subprocess even though they do not END in _API_KEY.
+  it('collects Qwen custom provider keys because they are internal env storage', () => {
     const keys = collectSensitiveShellEnvKeys({
       QWEN_CUSTOM_API_KEY_API_EXAMPLE_COM_AB12CD34EF56: 'tok',
     });
     expect(keys).toEqual(
       new Set(['QWEN_CUSTOM_API_KEY_API_EXAMPLE_COM_AB12CD34EF56']),
-    );
-  });
-
-  it('collects *_SECRET (incl. AWS_SECRET_ACCESS_KEY, CLIENT_SECRET)', () => {
-    const keys = collectSensitiveShellEnvKeys({
-      AWS_SECRET_ACCESS_KEY: 'aws-secret',
-      JWT_SECRET: 'jwt',
-      CLIENT_SECRET: 'cs',
-    });
-    expect(keys).toEqual(
-      new Set(['AWS_SECRET_ACCESS_KEY', 'JWT_SECRET', 'CLIENT_SECRET']),
-    );
-  });
-
-  it('collects *_CREDENTIAL(S) (incl. GOOGLE_APPLICATION_CREDENTIALS)', () => {
-    const keys = collectSensitiveShellEnvKeys({
-      GOOGLE_APPLICATION_CREDENTIALS: '/path/to/sa.json',
-      DB_CREDENTIAL: 'c',
-      AZURE_CREDENTIALS: 'az',
-    });
-    expect(keys).toEqual(
-      new Set([
-        'GOOGLE_APPLICATION_CREDENTIALS',
-        'DB_CREDENTIAL',
-        'AZURE_CREDENTIALS',
-      ]),
-    );
-  });
-
-  it('collects *_TOKEN (QWEN_SERVER_TOKEN, GITHUB_TOKEN, AWS_SESSION_TOKEN)', () => {
-    const keys = collectSensitiveShellEnvKeys({
-      QWEN_SERVER_TOKEN: 'bearer',
-      GITHUB_TOKEN: 'ghp',
-      GH_TOKEN: 'gh',
-      GITLAB_TOKEN: 'gl',
-      HF_TOKEN: 'hf',
-      AWS_SESSION_TOKEN: 'aws-tok',
-    });
-    expect(keys).toEqual(
-      new Set([
-        'QWEN_SERVER_TOKEN',
-        'GITHUB_TOKEN',
-        'GH_TOKEN',
-        'GITLAB_TOKEN',
-        'HF_TOKEN',
-        'AWS_SESSION_TOKEN',
-      ]),
-    );
-  });
-
-  it('collects *_PASSWORD (DB_PASSWORD, GITLAB_DB_PASSWORD, MYSQL_ROOT_PASSWORD)', () => {
-    const keys = collectSensitiveShellEnvKeys({
-      DB_PASSWORD: 'pw',
-      GITLAB_DB_PASSWORD: 'glpw',
-      MYSQL_ROOT_PASSWORD: 'mysql',
-      REDIS_PASSWORD: 'redis',
-    });
-    expect(keys).toEqual(
-      new Set([
-        'DB_PASSWORD',
-        'GITLAB_DB_PASSWORD',
-        'MYSQL_ROOT_PASSWORD',
-        'REDIS_PASSWORD',
-      ]),
-    );
-  });
-
-  it('does NOT match bare PASSWORD (no leading underscore) — pattern boundary', () => {
-    // The pattern is `_PASSWORD` (requires a leading underscore), mirroring
-    // the `_TOKEN$` anchoring rationale: avoid matching benign names that
-    // merely contain "password" as a substring. `PGPASSWORD` (a real Postgres
-    // env var with no underscore separator before PASSWORD) is therefore NOT
-    // caught by the pattern. This is an accepted boundary, not a bug: the
-    // shell subprocess is model-controlled, and the daemon should not be
-    // relying on PGPASSWORD inheritance anyway (it should set it explicitly).
-    const keys = collectSensitiveShellEnvKeys({
-      PGPASSWORD: 'pg',
-      PASSWORD: 'bare',
-    });
-    expect(keys).toEqual(new Set());
-  });
-
-  it('collects *_PRIVATE_KEY (SSH_PRIVATE_KEY, GCP_SERVICE_ACCOUNT_PRIVATE_KEY, GIT_SSH_PRIVATE_KEY)', () => {
-    const keys = collectSensitiveShellEnvKeys({
-      SSH_PRIVATE_KEY: '-----BEGIN...',
-      GCP_SERVICE_ACCOUNT_PRIVATE_KEY: '-----BEGIN...',
-      GIT_SSH_PRIVATE_KEY: 'k2',
-    });
-    expect(keys).toEqual(
-      new Set([
-        'SSH_PRIVATE_KEY',
-        'GCP_SERVICE_ACCOUNT_PRIVATE_KEY',
-        'GIT_SSH_PRIVATE_KEY',
-      ]),
-    );
-  });
-
-  it('collects AWS access-key-ID form (AWS_ACCESS_KEY_ID, GOOGLE_ACCESS_KEY_ID)', () => {
-    // The matching secret access key (AWS_SECRET_ACCESS_KEY) is caught by
-    // _SECRET; this covers the ID half, which also identifies the account.
-    const keys = collectSensitiveShellEnvKeys({
-      AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE',
-      GOOGLE_ACCESS_KEY_ID: 'GOOGEXAMPLE',
-    });
-    expect(keys).toEqual(
-      new Set(['AWS_ACCESS_KEY_ID', 'GOOGLE_ACCESS_KEY_ID']),
     );
   });
 
@@ -154,7 +42,6 @@ describe('collectSensitiveShellEnvKeys', () => {
       QWEN_CODE_SESSION_ID: 'sid',
       QWEN_CODE_AGENT_ID: 'aid',
       QWEN_CODE_PROMPT_ID: 'pid',
-      QWEN_CODE_SIMPLE: '1',
       TERM: 'xterm-256color',
       PAGER: 'cat',
       GIT_PAGER: 'cat',
@@ -208,11 +95,7 @@ describe('scrubChildEnv (shell-tool env policy)', () => {
     expect(result).not.toHaveProperty('QWEN_SERVER_TOKEN');
   });
 
-  // The end-to-end contract the shellExecutionService call site relies on:
-  // feeding collectSensitiveShellEnvKeys(process.env) as the scrub set
-  // strips every secret-semantic var while keeping the daemon's legitimate
-  // shell-tool overrides (QWEN_CODE, TERM, PAGER, session/agent/prompt IDs).
-  it('integration: collector + scrub strips secrets, keeps shell overrides', () => {
+  it('integration: collector + scrub strips internal env, keeps user credentials and shell overrides', () => {
     const source: NodeJS.ProcessEnv = {
       PATH: '/usr/bin',
       HOME: '/home/user',
@@ -240,21 +123,19 @@ describe('scrubChildEnv (shell-tool env policy)', () => {
       QWEN_CODE_PROMPT_ID: 'pid-1',
     });
 
-    // All secret-semantic vars stripped:
     expect(result).not.toHaveProperty('QWEN_SERVER_TOKEN');
-    expect(result).not.toHaveProperty('OPENAI_API_KEY');
-    expect(result).not.toHaveProperty('ANTHROPIC_API_KEY');
-    expect(result).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
-    expect(result).not.toHaveProperty('AWS_ACCESS_KEY_ID');
-    expect(result).not.toHaveProperty('GITHUB_TOKEN');
     expect(result).not.toHaveProperty(
       'QWEN_CUSTOM_API_KEY_API_EXAMPLE_COM_AB12CD34EF56',
     );
-    expect(result).not.toHaveProperty('GOOGLE_APPLICATION_CREDENTIALS');
-    expect(result).not.toHaveProperty('DB_PASSWORD');
-    expect(result).not.toHaveProperty('SSH_PRIVATE_KEY');
 
-    // Legit inherited vars preserved:
+    expect(result['OPENAI_API_KEY']).toBe('sk-leak');
+    expect(result['ANTHROPIC_API_KEY']).toBe('sk-ant-leak');
+    expect(result['AWS_SECRET_ACCESS_KEY']).toBe('aws-secret');
+    expect(result['AWS_ACCESS_KEY_ID']).toBe('AKIAEXAMPLE');
+    expect(result['GITHUB_TOKEN']).toBe('ghp-leak');
+    expect(result['GOOGLE_APPLICATION_CREDENTIALS']).toBe('/sa.json');
+    expect(result['DB_PASSWORD']).toBe('db-pw-leak');
+    expect(result['SSH_PRIVATE_KEY']).toBe('-----BEGIN LEAK...');
     expect(result['PATH']).toBe('/usr/bin');
     expect(result['HOME']).toBe('/home/user');
     expect(result['LANG']).toBe('en_US.UTF-8');

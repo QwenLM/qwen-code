@@ -5,33 +5,15 @@
 import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { ScriptRuntimeLanguage } from './resolve-script-runtime.ts';
+import { createSanitizedChildEnv } from './child-env-scrub.ts';
 
 /**
- * Env vars stripped from subprocesses to prevent credential leakage.
- * NOTE: Keep in sync with packages/shared/src/mcp/client.ts (BLOCKED_ENV_VARS).
+ * Return a shallow-copied environment with daemon-internal variables removed.
  */
-export const BLOCKED_ENV_VARS = [
-  'LLM_API_KEY',
-  'QWEN_API_KEY',
-  'AWS_ACCESS_KEY_ID',
-  'AWS_SECRET_ACCESS_KEY',
-  'AWS_SESSION_TOKEN',
-  'GITHUB_TOKEN',
-  'GH_TOKEN',
-  'GOOGLE_API_KEY',
-  'STRIPE_SECRET_KEY',
-  'NPM_TOKEN',
-] as const;
-
-/**
- * Return a shallow-copied environment with sensitive variables removed.
- */
-export function createSanitizedEnv(baseEnv: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...baseEnv };
-  for (const key of BLOCKED_ENV_VARS) {
-    delete env[key];
-  }
-  return env;
+export function createSanitizedEnv(
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return createSanitizedChildEnv(baseEnv);
 }
 
 export interface ScriptRuntimeEnvOptions {

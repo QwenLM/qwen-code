@@ -11,6 +11,7 @@ import { debug } from '../utils/debug.ts';
 import { parseError, type AgentError } from '../agent/errors.ts';
 import { normalizeMcpUrl } from '../sources/server-builder.ts';
 import type { McpTransport } from '../sources/types.ts';
+import { createSanitizedChildEnv } from '../../../session-tools-core/src/runtime/child-env-scrub.ts';
 
 export interface InvalidProperty {
   toolName: string;
@@ -267,7 +268,7 @@ export async function validateStdioMcpConnection(
     // Spawn the process
     const spawnPromise = (async () => {
       childProcess = spawn(command, args, {
-        env: { ...process.env, ...env },
+        env: createSanitizedChildEnv(process.env, env),
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
