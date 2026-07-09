@@ -253,9 +253,11 @@ describe('SessionArtifactStore', () => {
     } finally {
       stderr.mockRestore();
     }
-    await expect(store.list()).resolves.toMatchObject({
-      artifacts: [{ id: artifactId, clientId: 'client-a' }],
+    const listed = await store.list();
+    expect(listed).toMatchObject({
+      artifacts: [{ id: artifactId }],
     });
+    expect(listed.artifacts[0]).not.toHaveProperty('clientId');
 
     await expect(
       store.remove(artifactId, { clientId: 'client-a' }),
@@ -302,12 +304,13 @@ describe('SessionArtifactStore', () => {
         {
           id: artifactId,
           title: 'Client A link',
-          clientId: 'client-a',
           metadata: { owner: 'a' },
           retention: 'ephemeral',
         },
       ],
     });
+    const listed = await store.list();
+    expect(listed.artifacts[0]).not.toHaveProperty('clientId');
   });
 
   it('ignores explicit client retention flags from non-client sources', async () => {
@@ -377,7 +380,6 @@ describe('SessionArtifactStore', () => {
         {
           id: ownedId,
           title: 'Client A link',
-          clientId: 'client-a',
           metadata: { owner: 'a' },
         },
         {
@@ -385,6 +387,8 @@ describe('SessionArtifactStore', () => {
         },
       ],
     });
+    const listed = await store.list();
+    expect(listed.artifacts[0]).not.toHaveProperty('clientId');
   });
 
   it('keeps client ids live while omitting them from durable artifact records', async () => {
@@ -412,8 +416,22 @@ describe('SessionArtifactStore', () => {
       { strict: true },
     );
 
-    expect(created.changes[0]?.artifact).toMatchObject({
-      clientId: 'client-a',
+    expect(created.changes[0]?.artifact).not.toHaveProperty('clientId');
+    const listed = await store.list();
+    expect(listed.artifacts[0]).not.toHaveProperty('clientId');
+    await expect(
+      store.remove(created.changes[0]!.artifactId, { clientId: 'client-b' }),
+    ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
+    await expect(
+      store.remove(created.changes[0]!.artifactId, { clientId: 'client-a' }),
+    ).resolves.toMatchObject({
+      changes: [
+        {
+          action: 'removed',
+          artifactId: created.changes[0]!.artifactId,
+          reason: 'explicit',
+        },
+      ],
     });
     expect(events[0]?.changes[0]?.artifact).not.toHaveProperty('clientId');
     expect(events[0]?.changes[0]?.artifact).not.toHaveProperty('restoreState');

@@ -307,31 +307,35 @@ export function remapSessionArtifactPayloadForFork(
       markerArtifacts: snapshotMarkerArtifacts,
       ...snapshotWithoutMarkers
     } = snapshot;
-    const artifacts = snapshot.artifacts.map((artifact) => {
-      const remapped = remapSessionArtifactForFork(
+    const artifacts: PersistedSessionArtifact[] = [];
+    for (const artifact of snapshot.artifacts) {
+      const remapped = remapForkSafeSessionArtifactForFork(
         artifact,
         sourceSessionId,
         newSessionId,
       );
+      if (!remapped) continue;
       remappedArtifactIds.set(artifact.id, remapped.id);
-      return remapped;
-    });
+      artifacts.push(remapped);
+    }
     const markerIds = new Set([
       ...(snapshot.tombstonedIds ?? []),
       ...(snapshot.stickyEphemeralIds ?? []),
     ]);
     const markerArtifacts = (snapshotMarkerArtifacts ?? [])
       .filter((artifact) => markerIds.has(artifact.id))
-      .filter((artifact) => isForkSafeMarkerArtifact(artifact))
+      .filter((artifact) => isForkSafeArtifact(artifact))
       .map((artifact) => {
-        const remapped = remapSessionArtifactForFork(
+        const remapped = remapForkSafeSessionArtifactForFork(
           artifact,
           sourceSessionId,
           newSessionId,
         );
+        if (!remapped) return undefined;
         remappedArtifactIds.set(artifact.id, remapped.id);
         return remapped;
-      });
+      })
+      .filter((artifact) => artifact !== undefined);
     return {
       ...snapshotWithoutMarkers,
       sessionId: newSessionId,
@@ -365,11 +369,25 @@ export function remapSessionArtifactPayloadForFork(
     changes: event.changes
       .map((change): SessionArtifactPersistedChange | undefined => {
         if (change.artifact) {
-          const artifact = remapSessionArtifactForFork(
+          const artifact = remapForkSafeSessionArtifactForFork(
             change.artifact,
             sourceSessionId,
             newSessionId,
           );
+          if (!artifact) {
+            if (change.action !== 'removed') return undefined;
+            const { artifact: _unsafeArtifact, ...changeWithoutArtifact } =
+              change;
+            return {
+              ...changeWithoutArtifact,
+              artifactId: remapArtifactIdForFork(
+                change.artifactId,
+                sourceSessionId,
+                newSessionId,
+                remappedArtifactIds,
+              ),
+            };
+          }
           remappedArtifactIds.set(change.artifactId, artifact.id);
           return {
             ...change,
@@ -400,6 +418,15 @@ export function remapSessionArtifactPayloadForFork(
       })
       .filter((change) => change !== undefined),
   } satisfies SessionArtifactEventRecordPayload;
+}
+
+function remapForkSafeSessionArtifactForFork(
+  artifact: PersistedSessionArtifact,
+  sourceSessionId: string,
+  newSessionId: string,
+): PersistedSessionArtifact | undefined {
+  if (!isForkSafeArtifact(artifact)) return undefined;
+  return remapSessionArtifactForFork(artifact, sourceSessionId, newSessionId);
 }
 
 function remapArtifactIdForFork(
@@ -437,10 +464,11 @@ function remapSessionArtifactForFork(
   };
   delete next.contentRef;
   delete next.expiresAt;
+  delete next.clientId;
   return next;
 }
 
-function isForkSafeMarkerArtifact(artifact: PersistedSessionArtifact): boolean {
+function isForkSafeArtifact(artifact: PersistedSessionArtifact): boolean {
   if (artifact.metadata && hasRestoreUnsafeMetadata(artifact.metadata)) {
     return false;
   }

@@ -1996,7 +1996,6 @@ function toPublicArtifact(
     toolCallId,
     toolName,
     hookEventName,
-    clientId,
   } = artifact;
   return {
     id,
@@ -2022,7 +2021,6 @@ function toPublicArtifact(
     ...(toolCallId ? { toolCallId } : {}),
     ...(toolName ? { toolName } : {}),
     ...(hookEventName ? { hookEventName } : {}),
-    ...(clientId ? { clientId } : {}),
   };
 }
 

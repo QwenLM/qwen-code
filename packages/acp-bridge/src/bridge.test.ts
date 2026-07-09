@@ -56,6 +56,7 @@ import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   ShellExecutionService,
   stableSessionArtifactId,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
 import {
   FakeAgent,
@@ -238,9 +239,9 @@ describe('createAcpSessionBridge', () => {
         {
           title: 'Client link',
           source: 'client',
-          clientId: session.clientId,
         },
       ]);
+      expect(snapshot.artifacts[0]).not.toHaveProperty('clientId');
       expect(snapshot.artifacts[0]).not.toHaveProperty('toolName');
       expect(snapshot.artifacts[0]).not.toHaveProperty('hookEventName');
       expect(snapshot.artifacts[0]).not.toHaveProperty('toolCallId');
@@ -282,8 +283,10 @@ describe('createAcpSessionBridge', () => {
       await expect(
         bridge.getSessionArtifacts(first.sessionId),
       ).resolves.toMatchObject({
-        artifacts: [{ id: artifactId, clientId: first.clientId }],
+        artifacts: [{ id: artifactId }],
       });
+      const listed = await bridge.getSessionArtifacts(first.sessionId);
+      expect(listed.artifacts[0]).not.toHaveProperty('clientId');
 
       await expect(
         bridge.removeSessionArtifact(first.sessionId, artifactId, {
@@ -1397,7 +1400,12 @@ describe('createAcpSessionBridge', () => {
       lastEventId: 0,
     });
     expect(handles[0]?.agent.loadSessionCalls).toEqual([
-      { sessionId: 'persisted-1', cwd: WS_A, mcpServers: [] },
+      {
+        sessionId: 'persisted-1',
+        cwd: WS_A,
+        mcpServers: [],
+        _meta: { 'qwen.session.loadReplayMode': 'bulk' },
+      },
     ]);
     expect(bridge.sessionCount).toBe(1);
 
@@ -1450,6 +1458,7 @@ describe('createAcpSessionBridge', () => {
       sessionId,
       workspaceCwd: WS_A,
     });
+    expect(loaded.state).not.toHaveProperty('artifactSnapshot');
     expect(loaded.artifactWarnings).toEqual([
       'skipped corrupt artifact record',
     ]);
@@ -1495,6 +1504,7 @@ describe('createAcpSessionBridge', () => {
       workspaceCwd: WS_A,
     });
 
+    expect(loaded.state).not.toHaveProperty('artifactSnapshot');
     expect(loaded.artifactWarnings).toEqual([
       'skipped artifact without id/title',
       'kept warning',
@@ -1936,6 +1946,72 @@ describe('createAcpSessionBridge', () => {
       data: { reason: 'seeded_replay_not_in_ring' },
     });
     await iterator.return?.();
+    await bridge.shutdown();
+  });
+
+  it('restores artifacts from default bulk load replay when no snapshot is available', async () => {
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({
+        loadSessionImpl: (p) => {
+          expect(p._meta).toMatchObject({
+            'qwen.session.loadReplayMode': 'bulk',
+          });
+          return {
+            _meta: {
+              'qwen.session.loadReplay': {
+                v: 1,
+                updates: [
+                  {
+                    sessionUpdate: 'tool_call_update',
+                    toolCallId: 'call-replayed-artifact',
+                    status: 'completed',
+                    content: [],
+                    _meta: {
+                      toolName: ToolNames.ARTIFACT,
+                      artifacts: [
+                        {
+                          title: 'Replayed artifact',
+                          url: 'https://example.com/replayed-artifact',
+                          retention: 'restorable',
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            },
+          };
+        },
+      });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-replayed-artifact',
+      workspaceCwd: WS_A,
+    });
+
+    expect(handles[0]?.agent.loadSessionCalls[0]).toMatchObject({
+      sessionId: 'persisted-replayed-artifact',
+      cwd: WS_A,
+      mcpServers: [],
+      _meta: { 'qwen.session.loadReplayMode': 'bulk' },
+    });
+    await expect(
+      bridge.getSessionArtifacts(loaded.sessionId),
+    ).resolves.toMatchObject({
+      artifacts: [
+        {
+          title: 'Replayed artifact',
+          url: 'https://example.com/replayed-artifact',
+          restoreState: 'live',
+        },
+      ],
+    });
+
     await bridge.shutdown();
   });
 
@@ -2411,6 +2487,7 @@ describe('createAcpSessionBridge', () => {
     const first = bridge.loadSession({
       sessionId: 'coalesce-replay-mode',
       workspaceCwd: WS_A,
+      historyReplay: 'stream',
     });
     for (let i = 0; i < 50 && !releaseLoad; i++) {
       await new Promise((r) => setTimeout(r, 10));

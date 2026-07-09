@@ -529,6 +529,7 @@ describe('session artifact persistence records', () => {
     expect(forked).not.toHaveProperty('expiresAt');
     expect(forked).not.toHaveProperty('restoreState');
     expect(forked).not.toHaveProperty('persistenceWarning');
+    expect(forked).not.toHaveProperty('clientId');
   });
 
   it('remaps forked tombstone changes when artifact metadata is present', () => {
@@ -574,6 +575,48 @@ describe('session artifact persistence records', () => {
     expect(remapped.changes[0]?.artifact).not.toHaveProperty(
       'persistenceWarning',
     );
+    expect(remapped.changes[0]?.artifact).not.toHaveProperty('clientId');
+  });
+
+  it('drops unsafe forked event artifact payloads before persistence', () => {
+    const unsafe = artifact(
+      'source-session',
+      'https://example.com/deleted-unsafe-event',
+      {
+        metadata: { apiKey: 'redacted' },
+        clientId: 'legacy-owner',
+      },
+    );
+
+    const remapped = remapSessionArtifactPayloadForFork(
+      {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 'source-session',
+        sequence: 6,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [
+          {
+            action: 'removed',
+            artifactId: unsafe.id,
+            artifact: unsafe,
+            reason: 'explicit',
+          },
+        ],
+      },
+      'source-session',
+      'forked-session',
+    ) as SessionArtifactEventRecordPayload;
+
+    expect(remapped.changes).toEqual([
+      {
+        action: 'removed',
+        artifactId: stableSessionArtifactId(
+          'forked-session',
+          `fork:source-session:${unsafe.id}`,
+        ),
+        reason: 'explicit',
+      },
+    ]);
   });
 
   it('remaps forked tombstone changes that omit artifact metadata', () => {

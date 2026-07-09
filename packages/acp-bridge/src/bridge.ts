@@ -2973,6 +2973,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return typeof reason === 'string' && reason ? reason : undefined;
   };
 
+  const publicRestoreState = (
+    state: BridgeSessionState,
+  ): BridgeSessionState => {
+    const {
+      artifactSnapshot: _artifactSnapshot,
+      artifactSnapshotUnavailable: _artifactSnapshotUnavailable,
+      ...publicState
+    } = state;
+    return publicState;
+  };
+
   async function restoreSession(
     action: 'load' | 'resume',
     req: BridgeRestoreSessionRequest,
@@ -2983,7 +2994,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
     const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
     const historyReplay =
-      action === 'load' ? (req.historyReplay ?? 'stream') : 'stream';
+      action === 'load' ? (req.historyReplay ?? 'response') : 'stream';
 
     const existing = byId.get(req.sessionId);
     if (existing) {
@@ -3226,15 +3237,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         },
       );
       releaseAdmissionOnce();
-      entry.restoreState = state;
+      const restoredArtifactSnapshot = restoredArtifactSnapshotFromState(state);
+      const publicState = publicRestoreState(state);
+      entry.restoreState = publicState;
       if (replayPartial === true) {
         entry.restoreReplayPartial = true;
       }
       if (replayError !== undefined) {
         entry.restoreReplayError = replayError;
       }
-      seedSnapshotCaches(entry, state);
-      const restoredArtifactSnapshot = restoredArtifactSnapshotFromState(state);
+      seedSnapshotCaches(entry, publicState);
       const artifactRestoreWarnings = await entry.artifacts.restore(
         restoredArtifactSnapshot,
       );
@@ -3277,7 +3289,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         attached: false,
         clientId,
         createdAt: entry.createdAt,
-        state,
+        state: publicState,
         ...(artifactRestoreWarnings.length > 0
           ? { artifactWarnings: artifactRestoreWarnings }
           : {}),
