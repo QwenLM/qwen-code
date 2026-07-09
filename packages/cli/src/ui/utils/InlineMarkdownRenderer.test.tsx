@@ -5,8 +5,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import stringWidth from 'string-width';
 import { renderWithProviders } from '../../test-utils/render.js';
-import { RenderInline } from './InlineMarkdownRenderer.js';
+import { getPlainTextLength, RenderInline } from './InlineMarkdownRenderer.js';
 import { HYPERLINK_ENV_KEYS } from './osc8.js';
 
 describe('<RenderInline />', () => {
@@ -50,11 +51,24 @@ describe('<RenderInline />', () => {
 
   it('renders inline math only when explicitly enabled', () => {
     const { lastFrame } = renderWithProviders(
-      <RenderInline text="value $\\alpha$" enableInlineMath />,
+      <RenderInline text={String.raw`value $\alpha$`} enableInlineMath />,
     );
 
     expect(lastFrame()).toContain('α');
     expect(lastFrame()).not.toContain('$\\alpha$');
+  });
+
+  it('uses shared inline math detection for spaced math', () => {
+    const { lastFrame } = renderWithProviders(
+      <RenderInline
+        text={String.raw`value $ x $ and function $f(x)$`}
+        enableInlineMath
+      />,
+    );
+
+    expect((lastFrame() ?? '').replace(/\s+/g, ' ')).toContain(
+      'value x and function f(x)',
+    );
   });
 
   it('does not parse ordinary dollar amounts as inline math', () => {
@@ -63,6 +77,12 @@ describe('<RenderInline />', () => {
     );
 
     expect(lastFrame()).toContain('cost is $5 and $10 later');
+  });
+
+  it('renders inline math before stripping markdown for plain text length', () => {
+    expect(getPlainTextLength(String.raw`value $\alpha_{i_j}$`, true)).toBe(
+      stringWidth('value α_{iⱼ}'),
+    );
   });
 
   describe('markdown link OSC 8 wrapping', () => {
