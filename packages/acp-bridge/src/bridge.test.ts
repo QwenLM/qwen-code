@@ -991,6 +991,7 @@ describe('createAcpSessionBridge', () => {
         sessionId: 'session-1',
       });
       const rejection =
+        // eslint-disable-next-line vitest/valid-expect -- awaited via `rejection` below, after the fake timers advance (handler attached early so the timeout rejection is not unhandled)
         expect(request).rejects.toBeInstanceOf(BridgeTimeoutError);
       await callSeen.promise;
       await vi.advanceTimersByTimeAsync(60_000);
