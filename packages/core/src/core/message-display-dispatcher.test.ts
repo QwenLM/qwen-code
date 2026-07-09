@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   MessageDisplayDispatcher,
   MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS,
@@ -72,6 +72,21 @@ function createDispatcher(
 const PAST_DEBOUNCE = MESSAGE_DISPLAY_DEBOUNCE_MS + 1;
 
 describe('MessageDisplayDispatcher', () => {
+  // Centralized here instead of per-test: every test that spies on
+  // console.warn (and the handful that also fake timers) needs the same
+  // restore, so a shared afterEach removes the repeated try/finally
+  // boilerplate. Restoring on tests that never touched these is a no-op.
+  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleWarnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
   it('delivers a due mid-stream flush and then the final flush, sharing one message_id', async () => {
     const { bus, sent, release } = createControlledBus();
     const dispatcher = createDispatcher(bus);
@@ -213,166 +228,136 @@ describe('MessageDisplayDispatcher', () => {
   });
 
   it('logs a failed delivery with the message_id and still delivers the final flush', async () => {
-    const consoleWarnSpy = vi
-      .spyOn(console, 'warn')
-      .mockImplementation(() => {});
-    try {
-      const warn = vi.fn();
-      const sent: SentPayload[] = [];
-      const request = vi.fn((message: { input: SentPayload }) => {
-        sent.push(message.input);
-        return message.input.is_final
-          ? Promise.resolve({})
-          : Promise.reject(new Error('hook process failed'));
-      });
-      const dispatcher = createDispatcher(
-        { request } as unknown as MessageBus,
-        { warn },
-      );
+    const warn = vi.fn();
+    const sent: SentPayload[] = [];
+    const request = vi.fn((message: { input: SentPayload }) => {
+      sent.push(message.input);
+      return message.input.is_final
+        ? Promise.resolve({})
+        : Promise.reject(new Error('hook process failed'));
+    });
+    const dispatcher = createDispatcher(
+      { request } as unknown as MessageBus,
+      { warn },
+    );
 
-      dispatcher.addChunk('text', PAST_DEBOUNCE); // this delivery fails
-      // Let the failure settle while the message is still streaming — a
-      // failure noticed only after finish() dispatched the final payload is
-      // deliberately suppressed as superseded (see the next test).
-      await Promise.resolve();
-      await Promise.resolve();
-      await dispatcher.finish();
+    dispatcher.addChunk('text', PAST_DEBOUNCE); // this delivery fails
+    // Let the failure settle while the message is still streaming — a
+    // failure noticed only after finish() dispatched the final payload is
+    // deliberately suppressed as superseded (see the next test).
+    await Promise.resolve();
+    await Promise.resolve();
+    await dispatcher.finish();
 
-      expect(warn).toHaveBeenCalledWith(
-        `MessageDisplay hook failed [${dispatcher.messageId}]: Error: hook process failed`,
-      );
-      // The injected sink is typically the gated debug-file logger, so the
-      // dispatcher itself mirrors every warning to the console — a broken
-      // delivery must be visible by default, on every surface.
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        `MessageDisplay hook failed [${dispatcher.messageId}]: Error: hook process failed`,
-      );
-      expect(sent).toHaveLength(2);
-      expect(sent[1]).toMatchObject({ displayed_text: 'text', is_final: true });
-    } finally {
-      consoleWarnSpy.mockRestore();
-    }
+    expect(warn).toHaveBeenCalledWith(
+      `MessageDisplay hook failed [${dispatcher.messageId}]: Error: hook process failed`,
+    );
+    // The injected sink is typically the gated debug-file logger, so the
+    // dispatcher itself mirrors every warning to the console — a broken
+    // delivery must be visible by default, on every surface.
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      `MessageDisplay hook failed [${dispatcher.messageId}]: Error: hook process failed`,
+    );
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toMatchObject({ displayed_text: 'text', is_final: true });
   });
 
   it('does not warn when a superseded mid-stream delivery fails after the final was dispatched', async () => {
-    const consoleWarnSpy = vi
-      .spyOn(console, 'warn')
-      .mockImplementation(() => {});
-    try {
-      const warn = vi.fn();
-      const sent: SentPayload[] = [];
-      let rejectMidStream!: (err: Error) => void;
-      const request = vi.fn((message: { input: SentPayload }) => {
-        sent.push(message.input);
-        return message.input.is_final
-          ? Promise.resolve({})
-          : new Promise((_resolve, reject) => {
-              rejectMidStream = reject;
-            });
-      });
-      const dispatcher = createDispatcher(
-        { request } as unknown as MessageBus,
-        { warn },
-      );
+    const warn = vi.fn();
+    const sent: SentPayload[] = [];
+    let rejectMidStream!: (err: Error) => void;
+    const request = vi.fn((message: { input: SentPayload }) => {
+      sent.push(message.input);
+      return message.input.is_final
+        ? Promise.resolve({})
+        : new Promise((_resolve, reject) => {
+            rejectMidStream = reject;
+          });
+    });
+    const dispatcher = createDispatcher(
+      { request } as unknown as MessageBus,
+      { warn },
+    );
 
-      dispatcher.addChunk('text', PAST_DEBOUNCE); // in flight, held
-      await dispatcher.finish(); // final dispatched alongside, settles fine
+    dispatcher.addChunk('text', PAST_DEBOUNCE); // in flight, held
+    await dispatcher.finish(); // final dispatched alongside, settles fine
 
-      // The stale delivery's outcome no longer matters — the final payload
-      // superseded it and was delivered. A late failure (e.g. the bus
-      // request's own timeout) must not alarm anyone about a turn that
-      // actually completed correctly.
-      rejectMidStream(new Error('request timed out'));
-      await Promise.resolve();
-      await Promise.resolve();
+    // The stale delivery's outcome no longer matters — the final payload
+    // superseded it and was delivered. A late failure (e.g. the bus
+    // request's own timeout) must not alarm anyone about a turn that
+    // actually completed correctly.
+    rejectMidStream(new Error('request timed out'));
+    await Promise.resolve();
+    await Promise.resolve();
 
-      expect(warn).not.toHaveBeenCalled();
-      expect(consoleWarnSpy).not.toHaveBeenCalled();
-    } finally {
-      consoleWarnSpy.mockRestore();
-    }
+    expect(warn).not.toHaveBeenCalled();
+    expect(consoleWarnSpy).not.toHaveBeenCalled();
   });
 
   it('shares one drain budget across concurrent finish() calls', async () => {
     vi.useFakeTimers();
-    const consoleWarnSpy = vi
-      .spyOn(console, 'warn')
-      .mockImplementation(() => {});
-    try {
-      const warn = vi.fn();
-      const { bus } = createControlledBus();
-      const dispatcher = createDispatcher(bus, { warn });
+    const warn = vi.fn();
+    const { bus } = createControlledBus();
+    const dispatcher = createDispatcher(bus, { warn });
 
-      dispatcher.addChunk('text', PAST_DEBOUNCE); // in flight, never released
-      const first = dispatcher.finish();
-      const second = dispatcher.finish(); // concurrent, not sequential
+    dispatcher.addChunk('text', PAST_DEBOUNCE); // in flight, never released
+    const first = dispatcher.finish();
+    const second = dispatcher.finish(); // concurrent, not sequential
 
-      await vi.advanceTimersByTimeAsync(MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS);
-      await first;
-      await second;
+    await vi.advanceTimersByTimeAsync(MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS);
+    await first;
+    await second;
 
-      // Both calls shared ONE timer and produced ONE warning — a concurrent
-      // second call must not open a second timeout window of its own.
-      expect(warn).toHaveBeenCalledTimes(1);
-    } finally {
-      consoleWarnSpy.mockRestore();
-      vi.useRealTimers();
-    }
+    // Both calls shared ONE timer and produced ONE warning — a concurrent
+    // second call must not open a second timeout window of its own.
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 
   it('gives up waiting on drain after the timeout and warns, while delivery keeps running in the background', async () => {
     vi.useFakeTimers();
-    const consoleWarnSpy = vi
-      .spyOn(console, 'warn')
-      .mockImplementation(() => {});
-    try {
-      const warn = vi.fn();
-      const { bus, sent, release } = createControlledBus();
-      const dispatcher = createDispatcher(bus, { warn });
+    const warn = vi.fn();
+    const { bus, sent, release } = createControlledBus();
+    const dispatcher = createDispatcher(bus, { warn });
 
-      dispatcher.addChunk('text', PAST_DEBOUNCE); // in flight, never released
-      let finishResolved = false;
-      const finished = dispatcher.finish().then(() => {
-        finishResolved = true;
-      });
+    dispatcher.addChunk('text', PAST_DEBOUNCE); // in flight, never released
+    let finishResolved = false;
+    const finished = dispatcher.finish().then(() => {
+      finishResolved = true;
+    });
 
-      // The final payload was dispatched immediately, alongside the stale
-      // mid-stream delivery — the timeout bounds waiting for the hook to
-      // finish executing, not whether it receives is_final.
-      expect(sent).toHaveLength(2);
-      expect(sent[1]).toMatchObject({ displayed_text: 'text', is_final: true });
+    // The final payload was dispatched immediately, alongside the stale
+    // mid-stream delivery — the timeout bounds waiting for the hook to
+    // finish executing, not whether it receives is_final.
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toMatchObject({ displayed_text: 'text', is_final: true });
 
-      await vi.advanceTimersByTimeAsync(MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS - 1);
-      expect(finishResolved).toBe(false);
+    await vi.advanceTimersByTimeAsync(MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS - 1);
+    expect(finishResolved).toBe(false);
 
-      await vi.advanceTimersByTimeAsync(1);
-      await finished;
+    await vi.advanceTimersByTimeAsync(1);
+    await finished;
 
-      expect(finishResolved).toBe(true);
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining(
-          `MessageDisplay hook [${dispatcher.messageId}] still running after ${MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS}ms`,
-        ),
-      );
+    expect(finishResolved).toBe(true);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `MessageDisplay hook [${dispatcher.messageId}] still running after ${MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS}ms`,
+      ),
+    );
 
-      // finish() stopped waiting, but both deliveries are still running in
-      // the background and settle normally once released.
-      await release();
-      await release();
-      expect(sent).toHaveLength(2);
+    // finish() stopped waiting, but both deliveries are still running in
+    // the background and settle normally once released.
+    await release();
+    await release();
+    expect(sent).toHaveLength(2);
 
-      // The drain-timeout warning also reaches the console: the injected
-      // sink is typically the gated debug-file logger, and this is the
-      // moment a documented guarantee is being relaxed.
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining(
-          `MessageDisplay hook [${dispatcher.messageId}] still running after ${MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS}ms`,
-        ),
-      );
-    } finally {
-      consoleWarnSpy.mockRestore();
-      vi.useRealTimers();
-    }
+    // The drain-timeout warning also reaches the console: the injected
+    // sink is typically the gated debug-file logger, and this is the
+    // moment a documented guarantee is being relaxed.
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `MessageDisplay hook [${dispatcher.messageId}] still running after ${MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS}ms`,
+      ),
+    );
   });
 
   it('dispatches is_final immediately alongside a stale in-flight mid-stream delivery instead of queueing behind it', async () => {
@@ -410,35 +395,27 @@ describe('MessageDisplayDispatcher', () => {
 
   it('does not restart the drain budget when finish() is called again while delivery is still in flight', async () => {
     vi.useFakeTimers();
-    const consoleWarnSpy = vi
-      .spyOn(console, 'warn')
-      .mockImplementation(() => {});
-    try {
-      const warn = vi.fn();
-      const { bus } = createControlledBus();
-      const dispatcher = createDispatcher(bus, { warn });
+    const warn = vi.fn();
+    const { bus } = createControlledBus();
+    const dispatcher = createDispatcher(bus, { warn });
 
-      dispatcher.addChunk('text', PAST_DEBOUNCE); // in flight, never released
-      const first = dispatcher.finish();
-      await vi.advanceTimersByTimeAsync(MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS);
-      await first; // budget spent, one warning
+    dispatcher.addChunk('text', PAST_DEBOUNCE); // in flight, never released
+    const first = dispatcher.finish();
+    await vi.advanceTimersByTimeAsync(MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS);
+    await first; // budget spent, one warning
 
-      // The client.ts sequence: an explicit finish() before the Stop hook,
-      // then a second from the outer finally. The second call must not buy
-      // the hung delivery another full timeout — the ceiling is the
-      // constant, not a multiple of it.
-      let secondResolved = false;
-      const second = dispatcher.finish().then(() => {
-        secondResolved = true;
-      });
-      await vi.advanceTimersByTimeAsync(0);
-      expect(secondResolved).toBe(true);
-      await second;
-      expect(warn).toHaveBeenCalledTimes(1);
-    } finally {
-      consoleWarnSpy.mockRestore();
-      vi.useRealTimers();
-    }
+    // The client.ts sequence: an explicit finish() before the Stop hook,
+    // then a second from the outer finally. The second call must not buy
+    // the hung delivery another full timeout — the ceiling is the
+    // constant, not a multiple of it.
+    let secondResolved = false;
+    const second = dispatcher.finish().then(() => {
+      secondResolved = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(secondResolved).toBe(true);
+    await second;
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 
   it('ignores chunks that arrive after finish()', async () => {
