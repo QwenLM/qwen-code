@@ -19,6 +19,17 @@ import {
 } from './message-display-buffer.js';
 
 /**
+ * Ceiling on how long {@link MessageDisplayDispatcher.finish} waits for
+ * delivery to drain before letting the turn's teardown proceed anyway. Well
+ * short of `DEFAULT_HOOK_TIMEOUT` (60s, hookRunner.ts) because a turn can be
+ * blocked behind at most one in-flight hook execution — a slow or hung
+ * MessageDisplay hook shouldn't be able to freeze `qwen -p` or an ACP stream
+ * loop's `finally` for anywhere near that long. Delivery keeps running in the
+ * background past the timeout; this only bounds how long the caller waits.
+ */
+export const MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS = 5000;
+
+/**
  * Owns the delivery side of the MessageDisplay hook for ONE streamed message:
  * mints the `message_id`, folds streamed chunks through the pure
  * {@link stepMessageDisplay} debounce, and dispatches due flushes through
@@ -102,7 +113,7 @@ export class MessageDisplayDispatcher {
       // delivery to settle in the background.
       return;
     }
-    await this.drained();
+    await this.drainWithTimeout();
   }
 
   /**
@@ -154,13 +165,31 @@ export class MessageDisplayDispatcher {
       });
   }
 
-  /** Resolves once nothing is in flight and nothing is pending. */
-  private drained(): Promise<void> {
+  /**
+   * Resolves once nothing is in flight and nothing is pending, or after
+   * {@link MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS} elapses — whichever comes
+   * first — instead of waiting indefinitely behind a slow or hung hook
+   * process. Delivery is left running in the background; only the caller's
+   * wait is bounded.
+   */
+  private drainWithTimeout(): Promise<void> {
     if (!this.inFlight && !this.pending) {
       return Promise.resolve();
     }
     return new Promise((resolve) => {
-      this.drainWaiters.push(resolve);
+      const timer = setTimeout(() => {
+        this.warn(
+          `MessageDisplay hook [${this.messageId}] still running after ` +
+            `${MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS}ms; continuing without ` +
+            'waiting for it to finish (delivery continues in the background).',
+        );
+        resolve();
+      }, MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS);
+      timer.unref?.();
+      this.drainWaiters.push(() => {
+        clearTimeout(timer);
+        resolve();
+      });
     });
   }
 }

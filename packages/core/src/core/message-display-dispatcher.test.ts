@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { MessageDisplayDispatcher } from './message-display-dispatcher.js';
+import {
+  MessageDisplayDispatcher,
+  MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS,
+} from './message-display-dispatcher.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 
@@ -220,6 +223,43 @@ describe('MessageDisplayDispatcher', () => {
     );
     expect(sent).toHaveLength(2);
     expect(sent[1]).toMatchObject({ displayed_text: 'text', is_final: true });
+  });
+
+  it('gives up waiting on drain after the timeout and warns, while delivery keeps running in the background', async () => {
+    vi.useFakeTimers();
+    try {
+      const warn = vi.fn();
+      const { bus, sent, release } = createControlledBus();
+      const dispatcher = createDispatcher(bus, { warn });
+
+      dispatcher.addChunk('text', PAST_DEBOUNCE); // in flight, never released
+      let finishResolved = false;
+      const finished = dispatcher.finish().then(() => {
+        finishResolved = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS - 1);
+      expect(finishResolved).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await finished;
+
+      expect(finishResolved).toBe(true);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `MessageDisplay hook [${dispatcher.messageId}] still running after ${MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS}ms`,
+        ),
+      );
+
+      // finish() stopped waiting, but the in-flight delivery itself is still
+      // running and completes normally once released.
+      expect(sent).toHaveLength(1);
+      await release();
+      expect(sent).toHaveLength(2);
+      expect(sent[1]).toMatchObject({ displayed_text: 'text', is_final: true });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('ignores chunks that arrive after finish()', async () => {

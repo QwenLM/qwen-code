@@ -55,6 +55,11 @@ import { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import {
+  MessageBusType,
+  type HookExecutionRequest,
+  type HookExecutionResponse,
+} from '../confirmation-bus/types.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
@@ -6740,6 +6745,78 @@ describe('Model Switching and Config Updates', () => {
 
       // Zero context_limit: returns undefined
       expect(buildContextUsage(0, 64000)).toBeUndefined();
+    });
+  });
+
+  describe('MessageDisplay dispatch through the hook execution bridge', () => {
+    it('extracts message_id/displayed_text/is_final from the request input and forwards them positionally', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const fireMessageDisplayEvent = vi
+        .fn()
+        .mockResolvedValue({ finalOutput: undefined, allOutputs: [] });
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireMessageDisplayEvent };
+
+      const messageBus = config.getMessageBus();
+      expect(messageBus).toBeDefined();
+
+      const response = await messageBus!.request<
+        HookExecutionRequest,
+        HookExecutionResponse
+      >(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'MessageDisplay',
+          input: {
+            message_id: 'msg-123',
+            displayed_text: 'Hello, world',
+            is_final: true,
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+
+      expect(fireMessageDisplayEvent).toHaveBeenCalledWith(
+        'msg-123',
+        'Hello, world',
+        true,
+        undefined,
+      );
+      expect(response.success).toBe(true);
+    });
+
+    it('defaults missing fields (empty message_id/text, is_final false) rather than throwing', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const fireMessageDisplayEvent = vi
+        .fn()
+        .mockResolvedValue({ finalOutput: undefined, allOutputs: [] });
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireMessageDisplayEvent };
+
+      const messageBus = config.getMessageBus();
+      const response = await messageBus!.request<
+        HookExecutionRequest,
+        HookExecutionResponse
+      >(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'MessageDisplay',
+          input: {},
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+
+      expect(fireMessageDisplayEvent).toHaveBeenCalledWith(
+        '',
+        '',
+        false,
+        undefined,
+      );
+      expect(response.success).toBe(true);
     });
   });
 });
