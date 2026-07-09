@@ -86,6 +86,16 @@ class MockIdeContextStore {
   // 模拟 IDE 上下文存储
 }
 
+const createRawDiagnostic = (message: string) => ({
+  range: {
+    start: { line: 0, character: 0 },
+    end: { line: 0, character: 1 },
+  },
+  severity: 1,
+  message,
+  source: 'typescript',
+});
+
 describe('NativeLspService', () => {
   let lspService: NativeLspService;
   let mockConfig: MockConfig;
@@ -2143,6 +2153,220 @@ describe('NativeLspService', () => {
       expect(requestCount).toBe(1);
     } finally {
       vi.useRealTimers();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test('diagnostics falls back to cached publishDiagnostics when pull diagnostics fail', async () => {
+    vi.useFakeTimers();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-diag-cache-'));
+    try {
+      const filePath = path.join(tempDir, 'index.ts');
+      fs.writeFileSync(filePath, 'const value: string = 1;\n', 'utf-8');
+      const uri = pathToFileURL(filePath).toString();
+      const connection = {
+        listen: vi.fn(),
+        send: vi.fn(),
+        onNotification: vi.fn(),
+        onRequest: vi.fn(),
+        request: vi.fn((method: string) => {
+          if (method === 'textDocument/diagnostic') {
+            throw new Error('pull diagnostics unsupported');
+          }
+          return null;
+        }),
+        initialize: vi.fn(async () => ({})),
+        shutdown: vi.fn(async () => {}),
+        end: vi.fn(),
+      };
+      const handle = {
+        config: {
+          name: 'typescript-language-server',
+          languages: ['typescript'],
+          command: 'typescript-language-server',
+          args: [],
+          transport: 'stdio',
+        },
+        status: 'READY',
+        connection,
+        cachedDiagnostics: new Map([[uri, [createRawDiagnostic('bad type')]]]),
+      };
+      const tempConfig = new MockConfig();
+      tempConfig.rootPath = tempDir;
+      const tempWorkspace = new MockWorkspaceContext();
+      tempWorkspace.rootPath = tempDir;
+      const tempService = new NativeLspService(
+        tempConfig as unknown as CoreConfig,
+        tempWorkspace as unknown as WorkspaceContext,
+        new EventEmitter(),
+        new MockFileDiscoveryService() as unknown as FileDiscoveryService,
+        new MockIdeContextStore() as unknown as IdeContextStore,
+        { workspaceRoot: tempDir },
+      );
+      (tempService as unknown as { serverManager: unknown }).serverManager = {
+        getHandles: () => new Map([['typescript-language-server', handle]]),
+        warmupTypescriptServer: vi.fn(),
+      };
+
+      const diagnostics = tempService.diagnostics(uri);
+      await vi.runAllTimersAsync();
+
+      await expect(diagnostics).resolves.toMatchObject([
+        {
+          message: 'bad type',
+          severity: 'error',
+          serverName: 'typescript-language-server',
+        },
+      ]);
+      expect(connection.send).not.toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'textDocument/didClose' }),
+      );
+    } finally {
+      vi.useRealTimers();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test('diagnostics treats an empty publishDiagnostics cache entry as complete', async () => {
+    vi.useFakeTimers();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-diag-empty-'));
+    let diagnostics: Promise<unknown> | undefined;
+    try {
+      const filePath = path.join(tempDir, 'index.ts');
+      fs.writeFileSync(filePath, 'const value = 1;\n', 'utf-8');
+      const uri = pathToFileURL(filePath).toString();
+      const connection = {
+        listen: vi.fn(),
+        send: vi.fn(),
+        onNotification: vi.fn(),
+        onRequest: vi.fn(),
+        request: vi.fn((method: string) => {
+          if (method === 'textDocument/diagnostic') {
+            throw new Error('pull diagnostics unsupported');
+          }
+          return null;
+        }),
+        initialize: vi.fn(async () => ({})),
+        shutdown: vi.fn(async () => {}),
+        end: vi.fn(),
+      };
+      const handle = {
+        config: {
+          name: 'typescript-language-server',
+          languages: ['typescript'],
+          command: 'typescript-language-server',
+          args: [],
+          transport: 'stdio',
+        },
+        status: 'READY',
+        connection,
+        cachedDiagnostics: new Map([[uri, []]]),
+      };
+      const tempConfig = new MockConfig();
+      tempConfig.rootPath = tempDir;
+      const tempWorkspace = new MockWorkspaceContext();
+      tempWorkspace.rootPath = tempDir;
+      const tempService = new NativeLspService(
+        tempConfig as unknown as CoreConfig,
+        tempWorkspace as unknown as WorkspaceContext,
+        new EventEmitter(),
+        new MockFileDiscoveryService() as unknown as FileDiscoveryService,
+        new MockIdeContextStore() as unknown as IdeContextStore,
+        { workspaceRoot: tempDir },
+      );
+      (tempService as unknown as { serverManager: unknown }).serverManager = {
+        getHandles: () => new Map([['typescript-language-server', handle]]),
+        warmupTypescriptServer: vi.fn(),
+      };
+      (
+        tempService as unknown as {
+          openedDocuments: Map<string, Set<string>>;
+        }
+      ).openedDocuments.set('typescript-language-server', new Set([uri]));
+
+      diagnostics = tempService.diagnostics(uri);
+
+      await expect(diagnostics).resolves.toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(connection.send).not.toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'textDocument/didClose' }),
+      );
+    } finally {
+      await vi.runAllTimersAsync();
+      await diagnostics?.catch(() => undefined);
+      vi.useRealTimers();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test('workspace diagnostics cache fallback respects workspace directory boundaries', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-ws-diag-'));
+    try {
+      const workspaceDir = path.join(tempDir, 'workspace');
+      const siblingDir = path.join(tempDir, 'workspace-other');
+      fs.mkdirSync(workspaceDir);
+      fs.mkdirSync(siblingDir);
+      const workspaceUri = pathToFileURL(
+        path.join(workspaceDir, 'index.ts'),
+      ).toString();
+      const siblingUri = pathToFileURL(
+        path.join(siblingDir, 'index.ts'),
+      ).toString();
+      const connection = {
+        listen: vi.fn(),
+        send: vi.fn(),
+        onNotification: vi.fn(),
+        onRequest: vi.fn(),
+        request: vi.fn((method: string) => {
+          if (method === 'workspace/diagnostic') {
+            throw new Error('workspace diagnostics unsupported');
+          }
+          return null;
+        }),
+        initialize: vi.fn(async () => ({})),
+        shutdown: vi.fn(async () => {}),
+        end: vi.fn(),
+      };
+      const handle = {
+        config: {
+          name: 'typescript-language-server',
+          languages: ['typescript'],
+          command: 'typescript-language-server',
+          args: [],
+          transport: 'stdio',
+        },
+        status: 'READY',
+        connection,
+        cachedDiagnostics: new Map([
+          [workspaceUri, [createRawDiagnostic('inside workspace')]],
+          [siblingUri, [createRawDiagnostic('outside workspace')]],
+        ]),
+      };
+      const tempConfig = new MockConfig();
+      tempConfig.rootPath = workspaceDir;
+      const tempWorkspace = new MockWorkspaceContext();
+      tempWorkspace.rootPath = workspaceDir;
+      const tempService = new NativeLspService(
+        tempConfig as unknown as CoreConfig,
+        tempWorkspace as unknown as WorkspaceContext,
+        new EventEmitter(),
+        new MockFileDiscoveryService() as unknown as FileDiscoveryService,
+        new MockIdeContextStore() as unknown as IdeContextStore,
+        { workspaceRoot: workspaceDir },
+      );
+      (tempService as unknown as { serverManager: unknown }).serverManager = {
+        getHandles: () => new Map([['typescript-language-server', handle]]),
+        warmupTypescriptServer: vi.fn(),
+      };
+
+      const diagnostics = await tempService.workspaceDiagnostics(undefined, 10);
+
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]).toMatchObject({
+        uri: workspaceUri,
+        diagnostics: [{ message: 'inside workspace' }],
+      });
+    } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });

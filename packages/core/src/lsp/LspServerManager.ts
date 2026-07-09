@@ -85,7 +85,6 @@ export class LspServerManager {
         config,
         status: 'NOT_STARTED',
         cachedDiagnostics: new Map(),
-        pendingDiagnostics: new Map(),
       });
       this.serverConfigHashes.set(config.name, lspServerConfigHash(config));
     }
@@ -211,6 +210,7 @@ export class LspServerManager {
         const nextHandle: LspServerHandle = {
           config: nextConfig,
           status: 'NOT_STARTED',
+          cachedDiagnostics: new Map(),
         };
         this.serverHandles.set(name, nextHandle);
         await this.startServer(name, nextHandle);
@@ -235,6 +235,7 @@ export class LspServerManager {
       const handle: LspServerHandle = {
         config,
         status: 'NOT_STARTED',
+        cachedDiagnostics: new Map(),
       };
       this.serverHandles.set(name, handle);
       await this.startServer(name, handle);
@@ -471,11 +472,6 @@ export class LspServerManager {
           isPublishDiagnosticsParams(msg.params)
         ) {
           handle.cachedDiagnostics.set(msg.params.uri, msg.params.diagnostics);
-          const pending = handle.pendingDiagnostics.get(msg.params.uri);
-          if (pending) {
-            handle.pendingDiagnostics.delete(msg.params.uri);
-            pending.resolve();
-          }
         }
       });
 
@@ -762,7 +758,6 @@ export class LspServerManager {
     handle.warmedUp = false;
     handle.stopRequested = false;
     handle.cachedDiagnostics.clear();
-    handle.pendingDiagnostics.clear();
     handle.processExitedUnexpectedly = false;
   }
 
@@ -1192,8 +1187,12 @@ export class LspServerManager {
           references: { dynamicRegistration: true },
           documentSymbol: { dynamicRegistration: true },
           codeAction: { dynamicRegistration: true },
-          // Signal acceptance of publishDiagnostics notifications from server
-          publishDiagnostics: {},
+          publishDiagnostics: {
+            relatedInformation: true,
+            tagSupport: { valueSet: [1, 2] },
+            codeDescriptionSupport: true,
+            dataSupport: true,
+          },
         },
         workspace: {
           workspaceFolders: true,

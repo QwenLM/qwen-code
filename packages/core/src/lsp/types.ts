@@ -613,8 +613,6 @@ export interface LspServerHandle {
   startingPromise?: Promise<void>;
   /** Cache of diagnostics keyed by document URI */
   cachedDiagnostics: Map<string, Array<Record<string, unknown>>>;
-  /** Pending diagnostic notification resolvers keyed by document URI */
-  pendingDiagnostics: Map<string, { resolve: () => void }>;
   /** Cancels an in-flight startup attempt */
   startupAbortController?: AbortController;
   /** Whether the owned process exited unexpectedly during the current startup */

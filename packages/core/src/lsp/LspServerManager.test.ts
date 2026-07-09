@@ -1224,6 +1224,109 @@ describe('LspServerManager', () => {
     expect(process.kill).toHaveBeenCalledOnce();
   });
 
+  it('caches publishDiagnostics notifications from the server', async () => {
+    const manager = createTrustedManager();
+    let notificationHandler:
+      | ((message: {
+          method?: string;
+          params?: { uri: string; diagnostics: Array<Record<string, unknown>> };
+        }) => void)
+      | undefined;
+    const connection = createMockConnection({
+      onNotification: vi.fn((handler) => {
+        notificationHandler = handler as typeof notificationHandler;
+      }),
+    });
+    vi.spyOn(
+      manager as unknown as {
+        checkWorkspaceTrust: () => Promise<boolean>;
+      },
+      'checkWorkspaceTrust',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        isPathSafe: () => boolean;
+      },
+      'isPathSafe',
+    ).mockReturnValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        commandExists: () => Promise<boolean>;
+      },
+      'commandExists',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        createLspConnection: (
+          config: LspServerConfig,
+        ) => Promise<LspConnectionResult>;
+      },
+      'createLspConnection',
+    ).mockResolvedValue({
+      connection,
+      process: createMockProcess() as unknown as ChildProcess,
+    } as unknown as LspConnectionResult);
+    vi.spyOn(
+      manager as unknown as {
+        initializeLspServer: () => Promise<void>;
+      },
+      'initializeLspServer',
+    ).mockResolvedValue(undefined);
+
+    manager.setServerConfigs([serverConfig]);
+    await manager.startAll();
+    notificationHandler?.({
+      method: 'textDocument/publishDiagnostics',
+      params: {
+        uri: 'file:///workspace/index.ts',
+        diagnostics: [{ message: 'bad type' }],
+      },
+    });
+
+    expect(manager.getHandles().get('clangd')?.cachedDiagnostics).toEqual(
+      new Map([['file:///workspace/index.ts', [{ message: 'bad type' }]]]),
+    );
+  });
+
+  it('declares full publishDiagnostics client capabilities', async () => {
+    const manager = createTrustedManager();
+    const connection = createMockConnection();
+    const initialize = vi.fn(async () => ({}));
+    const initializeLspServer = (
+      manager as unknown as {
+        initializeLspServer(
+          connection: LspConnectionResult,
+          config: LspServerConfig,
+        ): Promise<void>;
+      }
+    ).initializeLspServer.bind(manager);
+
+    await initializeLspServer(
+      {
+        connection,
+        initialize,
+        shutdown: vi.fn(async () => {}),
+        exit: vi.fn(),
+      },
+      serverConfig,
+    );
+
+    expect(initialize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capabilities: expect.objectContaining({
+          textDocument: expect.objectContaining({
+            publishDiagnostics: {
+              relatedInformation: true,
+              tagSupport: { valueSet: [1, 2] },
+              codeDescriptionSupport: true,
+              dataSupport: true,
+            },
+          }),
+        }),
+      }),
+    );
+  });
+
   it('cancels an in-flight socket startup retry when stopped', async () => {
     const manager = createTrustedManager();
     vi.spyOn(
