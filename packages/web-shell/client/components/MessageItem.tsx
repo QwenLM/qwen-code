@@ -1,10 +1,11 @@
-import { memo, type ReactElement, type ReactNode } from 'react';
+import { memo, type ReactElement } from 'react';
 import type {
   ACPToolCall,
   Message,
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
+import type { WebShellAssistantTurnFooterRenderInfo } from '../customization';
 import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
@@ -31,7 +32,7 @@ interface MessageItemProps {
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
   isLocateFlashing?: boolean;
-  assistantTurnFooter?: ReactNode;
+  assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -46,7 +47,7 @@ export const MessageItem = memo(function MessageItem({
   showAssistantActions = false,
   showAssistantBranch = false,
   isLocateFlashing = false,
-  assistantTurnFooter,
+  assistantTurnFooterInfo,
 }: MessageItemProps) {
   const { t } = useI18n();
   const body = ((): ReactElement | null => {
@@ -69,7 +70,7 @@ export const MessageItem = memo(function MessageItem({
             showFooterActions={showAssistantActions}
             showBranchAction={showAssistantBranch}
             isLocateFlashing={isLocateFlashing}
-            customFooter={assistantTurnFooter}
+            customFooterInfo={assistantTurnFooterInfo}
           />
         );
       case 'thinking':
@@ -256,7 +257,30 @@ function areMessageItemPropsEqual(
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
   if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
+  if (
+    !areAssistantTurnFooterInfosEqual(
+      prev.assistantTurnFooterInfo,
+      next.assistantTurnFooterInfo,
+    )
+  ) {
+    return false;
+  }
   return areMessagesEqual(prev.message, next.message);
+}
+
+function areAssistantTurnFooterInfosEqual(
+  prev?: WebShellAssistantTurnFooterRenderInfo,
+  next?: WebShellAssistantTurnFooterRenderInfo,
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next) return false;
+  return (
+    prev.turnId === next.turnId &&
+    prev.message.id === next.message.id &&
+    prev.message.content === next.message.content &&
+    prev.message.isStreaming === next.message.isStreaming &&
+    prev.message.timestamp === next.message.timestamp
+  );
 }
 
 function areMessagesEqual(prev: Message, next: Message): boolean {

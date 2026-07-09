@@ -24,7 +24,10 @@ import {
   isSubAgentToolCall,
 } from '../adapters/toolClassification';
 import { CompactModeContext } from '../App';
-import { useWebShellCustomization } from '../customization';
+import {
+  useWebShellCustomization,
+  type WebShellAssistantTurnFooterRenderInfo,
+} from '../customization';
 import { useI18n } from '../i18n';
 import { MessageItem } from './MessageItem';
 import { MessageTimestamp } from './MessageTimestamp';
@@ -2173,8 +2176,7 @@ export const MessageList = memo(
     // (collapsed once complete). `displayItems` stays the full, pre-collapse
     // list — used only to locate rows hidden inside a collapsed turn — while
     // `visibleItems` is what actually renders.
-    const { collapseCompletedTurns, renderAssistantTurnFooter } =
-      useWebShellCustomization();
+    const { collapseCompletedTurns } = useWebShellCustomization();
     const collapseEnabled = collapseCompletedTurns ?? true;
     const [collapseOverrides, setCollapseOverrides] = useState<
       ReadonlyMap<string, boolean>
@@ -3150,12 +3152,14 @@ export const MessageList = memo(
             displayItem.message.role === 'assistant'
               ? finalAssistantTurnIdByAssistantId.get(displayItem.message.id)
               : undefined;
-          let assistantCustomFooter: ReactNode;
+          let assistantTurnFooterInfo:
+            | WebShellAssistantTurnFooterRenderInfo
+            | undefined;
           if (
             displayItem.message.role === 'assistant' &&
             finalAssistantTurnId
           ) {
-            assistantCustomFooter = renderAssistantTurnFooter?.({
+            assistantTurnFooterInfo = {
               turnId: finalAssistantTurnId,
               message: {
                 id: displayItem.message.id,
@@ -3163,7 +3167,7 @@ export const MessageList = memo(
                 isStreaming: displayItem.message.isStreaming,
                 timestamp: displayItem.message.timestamp,
               },
-            });
+            };
           }
 
           return (
@@ -3188,7 +3192,7 @@ export const MessageList = memo(
                 displayItem,
                 flashTarget,
               )}
-              assistantTurnFooter={assistantCustomFooter}
+              assistantTurnFooterInfo={assistantTurnFooterInfo}
             />
           );
         };
@@ -3225,7 +3229,6 @@ export const MessageList = memo(
         onRetryClick,
         onBranchSession,
         handleToggleCollapse,
-        renderAssistantTurnFooter,
       ],
     );
 

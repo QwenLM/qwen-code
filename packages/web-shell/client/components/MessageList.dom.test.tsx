@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { Message } from '../adapters/types';
 import {
   WebShellCustomizationProvider,
+  type WebShellAssistantTurnFooterRenderInfo,
   type WebShellCustomization,
 } from '../customization';
 import { I18nProvider } from '../i18n';
@@ -19,19 +20,24 @@ vi.mock('../App', async () => {
 });
 vi.mock('./MessageItem', async () => {
   const React = await import('react');
+  const { useWebShellCustomization } = await import('../customization');
   return {
     MessageItem: ({
       message,
       showAssistantActions,
       isLocateFlashing,
-      assistantTurnFooter,
+      assistantTurnFooterInfo,
     }: {
       message: Message;
       showAssistantActions?: boolean;
       isLocateFlashing?: boolean;
-      assistantTurnFooter?: React.ReactNode;
-    }) =>
-      React.createElement(
+      assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+    }) => {
+      const { renderAssistantTurnFooter } = useWebShellCustomization();
+      const assistantTurnFooter = assistantTurnFooterInfo
+        ? renderAssistantTurnFooter?.(assistantTurnFooterInfo)
+        : undefined;
+      return React.createElement(
         'div',
         {
           'data-testid': `msg-${message.id}`,
@@ -45,7 +51,8 @@ vi.mock('./MessageItem', async () => {
             })
           : null,
         assistantTurnFooter,
-      ),
+      );
+    },
   };
 });
 vi.mock('./messages/tools/ParallelAgentsGroup', async () => {
@@ -382,6 +389,50 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(
       c.querySelector('[data-testid="assistant-turn-footer"]')?.textContent,
     ).toBe('u1:a1:answer');
+  });
+
+  it('maps each completed turn footer to its own turn id', () => {
+    const renderAssistantTurnFooter = vi.fn(({ turnId, message }) => (
+      <span data-testid={`assistant-turn-footer-${message.id}`}>
+        {turnId}:{message.id}
+      </span>
+    ));
+
+    const c = mount(
+      [userMsg('u1'), asstMsg('a1'), userMsg('u2'), asstMsg('a2')],
+      undefined,
+      {
+        customization: { renderAssistantTurnFooter },
+      },
+    );
+
+    expect(renderAssistantTurnFooter).toHaveBeenCalledTimes(2);
+    expect(renderAssistantTurnFooter.mock.calls.map(([info]) => info)).toEqual([
+      {
+        turnId: 'u1',
+        message: {
+          id: 'a1',
+          content: 'answer',
+          isStreaming: undefined,
+          timestamp: undefined,
+        },
+      },
+      {
+        turnId: 'u2',
+        message: {
+          id: 'a2',
+          content: 'answer',
+          isStreaming: undefined,
+          timestamp: undefined,
+        },
+      },
+    ]);
+    expect(
+      c.querySelector('[data-testid="assistant-turn-footer-a1"]')?.textContent,
+    ).toBe('u1:a1');
+    expect(
+      c.querySelector('[data-testid="assistant-turn-footer-a2"]')?.textContent,
+    ).toBe('u2:a2');
   });
 
   it('does not render the custom assistant footer for the active streaming turn', () => {

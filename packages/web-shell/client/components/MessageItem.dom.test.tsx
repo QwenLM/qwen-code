@@ -3,6 +3,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
+import {
+  WebShellCustomizationProvider,
+  type WebShellAssistantTurnFooterRenderInfo,
+  type WebShellCustomization,
+} from '../customization';
 import type { Message } from '../adapters/types';
 
 // Stub the message body components so MessageItem's own wiring — not the bodies
@@ -29,15 +34,20 @@ vi.mock('./messages/UserMessage', async () => {
 });
 vi.mock('./messages/AssistantMessage', async () => {
   const React = await import('react');
+  const { useWebShellCustomization } = await import('../customization');
   return {
     AssistantMessage: ({
       content,
-      customFooter,
+      customFooterInfo,
     }: {
       content: string;
-      customFooter?: React.ReactNode;
+      customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
     }) => {
       if (content.includes('__BOOM__')) throw new Error('assistant boom');
+      const { renderAssistantTurnFooter } = useWebShellCustomization();
+      const customFooter = customFooterInfo
+        ? renderAssistantTurnFooter?.(customFooterInfo)
+        : undefined;
       return React.createElement(
         'div',
         { 'data-testid': 'assistant-ok' },
@@ -68,13 +78,20 @@ const RENDER_ERROR = 'This message could not be displayed.';
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
-function render(node: React.ReactNode): HTMLElement {
+function renderWithRoot(node: React.ReactNode): {
+  root: Root;
+  container: HTMLElement;
+} {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => root.render(node));
   mounted.push({ root, container });
-  return container;
+  return { root, container };
+}
+
+function render(node: React.ReactNode): HTMLElement {
+  return renderWithRoot(node).container;
 }
 
 afterEach(() => {
@@ -173,20 +190,105 @@ describe('MessageItem selectable wrapper', () => {
 });
 
 describe('MessageItem assistant turn footer', () => {
-  it('passes custom footer content to assistant messages', () => {
+  const customization = (
+    renderAssistantTurnFooter: WebShellCustomization['renderAssistantTurnFooter'],
+  ): WebShellCustomization => ({ renderAssistantTurnFooter });
+  const footerInfo = (
+    turnId: string,
+    messageId = '1',
+  ): WebShellAssistantTurnFooterRenderInfo => ({
+    turnId,
+    message: {
+      id: messageId,
+      content: 'hello',
+      isStreaming: false,
+      timestamp: 0,
+    },
+  });
+
+  it('passes custom footer info to assistant messages', () => {
+    const renderAssistantTurnFooter = vi.fn(({ turnId }) => (
+      <div data-testid="assistant-footer">{turnId}</div>
+    ));
     const container = render(
       <I18nProvider language="en">
-        <MessageItem
-          message={assistantMsg('1', 'hello')}
-          assistantTurnFooter={
-            <div data-testid="assistant-footer">artifact</div>
-          }
-        />
+        <WebShellCustomizationProvider
+          value={customization(renderAssistantTurnFooter)}
+        >
+          <MessageItem
+            message={assistantMsg('1', 'hello')}
+            assistantTurnFooterInfo={footerInfo('u1')}
+          />
+        </WebShellCustomizationProvider>
+      </I18nProvider>,
+    );
+
+    expect(renderAssistantTurnFooter).toHaveBeenCalledWith(footerInfo('u1'));
+    expect(
+      container.querySelector('[data-testid="assistant-footer"]')?.textContent,
+    ).toBe('u1');
+  });
+
+  it('updates custom footer content when only footer info changes', () => {
+    const message = assistantMsg('1', 'hello');
+    const renderAssistantTurnFooter = vi.fn(({ turnId }) => (
+      <div data-testid="assistant-footer">{turnId}</div>
+    ));
+    const value = customization(renderAssistantTurnFooter);
+    const { root, container } = renderWithRoot(
+      <I18nProvider language="en">
+        <WebShellCustomizationProvider value={value}>
+          <MessageItem
+            message={message}
+            assistantTurnFooterInfo={footerInfo('u1')}
+          />
+        </WebShellCustomizationProvider>
       </I18nProvider>,
     );
 
     expect(
       container.querySelector('[data-testid="assistant-footer"]')?.textContent,
-    ).toBe('artifact');
+    ).toBe('u1');
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <WebShellCustomizationProvider value={value}>
+            <MessageItem
+              message={message}
+              assistantTurnFooterInfo={footerInfo('u2')}
+            />
+          </WebShellCustomizationProvider>
+        </I18nProvider>,
+      ),
+    );
+
+    expect(
+      container.querySelector('[data-testid="assistant-footer"]')?.textContent,
+    ).toBe('u2');
+  });
+
+  it('degrades a crashing custom footer renderer to an inline notice', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const renderAssistantTurnFooter = vi.fn(() => {
+      throw new Error('footer boom');
+    });
+
+    const container = render(
+      <I18nProvider language="en">
+        <WebShellCustomizationProvider
+          value={customization(renderAssistantTurnFooter)}
+        >
+          <MessageItem
+            message={assistantMsg('1', 'hello')}
+            assistantTurnFooterInfo={footerInfo('u1')}
+          />
+        </WebShellCustomizationProvider>
+      </I18nProvider>,
+    );
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      RENDER_ERROR,
+    );
   });
 });

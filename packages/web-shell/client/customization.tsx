@@ -115,6 +115,7 @@ export interface WebShellAssistantMessageInfo {
 }
 
 export interface WebShellAssistantTurnFooterRenderInfo {
+  /** User-message id for the head of the completed turn. */
   turnId: string;
   message: WebShellAssistantMessageInfo;
 }

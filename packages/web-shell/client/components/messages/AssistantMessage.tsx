@@ -3,12 +3,16 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
-  type ReactNode,
 } from 'react';
 import { Markdown } from './Markdown';
 import { CompactModeContext } from '../../App';
+import {
+  useWebShellCustomization,
+  type WebShellAssistantTurnFooterRenderInfo,
+} from '../../customization';
 import { useI18n } from '../../i18n';
 import { formatTimestamp } from '../MessageTimestamp';
 import flashStyles from '../MessageLocateFlash.module.css';
@@ -22,7 +26,7 @@ interface AssistantMessageProps {
   showFooterActions?: boolean;
   showBranchAction?: boolean;
   isLocateFlashing?: boolean;
-  customFooter?: ReactNode;
+  customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
 }
 
 export const AssistantMessage = memo(function AssistantMessage({
@@ -33,11 +37,19 @@ export const AssistantMessage = memo(function AssistantMessage({
   showFooterActions = false,
   showBranchAction = false,
   isLocateFlashing = false,
-  customFooter,
+  customFooterInfo,
 }: AssistantMessageProps) {
   const { t } = useI18n();
+  const { renderAssistantTurnFooter } = useWebShellCustomization();
   const [copied, setCopied] = useState(false);
   const showFooter = !!content && !isStreaming && showFooterActions;
+  const customFooter = useMemo(
+    () =>
+      customFooterInfo
+        ? renderAssistantTurnFooter?.(customFooterInfo)
+        : undefined,
+    [customFooterInfo, renderAssistantTurnFooter],
+  );
   const handleCopy = useCallback(() => {
     const write = navigator.clipboard?.writeText(content);
     if (!write) {
