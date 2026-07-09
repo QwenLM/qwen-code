@@ -1036,17 +1036,26 @@ jobs:
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
                 | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED")) ] | length' \
               "${WORKDIR}/rv.json")"
+            # /review posts Suggestion-level findings as inline comments prefixed
+            # `**[Suggestion]**`. They are recommendations, not blockers — keep them
+            # out of the autofix loop, exactly as the suggestion-summary comment they
+            # replaced always was. Anchored to the body start and paired with the
+            # /review footer so a human comment that merely quotes the prefix stays
+            # actionable. jq's `^` is string-anchored, so tolerate leading whitespace
+            # the review model may emit; `**[Critical]**` can never match either way.
+            QWEN_SUGGESTION_FILTER='^[[:space:]]*\*\*\[Suggestion\]\*\*'
             N_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson trust "${TRUSTED_ASSOC}" --arg sf "${QWEN_SUGGESTION_FILTER}" '
               [ .[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
-                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb) ] | length' \
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((((.body // "") | test($sf)) and ((.body // "") | test("via Qwen Code /review"))) | not) ] | length' \
               "${WORKDIR}/rc.json")"
-            # Issue-level PR comments (e.g. /review suggestion summaries) are
-            # also actionable feedback. Exclude the bot's own eval markers.
-            # Exclude known non-actionable bot comments (triage stages,
-            # coverage reports, suggestion summaries, force-push reminders).
+            # Issue-level PR comments are also actionable feedback. Exclude the
+            # bot's own eval markers, and known non-actionable bot comments
+            # (triage stages, coverage reports, legacy suggestion summaries,
+            # force-push reminders).
             BOT_COMMENT_FILTER='<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) '
             N_ISSUE_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" --arg bf "${BOT_COMMENT_FILTER}" '
@@ -1275,12 +1284,15 @@ jobs:
               "${WORKDIR}/rv.json"
             echo
             echo "## Inline comments"
+            # Mirrors the review-scan gate: /review `**[Suggestion]**` findings are
+            # recommendations, not blockers, so they never become autofix work.
             jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson trust "${TRUSTED_ASSOC}" --arg sf '^[[:space:]]*\*\*\[Suggestion\]\*\*' '
               .[]
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+              | select((((.body // "") | test($sf)) and ((.body // "") | test("via Qwen Code /review"))) | not)
               | "- \(.path // "?"):\(.line // "?") @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/rc.json"
             echo
