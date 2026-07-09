@@ -544,7 +544,7 @@ async function readSegmentRecords(
   const anomalySessionId = path.basename(filePath, '.jsonl');
   const record = records[segment.fragmentIndex];
   if (!record) {
-    debugLogger.debug(
+    debugLogger.warn(
       `segment read anomaly: no fragment session=${anomalySessionId} ` +
         `uuid=${uuid} offset=${segment.offset} fragment=${segment.fragmentIndex}`,
     );
@@ -555,7 +555,7 @@ async function readSegmentRecords(
     throw new SessionTranscriptSnapshotUnavailableError(anomalySessionId);
   }
   if (record.uuid !== uuid) {
-    debugLogger.debug(
+    debugLogger.warn(
       `segment read anomaly: uuid mismatch session=${anomalySessionId} ` +
         `expected=${uuid} actual=${record.uuid} offset=${segment.offset}`,
     );

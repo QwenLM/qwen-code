@@ -65,6 +65,10 @@ export default defineConfig({
         __dirname,
         '../acp-bridge/src/bridgeFileSystem.ts',
       ),
+      '@qwen-code/acp-bridge/sessionArtifacts': path.resolve(
+        __dirname,
+        '../acp-bridge/src/sessionArtifacts.ts',
+      ),
       '@qwen-code/acp-bridge/eventBus': path.resolve(
         __dirname,
         '../acp-bridge/src/eventBus.ts',

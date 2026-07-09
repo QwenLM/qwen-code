@@ -26,6 +26,8 @@ import {
   InvalidClientIdError,
   PromptQueueFullError,
   SessionArtifactValidationError,
+  SessionArchivedError,
+  SessionConflictError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -190,6 +192,14 @@ function transcriptSnapshotUnavailableError(sessionId: string): Error & {
       sessionId,
     },
   });
+}
+
+function shouldPreserveTranscriptResolutionError(err: unknown): boolean {
+  return (
+    err instanceof SessionArchivedError ||
+    err instanceof SessionConflictError ||
+    err instanceof SessionNotFoundError
+  );
 }
 
 export function registerSessionRoutes(
@@ -686,7 +696,17 @@ export function registerSessionRoutes(
       return undefined;
     }
     if (loadError !== undefined) {
-      throw loadError;
+      if (shouldPreserveTranscriptResolutionError(loadError)) {
+        throw loadError;
+      }
+      const runtimes = workspaceRegistry.list();
+      const firstError =
+        loadError instanceof Error ? loadError.message : String(loadError);
+      throw new Error(
+        `Transcript session resolution failed across ${runtimes.length} workspace(s) ` +
+          `(${runtimes.map((runtime) => runtime.workspaceCwd).join(', ')}): ` +
+          firstError,
+      );
     }
     return throwMissingActiveTranscript();
   };

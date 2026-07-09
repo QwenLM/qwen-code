@@ -11397,6 +11397,98 @@ describe('createServeApp', () => {
       expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
     });
 
+    it('preserves archived transcript errors during multi-workspace fallback', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-adadadadadad';
+      const secondaryDir = path.join(runtimeDir, 'archived-secondary');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      await writeTranscriptSession(sid, 'archived', secondaryWs);
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'session_archived',
+        sessionId: sid,
+      });
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
+    });
+
+    it('wraps multi-workspace transcript scan errors with resolution context', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aeaeaeaeaeae';
+      const secondaryDir = path.join(runtimeDir, 'failing-secondary');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockRejectedValue(
+          new Error(`EACCES: permission denied, stat '${secondaryWs}'`),
+        );
+      try {
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          {
+            workspaceRegistry: registry,
+          },
+        );
+
+        const res = await request(app)
+          .get(`/session/${sid}/transcript`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(500);
+        expect(res.body.error).toContain(
+          'Transcript session resolution failed across 2 workspace(s)',
+        );
+        expect(res.body.error).toContain(wsDir);
+        expect(res.body.error).toContain(secondaryWs);
+        expect(res.body.error).toContain('EACCES: permission denied');
+        expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+        expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
+      } finally {
+        locationSpy.mockRestore();
+      }
+    });
+
     it('rejects archived sessions before touching the bridge', async () => {
       const sid = '55555555-bbbb-cccc-dddd-bbbbbbbbbbbb';
       const bridge = fakeBridge();

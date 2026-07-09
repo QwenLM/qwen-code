@@ -302,6 +302,24 @@ describe('SessionTranscriptReader', () => {
     expect(second.hasMore).toBe(true);
   });
 
+  it('rejects cursors signed for another workspace', async () => {
+    await writeRecords([
+      record('u1', null, 'hello'),
+      record('a1', 'u1', 'reply'),
+      record('u2', 'a1', 'next'),
+    ]);
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const cursor = encodeCursor(first.nextCursorState!);
+    const otherWorkspaceDir = path.join(runtimeDir, 'other-workspace');
+    await fs.mkdir(otherWorkspaceDir, { recursive: true });
+    const otherReader = new SessionTranscriptReader(otherWorkspaceDir);
+
+    await expect(
+      otherReader.readPage(sessionId, { cursor }),
+    ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+  });
+
   it('does not duplicate same-uuid fragments parsed from one glued JSONL line', async () => {
     const first = record('u1', null, 'hello');
     const second = record('u1', null, ' world');
