@@ -13,20 +13,14 @@ import {
 
 describe('approval mode display', () => {
   describe('formatApprovalModeName', () => {
-    it('formats yolo as uppercase', () => {
-      expect(formatApprovalModeName(ApprovalMode.YOLO)).toBe('YOLO');
-    });
-
-    it('formats default mode as a friendly name', () => {
+    it('formats all modes as friendly names', () => {
+      expect(formatApprovalModeName(ApprovalMode.PLAN)).toBe('plan mode');
       expect(formatApprovalModeName(ApprovalMode.DEFAULT)).toBe(
         'Ask permissions',
       );
-    });
-
-    it('falls back to the raw mode value for modes without a custom name', () => {
-      expect(formatApprovalModeName(ApprovalMode.PLAN)).toBe('plan');
-      expect(formatApprovalModeName(ApprovalMode.AUTO_EDIT)).toBe('auto-edit');
-      expect(formatApprovalModeName(ApprovalMode.AUTO)).toBe('auto');
+      expect(formatApprovalModeName(ApprovalMode.AUTO_EDIT)).toBe('Auto Edit');
+      expect(formatApprovalModeName(ApprovalMode.AUTO)).toBe('Auto mode');
+      expect(formatApprovalModeName(ApprovalMode.YOLO)).toBe('YOLO');
     });
   });
 

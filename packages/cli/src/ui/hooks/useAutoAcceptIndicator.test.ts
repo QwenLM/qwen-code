@@ -14,7 +14,10 @@ import {
   type Mock,
 } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useAutoAcceptIndicator } from './useAutoAcceptIndicator.js';
+import {
+  emitAutoModeEntryNotices,
+  useAutoAcceptIndicator,
+} from './useAutoAcceptIndicator.js';
 
 import { Config, ApprovalMode } from '@qwen-code/qwen-code-core';
 import type { Config as ActualConfigType } from '@qwen-code/qwen-code-core';
@@ -491,6 +494,26 @@ describe('useAutoAcceptIndicator', () => {
     expect(mockOnApprovalModeChange).toHaveBeenNthCalledWith(
       2,
       ApprovalMode.AUTO,
+    );
+  });
+
+  it('should emit the localizable AUTO mode entry notice', () => {
+    const mockAddItem = vi.fn();
+
+    emitAutoModeEntryNotices({
+      config: mockConfigInstance as unknown as ActualConfigType,
+      addItem: mockAddItem,
+    });
+
+    expect(mockAddItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.INFO,
+        text:
+          'Auto mode enabled.\n' +
+          '   An LLM classifier evaluates each tool call - safe actions auto-approve,\n' +
+          '   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.',
+      },
+      expect.any(Number),
     );
   });
 

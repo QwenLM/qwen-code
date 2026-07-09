@@ -33,11 +33,13 @@ describe('<AutoAcceptIndicator />', () => {
     expect(lastFrame()).toContain('auto-accept edits');
   });
 
-  it('renders AUTO mode indicator', () => {
+  it('renders AUTO mode indicator with the localized label', () => {
     const { lastFrame } = render(
       <AutoAcceptIndicator approvalMode={ApprovalMode.AUTO} />,
     );
-    expect(lastFrame()).toContain('auto mode (classifier-evaluated)');
+    const frame = lastFrame()!;
+    expect(frame).toContain('Auto mode');
+    expect(frame).not.toContain('auto mode (classifier-evaluated)');
   });
 
   it('renders YOLO mode indicator', () => {

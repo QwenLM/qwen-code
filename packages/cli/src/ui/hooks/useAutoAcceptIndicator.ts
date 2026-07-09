@@ -14,11 +14,12 @@ import { useKeypress } from './useKeypress.js';
 import type { HistoryItemWithoutId } from '../types.js';
 import { MessageType } from '../types.js';
 import { type LoadedSettings, SettingScope } from '../../config/settings.js';
+import { t } from '../../i18n/index.js';
 
-const AUTO_MODE_FIRST_TIME_MESSAGE =
-  'Auto mode enabled.\n' +
-  '   An LLM classifier evaluates each tool call — safe actions auto-approve,\n' +
-  '   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.';
+const getAutoModeFirstTimeMessage = () =>
+  t(
+    'Auto mode enabled.\n   An LLM classifier evaluates each tool call - safe actions auto-approve,\n   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.',
+  );
 
 export interface UseAutoAcceptIndicatorArgs {
   config: Config;
@@ -145,7 +146,7 @@ export function emitAutoModeEntryNotices(opts: {
   const acknowledged = settings?.merged.ui?.autoModeAcknowledged === true;
   if (!acknowledged) {
     addItem(
-      { type: MessageType.INFO, text: AUTO_MODE_FIRST_TIME_MESSAGE },
+      { type: MessageType.INFO, text: getAutoModeFirstTimeMessage() },
       now,
     );
     if (settings) {
