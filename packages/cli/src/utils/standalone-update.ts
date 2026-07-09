@@ -11,10 +11,14 @@ import * as path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { spawn, execFile } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
+import type { Stats } from 'node:fs';
 import { fetch } from 'undici';
 import * as tar from 'tar';
+import type { ReadEntry } from 'tar';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { verifySignature } from './standalone-update-verify.js';
+import { updateEventEmitter } from './updateEventEmitter.js';
+import { t } from '../i18n/index.js';
 
 const debugLogger = createDebugLogger('STANDALONE_UPDATE');
 
@@ -35,6 +39,7 @@ const VALID_TARGETS = new Set([
 const SEMVER_RE = /^v?\d+\.\d+\.\d+(-[\w.]+)?$/;
 
 type UndiciResponse = Awaited<ReturnType<typeof fetch>>;
+type TarFilterEntry = Stats | ReadEntry | { type?: string; linkpath?: unknown };
 
 function normalizeVersion(version: string): string {
   if (!SEMVER_RE.test(version)) {
@@ -193,21 +198,119 @@ async function downloadToFile(
   return hash.digest('hex');
 }
 
-function validateExtractedPaths(resolvedDest: string): void {
+function isPathInside(base: string, candidate: string): boolean {
+  const rel = path.relative(base, candidate);
+  return (
+    rel === '' ||
+    (!!rel &&
+      rel !== '..' &&
+      !rel.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(rel))
+  );
+}
+
+function normalizeTarEntryPath(entryPath: string): string | null {
+  const parts = entryPath
+    .split(/[\\/]+/)
+    .filter((part) => part && part !== '.');
+  if (parts.length === 0 || parts.includes('..')) {
+    return null;
+  }
+  return parts.join('/');
+}
+
+export function isSafeTarLinkTarget(
+  entryPath: string,
+  linkPath: string,
+  resolvedDest: string,
+): boolean {
+  if (path.posix.isAbsolute(linkPath) || path.win32.isAbsolute(linkPath)) {
+    return false;
+  }
+  const normalizedEntryPath = normalizeTarEntryPath(entryPath);
+  if (!normalizedEntryPath) {
+    return false;
+  }
+  const archiveRoot = normalizedEntryPath.split('/')[0];
+  const linkTarget = path.resolve(
+    resolvedDest,
+    path.posix.dirname(normalizedEntryPath),
+    linkPath,
+  );
+  return isPathInside(path.join(resolvedDest, archiveRoot), linkTarget);
+}
+
+function getTarEntryType(entry: TarFilterEntry): string | undefined {
+  if ('type' in entry) return entry.type;
+  if ('isFile' in entry && entry.isFile()) return 'File';
+  if ('isDirectory' in entry && entry.isDirectory()) return 'Directory';
+  if ('isSymbolicLink' in entry && entry.isSymbolicLink()) {
+    return 'SymbolicLink';
+  }
+  return undefined;
+}
+
+export function isSafeTarEntry(
+  entryPath: string,
+  entry: TarFilterEntry,
+  resolvedDest: string,
+): boolean {
+  if (!isSafeTarEntryPath(entryPath)) return false;
+  const entryType = getTarEntryType(entry);
+  const linkPath = 'linkpath' in entry ? entry.linkpath : undefined;
+
+  if (
+    entryType !== 'File' &&
+    entryType !== 'Directory' &&
+    entryType !== 'SymbolicLink'
+  ) {
+    return false;
+  }
+
+  if (entryType === 'SymbolicLink') {
+    if (linkPath === undefined) return false;
+    return isSafeTarLinkTarget(entryPath, String(linkPath), resolvedDest);
+  }
+
+  return true;
+}
+
+function isAlreadyExistsError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: string }).code === 'EEXIST'
+  );
+}
+
+function validateExtractedPaths(
+  resolvedDest: string,
+  options: { symlinksOnly?: boolean } = {},
+): void {
   const entries = fs.readdirSync(resolvedDest, {
     recursive: true,
     withFileTypes: true,
   });
   for (const entry of entries) {
+    if (options.symlinksOnly && !entry.isSymbolicLink()) {
+      continue;
+    }
     const fullPath = path.join(
       String(entry.parentPath || entry.path),
       entry.name,
     );
-    const resolved = fs.realpathSync(fullPath);
-    if (
-      !resolved.startsWith(resolvedDest + path.sep) &&
-      resolved !== resolvedDest
-    ) {
+    let resolved: string;
+    try {
+      resolved = fs.realpathSync(fullPath);
+    } catch (err) {
+      fs.rmSync(resolvedDest, { recursive: true, force: true });
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `Invalid archive entry: ${entry.name} could not be resolved (${detail})`,
+      );
+    }
+    if (!isPathInside(resolvedDest, resolved)) {
       fs.rmSync(resolvedDest, { recursive: true, force: true });
       throw new Error(
         `Path traversal detected in archive: ${entry.name} resolves to ${resolved}`,
@@ -221,7 +324,7 @@ export function isSafeTarEntryPath(entryPath: string): boolean {
   if (path.posix.isAbsolute(entryPath) || path.win32.isAbsolute(entryPath)) {
     return false;
   }
-  return !entryPath.split(/[\\/]+/).includes('..');
+  return normalizeTarEntryPath(entryPath) !== null;
 }
 
 async function extractArchive(
@@ -250,38 +353,20 @@ async function extractArchive(
       ps.on('error', reject);
     });
     const resolvedDest = fs.realpathSync(destDir);
+    // Windows Expand-Archive has no pre-extraction filter like tar.extract,
+    // so keep the full post-extraction traversal scan here. The Unix/tar path
+    // can limit its defense-in-depth scan to symlinks because isSafeTarEntry
+    // validates regular entry paths and rejects hardlinks before extraction.
     validateExtractedPaths(resolvedDest);
   } else {
-    const resolvedDest = path.resolve(destDir);
+    const resolvedDest = fs.realpathSync(destDir);
     await tar.extract({
       file: archivePath,
       cwd: destDir,
       preservePaths: false,
-      filter: (p, entry) => {
-        if (!isSafeTarEntryPath(p)) return false;
-        if (
-          'type' in entry &&
-          entry.type === 'SymbolicLink' &&
-          'linkpath' in entry
-        ) {
-          const linkTarget = path.resolve(
-            resolvedDest,
-            path.dirname(p),
-            String(entry.linkpath),
-          );
-          if (
-            !linkTarget.startsWith(resolvedDest + path.sep) &&
-            linkTarget !== resolvedDest
-          ) {
-            return false;
-          }
-        }
-        return true;
-      },
+      filter: (p, entry) => isSafeTarEntry(p, entry, resolvedDest),
     });
-    // Post-extraction defense-in-depth: detect chained symlink attacks that
-    // bypass the string-level filter (e.g. symlink A → ".", then A/payload → "../../etc")
-    validateExtractedPaths(fs.realpathSync(destDir));
+    validateExtractedPaths(fs.realpathSync(destDir), { symlinksOnly: true });
   }
 }
 
@@ -364,27 +449,92 @@ async function smokeTest(newInstallDir: string, target: string): Promise<void> {
   debugLogger.info(`Smoke test passed: ${version}`);
 }
 
-function acquireLock(lockPath: string): boolean {
+// Check .deferred marker and .new directory for an in-flight swap from a
+// previous Windows update. Called from both acquireLock fast-path and
+// slow-path so that a freshly created lock file cannot bypass the check.
+function checkDeferredSwap(standaloneDir: string): void {
+  const deferredMarker = `${standaloneDir}.deferred`;
+  if (fs.existsSync(deferredMarker)) {
+    try {
+      const batPid = parseInt(
+        fs.readFileSync(deferredMarker, 'utf-8').trim(),
+        10,
+      );
+      if (!Number.isNaN(batPid) && isProcessAlive(batPid)) {
+        throw new Error(
+          'A previous update is still being applied. Please wait a moment and try again.',
+        );
+      }
+    } catch (readErr) {
+      if (
+        readErr instanceof Error &&
+        readErr.message.startsWith('A previous update')
+      ) {
+        throw readErr;
+      }
+    }
+    // Bat script has exited (or crashed) — clean up stale marker
+    try {
+      fs.unlinkSync(deferredMarker);
+    } catch {
+      // already gone
+    }
+  }
+
+  if (fs.existsSync(`${standaloneDir}.new`)) {
+    throw new Error(
+      `A previous update left a pending swap at ${standaloneDir}.new. ` +
+        'If no qwen-update.bat process is running, remove the pending swap and .qwen-update.lock, then try again.',
+    );
+  }
+}
+
+export function acquireLock(lockPath: string, standaloneDir?: string): boolean {
   try {
     fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+    if (standaloneDir) {
+      checkDeferredSwap(standaloneDir);
+    }
     return true;
-  } catch {
-    try {
-      const pidStr = fs.readFileSync(lockPath, 'utf-8').trim();
-      const pid = parseInt(pidStr, 10);
-      if (Number.isNaN(pid) || !isProcessAlive(pid)) {
+  } catch (fastPathErr) {
+    if (
+      fastPathErr instanceof Error &&
+      (fastPathErr.message.startsWith('A previous update') ||
+        fastPathErr.message.includes('pending swap'))
+    ) {
+      // Lock was acquired but deferred swap check failed — release the lock
+      try {
         fs.unlinkSync(lockPath);
-        try {
-          fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
-          return true;
-        } catch {
-          return false;
-        }
+      } catch {
+        // best-effort
       }
+      throw fastPathErr;
+    }
+
+    let pidStr: string;
+    try {
+      pidStr = fs.readFileSync(lockPath, 'utf-8').trim();
     } catch {
       // lock is held by another live process
+      return false;
     }
-    return false;
+
+    const pid = parseInt(pidStr, 10);
+    if (!Number.isNaN(pid) && isProcessAlive(pid)) {
+      return false;
+    }
+
+    if (standaloneDir) {
+      checkDeferredSwap(standaloneDir);
+    }
+
+    try {
+      fs.unlinkSync(lockPath);
+      fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -406,15 +556,36 @@ function cleanupEmptyStandaloneDir(standaloneDir: string): void {
   }
 }
 
-const UNSAFE_SHELL_CHARS = /["`$\\;\n\r]/;
+export type ShellPathUpdate = {
+  rcFile?: string;
+  blockAdded: boolean;
+  error?: string;
+};
+
+export type BinWrapperArtifacts = {
+  wrapperPath?: string;
+  wrapperCreated: boolean;
+  shellPathUpdate?: ShellPathUpdate;
+  wrapperNeedsAttention?: boolean;
+};
+
+const UNSAFE_SHELL_CHARS = /[\0\n\r]/;
 const UNSAFE_CMD_CHARS = /[&|<>^%!"`\n\r]/;
 
-function assertSafeForShellEmbed(p: string, context: string): void {
+function assertSafeForSingleQuotedShellPath(p: string, context: string): void {
   if (UNSAFE_SHELL_CHARS.test(p)) {
     throw new Error(
       `${context} contains characters unsafe for shell embedding: ${p}`,
     );
   }
+}
+
+function shellQuoteForSh(p: string): string {
+  return `'${p.replace(/'/g, "'\\''")}'`;
+}
+
+function shellQuoteForFish(p: string): string {
+  return shellQuoteForSh(p);
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -458,6 +629,7 @@ function atomicReplace(
     fs.renameSync(newDir, pendingDir);
 
     const lockFile = lockPath;
+    const deferredMarker = `${standaloneDir}.deferred`;
     const logFile = path.join(path.dirname(standaloneDir), 'qwen-update.log');
     // Bat script runs detached after Node exits. It must:
     // 1. Wait for this Node process to release file locks (<= 30s).
@@ -465,6 +637,9 @@ function atomicReplace(
     //    move #1 so the user is never left without a working install.
     // 3. Log success/failure to qwen-update.log for post-mortem (the bat
     //    runs with stdio:ignore — the log is the only diagnostic surface).
+    // 4. Delete the .deferred marker so future `qwen update` calls know the
+    //    swap is complete (the lock file alone is insufficient because
+    //    acquireLock falls through when the Node PID is dead).
     const script = [
       '@echo off',
       'set /a TRIES=0',
@@ -492,6 +667,7 @@ function atomicReplace(
       `  echo [%DATE% %TIME%] rollback succeeded >> "${logFile}"`,
       ')',
       ':cleanup',
+      `del /F /Q "${deferredMarker}" 2>nul`,
       `del /F /Q "${lockFile}" 2>nul`,
       `del "%~f0"`,
     ].join('\r\n');
@@ -500,11 +676,24 @@ function atomicReplace(
       'qwen-update.bat',
     );
     fs.writeFileSync(scriptPath, script);
-    spawn('cmd.exe', ['/c', scriptPath], {
+    const child = spawn('cmd.exe', ['/c', scriptPath], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
-    }).unref();
+    });
+    child.on('error', (err) => {
+      debugLogger.warn('Deferred bat script failed to spawn:', err);
+    });
+    child.unref();
+    if (!child.pid) {
+      throw new Error(
+        'Failed to spawn deferred update script. Update was not applied.',
+      );
+    }
+    // Write .deferred marker with the bat script PID so future `qwen update`
+    // calls can detect the in-flight swap via isProcessAlive(batPid).
+    // acquireLock checks this marker before allowing lock theft.
+    fs.writeFileSync(deferredMarker, String(child.pid));
     return 'deferred';
   } else {
     // Unix: rename is atomic on same filesystem. newDir is a sibling of
@@ -537,8 +726,12 @@ function atomicReplace(
  * Ensures ~/.local/bin/qwen exists and points to the standalone install.
  * Required for npm→standalone migration so the new binary is on PATH.
  */
-export function ensureBinWrapper(standaloneDir: string, target: string): void {
+export function ensureBinWrapper(
+  standaloneDir: string,
+  target: string,
+): BinWrapperArtifacts {
   const binDir = path.join(path.dirname(standaloneDir), '..', 'bin');
+  const artifacts: BinWrapperArtifacts = { wrapperCreated: false };
 
   try {
     fs.mkdirSync(binDir, { recursive: true });
@@ -549,21 +742,59 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
         );
       }
       const wrapperPath = path.join(binDir, 'qwen.cmd');
-      if (!fs.existsSync(wrapperPath)) {
-        const content = `@echo off\r\ncall "${standaloneDir}\\bin\\qwen.cmd" %*\r\n`;
-        fs.writeFileSync(wrapperPath, content);
+      artifacts.wrapperPath = wrapperPath;
+      const content = `@echo off\r\ncall "${standaloneDir}\\bin\\qwen.cmd" %*\r\n`;
+      try {
+        fs.writeFileSync(wrapperPath, content, { flag: 'wx' });
+        artifacts.wrapperCreated = true;
+      } catch (err) {
+        if (!isAlreadyExistsError(err)) {
+          throw err;
+        }
+        artifacts.wrapperNeedsAttention = !existingWrapperMatches(
+          wrapperPath,
+          standaloneDir,
+        );
       }
     } else {
-      assertSafeForShellEmbed(standaloneDir, 'standaloneDir');
+      assertSafeForSingleQuotedShellPath(standaloneDir, 'standaloneDir');
       const wrapperPath = path.join(binDir, 'qwen');
-      if (!fs.existsSync(wrapperPath)) {
-        const content = `#!/bin/sh\nexec "${standaloneDir}/bin/qwen" "$@"\n`;
-        fs.writeFileSync(wrapperPath, content, { mode: 0o755 });
+      artifacts.wrapperPath = wrapperPath;
+      // Match install-qwen-standalone.sh's write_unix_wrapper:
+      // uses /usr/bin/env sh for portability, and single-quoted paths.
+      const quotedQwenBin = shellQuoteForSh(
+        path.join(standaloneDir, 'bin', 'qwen'),
+      );
+      const content = `#!/usr/bin/env sh\nexec ${quotedQwenBin} "$@"\n`;
+      try {
+        fs.writeFileSync(wrapperPath, content, { mode: 0o755, flag: 'wx' });
+        artifacts.wrapperCreated = true;
+      } catch (err) {
+        if (!isAlreadyExistsError(err)) {
+          throw err;
+        }
+        artifacts.wrapperNeedsAttention = !existingWrapperMatches(
+          wrapperPath,
+          standaloneDir,
+        );
       }
-      ensurePathInShellRc(binDir);
+      artifacts.shellPathUpdate = ensurePathInShellRc(binDir);
     }
+    return artifacts;
   } catch (err) {
-    debugLogger.warn('Failed to create bin wrapper:', err);
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to create bin wrapper: ${detail}`);
+  }
+}
+
+function existingWrapperMatches(
+  wrapperPath: string,
+  standaloneDir: string,
+): boolean {
+  try {
+    return fs.readFileSync(wrapperPath, 'utf-8').includes(standaloneDir);
+  } catch {
+    return false;
   }
 }
 
@@ -571,8 +802,8 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
  * Appends binDir to the user's shell rc file if not already present.
  * Mirrors the logic in install-qwen-standalone.sh maybe_update_shell_path.
  */
-export function ensurePathInShellRc(binDir: string): void {
-  assertSafeForShellEmbed(binDir, 'binDir');
+export function ensurePathInShellRc(binDir: string): ShellPathUpdate {
+  assertSafeForSingleQuotedShellPath(binDir, 'binDir');
 
   const shell = process.env['SHELL'] || '';
   let rcFile: string | null = null;
@@ -583,10 +814,13 @@ export function ensurePathInShellRc(binDir: string): void {
   } else if (shell.endsWith('/bash')) {
     const bashrc = path.join(home, '.bashrc');
     const profile = path.join(home, '.bash_profile');
-    // macOS bash reads .bash_profile for login shells; Linux reads .bashrc.
-    // Match install-qwen-standalone.sh's maybe_update_shell_path logic.
-    if (os.platform() === 'darwin') {
-      rcFile = fs.existsSync(profile) ? profile : bashrc;
+    // Match install-qwen-standalone.sh's maybe_update_shell_path logic:
+    // prefer .bashrc when it exists, otherwise fall back to .bash_profile,
+    // and create .bashrc if neither file exists.
+    if (fs.existsSync(bashrc)) {
+      rcFile = bashrc;
+    } else if (fs.existsSync(profile)) {
+      rcFile = profile;
     } else {
       rcFile = bashrc;
     }
@@ -594,24 +828,91 @@ export function ensurePathInShellRc(binDir: string): void {
     rcFile = path.join(home, '.config', 'fish', 'config.fish');
   }
 
-  if (!rcFile) return;
+  if (!rcFile) return { blockAdded: false };
 
   try {
     const content = fs.existsSync(rcFile)
       ? fs.readFileSync(rcFile, 'utf-8')
       : '';
-    // Use a marker to detect our managed PATH entry precisely,
-    // avoiding false positives from comments or $PATH-appended entries
-    const marker = '# Added by Qwen Code standalone installer';
-    if (content.includes(marker)) return;
+    // Use begin/end block markers matching install-qwen-standalone.sh's
+    // maybe_update_shell_path, so the update codepath is idempotent with the
+    // install script and does not produce duplicate PATH entries.
+    const beginMarker = '# Qwen Code PATH block begin';
+    const endMarker = '# Qwen Code PATH block end';
+    const legacyMarker = '# Added by Qwen Code standalone installer';
+    if (content.includes(beginMarker) && content.includes(endMarker)) {
+      return { rcFile, blockAdded: false };
+    }
+    if (content.includes(legacyMarker)) return { rcFile, blockAdded: false };
 
     const exportLine = shell.endsWith('/fish')
-      ? `\n${marker}\nfish_add_path "${binDir}"\n`
-      : `\n${marker}\nexport PATH="${binDir}:$PATH"\n`;
-    fs.appendFileSync(rcFile, exportLine);
+      ? `set -gx PATH ${shellQuoteForFish(binDir)} $PATH`
+      : `export PATH=${shellQuoteForSh(binDir)}:$PATH`;
+
+    const block = `\n${beginMarker}\n${exportLine}\n${endMarker}\n`;
+    fs.mkdirSync(path.dirname(rcFile), { recursive: true });
+    fs.appendFileSync(rcFile, block);
     debugLogger.info(`Added ${binDir} to ${rcFile}`);
+    return { rcFile, blockAdded: true };
   } catch (err) {
     debugLogger.debug('Failed to update shell rc:', err);
+    return {
+      rcFile,
+      blockAdded: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+function surfaceBinWrapperWarnings(artifacts?: BinWrapperArtifacts): void {
+  if (!artifacts) return;
+  if (artifacts.wrapperNeedsAttention && artifacts.wrapperPath) {
+    const message =
+      `Update completed, but the existing wrapper at ${artifacts.wrapperPath} ` +
+      'does not point to this standalone installation.';
+    debugLogger.warn(message);
+    updateEventEmitter.emit('update-info', { message });
+  }
+  if (artifacts.shellPathUpdate?.error && artifacts.shellPathUpdate.rcFile) {
+    const message =
+      `Update completed, but ${artifacts.shellPathUpdate.rcFile} could not be updated. ` +
+      'Add ~/.local/bin to PATH manually.';
+    debugLogger.warn(message);
+    updateEventEmitter.emit('update-info', { message });
+  }
+}
+
+function cleanupShellPathBlock(rcFile: string): void {
+  try {
+    if (!fs.existsSync(rcFile)) return;
+    const content = fs.readFileSync(rcFile, 'utf-8');
+    const blockPattern =
+      /\n?# Qwen Code PATH block begin\n(?:.|\n)*?\n# Qwen Code PATH block end\n?/;
+    const nextContent = content.replace(blockPattern, '');
+    if (nextContent !== content) {
+      fs.writeFileSync(rcFile, nextContent);
+    }
+  } catch (err) {
+    debugLogger.debug('Failed to roll back shell rc PATH block:', err);
+  }
+}
+
+export function cleanupFirstTimeMigrationArtifacts(
+  artifacts?: BinWrapperArtifacts,
+): void {
+  if (!artifacts) return;
+  if (artifacts.wrapperCreated && artifacts.wrapperPath) {
+    try {
+      fs.unlinkSync(artifacts.wrapperPath);
+    } catch (err) {
+      debugLogger.debug('Failed to roll back bin wrapper:', err);
+    }
+  }
+  if (
+    artifacts.shellPathUpdate?.blockAdded &&
+    artifacts.shellPathUpdate.rcFile
+  ) {
+    cleanupShellPathBlock(artifacts.shellPathUpdate.rcFile);
   }
 }
 
@@ -665,16 +966,22 @@ export async function performStandaloneUpdate(
   // On first-time migration, standaloneDir (and its parent) may not exist yet.
   fs.mkdirSync(parentDir, { recursive: true });
 
-  // Use a lockfile to prevent concurrent updates.
-  // Acquire lock BEFORE creating standaloneDir to prevent a concurrent
-  // process from seeing the empty directory and throwing a misleading error.
+  // Use a lockfile (+ .deferred marker on Windows) to prevent concurrent
+  // updates. Acquire lock BEFORE creating standaloneDir to prevent a
+  // concurrent process from seeing the empty directory and throwing a
+  // misleading error.
   const lockPath = path.join(parentDir, '.qwen-update.lock');
-  if (!acquireLock(lockPath)) {
+  if (!acquireLock(lockPath, standaloneDir)) {
     throw new Error('Another update is already in progress');
   }
 
   if (isFirstTimeMigration) {
-    fs.mkdirSync(standaloneDir, { recursive: true });
+    try {
+      fs.mkdirSync(standaloneDir, { recursive: true });
+    } catch (err) {
+      releaseLock(lockPath);
+      throw err;
+    }
   }
 
   // Download to a temp dir in os.tmpdir(), then extract to a sibling dir
@@ -684,6 +991,7 @@ export async function performStandaloneUpdate(
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-update-'));
   let extractDir: string;
   let updateResult: 'done' | 'deferred' | undefined;
+  let migrationArtifacts: BinWrapperArtifacts | undefined;
   try {
     extractDir = fs.mkdtempSync(path.join(parentDir, '.qwen-code-update-'));
   } catch (err) {
@@ -695,6 +1003,9 @@ export async function performStandaloneUpdate(
   try {
     const archivePath = path.join(tempDir, filename);
     debugLogger.info(`Downloading ${filename} (${versionPath})...`);
+    updateEventEmitter.emit('update-info', {
+      message: t('Downloading update...'),
+    });
     const archiveHash = await downloadToFile(
       versionPath,
       filename,
@@ -753,23 +1064,48 @@ export async function performStandaloneUpdate(
       }
     }
 
-    // Ensure bin wrapper exists (critical for npm→standalone migration)
-    ensureBinWrapper(standaloneDir, target);
+    try {
+      migrationArtifacts = ensureBinWrapper(standaloneDir, target);
+      surfaceBinWrapperWarnings(migrationArtifacts);
+    } catch (wrapperErr) {
+      debugLogger.warn('Failed to refresh bin wrapper:', wrapperErr);
+      updateEventEmitter.emit('update-info', {
+        message: isFirstTimeMigration
+          ? 'Update installed, but the PATH wrapper could not be created. ' +
+            'Add the standalone bin directory to your PATH manually, or re-run the update.'
+          : 'Update completed, but the PATH wrapper could not be refreshed. ' +
+            'The existing installation remains usable.',
+      });
+    }
 
     debugLogger.info('Standalone update complete.');
     return updateResult;
   } catch (err) {
     const pendingDir = `${standaloneDir}.new`;
-    if (fs.existsSync(pendingDir)) {
+    if (updateResult !== 'deferred' && fs.existsSync(pendingDir)) {
       fs.rmSync(pendingDir, { recursive: true, force: true });
     }
     cleanupEmptyStandaloneDir(standaloneDir);
+    if (isFirstTimeMigration) {
+      cleanupFirstTimeMigrationArtifacts(migrationArtifacts);
+    }
     throw err;
   } finally {
     // Only keep the lock alive when the bat script was spawned (deferred).
     // On failure or on Unix, release immediately.
     if (updateResult !== 'deferred') {
       releaseLock(lockPath);
+      // Clean up .deferred marker if a previous run's bat script exited
+      // without removing it (e.g. crash). The current run's marker was
+      // never created (non-deferred path), so this is always safe.
+      const deferredMarker = `${standaloneDir}.deferred`;
+      if (fs.existsSync(deferredMarker)) {
+        try {
+          fs.unlinkSync(deferredMarker);
+        } catch {
+          // already gone
+        }
+      }
     }
     try {
       fs.rmSync(tempDir, { recursive: true, force: true });

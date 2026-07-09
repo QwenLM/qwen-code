@@ -1,7 +1,8 @@
 .list {
   flex: 1;
   overflow-y: auto;
-  padding: 12px 24px;
+  padding: 12px 24px calc(8px + var(--web-shell-bottom-panel-inset, 0px));
+  scroll-padding-bottom: calc(8px + var(--web-shell-bottom-panel-inset, 0px));
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
   min-height: 0;

@@ -8,6 +8,7 @@ export {
   DaemonClient,
   DaemonHttpError,
   DaemonPendingPromptLimitError,
+  WorkspaceDaemonClient,
   isDaemonTurnError,
   isNonBlockingAccepted,
   matchTurnEvent,
