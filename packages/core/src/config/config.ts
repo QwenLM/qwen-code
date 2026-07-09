@@ -1132,6 +1132,11 @@ export interface ConfigParameters {
   /** Require user confirmation before persisting an auto-activated skill. Defaults to true. */
   autoSkillConfirm?: boolean;
   /**
+   * Max runtime in minutes for background memory agents (extraction, dream,
+   * remember, skill review). Unset → per-agent defaults; 0 → no time limit.
+   */
+  memoryAgentTimeoutMinutes?: number;
+  /**
    * Lightweight model for background tasks (memory extraction, dream, /btw side questions).
    * When set and valid for the current auth type, forked agents use this model instead of
    * the main session model, reducing latency and cost.
@@ -1151,6 +1156,12 @@ export interface ConfigParameters {
    * (configurable via `/model --vision`).
    */
   visionModel?: string;
+  /**
+   * Per-attempt timeout in milliseconds for the vision bridge transcription
+   * call. Unset → built-in 30s. Corresponds to the `visionBridgeTimeoutMs`
+   * setting; useful for slow or proxied vision endpoints.
+   */
+  visionBridgeTimeoutMs?: number;
   /**
    * Ordered list of fallback model IDs to try when the primary model hits
    * capacity errors (429/503/529). At most 3 entries; duplicate fallback
@@ -1744,8 +1755,10 @@ export class Config {
   private readonly teamMemoryShareabilityChecked = new Set<string>();
   private enableAutoSkill: boolean;
   private readonly autoSkillConfirm: boolean;
+  private readonly memoryAgentTimeoutMinutes: number | undefined;
   private fastModel?: string;
   private visionModel?: string;
+  private readonly visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
@@ -2065,8 +2078,29 @@ export class Config {
     this.enableTeamMemorySync = params.enableTeamMemorySync ?? false;
     this.enableAutoSkill = params.enableAutoSkill ?? true;
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
+    // Clamp: schema validation only runs on interactive edit paths, so a
+    // negative value in settings.json would otherwise reach the agent runtime
+    // and make every memory agent time out immediately.
+    this.memoryAgentTimeoutMinutes =
+      params.memoryAgentTimeoutMinutes !== undefined &&
+      params.memoryAgentTimeoutMinutes >= 0
+        ? params.memoryAgentTimeoutMinutes
+        : undefined;
     this.fastModel = params.fastModel || undefined;
     this.visionModel = params.visionModel || undefined;
+    // Guard: nothing validates settings.json on the load path, so this is the
+    // only real gate. `AbortSignal.timeout()` requires an integer in
+    // [0, 2^31-1] — a fractional or out-of-range value (which the number-typed
+    // schema still accepts via /config) would throw RangeError or silently
+    // degrade to a 1ms timeout, killing every bridge turn. Reject anything the
+    // timer can't take and fall back to the built-in default.
+    this.visionBridgeTimeoutMs =
+      params.visionBridgeTimeoutMs !== undefined &&
+      Number.isInteger(params.visionBridgeTimeoutMs) &&
+      params.visionBridgeTimeoutMs > 0 &&
+      params.visionBridgeTimeoutMs <= 2_147_483_647
+        ? params.visionBridgeTimeoutMs
+        : undefined;
     this.modelFallbacks = normalizeModelFallbacks(params.modelFallbacks);
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
@@ -3450,6 +3484,15 @@ export class Config {
         baseUrl: contentGeneratorConfig?.baseUrl,
       },
     );
+  }
+
+  /**
+   * Per-attempt timeout in milliseconds for the vision bridge transcription
+   * call. Resolves the `visionBridgeTimeoutMs` setting; `undefined` means the
+   * bridge's built-in default applies.
+   */
+  getVisionBridgeTimeoutMs(): number | undefined {
+    return this.visionBridgeTimeoutMs;
   }
 
   /**
@@ -5499,6 +5542,15 @@ export class Config {
 
   getAutoSkillConfirmEnabled(): boolean {
     return this.autoSkillConfirm && !this.getBareMode();
+  }
+
+  /**
+   * Max runtime in minutes for background memory agents (extraction, dream,
+   * remember, skill review). Resolves the `memory.agentTimeoutMinutes`
+   * setting. Unset → each agent's built-in default; 0 → no time limit.
+   */
+  getMemoryAgentTimeoutMinutes(): number | undefined {
+    return this.memoryAgentTimeoutMinutes;
   }
 
   getPreventSystemSleepEnabled(): boolean {

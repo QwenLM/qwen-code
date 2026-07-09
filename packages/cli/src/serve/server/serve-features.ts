@@ -9,6 +9,7 @@ import { SUPPORTED_LANGUAGES } from '../../i18n/index.js';
 import { hasConfiguredBatchVoiceTranscriptionModel } from '../../services/voice-service.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getAdvertisedServeFeatures } from '../capabilities.js';
+import { isBrowserAutomationMcpAvailable } from '../cdp-mcp-command.js';
 import type { ServeOptions } from '../types.js';
 
 // Keep in sync with acp-bridge bridge.ts and SDK DaemonClient.ts.
@@ -94,6 +95,10 @@ export function createServeFeatures(
         multiWorkspaceSessionsEnabled,
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
+        browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
+          opts,
+          process.env,
+        ),
         voiceTranscriptionAvailable: getCachedVoiceTranscriptionAvailable(),
         // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
         // on). A configured token no longer suppresses it — the browser carries

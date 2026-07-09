@@ -18,6 +18,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolResult,
   ChatRecord,
+  HistoryGap,
   AgentEventEmitter,
   StopHookOutput,
   HookExecutionRequest,
@@ -134,6 +135,10 @@ import { MID_TURN_QUEUE_DRAIN_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
+import {
+  inactiveExtensionSkillRefs,
+  isInactiveExtensionSkill,
+} from '../extension-skills.js';
 
 import { RequestError } from '@agentclientprotocol/sdk';
 import type {
@@ -738,10 +743,26 @@ export async function buildAvailableCommandsSnapshot(
     settings,
   );
   const disabledSkillNames = config.getDisabledSkillNames();
+  const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
 
   const visibleSlashCommands = slashCommands.filter((cmd) => {
     if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
-    return !disabledSkillNames.has(cmd.skillDetail.name.toLowerCase());
+    const skillName = cmd.skillDetail.name.toLowerCase();
+    const isInactiveExtensionCommand =
+      cmd.skillDetail.level === 'extension' &&
+      isInactiveExtensionSkill(
+        {
+          name: cmd.skillDetail.name,
+          level: 'extension',
+          extensionName:
+            'extensionName' in cmd.skillDetail &&
+            typeof cmd.skillDetail.extensionName === 'string'
+              ? cmd.skillDetail.extensionName
+              : undefined,
+        },
+        inactiveSkillRefs,
+      );
+    return !disabledSkillNames.has(skillName) && !isInactiveExtensionCommand;
   });
 
   const availableCommands: AvailableCommand[] = visibleSlashCommands.map(
@@ -784,7 +805,9 @@ export async function buildAvailableCommandsSnapshot(
     const skillManager = config.getSkillManager();
     if (skillManager) {
       const skills = (await skillManager.listSkills()).filter(
-        (skill) => !disabledSkillNames.has(skill.name.toLowerCase()),
+        (skill) =>
+          !disabledSkillNames.has(skill.name.toLowerCase()) &&
+          !isInactiveExtensionSkill(skill, inactiveSkillRefs),
       );
       availableSkills = skills.map((skill) => skill.name);
       for (const skill of skills) {
@@ -807,6 +830,9 @@ export async function buildAvailableCommandsSnapshot(
       continue;
     }
     const existing = skillDetailsByName.get(command.skillDetail.name);
+    if (command.skillDetail.level === 'extension' && !existing) {
+      continue;
+    }
     skillDetailsByName.set(command.skillDetail.name, {
       ...existing,
       ...command.skillDetail,
@@ -1119,9 +1145,12 @@ export class Session implements SessionContext {
     );
   }
 
-  async replayHistory(records: ChatRecord[]): Promise<void> {
+  async replayHistory(
+    records: ChatRecord[],
+    gaps?: HistoryGap[],
+  ): Promise<void> {
     this.primeTurnFromHistory(records);
-    await this.historyReplayer.replay(records);
+    await this.historyReplayer.replay(records, gaps);
   }
 
   rewindToTurn(

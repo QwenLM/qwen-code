@@ -48,6 +48,24 @@ export type BridgeFreshSessionAdmission = (
   context: BridgeFreshSessionAdmissionContext,
 ) => BridgeFreshSessionReservation | undefined;
 
+export type BridgeSessionLifecycleEvent =
+  | {
+      readonly type: 'registered';
+      readonly sessionId: string;
+      readonly workspaceCwd: string;
+      readonly reason: string;
+    }
+  | {
+      readonly type: 'removed';
+      readonly sessionId: string;
+      readonly workspaceCwd: string;
+      readonly reason: string;
+    };
+
+export type BridgeSessionLifecycle = (
+  event: BridgeSessionLifecycleEvent,
+) => void;
+
 /**
  * Optional injection seam for daemon-host-specific status cells —
  * `process.env` snapshots and the daemon-side preflight checks
@@ -168,6 +186,13 @@ export interface BridgeOptions {
    * side effect starts. Attaches bypass this hook.
    */
   freshSessionAdmission?: BridgeFreshSessionAdmission;
+  /**
+   * Host-level live session owner callback. The bridge emits registration
+   * only after a live entry is installed, and removal when that live entry is
+   * removed. Callback failures are diagnostic only and do not fail session
+   * lifecycle operations.
+   */
+  sessionLifecycle?: BridgeSessionLifecycle;
   /**
    * Per-session SSE replay ring depth. Sets `ringSize` on every
    * `new EventBus(...)` the bridge constructs (both fresh sessions

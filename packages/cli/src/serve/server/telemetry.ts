@@ -114,6 +114,9 @@ export function resolveDaemonTelemetryRoute(
   if (req.method === 'GET' && /^\/workspace\/[^/]+\/sessions$/.test(path)) {
     return { route: 'GET /workspace/:id/sessions' };
   }
+  if (req.method === 'GET' && /^\/workspaces\/[^/]+\/sessions$/.test(path)) {
+    return { route: 'GET /workspace/:id/sessions' };
+  }
   if (req.method === 'POST' && path === '/workspace/init') {
     return { route: 'POST /workspace/init' };
   }

@@ -23,6 +23,7 @@ import {
   validatePolicyConfig,
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
+import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
@@ -1345,6 +1346,7 @@ describe('runQwenServe runtime startup failures', () => {
   async function readBrowserMcpFeatureFlagsForEnv(
     raw: string | undefined,
     origin = 'chrome-extension://qwen-test-extension',
+    cdpMcpCommand?: string,
   ) {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-fail-')),
@@ -1353,12 +1355,18 @@ describe('runQwenServe runtime startup failures', () => {
       process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
     const originalCdpTunnelOverWs =
       process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
+    const originalCdpMcpCommand = process.env['QWEN_CDP_MCP_COMMAND'];
     if (raw === undefined) {
       delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
       delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
     } else {
       process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'] = raw;
       process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = raw;
+    }
+    if (cdpMcpCommand === undefined) {
+      delete process.env['QWEN_CDP_MCP_COMMAND'];
+    } else {
+      process.env['QWEN_CDP_MCP_COMMAND'] = cdpMcpCommand;
     }
     vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
       throw new Error('runtime boom');
@@ -1395,6 +1403,11 @@ describe('runQwenServe runtime startup failures', () => {
         delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
       } else {
         process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = originalCdpTunnelOverWs;
+      }
+      if (originalCdpMcpCommand === undefined) {
+        delete process.env['QWEN_CDP_MCP_COMMAND'];
+      } else {
+        process.env['QWEN_CDP_MCP_COMMAND'] = originalCdpMcpCommand;
       }
       await handle.close();
     }
@@ -1476,6 +1489,41 @@ describe('runQwenServe runtime startup failures', () => {
 
     expect(features).toContain('cdp_tunnel_over_ws');
     expect(features).not.toContain('client_mcp_over_ws');
+    expect(features).not.toContain('browser_automation_mcp');
+  });
+
+  it('advertises browser automation MCP when the external CDP adapter command is set', async () => {
+    const features = await readBrowserMcpFeatureFlagsForEnv(
+      undefined,
+      'chrome-extension://qwen-test-extension',
+      '/opt/qwen-cdp-mcp-adapter',
+    );
+
+    expect(features).toContain('cdp_tunnel_over_ws');
+    expect(features).toContain('browser_automation_mcp');
+    expect(features).not.toContain('client_mcp_over_ws');
+  });
+
+  it('does not advertise browser automation MCP without an active CDP tunnel', async () => {
+    const features = await readBrowserMcpFeatureFlagsForEnv(
+      undefined,
+      'https://example.com',
+      '/opt/qwen-cdp-mcp-adapter',
+    );
+
+    expect(features).not.toContain('browser_automation_mcp');
+  });
+
+  it('does not enable browser automation MCP on bearer-protected endpoints', () => {
+    expect(
+      isBrowserAutomationMcpAvailable(
+        {
+          cdpTunnelOverWs: true,
+          token: 'secret-token',
+        },
+        {},
+      ),
+    ).toBe(false);
   });
 
   it('forwards auto-enabled CDP tunnel state to the ACP child env', async () => {
