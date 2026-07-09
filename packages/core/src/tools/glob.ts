@@ -6,7 +6,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { glob, escape } from 'glob';
+import { globStream, escape } from 'glob';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
@@ -32,11 +32,17 @@ import { isPathWithinRoot } from '../utils/workspaceContext.js';
 const debugLogger = createDebugLogger('GLOB');
 
 const MAX_FILE_COUNT = 100;
+const MAX_GLOB_COLLECTED_ENTRIES = 10_000;
 
 // Subset of 'Path' interface provided by 'glob' that we can implement for testing
 export interface GlobPath {
   fullpath(): string;
   mtimeMs?: number;
+}
+
+interface GlobDirectoryResult {
+  entries: GlobPath[];
+  hitLimit: boolean;
 }
 
 /**
@@ -136,7 +142,8 @@ class GlobToolInvocation extends BaseToolInvocation<
     searchDir: string,
     pattern: string,
     signal: AbortSignal,
-  ): Promise<GlobPath[]> {
+    entryLimit: number,
+  ): Promise<GlobDirectoryResult> {
     let effectivePattern = pattern;
     const fullPath = path.join(searchDir, effectivePattern);
     if (fs.existsSync(fullPath)) {
@@ -183,7 +190,26 @@ class GlobToolInvocation extends BaseToolInvocation<
       }
     };
 
-    const entries = (await glob(effectivePattern, {
+    const normalizePathForComparison = (p: string) =>
+      process.platform === 'win32' || process.platform === 'darwin'
+        ? p.toLowerCase()
+        : p;
+
+    const isAllowedByFileFilters = (entry: GlobPath): boolean => {
+      const relativePath = path.relative(projectRoot, entry.fullpath());
+      const { filteredPaths } = this.fileService.filterFilesWithReport(
+        [relativePath],
+        fileFilteringOptions,
+      );
+      const entryFullPath = normalizePathForComparison(entry.fullpath());
+      return filteredPaths.some(
+        (p) =>
+          normalizePathForComparison(path.resolve(projectRoot, p)) ===
+          entryFullPath,
+      );
+    };
+
+    const stream = globStream(effectivePattern, {
       cwd: searchDir,
       withFileTypes: true,
       nodir: true,
@@ -196,35 +222,22 @@ class GlobToolInvocation extends BaseToolInvocation<
         ignored: isTraversalIgnored,
         childrenIgnored: isTraversalIgnored,
       },
-    })) as GlobPath[];
+    }) as AsyncIterable<GlobPath>;
 
-    // Filter using paths relative to the project root (the base that
-    // FileDiscoveryService uses for .gitignore / .qwenignore evaluation).
-    // Using searchDir-relative paths would cause ignore rules to be
-    // evaluated against incorrect paths when searchDir != projectRoot.
-    const relativePaths = entries.map((p) =>
-      path.relative(projectRoot, p.fullpath()),
-    );
+    const entries: GlobPath[] = [];
+    let hitLimit = false;
+    for await (const entry of stream) {
+      if (!isAllowedByFileFilters(entry)) {
+        continue;
+      }
+      if (entries.length >= entryLimit) {
+        hitLimit = true;
+        break;
+      }
+      entries.push(entry);
+    }
 
-    const { filteredPaths } = this.fileService.filterFilesWithReport(
-      relativePaths,
-      fileFilteringOptions,
-    );
-
-    const normalizePathForComparison = (p: string) =>
-      process.platform === 'win32' || process.platform === 'darwin'
-        ? p.toLowerCase()
-        : p;
-
-    const filteredAbsolutePaths = new Set(
-      filteredPaths.map((p) =>
-        normalizePathForComparison(path.resolve(projectRoot, p)),
-      ),
-    );
-
-    return entries.filter((entry) =>
-      filteredAbsolutePaths.has(normalizePathForComparison(entry.fullpath())),
-    );
+    return { entries, hitLimit };
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
@@ -258,9 +271,22 @@ class GlobToolInvocation extends BaseToolInvocation<
       const pattern = this.params.pattern;
       const allFilteredEntries: GlobPath[] = [];
       const seenPaths = new Set<string>();
+      let hitCollectionLimit = false;
 
       for (const searchDir of searchDirs) {
-        const entries = await this.globInDirectory(searchDir, pattern, signal);
+        const remainingEntries =
+          MAX_GLOB_COLLECTED_ENTRIES - allFilteredEntries.length;
+        if (remainingEntries <= 0) {
+          hitCollectionLimit = true;
+          break;
+        }
+        const { entries, hitLimit } = await this.globInDirectory(
+          searchDir,
+          pattern,
+          signal,
+          remainingEntries,
+        );
+        hitCollectionLimit ||= hitLimit;
         for (const entry of entries) {
           // Deduplicate entries that might appear in overlapping directories
           const normalized = entry.fullpath();
@@ -296,7 +322,7 @@ class GlobToolInvocation extends BaseToolInvocation<
         MAX_FILE_COUNT,
         this.config.getTruncateToolOutputLines(),
       );
-      const truncated = totalFileCount > fileLimit;
+      const truncated = hitCollectionLimit || totalFileCount > fileLimit;
 
       // Limit to fileLimit if needed
       const entriesToShow = truncated
@@ -308,11 +334,15 @@ class GlobToolInvocation extends BaseToolInvocation<
       );
       const fileListDescription = sortedAbsolutePaths.join('\n');
 
-      let resultMessage = `Found ${totalFileCount} file(s) matching "${this.params.pattern}" ${searchLocationDescription}`;
+      let resultMessage = hitCollectionLimit
+        ? `Found at least ${totalFileCount} file(s) matching "${this.params.pattern}" ${searchLocationDescription}`
+        : `Found ${totalFileCount} file(s) matching "${this.params.pattern}" ${searchLocationDescription}`;
       resultMessage += `, sorted by modification time (newest first):\n---\n${fileListDescription}`;
 
       // Add truncation notice if needed
-      if (truncated) {
+      if (hitCollectionLimit) {
+        resultMessage += `\n---\n[Results truncated after scanning ${totalFileCount} matching files. Narrow the pattern or path.]`;
+      } else if (truncated) {
         const omittedFiles = totalFileCount - fileLimit;
         const fileTerm = omittedFiles === 1 ? 'file' : 'files';
         resultMessage += `\n---\n[${omittedFiles} ${fileTerm} truncated] ...`;
@@ -320,7 +350,7 @@ class GlobToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: resultMessage,
-        returnDisplay: `Found ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}`,
+        returnDisplay: `${hitCollectionLimit ? 'Found at least' : 'Found'} ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}`,
         resultFilePaths: sortedAbsolutePaths,
       };
     } catch (error) {
