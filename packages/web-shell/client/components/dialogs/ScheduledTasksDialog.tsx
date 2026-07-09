@@ -4,13 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react';
+import { createPortal } from 'react-dom';
 import {
   useWorkspaceActions,
   type DaemonScheduledTask,
   type DaemonScheduledTaskRun,
 } from '@qwen-code/webui/daemon-react-sdk';
+import type {
+  DaemonExtensionEntry,
+  DaemonWorkspaceMcpServerStatus,
+  DaemonWorkspaceSkillStatus,
+} from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
+import { getComposerTagIconUrl } from '../composerTagIcons';
+import { cssUrlValue } from '../../utils/cssUrlVar';
 import { DialogShell } from './DialogShell';
 import {
   buildCron,
@@ -83,6 +97,202 @@ const MAX_SET_TIMEOUT_MS = 2_147_483_647;
 // back to the slow lane so a permanently-stuck task can't spin a 1 Hz GET loop.
 const PAST_DUE_FAST_RELOADS = 3;
 const OVERDUE_RELOAD_INTERVAL_MS = 30_000;
+const AT_REFERENCE_UNSAFE_CHARS = /[^\p{L}\p{N}_./-]/gu;
+const REFERENCE_PICKER_THEME_VARS = [
+  '--background',
+  '--foreground',
+  '--muted',
+  '--muted-foreground',
+  '--border',
+  '--error-color',
+  '--font-mono',
+];
+
+type PromptTagKind = 'extension' | 'skill' | 'mcp';
+
+interface PromptReferenceItem {
+  id: string;
+  kind: PromptTagKind;
+  label: string;
+  description?: string;
+  insertText: string;
+}
+
+interface ReferencePickerPosition {
+  left: number;
+  top: number;
+  width: number;
+  maxHeight: number;
+}
+
+function escapeAtReferenceText(ref: string): string {
+  return ref.replace(AT_REFERENCE_UNSAFE_CHARS, '\\$&');
+}
+
+function extensionDescription(extension: DaemonExtensionEntry) {
+  if (extension.displayName && extension.displayName !== extension.name) {
+    return extension.displayName;
+  }
+  return extension.description;
+}
+
+function skillDescription(skill: DaemonWorkspaceSkillStatus) {
+  return skill.description || skill.argumentHint || skill.level;
+}
+
+function mcpDescription(server: DaemonWorkspaceMcpServerStatus) {
+  return server.description || server.mcpStatus;
+}
+
+function textFromPromptNode(node: ChildNode): string {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return node.textContent ?? '';
+  }
+  if (!(node instanceof HTMLElement)) return '';
+
+  const serialized = node.dataset.promptTagSerialized;
+  if (serialized) return serialized;
+  if (node.tagName === 'BR') return '\n';
+
+  let text = '';
+  node.childNodes.forEach((child) => {
+    text += textFromPromptNode(child);
+  });
+  return node.tagName === 'DIV' || node.tagName === 'P' ? `${text}\n` : text;
+}
+
+function textFromPromptEditor(root: HTMLElement): string {
+  let text = '';
+  root.childNodes.forEach((node) => {
+    text += textFromPromptNode(node);
+  });
+  return text.replace(/\u00a0/g, ' ').replace(/\n$/, '');
+}
+
+function clearPromptEditor(root: HTMLElement) {
+  while (root.firstChild) root.removeChild(root.firstChild);
+}
+
+function setPromptEditorText(root: HTMLElement, text: string) {
+  clearPromptEditor(root);
+  if (!text) return;
+  const lines = text.split('\n');
+  lines.forEach((line, index) => {
+    if (index > 0) root.appendChild(document.createElement('br'));
+    root.appendChild(document.createTextNode(line));
+  });
+}
+
+function makePromptTagElement(item: PromptReferenceItem): HTMLElement {
+  const tag = document.createElement('span');
+  tag.className = styles.promptTag;
+  tag.contentEditable = 'false';
+  tag.dataset.promptTagSerialized = item.insertText.trim();
+
+  const iconUrl = getComposerTagIconUrl(item.kind);
+  if (iconUrl) {
+    const icon = document.createElement('span');
+    icon.className = styles.promptTagIcon;
+    icon.style.setProperty('--composer-tag-icon-url', cssUrlValue(iconUrl));
+    icon.setAttribute('aria-hidden', 'true');
+    tag.appendChild(icon);
+  }
+
+  const value = document.createElement('span');
+  value.className = styles.promptTagValue;
+  value.textContent = item.label;
+  tag.appendChild(value);
+  return tag;
+}
+
+function insertPromptTagElement(root: HTMLElement, item: PromptReferenceItem) {
+  const selection = window.getSelection();
+  const tag = makePromptTagElement(item);
+  const spacer = document.createTextNode(' ');
+
+  if (textFromPromptEditor(root).trim().length === 0) {
+    clearPromptEditor(root);
+  }
+
+  const lastText = root.lastChild?.textContent ?? '';
+  if (root.childNodes.length > 0 && !/\s$/.test(lastText)) {
+    root.appendChild(document.createTextNode(' '));
+  }
+  root.appendChild(tag);
+  root.appendChild(spacer);
+
+  const range = document.createRange();
+  range.setStartAfter(spacer);
+  range.collapse(true);
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function PromptReferenceEditor({
+  value,
+  placeholder,
+  onChange,
+  insertItem,
+  onInserted,
+}: {
+  value: string;
+  placeholder: string;
+  onChange: (value: string) => void;
+  insertItem: PromptReferenceItem | null;
+  onInserted: () => void;
+}) {
+  const editorRef = useRef<HTMLDivElement | null>(null);
+  const lastAppliedValueRef = useRef('');
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    if (value === lastAppliedValueRef.current) return;
+    setPromptEditorText(editor, value);
+    lastAppliedValueRef.current = value;
+  }, [value]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor || !insertItem) return;
+    insertPromptTagElement(editor, insertItem);
+    const next = textFromPromptEditor(editor);
+    lastAppliedValueRef.current = next;
+    onChange(next);
+    editor.focus();
+    onInserted();
+  }, [insertItem, onChange, onInserted]);
+
+  return (
+    <div className={styles.promptEditorWrap}>
+      <div
+        ref={editorRef}
+        className={styles.promptEditor}
+        contentEditable
+        role="textbox"
+        aria-multiline="true"
+        aria-placeholder={placeholder}
+        onInput={(event) => {
+          let next = textFromPromptEditor(event.currentTarget);
+          if (next.trim().length === 0) {
+            clearPromptEditor(event.currentTarget);
+            next = '';
+          }
+          lastAppliedValueRef.current = next;
+          onChange(next);
+        }}
+        onPaste={(event) => {
+          event.preventDefault();
+          const text = event.clipboardData.getData('text/plain');
+          document.execCommand('insertText', false, text);
+        }}
+      />
+      {value.trim().length === 0 && (
+        <div className={styles.promptPlaceholder}>{placeholder}</div>
+      )}
+    </div>
+  );
+}
 
 export function ScheduledTasksDialog({
   onRunPrompt,
@@ -110,6 +320,22 @@ export function ScheduledTasksDialog({
   const [builder, setBuilder] = useState<BuilderState>(DEFAULT_BUILDER);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [referenceKind, setReferenceKind] = useState<PromptTagKind | null>(
+    null,
+  );
+  const [referenceItems, setReferenceItems] = useState<PromptReferenceItem[]>(
+    [],
+  );
+  const [referenceLoading, setReferenceLoading] = useState(false);
+  const [referenceError, setReferenceError] = useState<string | null>(null);
+  const [pendingPromptTag, setPendingPromptTag] =
+    useState<PromptReferenceItem | null>(null);
+  const referencePopoverRef = useRef<HTMLDivElement | null>(null);
+  const referencePickerRef = useRef<HTMLDivElement | null>(null);
+  const [referencePickerPosition, setReferencePickerPosition] =
+    useState<ReferencePickerPosition | null>(null);
+  const [referencePickerThemeVars, setReferencePickerThemeVars] =
+    useState<CSSProperties>({});
 
   // Which task's run history is expanded inline (only one at a time).
   const [expandedRunsId, setExpandedRunsId] = useState<string | null>(null);
@@ -195,6 +421,139 @@ export function ScheduledTasksDialog({
   const previewCron = buildCron(builder);
   const previewLabel = previewCron ? describeCron(previewCron, t) : null;
 
+  const updateReferencePickerPosition = useCallback(() => {
+    const anchor = referencePopoverRef.current;
+    if (!anchor) {
+      setReferencePickerPosition(null);
+      return;
+    }
+    const computedStyle = getComputedStyle(anchor);
+    setReferencePickerThemeVars(
+      Object.fromEntries(
+        REFERENCE_PICKER_THEME_VARS.map((name) => [
+          name,
+          computedStyle.getPropertyValue(name),
+        ]),
+      ) as CSSProperties,
+    );
+    const rect = anchor.getBoundingClientRect();
+    const width = Math.min(420, window.innerWidth - 24);
+    const left = Math.max(
+      12,
+      Math.min(rect.left, window.innerWidth - width - 12),
+    );
+    const top = rect.bottom + 6;
+    const maxHeight = Math.max(
+      140,
+      Math.min(320, window.innerHeight - top - 12),
+    );
+    setReferencePickerPosition((prev) => {
+      const next = { left, top, width, maxHeight };
+      return prev &&
+        prev.left === next.left &&
+        prev.top === next.top &&
+        prev.width === next.width &&
+        prev.maxHeight === next.maxHeight
+        ? prev
+        : next;
+    });
+  }, []);
+
+  const loadReferences = useCallback(
+    async (kind: PromptTagKind) => {
+      if (referenceKind === kind) {
+        setReferenceKind(null);
+        return;
+      }
+      updateReferencePickerPosition();
+      setReferenceKind(kind);
+      setReferenceLoading(true);
+      setReferenceError(null);
+      setReferenceItems([]);
+      try {
+        if (kind === 'extension') {
+          const status = await actions.loadExtensionsStatus();
+          setReferenceItems(
+            (status.extensions ?? [])
+              .filter((extension) => extension.isActive)
+              .map((extension) => ({
+                id: extension.id || extension.name,
+                kind,
+                label: extension.name,
+                description: extensionDescription(extension),
+                insertText: `@ext:${escapeAtReferenceText(extension.name)} `,
+              })),
+          );
+        } else if (kind === 'skill') {
+          const status = await actions.loadSkillsStatus();
+          setReferenceItems(
+            (status.skills ?? [])
+              .filter((skill) => skill.modelInvocable)
+              .map((skill) => ({
+                id: skill.name,
+                kind,
+                label: skill.name,
+                description: skillDescription(skill),
+                insertText: `/${skill.name} `,
+              })),
+          );
+        } else {
+          const status = await actions.loadMcpStatus();
+          setReferenceItems(
+            (status.servers ?? [])
+              .filter((server) => !server.disabled)
+              .map((server) => ({
+                id: server.name,
+                kind,
+                label: server.name,
+                description: mcpDescription(server),
+                insertText: `@mcp:${escapeAtReferenceText(server.name)} `,
+              })),
+          );
+        }
+      } catch (err) {
+        if (!mountedRef.current) return;
+        setReferenceError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (mountedRef.current) setReferenceLoading(false);
+      }
+    },
+    [actions, referenceKind, updateReferencePickerPosition],
+  );
+
+  useEffect(() => {
+    if (!referenceKind) return;
+    updateReferencePickerPosition();
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const popover = referencePopoverRef.current;
+      const picker = referencePickerRef.current;
+      if (popover?.contains(event.target as Node)) return;
+      if (picker?.contains(event.target as Node)) return;
+      setReferenceKind(null);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        setReferenceKind(null);
+      }
+    };
+
+    const handleReposition = () => updateReferencePickerPosition();
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('resize', handleReposition);
+    window.addEventListener('scroll', handleReposition, true);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown, true);
+      window.removeEventListener('resize', handleReposition);
+      window.removeEventListener('scroll', handleReposition, true);
+    };
+  }, [referenceKind, updateReferencePickerPosition]);
+
   const resetForm = useCallback(() => {
     setName('');
     setPrompt('');
@@ -202,6 +561,11 @@ export function ScheduledTasksDialog({
     setFormError(null);
     setShowForm(false);
     setEditingId(null);
+    setReferenceKind(null);
+    setReferenceItems([]);
+    setReferenceError(null);
+    setPendingPromptTag(null);
+    setReferencePickerPosition(null);
   }, []);
 
   const openCreate = useCallback(() => {
@@ -210,6 +574,11 @@ export function ScheduledTasksDialog({
     setPrompt('');
     setBuilder(DEFAULT_BUILDER);
     setFormError(null);
+    setReferenceKind(null);
+    setReferenceItems([]);
+    setReferenceError(null);
+    setPendingPromptTag(null);
+    setReferencePickerPosition(null);
     setShowForm(true);
   }, []);
 
@@ -221,6 +590,11 @@ export function ScheduledTasksDialog({
     // represent lands in the `custom` field, never silently rewritten.
     setBuilder(parseCronToBuilder(task.cron));
     setFormError(null);
+    setReferenceKind(null);
+    setReferenceItems([]);
+    setReferenceError(null);
+    setPendingPromptTag(null);
+    setReferencePickerPosition(null);
     setShowForm(true);
   }, []);
 
@@ -365,6 +739,60 @@ export function ScheduledTasksDialog({
     [actions, onError, reload, t],
   );
 
+  const referencePicker =
+    referenceKind && referencePickerPosition
+      ? createPortal(
+          <div
+            ref={referencePickerRef}
+            className={styles.referencePicker}
+            style={
+              {
+                ...referencePickerThemeVars,
+                left: referencePickerPosition.left,
+                top: referencePickerPosition.top,
+                width: referencePickerPosition.width,
+                maxHeight: referencePickerPosition.maxHeight,
+              } as CSSProperties
+            }
+          >
+            {referenceLoading ? (
+              <div className={styles.referenceEmpty}>
+                {t('scheduledTasks.reference.loading')}
+              </div>
+            ) : referenceError ? (
+              <div className={styles.referenceError}>{referenceError}</div>
+            ) : referenceItems.length === 0 ? (
+              <div className={styles.referenceEmpty}>
+                {t('scheduledTasks.reference.empty')}
+              </div>
+            ) : (
+              referenceItems.map((item) => (
+                <button
+                  key={`${item.kind}:${item.id}`}
+                  type="button"
+                  className={styles.referenceItem}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    setPendingPromptTag(item);
+                    setReferenceKind(null);
+                  }}
+                >
+                  <span className={styles.referenceItemLabel}>
+                    {item.label}
+                  </span>
+                  {item.description && (
+                    <span className={styles.referenceItemDescription}>
+                      {item.description}
+                    </span>
+                  )}
+                </button>
+              ))
+            )}
+          </div>,
+          document.body,
+        )
+      : null;
+
   return (
     <div className={styles.root}>
       <div className={styles.intro}>{t('scheduledTasks.subtitle')}</div>
@@ -428,15 +856,47 @@ export function ScheduledTasksDialog({
                 {t('scheduledTasks.prompt')}
                 <span className={styles.required}>*</span>
               </span>
-              <textarea
-                className={styles.textarea}
+              <PromptReferenceEditor
                 value={prompt}
-                rows={4}
-                maxLength={100_000}
                 placeholder={t('scheduledTasks.promptPlaceholder')}
-                onChange={(e) => setPrompt(e.target.value)}
+                onChange={setPrompt}
+                insertItem={pendingPromptTag}
+                onInserted={() => setPendingPromptTag(null)}
               />
             </label>
+            <div ref={referencePopoverRef} className={styles.referencePopover}>
+              <div className={styles.referenceBar}>
+                {(['extension', 'skill', 'mcp'] as const).map((kind) => {
+                  const iconUrl = getComposerTagIconUrl(kind);
+                  return (
+                    <button
+                      key={kind}
+                      type="button"
+                      className={`${styles.referenceButton} ${
+                        referenceKind === kind
+                          ? styles.referenceButtonActive
+                          : ''
+                      }`}
+                      aria-expanded={referenceKind === kind}
+                      onClick={() => void loadReferences(kind)}
+                    >
+                      {iconUrl && (
+                        <span
+                          className={styles.referenceButtonIcon}
+                          style={
+                            {
+                              '--composer-tag-icon-url': cssUrlValue(iconUrl),
+                            } as CSSProperties
+                          }
+                          aria-hidden
+                        />
+                      )}
+                      {t(`scheduledTasks.reference.${kind}`)}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
 
             <div className={styles.scheduleRow}>
               <label className={styles.field}>
@@ -599,6 +1059,7 @@ export function ScheduledTasksDialog({
           </div>
         </DialogShell>
       )}
+      {referencePicker}
 
       {loadError && <div className={styles.loadError}>{loadError}</div>}
 

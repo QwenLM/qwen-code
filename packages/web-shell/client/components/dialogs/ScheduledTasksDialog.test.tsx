@@ -36,6 +36,9 @@ const { actions } = vi.hoisted(() => ({
     updateScheduledTask: vi.fn(),
     runScheduledTask: vi.fn(),
     deleteScheduledTask: vi.fn(),
+    loadExtensionsStatus: vi.fn(),
+    loadSkillsStatus: vi.fn(),
+    loadMcpStatus: vi.fn(),
   },
 }));
 
@@ -63,6 +66,15 @@ async function mount(
   actions.listScheduledTasks.mockResolvedValue(tasks);
   actions.updateScheduledTask.mockResolvedValue(tasks[0]);
   actions.runScheduledTask.mockResolvedValue(tasks[0]);
+  actions.loadExtensionsStatus.mockResolvedValue({
+    extensions: [],
+  });
+  actions.loadSkillsStatus.mockResolvedValue({
+    skills: [],
+  });
+  actions.loadMcpStatus.mockResolvedValue({
+    servers: [],
+  });
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -104,6 +116,12 @@ function findButton(label: string): HTMLButtonElement | undefined {
   );
 }
 
+function findButtonContaining(label: string): HTMLButtonElement | undefined {
+  return Array.from(document.querySelectorAll('button')).find((b) =>
+    b.textContent?.includes(label),
+  );
+}
+
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
@@ -128,6 +146,19 @@ const baseTask = (over: Partial<MockTask>): MockTask => ({
 });
 
 describe('ScheduledTasksDialog editing', () => {
+  it('keeps the prompt placeholder outside the editable textbox', async () => {
+    await mount([]);
+
+    click(findButton('New scheduled task'));
+
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    expect(prompt?.textContent).toBe('');
+    expect(prompt?.getAttribute('aria-placeholder')).toBe(
+      'What should this task do?',
+    );
+    expect(document.body.textContent).toContain('What should this task do?');
+  });
+
   it('prefills the form from the task and saves via updateScheduledTask', async () => {
     await mount([baseTask({})]);
 
@@ -137,11 +168,11 @@ describe('ScheduledTasksDialog editing', () => {
     // The cron reverses onto the structured pickers (weekdays @ 12:30) and the
     // name/prompt are prefilled — not left blank as they would be for create.
     const name = document.querySelector<HTMLInputElement>('input[type="text"]');
-    const prompt = document.querySelector<HTMLTextAreaElement>('textarea');
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
     const frequency = document.querySelector<HTMLSelectElement>('select');
     const time = document.querySelector<HTMLInputElement>('input[type="time"]');
     expect(name?.value).toBe('Digest');
-    expect(prompt?.value).toBe('summarize the day');
+    expect(prompt?.textContent).toBe('summarize the day');
     expect(frequency?.value).toBe('weekdays');
     expect(time?.value).toBe('12:30');
 
@@ -156,6 +187,122 @@ describe('ScheduledTasksDialog editing', () => {
       name: 'Digest',
     });
     expect(actions.createScheduledTask).not.toHaveBeenCalled();
+  });
+
+  it('inserts extension, skill, and MCP references into the created prompt', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+
+    await mount([]);
+
+    actions.loadExtensionsStatus.mockResolvedValue({
+      extensions: [
+        {
+          id: 'ext-1',
+          name: 'alibabacloud-compute-suite',
+          displayName: 'Alibaba Cloud',
+          description: '',
+          version: '1.0.0',
+          isActive: true,
+          path: '/ext',
+          capabilities: {},
+        },
+      ],
+    });
+    actions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          kind: 'skill',
+          name: 'review',
+          description: 'Review code',
+          level: 'project',
+          modelInvocable: true,
+        },
+      ],
+    });
+    actions.loadMcpStatus.mockResolvedValue({
+      servers: [
+        {
+          kind: 'mcp_server',
+          name: 'repo-tools',
+          transport: 'stdio',
+          disabled: false,
+          mcpStatus: 'connected',
+        },
+      ],
+    });
+    click(findButton('New scheduled task'));
+
+    click(findButtonContaining('Extensions'));
+    await flush();
+    click(findButtonContaining('alibabacloud-compute-suite'));
+    await flush();
+
+    click(findButtonContaining('Skills'));
+    await flush();
+    click(findButtonContaining('review'));
+    await flush();
+
+    click(findButtonContaining('MCP'));
+    await flush();
+    click(findButtonContaining('repo-tools'));
+    await flush();
+
+    expect(document.querySelector('[role="textbox"]')?.textContent).toContain(
+      'alibabacloud-compute-suite',
+    );
+
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: '@ext:alibabacloud-compute-suite /review @mcp:repo-tools',
+      }),
+    );
+  });
+
+  it('does not preserve empty contenteditable leftovers before an inserted reference', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+
+    await mount([]);
+
+    actions.loadExtensionsStatus.mockResolvedValue({
+      extensions: [
+        {
+          id: 'ext-1',
+          name: 'alibabacloud-compute-suite',
+          displayName: 'Alibaba Cloud',
+          description: '',
+          version: '1.0.0',
+          isActive: true,
+          path: '/ext',
+          capabilities: {},
+        },
+      ],
+    });
+    click(findButton('New scheduled task'));
+
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    if (!prompt) throw new Error('prompt editor not found');
+    act(() => {
+      prompt.innerHTML = '<br>';
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+    await flush();
+
+    click(findButtonContaining('Extensions'));
+    await flush();
+    click(findButtonContaining('alibabacloud-compute-suite'));
+    await flush();
+
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: '@ext:alibabacloud-compute-suite',
+      }),
+    );
   });
 
   it('an unrepresentable cron lands in the custom field, losslessly', async () => {
