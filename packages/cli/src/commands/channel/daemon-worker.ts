@@ -30,7 +30,10 @@ import {
   QWEN_DAEMON_WORKSPACE_ENV,
   QWEN_SERVER_TOKEN_ENV,
 } from '../../serve/channel-worker-env.js';
-import { isChannelWebhookTaskMessage } from '../../serve/channel-webhook-ipc.js';
+import {
+  isChannelWebhookTaskMessage,
+  type ChannelWebhookEnqueueErrorCode,
+} from '../../serve/channel-webhook-ipc.js';
 import { isLoopbackBind } from '../../serve/loopback-binds.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
@@ -566,7 +569,13 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       let heartbeatTimer: NodeJS.Timeout | undefined;
       const sendWebhookTaskResult = (
         id: string,
-        result: { ok: true } | { ok: false; error: string },
+        result:
+          | { ok: true }
+          | {
+              ok: false;
+              code: ChannelWebhookEnqueueErrorCode;
+              error: string;
+            },
       ) => {
         process.send?.({
           type: 'webhook_task_result',
@@ -580,6 +589,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         if (message.expiresAt <= Date.now()) {
           sendWebhookTaskResult(message.id, {
             ok: false,
+            code: 'channel_webhook_enqueue_timeout',
             error: 'Channel webhook task IPC timed out.',
           });
           return;
@@ -589,6 +599,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         } catch (err) {
           sendWebhookTaskResult(message.id, {
             ok: false,
+            code: classifyWebhookTaskValidationError(err),
             error: sanitizeLogText(
               err instanceof Error ? err.message : String(err),
               512,
@@ -599,6 +610,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         if (activeWebhookTasks.size >= MAX_ACTIVE_WEBHOOK_TASKS) {
           sendWebhookTaskResult(message.id, {
             ok: false,
+            code: 'channel_webhook_queue_full',
             error: 'Channel webhook task queue is full.',
           });
           return;
@@ -719,3 +731,30 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
     }
   },
 };
+
+function classifyWebhookTaskValidationError(
+  error: unknown,
+): ChannelWebhookEnqueueErrorCode {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    message === 'Webhook tasks require unattended approval mode.' ||
+    message ===
+      'Webhook tasks are not supported when sessionScope is single.' ||
+    message === 'Channel does not support proactive webhook messages.' ||
+    message ===
+      'Channel does not support proactive webhook messages for this chat target.'
+  ) {
+    return 'channel_webhook_target_unavailable';
+  }
+  if (
+    message.startsWith('Unknown webhook source "') ||
+    message.startsWith('Unknown webhook target "') ||
+    message.startsWith('Webhook task belongs to ')
+  ) {
+    return 'channel_webhook_invalid_task';
+  }
+  if (/^Channel ".+" is not running\.$/u.test(message)) {
+    return 'channel_worker_unavailable';
+  }
+  return 'channel_webhook_enqueue_failed';
+}

@@ -16,9 +16,12 @@ import type { ChannelWebhookTask } from '@qwen-code/channel-base';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import {
   CHANNEL_WEBHOOK_TASK_IPC_TIMEOUT_MS,
+  ChannelWebhookEnqueueError,
   createChannelWebhookTaskMessage,
+  isChannelWebhookEnqueueErrorCode,
   isChannelWebhookTaskResultMessage,
   type ChannelWebhookAccepted,
+  type ChannelWebhookEnqueueErrorCode,
 } from './channel-webhook-ipc.js';
 
 const DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS = 30_000;
@@ -493,10 +496,13 @@ export function createChannelWorkerSupervisor(
     staleHeartbeatTimer = undefined;
   };
 
-  const rejectPendingWebhookTasks = (message: string) => {
+  const rejectPendingWebhookTasks = (
+    code: ChannelWebhookEnqueueErrorCode,
+    message: string,
+  ) => {
     for (const pending of pendingWebhookTasks.values()) {
       clearTimeout(pending.timer);
-      pending.reject(new Error(message));
+      pending.reject(new ChannelWebhookEnqueueError(code, message));
     }
     pendingWebhookTasks.clear();
   };
@@ -518,9 +524,15 @@ export function createChannelWorkerSupervisor(
       clearTimeout(pending.timer);
       pending.resolve({ accepted: true });
     } else {
+      const code = isChannelWebhookEnqueueErrorCode(message.code)
+        ? message.code
+        : 'channel_webhook_enqueue_failed';
       rejectPendingWebhookTask(
         message.id,
-        new Error(message.error || 'Channel webhook task failed.'),
+        new ChannelWebhookEnqueueError(
+          code,
+          message.error || 'Channel webhook task failed.',
+        ),
       );
     }
     return true;
@@ -819,7 +831,10 @@ export function createChannelWorkerSupervisor(
           snapshot.error ??
             (ready ? undefined : sanitizeWorkerError(message, redaction)),
         );
-        rejectPendingWebhookTasks('Channel worker exited.');
+        rejectPendingWebhookTasks(
+          'channel_worker_unavailable',
+          'Channel worker exited.',
+        );
         child = undefined;
         if ((ready || kind === 'restart') && !stopping) {
           scheduleRestart();
@@ -881,7 +896,10 @@ export function createChannelWorkerSupervisor(
     async stop() {
       clearRestartTimer();
       clearStaleHeartbeatTimer();
-      rejectPendingWebhookTasks('Channel worker stopped.');
+      rejectPendingWebhookTasks(
+        'channel_worker_unavailable',
+        'Channel worker stopped.',
+      );
       if (
         !child ||
         snapshot.state === 'exited' ||
@@ -915,7 +933,10 @@ export function createChannelWorkerSupervisor(
       snapshot = { ...snapshot, state: 'stopped' };
     },
     killAllSync() {
-      rejectPendingWebhookTasks('Channel worker stopped.');
+      rejectPendingWebhookTasks(
+        'channel_worker_unavailable',
+        'Channel worker stopped.',
+      );
       if (
         !child ||
         snapshot.state === 'exited' ||
@@ -947,17 +968,28 @@ export function createChannelWorkerSupervisor(
     async enqueueWebhookTask(task) {
       const startedChild = child;
       if (!startedChild || snapshot.state !== 'running') {
-        throw new Error('Channel worker is not running.');
+        throw new ChannelWebhookEnqueueError(
+          'channel_worker_unavailable',
+          'Channel worker is not running.',
+        );
       }
       const send = startedChild.send;
       if (!send) {
-        throw new Error('Channel worker IPC send failed.');
+        throw new ChannelWebhookEnqueueError(
+          'channel_worker_unavailable',
+          'Channel worker IPC send failed.',
+        );
       }
       const message = createChannelWebhookTaskMessage(task);
       return await new Promise<ChannelWebhookAccepted>((resolve, reject) => {
         const timer = setTimeout(() => {
           pendingWebhookTasks.delete(message.id);
-          reject(new Error('Channel webhook task IPC timed out.'));
+          reject(
+            new ChannelWebhookEnqueueError(
+              'channel_webhook_enqueue_timeout',
+              'Channel webhook task IPC timed out.',
+            ),
+          );
         }, CHANNEL_WEBHOOK_TASK_IPC_TIMEOUT_MS);
         timer.unref();
         pendingWebhookTasks.set(message.id, { resolve, reject, timer });

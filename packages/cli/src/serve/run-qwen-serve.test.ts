@@ -2745,6 +2745,11 @@ describe('runQwenServe runtime startup failures', () => {
     );
     process.env['QWEN_HOME'] = tempHome;
     settingsRuntime.resetHomeEnvBootstrapForTesting();
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
     fs.writeFileSync(
       path.join(tempHome, 'settings.json'),
       JSON.stringify({

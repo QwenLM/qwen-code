@@ -1530,6 +1530,7 @@ describe('daemonWorkerCommand', () => {
         type: 'webhook_task_result',
         id: 'webhook-1',
         ok: false,
+        code: 'channel_worker_unavailable',
         error: 'Channel "missing" is not running.',
       });
 
@@ -1589,6 +1590,7 @@ describe('daemonWorkerCommand', () => {
         type: 'webhook_task_result',
         id: 'webhook-1',
         ok: false,
+        code: 'channel_webhook_target_unavailable',
         error: 'Webhook tasks require unattended approval mode.',
       });
       expect(runWebhookTask).not.toHaveBeenCalled();
@@ -1647,6 +1649,7 @@ describe('daemonWorkerCommand', () => {
         type: 'webhook_task_result',
         id: 'webhook-1',
         ok: false,
+        code: 'channel_webhook_enqueue_timeout',
         error: 'Channel webhook task IPC timed out.',
       });
       expect(validateWebhookTask).not.toHaveBeenCalled();
@@ -1774,6 +1777,7 @@ describe('daemonWorkerCommand', () => {
         type: 'webhook_task_result',
         id: 'webhook-16',
         ok: false,
+        code: 'channel_webhook_queue_full',
         error: 'Channel webhook task queue is full.',
       });
       expect(runWebhookTask).toHaveBeenCalledTimes(16);

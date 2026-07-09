@@ -7522,6 +7522,30 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('rolls back restored sessions when approval-mode initialization fails', async () => {
+      const bridge = makeBridge({
+        channelFactory: rejectingApprovalModeFactory(),
+        maxSessions: 1,
+      });
+
+      await expect(
+        bridge.loadSession({
+          sessionId: 'restore-with-mode',
+          workspaceCwd: WS_A,
+          approvalMode: ApprovalMode.YOLO,
+        }),
+      ).rejects.toThrow();
+
+      expect(bridge.sessionCount).toBe(0);
+      await expect(
+        bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+        }),
+      ).resolves.toMatchObject({ attached: false });
+      await bridge.shutdown();
+    });
+
     it('reaps a tombstoned session when approval-mode attach rollback removes the last attach', async () => {
       const { factory, waitForApprovalMode, rejectApprovalMode } =
         deferredApprovalModeFactory();

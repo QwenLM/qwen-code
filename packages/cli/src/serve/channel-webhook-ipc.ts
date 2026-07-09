@@ -1,6 +1,53 @@
 import { randomUUID } from 'node:crypto';
 import type { ChannelWebhookTask } from '@qwen-code/channel-base';
 
+export type ChannelWebhookEnqueueErrorCode =
+  | 'channel_worker_unavailable'
+  | 'channel_webhook_enqueue_timeout'
+  | 'channel_webhook_queue_full'
+  | 'channel_webhook_target_unavailable'
+  | 'channel_webhook_invalid_task'
+  | 'channel_webhook_enqueue_failed';
+
+const CHANNEL_WEBHOOK_ENQUEUE_ERROR_CODES: ReadonlySet<string> = new Set([
+  'channel_worker_unavailable',
+  'channel_webhook_enqueue_timeout',
+  'channel_webhook_queue_full',
+  'channel_webhook_target_unavailable',
+  'channel_webhook_invalid_task',
+  'channel_webhook_enqueue_failed',
+]);
+
+export class ChannelWebhookEnqueueError extends Error {
+  constructor(
+    readonly code: ChannelWebhookEnqueueErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ChannelWebhookEnqueueError';
+  }
+}
+
+export function isChannelWebhookEnqueueErrorCode(
+  value: unknown,
+): value is ChannelWebhookEnqueueErrorCode {
+  return (
+    typeof value === 'string' && CHANNEL_WEBHOOK_ENQUEUE_ERROR_CODES.has(value)
+  );
+}
+
+export function isChannelWebhookEnqueueError(
+  value: unknown,
+): value is ChannelWebhookEnqueueError {
+  return (
+    value instanceof ChannelWebhookEnqueueError ||
+    (typeof value === 'object' &&
+      value !== null &&
+      isChannelWebhookEnqueueErrorCode((value as { code?: unknown }).code) &&
+      typeof (value as { message?: unknown }).message === 'string')
+  );
+}
+
 export interface ChannelWebhookTaskRequestMessage {
   type: 'webhook_task';
   id: string;
@@ -12,6 +59,7 @@ export interface ChannelWebhookTaskResultMessage {
   type: 'webhook_task_result';
   id: string;
   ok: boolean;
+  code?: ChannelWebhookEnqueueErrorCode;
   error?: string;
 }
 

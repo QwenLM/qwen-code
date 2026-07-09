@@ -461,15 +461,17 @@ describe('parseChannelConfig', () => {
       },
     });
 
-    expect(config.webhooks).toEqual({
-      sources: {
-        'github-ci': {
-          secret: 'env-secret',
-          targets: {
-            default: {
-              chatId: 'group-1',
-              senderId: 'webhook:github-ci',
-              isGroup: true,
+    expect(config).toMatchObject({
+      webhooks: {
+        sources: {
+          'github-ci': {
+            secret: 'env-secret',
+            targets: {
+              default: {
+                chatId: 'group-1',
+                senderId: 'webhook:github-ci',
+                isGroup: true,
+              },
             },
           },
         },
@@ -498,8 +500,36 @@ describe('parseChannelConfig', () => {
       },
     });
 
-    expect(config.webhooks?.sources['github-ci']?.secret).toBe('env-secret');
+    expect(config).toMatchObject({
+      webhooks: { sources: { 'github-ci': { secret: 'env-secret' } } },
+    });
     delete process.env['QWEN_TEST_WEBHOOK_SECRET'];
+  });
+
+  it('accepts webhook secretEnv refs that are bare env var names without underscores', async () => {
+    process.env['MYSECRET'] = 'env-secret';
+    const config = await parseChannelConfig('dingtalk-main', {
+      type: 'bare',
+      token: 'token',
+      webhooks: {
+        sources: {
+          'github-ci': {
+            secretEnv: 'MYSECRET',
+            targets: {
+              default: {
+                chatId: 'group-1',
+                senderId: 'webhook:github-ci',
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(config).toMatchObject({
+      webhooks: { sources: { 'github-ci': { secret: 'env-secret' } } },
+    });
+    delete process.env['MYSECRET'];
   });
 
   it('accepts webhook secretEnv values already resolved by settings loading', async () => {
@@ -521,9 +551,11 @@ describe('parseChannelConfig', () => {
       },
     });
 
-    expect(config.webhooks?.sources['github-ci']?.secret).toBe(
-      'whsec-from-settings',
-    );
+    expect(config).toMatchObject({
+      webhooks: {
+        sources: { 'github-ci': { secret: 'whsec-from-settings' } },
+      },
+    });
   });
 
   it('does not treat resolved uppercase secret values as env names', async () => {
@@ -547,7 +579,9 @@ describe('parseChannelConfig', () => {
       },
     });
 
-    expect(config.webhooks?.sources['github-ci']?.secret).toBe('ABC123');
+    expect(config).toMatchObject({
+      webhooks: { sources: { 'github-ci': { secret: 'ABC123' } } },
+    });
   });
 
   it('resolves existing uppercase webhook secretEnv names without underscores', async () => {

@@ -12,7 +12,11 @@ import type {
   ChannelWebhookSourceConfig,
   ChannelWebhookTask,
 } from '@qwen-code/channel-base';
-import type { ChannelWebhookAccepted } from '../channel-webhook-ipc.js';
+import type {
+  ChannelWebhookAccepted,
+  ChannelWebhookEnqueueErrorCode,
+} from '../channel-webhook-ipc.js';
+import { isChannelWebhookEnqueueError } from '../channel-webhook-ipc.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
 
@@ -167,6 +171,7 @@ export function registerChannelWebhookRoutes(
         res.status(enqueueError.status).json({
           error: 'Failed to enqueue channel webhook task',
           code: enqueueError.code,
+          ...(enqueueError.detail ? { detail: enqueueError.detail } : {}),
         });
         return;
       }
@@ -184,13 +189,21 @@ function createWebhookRateLimitMiddleware(
       next();
       return;
     }
-    const ip = req.ip ?? req.socket.remoteAddress ?? 'unknown';
-    if (deps.rateLimiter.checkRate(`webhook:preauth:${ip}`, 'mutation')) {
+    if (
+      deps.rateLimiter.checkRate(
+        `webhook:preauth:${readRequestAddress(req)}`,
+        'mutation',
+      )
+    ) {
       next();
       return;
     }
     sendWebhookRateLimitExceeded(res);
   };
+}
+
+function readRequestAddress(req: Request): string {
+  return req.ip || req.socket.remoteAddress || 'unknown';
 }
 
 function sendWebhookRateLimitExceeded(res: Response): void {
@@ -287,65 +300,38 @@ function isWithinPayloadDepth(value: unknown, maxDepth: number): boolean {
 
 function classifyChannelWebhookEnqueueError(error: unknown): {
   status: number;
-  code: string;
+  code: ChannelWebhookEnqueueErrorCode;
+  detail?: string;
 } {
-  const errorCode =
-    typeof error === 'object' && error !== null && 'code' in error
-      ? (error as { code?: unknown }).code
-      : undefined;
-  if (typeof errorCode === 'string') {
-    switch (errorCode) {
-      case 'WORKER_NOT_RUNNING':
-      case 'WORKER_EXITED':
-      case 'WORKER_STOPPED':
-      case 'IPC_SEND_FAILED':
-        return { status: 503, code: 'channel_worker_unavailable' };
-      case 'IPC_TIMEOUT':
-        return { status: 504, code: 'channel_webhook_enqueue_timeout' };
-      case 'QUEUE_FULL':
-        return { status: 503, code: 'channel_webhook_queue_full' };
-      case 'UNSUPPORTED_TASK':
-      case 'SCOPE_RESTRICTED':
-        return { status: 409, code: 'channel_webhook_target_unavailable' };
-      case 'INVALID_TARGET':
-      case 'INVALID_TASK':
-        return { status: 400, code: 'channel_webhook_invalid_task' };
-      default:
-        break;
-    }
+  if (isChannelWebhookEnqueueError(error)) {
+    return {
+      status: statusForChannelWebhookEnqueueCode(error.code),
+      code: error.code,
+    };
   }
-  const message = error instanceof Error ? error.message : String(error);
-  if (
-    message === 'Channel worker is not running.' ||
-    message === 'Channel worker exited.' ||
-    message === 'Channel worker stopped.' ||
-    message === 'Channel worker IPC send failed.' ||
-    /^Channel ".+" is not running\.$/u.test(message)
-  ) {
-    return { status: 503, code: 'channel_worker_unavailable' };
+  return {
+    status: 500,
+    code: 'channel_webhook_enqueue_failed',
+    detail: error instanceof Error ? error.message : String(error),
+  };
+}
+
+function statusForChannelWebhookEnqueueCode(
+  code: ChannelWebhookEnqueueErrorCode,
+): number {
+  switch (code) {
+    case 'channel_webhook_invalid_task':
+      return 400;
+    case 'channel_webhook_target_unavailable':
+      return 409;
+    case 'channel_webhook_enqueue_timeout':
+      return 504;
+    case 'channel_worker_unavailable':
+    case 'channel_webhook_queue_full':
+      return 503;
+    case 'channel_webhook_enqueue_failed':
+      return 500;
+    default:
+      return 500;
   }
-  if (message === 'Channel webhook task IPC timed out.') {
-    return { status: 504, code: 'channel_webhook_enqueue_timeout' };
-  }
-  if (message === 'Channel webhook task queue is full.') {
-    return { status: 503, code: 'channel_webhook_queue_full' };
-  }
-  if (
-    message === 'Webhook tasks require unattended approval mode.' ||
-    message ===
-      'Webhook tasks are not supported when sessionScope is single.' ||
-    message === 'Channel does not support proactive webhook messages.' ||
-    message ===
-      'Channel does not support proactive webhook messages for this chat target.'
-  ) {
-    return { status: 409, code: 'channel_webhook_target_unavailable' };
-  }
-  if (
-    message.startsWith('Unknown webhook source "') ||
-    message.startsWith('Unknown webhook target "') ||
-    message.startsWith('Webhook task belongs to ')
-  ) {
-    return { status: 400, code: 'channel_webhook_invalid_task' };
-  }
-  return { status: 500, code: 'channel_webhook_enqueue_failed' };
 }

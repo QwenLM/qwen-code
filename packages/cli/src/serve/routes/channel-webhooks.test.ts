@@ -7,6 +7,7 @@
 import express from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
+import { ChannelWebhookEnqueueError } from '../channel-webhook-ipc.js';
 import { registerChannelWebhookRoutes } from './channel-webhooks.js';
 
 function appHarness(opts?: {
@@ -381,43 +382,17 @@ describe('channel webhook routes', () => {
     expect(res.body).toEqual({
       error: 'Failed to enqueue channel webhook task',
       code: 'channel_webhook_enqueue_failed',
+      detail: 'worker offline',
     });
   });
 
-  it('classifies coded worker errors without depending on message text', async () => {
+  it('returns 503 when the worker is unavailable', async () => {
     const h = appHarness({
       enqueueWebhookTask: vi.fn(async () => {
-        const err = new Error('message changed');
-        (err as Error & { code: string }).code = 'WORKER_NOT_RUNNING';
-        throw err;
-      }),
-    });
-    const res = await request(h.app)
-      .post('/channels/dingtalk-main/webhooks/github-ci')
-      .set('x-qwen-webhook-secret', 'secret-value')
-      .send({
-        eventType: 'ci_failed',
-        targetRef: 'default',
-        title: 'CI failed',
-      });
-
-    expect(res.status).toBe(503);
-    expect(res.body).toEqual({
-      error: 'Failed to enqueue channel webhook task',
-      code: 'channel_worker_unavailable',
-    });
-  });
-
-  it.each([
-    'Channel worker is not running.',
-    'Channel worker exited.',
-    'Channel worker stopped.',
-    'Channel worker IPC send failed.',
-    'Channel "dingtalk-main" is not running.',
-  ])('returns 503 when the worker is unavailable: %s', async (message) => {
-    const h = appHarness({
-      enqueueWebhookTask: vi.fn(async () => {
-        throw new Error(message);
+        throw new ChannelWebhookEnqueueError(
+          'channel_worker_unavailable',
+          'worker unavailable',
+        );
       }),
     });
     const res = await request(h.app)
@@ -439,7 +414,10 @@ describe('channel webhook routes', () => {
   it('returns 503 when the worker webhook queue is full', async () => {
     const h = appHarness({
       enqueueWebhookTask: vi.fn(async () => {
-        throw new Error('Channel webhook task queue is full.');
+        throw new ChannelWebhookEnqueueError(
+          'channel_webhook_queue_full',
+          'queue full',
+        );
       }),
     });
     const res = await request(h.app)
@@ -458,40 +436,38 @@ describe('channel webhook routes', () => {
     });
   });
 
-  it.each([
-    'Webhook tasks require unattended approval mode.',
-    'Webhook tasks are not supported when sessionScope is single.',
-    'Channel does not support proactive webhook messages.',
-    'Channel does not support proactive webhook messages for this chat target.',
-  ])(
-    'returns 409 when the target cannot accept webhook work: %s',
-    async (message) => {
-      const h = appHarness({
-        enqueueWebhookTask: vi.fn(async () => {
-          throw new Error(message);
-        }),
+  it('returns 409 when the target cannot accept webhook work', async () => {
+    const h = appHarness({
+      enqueueWebhookTask: vi.fn(async () => {
+        throw new ChannelWebhookEnqueueError(
+          'channel_webhook_target_unavailable',
+          'target unavailable',
+        );
+      }),
+    });
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
       });
-      const res = await request(h.app)
-        .post('/channels/dingtalk-main/webhooks/github-ci')
-        .set('x-qwen-webhook-secret', 'secret-value')
-        .send({
-          eventType: 'ci_failed',
-          targetRef: 'default',
-          title: 'CI failed',
-        });
 
-      expect(res.status).toBe(409);
-      expect(res.body).toEqual({
-        error: 'Failed to enqueue channel webhook task',
-        code: 'channel_webhook_target_unavailable',
-      });
-    },
-  );
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      error: 'Failed to enqueue channel webhook task',
+      code: 'channel_webhook_target_unavailable',
+    });
+  });
 
   it('returns 400 when the worker rejects an invalid webhook task', async () => {
     const h = appHarness({
       enqueueWebhookTask: vi.fn(async () => {
-        throw new Error('Unknown webhook source "github-ci".');
+        throw new ChannelWebhookEnqueueError(
+          'channel_webhook_invalid_task',
+          'invalid task',
+        );
       }),
     });
     const res = await request(h.app)
@@ -513,7 +489,10 @@ describe('channel webhook routes', () => {
   it('returns 504 when enqueueing the webhook task times out', async () => {
     const h = appHarness({
       enqueueWebhookTask: vi.fn(async () => {
-        throw new Error('Channel webhook task IPC timed out.');
+        throw new ChannelWebhookEnqueueError(
+          'channel_webhook_enqueue_timeout',
+          'timed out',
+        );
       }),
     });
     const res = await request(h.app)
