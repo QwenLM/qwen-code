@@ -6,6 +6,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type ReactNode,
 } from 'react';
 import { isSafeImageSrc } from './Markdown';
 import { useWebShellCustomization } from '../../customization';
@@ -192,8 +193,18 @@ function UserMessageTag({
   onComposerTagClick: ComposerTagClickHandler | undefined;
 }) {
   const info = { tag, placement: 'user-message' as const, readonly: true };
-  const custom = renderComposerTag?.(info);
-  const tooltip = renderComposerTagTooltip?.(info);
+  let custom: ReactNode | null | undefined;
+  let tooltip: ReactNode | null | undefined;
+  try {
+    custom = renderComposerTag?.(info);
+  } catch (error) {
+    console.warn('[WebShell] user message tag render failed', error);
+  }
+  try {
+    tooltip = renderComposerTagTooltip?.(info);
+  } catch (error) {
+    console.warn('[WebShell] user message tag tooltip render failed', error);
+  }
   const clickable = Boolean(onComposerTagClick);
   const rawTagLabel = getComposerTagLabel(tag);
   const tagValue = getComposerTagValue(tag);

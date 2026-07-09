@@ -214,4 +214,47 @@ describe('UserMessage', () => {
     expect(container.textContent).toBe('raw <broken /> content');
     warn.mockRestore();
   });
+
+  it('falls back when user-message tag rendering throws', () => {
+    const renderError = new Error('bad tag renderer');
+    const tooltipError = new Error('bad tag tooltip');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          parseUserMessageContent: () => [
+            {
+              type: 'tag',
+              tag: {
+                id: 'ctx-1',
+                label: 'Table',
+                value: 'orders',
+                serialized: '<context />',
+              },
+            },
+          ],
+          renderComposerTag: () => {
+            throw renderError;
+          },
+          renderComposerTagTooltip: () => {
+            throw tooltipError;
+          },
+        }}
+      >
+        <UserMessage content="<context />" />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(container.textContent).toContain('Table');
+    expect(container.textContent).toContain('orders');
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] user message tag render failed',
+      renderError,
+    );
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] user message tag tooltip render failed',
+      tooltipError,
+    );
+    warn.mockRestore();
+  });
 });

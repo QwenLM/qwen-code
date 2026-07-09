@@ -678,14 +678,23 @@ class ComposerTagWidget extends WidgetType {
       console.warn('[WebShell] inline tag renderContent failed', error);
     }
 
+    let renderedCustomContent = false;
     if (customContent !== undefined && customContent !== null) {
       const content = document.createElement('span');
       content.style.cssText =
         'display:inline-flex;align-items:center;min-width:0;max-width:100%;';
-      this.contentRoot = createRoot(content);
-      this.contentRoot.render(customContent);
-      chip.appendChild(content);
-    } else if (iconUrl) {
+      try {
+        this.contentRoot = createRoot(content);
+        this.contentRoot.render(customContent);
+        chip.appendChild(content);
+        renderedCustomContent = true;
+      } catch (error) {
+        this.contentRoot = null;
+        console.warn('[WebShell] inline tag renderContent failed', error);
+      }
+    }
+
+    if (!renderedCustomContent && iconUrl) {
       const icon = document.createElement('span');
       icon.style.cssText =
         'display:block;width:12px;height:12px;flex:0 0 auto;margin-left:7px;background:currentColor;mask:var(--composer-tag-icon-url) center / contain no-repeat;-webkit-mask:var(--composer-tag-icon-url) center / contain no-repeat;';
@@ -693,7 +702,7 @@ class ComposerTagWidget extends WidgetType {
       chip.appendChild(icon);
     }
 
-    if (customContent === undefined || customContent === null) {
+    if (!renderedCustomContent) {
       this.appendDefaultContent(chip, tagLabel, tagValue);
     }
 
@@ -1692,11 +1701,17 @@ export function useComposerCore(
       const rawText = sourceText.trim();
       const normalizedInlineTags =
         textOverride === undefined && followupCompletion === null
-          ? inlineTags.map((placement) => ({
-              ...placement,
-              start: placement.start - leadingTrimLength,
-              end: placement.end - leadingTrimLength,
-            }))
+          ? inlineTags
+              .map((placement) => ({
+                ...placement,
+                start: placement.start - leadingTrimLength,
+                end: placement.end - leadingTrimLength,
+              }))
+              .filter((placement) => placement.end > 0)
+              .map((placement) => ({
+                ...placement,
+                start: Math.max(0, placement.start),
+              }))
           : [];
       const tags = tagsOverride ?? composerTagsRef.current;
       if (!rawText && tags.length === 0) return true;
