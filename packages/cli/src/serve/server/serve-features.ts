@@ -95,7 +95,10 @@ export function createServeFeatures(
         multiWorkspaceSessionsEnabled,
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
-        browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts),
+        browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
+          opts,
+          process.env,
+        ),
         voiceTranscriptionAvailable: getCachedVoiceTranscriptionAvailable(),
         // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
         // on). A configured token no longer suppresses it — the browser carries
