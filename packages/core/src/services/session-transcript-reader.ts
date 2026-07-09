@@ -107,12 +107,17 @@ interface TranscriptIndex {
 
 interface CacheEntry {
   expiresAt: number;
+  byteSize?: number;
   value?: TranscriptIndex;
   pending?: Promise<TranscriptIndex>;
 }
 
 const INDEX_CACHE_MAX_ENTRIES = 32;
+const INDEX_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 const INDEX_CACHE_TTL_MS = 5 * 60 * 1000;
+const INDEX_ENTRY_BASE_BYTES = 256;
+const INDEX_SEGMENT_BYTES = 64;
+const INDEX_STRING_BYTES = 2;
 const READ_CHUNK_SIZE = 64 * 1024;
 const CURSOR_HMAC_KEY_BYTES = 32;
 const CURSOR_HMAC_KEY_FILENAME = 'session-transcript-cursor-key';
@@ -122,6 +127,7 @@ const debugLogger = createDebugLogger('SESSION_TRANSCRIPT');
 
 const indexCache = new Map<string, CacheEntry>();
 const cursorHmacKeys = new Map<string, Buffer>();
+let indexCacheMaxBytesForTest: number | undefined;
 
 function makeSessionTranscriptNotFoundError(
   sessionId: string,
@@ -365,6 +371,50 @@ function makeCacheKey(
   return `${filePath}:${fileIdentity.dev}:${fileIdentity.ino}:${snapshotSize}`;
 }
 
+function getIndexCacheMaxBytes(): number {
+  return indexCacheMaxBytesForTest ?? INDEX_CACHE_MAX_BYTES;
+}
+
+function estimateStringBytes(value: string | null | undefined): number {
+  return value ? value.length * INDEX_STRING_BYTES : 0;
+}
+
+function estimateIndexCacheBytes(index: TranscriptIndex): number {
+  let total =
+    INDEX_ENTRY_BASE_BYTES +
+    estimateStringBytes(index.filePath) +
+    estimateStringBytes(index.leafUuid) +
+    estimateStringBytes(index.startTime) +
+    estimateStringBytes(index.lastUpdated);
+
+  for (const uuid of index.activeUuids) {
+    total += estimateStringBytes(uuid);
+  }
+  for (const gap of index.gaps) {
+    total +=
+      INDEX_ENTRY_BASE_BYTES +
+      estimateStringBytes(gap.childUuid) +
+      estimateStringBytes(gap.missingParentUuid);
+  }
+  for (const [uuid, entry] of index.byUuid) {
+    total +=
+      INDEX_ENTRY_BASE_BYTES +
+      estimateStringBytes(uuid) +
+      estimateStringBytes(entry.parentUuid) +
+      entry.segments.length * INDEX_SEGMENT_BYTES;
+  }
+
+  return total;
+}
+
+function getIndexCacheBytes(): number {
+  let total = 0;
+  for (const entry of indexCache.values()) {
+    total += entry.byteSize ?? 0;
+  }
+  return total;
+}
+
 function pruneCache(now = Date.now()): void {
   for (const [key, entry] of indexCache) {
     if (entry.expiresAt <= now) {
@@ -377,6 +427,17 @@ function pruneCache(now = Date.now()): void {
     if (typeof oldest !== 'string') break;
     indexCache.delete(oldest);
     debugLogger.debug(`index cache evicted LRU ${oldest}`);
+  }
+  while (getIndexCacheBytes() > getIndexCacheMaxBytes()) {
+    let evicted = false;
+    for (const [key, entry] of indexCache) {
+      if (!entry.byteSize) continue;
+      indexCache.delete(key);
+      debugLogger.debug(`index cache evicted by byte budget ${key}`);
+      evicted = true;
+      break;
+    }
+    if (!evicted) break;
   }
 }
 
@@ -718,6 +779,7 @@ async function getCachedIndex(params: {
     const value = await pending;
     indexCache.set(key, {
       value,
+      byteSize: estimateIndexCacheBytes(value),
       expiresAt: Date.now() + INDEX_CACHE_TTL_MS,
     });
     pruneCache();
@@ -848,4 +910,22 @@ export class SessionTranscriptReader {
 export function resetSessionTranscriptIndexCacheForTest(): void {
   indexCache.clear();
   cursorHmacKeys.clear();
+  indexCacheMaxBytesForTest = undefined;
+}
+
+export function setSessionTranscriptIndexCacheMaxBytesForTest(
+  maxBytes: number,
+): void {
+  indexCacheMaxBytesForTest = maxBytes;
+  pruneCache();
+}
+
+export function getSessionTranscriptIndexCacheStatsForTest(): {
+  entries: number;
+  byteSize: number;
+} {
+  return {
+    entries: indexCache.size,
+    byteSize: getIndexCacheBytes(),
+  };
 }

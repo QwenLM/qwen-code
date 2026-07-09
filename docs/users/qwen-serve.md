@@ -460,6 +460,8 @@ curl "http://127.0.0.1:4170/session/$SESSION_ID/transcript?limit=100"
 
 `limit` counts active chat records, not emitted replay frames; one record can produce several `session_update` events. The first response freezes the JSONL snapshot size and returns `nextCursor` while `hasMore` is true. Later pages ignore appends after page 1, but return `409` if the file is deleted, truncated, replaced, archived, or otherwise conflicts with the frozen cursor. Very large snapshots return `413 transcript_too_large` before indexing so the daemon does not scan unbounded transcript files on the request path.
 
+For repeated cold-session transcript paging, `--channel-idle-timeout-ms` controls whether the ACP child survives between page requests. The default `0` may rebuild read-only replay state on each page; a positive timeout lets the child reuse its in-memory transcript and replay-config caches across the cursor walk.
+
 Note: live-session history replay is bounded twice: by the SSE ring for `Last-Event-ID` reconnects and by `--compacted-replay-max-bytes` for the snapshot returned by `POST /session/:id/load`. Long histories with chatty turns can exceed either bound. The daemon surfaces snapshot truncation with `history_truncated`; use `/transcript` when you need the complete active persisted history.
 
 ## Durability model

@@ -12,9 +12,11 @@ import { Storage } from '../config/storage.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import {
   encodeSessionTranscriptCursor,
+  getSessionTranscriptIndexCacheStatsForTest,
   InvalidSessionTranscriptCursorError,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   resetSessionTranscriptIndexCacheForTest,
+  setSessionTranscriptIndexCacheMaxBytesForTest,
   SessionTranscriptReader,
 } from './session-transcript-reader.js';
 
@@ -262,6 +264,26 @@ describe('SessionTranscriptReader', () => {
       snapshotSize: SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1,
       maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
     });
+  });
+
+  it('evicts cached indexes when the byte budget is exceeded', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    await writeRecords([
+      record('u1', null, 'hello'),
+      record('a1', 'u1', 'reply'),
+      record('u2', 'a1', 'next'),
+    ]);
+    const reader = new SessionTranscriptReader(workspaceDir);
+
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(0);
+    const second = await reader.readPage(sessionId, {
+      cursor: encodeCursor(first.nextCursorState!),
+      limit: 1,
+    });
+
+    expect(second.records.map((r) => r.uuid)).toEqual(['a1']);
+    expect(second.hasMore).toBe(true);
   });
 
   it('rejects path-like session ids before building a transcript path', async () => {

@@ -5848,7 +5848,6 @@ class QwenAgent implements Agent {
 
         try {
           const settings = loadSettingsCached(cwd);
-          this.settings = settings;
           return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
             const reader = new SessionTranscriptReader(cwd);
             const page = await reader.readPage(sessionId, {
@@ -5873,6 +5872,9 @@ class QwenAgent implements Agent {
                 ...page.nextCursorState,
                 replay: {
                   pendingToolCalls: replay.pendingToolCalls,
+                  // Preserved for future replay emitters that need cumulative
+                  // usage across page boundaries; current frames expose per-record
+                  // usage metadata only.
                   cumulativeUsage: replayState.cumulativeUsage,
                 },
               };
