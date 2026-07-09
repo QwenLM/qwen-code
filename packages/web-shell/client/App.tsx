@@ -2656,6 +2656,19 @@ export function App({
     [loadSidebarSession, reportError],
   );
 
+  // Listen for `qwen:open-session` events dispatched by the markdown renderer
+  // when a `qwen-session://<id>` link is clicked. Navigate to the session.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const sessionId = (e as CustomEvent<string>).detail;
+      if (typeof sessionId === 'string' && sessionId) {
+        handleOpenSessionFromOverview(sessionId);
+      }
+    };
+    window.addEventListener('qwen:open-session', handler);
+    return () => window.removeEventListener('qwen:open-session', handler);
+  }, [handleOpenSessionFromOverview]);
+
   useEffect(() => {
     if (
       sidebarSwitchingSessionId !== null &&
