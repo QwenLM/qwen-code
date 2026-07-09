@@ -6367,7 +6367,10 @@ describe('createServeApp', () => {
 
         expect(res.status).toBe(400);
         expect(res.body.code).toBe('workspace_mismatch');
-        expect(res.body.requestedWorkspace).toBe(missingCwd);
+        expect(res.body.boundWorkspace).toBeUndefined();
+        expect(res.body.requestedWorkspace).toBeUndefined();
+        expect(JSON.stringify(res.body)).not.toContain(WS_BOUND);
+        expect(JSON.stringify(res.body)).not.toContain(missingCwd);
         expect(bridge.loadCalls).toHaveLength(0);
         expect(bridge.resumeCalls).toHaveLength(0);
       }
@@ -6475,9 +6478,11 @@ describe('createServeApp', () => {
       expect(res.status).toBe(400);
       expect(res.body).toMatchObject({
         code: 'workspace_mismatch',
-        boundWorkspace: WS_BOUND,
-        requestedWorkspace: WS_DIFFERENT,
       });
+      expect(res.body.boundWorkspace).toBeUndefined();
+      expect(res.body.requestedWorkspace).toBeUndefined();
+      expect(JSON.stringify(res.body)).not.toContain(WS_BOUND);
+      expect(JSON.stringify(res.body)).not.toContain(WS_DIFFERENT);
       expect(bridge.loadCalls).toHaveLength(0);
     });
 
@@ -8217,7 +8222,10 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('workspace_mismatch');
-      expect(res.body.boundWorkspace).toBe(WS_BOUND);
+      expect(res.body.boundWorkspace).toBeUndefined();
+      expect(res.body.requestedWorkspace).toBeUndefined();
+      expect(JSON.stringify(res.body)).not.toContain(WS_BOUND);
+      expect(JSON.stringify(res.body)).not.toContain(WS_DIFFERENT);
       expect(bridge.listCalls).toHaveLength(0);
     });
 
