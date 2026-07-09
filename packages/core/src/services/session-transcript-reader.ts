@@ -777,9 +777,19 @@ async function getCachedIndex(params: {
   });
   try {
     const value = await pending;
+    const byteSize = estimateIndexCacheBytes(value);
+    if (byteSize > getIndexCacheMaxBytes()) {
+      if (indexCache.get(key)?.pending === pending) {
+        indexCache.delete(key);
+      }
+      debugLogger.debug(
+        `index cache skipped oversized entry ${key} byteSize=${byteSize}`,
+      );
+      return value;
+    }
     indexCache.set(key, {
       value,
-      byteSize: estimateIndexCacheBytes(value),
+      byteSize,
       expiresAt: Date.now() + INDEX_CACHE_TTL_MS,
     });
     pruneCache();

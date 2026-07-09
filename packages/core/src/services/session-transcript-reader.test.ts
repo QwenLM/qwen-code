@@ -40,13 +40,16 @@ describe('SessionTranscriptReader', () => {
     await fs.rm(runtimeDir, { recursive: true, force: true });
   });
 
-  async function writeRecords(records: ChatRecord[]): Promise<string> {
+  async function writeRecords(
+    records: ChatRecord[],
+    targetSessionId = sessionId,
+  ): Promise<string> {
     const chatsDir = path.join(
       new Storage(workspaceDir).getProjectDir(),
       'chats',
     );
     await fs.mkdir(chatsDir, { recursive: true });
-    const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+    const filePath = path.join(chatsDir, `${targetSessionId}.jsonl`);
     await fs.writeFile(
       filePath,
       records.map((record) => JSON.stringify(record)).join('\n') + '\n',
@@ -70,11 +73,12 @@ describe('SessionTranscriptReader', () => {
     uuid: string,
     parentUuid: string | null,
     text: string,
+    targetSessionId = sessionId,
   ): ChatRecord {
     return {
       uuid,
       parentUuid,
-      sessionId,
+      sessionId: targetSessionId,
       timestamp: `2026-01-01T00:00:0${text.length}.000Z`,
       type: uuid.startsWith('a') ? 'assistant' : 'user',
       cwd: workspaceDir,
@@ -266,24 +270,39 @@ describe('SessionTranscriptReader', () => {
     });
   });
 
-  it('evicts cached indexes when the byte budget is exceeded', async () => {
-    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+  it('does not evict cached indexes when a new index exceeds the byte budget alone', async () => {
     await writeRecords([
       record('u1', null, 'hello'),
       record('a1', 'u1', 'reply'),
-      record('u2', 'a1', 'next'),
     ]);
     const reader = new SessionTranscriptReader(workspaceDir);
-
     const first = await reader.readPage(sessionId, { limit: 1 });
-    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(0);
+    const warmCache = getSessionTranscriptIndexCacheStatsForTest();
+    expect(warmCache.entries).toBe(1);
+    setSessionTranscriptIndexCacheMaxBytesForTest(warmCache.byteSize + 1);
+
+    const largeSessionId = '660e8400-e29b-41d4-a716-446655440000';
+    const largeRecords: ChatRecord[] = [];
+    let parentUuid: string | null = null;
+    for (let i = 0; i < 20; i++) {
+      const uuid = `large-${i}`;
+      largeRecords.push(
+        record(uuid, parentUuid, `large transcript ${i}`, largeSessionId),
+      );
+      parentUuid = uuid;
+    }
+    await writeRecords(largeRecords, largeSessionId);
+
+    await reader.readPage(largeSessionId, { limit: 1 });
+    const afterOversizedRead = getSessionTranscriptIndexCacheStatsForTest();
+    expect(afterOversizedRead.entries).toBe(1);
+    expect(afterOversizedRead.byteSize).toBe(warmCache.byteSize);
+
     const second = await reader.readPage(sessionId, {
       cursor: encodeCursor(first.nextCursorState!),
       limit: 1,
     });
-
     expect(second.records.map((r) => r.uuid)).toEqual(['a1']);
-    expect(second.hasMore).toBe(true);
   });
 
   it('rejects path-like session ids before building a transcript path', async () => {

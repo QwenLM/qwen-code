@@ -5867,7 +5867,7 @@ class QwenAgent implements Agent {
             });
             const updates = liftSessionUpdateTimestamps(replay.updates);
             let nextCursor: string | undefined;
-            if (page.nextCursorState && replay.replayError === undefined) {
+            if (page.nextCursorState) {
               const nextCursorState: SessionTranscriptCursorState = {
                 ...page.nextCursorState,
                 replay: {
