@@ -34,7 +34,7 @@ on:
         default: false
 
 concurrency:
-  group: "${{ github.workflow }}-${{ github.event.inputs.create_nightly_release == 'true' && 'nightly' || github.event.inputs.create_preview_release == 'true' && 'preview' || 'stable' }}"
+  group: '${{ github.workflow }}-${{ github.event.inputs.create_nightly_release == ''true'' && ''nightly'' || github.event.inputs.create_preview_release == ''true'' && ''preview'' || ''stable'' }}'
   cancel-in-progress: false
 
 jobs:
