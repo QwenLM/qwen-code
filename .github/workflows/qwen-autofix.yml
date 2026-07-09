@@ -21,6 +21,7 @@ on:
   issues:
     types:
       - 'labeled'
+      - 'assigned'
   pull_request_review:
     types:
       - 'submitted'
@@ -88,6 +89,9 @@ jobs:
       ${{ github.repository == 'QwenLM/qwen-code' }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
+    concurrency:
+      group: 'qwen-autofix-route'
+      cancel-in-progress: true
     permissions:
       contents: 'read'
     outputs:
@@ -115,6 +119,7 @@ jobs:
           AUTOFIX_APPROVED_LABEL: 'autofix/approved'
           REPO: '${{ github.repository }}'
           SENDER_LOGIN: '${{ github.event.sender.login }}'
+          ASSIGNEE_LOGIN: '${{ github.event.assignee.login }}'
           SCHEDULE: '${{ github.event.schedule }}'
           PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
           PR_NUMBER_EVENT: '${{ github.event.pull_request.number }}'
@@ -196,8 +201,15 @@ jobs:
               fi
               if [[ "${EVENT_NAME}" == 'issues' ]]; then
                 DO_REVIEW=false
-                label_is_trigger=false
-                [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true
+                # Assigned to the autofix bot → issue phase directly (bypasses
+                # label gates; the assignee itself is the trust signal).
+                if [[ "${ASSIGNEE_LOGIN}" == "${AUTOFIX_BOT}" && "${ISSUE_STATE}" == 'open' ]]; then
+                  DO_ISSUE=true
+                  ROUTE_ISSUE="${ISSUE_NUMBER}"
+                  echo "🧭 issue #${ISSUE_NUMBER} assigned to ${AUTOFIX_BOT} → issue phase"
+                else
+                  label_is_trigger=false
+                  [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true
                 if [[ "${label_is_trigger}" != 'true' ]]; then
                   echo "🧭 issue event ignored: trigger_label=false label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
                 else
@@ -225,6 +237,7 @@ jobs:
                     echo "🧭 issue event ignored: state_open=$([[ "${ISSUE_STATE}" == 'open' ]] && echo true || echo false) bug=${issue_is_bug} ready=${issue_is_ready} approved=${issue_is_approved} trigger_label=${label_is_trigger} sender_permission='${sender_permission:-none}' sender_trusted=${sender_is_trusted} label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
                   fi
                 fi
+              fi
               fi
               ;;
           esac
@@ -259,7 +272,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 180
     concurrency:
-      group: 'qwen-autofix-issue'
+      group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'
       cancel-in-progress: false
     permissions:
       contents: 'read'
@@ -1036,17 +1049,26 @@ jobs:
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
                 | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED")) ] | length' \
               "${WORKDIR}/rv.json")"
+            # /review posts Suggestion-level findings as inline comments prefixed
+            # `**[Suggestion]**`. They are recommendations, not blockers — keep them
+            # out of the autofix loop, exactly as the suggestion-summary comment they
+            # replaced always was. Anchored to the body start and paired with the
+            # /review footer so a human comment that merely quotes the prefix stays
+            # actionable. jq's `^` is string-anchored, so tolerate leading whitespace
+            # the review model may emit; `**[Critical]**` can never match either way.
+            QWEN_SUGGESTION_FILTER='^[[:space:]]*\*\*\[Suggestion\]\*\*'
             N_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson trust "${TRUSTED_ASSOC}" --arg sf "${QWEN_SUGGESTION_FILTER}" '
               [ .[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
-                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb) ] | length' \
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((((.body // "") | test($sf)) and ((.body // "") | test("via Qwen Code /review"))) | not) ] | length' \
               "${WORKDIR}/rc.json")"
-            # Issue-level PR comments (e.g. /review suggestion summaries) are
-            # also actionable feedback. Exclude the bot's own eval markers.
-            # Exclude known non-actionable bot comments (triage stages,
-            # coverage reports, suggestion summaries, force-push reminders).
+            # Issue-level PR comments are also actionable feedback. Exclude the
+            # bot's own eval markers, and known non-actionable bot comments
+            # (triage stages, coverage reports, legacy suggestion summaries,
+            # force-push reminders).
             BOT_COMMENT_FILTER='<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) '
             N_ISSUE_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" --arg bf "${BOT_COMMENT_FILTER}" '
@@ -1275,12 +1297,15 @@ jobs:
               "${WORKDIR}/rv.json"
             echo
             echo "## Inline comments"
+            # Mirrors the review-scan gate: /review `**[Suggestion]**` findings are
+            # recommendations, not blockers, so they never become autofix work.
             jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson trust "${TRUSTED_ASSOC}" --arg sf '^[[:space:]]*\*\*\[Suggestion\]\*\*' '
               .[]
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+              | select((((.body // "") | test($sf)) and ((.body // "") | test("via Qwen Code /review"))) | not)
               | "- \(.path // "?"):\(.line // "?") @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/rc.json"
             echo

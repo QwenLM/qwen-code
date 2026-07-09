@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useState } from 'react';
+import type React from 'react';
+import { useEffect, useState } from 'react';
 import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
 import { useVoiceCapture } from './useVoiceCapture';

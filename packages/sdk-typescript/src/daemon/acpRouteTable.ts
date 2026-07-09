@@ -286,10 +286,16 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     pattern: /^\/session\/([^/]+)\/artifacts\/([^/]+)$/,
     mapping: {
       method: '_qwen/session/artifacts/remove',
-      extractParams: (segs) => ({
-        sessionId: segs[0],
-        artifactId: segs[1],
-      }),
+      extractParams: (segs, body) => {
+        const record = isRecord(body) ? body : {};
+        return {
+          sessionId: segs[0],
+          artifactId: segs[1],
+          ...(typeof record.clientId === 'string'
+            ? { clientId: record.clientId }
+            : {}),
+        };
+      },
     },
   },
   // POST /session/:id/recap → _qwen/session/recap

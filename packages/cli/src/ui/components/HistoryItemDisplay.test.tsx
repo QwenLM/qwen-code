@@ -440,7 +440,13 @@ describe('<HistoryItemDisplay />', () => {
     };
 
     const { lastFrame } = renderWithProviders(
-      <ThoughtExpandedProvider value={true}>
+      <ThoughtExpandedProvider
+        value={{
+          allExpanded: true,
+          expandedHeadIds: new Set<number>(),
+          toggle: () => {},
+        }}
+      >
         <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
       </ThoughtExpandedProvider>,
     );

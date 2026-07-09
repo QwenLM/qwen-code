@@ -66,6 +66,9 @@ import {
   matchesAnyServerPattern,
   IMAGE_CAPABILITY,
   registerAcpEventLoopLagGauge,
+  SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  normalizeEventPayload,
+  normalizeSnapshotPayload,
   startEventLoopLagMonitor,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
@@ -86,6 +89,8 @@ import type {
   DiscoveredMCPResource,
   DiscoveredMCPPrompt,
   WorkspaceRememberContextMode,
+  SessionArtifactEventRecordPayload,
+  SessionArtifactSnapshotRecordPayload,
   ChatRecord,
   HistoryGap,
 } from '@qwen-code/qwen-code-core';
@@ -176,6 +181,10 @@ import {
 } from '../serve/workspace-remember-errors.js';
 import { formatWorkspaceMemoryForgetSummary } from '../serve/workspace-memory-summaries.js';
 import { mapSkillConfigToStatus } from '../serve/workspace-skills-mapping.js';
+import {
+  inactiveExtensionSkillRefs,
+  isInactiveExtensionSkill,
+} from './extension-skills.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import { HistoryReplayer } from './session/HistoryReplayer.js';
@@ -324,6 +333,67 @@ function buildAcpLocalReadRoots(config: Config): string[] {
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseSessionArtifactEventPayload(
+  payload: unknown,
+  expectedSessionId: string,
+): SessionArtifactEventRecordPayload {
+  const record = parseSessionArtifactBasePayload(payload, expectedSessionId);
+  const warnings: string[] = [];
+  const normalized = normalizeEventPayload(record, warnings);
+  if (
+    !normalized ||
+    warnings.length > 0 ||
+    normalized.changes.length !== (record['changes'] as unknown[]).length
+  ) {
+    throw invalidArtifactPersistPayload();
+  }
+  return normalized;
+}
+
+function parseSessionArtifactSnapshotPayload(
+  payload: unknown,
+  expectedSessionId: string,
+): SessionArtifactSnapshotRecordPayload {
+  const record = parseSessionArtifactBasePayload(payload, expectedSessionId);
+  const warnings: string[] = [];
+  const normalized = normalizeSnapshotPayload(record, warnings);
+  if (
+    !normalized ||
+    warnings.length > 0 ||
+    normalized.artifacts.length !== (record['artifacts'] as unknown[]).length
+  ) {
+    throw invalidArtifactPersistPayload();
+  }
+  return normalized;
+}
+
+function parseSessionArtifactBasePayload(
+  payload: unknown,
+  expectedSessionId: string,
+): Record<string, unknown> {
+  if (!isObjectRecord(payload)) {
+    throw invalidArtifactPersistPayload();
+  }
+  if (
+    payload['v'] !== SESSION_ARTIFACT_PERSISTENCE_VERSION ||
+    payload['sessionId'] !== expectedSessionId ||
+    !Number.isSafeInteger(payload['sequence']) ||
+    (payload['sequence'] as number) < 0 ||
+    typeof payload['recordedAt'] !== 'string' ||
+    payload['recordedAt'].length === 0
+  ) {
+    throw invalidArtifactPersistPayload();
+  }
+  return payload;
+}
+
+function invalidArtifactPersistPayload(): Error {
+  return RequestError.invalidParams(
+    undefined,
+    'Invalid or missing artifact persist payload',
+  );
 }
 
 function isBulkLoadReplayRequest(params: LoadSessionRequest): boolean {
@@ -3198,7 +3268,10 @@ class QwenAgent implements Agent {
       modes: modesData,
       models: availableModels,
       configOptions,
-    };
+      ...(sessionData?.artifactSnapshot
+        ? { artifactSnapshot: sessionData.artifactSnapshot }
+        : {}),
+    } as LoadSessionResponse;
     if (!replayEnvelope) {
       return response;
     }
@@ -3251,11 +3324,15 @@ class QwenAgent implements Agent {
     const availableModels = this.buildAvailableModels(config);
     const configOptions = this.buildConfigOptions(config);
 
+    const sessionData = config.getResumedSessionData();
     return {
       modes: modesData,
       models: availableModels,
       configOptions,
-    };
+      ...(sessionData?.artifactSnapshot
+        ? { artifactSnapshot: sessionData.artifactSnapshot }
+        : {}),
+    } as ResumeSessionResponse;
   }
 
   /**
@@ -4218,12 +4295,58 @@ class QwenAgent implements Agent {
 
     try {
       const disabled = config.getDisabledSkillNames();
+      try {
+        await config.getExtensionManager().refreshCache();
+      } catch (error) {
+        debugLogger.warn('Extension cache refresh failed:', error);
+      }
+      try {
+        await skillManager.refreshCache();
+      } catch (error) {
+        debugLogger.warn('Skill cache refresh failed:', error);
+      }
       const skills = await skillManager.listSkills();
+      const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
+      const skillsByKey = new Map(
+        skills.map((skill) => [
+          `${skill.level}:${skill.extensionName ?? ''}:${skill.name}`,
+          mapSkillConfigToStatus(skill, disabled, {
+            disabled: isInactiveExtensionSkill(skill, inactiveSkillRefs),
+          }),
+        ]),
+      );
+      for (const extension of config.getExtensions()) {
+        if (extension.isActive) continue;
+        for (const skill of extension.skills ?? []) {
+          const extensionName = extension.displayName ?? extension.name;
+          const key = `extension:${extensionName}:${skill.name}`;
+          if (
+            skillsByKey.has(`extension:${extension.name}:${skill.name}`) ||
+            skillsByKey.has(key)
+          ) {
+            continue;
+          }
+          skillsByKey.set(
+            key,
+            mapSkillConfigToStatus(
+              {
+                ...skill,
+                level: 'extension',
+                extensionName,
+              },
+              disabled,
+              { disabled: true },
+            ),
+          );
+        }
+      }
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: this.workspaceCwd(config),
         initialized: true,
-        skills: skills.map((skill) => mapSkillConfigToStatus(skill, disabled)),
+        skills: Array.from(skillsByKey.values()).sort((a, b) =>
+          a.name.localeCompare(b.name),
+        ),
       };
     } catch (error) {
       return {
@@ -6423,6 +6546,47 @@ class QwenAgent implements Agent {
           AbortSignal.timeout(5 * 60_000),
         )) as unknown as Record<string, unknown>;
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const kind = params['kind'];
+        if (kind !== 'event' && kind !== 'snapshot') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing artifact persist kind',
+          );
+        }
+        const payload = params['payload'];
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing artifact persist payload',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const recording = session.getConfig().getChatRecordingService();
+        if (!recording) {
+          throw RequestError.internalError(
+            undefined,
+            'Chat recording service unavailable',
+          );
+        }
+        if (kind === 'event') {
+          await recording.recordSessionArtifactEvent(
+            parseSessionArtifactEventPayload(payload, sessionId),
+          );
+        } else {
+          await recording.recordSessionArtifactSnapshot(
+            parseSessionArtifactSnapshotPayload(payload, sessionId),
+          );
+        }
+        return { sessionId, persisted: true, kind };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionTitle: {
         const sessionId = params['sessionId'];
         const displayName = params['displayName'];
@@ -7273,7 +7437,23 @@ class QwenAgent implements Agent {
         const sessionId = params['sessionId'] as string;
         const session = this.sessionOrThrow(sessionId);
         const extensionManager = session.getConfig().getExtensionManager();
-        await extensionManager.refreshCache();
+        const skillManager = session.getConfig().getSkillManager();
+        await Promise.all([
+          extensionManager.refreshCache().catch((err: unknown) => {
+            debugLogger.warn(
+              `Extension refresh failed for session ${sessionId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }),
+          skillManager?.refreshCache().catch((err: unknown) => {
+            debugLogger.warn(
+              `Skill refresh failed after extension refresh for session ${sessionId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }),
+        ]);
         try {
           await extensionManager.refreshTools();
         } catch (err) {
@@ -7455,6 +7635,46 @@ class QwenAgent implements Agent {
             filesFailed = [`file-history-rewind: ${reason}`];
           }
         }
+        let artifactSnapshot: unknown;
+        let artifactSnapshotUnavailable: string | undefined;
+        try {
+          await session.getConfig().getChatRecordingService()?.flush();
+          const cwd = session.getConfig().getProjectRoot();
+          const sessionData = await runWithAcpRuntimeOutputDir(
+            this.settings,
+            cwd,
+            async () => {
+              const sessionService = new SessionService(cwd);
+              return sessionService.loadSession(sessionId);
+            },
+          );
+          if (sessionData === undefined) {
+            artifactSnapshotUnavailable =
+              'session data unavailable after rewind';
+          } else if (sessionData.artifactSnapshot) {
+            artifactSnapshot = sessionData.artifactSnapshot;
+          } else {
+            // A successful reload with no artifact records is a valid empty
+            // artifact timeline, distinct from an unavailable reload.
+            artifactSnapshot = {
+              v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+              sessionId,
+              sequence: 0,
+              artifacts: [],
+              tombstonedIds: [],
+              stickyEphemeralIds: [],
+              warnings: [],
+            };
+          }
+        } catch (err) {
+          artifactSnapshotUnavailable =
+            err instanceof Error ? err.message : String(err);
+          debugLogger.warn(
+            `[ACP] Failed to rebuild artifact snapshot after rewind for session=${sessionId}: ${
+              artifactSnapshotUnavailable
+            }`,
+          );
+        }
 
         return {
           success: true,
@@ -7462,6 +7682,10 @@ class QwenAgent implements Agent {
           ...rewindResult,
           filesChanged,
           filesFailed,
+          ...(artifactSnapshot ? { artifactSnapshot } : {}),
+          ...(artifactSnapshotUnavailable
+            ? { artifactSnapshotUnavailable }
+            : {}),
         };
       }
       case 'qwen/session/loadUpdates': {
