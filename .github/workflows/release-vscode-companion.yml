@@ -337,9 +337,9 @@ jobs:
             echo "Publishing: ${vsix}"
             for attempt in 1 2 3; do
               if [[ "${{ needs.prepare.outputs.is_preview }}" == "true" ]]; then
-                publish_cmd=(ovsx publish "${vsix}" --pat "${OVSX_TOKEN}" --pre-release)
+                publish_cmd=(ovsx publish "${vsix}" --pat "${OVSX_TOKEN}" --pre-release --skip-duplicate)
               else
-                publish_cmd=(ovsx publish "${vsix}" --pat "${OVSX_TOKEN}")
+                publish_cmd=(ovsx publish "${vsix}" --pat "${OVSX_TOKEN}" --skip-duplicate)
               fi
               if "${publish_cmd[@]}"; then
                 break
