@@ -1460,9 +1460,20 @@ export async function processSingleFileContent(
           );
           if (render.success) {
             const parts = toImageParts(render.images, startPage);
+            // Never drop pages silently. Two ways a no-page-range read can be
+            // partial: the byte cap kicked in, or the render filled the page
+            // ceiling (the page count was unknown/underestimated upstream, so
+            // more pages may follow).
             if (render.bytesTruncated) {
               parts.push({
                 text: `[Rendered the first ${render.images.length} page(s) of "${displayName}"; later pages were omitted to stay within size limits. Use the 'pages' parameter to read a specific range.]`,
+              });
+            } else if (
+              !pageRange &&
+              render.images.length >= PDF_MAX_PAGES_PER_READ
+            ) {
+              parts.push({
+                text: `[Rendered the first ${render.images.length} page(s) (the per-read maximum) of "${displayName}". If the document has more pages, use the 'pages' parameter to read a later range.]`,
               });
             }
             return {
@@ -1492,13 +1503,17 @@ export async function processSingleFileContent(
           if (render.success) {
             const parts = toImageParts(render.images, 1);
             const pageCount = await getPDFPageCount(filePath);
-            if (
-              (pageCount !== null && pageCount > render.images.length) ||
-              render.bytesTruncated
-            ) {
+            // Never drop pages silently: a known page count above what we
+            // rendered, or (when the count is unknown) a render that filled the
+            // page cap, both mean pages may be missing.
+            const mayHaveMore =
+              pageCount !== null
+                ? pageCount > render.images.length
+                : render.images.length >= VISION_BRIDGE_MAX_IMAGES;
+            if (mayHaveMore || render.bytesTruncated) {
               const total = pageCount !== null ? ` of ${pageCount}` : '';
               parts.push({
-                text: `[Rendered the first ${render.images.length}${total} page(s) of "${displayName}" for transcription; read a later range to see more.]`,
+                text: `[Rendered the first ${render.images.length}${total} page(s) of "${displayName}" for transcription; later pages were not included.]`,
               });
             }
             return {

@@ -2016,6 +2016,39 @@ describe('fileUtils', () => {
         ).toBe(true);
       });
 
+      it('notes the page ceiling when a no-pages render fills it (page count unknown)', async () => {
+        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
+        mockMimeGetType.mockReturnValue('application/pdf');
+        // pdfinfo unavailable -> page count falls back to the size heuristic,
+        // which underestimates; the render then fills the 20-page ceiling.
+        mockExecResult({ stdout: '', stderr: 'pdfinfo missing', code: 1 });
+        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+        mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
+        mockRender.mockResolvedValue({
+          success: true,
+          images: Array.from({ length: PDF_MAX_PAGES_PER_READ }, (_, i) =>
+            fakeImage(`P${i + 1}`),
+          ),
+          bytesTruncated: false,
+        });
+
+        const result = await processSingleFileContent(
+          testPdfFilePath,
+          visionConfig,
+        );
+
+        const parts = result.llmContent as MediaPart[];
+        expect(parts.filter((p) => p.inlineData).length).toBe(
+          PDF_MAX_PAGES_PER_READ,
+        );
+        expect(
+          parts.some(
+            (p) =>
+              typeof p.text === 'string' && /per-read maximum/.test(p.text),
+          ),
+        ).toBe(true);
+      });
+
       it('falls back to text guidance when the renderer is unavailable', async () => {
         actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
         mockMimeGetType.mockReturnValue('application/pdf');
@@ -2099,6 +2132,40 @@ describe('fileUtils', () => {
         expect(
           parts.some((p) => typeof p.text === 'string' && /of 10/.test(p.text)),
         ).toBe(true);
+      });
+
+      it('notes truncation when the render fills the cap and the page count is unknown', async () => {
+        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
+        mockMimeGetType.mockReturnValue('application/pdf');
+        // pdfinfo unavailable on both the pre-gate probe and the note probe.
+        mockExecResult({ stdout: '', stderr: 'pdfinfo missing', code: 1 });
+        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+        mockExecResult({ stdout: '   ', stderr: '', code: 0 });
+        mockExecResult({ stdout: '', stderr: 'pdfinfo missing', code: 1 });
+        mockRender.mockResolvedValue({
+          success: true,
+          images: Array.from({ length: VISION_BRIDGE_MAX_IMAGES }, (_, i) =>
+            fakeImage(`B${i + 1}`),
+          ),
+          bytesTruncated: false,
+        });
+
+        const result = await processSingleFileContent(
+          testPdfFilePath,
+          bridgeConfig,
+          { preserveUnsupportedImage: true, largePdfBehavior: 'reference' },
+        );
+
+        const parts = result.llmContent as MediaPart[];
+        expect(parts.filter((p) => p.inlineData).length).toBe(
+          VISION_BRIDGE_MAX_IMAGES,
+        );
+        // No exact count is known, so no "of N", but truncation is still noted.
+        const note = parts.find(
+          (p) => typeof p.text === 'string' && /not included/.test(p.text),
+        );
+        expect(note).toBeDefined();
+        expect(note!.text).not.toMatch(/ of \d/);
       });
 
       it('keeps text-heavy @ PDFs as reference (text-first, no render)', async () => {
