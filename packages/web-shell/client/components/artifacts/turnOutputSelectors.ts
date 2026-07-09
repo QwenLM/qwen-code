@@ -267,6 +267,18 @@ function getStringField(
   return undefined;
 }
 
+function getStringContentField(
+  record: Record<string, unknown> | undefined,
+  ...keys: string[]
+): string | undefined {
+  if (!record) return undefined;
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string') return value;
+  }
+  return undefined;
+}
+
 function inferFileChangeStatus(
   tool: ACPToolCall,
 ): TurnOutputFileChange['status'] {
@@ -296,8 +308,8 @@ function getFileChangeLineStats(diffs: TurnOutputFileChange['diffs']):
 
 function getFileChangeDiffs(tool: ACPToolCall): TurnOutputFileChange['diffs'] {
   const raw = getRawOutputRecord(tool);
-  const originalContent = getStringField(raw, 'originalContent');
-  const newContent = getStringField(raw, 'newContent');
+  const originalContent = getStringContentField(raw, 'originalContent');
+  const newContent = getStringContentField(raw, 'newContent');
   if (originalContent !== undefined || newContent !== undefined) {
     return [
       {
@@ -319,8 +331,10 @@ function getFileChangeDiffs(tool: ACPToolCall): TurnOutputFileChange['diffs'] {
   }
   if (diffs.length > 0) return diffs;
   if (tool.toolName.toLowerCase() === 'write_file') {
-    const newText = getStringField(tool.args, 'content');
-    return newText ? [{ oldText: '', newText, fullContent: true }] : [];
+    const newText = getStringContentField(tool.args, 'content');
+    return newText !== undefined
+      ? [{ oldText: '', newText, fullContent: true }]
+      : [];
   }
   return [];
 }

@@ -1103,9 +1103,7 @@ export function App({
     const merged = [...artifacts];
     for (const artifact of artifactPanelExtraArtifacts) {
       const index = merged.findIndex((item) => item.id === artifact.id);
-      if (index >= 0) {
-        merged[index] = artifact;
-      } else {
+      if (index < 0) {
         merged.push(artifact);
       }
     }

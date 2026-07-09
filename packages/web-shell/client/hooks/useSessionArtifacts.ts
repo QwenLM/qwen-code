@@ -36,22 +36,26 @@ export function useSessionArtifacts(): SessionArtifactsState {
   const previousArtifactsVersionRef = useRef(artifactsVersion);
 
   const refresh = useCallback(async () => {
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
     if (!sessionId) {
       setArtifacts([]);
       setError(null);
+      setLoading(false);
       return;
     }
     if (!isConnected) {
+      setArtifacts([]);
       setError(null);
+      setLoading(false);
       return;
     }
     if (!supportsArtifacts) {
       setArtifacts([]);
       setError(null);
+      setLoading(false);
       return;
     }
-    const requestId = requestIdRef.current + 1;
-    requestIdRef.current = requestId;
     setLoading(true);
     try {
       const result = await actions.loadArtifacts();

@@ -346,6 +346,15 @@ function ScheduledTaskDetail({ task }: { task: TurnOutputScheduledTask }) {
   const [formError, setFormError] = useState<string | null>(null);
 
   const loadTask = useCallback(async () => {
+    if (!task.durable) {
+      setLoadedTask(null);
+      setName('');
+      setPrompt(task.prompt);
+      setBuilder(parseCronToBuilder(task.cron));
+      setLoadError(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setLoadError(null);
     try {
@@ -366,13 +375,14 @@ function ScheduledTaskDetail({ task }: { task: TurnOutputScheduledTask }) {
     } finally {
       setLoading(false);
     }
-  }, [actions, task.cron, task.id, task.prompt]);
+  }, [actions, task.cron, task.durable, task.id, task.prompt]);
 
   useEffect(() => {
     void loadTask();
   }, [loadTask]);
 
-  const isDeleted = !loading && !loadError && !loadedTask;
+  const isSessionScoped = !task.durable;
+  const isDeleted = task.durable && !loading && !loadError && !loadedTask;
   const canEdit = Boolean(loadedTask);
   const detailTitle = loadedTask?.name || loadedTask?.prompt || task.title;
   const detailPrompt = loadedTask?.prompt ?? task.prompt;
@@ -472,6 +482,11 @@ function ScheduledTaskDetail({ task }: { task: TurnOutputScheduledTask }) {
       {isDeleted && (
         <div className={styles.empty}>
           {t('scheduledTasks.deletedSnapshot')}
+        </div>
+      )}
+      {isSessionScoped && (
+        <div className={styles.empty}>
+          {t('scheduledTasks.sessionScopedSnapshot')}
         </div>
       )}
       <div className={styles.section}>
@@ -1077,7 +1092,7 @@ function getDisplayDiffs(
 ): readonly TurnOutputFileDiff[] {
   for (let index = diffs.length - 1; index >= 0; index--) {
     const diff = diffs[index];
-    if (diff?.fullContent) return [diff];
+    if (diff?.fullContent) return diffs.slice(index);
   }
   return diffs;
 }
@@ -1525,13 +1540,19 @@ function ArtifactDetail({
     return (
       <HtmlArtifactPreview
         workspacePath={artifact.workspacePath}
+        artifactVersion={artifact.updatedAt}
         previewContent={previewContent}
       />
     );
   }
 
   if (canPreviewWorkspaceFile && artifact.workspacePath) {
-    return <FileArtifactPreview workspacePath={artifact.workspacePath} />;
+    return (
+      <FileArtifactPreview
+        workspacePath={artifact.workspacePath}
+        artifactVersion={artifact.updatedAt}
+      />
+    );
   }
 
   return (
@@ -1608,9 +1629,11 @@ function isHtmlArtifact(artifact: DaemonSessionArtifact) {
 
 function HtmlArtifactPreview({
   workspacePath,
+  artifactVersion,
   previewContent,
 }: {
   workspacePath: string;
+  artifactVersion?: string;
   previewContent?: string;
 }) {
   const workspaceActions = useWorkspaceActions();
@@ -1618,13 +1641,8 @@ function HtmlArtifactPreview({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (previewContent !== undefined) {
-      setHtml(previewContent);
-      setError(null);
-      return;
-    }
     let cancelled = false;
-    setHtml(null);
+    setHtml(previewContent ?? null);
     setError(null);
     workspaceActions
       .readWorkspaceFile(workspacePath)
@@ -1642,7 +1660,7 @@ function HtmlArtifactPreview({
     return () => {
       cancelled = true;
     };
-  }, [previewContent, workspaceActions, workspacePath]);
+  }, [artifactVersion, previewContent, workspaceActions, workspacePath]);
 
   return (
     <div className={styles.htmlPreviewWrap}>
@@ -1675,7 +1693,13 @@ function withArtifactPreviewCsp(html: string) {
   return `<!doctype html>${doc.documentElement.outerHTML}`;
 }
 
-function FileArtifactPreview({ workspacePath }: { workspacePath: string }) {
+function FileArtifactPreview({
+  workspacePath,
+  artifactVersion,
+}: {
+  workspacePath: string;
+  artifactVersion?: string;
+}) {
   const workspaceActions = useWorkspaceActions();
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [content, setContent] = useState<string | null>(null);
@@ -1701,7 +1725,7 @@ function FileArtifactPreview({ workspacePath }: { workspacePath: string }) {
     return () => {
       cancelled = true;
     };
-  }, [workspaceActions, workspacePath]);
+  }, [artifactVersion, workspaceActions, workspacePath]);
 
   useEffect(() => {
     const host = hostRef.current;

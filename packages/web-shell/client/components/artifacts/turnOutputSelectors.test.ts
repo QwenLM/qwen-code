@@ -311,6 +311,41 @@ describe('turnOutputSelectors', () => {
     ]);
   });
 
+  it('keeps empty and whitespace-only file contents', () => {
+    const messages = [
+      userMessage('u1', 'write blank files'),
+      toolGroup('tg1', [
+        {
+          callId: 'write-empty',
+          toolName: 'write_file',
+          status: 'completed',
+          args: {
+            file_path: 'src/empty.txt',
+            content: '',
+          },
+        },
+        {
+          callId: 'edit-spaces',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/spaces.txt' },
+          rawOutput: {
+            originalContent: '',
+            newContent: '   ',
+          },
+        },
+      ]),
+    ];
+
+    const changes = getFileChangesByTurn(messages, new Map()).get('u1');
+    expect(changes?.[0]?.diffs).toEqual([
+      { oldText: '', newText: '', fullContent: true },
+    ]);
+    expect(changes?.[1]?.diffs).toEqual([
+      { oldText: '', newText: '   ', fullContent: true },
+    ]);
+  });
+
   it('extracts completed cron_create tasks', () => {
     const messages = [
       userMessage('u1', 'schedule'),

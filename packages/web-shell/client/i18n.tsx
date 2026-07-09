@@ -712,6 +712,8 @@ const EN: Messages = {
     `Delete scheduled task "${v?.name ?? ''}"?`,
   'scheduledTasks.deletedSnapshot':
     'This scheduled task has been deleted. Showing the snapshot from when it was created.',
+  'scheduledTasks.sessionScopedSnapshot':
+    'This is a session-scoped scheduled task. Showing the snapshot from when it was created.',
   'scheduledTasks.empty': 'No scheduled tasks yet. Create one to get started.',
   'scheduledTasks.create': 'Create',
   'scheduledTasks.creating': 'Creating…',
@@ -2418,6 +2420,8 @@ const ZH: Messages = {
     `确定删除定时任务「${v?.name ?? ''}」？`,
   'scheduledTasks.deletedSnapshot':
     '这个定时任务已被删除，下面显示的是创建时的快照。',
+  'scheduledTasks.sessionScopedSnapshot':
+    '这是一个会话内定时任务，下面显示的是创建时的快照。',
   'scheduledTasks.empty': '还没有定时任务，创建一个开始吧。',
   'scheduledTasks.create': '创建',
   'scheduledTasks.creating': '创建中…',
