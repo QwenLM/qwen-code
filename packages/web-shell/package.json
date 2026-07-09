@@ -20,7 +20,8 @@
     "dev": "vite",
     "build": "vite build && vite build --config vite.lib.config.ts && tsc -p tsconfig.lib.json",
     "test": "vitest run",
-    "test:ci": "vitest run"
+    "test:ci": "vitest run",
+    "test:e2e:smoke": "vitest run client/App.test.tsx client/components/MessageList.dom.test.tsx"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.18.0",
