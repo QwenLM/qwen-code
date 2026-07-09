@@ -109,7 +109,7 @@ export function requireTrustedWorkspaceRuntime(
 
 export function sendUntrustedWorkspaceResponse(
   res: Response,
-  extra?: { sessionId?: string },
+  extra?: { sessionId?: string; workspaceCwd?: string; workspaceId?: string },
 ): void {
   res.status(403).json({
     error: 'Workspace is not trusted.',

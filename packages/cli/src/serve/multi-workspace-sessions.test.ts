@@ -489,10 +489,8 @@ describe('multi-workspace session dispatch', () => {
     expect(unknownRes.status).toBe(400);
     expect(unknownRes.body.code).toBe('workspace_mismatch');
     expect(unknownRes.body.workspaceCount).toBe(2);
-    expect(unknownRes.body.boundWorkspace).toBeUndefined();
-    expect(unknownRes.body.requestedWorkspace).toBeUndefined();
-    expect(JSON.stringify(unknownRes.body)).not.toContain(PRIMARY_CWD);
-    expect(JSON.stringify(unknownRes.body)).not.toContain(UNKNOWN_CWD);
+    expect(unknownRes.body.boundWorkspace).toBe(PRIMARY_CWD);
+    expect(unknownRes.body.requestedWorkspace).toBe(UNKNOWN_CWD);
     expect(unknown.primaryBridge.spawnCalls).toEqual([]);
     expect(unknown.secondaryBridge.spawnCalls).toEqual([]);
 
@@ -506,8 +504,8 @@ describe('multi-workspace session dispatch', () => {
     expect(untrustedRes.status).toBe(403);
     expect(untrustedRes.body.code).toBe('untrusted_workspace');
     expect(untrustedRes.body.error).toBe('Workspace is not trusted.');
-    expect(untrustedRes.body).not.toHaveProperty('workspaceCwd');
-    expect(untrustedRes.body).not.toHaveProperty('workspaceId');
+    expect(untrustedRes.body.workspaceCwd).toBe(SECONDARY_CWD);
+    expect(untrustedRes.body.workspaceId).toBe('secondary-id');
     expect(untrusted.secondaryBridge.spawnCalls).toEqual([]);
     expect(daemonLog.warn).toHaveBeenCalledWith(
       'session routing failed',
@@ -530,8 +528,8 @@ describe('multi-workspace session dispatch', () => {
     expect(res.body.code).toBe('untrusted_workspace');
     expect(res.body.error).toBe('Workspace is not trusted.');
     expect(res.body.sessionId).toBe('secondary-session');
-    expect(res.body).not.toHaveProperty('workspaceCwd');
-    expect(res.body).not.toHaveProperty('workspaceId');
+    expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
+    expect(res.body.workspaceId).toBe('secondary-id');
     expect(secondaryBridge.promptCalls).toEqual([]);
   });
 
@@ -731,10 +729,8 @@ describe('multi-workspace session dispatch', () => {
     expect(unknownRes.status).toBe(400);
     expect(unknownRes.body.code).toBe('workspace_mismatch');
     expect(unknownRes.body.workspaceCount).toBe(2);
-    expect(unknownRes.body.boundWorkspace).toBeUndefined();
-    expect(unknownRes.body.requestedWorkspace).toBeUndefined();
-    expect(JSON.stringify(unknownRes.body)).not.toContain(PRIMARY_CWD);
-    expect(JSON.stringify(unknownRes.body)).not.toContain(UNKNOWN_CWD);
+    expect(unknownRes.body.boundWorkspace).toBe(PRIMARY_CWD);
+    expect(unknownRes.body.requestedWorkspace).toBe(UNKNOWN_CWD);
     expect(unknown.primaryBridge.restoreCalls).toEqual([]);
     expect(unknown.secondaryBridge.restoreCalls).toEqual([]);
 
@@ -748,8 +744,8 @@ describe('multi-workspace session dispatch', () => {
     expect(untrustedRes.status).toBe(403);
     expect(untrustedRes.body.code).toBe('untrusted_workspace');
     expect(untrustedRes.body.error).toBe('Workspace is not trusted.');
-    expect(untrustedRes.body).not.toHaveProperty('workspaceCwd');
-    expect(untrustedRes.body).not.toHaveProperty('workspaceId');
+    expect(untrustedRes.body.workspaceCwd).toBe(SECONDARY_CWD);
+    expect(untrustedRes.body.workspaceId).toBe('secondary-id');
     expect(untrusted.primaryBridge.restoreCalls).toEqual([]);
     expect(untrusted.secondaryBridge.restoreCalls).toEqual([]);
     expect(daemonLog.warn).toHaveBeenCalledWith(
@@ -865,10 +861,8 @@ describe('multi-workspace session dispatch', () => {
     expect(unknown.status).toBe(400);
     expect(unknown.body.code).toBe('workspace_mismatch');
     expect(unknown.body.workspaceCount).toBe(2);
-    expect(unknown.body.boundWorkspace).toBeUndefined();
-    expect(unknown.body.requestedWorkspace).toBeUndefined();
-    expect(JSON.stringify(unknown.body)).not.toContain(PRIMARY_CWD);
-    expect(JSON.stringify(unknown.body)).not.toContain(UNKNOWN_CWD);
+    expect(unknown.body.boundWorkspace).toBe(PRIMARY_CWD);
+    expect(unknown.body.requestedWorkspace).toBe(UNKNOWN_CWD);
   });
 
   it('lists active persisted non-primary sessions by encoded workspace cwd', async () => {

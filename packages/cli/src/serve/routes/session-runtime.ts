@@ -44,7 +44,11 @@ export function requireSessionRuntime(opts: {
         workspaceCwd: runtime.workspaceCwd,
         ...details,
       });
-      sendUntrustedWorkspaceResponse(res, { sessionId });
+      sendUntrustedWorkspaceResponse(res, {
+        sessionId,
+        workspaceCwd: runtime.workspaceCwd,
+        workspaceId: runtime.workspaceId,
+      });
       return undefined;
     }
     return runtime;
