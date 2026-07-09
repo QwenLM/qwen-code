@@ -20,8 +20,8 @@ describe('comment attachment guard workflow', () => {
     'utf8',
   );
 
-  it('treats a slash after a risky extension as a match boundary', () => {
-    expect(workflow).toContain('>?#/]');
+  it('treats common URL punctuation after a risky extension as a match boundary', () => {
+    expect(workflow).toContain('>?#/&;.,!:]');
   });
 
   it('keeps diagnostics when deletion or summary writing fails', () => {

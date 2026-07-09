@@ -33,7 +33,7 @@ jobs:
               'COLLABORATOR',
             ]);
             const highRiskExtension =
-              /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|sh|bat|ps1|node|dylib|so)(?:$|[\s)"'\]>?#/])/i;
+              /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|sh|bat|ps1|node|dylib|so)(?:$|[\s)"'\]>?#/&;.,!:])/i;
             const linkPattern =
               /https?:\/\/[^\s)"'<>\]]+|\[[^\]]+\]\([^)]+\)/gi;
 
