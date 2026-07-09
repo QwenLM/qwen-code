@@ -487,52 +487,6 @@ export function buildImageRestorationBlock(
 const RESUME_TRAILER =
   'Resume the prior task using the summary above. Continue from the last in-flight step; do not acknowledge the summary, do not re-introduce, do not greet the user again.';
 
-/**
- * Strip the model's drafting scratchpad before the summary becomes the new
- * post-compact context. The compression prompt instructs the summary model
- * to wrap its chain-of-thought reasoning in an `<analysis>...</analysis>`
- * block, which is purely for the model's own benefit; keeping it in history
- * wastes tokens and degrades signal-to-noise for the resuming agent.
- *
- * Defensive design: if the strip removes everything (model produced ONLY an
- * analysis block with no summary content), fall back to the raw summary so
- * the caller sees something rather than an empty string — the inflation
- * guard upstream will still NOOP this round, but we don't want to silently
- * lose the entire model response.
- */
-/**
- * Strip `<analysis>...</analysis>` chain-of-thought blocks from raw
- * summary text. Exposed separately from `postProcessSummary` so the
- * PostCompact hook event can receive the same stripped text that
- * enters history — without the resume trailer, which is wrapper
- * decoration meant for the next agent turn only (Finding 8a).
- *
- * NOTE on the regex:
- *  - `[\s\S]*?` (non-greedy) handles newlines inside the block AND
- *    stops at the first `</analysis>` — so multiple non-overlapping
- *    blocks each get stripped via the `/g` flag.
- *  - It matches the exact tag `<analysis>` only. If the prompt ever
- *    evolves to use attributes (e.g. `<analysis type="...">`) or
- *    nested `<analysis>` tags, this pattern will leak content. The
- *    compression prompt is under our control, so we keep the pattern
- *    strict rather than over-engineering.
- *  - The unclosed-tag fallback (`<analysis>[\s\S]*$`) catches the case
- *    where the model started an `<analysis>` block and ran out of
- *    output tokens before closing it. Without this, the closed-tag
- *    regex above misses and the entire scratchpad leaks into history
- *    via the fallback path in `postProcessSummary`.
- */
-export function stripAnalysisBlock(rawSummary: string): string {
-  // First pass: strip well-formed `<analysis>...</analysis>` blocks
-  // (handles multiple via `/g`, newlines via `[\s\S]`).
-  let result = rawSummary.replace(/<analysis>[\s\S]*?<\/analysis>\s*/g, '');
-  // Second pass: strip any remaining unclosed `<analysis>` tag (the
-  // model ran out of output tokens before closing). Uses an
-  // end-of-string anchor since there's no closing tag to stop at.
-  result = result.replace(/<analysis>[\s\S]*$/g, '');
-  return result.trim();
-}
-
 export function stripCompressionProtocolTags(rawSummary: string): string {
   return stripAnalysisSummaryProtocolTags(rawSummary);
 }
