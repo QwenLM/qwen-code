@@ -1907,20 +1907,6 @@ describe('startInteractiveUI', () => {
     disableKittyProtocol: vi.fn(),
   }));
 
-  vi.mock('./ui/utils/updateCheck.js', () => ({
-    checkForUpdatesDetailed: vi.fn(() =>
-      Promise.resolve({ status: 'up-to-date', currentVersion: '1.0.0' }),
-    ),
-  }));
-
-  vi.mock('./utils/updateEventEmitter.js', () => ({
-    updateEventEmitter: {
-      emit: vi.fn(),
-      on: vi.fn(),
-      off: vi.fn(),
-    },
-  }));
-
   vi.mock('./utils/cleanup.js', () => ({
     cleanupCheckpoints: vi.fn(() => Promise.resolve()),
     registerCleanup: vi.fn(),
@@ -1971,9 +1957,6 @@ describe('startInteractiveUI', () => {
 
   it('should perform all startup tasks in correct order', async () => {
     const { getCliVersion } = await import('./utils/version.js');
-    const { checkForUpdatesDetailed } = await import(
-      './ui/utils/updateCheck.js'
-    );
     const { registerCleanup } = await import('./utils/cleanup.js');
 
     const mockInitializationResult = {
@@ -1999,10 +1982,6 @@ describe('startInteractiveUI', () => {
     const cleanupFn = vi.mocked(registerCleanup).mock.calls[0][0];
     expect(typeof cleanupFn).toBe('function');
 
-    // checkForUpdates should be called asynchronously (not waited for)
-    // We need a small delay to let it execute
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(checkForUpdatesDetailed).toHaveBeenCalledTimes(1);
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
       mockConfig,
       mockSettings,
@@ -2010,11 +1989,7 @@ describe('startInteractiveUI', () => {
     );
   });
 
-  it('should not call checkForUpdates when enableAutoUpdate is false', async () => {
-    const { checkForUpdatesDetailed } = await import(
-      './ui/utils/updateCheck.js'
-    );
-
+  it('delegates disabled auto-update settings to post-render prefetch', async () => {
     const settingsWithAutoUpdateDisabled = {
       merged: {
         general: {
@@ -2041,10 +2016,11 @@ describe('startInteractiveUI', () => {
       mockInitializationResult,
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    // checkForUpdates should NOT be called when enableAutoUpdate is false
-    expect(checkForUpdatesDetailed).not.toHaveBeenCalled();
+    expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
+      mockConfig,
+      settingsWithAutoUpdateDisabled,
+      { connectIde: false, initializeTelemetry: true },
+    );
   });
 
   it('can skip post-render IDE connection after prompt-interactive awaited it', async () => {
@@ -2073,81 +2049,5 @@ describe('startInteractiveUI', () => {
       mockSettings,
       { connectIde: false, initializeTelemetry: false },
     );
-  });
-
-  it('delegates auto-update gating to post-render prefetch', async () => {
-    const { checkForUpdatesDetailed } = await import(
-      './ui/utils/updateCheck.js'
-    );
-
-    const settingsWithAutoUpdateDisabled = {
-      merged: {
-        general: {
-          enableAutoUpdate: false,
-        },
-        ui: {
-          hideWindowTitle: false,
-        },
-      },
-    } as LoadedSettings;
-
-    const mockInitializationResult = {
-      authError: null,
-      themeError: null,
-      shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
-    };
-
-    await startInteractiveUI(
-      mockConfig,
-      settingsWithAutoUpdateDisabled,
-      mockStartupWarnings,
-      mockWorkspaceRoot,
-      mockInitializationResult,
-    );
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    // checkForUpdates should NOT be called when enableAutoUpdate is false
-    expect(checkForUpdatesDetailed).not.toHaveBeenCalled();
-    expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
-      mockConfig,
-      settingsWithAutoUpdateDisabled,
-      { connectIde: false, initializeTelemetry: true },
-    );
-  });
-
-  it('should surface startup update check errors', async () => {
-    const { checkForUpdatesDetailed } = await import(
-      './ui/utils/updateCheck.js'
-    );
-    const { updateEventEmitter } = await import(
-      './utils/updateEventEmitter.js'
-    );
-    vi.mocked(checkForUpdatesDetailed).mockResolvedValueOnce({
-      status: 'error',
-      error: new Error('registry unavailable'),
-    });
-
-    const mockInitializationResult = {
-      authError: null,
-      themeError: null,
-      shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
-    };
-
-    await startInteractiveUI(
-      mockConfig,
-      mockSettings,
-      mockStartupWarnings,
-      mockWorkspaceRoot,
-      mockInitializationResult,
-    );
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(updateEventEmitter.emit).toHaveBeenCalledWith('update-failed', {
-      message: expect.any(String),
-    });
   });
 });
