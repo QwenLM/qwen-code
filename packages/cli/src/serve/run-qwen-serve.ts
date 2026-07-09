@@ -26,7 +26,6 @@ import {
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
-import { createDeviceFlowRegistry } from './server/device-flow-registry.js';
 import {
   loadServeFastPathSettings,
   preResolveServeFastPathHomeEnvOverrides,
@@ -3003,9 +3002,12 @@ export async function runQwenServe(
         clientMcpSenderRegistry: secondaryClientMcpSenderRegistry,
         // Phase 4: per-runtime device-flow registry so this workspace's ACP
         // `auth/device_flow` calls publish to its own bridge, not primary.
-        deviceFlowRegistry: createDeviceFlowRegistry({
-          bridge: secondaryBridge,
-        }).deviceFlowRegistry,
+        // Imported dynamically so the device-flow provider closure (and its
+        // heavy transitive deps) stays out of the serve fast-path bundle.
+        deviceFlowRegistry: (
+          await import('./server/device-flow-registry.js')
+        ).createDeviceFlowRegistry({ bridge: secondaryBridge })
+          .deviceFlowRegistry,
       });
     }
 
