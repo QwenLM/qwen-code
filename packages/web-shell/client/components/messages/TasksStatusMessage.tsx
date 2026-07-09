@@ -21,6 +21,10 @@ import styles from './TasksStatusMessage.module.css';
 const ACTIVE_EVENT = 'web-shell:tasks-panel-active';
 const REFRESH_INTERVAL_MS = 3000;
 const LIST_MAX_ROWS = 8;
+// Compact web panel budget — intentionally smaller than core's
+// MAX_RECENT_ACTIVITIES (10) retention cap, which the CLI's full-height
+// detail dialog renders in full.
+const MAX_DISPLAYED_ACTIVITIES = 5;
 
 export interface SerializedTasksMessage {
   snapshot: DaemonSessionTasksStatus;
@@ -922,21 +926,23 @@ function TaskDetail({
               {t('tasks.detail.progress')}
             </div>
             <div className={styles.detailContent}>
-              {task.recentActivities.slice(-5).map((a, i, arr) => {
-                const isLast = i === arr.length - 1;
-                const desc = formatActivityLabel(a.name, a.description, t);
-                return (
-                  <div
-                    key={`${a.at}-${i}`}
-                    className={
-                      isLast ? styles.activityCurrent : styles.activityPast
-                    }
-                  >
-                    {isLast ? '> ' : '  '}
-                    {desc}
-                  </div>
-                );
-              })}
+              {task.recentActivities
+                .slice(-MAX_DISPLAYED_ACTIVITIES)
+                .map((a, i, arr) => {
+                  const isLast = i === arr.length - 1;
+                  const desc = formatActivityLabel(a.name, a.description, t);
+                  return (
+                    <div
+                      key={`${a.at}-${i}`}
+                      className={
+                        isLast ? styles.activityCurrent : styles.activityPast
+                      }
+                    >
+                      {isLast ? '> ' : '  '}
+                      {desc}
+                    </div>
+                  );
+                })}
             </div>
           </div>
         )}

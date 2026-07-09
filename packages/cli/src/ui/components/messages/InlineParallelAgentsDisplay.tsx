@@ -33,7 +33,10 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
-import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
+import {
+  escapeAnsiCtrlCodes,
+  sanitizeMultilineForDisplay,
+} from '../../utils/textUtils.js';
 import { TOOL_DISPLAY_BY_NAME } from '../../utils/tool-display-map.js';
 import { localizeToolDisplayName } from '../../../i18n/index.js';
 
@@ -334,7 +337,10 @@ const AgentRow: React.FC<{ row: RowData; now: number }> = ({ row, now }) => {
   const { glyph, color } = statusGlyph(row.status);
   const safeName = escapeAnsiCtrlCodes(row.name);
   const displayName = truncateMiddle(safeName, NAME_COL_WIDTH);
-  const activity = escapeAnsiCtrlCodes(activityLabel(row));
+  // sanitizeMultilineForDisplay: LLM-generated descriptions can carry bare
+  // C0 controls that escapeAnsiCtrlCodes passes through — matches the
+  // hardened dialog Progress rows and ToolMessage approval context.
+  const activity = sanitizeMultilineForDisplay(activityLabel(row));
   const elapsed = elapsedLabel(row, now);
   const tokens =
     row.tokenCount && row.tokenCount > 0

@@ -38,7 +38,10 @@ import {
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
-import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
+import {
+  escapeAnsiCtrlCodes,
+  sanitizeMultilineForDisplay,
+} from '../../utils/textUtils.js';
 import { TOOL_DISPLAY_BY_NAME } from '../../utils/tool-display-map.js';
 import type {
   AgentDialogEntry,
@@ -468,7 +471,11 @@ const AgentRow: React.FC<{
   // cancel. The glance panel has no cancel surface, so the marker
   // reads as ambient noise. Keep the dialog as the place that
   // surfaces the flavor distinction.
-  const activity = escapeAnsiCtrlCodes(activityLabel(entry));
+  // `sanitizeMultilineForDisplay` (not just `escapeAnsiCtrlCodes`): the
+  // activity description is LLM-generated and bare C0 controls (\r, BS,
+  // BEL) pass through the ANSI-sequence escape — matches the hardened
+  // dialog Progress rows and ToolMessage approval context.
+  const activity = sanitizeMultilineForDisplay(activityLabel(entry));
   const elapsed = elapsedLabel(entry, now);
   const showType =
     entry.subagentType !== undefined &&
