@@ -1216,12 +1216,14 @@ describe('LspServerManager', () => {
     handle!.connection = connection;
     handle!.process = process as unknown as ChildProcess;
     handle!.status = 'READY';
+    handle!.cachedDiagnostics.set('file:///workspace/index.ts', []);
 
     await manager.stopAll();
 
     expect(connection.shutdown).toHaveBeenCalledOnce();
     expect(connection.end).toHaveBeenCalledOnce();
     expect(process.kill).toHaveBeenCalledOnce();
+    expect(handle!.cachedDiagnostics.size).toBe(0);
   });
 
   it('caches publishDiagnostics notifications from the server', async () => {

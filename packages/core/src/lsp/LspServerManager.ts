@@ -540,6 +540,7 @@ export class LspServerManager {
     handle.status = 'NOT_STARTED';
     handle.warmedUp = false;
     handle.restartAttempts = 0;
+    handle.cachedDiagnostics.clear();
     debugLogger.info(`LSP server ${name} stopped`);
   }
 
