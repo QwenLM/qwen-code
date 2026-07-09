@@ -1010,22 +1010,23 @@ export class BridgeClient implements Client {
         `\`name\` exceeds the ${MAX_SUB_SESSION_NAME_CHARS}-character limit`,
       );
     }
-    // `callerSessionId` keys the launcher's per-caller concurrency bucket, so a
-    // child that can name any session it likes can both evade its own cap (a
-    // fresh fabricated id starts every bucket at zero) and exhaust a victim
-    // session's. The connection already knows which sessions it owns — check.
+    // `callerSessionId` keys the launcher's per-caller concurrency bucket AND
+    // its depth-1 nesting gate. A child that names a session it does not own
+    // could evade its own cap (a fabricated id starts every bucket at zero) or
+    // exhaust a victim session's; a child that OMITS the field would get an
+    // anonymous per-call bucket and skip the nesting gate entirely. Neither is
+    // acceptable, so it is required and authenticated. Every real caller has
+    // one — the tool runs inside a session's turn.
     const callerSessionId = params['callerSessionId'];
-    if (callerSessionId !== undefined) {
-      if (
-        typeof callerSessionId !== 'string' ||
-        callerSessionId.length === 0 ||
-        !this.ownsSession(callerSessionId)
-      ) {
-        throw RequestError.invalidParams(
-          undefined,
-          '`callerSessionId` must name a session owned by this connection',
-        );
-      }
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`callerSessionId` is required and must name a session owned by this connection',
+      );
     }
     const model = params['model'];
     const result = await this.onCreateSubSession({
@@ -1035,7 +1036,7 @@ export class BridgeClient implements Client {
         ? { model }
         : {}),
       ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
-      ...(typeof callerSessionId === 'string' ? { callerSessionId } : {}),
+      callerSessionId,
     });
     return {
       sessionId: result.sessionId,

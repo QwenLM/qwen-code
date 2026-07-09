@@ -130,7 +130,16 @@ async function awaitFirstTurn(
   stopSignal?: AbortSignal,
 ): Promise<{ result: string; stopReason: string }> {
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  // `ac.signal.aborted` cannot report whether the deadline passed: the `finally`
+  // below aborts unconditionally to tear the subscription down, so by the time
+  // the stopReason is computed the signal is always aborted. Record the timer
+  // firing separately, or a stream that closes early (bridge teardown, WS drop)
+  // is misreported as a 5-minute wall-clock timeout.
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ac.abort();
+  }, timeoutMs);
   if (typeof timer.unref === 'function') timer.unref();
   // Compose: the subscription ends on timeout OR daemon shutdown, whichever
   // fires first. Without this, stop() cannot interrupt a first-turn await and
@@ -204,11 +213,12 @@ async function awaitFirstTurn(
 
   if (stopReason === undefined) {
     // Distinguish shutdown (stop() called) from timeout from bus-closure so the
-    // caller can tell the difference between "daemon is going away" and "the
-    // sub-session turn didn't finish in time".
+    // caller can tell the difference between "daemon is going away", "the
+    // sub-session turn didn't finish in time", and "the event stream ended
+    // before the turn did".
     stopReason = stopSignal?.aborted
       ? 'shutdown'
-      : ac.signal.aborted
+      : timedOut
         ? 'timeout'
         : 'incomplete';
   }
@@ -263,22 +273,20 @@ export function createSubSessionLauncher(
     // Depth-1 gate. Every daemon session wires a spawner, sub-sessions included,
     // and each gets its own 5-slot bucket — so without this a sub-session can
     // spawn 5 more, each of which spawns 5 more (5ⁿ), exhausting `maxSessions`
-    // from one prompt. `callerSessionId` is authenticated at the bridge
-    // (`ownsSession`), so it can't be forged to sidestep this.
-    if (
-      info.callerSessionId !== undefined &&
-      spawnedSessionIds.has(info.callerSessionId)
-    ) {
+    // from one prompt. `callerSessionId` is required and authenticated at the
+    // bridge (`ownsSession`), so it can neither be forged nor omitted to
+    // sidestep this gate or the per-caller cap below.
+    if (spawnedSessionIds.has(info.callerSessionId)) {
       throw new Error(
         'A sub-session cannot create further sub-sessions (nesting is capped ' +
           'at one level).',
       );
     }
 
-    // Per-caller concurrency key. Without callerSessionId, each launch gets
-    // its own bucket (via randomUUID) rather than sharing a single '<unknown>'
-    // slot — one busy anonymous caller can't starve all other anonymous callers.
-    const key = info.callerSessionId ?? `anon:${randomUUID()}`;
+    // Per-caller concurrency key. Always a real, bridge-authenticated session
+    // id: an anonymous fallback (a per-launch UUID) would give every call its
+    // own bucket, which is the same as having no cap at all.
+    const key = info.callerSessionId;
     const current = inflight.get(key) ?? 0;
     if (current >= MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER) {
       throw new Error(

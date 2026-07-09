@@ -463,8 +463,13 @@ export interface CreateSubSessionInfo {
   model?: string;
   /** Optional display name for the sub-session in the session list. */
   name?: string;
-  /** The calling session's id — used for per-caller concurrency accounting. */
-  callerSessionId?: string;
+  /**
+   * The calling session's id. REQUIRED, and authenticated against the
+   * connection's owned sessions before it reaches the host — it keys the
+   * per-caller concurrency bucket and the depth-1 nesting gate, so a caller
+   * that could omit it would face neither.
+   */
+  callerSessionId: string;
 }
 
 /** Result the daemon host returns for a create-sub-session request. `result`

@@ -272,7 +272,11 @@ describe('sub-session launcher', () => {
       boundWorkspace: WS,
     });
     await expect(
-      launcher.launch({ prompt: 'x', completion: 'sent' }),
+      launcher.launch({
+        prompt: 'x',
+        completion: 'sent',
+        callerSessionId: 'c',
+      }),
     ).rejects.toThrow();
   });
 
@@ -284,7 +288,11 @@ describe('sub-session launcher', () => {
     });
     launcher.stop();
     await expect(
-      launcher.launch({ prompt: 'x', completion: 'sent' }),
+      launcher.launch({
+        prompt: 'x',
+        completion: 'sent',
+        callerSessionId: 'c',
+      }),
     ).rejects.toThrow(/shutting down/i);
     expect(fake.spawns).toHaveLength(0);
   });
@@ -404,6 +412,28 @@ describe('sub-session launcher', () => {
     });
     expect(fresh.sessionId).toBeTruthy();
     launcher.stop();
+  });
+
+  it('first-turn: reports "incomplete" when the stream ends before the turn does', async () => {
+    // Bridge teardown / WS drop: the subscription ends with no turn_complete and
+    // no deadline passed. Reading `ac.signal.aborted` here would always say
+    // "timeout" — the cleanup `finally` aborts that controller unconditionally.
+    const fake = makeFakeBridge({
+      events: () => [chunk('partial')],
+      blockAfterEvents: false, // stream ends on its own
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      firstTurnTimeoutMs: 60_000, // nowhere near firing
+    });
+    const res = await launcher.launch({
+      prompt: 'x',
+      completion: 'first-turn',
+      callerSessionId: 'c',
+    });
+    expect(res.stopReason).toBe('incomplete');
+    expect(res.result).toContain('partial');
   });
 
   it('refuses to spawn from a session it already spawned (depth-1 gate)', async () => {

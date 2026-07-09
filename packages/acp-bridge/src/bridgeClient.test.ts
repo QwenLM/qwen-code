@@ -797,6 +797,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
     const res = await client.extMethod(METHOD, {
       prompt: 'go',
       completion: 'sent',
+      callerSessionId: 'caller-1',
     });
     expect(res).toEqual({ sessionId: 'sub-10' });
   });
@@ -804,7 +805,11 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
   it('rejects methodNotFound when no host handler is wired (non-daemon)', async () => {
     const client = makeClientWithCreateSubSession(undefined);
     await expect(
-      client.extMethod(METHOD, { prompt: 'x', completion: 'sent' }),
+      client.extMethod(METHOD, {
+        prompt: 'x',
+        completion: 'sent',
+        callerSessionId: 'caller-1',
+      }),
     ).rejects.toThrow();
   });
 
@@ -855,10 +860,13 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       callerSessionId: 'mine',
     });
 
-    // Omitting it stays legal (anonymous callers get their own bucket).
+    // Omitting it is NOT legal: an absent id would give the launcher an
+    // anonymous per-call bucket (no cap) and skip its depth-1 nesting gate.
     onCreate.mockClear();
-    await client.extMethod(METHOD, { prompt: 'x', completion: 'sent' });
-    expect(onCreate).toHaveBeenCalledWith({ prompt: 'x', completion: 'sent' });
+    await expect(
+      client.extMethod(METHOD, { prompt: 'x', completion: 'sent' }),
+    ).rejects.toThrow(/callerSessionId/i);
+    expect(onCreate).not.toHaveBeenCalled();
   });
 
   it('rejects an over-long prompt and an over-long name', async () => {
@@ -869,6 +877,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       client.extMethod(METHOD, {
         prompt: 'x'.repeat(MAX_SUB_SESSION_PROMPT_CHARS + 1),
         completion: 'sent',
+        callerSessionId: 'caller-1',
       }),
     ).rejects.toThrow(new RegExp(`${MAX_SUB_SESSION_PROMPT_CHARS}`));
 
@@ -877,6 +886,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
         prompt: 'x',
         completion: 'sent',
         name: 'n'.repeat(MAX_SUB_SESSION_NAME_CHARS + 1),
+        callerSessionId: 'caller-1',
       }),
     ).rejects.toThrow(new RegExp(`${MAX_SUB_SESSION_NAME_CHARS}`));
 
@@ -887,6 +897,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       prompt: 'x'.repeat(MAX_SUB_SESSION_PROMPT_CHARS),
       completion: 'sent',
       name: 'n'.repeat(MAX_SUB_SESSION_NAME_CHARS),
+      callerSessionId: 'caller-1',
     });
     expect(onCreate).toHaveBeenCalledTimes(1);
   });
