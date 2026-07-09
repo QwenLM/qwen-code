@@ -10,5 +10,12 @@
     "noEmit": true
   },
   "include": ["client/**/*.ts", "client/**/*.tsx"],
-  "exclude": ["node_modules", "dist"]
+  "exclude": [
+    "client/**/*.test.ts",
+    "client/**/*.test.tsx",
+    "client/e2e/**",
+    "client/test/**",
+    "node_modules",
+    "dist"
+  ]
 }
