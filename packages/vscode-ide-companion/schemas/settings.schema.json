@@ -1034,6 +1034,10 @@
               "description": "Show color in shell output.",
               "type": "boolean",
               "default": false
+            },
+            "defaultTimeoutMs": {
+              "description": "Default timeout, in milliseconds, for foreground shell commands started by the agent. A per-call timeout on the shell tool overrides this. When unset, foreground commands time out after 120000 ms (2 minutes). Set to 0 to disable the timeout.",
+              "type": "number"
             }
           }
         },

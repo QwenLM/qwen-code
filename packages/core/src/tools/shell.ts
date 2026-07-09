@@ -2070,8 +2070,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return this.executeBackground(signal, shellExecutionConfig);
     }
 
+    // Precedence: an explicit per-call `timeout` wins; otherwise fall back
+    // to the configured `tools.shell.defaultTimeoutMs` setting; otherwise
+    // the built-in default. A value of 0 at any level disables the timeout.
     const effectiveTimeout =
-      this.params.timeout ?? DEFAULT_FOREGROUND_TIMEOUT_MS;
+      this.params.timeout ??
+      this.config.getShellDefaultTimeoutMs() ??
+      DEFAULT_FOREGROUND_TIMEOUT_MS;
 
     // Create combined signal with timeout AND promote-trigger for
     // foreground execution. The promoteAbortController is exposed to
