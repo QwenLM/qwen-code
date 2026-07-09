@@ -232,7 +232,7 @@ describe('/context shows three-tier thresholds', () => {
 
   it('renders warn/auto/hard with the warn-tier marker when usage sits between warn and auto', async () => {
     // 200K window. computeThresholds(200K) = {
-    //   warn: 150,000, auto: 170,000, hard: 177,000, effectiveWindow: 180,000
+    //   warn: 147,000, auto: 167,000, hard: 177,000, effectiveWindow: 180,000
     // }
     // lastPromptTokenCount = 160K → between warn and auto → tier = warn.
     mockGetLastPromptTokenCount.mockReturnValue(160_000);
@@ -240,15 +240,15 @@ describe('/context shows three-tier thresholds', () => {
     const text = formatContextUsageText(data);
 
     expect(text).toMatch(/Effective window:\s+180,000/);
-    expect(text).toMatch(/Warn threshold:\s+150,000/);
-    expect(text).toMatch(/Auto threshold:\s+170,000/);
+    expect(text).toMatch(/Warn threshold:\s+147,000/);
+    expect(text).toMatch(/Auto threshold:\s+167,000/);
     expect(text).toMatch(/Hard threshold:\s+177,000/);
     expect(text).toMatch(/Current tier:\s+warn/);
     expect(data.breakdown.currentTier).toBe('warn');
     expect(data.breakdown.thresholds).toEqual({
       effectiveWindow: 180_000,
-      warn: 150_000,
-      auto: 170_000,
+      warn: 147_000,
+      auto: 167_000,
       hard: 177_000,
     });
   });
@@ -269,7 +269,7 @@ describe('/context shows three-tier thresholds', () => {
   });
 
   it('classifies usage between auto and hard as the auto tier', async () => {
-    // 200K window — between 170K (auto) and 177K (hard) → tier = auto.
+    // 200K window — between 167K (auto) and 177K (hard) → tier = auto.
     mockGetLastPromptTokenCount.mockReturnValue(173_000);
     const data = await collectContextData(makeMockConfig(200_000), false);
     expect(data.breakdown.currentTier).toBe('auto');
@@ -291,14 +291,15 @@ describe('/context shows three-tier thresholds', () => {
     expect(data.breakdown.currentTier).toBe('safe');
     // Thresholds are still computed and exposed on the breakdown for downstream
     // consumers, even though the text layout suppresses them.
-    expect(data.breakdown.thresholds.auto).toBe(170_000);
+    expect(data.breakdown.thresholds.auto).toBe(167_000);
     const text = formatContextUsageText(data);
     expect(text).not.toMatch(/Compaction thresholds/);
   });
 
   it('propagates custom autoCompactThreshold through to /context thresholds', async () => {
     // config.getAutoCompactThreshold() returns 0.5 → computeThresholds(32000, 0.5)
-    // = { warn: 16,000, auto: 16,000, hard: 19,000, effectiveWindow: 12,000 }
+    // = { warn: 0, auto: 16,000, hard: 19,000, effectiveWindow: 12,000 }
+    // (32K ceiling degenerates, so auto = proportional floor = 0.5 * 32K)
     const config = makeMockConfig(32_000);
     vi.mocked(config.getAutoCompactThreshold).mockReturnValue(0.5);
     const data = await collectContextData(config, false);
