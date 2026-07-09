@@ -33,7 +33,6 @@
   gap: 6px;
   min-height: 22px;
   margin-bottom: 16px;
-  padding-right: 72px;
 }
 
 .icon {
@@ -52,15 +51,57 @@
 }
 
 .tabs {
-  position: absolute;
-  top: 16px;
-  right: 16px;
   display: flex;
   gap: 4px;
   margin: 0;
   border-bottom: 0;
   padding: 0;
   flex-wrap: nowrap;
+  align-items: center;
+}
+
+.topRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.collapseButton {
+  display: flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.collapseButton:hover {
+  color: var(--foreground);
+}
+
+.collapseIcon {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.2s ease;
+}
+
+.collapseIconCollapsed {
+  transform: rotate(-90deg);
+}
+
+.collapsed {
+  padding: 10px 16px;
+}
+
+.collapsed .titleLine {
+  margin-bottom: 0;
 }
 
 .tab {
@@ -72,7 +113,6 @@
   border-radius: 999px;
   background: var(--secondary);
   color: transparent;
-  cursor: pointer;
 }
 
 .tabActive {
