@@ -42,6 +42,7 @@ import {
   DEFAULT_MAX_CHUNK_LINES,
   type DiffChunk,
   type DiffPlan,
+  type PathKind,
 } from './lib/diff-plan.js';
 
 interface PrMetadata {
@@ -82,14 +83,23 @@ interface FetchPrResult {
   diffPathAbsolute: string | null;
   diffLines: number;
   diffChars: number;
+  /**
+   * Diff lines in `source` files. The review topology is chosen from this, not
+   * from `diffLines` — a 150-line production change shipping 800 lines of new
+   * tests carries the risk of a small change.
+   */
+  srcDiffLines: number;
+  testDiffLines: number;
+  generatedDiffLines: number;
   /** Contiguous, non-overlapping line ranges tiling the whole diff file. */
   chunks: DiffChunk[];
-  /** Per-file rewrite metrics. `heavy` files get a whole-file invariant agent. */
+  /** Per-file rewrite metrics. `heavy` files get whole-file invariant agents. */
   files: FileMetric[];
 }
 
 interface FileMetric {
   path: string;
+  kind: PathKind;
   addedLines: number;
   removedLines: number;
   changedLines: number;
@@ -111,6 +121,11 @@ interface FileMetric {
 
 /**
  * Heaviness thresholds.
+ *
+ * Only `source` files qualify. The invariant checklist is about a long-lived
+ * stateful object — its fields, timers, collections, error taxonomy. A test
+ * file has none of that, and three whole-file agents on one would be spent
+ * for nothing.
  *
  * A file must already have existed at some real size (`HEAVY_MIN_PRE_LINES`) —
  * a brand-new file has `rewriteRatio` 1.0 by definition but is not a *rewrite*,
@@ -135,11 +150,13 @@ export function classifyHeavy(input: {
   fileLines: number;
   changedLines: number;
   binary: boolean;
+  kind: PathKind;
 }): { rewriteRatio: number; heavy: boolean } {
-  const { preLines, fileLines, changedLines, binary } = input;
+  const { preLines, fileLines, changedLines, binary, kind } = input;
   const exactRatio = fileLines > 0 ? changedLines / fileLines : 0;
   const heavy =
     !binary &&
+    kind === 'source' &&
     preLines >= HEAVY_MIN_PRE_LINES &&
     (exactRatio >= HEAVY_REWRITE_RATIO || changedLines >= HEAVY_CHANGED_LINES);
   return { rewriteRatio: Math.round(exactRatio * 100) / 100, heavy };
@@ -176,9 +193,11 @@ function fileMetrics(plan: DiffPlan, headSha: string): FileMetric[] {
       fileLines,
       changedLines,
       binary: f.binary,
+      kind: f.kind,
     });
     return {
       path: f.path,
+      kind: f.kind,
       addedLines: f.addedLines,
       removedLines: f.removedLines,
       changedLines,
@@ -347,6 +366,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffPathAbsolute,
     diffLines: plan.diffLines,
     diffChars: plan.diffChars,
+    srcDiffLines: plan.srcDiffLines,
+    testDiffLines: plan.testDiffLines,
+    generatedDiffLines: plan.generatedDiffLines,
     chunks: plan.chunks,
     files: fileMetrics(plan, fetchedSha),
   };
@@ -360,7 +382,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     `PR #${prNumber} (${ownerRepo}): ${meta.changedFiles} files, +${meta.additions}/-${meta.deletions}, base=${meta.baseRefName}, head=${meta.headRefName}`,
   );
   writeStderrLine(
-    `Diff: ${plan.diffLines} lines / ${plan.diffChars} chars -> ${plan.chunks.length} review chunk(s)`,
+    `Diff: ${plan.diffLines} lines (${plan.srcDiffLines} source, ` +
+      `${plan.testDiffLines} test, ${plan.generatedDiffLines} generated) ` +
+      `/ ${plan.diffChars} chars -> ${plan.chunks.length} review chunk(s)`,
   );
   const heavy = result.files.filter((f) => f.heavy);
   if (heavy.length > 0) {

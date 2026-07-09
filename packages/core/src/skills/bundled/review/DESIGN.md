@@ -74,6 +74,16 @@ Requiring two consecutive dry rounds makes a single lazy or context-starved agen
 
 The original design gave one agent the whole diff plus a growing cumulative finding list. On a 5 800-line diff that is the most context-starved agent in the pipeline — exactly on the PRs where reverse audit matters most. Under Step 3B each round runs one auditor per chunk, each with the full cumulative finding list but only its own territory to re-read.
 
+### Why the topology gate counts source lines, not diff lines
+
+Diff size is a bad proxy for review risk, because tests dominate it. Across this repo's last 40 merged PRs the median diff is **41% test code**, and 14 of the 40 are more than half tests. A gate on raw diff lines sends a change of 173 production lines that ships 489 lines of new tests into the territory fan-out, where the production code ends up owned by a single chunk agent — while under the dimension fan-out it would have been read by eight lenses.
+
+Territory fan-out is worth it when there is a lot of _risky_ code to divide, not a lot of _lines_. So the gate is `srcDiffLines > 500`, with a second clause `diffLines > 2400` as a delivery bound: past that point `ceil(diffLines / 400) + 4 > 10`, so chunking uses fewer agents than the ten-lens topology anyway, and asking ten agents each to read a diff that large dilutes all of them. On the 40-PR sample the second clause never fires; it exists for a changeset dominated by tests or generated files.
+
+Re-gating moves 6 of those 40 PRs from 3B back to 3A and costs 22 extra agents in total across all 40 — about 5%. It buys those six PRs eight review lenses on their production code instead of one.
+
+Chunking itself is unchanged: the plan still tiles every line, tests and generated files included. Only the count of reviewers and their brief change. `heavy` is likewise restricted to `source` files — the invariant checklist asks about fields, timers, collections, and error taxonomies, and a rewritten test file has none of those.
+
 ### Why the invariant checklist is split across three agents
 
 Measured on PR #6457's `QQChannel.ts` (1551 → 2643 lines, 65% rewritten), at its first commit, against the nine defects maintainers later confirmed in that commit:

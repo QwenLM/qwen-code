@@ -15,6 +15,7 @@ describe('classifyHeavy', () => {
       fileLines: 2643,
       changedLines: 1714,
       binary: false,
+      kind: 'source',
     });
     expect(r.rewriteRatio).toBe(0.65);
     expect(r.heavy).toBe(true);
@@ -28,6 +29,7 @@ describe('classifyHeavy', () => {
       fileLines: 1535,
       changedLines: 1535,
       binary: false,
+      kind: 'source',
     });
     expect(r.rewriteRatio).toBe(1);
     expect(r.heavy).toBe(false);
@@ -41,6 +43,7 @@ describe('classifyHeavy', () => {
       fileLines: 113,
       changedLines: 75,
       binary: false,
+      kind: 'source',
     });
     expect(r.rewriteRatio).toBe(0.66);
     expect(r.heavy).toBe(false);
@@ -54,6 +57,7 @@ describe('classifyHeavy', () => {
         fileLines: 2170,
         changedLines: 449,
         binary: false,
+        kind: 'source',
       }).heavy,
     ).toBe(false);
   });
@@ -66,6 +70,7 @@ describe('classifyHeavy', () => {
       fileLines: 6000,
       changedLines: 900,
       binary: false,
+      kind: 'source',
     });
     expect(r.rewriteRatio).toBe(0.15);
     expect(r.heavy).toBe(true);
@@ -85,6 +90,7 @@ describe('classifyHeavy', () => {
       fileLines,
       changedLines: added + removed,
       binary: false,
+      kind: 'source',
     });
     expect(r.heavy).toBe(true);
   });
@@ -96,6 +102,7 @@ describe('classifyHeavy', () => {
         fileLines: 0,
         changedLines: 5000,
         binary: true,
+        kind: 'source',
       }).heavy,
     ).toBe(false);
   });
@@ -106,6 +113,7 @@ describe('classifyHeavy', () => {
       fileLines: 0,
       changedLines: 900,
       binary: false,
+      kind: 'source',
     });
     expect(r.rewriteRatio).toBe(0);
     // 900 changed lines clears the volume threshold, so it is still heavy —
@@ -114,8 +122,30 @@ describe('classifyHeavy', () => {
     expect(r.heavy).toBe(true);
   });
 
+  it('never flags a test or generated file', () => {
+    // The invariant checklist is about a long-lived stateful object. A heavily
+    // rewritten test file has no fields, timers, or error taxonomy to check,
+    // and three whole-file agents on it would be spent for nothing.
+    const heavyShape = {
+      preLines: 1800,
+      fileLines: 2600,
+      changedLines: 1700,
+      binary: false,
+    } as const;
+    expect(classifyHeavy({ ...heavyShape, kind: 'source' }).heavy).toBe(true);
+    expect(classifyHeavy({ ...heavyShape, kind: 'test' }).heavy).toBe(false);
+    expect(classifyHeavy({ ...heavyShape, kind: 'generated' }).heavy).toBe(
+      false,
+    );
+  });
+
   it('compares the exact ratio, not the rounded one', () => {
-    const base = { preLines: 300, fileLines: 1000, binary: false };
+    const base = {
+      preLines: 300,
+      fileLines: 1000,
+      binary: false,
+      kind: 'source',
+    } as const;
     expect(classifyHeavy({ ...base, changedLines: 400 }).heavy).toBe(true);
     // 399/1000 = 0.399 — below the 0.40 threshold, even though it *reports*
     // as 0.4. Rounding before comparing would wrongly flag it.
@@ -131,6 +161,7 @@ describe('classifyHeavy', () => {
         fileLines: 1000,
         changedLines: 900,
         binary: false,
+        kind: 'source',
       }).heavy,
     ).toBe(false);
     expect(
@@ -139,6 +170,7 @@ describe('classifyHeavy', () => {
         fileLines: 1000,
         changedLines: 900,
         binary: false,
+        kind: 'source',
       }).heavy,
     ).toBe(true);
   });

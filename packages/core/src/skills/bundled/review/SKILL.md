@@ -102,12 +102,13 @@ Based on the remaining arguments:
 For **PR reviews**, `qwen review fetch-pr` (above) has already written the diff to `diffPath` and partitioned it. Read from the fetch report:
 
 - `diffPathAbsolute` — pass this to `read_file` (it rejects relative paths)
-- `diffLines`, `diffChars`
+- `diffLines`, `diffChars`, and `srcDiffLines` / `testDiffLines` / `generatedDiffLines`
 - `chunks[]` — contiguous, non-overlapping line ranges tiling the whole diff. Each entry has `id`, `startLine`, `endLine` (1-based, inclusive), and `files[]` naming the source files and new-side line ranges it covers.
+- `files[]` — per-file `kind` (`source` / `test` / `generated`), change counts, and the `heavy` flag
 
 A chunk is read with `read_file(file_path=diffPathAbsolute, offset=startLine - 1, limit=endLine - startLine + 1)` — `offset` is 0-based.
 
-For **local-diff and file-path reviews**, capture the diff the same way before launching agents, then treat the whole file as a single chunk when it is under 500 lines:
+For **local-diff and file-path reviews**, capture the diff to a file the same way before launching agents, and count its source lines yourself to choose the topology:
 
 ```bash
 git diff > .qwen/tmp/qwen-review-local-diff.txt   # or: git diff HEAD -- <file>
@@ -115,10 +116,16 @@ git diff > .qwen/tmp/qwen-review-local-diff.txt   # or: git diff HEAD -- <file>
 
 If `diffPath` is `null` (merge-base could not be resolved), fall back to giving agents the `git diff` command and **tell the user coverage will be partial on a large diff**.
 
-**Choose the topology from `diffLines`:**
+**Choose the topology from `srcDiffLines`, not from `diffLines`.**
 
-- **≤ 500 diff lines** — one chunk. Use the dimension fan-out in Step 3A unchanged.
-- **> 500 diff lines** — use the territory × dimension fan-out in Step 3B, and inform the user: "This is a large changeset (N lines, M chunks). The review may take a few minutes."
+- **`srcDiffLines` ≤ 500 and `diffLines` ≤ 2400** — use the dimension fan-out in Step 3A.
+- **otherwise** — use the territory × dimension fan-out in Step 3B, and inform the user: "This is a large changeset (N source lines of M total, K chunks). The review may take a few minutes."
+
+Test code is where diff size lies. Across this repo's last 40 merged PRs the median diff is **41% test code**, and a third of them are more than half tests. A change of 173 production lines that ships 489 lines of new tests is a small change; carving it into territories spends most of the reviewers on test files and leaves the production code with **one** agent instead of the eight lenses it deserves. Territory fan-out earns its keep when there is a lot of _risky_ code to divide, not a lot of _lines_.
+
+The second clause is a delivery bound, not a risk one: past roughly 2400 diff lines the territory fan-out needs fewer agents than ten anyway (`ceil(diffLines / 400) + 4 > 10`), and asking ten agents each to read a diff that large dilutes them all. It is the safety valve for a changeset dominated by tests or generated files.
+
+Either way the chunk plan covers **every** line — tests and generated files included. What changes is how many reviewers are assigned and what each is asked to do, not what gets read.
 
 ## Step 2: Load project review rules
 
@@ -143,17 +150,17 @@ Do NOT inject review rules into Agent 7 (Build & Test) — it runs deterministic
 
 Launch review agents by invoking all `agent` tools in a **single response**. The runtime executes agent tools concurrently — they will run in parallel. You MUST include all tool calls in one response; do NOT send them one at a time.
 
-Use **Step 3A** when the diff is ≤ 500 lines (one chunk) and **Step 3B** when it is larger. The dimension definitions (Agents 0–7) are shared by both and are listed after 3B.
+Use **Step 3A** or **Step 3B** as the topology gate in Step 1 decided. The dimension definitions (Agents 0–7) are shared by both and are listed after 3B.
 
-## Step 3A: Dimension fan-out (diffs ≤ 500 lines)
+## Step 3A: Dimension fan-out (small source change)
 
 Launch **10 agents** for same-repo **PR** reviews (Agent 6 has three persona variants 6a/6b/6c that each count as separate parallel agents), or **9 agents** (skip Agent 7: Build & Test) for cross-repo lightweight **PR** mode since there is no local codebase to build/test. **Agent 0 (Issue Fidelity) runs only when the review target is a PR** — a local-diff or file-path review has no PR and no linked issue, so skip Agent 0 and launch **9 agents** (Agents 1–7). Each agent should focus exclusively on its dimension.
 
 Every agent reads the whole diff, **by walking the `chunks[]` ranges** — usually one or two `read_file` calls at this size. Do **not** ask for the whole diff in one read: `read_file` caps a single call at ~25 000 characters, and a 500-line diff of long lines exceeds that. Chunks are sized to fit inside one un-truncated read, which is exactly why they exist.
 
-## Step 3B: Territory × dimension fan-out (diffs > 500 lines)
+## Step 3B: Territory × dimension fan-out (large source change)
 
-Ten agents all reading the same diff multiplies redundant reading of the early hunks; it does not add coverage. Past 500 lines, fan out along **territory** as well: one agent per chunk, with the review dimensions folded into that agent's brief, plus a small set of whole-diff agents for the concerns that only exist at diff scale.
+Ten agents all reading the same diff multiplies redundant reading of the early hunks; it does not add coverage. Once there is enough production code to divide, fan out along **territory** as well: one agent per chunk, with the review dimensions folded into that agent's brief, plus a small set of whole-diff agents for the concerns that only exist at diff scale.
 
 **Chunk agents — one per entry in `chunks[]`.** Each is a `general-purpose` subagent whose prompt gives it:
 
@@ -168,9 +175,9 @@ Ten agents all reading the same diff multiplies redundant reading of the early h
 - **Agent 7 (Build & Test)** — same-repo reviews only. Unchanged.
 - **Cross-file impact** — the analysis described below, run once over the whole diff rather than repeated by every chunk agent (a chunk agent cannot see a caller that lives in another chunk).
 - **Test coverage matrix** — does each behavioural change in the diff have a corresponding test? A chunk agent sees either the implementation or the test, rarely both.
-- **Whole-file invariant agents — three per `heavy` file** in the fetch report's `files[]` (an existing file of 300+ lines that is now 40%+ new, or has 800+ changed lines). See below.
+- **Whole-file invariant agents — three per `heavy` file** in the fetch report's `files[]` (a **source** file that already had 300+ lines and is now 40%+ new, or has 800+ changed lines). Test and generated files are never `heavy`. See below.
 
-### Whole-file invariant agents (Step 3B, `heavy` files only)
+### Whole-file invariant agents (Step 3B, `heavy` source files only)
 
 When a file is largely rewritten, reviewing it as a diff is the wrong frame. The bugs are not inside any one hunk; they are **between** the new lines, which can sit two thousand lines apart — a timer armed near the top of the file and a teardown path near the bottom. No chunk agent, and no reader of a diff with three lines of context, can see that pair.
 

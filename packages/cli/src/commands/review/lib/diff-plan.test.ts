@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
   buildDiffPlan,
   chunksCoverDiff,
+  classifyPath,
   MAX_CHUNK_CHARS,
   parseDiff,
 } from './diff-plan.js';
@@ -30,6 +31,56 @@ function fileSection(path: string, hunks: Array<[number, number]>): string[] {
   }
   return out;
 }
+
+describe('classifyPath', () => {
+  /** Map each path to its kind so a failure names the offending path. */
+  const kinds = (paths: string[]) =>
+    Object.fromEntries(paths.map((p) => [p, classifyPath(p)]));
+  const all = (paths: string[], kind: string) =>
+    Object.fromEntries(paths.map((p) => [p, kind]));
+
+  it('recognises test files across the common conventions', () => {
+    const paths = [
+      'packages/channels/qqbot/src/events.test.ts',
+      'src/foo.spec.tsx',
+      'packages/webui/src/__tests__/App.tsx',
+      'integration-tests/foo.ts',
+      'pkg/server/handler_test.go',
+      'app/tests/test_views.py',
+      'app/test_views.py',
+      'src/test/java/Foo.java',
+    ];
+    expect(kinds(paths)).toEqual(all(paths, 'test'));
+  });
+
+  it('recognises generated and vendored files', () => {
+    const paths = [
+      'package-lock.json',
+      'packages/desktop/bun.lock',
+      'packages/vscode-ide-companion/NOTICES.txt',
+      'dist/bundle.min.js',
+      'vendor/lib.go',
+    ];
+    expect(kinds(paths)).toEqual(all(paths, 'generated'));
+  });
+
+  it('does not mistake a word containing "test" for a test path', () => {
+    const paths = [
+      'src/testing/helpers.ts',
+      'src/contest/foo.ts',
+      'src/latest/foo.ts',
+      'packages/core/src/skills/bundled/review/SKILL.md',
+      'packages/channels/qqbot/src/QQChannel.ts',
+    ];
+    expect(kinds(paths)).toEqual(all(paths, 'source'));
+  });
+
+  it('classifies a generated snapshot as generated, not as a test', () => {
+    // It lives under __snapshots__/, which also matches the test pattern, so
+    // the generated check has to run first.
+    expect(classifyPath('src/__snapshots__/App.snap')).toBe('generated');
+  });
+});
 
 describe('parseDiff', () => {
   it('records file sections and hunk ranges', () => {
@@ -282,6 +333,38 @@ describe('planChunks', () => {
     expect(plan.chunks.map((c) => c.id)).toEqual(
       plan.chunks.map((_, i) => i + 1),
     );
+  });
+});
+
+describe('per-kind diff line totals', () => {
+  it('splits the diff into source, test, and generated lines', () => {
+    const diff = [
+      ...fileSection('src/a.ts', [[1, 40]]),
+      ...fileSection('src/a.test.ts', [[1, 200]]),
+      ...fileSection('package-lock.json', [[1, 500]]),
+    ].join('\n');
+
+    const plan = buildDiffPlan(diff, 400);
+    // Each section is its 4 header lines + 1 hunk header + N body lines.
+    expect(plan.srcDiffLines).toBe(45);
+    expect(plan.testDiffLines).toBe(205);
+    expect(plan.generatedDiffLines).toBe(505);
+    expect(
+      plan.srcDiffLines + plan.testDiffLines + plan.generatedDiffLines,
+    ).toBe(plan.diffLines);
+  });
+
+  it('is what separates a small production change from a big test diff', () => {
+    // The shape the topology gate exists for: a modest source change shipping
+    // a large new test file. Raw diff size says "large"; the risk does not.
+    const diff = [
+      ...fileSection('src/a.ts', [[1, 150]]),
+      ...fileSection('src/a.test.ts', [[1, 800]]),
+    ].join('\n');
+    const plan = buildDiffPlan(diff, 400);
+    expect(plan.diffLines).toBeGreaterThan(900);
+    expect(plan.srcDiffLines).toBeLessThan(500);
+    expect(chunksCoverDiff(plan.chunks, plan.diffLines)).toBe(true);
   });
 });
 
