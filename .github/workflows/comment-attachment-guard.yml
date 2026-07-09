@@ -52,7 +52,12 @@ jobs:
 
             const reasons = [];
             const linkSnippets = body.match(linkPattern) ?? [];
-            if (linkSnippets.some((snippet) => highRiskExtension.test(snippet))) {
+            const hasHighRiskLink = linkSnippets.some((snippet) => {
+              const mdMatch = snippet.match(/^\[[^\]]+\]\((.+)\)$/);
+              const url = mdMatch ? mdMatch[1] : snippet;
+              return highRiskExtension.test(url);
+            });
+            if (hasHighRiskLink) {
               reasons.push('high-risk file extension in a link or attachment');
             }
 

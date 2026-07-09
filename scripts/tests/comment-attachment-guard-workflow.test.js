@@ -24,6 +24,11 @@ describe('comment attachment guard workflow', () => {
     expect(workflow).toContain('>?#/&;.,!:]');
   });
 
+  it('checks markdown link URLs instead of display text', () => {
+    expect(workflow).toContain('const url = mdMatch ? mdMatch[1] : snippet;');
+    expect(workflow).toContain('return highRiskExtension.test(url);');
+  });
+
   it('keeps diagnostics when deletion or summary writing fails', () => {
     expect(workflow).toContain(
       'Failed to delete suspicious comment ${comment.id}',
