@@ -6,6 +6,8 @@ import type {
 } from './TurnOutputs';
 import { isSamePath, normalizePath } from './artifactUtils';
 
+const MAX_LINE_STAT_COMPARISONS = 1_000_000;
+
 function getToolCallIds(tool: ACPToolCall): string[] {
   const ids = new Set<string>();
   if (tool.callId) ids.add(tool.callId);
@@ -441,6 +443,9 @@ function getFinalFullContentDiff(diffs: TurnOutputFileChange['diffs']) {
 function countChangedLines(oldText: string, newText: string) {
   const oldLines = splitDiffLines(oldText);
   const newLines = splitDiffLines(newText);
+  if (oldLines.length * newLines.length > MAX_LINE_STAT_COMPARISONS) {
+    return undefined;
+  }
   const commonLines = countLongestCommonSubsequence(oldLines, newLines);
   return {
     additions: newLines.length - commonLines,
@@ -463,7 +468,9 @@ function countLongestCommonSubsequence(left: string[], right: string[]) {
           ? previous[index] + 1
           : Math.max(previous[index + 1], current[index]);
     }
-    previous.splice(0, previous.length, ...current);
+    for (let index = 0; index < current.length; index++) {
+      previous[index] = current[index];
+    }
     current.fill(0);
   }
   return previous[right.length] ?? 0;

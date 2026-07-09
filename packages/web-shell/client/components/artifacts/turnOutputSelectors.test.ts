@@ -161,6 +161,66 @@ describe('turnOutputSelectors', () => {
     ]);
   });
 
+  it('keeps partial diffs after a full-content diff', () => {
+    const messages = [
+      userMessage('u1', 'write then edit file'),
+      toolGroup('tg1', [
+        {
+          callId: 'write-1',
+          toolName: 'write_file',
+          status: 'completed',
+          args: { file_path: 'src/app.ts', content: 'one\n' },
+        },
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          content: [{ type: 'diff', oldText: 'one\n', newText: 'two\n' }],
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change?.additions).toBeUndefined();
+    expect(change?.deletions).toBeUndefined();
+    expect(change?.diffs).toEqual([
+      { oldText: '', newText: 'one\n', fullContent: true },
+      { oldText: 'one\n', newText: 'two\n' },
+    ]);
+  });
+
+  it('omits stats for large full-content diffs', () => {
+    const oldContent = Array.from({ length: 1001 }, (_, index) => `${index}`)
+      .join('\n')
+      .concat('\n');
+    const newContent = Array.from({ length: 1001 }, (_, index) => `${index}x`)
+      .join('\n')
+      .concat('\n');
+    const messages = [
+      userMessage('u1', 'edit large file'),
+      toolGroup('tg1', [
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          rawOutput: {
+            originalContent: oldContent,
+            newContent,
+          },
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change?.additions).toBeUndefined();
+    expect(change?.deletions).toBeUndefined();
+    expect(change?.diffs).toEqual([
+      { oldText: oldContent, newText: newContent, fullContent: true },
+    ]);
+  });
+
   it('omits stats for unrelated partial diffs', () => {
     const messages = [
       userMessage('u1', 'edit file twice'),
