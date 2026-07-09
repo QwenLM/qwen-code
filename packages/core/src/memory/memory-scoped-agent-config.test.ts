@@ -271,4 +271,76 @@ describe('createMemoryScopedAgentConfig', () => {
       }),
     ).resolves.toBe('deny');
   });
+
+  it('can bypass base ask rules for scoped memory writes only', async () => {
+    const basePm: Pick<
+      PermissionManager,
+      | 'evaluate'
+      | 'findMatchingDenyRule'
+      | 'hasMatchingAskRule'
+      | 'hasRelevantRules'
+      | 'isToolEnabled'
+    > = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      hasMatchingAskRule: vi.fn().mockReturnValue(true),
+      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+      evaluate: vi.fn().mockResolvedValue('ask'),
+      isToolEnabled: vi.fn().mockResolvedValue(true),
+    };
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig(
+        {
+          getPermissionManager: () => basePm as PermissionManager,
+        } as Config,
+        projectRoot,
+        { bypassBaseAskForScopedPaths: true },
+      ),
+    );
+
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(getUserAutoMemoryRoot(), 'user', 'a.md'),
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(projectRoot, 'README.md'),
+      }),
+    ).resolves.toBe('deny');
+  });
+
+  it('does not bypass base deny rules for scoped memory writes', async () => {
+    const basePm: Pick<
+      PermissionManager,
+      | 'evaluate'
+      | 'findMatchingDenyRule'
+      | 'hasMatchingAskRule'
+      | 'hasRelevantRules'
+      | 'isToolEnabled'
+    > = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue('base deny'),
+      evaluate: vi.fn().mockResolvedValue('deny'),
+      isToolEnabled: vi.fn().mockResolvedValue(true),
+    };
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig(
+        {
+          getPermissionManager: () => basePm as PermissionManager,
+        } as Config,
+        projectRoot,
+        { bypassBaseAskForScopedPaths: true },
+      ),
+    );
+
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(getUserAutoMemoryRoot(), 'user', 'a.md'),
+      }),
+    ).resolves.toBe('deny');
+  });
 });

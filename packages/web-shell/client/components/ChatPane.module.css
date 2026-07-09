@@ -10,10 +10,6 @@
   overflow: hidden;
 }
 
-.paneCurrent {
-  border-color: color-mix(in srgb, var(--primary) 60%, var(--border));
-}
-
 .header {
   display: flex;
   align-items: center;
@@ -50,16 +46,6 @@
   font-size: 13px;
   font-weight: 600;
   color: var(--foreground);
-}
-
-.currentBadge {
-  flex: 0 0 auto;
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--primary);
-  background: color-mix(in srgb, var(--primary) 14%, transparent);
 }
 
 .closeButton {

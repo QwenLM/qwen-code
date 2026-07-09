@@ -197,6 +197,8 @@ export type {
   DaemonApprovalModeChangedEvent,
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
+  DaemonHistoryTruncatedData,
+  DaemonHistoryTruncatedEvent,
   DaemonControlEvent,
   // Daemon-emitted resync
   // signal for SSE reconnects past the ring eviction boundary.
@@ -362,6 +364,7 @@ export type {
   DaemonWorkspaceTrustSource,
   DaemonWorkspaceTrustState,
   DaemonWorkspaceTrustStatus,
+  DaemonWorkspaceCapability,
   DaemonAvailableCommand,
   DaemonArchiveSessionsResult,
   DaemonCapabilities,
@@ -485,6 +488,8 @@ export type {
   DaemonWorkspaceMemoryTaskStatus,
   DaemonWorkspaceMemoryTopic,
   DaemonWorkspacePreflightStatus,
+  DaemonWorkspaceAcpStatusResult,
+  DaemonWorkspaceAcpPreheatResult,
   DaemonWorkspaceProviderCurrent,
   DaemonWorkspaceProviderModel,
   DaemonWorkspaceProviderStatus,

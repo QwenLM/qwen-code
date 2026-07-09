@@ -1515,6 +1515,7 @@ function jobToDurableTask(job: CronJob): DurableCronTask {
     recurring: job.recurring,
     createdAt: job.createdAt,
     lastFiredAt: job.lastFiredAt ?? null,
+    ...(job.boundSessionId ? { sessionId: job.boundSessionId } : {}),
   };
 }
 

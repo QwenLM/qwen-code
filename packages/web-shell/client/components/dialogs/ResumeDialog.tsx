@@ -73,7 +73,10 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
   }, []);
 
   return (
-    <div className={dp('picker', 'picker-in-shell')}>
+    <div
+      className={dp('picker', 'picker-in-shell')}
+      data-web-shell-resume-dialog
+    >
       <div className={dp('picker-search')}>
         <span className={dp('picker-search-label')}>
           {t('resume.search')}:{' '}
@@ -112,7 +115,7 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
         )}
         {!loading && error && (
           <div className={dp('picker-empty')}>
-            {error.message || 'Failed to load sessions'}
+            {error.message || t('resume.failedToLoad')}
           </div>
         )}
         {!loading && !error && filtered.length === 0 && (
@@ -131,6 +134,7 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
               active={index === selectedIdx}
               current={s.sessionId === currentSessionId}
               currentLabel={t('resume.current')}
+              resumeSelector
               onClick={() => confirm(index)}
               onActivate={() => setSelectedIdx(index)}
             />

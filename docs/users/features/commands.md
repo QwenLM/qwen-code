@@ -104,6 +104,7 @@ Commands for managing AI tools and models.
 | `/forget`         | Remove matching entries from auto-memory                                         | `/forget <query>`                                                                                         |
 | `/dream`          | Manually run auto-memory consolidation                                           | `/dream`                                                                                                  |
 | `/hooks`          | Manage Qwen Code hooks                                                           | `/hooks`, `/hooks list`                                                                                   |
+| `/reload-plugins` | Reload extension changes (commands, skills, agents, hooks, MCP/LSP servers) from disk | `/reload-plugins`                                                                                   |
 | `/permissions`    | Manage permission rules                                                          | `/permissions`                                                                                            |
 | `/agents`         | Manage subagents                                                                 | `/agents manage`, `/agents create`                                                                        |
 | `/arena`          | Manage Arena sessions                                                            | `/arena start`, `/arena stop`, `/arena status`, `/arena select` (alias `choose`)                          |
@@ -123,7 +124,7 @@ Commands for managing AI tools and models.
 
 > [!note]
 >
-> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. When disabled they won't appear and will report an unknown command.
+> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. When disabled they won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
 
 ### 1.5 Built-in Skills
 

@@ -32,11 +32,13 @@ import {
   loadChannelsConfig,
   loadChannelsFromExtensions,
   parseConfiguredChannels,
+  registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
   selectFirstModel,
   sessionsPath,
 } from './runtime.js';
+import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
 
 export { resolveExtensionChannelEntrySpecifier } from './runtime.js';
 export { resolveProxy } from './proxy.js';
@@ -53,13 +55,20 @@ function isFileExistsError(err: unknown): boolean {
   );
 }
 
-function channelMemoryOptions(): Pick<ChannelBaseOptions, 'channelMemory'> {
+function channelMemoryOptions(
+  getBridge: () => AcpBridge,
+  cwd: string,
+): Pick<ChannelBaseOptions, 'channelMemory' | 'memoryIntentClassifier'> {
   return {
     channelMemory: {
       readChannelMemory,
       appendChannelMemory,
       clearChannelMemory,
     },
+    memoryIntentClassifier: new BridgeChannelMemoryIntentClassifier(
+      getBridge,
+      cwd,
+    ),
   };
 }
 
@@ -168,6 +177,8 @@ async function startSingle(
     config = await parseChannelConfig(
       name,
       channelsConfig[name] as Record<string, unknown>,
+      process.cwd(),
+      { resolveEnvVars: 'available' },
     );
   } catch (err) {
     writeStderrLine(
@@ -201,7 +212,7 @@ async function startSingle(
   const channel = await createChannel(name, config, bridge, {
     router,
     proxy,
-    ...channelMemoryOptions(),
+    ...channelMemoryOptions(() => bridge, config.cwd),
     ...(loopController ? { loopController } : {}),
   });
   channels.set(name, channel);
@@ -213,6 +224,7 @@ async function startSingle(
       })
     : undefined;
   registerToolCallDispatch(bridge, router, channels);
+  registerPermissionRelay(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
 
   try {
@@ -266,6 +278,7 @@ async function startSingle(
         channel.disconnect();
         await channel.connect();
         registerToolCallDispatch(bridge, router, channels);
+        registerPermissionRelay(bridge, router, channels);
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
 
@@ -368,12 +381,13 @@ async function startAll(
       await createChannel(name, config, bridge, {
         router,
         proxy,
-        ...channelMemoryOptions(),
+        ...channelMemoryOptions(() => bridge, config.cwd),
         ...(loopController ? { loopController } : {}),
       }),
     );
   }
   registerToolCallDispatch(bridge, router, channels);
+  registerPermissionRelay(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
 
   // Connect all channels
@@ -472,6 +486,7 @@ async function startAll(
           process.exit(1);
         }
         registerToolCallDispatch(bridge, router, channels);
+        registerPermissionRelay(bridge, router, channels);
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
 

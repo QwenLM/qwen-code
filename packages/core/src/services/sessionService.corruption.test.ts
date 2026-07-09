@@ -21,6 +21,7 @@ import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { SessionService } from './sessionService.js';
 import type { ChatRecord } from './chatRecordingService.js';
+import type { HistoryGap } from '../utils/conversation-chain.js';
 
 let tmpRoot: string;
 
@@ -231,5 +232,52 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
     );
 
     expect(svc.readLastRecordUuid(file)).toBe('boundary-final');
+  });
+});
+
+describe('SessionService.reconstructHistory (history-gap detection)', () => {
+  // reconstructHistory is private; cast to reach it directly, matching the
+  // pattern above. Integration point under test: the sessionService delegate
+  // to buildOrderedUuidChain + aggregateRecords, plus the returned gaps.
+  type Privates = {
+    reconstructHistory: (
+      records: ChatRecord[],
+      opts?: { leafUuid?: string; detectGaps?: boolean },
+    ) => { messages: ChatRecord[]; gaps: HistoryGap[] };
+  };
+  let svc: Privates;
+
+  beforeEach(() => {
+    svc = new SessionService('/tmp/x') as unknown as Privates;
+  });
+
+  // Two disconnected islands, the 965867 shape: island A (older) is a clean
+  // root chain; island B (newer) begins with a record whose parentUuid points
+  // at a record that is not in the file at all.
+  const twoIslands: ChatRecord[] = [
+    recordFor('a1', 'user', null),
+    recordFor('a2', 'assistant', 'a1'),
+    recordFor('b1', 'user', 'missing-parent-uuid'),
+    recordFor('b2', 'assistant', 'b1'),
+  ];
+
+  it('reports the gap but does NOT reconstruct the earlier island (detectGaps on)', () => {
+    const { messages, gaps } = svc.reconstructHistory(twoIslands, {
+      detectGaps: true,
+    });
+    // Only the reachable tail island — the earlier island is not stitched back.
+    expect(messages.map((m) => m.uuid)).toEqual(['b1', 'b2']);
+    expect(gaps).toEqual([
+      { childUuid: 'b1', missingParentUuid: 'missing-parent-uuid' },
+    ]);
+    // The gap child's parentUuid is left as-is (not rewritten to a guess).
+    const child = messages.find((m) => m.uuid === 'b1');
+    expect(child?.parentUuid).toBe('missing-parent-uuid');
+  });
+
+  it('preserves today truncation behavior when detectGaps is off', () => {
+    const { messages, gaps } = svc.reconstructHistory(twoIslands);
+    expect(messages.map((m) => m.uuid)).toEqual(['b1', 'b2']);
+    expect(gaps).toEqual([]);
   });
 });
