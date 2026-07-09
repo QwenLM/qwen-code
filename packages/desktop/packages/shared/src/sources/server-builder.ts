@@ -338,7 +338,14 @@ export class SourceServerBuilder {
  * - Preserves the user-configured path as-is (no /mcp suffix appended)
  */
 export function normalizeMcpUrl(url: string): string {
-  return url.replace(/\/+$/, '');
+  const suffixIndex = url.search(/[?#]/);
+  if (suffixIndex === -1) {
+    return url.replace(/\/+$/, '');
+  }
+
+  return (
+    url.slice(0, suffixIndex).replace(/\/+$/, '') + url.slice(suffixIndex)
+  );
 }
 
 // Singleton instance
