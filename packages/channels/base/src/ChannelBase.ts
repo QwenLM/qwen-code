@@ -29,7 +29,6 @@ import {
   sanitizePromptText,
   sanitizePromptPath,
   sanitizeLogText,
-  truncateCodePoints,
   PROMPT_UNSAFE_INVISIBLES,
 } from './sanitize.js';
 import type {
@@ -64,7 +63,7 @@ const CURRENT_MESSAGE_MARKER = '[Current message - respond to this]';
 const GROUP_HISTORY_ENTRY_TEXT_LIMIT = 1000;
 const GROUP_HISTORY_ENTRY_METADATA_LIMIT = 256;
 const LOOP_CANCEL_GRACE_MS = 5000;
-const CHANNEL_MEMORY_PROMPT_CHAR_LIMIT = 12_000;
+const CHANNEL_MEMORY_PROMPT_CODE_POINT_LIMIT = 12_000;
 const CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE = 0.7;
 const CHANNEL_MEMORY_CLASSIFIER_TRIGGER_RE =
   /(记住|记得|记一下|记忆|忘掉|忘记|清空|清除|删除|保存|remember|memory|forget)/iu;
@@ -104,13 +103,14 @@ function formatChannelMemoryPrompt(memoryText: string): string | undefined {
   if (!sanitized) {
     return undefined;
   }
-  if (sanitized.length <= CHANNEL_MEMORY_PROMPT_CHAR_LIMIT) {
+  const codePoints = Array.from(sanitized);
+  if (codePoints.length <= CHANNEL_MEMORY_PROMPT_CODE_POINT_LIMIT) {
     return `Channel memory for this chat:\n${sanitized}`;
   }
-  const truncated = truncateCodePoints(
-    sanitized,
-    CHANNEL_MEMORY_PROMPT_CHAR_LIMIT,
-  ).trimEnd();
+  const truncated = codePoints
+    .slice(0, CHANNEL_MEMORY_PROMPT_CODE_POINT_LIMIT)
+    .join('')
+    .trimEnd();
   return `Channel memory for this chat (truncated):\n${truncated}\n[Channel memory truncated]`;
 }
 
