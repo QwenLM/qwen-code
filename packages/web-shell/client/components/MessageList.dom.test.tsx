@@ -260,8 +260,6 @@ const nextFrame = () =>
     () =>
       new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
   );
-const nextTask = () =>
-  act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
 const mockMessageListWidth = (width: number) =>
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
     width,
@@ -650,7 +648,7 @@ describe('MessageList — turn collapse (DOM)', () => {
         document.querySelector('[data-testid="session-timeline-detail"]'),
       ).not.toBeNull();
 
-      await nextTask();
+      await nextFrame();
       act(() =>
         viewport!.dispatchEvent(new Event('scroll', { bubbles: true })),
       );

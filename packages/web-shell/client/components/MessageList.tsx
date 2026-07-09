@@ -1802,12 +1802,16 @@ const SessionTimeline = memo(function SessionTimeline({
     if (viewport.scrollTop === nextScrollTop) return;
     programmaticScrollRef.current = true;
     viewport.scrollTop = nextScrollTop;
-    const timer = window.setTimeout(() => {
+    const frame = window.requestAnimationFrame(() => {
       programmaticScrollRef.current = false;
       syncTooltip();
-    }, 0);
+    });
+    const fallback = window.setTimeout(() => {
+      programmaticScrollRef.current = false;
+    }, 100);
     return () => {
-      window.clearTimeout(timer);
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(fallback);
       programmaticScrollRef.current = false;
     };
   }, [currentIndex, hidden, syncTooltip]);
