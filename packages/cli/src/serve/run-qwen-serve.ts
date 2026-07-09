@@ -3000,14 +3000,6 @@ export async function runQwenServe(
         workspaceService: secondaryWorkspaceService,
         routeFileSystemFactory: secondaryBridgeFsFactory,
         clientMcpSenderRegistry: secondaryClientMcpSenderRegistry,
-        // Phase 4: per-runtime device-flow registry so this workspace's ACP
-        // `auth/device_flow` calls publish to its own bridge, not primary.
-        // Imported dynamically so the device-flow provider closure (and its
-        // heavy transitive deps) stays out of the serve fast-path bundle.
-        deviceFlowRegistry: (
-          await import('./server/device-flow-registry.js')
-        ).createDeviceFlowRegistry({ bridge: secondaryBridge })
-          .deviceFlowRegistry,
       });
     }
 
