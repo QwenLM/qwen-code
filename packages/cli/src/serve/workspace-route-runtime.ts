@@ -104,13 +104,19 @@ export function requireTrustedWorkspaceRuntime(
   res: Response,
 ): boolean {
   if (runtime.trusted) return true;
-  res.status(403).json({
-    error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
-    code: 'untrusted_workspace',
-    workspaceCwd: runtime.workspaceCwd,
-    workspaceId: runtime.workspaceId,
-  });
+  sendUntrustedWorkspaceResponse(res);
   return false;
+}
+
+export function sendUntrustedWorkspaceResponse(
+  res: Response,
+  extra?: { sessionId?: string },
+): void {
+  res.status(403).json({
+    error: 'Workspace is not trusted.',
+    code: 'untrusted_workspace',
+    ...extra,
+  });
 }
 
 export function getWorkspaceRouteContext(

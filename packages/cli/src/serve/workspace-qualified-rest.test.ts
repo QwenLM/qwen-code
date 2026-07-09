@@ -473,6 +473,9 @@ describe('workspace-qualified core REST', () => {
         .set('Host', host());
       expect(mcp.status).toBe(403);
       expect(mcp.body.code).toBe('untrusted_workspace');
+      expect(mcp.body.error).toBe('Workspace is not trusted.');
+      expect(mcp.body).not.toHaveProperty('workspaceCwd');
+      expect(mcp.body).not.toHaveProperty('workspaceId');
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -532,6 +535,9 @@ describe('workspace-qualified core REST', () => {
         .set('Host', host());
       expect(res.status).toBe(403);
       expect(res.body.code).toBe('untrusted_workspace');
+      expect(res.body.error).toBe('Workspace is not trusted.');
+      expect(res.body).not.toHaveProperty('workspaceCwd');
+      expect(res.body).not.toHaveProperty('workspaceId');
     } finally {
       await fsp.rm(untrusted.scratch, { recursive: true, force: true });
     }

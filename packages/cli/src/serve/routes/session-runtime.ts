@@ -10,6 +10,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { sendUntrustedWorkspaceResponse } from '../workspace-route-runtime.js';
 
 export function requireSessionRuntime(opts: {
   sessionId: string;
@@ -43,13 +44,7 @@ export function requireSessionRuntime(opts: {
         workspaceCwd: runtime.workspaceCwd,
         ...details,
       });
-      res.status(403).json({
-        error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
-        code: 'untrusted_workspace',
-        sessionId,
-        workspaceId: runtime.workspaceId,
-        workspaceCwd: runtime.workspaceCwd,
-      });
+      sendUntrustedWorkspaceResponse(res, { sessionId });
       return undefined;
     }
     return runtime;

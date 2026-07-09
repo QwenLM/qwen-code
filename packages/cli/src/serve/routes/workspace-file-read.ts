@@ -8,10 +8,10 @@ import * as path from 'node:path';
 import type { Application, Request, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  FsError,
   MAX_READ_BYTES,
   canonicalizeWorkspace,
   isFsError,
-  type FsError,
   type WorkspaceFileSystemFactory,
 } from '../fs/index.js';
 import {
@@ -524,16 +524,30 @@ export function workspaceRelative(req: Request, resolved: string): string {
     throw new Error('bound workspace is not configured');
   }
   let rel = path.relative(boundWorkspace, resolved);
-  if (rel.startsWith('..')) {
+  if (isOutsideWorkspaceRelative(rel)) {
     try {
       rel = path.relative(canonicalizeWorkspace(boundWorkspace), resolved);
     } catch {
-      // Keep the original relative path; the route will still avoid returning
-      // an absolute path if an injected workspace root cannot be canonicalized.
+      throw new FsError(
+        'path_outside_workspace',
+        'path resolved outside workspace',
+      );
     }
+  }
+  if (isOutsideWorkspaceRelative(rel)) {
+    throw new FsError(
+      'path_outside_workspace',
+      'path resolved outside workspace',
+    );
   }
   if (rel === '') return '.';
   return path.sep === '/' ? rel : rel.split(path.sep).join('/');
+}
+
+function isOutsideWorkspaceRelative(rel: string): boolean {
+  return (
+    rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)
+  );
 }
 
 export function registerWorkspaceFileReadRoutes(

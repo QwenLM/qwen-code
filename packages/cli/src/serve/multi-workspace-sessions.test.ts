@@ -501,6 +501,9 @@ describe('multi-workspace session dispatch', () => {
 
     expect(untrustedRes.status).toBe(403);
     expect(untrustedRes.body.code).toBe('untrusted_workspace');
+    expect(untrustedRes.body.error).toBe('Workspace is not trusted.');
+    expect(untrustedRes.body).not.toHaveProperty('workspaceCwd');
+    expect(untrustedRes.body).not.toHaveProperty('workspaceId');
     expect(untrusted.secondaryBridge.spawnCalls).toEqual([]);
     expect(daemonLog.warn).toHaveBeenCalledWith(
       'session routing failed',
@@ -521,7 +524,10 @@ describe('multi-workspace session dispatch', () => {
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('untrusted_workspace');
-    expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
+    expect(res.body.error).toBe('Workspace is not trusted.');
+    expect(res.body.sessionId).toBe('secondary-session');
+    expect(res.body).not.toHaveProperty('workspaceCwd');
+    expect(res.body).not.toHaveProperty('workspaceId');
     expect(secondaryBridge.promptCalls).toEqual([]);
   });
 
@@ -733,6 +739,9 @@ describe('multi-workspace session dispatch', () => {
 
     expect(untrustedRes.status).toBe(403);
     expect(untrustedRes.body.code).toBe('untrusted_workspace');
+    expect(untrustedRes.body.error).toBe('Workspace is not trusted.');
+    expect(untrustedRes.body).not.toHaveProperty('workspaceCwd');
+    expect(untrustedRes.body).not.toHaveProperty('workspaceId');
     expect(untrusted.primaryBridge.restoreCalls).toEqual([]);
     expect(untrusted.secondaryBridge.restoreCalls).toEqual([]);
     expect(daemonLog.warn).toHaveBeenCalledWith(
@@ -990,7 +999,9 @@ describe('multi-workspace session dispatch', () => {
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('untrusted_workspace');
-    expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
+    expect(res.body.error).toBe('Workspace is not trusted.');
+    expect(res.body).not.toHaveProperty('workspaceCwd');
+    expect(res.body).not.toHaveProperty('workspaceId');
     expect(secondaryBridge.listCalls).toEqual([]);
     expect(daemonLog.warn).toHaveBeenCalledWith(
       'session routing failed',
@@ -1015,7 +1026,9 @@ describe('multi-workspace session dispatch', () => {
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('untrusted_workspace');
-    expect(res.body.workspaceCwd).toBe(PRIMARY_CWD);
+    expect(res.body.error).toBe('Workspace is not trusted.');
+    expect(res.body).not.toHaveProperty('workspaceCwd');
+    expect(res.body).not.toHaveProperty('workspaceId');
     expect(daemonLog.warn).toHaveBeenCalledWith(
       'session routing failed',
       expect.objectContaining({

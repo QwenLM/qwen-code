@@ -63,7 +63,10 @@ import {
 } from '../server/session-export.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import { requireSessionRuntime } from './session-runtime.js';
-import { resolveWorkspaceRuntimeFromParam } from '../workspace-route-runtime.js';
+import {
+  resolveWorkspaceRuntimeFromParam,
+  sendUntrustedWorkspaceResponse,
+} from '../workspace-route-runtime.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -211,11 +214,7 @@ export function registerSessionRoutes(
         workspaceId: runtime.workspaceId,
         workspaceCwd: runtime.workspaceCwd,
       });
-      res.status(403).json({
-        error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
-        code: 'untrusted_workspace',
-        workspaceCwd: runtime.workspaceCwd,
-      });
+      sendUntrustedWorkspaceResponse(res);
       return undefined;
     }
     return { runtime, workspaceCwd: runtime.workspaceCwd };
@@ -290,12 +289,7 @@ export function registerSessionRoutes(
         workspaceId: runtime.workspaceId,
         workspaceCwd: runtime.workspaceCwd,
       });
-      res.status(403).json({
-        error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
-        code: 'untrusted_workspace',
-        workspaceCwd: runtime.workspaceCwd,
-        workspaceId: runtime.workspaceId,
-      });
+      sendUntrustedWorkspaceResponse(res);
       return null;
     }
     return runtime;
@@ -430,12 +424,7 @@ export function registerSessionRoutes(
         workspaceId: runtime.workspaceId,
         workspaceCwd: runtime.workspaceCwd,
       });
-      res.status(403).json({
-        error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
-        code: 'untrusted_workspace',
-        workspaceCwd: runtime.workspaceCwd,
-        workspaceId: runtime.workspaceId,
-      });
+      sendUntrustedWorkspaceResponse(res);
       return undefined;
     }
 
@@ -1944,12 +1933,7 @@ export function registerSessionRoutes(
           workspaceId: runtime.workspaceId,
           workspaceCwd: runtime.workspaceCwd,
         });
-        res.status(403).json({
-          error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
-          code: 'untrusted_workspace',
-          workspaceCwd: runtime.workspaceCwd,
-          workspaceId: runtime.workspaceId,
-        });
+        sendUntrustedWorkspaceResponse(res);
         return;
       }
       const key = runtime.workspaceCwd;
