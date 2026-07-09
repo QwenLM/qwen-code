@@ -15,10 +15,10 @@
  * to read instead: a goal only advances while its session is resident, so "the
  * live sessions" IS the complete set of goals that are actually running.
  *
- * A session whose child is wedged or dying rejects; those are dropped rather
- * than failing the whole list, so one bad session can't hide the others. The
- * per-call timeout is the bridge's, and the calls run concurrently, so a wedged
- * child costs one timeout rather than one per session.
+ * A session whose child is wedged or dying rejects; those are dropped (and
+ * logged) rather than failing the whole list, so one bad session can't hide the
+ * others. The per-call timeout is the bridge's, and the calls run concurrently,
+ * so a wedged child costs one timeout rather than one per session.
  *
  * Read-only: clearing a goal stays on `POST /session/:id/goal/clear`, and
  * setting one stays a prompt (`/goal <condition>` registers the hook and kicks
@@ -76,10 +76,21 @@ export function registerGoalsRoutes(
       );
 
       const goals: GoalView[] = [];
-      for (const outcome of settled) {
+      const dropped: string[] = [];
+      for (const [index, outcome] of settled.entries()) {
         // A session that died between the list and the probe simply has no
-        // goal to report.
-        if (outcome.status !== 'fulfilled') continue;
+        // goal to report. Dropping it keeps one bad session from hiding the
+        // others, but do not drop it silently: an empty page and a page whose
+        // probes all failed look identical from the client.
+        if (outcome.status !== 'fulfilled') {
+          const sessionId = sessions[index]?.sessionId ?? '(unknown)';
+          const reason =
+            outcome.reason instanceof Error
+              ? outcome.reason.message
+              : String(outcome.reason);
+          dropped.push(`${sessionId}: ${reason}`);
+          continue;
+        }
         const { session, goal } = outcome.value;
         if (!goal.active) continue;
         goals.push({
@@ -94,6 +105,12 @@ export function registerGoalsRoutes(
           running: session.hasActivePrompt,
         });
       }
+      if (dropped.length > 0) {
+        writeStderrLine(
+          `qwen serve: GET /goals could not probe ${dropped.length} of ${sessions.length} session(s): ${dropped.join('; ')}`,
+        );
+      }
+
       // Newest first, matching the scheduled-tasks page.
       goals.sort((a, b) => b.setAt - a.setAt);
 

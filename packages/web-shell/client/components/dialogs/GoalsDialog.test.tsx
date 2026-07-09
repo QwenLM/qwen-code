@@ -60,6 +60,20 @@ function findButton(label: string): HTMLButtonElement | undefined {
   );
 }
 
+/** Set the condition textarea the way React's onChange expects. */
+function setTextarea(value: string) {
+  const textarea = document.querySelector('textarea');
+  if (!textarea) throw new Error('textarea not found');
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      'value',
+    )!.set!;
+    setter.call(textarea, value);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
 async function mount(
   goals: MockGoal[],
   opts: {
@@ -202,21 +216,40 @@ describe('GoalsDialog', () => {
     expect(document.body.textContent).toContain('Enter a condition');
   });
 
+  it('rejects a condition longer than MAX_GOAL_LENGTH', async () => {
+    const onCreateGoal = vi.fn();
+    await mount([], { onCreateGoal });
+
+    click(findButton('New goal'));
+    setTextarea('x'.repeat(4001));
+    click(findButton('Set goal'));
+    await flush();
+
+    expect(onCreateGoal).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain('limited to 4000 characters');
+  });
+
+  it('rejects a clear keyword, which would drop the goal instead of setting it', async () => {
+    const onCreateGoal = vi.fn();
+    await mount([], { onCreateGoal });
+
+    click(findButton('New goal'));
+    // `/goal clear` clears; a form that accepted it would spawn a session that
+    // immediately drops its own goal.
+    setTextarea('  Clear  ');
+    click(findButton('Set goal'));
+    await flush();
+
+    expect(onCreateGoal).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain('clears a goal rather than');
+  });
+
   it('submits a trimmed condition and closes the form', async () => {
     const onCreateGoal = vi.fn();
     await mount([], { onCreateGoal });
 
     click(findButton('New goal'));
-    const textarea = document.querySelector('textarea');
-    if (!textarea) throw new Error('textarea not found');
-    act(() => {
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLTextAreaElement.prototype,
-        'value',
-      )!.set!;
-      setter.call(textarea, '  ship it  ');
-      textarea.dispatchEvent(new Event('input', { bubbles: true }));
-    });
+    setTextarea('  ship it  ');
     click(findButton('Set goal'));
     await flush();
 

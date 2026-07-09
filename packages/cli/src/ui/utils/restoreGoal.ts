@@ -5,6 +5,7 @@
  */
 
 import {
+  createDebugLogger,
   registerGoalHook,
   setGoalTerminalObserver,
   setLastGoalTerminal,
@@ -15,6 +16,8 @@ import {
   type GoalTerminalKind,
   type SlashCommandRecordPayload,
 } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('GOAL_RESTORE');
 import {
   isGoalStatusKind,
   isTerminalGoalStatusKind,
@@ -166,9 +169,14 @@ export function recordGoalStatusItem(
       rawCommand,
       outputHistoryItems: [{ ...item } as Record<string, unknown>],
     });
-  } catch {
+  } catch (error) {
     // Recording is best-effort; the live goal loop must not fail because the
-    // session transcript could not be appended.
+    // session transcript could not be appended. But swallowing it silently is
+    // how a goal ends up unrecoverable on resume — the failure mode this
+    // recording exists to prevent — so leave a trace.
+    debugLogger.warn(
+      `Failed to record goal_status (kind=${item.kind}): ${error}`,
+    );
   }
 }
 

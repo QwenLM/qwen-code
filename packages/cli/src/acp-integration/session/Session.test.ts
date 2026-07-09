@@ -7440,6 +7440,45 @@ describe('Session', () => {
         ]);
       });
 
+      it('persists the cleared card when /goal clear arrives as a prompt', async () => {
+        // The web shell clears via the `sessionGoalClear` ext method, but an ACP
+        // client (Zed) can send `/goal clear` as a prompt. That returns a
+        // `message` result, whose `outputHistoryItems` still carry the cleared
+        // card — `#emitGoalStatusItems` runs before the switch — so the card is
+        // persisted on this path too.
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'message',
+          messageType: 'info',
+          content: 'Goal cleared: check weather',
+          outputHistoryItems: [
+            {
+              type: MessageType.GOAL_STATUS,
+              kind: 'cleared',
+              condition: 'check weather',
+              iterations: 2,
+              durationMs: 5000,
+            },
+          ],
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/goal clear' }],
+        });
+
+        expect(recordedGoalCards()).toEqual([
+          {
+            type: MessageType.GOAL_STATUS,
+            kind: 'cleared',
+            condition: 'check weather',
+            iterations: 2,
+            durationMs: 5000,
+          },
+        ]);
+      });
+
       it('persists the goal card so a resumed session can restore the hook', async () => {
         vi.mocked(
           nonInteractiveCliCommands.handleSlashCommand,

@@ -71,6 +71,11 @@ import { useIsLargeScreen } from './hooks/useIsLargeScreen';
 import { MAX_SPLIT_PANES, parseSplitSessionIds } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { GoalsDialog } from './components/dialogs/GoalsDialog';
+import {
+  goalArgOf,
+  isGoalClearCommand,
+  isGoalClearKeyword,
+} from './utils/goalCondition';
 import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
@@ -253,25 +258,6 @@ const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
 
 function normalizeHiddenCommand(command: string): string {
   return command.trim().replace(/^\/+/, '').toLowerCase();
-}
-
-// Keep in sync with CLEAR_KEYWORDS in packages/cli/src/ui/commands/goalCommand.ts
-const GOAL_CLEAR_KEYWORDS = new Set([
-  'clear',
-  'stop',
-  'off',
-  'reset',
-  'none',
-  'cancel',
-]);
-
-/** The argument of a `/goal …` command; `''` for a bare `/goal`. */
-function goalArgOf(text: string): string {
-  return text.replace(/^\/goal\b/i, '').trim();
-}
-
-function isGoalClearCommand(text: string): boolean {
-  return GOAL_CLEAR_KEYWORDS.has(goalArgOf(text).toLowerCase());
 }
 
 interface ActiveGoalStatus {
@@ -2917,7 +2903,6 @@ export function App({
       },
     ) => {
       const goalArg = goalArgOf(text);
-      const lowerGoalArg = goalArg.toLowerCase();
       const sendToDaemon = opts?.sendToDaemon ?? true;
       const sendGoalPrompt = () => {
         const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
@@ -2934,7 +2919,7 @@ export function App({
         return clearComposerOnPromptStart ? false : true;
       };
 
-      if (goalArg && GOAL_CLEAR_KEYWORDS.has(lowerGoalArg)) {
+      if (goalArg && isGoalClearKeyword(goalArg)) {
         if (!sendToDaemon) {
           store.appendLocalUserMessage(text);
           dispatchGoalCleared(activeGoalRef.current);
@@ -4906,9 +4891,16 @@ export function App({
                         // drop the goal into the wrong (still-current) session.
                         if (!created) return;
                         onSessionIdChange?.(undefined);
-                        await sendPrompt(`/goal ${condition}`, undefined, {
-                          clearComposerOnPromptStart: true,
-                        });
+                        try {
+                          await sendPrompt(`/goal ${condition}`, undefined, {
+                            clearComposerOnPromptStart: true,
+                          });
+                        } catch (error: unknown) {
+                          // The Goals page has already unmounted, so its inline
+                          // form error would never be seen. Toast instead, or the
+                          // goal silently fails to start in the new session.
+                          reportError(error, 'Failed to start the goal');
+                        }
                       }}
                       onOpenSession={(sessionId) => {
                         // The goal's session transcript IS its history.

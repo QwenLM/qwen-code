@@ -12,6 +12,7 @@ import {
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
 import { formatRuntime } from '../../utils/formatRuntime';
+import { isGoalClearKeyword } from '../../utils/goalCondition';
 import styles from './GoalsDialog.module.css';
 
 /** Keep in sync with MAX_GOAL_LENGTH in packages/cli/src/ui/commands/goalCommand.ts */
@@ -124,6 +125,13 @@ export function GoalsDialog({
     }
     if (trimmed.length > MAX_GOAL_LENGTH) {
       setFormError(t('goals.error.tooLong', { max: MAX_GOAL_LENGTH }));
+      return;
+    }
+    // The condition travels to the daemon as `/goal <condition>`, so a bare
+    // clear keyword arrives as a clear command: the fresh session would drop
+    // the goal the instant it was set, with nothing to show for it.
+    if (isGoalClearKeyword(trimmed)) {
+      setFormError(t('goals.error.clearKeyword', { word: trimmed }));
       return;
     }
     setSubmitting(true);

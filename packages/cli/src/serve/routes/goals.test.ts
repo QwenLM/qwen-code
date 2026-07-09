@@ -7,10 +7,16 @@
 import express from 'express';
 import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStderrLine: vi.fn(),
+}));
+
 import type {
   BridgeSessionGoal,
   BridgeSessionSummary,
 } from '@qwen-code/acp-bridge';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { registerGoalsRoutes, type GoalsSessionBridge } from './goals.js';
 
 const WORKSPACE = '/w';
@@ -98,6 +104,7 @@ describe('GET /goals', () => {
   });
 
   it('drops a session whose probe rejects rather than failing the whole list', async () => {
+    vi.mocked(writeStderrLine).mockClear();
     const app = makeApp({
       listWorkspaceSessions: () => [summary('dead'), summary('alive')],
       getSessionGoal: async (id) => {
@@ -119,6 +126,24 @@ describe('GET /goals', () => {
         running: false,
       },
     ]);
+
+    // An empty page and a page whose probes all failed look identical to the
+    // client, so the drop must not be silent.
+    const logged = vi.mocked(writeStderrLine).mock.calls.map((c) => c[0]);
+    expect(logged.join('\n')).toContain('could not probe 1 of 2 session(s)');
+    expect(logged.join('\n')).toContain('dead: Session not found: dead');
+  });
+
+  it('does not log when every probe succeeds', async () => {
+    vi.mocked(writeStderrLine).mockClear();
+    const app = makeApp({
+      listWorkspaceSessions: () => [summary('s1')],
+      getSessionGoal: async () => noGoal,
+    });
+
+    await request(app).get('/goals');
+
+    expect(writeStderrLine).not.toHaveBeenCalled();
   });
 
   it('probes the live sessions concurrently, one call each', async () => {
