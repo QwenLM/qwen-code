@@ -13,6 +13,7 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
 import { useMessages } from '../hooks/useMessages';
+import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptImage } from '../adapters/promptTypes';
 import type { ComposerSubmitCommit } from '../hooks/useComposerCore';
@@ -31,6 +32,15 @@ import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
+import type {
+  TurnOutputKind,
+  TurnOutputOpenRequest,
+} from './artifacts/TurnOutputs';
+import {
+  getArtifactsByTurn,
+  getFileChangesByTurn,
+  getScheduledTasksByTurn,
+} from './artifacts/turnOutputSelectors';
 import styles from './ChatPane.module.css';
 
 // Split-view panes get the same interactive composer controls as the main chat,
@@ -42,12 +52,19 @@ const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
   'model',
   'voice',
 ];
+const TURN_OUTPUT_KINDS: readonly TurnOutputKind[] = [
+  'file',
+  'artifact',
+  'scheduled_task',
+];
 
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */
   title?: string;
   onClose?: () => void;
   onError?: (error: unknown, fallback: string) => void;
+  onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  messageTurnOutputs?: readonly TurnOutputKind[];
 }
 
 /**
@@ -57,13 +74,20 @@ export interface ChatPaneProps {
  * state, approvals, and composer, and the browser scopes keyboard focus to the
  * pane the user clicks into — so there is no cross-pane approval arbitration.
  */
-export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
+export function ChatPane({
+  title,
+  onClose,
+  onError,
+  onRightPanelOpen,
+  messageTurnOutputs,
+}: ChatPaneProps) {
   const { t } = useI18n();
   const connection = useConnection();
   const actions = useActions();
   const messages = useMessages(t);
   const blocks = useTranscriptBlocks();
   const streamingState = useStreamingState();
+  const { artifacts } = useSessionArtifacts();
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -90,6 +114,22 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
   const approvalActive =
     pendingToolApproval !== null || pendingAskUserApproval !== null;
   const isResponding = streamingState !== 'idle';
+  const artifactsByTurn = useMemo(
+    () => getArtifactsByTurn(messages, artifacts),
+    [messages, artifacts],
+  );
+  const fileChangesByTurn = useMemo(
+    () => getFileChangesByTurn(messages, artifactsByTurn),
+    [messages, artifactsByTurn],
+  );
+  const scheduledTasksByTurn = useMemo(
+    () => getScheduledTasksByTurn(messages),
+    [messages],
+  );
+  const visibleTurnOutputKinds = useMemo(
+    () => new Set<TurnOutputKind>(messageTurnOutputs ?? TURN_OUTPUT_KINDS),
+    [messageTurnOutputs],
+  );
 
   // Anchor the streaming timer to the turn's own start (the last user message's
   // timestamp) rather than letting StreamingStatus fall back to "now" — so a
@@ -278,6 +318,18 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
           isResponding={isResponding}
           workspaceCwd={connection.workspaceCwd || ''}
           hideSessionTimeline
+          turnFileChanges={
+            visibleTurnOutputKinds.has('file') ? fileChangesByTurn : undefined
+          }
+          turnArtifacts={
+            visibleTurnOutputKinds.has('artifact') ? artifactsByTurn : undefined
+          }
+          turnScheduledTasks={
+            visibleTurnOutputKinds.has('scheduled_task')
+              ? scheduledTasksByTurn
+              : undefined
+          }
+          onTurnOutputOpen={onRightPanelOpen}
         />
       </div>
 

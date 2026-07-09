@@ -17,6 +17,7 @@ import type {
   DaemonSessionRecapResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionTaskStatus,
+  DaemonSessionArtifactsEnvelope,
   DaemonTranscriptStore,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
@@ -1086,6 +1087,26 @@ export function createDaemonSessionActions({
           'Load stats failed',
           error,
           'load_stats',
+        );
+      }
+    },
+
+    async loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope> {
+      const session = sessionRef.current;
+      if (!session) {
+        throw new Error('Daemon session is not connected');
+      }
+      try {
+        return await withActionTimeout(
+          session.artifacts(),
+          'Load artifacts timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Load artifacts failed',
+          error,
+          'load_artifacts',
         );
       }
     },

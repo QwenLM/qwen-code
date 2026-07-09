@@ -128,6 +128,10 @@ export type {
   WebShellMarkdownCustomization,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
+export type {
+  TurnOutputKind,
+  TurnOutputOpenRequest,
+} from './components/artifacts/TurnOutputs';
 export {
   ECHARTS_FULLDATA_LANGUAGE,
   EchartsFullDataBlock,

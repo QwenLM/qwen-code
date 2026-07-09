@@ -82,6 +82,7 @@ const {
       forkSession: vi.fn().mockResolvedValue({ launched: false }),
       sendShellCommand: vi.fn().mockResolvedValue(undefined),
       getStats: vi.fn().mockResolvedValue({}),
+      loadArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
       loadSession: vi.fn().mockResolvedValue(undefined),
     },
     mockWorkspaceActions: {
@@ -137,6 +138,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     onDismissFollowup: mockFollowup.onDismissFollowup,
   }),
   useSessionNotices: () => ({ notices: [], dismissNotice: vi.fn() }),
+  usePromptStatus: () => 'idle',
   useSettings: () => ({
     settings: [],
     setValue: vi.fn().mockResolvedValue(undefined),
@@ -147,7 +149,10 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useTranscriptBlocks: () => testState.blocks,
   useTranscriptStore: () => mockStore,
   useWorkspaceActions: () => mockWorkspaceActions,
-  useWorkspaceEventSignals: () => ({ extensionsVersion: 0 }),
+  useWorkspaceEventSignals: () => ({
+    artifactsVersion: 0,
+    extensionsVersion: 0,
+  }),
 }));
 
 vi.mock('@qwen-code/sdk/daemon', async (importOriginal) => ({

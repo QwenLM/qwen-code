@@ -2162,6 +2162,29 @@ describe('DaemonSessionProvider', () => {
             durationMs: 42,
           },
         };
+        yield {
+          id: 26,
+          v: 1,
+          type: 'artifact_changed',
+          data: {
+            sessionId: 'session-1',
+            change: {
+              action: 'created',
+              artifactId: 'artifact-1',
+              artifact: {
+                id: 'artifact-1',
+                kind: 'html',
+                storage: 'workspace',
+                source: 'tool',
+                status: 'available',
+                title: 'Report',
+                workspacePath: 'report.html',
+                createdAt: '2026-07-09T00:00:00.000Z',
+                updatedAt: '2026-07-09T00:00:00.000Z',
+              },
+            },
+          },
+        };
       },
     });
     sdkMocks.sessions.push(session);
@@ -2183,6 +2206,7 @@ describe('DaemonSessionProvider', () => {
       toolsVersion: 1,
       settingsVersion: 1,
       mcpVersion: 1,
+      artifactsVersion: 1,
       initVersion: 0,
       authVersion: 0,
     });

@@ -27,6 +27,7 @@ const submitPermission = vi.fn(async () => {});
 const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
+const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
@@ -36,10 +37,13 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     cancel,
     setApprovalMode,
     setModel,
+    loadArtifacts,
   }),
   useConnection: () => connectionState,
+  usePromptStatus: () => 'idle',
   useStreamingState: () => streamingStateValue,
   useTranscriptBlocks: () => [],
+  useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
 }));
 
 let messagesState: any[];
@@ -161,6 +165,8 @@ beforeEach(() => {
   messagesState = [{ id: 'm1', role: 'user', content: 'hi' }];
   latestOnSubmit = undefined;
   sendPrompt.mockReset();
+  loadArtifacts.mockReset();
+  loadArtifacts.mockResolvedValue({ artifacts: [] });
   // Each sendPrompt returns a promise the test controls, so we can assert the
   // draft is committed on admission (onAdmitted) rather than on turn completion
   // (promise resolution). `sendPromptAdmit` captures the options.onAdmitted hook.

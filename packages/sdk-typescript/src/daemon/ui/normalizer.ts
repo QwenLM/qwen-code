@@ -9,6 +9,7 @@ import type {
   DaemonAuthProviderId,
   DaemonErrorKind,
   DaemonEvent,
+  DaemonSessionArtifactChange,
 } from '../types.js';
 import { DAEMON_ERROR_KINDS } from '../types.js';
 import type {
@@ -298,6 +299,9 @@ export function normalizeDaemonEvent(
 
     case 'extensions_changed':
       return normalizeExtensionsChanged(event, base);
+
+    case 'artifact_changed':
+      return normalizeArtifactChanged(event, base);
 
     // ── Auth device-flow events (RFC 8628) ─────────────────
     case 'auth_device_flow_started':
@@ -1121,6 +1125,25 @@ function normalizeSessionMetadataUpdated(
       type: 'session.metadata.changed',
       sessionId,
       ...(displayName !== undefined ? { displayName } : {}),
+    },
+  ];
+}
+
+function normalizeArtifactChanged(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const sessionId = getString(event.data, 'sessionId');
+  const change = isRecord(event.data) ? event.data['change'] : undefined;
+  if (!sessionId || !isRecord(change)) {
+    return fallbackDebug(event, base, 'malformed artifact_changed payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'session.artifact.changed',
+      sessionId,
+      change: change as unknown as DaemonSessionArtifactChange,
     },
   ];
 }
