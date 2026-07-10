@@ -57,6 +57,14 @@ function writePersistedSession(persistPath: string, key = 'key1'): void {
   );
 }
 
+function invalidationMetadataSize(router: SessionRouter): number {
+  const state = router as unknown as {
+    routeGenerations?: Map<string, unknown>;
+    routeTokens?: Map<string, unknown>;
+  };
+  return (state.routeTokens ?? state.routeGenerations)?.size ?? 0;
+}
+
 describe('SessionRouter', () => {
   let bridge: ChannelAgentBridge;
   let tempDirs: string[] = [];
@@ -549,6 +557,32 @@ describe('SessionRouter', () => {
 
       expect(router.hasSession('ch', 'bob', 'chat1', 'thread1')).toBe(true);
       expect(router.hasSession('ch', 'bob', 'chat1', 'thread2')).toBe(false);
+    });
+
+    it('releases invalidation metadata for cleared and failed routes', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+
+      for (let index = 0; index < 20; index++) {
+        router.removeSession('ch', `missing-${index}`, `chat-${index}`);
+      }
+
+      for (let index = 0; index < 20; index++) {
+        await router.resolve('ch', `complete-${index}`, `chat-${index}`);
+        router.removeSession('ch', `complete-${index}`, `chat-${index}`);
+      }
+
+      router.setBridge({
+        ...mockBridge(),
+        newSession: vi.fn().mockRejectedValue(new Error('unavailable')),
+      });
+      for (let index = 0; index < 20; index++) {
+        await expect(
+          router.resolve('ch', `failed-${index}`, `chat-${index}`),
+        ).rejects.toThrow('unavailable');
+      }
+
+      expect(router.getAll()).toEqual([]);
+      expect(invalidationMetadataSize(router)).toBe(0);
     });
   });
 

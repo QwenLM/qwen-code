@@ -30,7 +30,7 @@ interface SessionOperation {
   promise: Promise<string>;
   target: SessionTarget;
   lifecycleGeneration: number;
-  routeGeneration: number;
+  routeToken: object;
   invalidationError?: Error;
 }
 
@@ -52,7 +52,7 @@ export class SessionRouter {
   private creatingSessions: Map<string, SessionOperation> = new Map();
   private sessionLoadWindows: Set<SessionLoadWindow> = new Set();
   private readonly liveSessionIds = new Set<string>();
-  private readonly routeGenerations = new Map<string, number>();
+  private readonly routeTokens = new Map<string, object>();
   private lifecycleGeneration = 0;
 
   private bridge: ChannelAgentBridge;
@@ -168,6 +168,7 @@ export class SessionRouter {
           if (this.creatingSessions.get(key) === creating) {
             this.creatingSessions.delete(key);
           }
+          this.releaseRouteToken(key, creating);
           failedWaits++;
           if (failedWaits > 3) throw error;
           continue;
@@ -198,6 +199,7 @@ export class SessionRouter {
         if (this.creatingSessions.get(key) === operation) {
           this.creatingSessions.delete(key);
         }
+        this.releaseRouteToken(key, operation);
       }
     }
   }
@@ -593,6 +595,7 @@ export class SessionRouter {
           if (this.creatingSessions.get(key) === operation) {
             this.creatingSessions.delete(key);
           }
+          this.releaseRouteToken(key, operation);
         }
       }
     } finally {
@@ -618,7 +621,7 @@ export class SessionRouter {
     this.creatingSessions.clear();
     this.sessionLoadWindows.clear();
     this.liveSessionIds.clear();
-    this.routeGenerations.clear();
+    this.routeTokens.clear();
   }
 
   /** Clear in-memory state and delete persist file. Used on clean shutdown. */
@@ -792,11 +795,16 @@ export class SessionRouter {
     target: SessionTarget,
     run: (operation: SessionOperation) => Promise<string>,
   ): SessionOperation {
+    let routeToken = this.routeTokens.get(key);
+    if (!routeToken) {
+      routeToken = {};
+      this.routeTokens.set(key, routeToken);
+    }
     const operation: SessionOperation = {
       promise: Promise.resolve(''),
       target,
       lifecycleGeneration: this.lifecycleGeneration,
-      routeGeneration: this.routeGenerations.get(key) ?? 0,
+      routeToken,
     };
     operation.promise = Promise.resolve()
       .then(() => run(operation))
@@ -808,7 +816,7 @@ export class SessionRouter {
   }
 
   private invalidateRouteOperation(key: string): void {
-    this.routeGenerations.set(key, (this.routeGenerations.get(key) ?? 0) + 1);
+    this.routeTokens.delete(key);
     const operation = this.creatingSessions.get(key);
     if (!operation) return;
     this.invalidateOperation(operation);
@@ -835,13 +843,23 @@ export class SessionRouter {
     sessionId: string,
     operation: SessionOperation,
   ): void {
-    if (operation.routeGeneration !== (this.routeGenerations.get(key) ?? 0)) {
+    if (operation.routeToken !== this.routeTokens.get(key)) {
       this.invalidateOperation(operation);
     }
     if (this.toSession.get(key) !== sessionId) {
       this.invalidateOperation(operation);
     }
     this.assertOperationCurrent(operation);
+  }
+
+  private releaseRouteToken(key: string, operation: SessionOperation): void {
+    if (
+      this.routeTokens.get(key) === operation.routeToken &&
+      !this.toSession.has(key) &&
+      !this.creatingSessions.has(key)
+    ) {
+      this.routeTokens.delete(key);
+    }
   }
 
   private createSessionReservation(): SessionReservation {
