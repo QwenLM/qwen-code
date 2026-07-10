@@ -1490,6 +1490,52 @@ describe('EnhancedMarkdownTable', () => {
     expect(writeText).toHaveBeenCalledWith('Note\nline 1 line 2 line 3');
   });
 
+  it('flattens cell-internal tabs when copying a selection', () => {
+    const writeText = mockClipboard();
+    const tabbedText = 'data\t=CMD("calc")';
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Note</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>{tabbedText}</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
+    click(textButton(container, 'Copy TSV'));
+
+    expect(writeText).toHaveBeenCalledWith('data =CMD("calc")');
+  });
+
+  it('flattens cell-internal tabs when quick copying the visible table', async () => {
+    const writeText = mockClipboard();
+    const tabbedText = 'data\t=CMD("calc")';
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Note</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>{tabbedText}</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    await act(async () => {
+      textButton(container, 'Quick copy').click();
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith('Note\ndata =CMD("calc")');
+  });
+
   it('only shows the long text toolbar action for visible rows', () => {
     const longText =
       'A long visible note that should make the table show a toolbar expand text action before filtering.';

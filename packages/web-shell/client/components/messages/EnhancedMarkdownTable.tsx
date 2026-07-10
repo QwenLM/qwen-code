@@ -372,7 +372,7 @@ function sanitizeForClipboard(value: string): string {
 }
 
 function cellClipboardText(cell: EnhancedTableCell | undefined): string {
-  return (cell?.rawText ?? cell?.text ?? '').replace(/\r\n|\r|\n/g, ' ');
+  return (cell?.rawText ?? cell?.text ?? '').replace(/[\r\n\t]+/g, ' ');
 }
 
 function cellReadableText(cell: EnhancedTableCell): string {
