@@ -25,7 +25,7 @@ on:
       version:
         description: 'Version to release (without v prefix)'
         required: true
-        default: '0.6.7'
+        default: '0.7.1'
       notarize:
         description: 'Codesign + notarize the macOS artifacts (false to skip during
           iteration)'
