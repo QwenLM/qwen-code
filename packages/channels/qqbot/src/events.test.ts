@@ -7,6 +7,30 @@ const { mockSendQQMessage, mockFetchAccessToken, mockHandleInbound } =
     mockHandleInbound: vi.fn(),
   }));
 
+const { MockWebSocket } = vi.hoisted(() => {
+  class MockWebSocket {
+    static OPEN = 1;
+    readyState = MockWebSocket.OPEN;
+    send = vi.fn();
+    close = vi.fn();
+    private listeners = new Map<string, Array<(...args: unknown[]) => void>>();
+    constructor(_url: string) {}
+    on(event: string, listener: (...args: unknown[]) => void): this {
+      const arr = this.listeners.get(event) ?? [];
+      arr.push(listener);
+      this.listeners.set(event, arr);
+      return this;
+    }
+    emit(event: string, ...args: unknown[]): void {
+      for (const l of this.listeners.get(event) ?? []) l(...args);
+    }
+  }
+  return { MockWebSocket };
+});
+vi.mock('ws', () => ({
+  default: MockWebSocket,
+}));
+
 vi.mock('node:fs', () => ({
   mkdirSync: vi.fn(),
   readFileSync: vi.fn(),
@@ -731,6 +755,41 @@ describe('handleGroupAll', () => {
     expect(env['text']).toBe(
       '[atMention=false] [Charlie(FEDCBA98…)]: hello world',
     );
+  });
+
+  it('policy=keyword with empty keywordTriggers drops non-@-bot messages', async () => {
+    const ch = makeChannel({
+      groupAllPolicy: 'keyword',
+      keywordTriggers: [],
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    pvt['handleGroupAll'](makeGroupAllEvent({ content: 'hello world' }));
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((c) => c.includes('no keywords configured'))).toBe(true);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('policy=keyword with all-empty-string keywordTriggers drops non-@-bot messages', async () => {
+    const ch = makeChannel({
+      groupAllPolicy: 'keyword',
+      keywordTriggers: ['', '', ''],
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroupAll'](makeGroupAllEvent({ content: 'hello world' }));
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).not.toHaveBeenCalled();
   });
 });
 
@@ -1531,5 +1590,32 @@ describe('extractBotOpenId', () => {
       },
     ]);
     expect(result).toBe('11111111222222223333333344444444');
+  });
+
+  describe('WS close handler abnormal disconnect', () => {
+    it('sets coldStart=true and tryResume=false on abnormal WS close (code 4009 session timeout)', () => {
+      const ch = makeChannel();
+      const chp = ch as unknown as Record<string, unknown>;
+
+      chp['tryResume'] = true;
+      chp['coldStart'] = false;
+
+      // dialGateway creates the ws and registers close handler
+      (
+        chp['dialGateway'] as (
+          url: string,
+          resolve: () => void,
+          reject: (err: Error) => void,
+        ) => void
+      )('wss://gateway.test', vi.fn(), vi.fn());
+
+      const ws = chp['ws'] as {
+        emit: (event: string, ...args: unknown[]) => void;
+      };
+      ws.emit('close', 4009);
+
+      expect(chp['tryResume']).toBe(false);
+      expect(chp['coldStart']).toBe(true);
+    });
   });
 });

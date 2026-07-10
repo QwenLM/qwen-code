@@ -308,7 +308,7 @@ describe('restoreQQState', () => {
     expect(groupActiveMsgEnabled.get('g2')).toBe(false);
   });
 
-  it('filters expired replyMsgId entries (timestamp < 5 min ago)', () => {
+  it('normalizes string-format replyMsgId entries to object format', () => {
     fsStore[statePath] = JSON.stringify({
       replyMsgId: [
         ['u1', 'msg_old'],

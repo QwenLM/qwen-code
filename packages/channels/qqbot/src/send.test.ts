@@ -1093,6 +1093,38 @@ describe('sendMessage', () => {
     });
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
+
+  it('throws ACTIVE_MSG_DISABLED when active messages disabled mid-flow after passive markdown fails (msgId present)', async () => {
+    const ch = makeChannel({ chatType: 'group', replyMsgId: 'msg-001' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const groupActiveMsgEnabled = chp['groupActiveMsgEnabled'] as Map<
+      string,
+      boolean
+    >;
+    groupActiveMsgEnabled.set('test-chat-id', false);
+
+    // Passive markdown fails with non-429 error, triggering mid-flow guard
+    mockSendQQMessage.mockResolvedValueOnce(
+      mockResponse(false, 400, 'bad request'),
+    );
+
+    await expect(ch.sendMessage('test-chat-id', 'hello')).rejects.toMatchObject(
+      {
+        name: 'DeliveryError',
+        code: 'ACTIVE_MSG_DISABLED',
+      },
+    );
+
+    // Passive markdown was attempted but failed
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    // The first call should be passive markdown with msg_id set
+    const firstCall = mockSendQQMessage.mock.calls[0][3] as Record<
+      string,
+      unknown
+    >;
+    expect(firstCall['msg_id']).toBe('msg-001');
+    expect(firstCall['msg_type']).toBe(2);
+  });
 });
 
 describe('setReplyMsgId', () => {
@@ -1985,13 +2017,16 @@ describe('replyMsgId cleanup timer', () => {
         return ch;
       }
 
-      it('keeps streamState on RETRY_EXHAUSTED (permanent error)', async () => {
+      it('keeps streamState on RETRY_EXHAUSTED when buffer has concurrent chunks', async () => {
         vi.useFakeTimers();
         const ch = makeChannelForPerm();
         const chp = ch as unknown as Record<string, unknown>;
 
         const state = {
           chatId: 'test-chat-id',
+          // Set buffer to simulate concurrent chunks arriving during the in-flight send.
+          // Production code clears state.buffer before calling flushAndTrack, but new chunks
+          // can accumulate in state.buffer between the clear and the send's completion.
           buffer: 'test buffer',
           timer: null as ReturnType<typeof setTimeout> | null,
           retryCount: 0,
@@ -2087,6 +2122,91 @@ describe('replyMsgId cleanup timer', () => {
         sendSpy.mockRestore();
         vi.useRealTimers();
       });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // re-buffer exhaustion — streamState entry deleted when retries exhausted
+  // ---------------------------------------------------------------------------
+  describe('re-buffer exhaustion', () => {
+    function makeChannelForReBuffer(): QQChannelInstance {
+      const ch = new QQChannel(
+        'test-bot',
+        {
+          type: 'qq',
+          token: '',
+          senderPolicy: 'open' as const,
+          allowedUsers: [],
+          sessionScope: 'user' as const,
+          cwd: '/tmp',
+          groupPolicy: 'disabled' as const,
+          groups: {},
+          appID: 'test-app-id',
+          appSecret: 'test-secret',
+        },
+        {} as unknown as ChannelAgentBridge,
+      );
+      return ch;
+    }
+
+    it('deletes streamState on re-buffer exhaustion when retryCount >= maxFlushRetries', async () => {
+      vi.useFakeTimers();
+      const ch = makeChannelForReBuffer();
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const state = {
+        chatId: 'test-chat-id',
+        buffer: '',
+        timer: null as ReturnType<typeof setTimeout> | null,
+        retryCount: 2, // one less than default maxFlushRetries=3
+      };
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+        }
+      >;
+      streamState.set('session-exhaust', state);
+      // Set access token and expiry so resolveRoute succeeds
+      chp['accessToken'] = 'test-token';
+      chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+      // Set chatTypeMap so sendMessage can resolveRoute for the chatId
+      const chatTypeMap = chp['chatTypeMap'] as Map<string, string>;
+      chatTypeMap.set('test-chat-id', 'c2c');
+
+      // sendMessage throws RATE_LIMITED (transient) when API returns 429.
+      // This is NOT a permanent code, so flushAndTrack falls through to
+      // the re-buffer-and-retry path where exhaustion deletes the entry.
+      mockSendQQMessage.mockResolvedValueOnce(mockResponse(false, 429));
+
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      // buffer exceeds bufferFlushLength (4096)
+      const longBuffer = 'X'.repeat(4096);
+      (
+        chp['flushAndTrack'] as (
+          sessionId: string,
+          buffer: string,
+          s: typeof state,
+          logLabel: string,
+        ) => void
+      )('session-exhaust', longBuffer, state, 'test');
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(streamState.has('session-exhaust')).toBe(false);
+
+      const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+      expect(calls.some((c) => c.includes('retries exhausted'))).toBe(true);
+
+      stderrSpy.mockRestore();
+      vi.useRealTimers();
     });
   });
 

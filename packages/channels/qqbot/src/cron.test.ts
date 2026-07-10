@@ -306,6 +306,8 @@ describe('cronTextHandler', () => {
 
     // Verify buffer was cleaned up — no retry, no lingering entry
     // RETRY_EXHAUSTED errors clean up immediately (permanent failure)
+    expect(cronBuffer.has('sess-fail')).toBe(false);
+    // RETRY_EXHAUSTED errors clean up immediately (permanent failure)
 
     stderrSpy.mockRestore();
   });
