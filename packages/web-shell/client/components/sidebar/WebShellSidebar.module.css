@@ -220,67 +220,10 @@
   color: var(--sidebar-foreground);
 }
 
-.workspacePickerSelect {
-  width: 100%;
-  padding: 6px 8px;
-  border-radius: 8px;
-  border: 1px solid var(--sidebar-accent);
-  background: transparent;
-  color: var(--sidebar-foreground);
-  font-size: 13px;
-  line-height: 18px;
-  cursor: pointer;
-}
-
 .workspaceList {
   display: flex;
   flex-direction: column;
   gap: 2px;
-}
-
-.workspaceItem {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 6px 8px;
-  border-radius: 6px;
-  border: none;
-  background: transparent;
-  color: var(--sidebar-foreground);
-  font-size: 13px;
-  text-align: left;
-  cursor: pointer;
-  transition: background 0.1s;
-}
-
-.workspaceItem:hover {
-  background: var(--sidebar-accent);
-}
-
-.workspaceItemActive {
-  background: var(--sidebar-accent);
-  font-weight: 600;
-}
-
-.workspaceItemDisabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.workspaceItemName {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.workspaceItemBadge {
-  font-size: 10px;
-  color: var(--muted-foreground);
-  background: var(--sidebar-accent);
-  padding: 1px 5px;
-  border-radius: 4px;
 }
 
 .addWorkspaceButton {

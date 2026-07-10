@@ -77,6 +77,11 @@ export function WorkspaceSection({
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
   const [expanded, setExpanded] = useState(workspace.primary);
 
+  // Sync if the primary flag changes after mount (e.g. capabilities refresh).
+  useEffect(() => {
+    setExpanded(workspace.primary);
+  }, [workspace.primary]);
+
   const loadSessions = useCallback(async () => {
     if (!workspace.trusted) return;
     try {

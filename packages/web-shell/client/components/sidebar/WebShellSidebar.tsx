@@ -2529,7 +2529,12 @@ export function WebShellSidebar({
               <span className={`${styles.navIcon} ${styles.projectFolderIcon}`}>
                 <IconFolder expanded={projectExpanded} />
               </span>
-              <span className={styles.projectName}>{projectName}</span>
+              <span
+                className={styles.projectName}
+                title={connection.workspaceCwd || projectName}
+              >
+                {projectName}
+              </span>
               <button
                 className={styles.projectIconButton}
                 type="button"
