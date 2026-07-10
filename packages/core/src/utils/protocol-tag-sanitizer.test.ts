@@ -88,4 +88,58 @@ describe('protocol tag sanitizer', () => {
       'fresh',
     );
   });
+
+  it('handles single-character chunk splitting', () => {
+    const filter = new TopLevelProtocolTagStreamFilter();
+    const input = '<analysis>hidden</analysis><summary>ok</summary>';
+    let out = '';
+
+    for (const char of input) {
+      out += filter.accept(char);
+    }
+    out += filter.flush();
+
+    expect(out).toBe('ok');
+  });
+
+  it.each(['<analyze>', '<suitor>', '<analysisx>'])(
+    'treats adversarial prefix %s as non-protocol text',
+    (tag) => {
+      const filter = new TopLevelProtocolTagStreamFilter();
+      const input = `${tag}keep me</${tag.slice(1)}`;
+
+      expect(filter.accept(input) + filter.flush()).toBe(input);
+    },
+  );
+
+  it('flushes whitespace-only buffer as non-protocol content', () => {
+    const filter = new TopLevelProtocolTagStreamFilter();
+
+    expect(filter.accept('   ')).toBe('');
+    expect(filter.flush()).toBe('   ');
+  });
+
+  it('works correctly after reset and reuse', () => {
+    const filter = new TopLevelProtocolTagStreamFilter();
+
+    expect(
+      filter.accept('<analysis>first</analysis><summary>a</summary>') +
+        filter.flush(),
+    ).toBe('a');
+
+    filter.reset();
+
+    expect(
+      filter.accept('<analysis>second</analysis><summary>b</summary>') +
+        filter.flush(),
+    ).toBe('b');
+  });
+
+  it('handles nested analysis inside summary inside analysis', () => {
+    const input =
+      '<analysis>outer<summary>inner<analysis>deep</analysis></summary></analysis>' +
+      '<summary>visible</summary>';
+
+    expect(stripAnalysisSummaryProtocolTags(input)).toBe('visible');
+  });
 });

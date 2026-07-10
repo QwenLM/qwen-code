@@ -164,10 +164,15 @@ type TagStart =
 
 function classifyTagStart(text: string): TagStart {
   const lower = text.toLowerCase();
+  // Direction 1: buffer is a prefix of a known tag (e.g. '<ana' could
+  // become '<analysis>'). We need more characters to decide.
   if (PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(lower))) {
     return { type: 'possible' };
   }
 
+  // Direction 2: a known tag is a prefix of the buffer (e.g. '<analysis>'
+  // or '<analysis attr>'). Check the delimiter character after the tag name
+  // to confirm it is a real tag boundary, not a longer word like '<analyze'.
   for (const prefix of PROTOCOL_TAG_PREFIXES) {
     if (!lower.startsWith(prefix)) continue;
     const delimiter = lower[prefix.length];

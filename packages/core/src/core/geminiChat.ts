@@ -3424,6 +3424,14 @@ export class GeminiChat {
                 if (text) {
                   sanitizedParts.push({ ...part, text });
                 } else {
+                  if (part.text.length > 0 && !protocolTextWasSuppressed) {
+                    debugLogger.debug(
+                      'protocol tag sanitization stripping stream text',
+                      {
+                        rawLen: part.text.length,
+                      },
+                    );
+                  }
                   protocolTextWasSuppressed ||= part.text.length > 0;
                   const { text: _text, ...rest } = part;
                   const hasNonTextData = Object.entries(rest).some(
