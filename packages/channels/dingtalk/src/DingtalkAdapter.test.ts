@@ -35,7 +35,7 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => ({
       if (msg.type === 'CALLBACK') this.onCallback(msg);
     });
 
-    constructor() {
+    constructor(readonly options: Record<string, unknown>) {
       dingtalkSdkMock.instances.push(this);
     }
   },
@@ -110,6 +110,18 @@ function latestMockClient(): Record<string, unknown> {
   if (!client) throw new Error('No mock DingTalk client created');
   return client;
 }
+
+it('enables SDK keepalive for Stream connections', () => {
+  createChannel();
+
+  expect(latestMockClient().options).toEqual(
+    expect.objectContaining({
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      keepAlive: true,
+    }),
+  );
+});
 
 function getPromptHook(
   channel: DingtalkChannelInstance,

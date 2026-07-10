@@ -99,14 +99,14 @@ You can send photos and documents to the bot, not just text.
 
 - **Authentication:** AppKey + AppSecret instead of a static bot token. The SDK manages access token refresh automatically.
 - **Connection:** WebSocket stream instead of polling — no public IP or webhook URL needed.
-- **Formatting:** Responses use DingTalk's markdown dialect (a limited subset). Tables are automatically converted to plain text since DingTalk doesn't render them. Long messages are split into chunks at ~3800 characters.
+- **Formatting:** Responses use DingTalk's markdown dialect. Markdown tables are passed through to the DingTalk client; long messages are split into chunks at ~3800 characters.
 - **Working indicator:** A 👀 emoji reaction is added to the user's message while processing, then removed when the response is sent.
 - **Media download:** Two-step process — a `downloadCode` from the message is exchanged for a temporary download URL via DingTalk's API.
 - **Groups:** DingTalk uses `isInAtList` for @mention detection instead of parsing message entities.
 
 ## Tips
 
-- **Use DingTalk markdown-aware instructions** — DingTalk supports a limited markdown subset (headers, bold, links, code blocks, but not tables). Adding instructions like "Use DingTalk markdown. Avoid tables." helps the agent format responses correctly.
+- **Use DingTalk markdown-aware instructions** — DingTalk supports headings, bold text, links, code blocks, and tables. Keep tables compact because narrow screens may scroll horizontally.
 - **Restrict access** — In an organization context, `senderPolicy: "open"` may be acceptable. For tighter control, use `"allowlist"` or `"pairing"`. See [DM Pairing](./overview#dm-pairing) for details.
 - **Referenced messages** — Quoting (replying to) a user message includes the quoted text as context for the agent. Quoting bot responses is not yet supported.
 
