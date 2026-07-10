@@ -737,6 +737,7 @@ describe('EnhancedMarkdownTable', () => {
   it('sanitizes spreadsheet formulas when copying TSV', () => {
     const writeText = mockClipboard();
     const hiddenFormula = '\u200B=2+2';
+    const spacedFormula = ' =3+3';
     const container = renderTableContent([
       <thead key="head">
         <tr>
@@ -757,6 +758,10 @@ describe('EnhancedMarkdownTable', () => {
           <td>Gamma</td>
           <td>{hiddenFormula}</td>
         </tr>
+        <tr>
+          <td>Delta</td>
+          <td>{spacedFormula}</td>
+        </tr>
       </tbody>,
     ]);
 
@@ -767,6 +772,7 @@ describe('EnhancedMarkdownTable', () => {
         "Alpha\t'=1+1",
         "Beta\t'-10",
         `Gamma\t'${hiddenFormula}`,
+        `Delta\t'${spacedFormula}`,
       ].join('\n'),
     );
 
@@ -1024,6 +1030,29 @@ describe('EnhancedMarkdownTable', () => {
     expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
       '160px',
     );
+  });
+
+  it('resizes compact auto columns from their rendered width with keyboard arrows', () => {
+    const container = renderTable();
+    click(textButton(container, 'Density: Standard'));
+    const header = button(container, 'Sort by Team').closest('th');
+    expect(header).not.toBeNull();
+    Object.defineProperty(header, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ width: 92 }) as DOMRect,
+    });
+    const resize = button(container, 'Resize Team');
+
+    act(() => {
+      resize.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          key: 'ArrowRight',
+        }),
+      );
+    });
+
+    expect(header?.style.width).toBe('108px');
   });
 
   it('ignores keyboard resize arrows with modifiers', () => {
@@ -1298,13 +1327,13 @@ describe('EnhancedMarkdownTable', () => {
     expect(container.textContent).not.toContain('Freeze first column');
   });
 
-  it('keeps column menus mutually exclusive and suppresses native context menus', () => {
+  it('keeps column menus mutually exclusive while allowing native menus on other columns', () => {
     const container = renderWideTable();
     const scoreHeader = button(container, 'Sort by Score').closest('th');
     expect(scoreHeader).not.toBeNull();
 
     const nonFirstColumnEvent = rightClick(scoreHeader!);
-    expect(nonFirstColumnEvent.defaultPrevented).toBe(true);
+    expect(nonFirstColumnEvent.defaultPrevented).toBe(false);
     expect(container.textContent).not.toContain('Freeze first column');
 
     openColumnMenu(container, 'Team');
@@ -1399,7 +1428,7 @@ describe('EnhancedMarkdownTable', () => {
     expect(writeText).toHaveBeenCalledWith(longText);
   });
 
-  it('preserves raw multiline values when copying a selection', () => {
+  it('flattens cell-internal newlines when copying a selection', () => {
     const writeText = mockClipboard();
     const multilineText = 'line 1\nline 2\nline 3';
     const container = renderTableContent([
@@ -1418,10 +1447,10 @@ describe('EnhancedMarkdownTable', () => {
     dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
     click(textButton(container, 'Copy TSV'));
 
-    expect(writeText).toHaveBeenCalledWith(multilineText);
+    expect(writeText).toHaveBeenCalledWith('line 1 line 2 line 3');
   });
 
-  it('preserves raw multiline values when quick copying the visible table', async () => {
+  it('flattens cell-internal newlines when quick copying the visible table', async () => {
     const writeText = mockClipboard();
     const multilineText = 'line 1\nline 2\nline 3';
     const container = renderTableContent([
@@ -1442,7 +1471,7 @@ describe('EnhancedMarkdownTable', () => {
       await Promise.resolve();
     });
 
-    expect(writeText).toHaveBeenCalledWith(`Note\n${multilineText}`);
+    expect(writeText).toHaveBeenCalledWith('Note\nline 1 line 2 line 3');
   });
 
   it('only shows the long text toolbar action for visible rows', () => {

@@ -365,11 +365,18 @@ function getSelectedColumnIndexes(
 }
 
 function sanitizeForClipboard(value: string): string {
-  const inspectedValue = value.replace(
-    /[\u200B-\u200D\u2060\u00AD\uFEFF]/g,
-    '',
-  );
+  const inspectedValue = value
+    .replace(/[\u200B-\u200D\u2060\u00AD\uFEFF]/g, '')
+    .trimStart();
   return /^[=+\-@]/.test(inspectedValue) ? `'${value}` : value;
+}
+
+function cellClipboardText(cell: EnhancedTableCell | undefined): string {
+  return (cell?.rawText ?? cell?.text ?? '').replace(/\r\n|\r|\n/g, ' ');
+}
+
+function cellReadableText(cell: EnhancedTableCell): string {
+  return cell.rawText || cell.text;
 }
 
 function applyColumnWidth(
@@ -407,11 +414,7 @@ function getSelectionText(
     lines.push(
       selectedColumns
         .map((columnIndex) =>
-          sanitizeForClipboard(
-            row.cells[columnIndex]?.rawText ??
-              row.cells[columnIndex]?.text ??
-              '',
-          ),
+          sanitizeForClipboard(cellClipboardText(row.cells[columnIndex])),
         )
         .join('\t'),
     );
@@ -428,19 +431,13 @@ function getVisibleTableText(
   const lines = [
     visibleColumnIndexes
       .map((columnIndex) =>
-        sanitizeForClipboard(
-          headers[columnIndex]?.rawText ?? headers[columnIndex]?.text ?? '',
-        ),
+        sanitizeForClipboard(cellClipboardText(headers[columnIndex])),
       )
       .join('\t'),
     ...rows.map((row) =>
       visibleColumnIndexes
         .map((columnIndex) =>
-          sanitizeForClipboard(
-            row.cells[columnIndex]?.rawText ??
-              row.cells[columnIndex]?.text ??
-              '',
-          ),
+          sanitizeForClipboard(cellClipboardText(row.cells[columnIndex])),
         )
         .join('\t'),
     ),
@@ -1699,10 +1696,10 @@ export function EnhancedTable({
     event: ReactMouseEvent<HTMLElement>,
     columnIndex: number,
   ) => {
-    event.preventDefault();
     if (columnIndex !== orderedVisibleColumnIndexes[0]) {
       return;
     }
+    event.preventDefault();
     setSelection(null);
     setActiveColumn(columnIndex);
     setOpenFilterMenu(null);
@@ -1804,8 +1801,12 @@ export function EnhancedTable({
 
     event.preventDefault();
     event.stopPropagation();
+    const headerCell = event.currentTarget.closest('th');
+    const renderedWidth = headerCell?.getBoundingClientRect().width;
     setColumnWidths((current) => {
-      const width = current[columnIndex] ?? DEFAULT_COLUMN_WIDTH;
+      const width =
+        current[columnIndex] ??
+        (renderedWidth ? Math.round(renderedWidth) : DEFAULT_COLUMN_WIDTH);
       const nextWidth = clampColumnWidth(width + delta);
       return applyColumnWidth(current, columnIndex, nextWidth);
     });
@@ -2023,7 +2024,7 @@ export function EnhancedTable({
   const hasLongText = useMemo(
     () =>
       visibleRows.some((row) =>
-        row.cells.some((cell) => isLongCellText(cell.rawText || cell.text)),
+        row.cells.some((cell) => isLongCellText(cellReadableText(cell))),
       ),
     [visibleRows],
   );
@@ -2045,7 +2046,7 @@ export function EnhancedTable({
       : '';
 
   const renderCellContent = (cell: EnhancedTableCell, expanded: boolean) => {
-    const displayText = cell.rawText || cell.text;
+    const displayText = cellReadableText(cell);
     const isLong = isLongCellText(displayText);
     return (
       <div
@@ -2061,7 +2062,7 @@ export function EnhancedTable({
 
   const renderDetailValue = (cell: EnhancedTableCell, expanded: boolean) => {
     const isEmpty = cell.text.length === 0;
-    const displayText = cell.rawText || cell.text;
+    const displayText = cellReadableText(cell);
     const isLong = isLongCellText(displayText);
     return (
       <div
