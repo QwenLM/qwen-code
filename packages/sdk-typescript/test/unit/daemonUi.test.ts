@@ -3275,7 +3275,7 @@ describe('daemon UI reducer state machine (PR-E)', () => {
         retainedEvents: 2,
         maxBytes: 512,
         truncatedTurns: 2,
-        fullTranscriptAvailable: false,
+        fullTranscriptAvailable: true,
       },
     } as never);
 
@@ -3315,7 +3315,7 @@ describe('daemon UI reducer state machine (PR-E)', () => {
         truncatedEvents: '4',
         retainedEvents: 2,
         maxBytes: 512,
-        fullTranscriptAvailable: false,
+        fullTranscriptAvailable: true,
       },
     } as never);
 

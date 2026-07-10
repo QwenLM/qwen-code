@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
 
 const {
   mockConnection,
@@ -11,6 +12,7 @@ const {
   renameSessionSpy,
   mockExportSession,
   mockWorkspaceActions,
+  mockWorkspace,
 } = vi.hoisted(() => {
   const makeStore = () => ({
     sessions: [] as MockSession[],
@@ -36,7 +38,11 @@ const {
       sessionId: null as string | null,
       workspaceCwd: '/tmp/project',
       capabilities: { qwenCodeVersion: '1.2.3', features: [] as string[] } as
-        | { qwenCodeVersion?: string; features?: string[] }
+        | {
+            qwenCodeVersion?: string;
+            features?: string[];
+            workspaces?: DaemonWorkspaceCapability[];
+          }
         | undefined,
     },
     mockUseSessions,
@@ -53,6 +59,22 @@ const {
       updateSessionGroup: vi.fn(),
       deleteSessionGroup: vi.fn(),
       updateSessionOrganization: vi.fn(),
+    },
+    mockWorkspace: {
+      client: {
+        listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+      },
+      capabilities: {
+        qwenCodeVersion: '1.2.3',
+        features: [] as string[],
+      } as
+        | {
+            qwenCodeVersion?: string;
+            features?: string[];
+            workspaces?: DaemonWorkspaceCapability[];
+          }
+        | undefined,
+      getCapabilities: vi.fn(),
     },
   };
 });
@@ -75,6 +97,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useConnection: () => mockConnection,
   useActions: () => ({ renameSession: renameSessionSpy }),
   useWorkspaceActions: () => mockWorkspaceActions,
+  useWorkspace: () => mockWorkspace,
   useSessions: (options?: { archiveState?: 'active' | 'archived' }) =>
     mockUseSessions(options),
 }));
@@ -130,6 +153,8 @@ function renderSidebar(
     onLoadSession: (sessionId: string) => Promise<void> | void;
     onError: (error: unknown, message: string) => void;
     sessionListReloadToken: number;
+    selectedWorkspaceCwd: string;
+    onSelectWorkspace: (workspaceCwd: string | undefined) => void;
   }> = {},
 ): { container: HTMLElement; rerender: (props: typeof overrides) => void } {
   const container = document.createElement('div');
@@ -166,6 +191,10 @@ beforeEach(() => {
   window.localStorage.clear();
   mockConnection.sessionId = null;
   mockConnection.capabilities = { qwenCodeVersion: '1.2.3', features: [] };
+  mockWorkspace.capabilities = { qwenCodeVersion: '1.2.3', features: [] };
+  mockWorkspace.client.listWorkspaceSessions.mockReset();
+  mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([]);
+  mockWorkspace.getCapabilities.mockReset();
   for (const store of [mockActive, mockArchived]) {
     store.sessions = [];
     store.loading = false;
@@ -204,6 +233,106 @@ afterEach(() => {
   }
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe('WebShellSidebar — workspace picker', () => {
+  const multiWorkspaceCaps = {
+    qwenCodeVersion: '1.2.3',
+    features: ['multi_workspace_sessions'],
+    workspaces: [
+      { id: 'ws-primary', cwd: '/tmp/project', primary: true, trusted: true },
+      { id: 'ws-second', cwd: '/tmp/other', primary: false, trusted: true },
+      {
+        id: 'ws-untrusted',
+        cwd: '/tmp/danger',
+        primary: false,
+        trusted: false,
+      },
+    ],
+  };
+
+  // Each registered workspace renders as a WorkspaceSection header <button>
+  // whose text contains the workspace's basename. Match on those instead of
+  // the removed <select> picker.
+  function workspaceButtons(container: HTMLElement): HTMLButtonElement[] {
+    return Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).filter((b) =>
+      ['project', 'other', 'danger'].some((name) =>
+        b.textContent?.includes(name),
+      ),
+    );
+  }
+
+  it('renders a workspace entry per registered workspace', () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    const { container } = renderSidebar(false);
+    const labels = workspaceButtons(container).map((b) => b.textContent ?? '');
+    expect(labels.some((l) => l.includes('project'))).toBe(true);
+    expect(labels.some((l) => l.includes('other'))).toBe(true);
+    expect(labels.some((l) => l.includes('danger'))).toBe(true);
+  });
+
+  it('disables the untrusted workspace and enables trusted ones', () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    const { container } = renderSidebar(false);
+    const buttons = workspaceButtons(container);
+    const untrusted = buttons.find((b) => b.textContent?.includes('danger'));
+    const trusted = buttons.find((b) => b.textContent?.includes('other'));
+    expect(untrusted?.disabled).toBe(true);
+    expect(trusted?.disabled).toBe(false);
+  });
+
+  it('calls onSelectWorkspace with the chosen cwd for a secondary workspace', () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    const onSelectWorkspace = vi.fn();
+    const { container } = renderSidebar(false, { onSelectWorkspace });
+    const other = workspaceButtons(container).find((b) =>
+      b.textContent?.includes('other'),
+    );
+    act(() => {
+      other?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onSelectWorkspace).toHaveBeenCalledWith('/tmp/other');
+  });
+
+  it('maps the primary workspace selection back to undefined', () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    const onSelectWorkspace = vi.fn();
+    const { container } = renderSidebar(false, { onSelectWorkspace });
+    const primary = workspaceButtons(container).find((b) =>
+      b.textContent?.includes('project'),
+    );
+    act(() => {
+      primary?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onSelectWorkspace).toHaveBeenCalledWith(undefined);
+  });
+
+  it('does not render secondary workspace entries with a single workspace', () => {
+    mockWorkspace.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['multi_workspace_sessions'],
+      workspaces: [
+        { id: 'ws-primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    };
+    const { container } = renderSidebar(false);
+    const secondary = workspaceButtons(container).filter(
+      (b) =>
+        b.textContent?.includes('other') || b.textContent?.includes('danger'),
+    );
+    expect(secondary.length).toBe(0);
+  });
+
+  it('does not render workspace entries when collapsed', () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    const { container } = renderSidebar(true);
+    const secondary = workspaceButtons(container).find((b) =>
+      b.textContent?.includes('other'),
+    );
+    expect(secondary).toBeUndefined();
+  });
 });
 
 describe('WebShellSidebar — version footer', () => {

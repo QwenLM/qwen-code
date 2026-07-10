@@ -148,35 +148,6 @@ describe('scheduled-tasks routes', () => {
     const list = await request(h.app).get('/scheduled-tasks');
     expect(list.body.tasks).toHaveLength(1);
     expect(list.body.tasks[0].id).toBe(res.body.id);
-    // runMode defaults to 'shared' when omitted (the #6389 model).
-    expect(res.body.runMode).toBe('shared');
-    expect(list.body.tasks[0].runMode).toBe('shared');
-  });
-
-  it('creates an isolated task, persisting runMode and still minting an anchor', async () => {
-    const res = await create({
-      cron: '0 9 * * *',
-      prompt: 'p',
-      runMode: 'isolated',
-    });
-    expect(res.status).toBe(201);
-    expect(res.body.runMode).toBe('isolated');
-    // The anchor (ticker) session is still minted for an isolated task — it is
-    // what fires the cron; the runs happen in fresh siblings the daemon spawns.
-    expect(h.bridge.spawned).toHaveLength(1);
-    expect(res.body.sessionId).toBe(h.bridge.spawned[0]);
-    const list = await request(h.app).get('/scheduled-tasks');
-    expect(list.body.tasks[0].runMode).toBe('isolated');
-  });
-
-  it('rejects an invalid runMode on create', async () => {
-    const res = await create({
-      cron: '0 9 * * *',
-      prompt: 'p',
-      runMode: 'per-run',
-    });
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('invalid_run_mode');
   });
 
   it('binds a created task to a freshly minted session', async () => {
@@ -321,36 +292,6 @@ describe('scheduled-tasks routes', () => {
     expect(list.body.tasks[0].enabled).toBe(false);
   });
 
-  it('switches runMode via PATCH, and rejects an invalid value', async () => {
-    const created = await create({ cron: '0 9 * * *', prompt: 'x' });
-    const id = created.body.id as string;
-    expect(created.body.runMode).toBe('shared');
-
-    const patch = await request(h.app)
-      .patch(`/scheduled-tasks/${id}`)
-      .send({ runMode: 'isolated' });
-    expect(patch.status).toBe(200);
-    expect(patch.body.runMode).toBe('isolated');
-    const list = await request(h.app).get('/scheduled-tasks');
-    expect(list.body.tasks[0].runMode).toBe('isolated');
-
-    // Reverse direction: isolated → shared clears the on-disk field (regression
-    // for PATCH runMode=undefined spread-overwrite subtlety).
-    const revert = await request(h.app)
-      .patch(`/scheduled-tasks/${id}`)
-      .send({ runMode: 'shared' });
-    expect(revert.status).toBe(200);
-    expect(revert.body.runMode).toBe('shared');
-    const listAfterRevert = await request(h.app).get('/scheduled-tasks');
-    expect(listAfterRevert.body.tasks[0].runMode).toBe('shared');
-
-    const bad = await request(h.app)
-      .patch(`/scheduled-tasks/${id}`)
-      .send({ runMode: 'per-run' });
-    expect(bad.status).toBe(400);
-    expect(bad.body.code).toBe('invalid_run_mode');
-  });
-
   it('clears the name when patched to an empty string', async () => {
     const created = await create({
       name: 'Named',
@@ -445,6 +386,100 @@ describe('scheduled-tasks routes', () => {
     const res = await request(h.app).post('/scheduled-tasks/arch3/run');
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('task_disabled');
+  });
+
+  it('reports a legacy guarded task (still-on-disk `condition`) as disabled on GET, fail-closed', async () => {
+    // A task written by a pre-removal version as an isolated run with a
+    // `condition` precondition — the field is no longer part of DurableCronTask,
+    // so it lives on disk as an unknown key (isValidTask ignores it). Even
+    // though its on-disk `enabled` is true, the REST list must fail it CLOSED:
+    // reported disabled with no next-run, so the management UI never shows it
+    // active or offers a Run affordance for a task the scheduler refuses to fire.
+    await seedTask({
+      id: 'legacy-guard',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: true,
+      sessionId: 'sess-legacy-guard',
+      condition: 'only when files changed',
+    });
+    // A normal enabled task, appended alongside, for contrast.
+    const normal = await create({ cron: '0 9 * * *', prompt: 'ok' });
+    expect(normal.status).toBe(201);
+
+    const res = await request(h.app).get('/scheduled-tasks');
+    expect(res.status).toBe(200);
+    const legacy = res.body.tasks.find(
+      (t: { id: string }) => t.id === 'legacy-guard',
+    );
+    expect(legacy.enabled).toBe(false); // fail-closed despite on-disk enabled:true
+    expect(legacy.nextRunAt).toBeNull(); // no next-run advertised
+    // The ordinary task is unaffected — enabled with a real next-run.
+    const ok = res.body.tasks.find(
+      (t: { id: string }) => t.id === normal.body.id,
+    );
+    expect(ok.enabled).toBe(true);
+    expect(typeof ok.nextRunAt).toBe('number');
+  });
+
+  it('refuses a manual run for a legacy guarded task (409 task_legacy_unsupported, no record)', async () => {
+    // The direct `/run` path is a second fail-closed guard: the task's on-disk
+    // `enabled` may still be true, so the disabled check is not enough. Running
+    // it here would execute the prompt with its removed safety gate ignored.
+    await seedTask({
+      id: 'legacy-run',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: true,
+      sessionId: 'sess-legacy-run',
+      condition: 'only when files changed',
+    });
+    const res = await request(h.app).post('/scheduled-tasks/legacy-run/run');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('task_legacy_unsupported');
+    // The message points at re-creating the task / the create_sub_session path.
+    expect(res.body.error).toContain('create_sub_session');
+    // No phantom run recorded and lastFiredAt untouched.
+    const list = await request(h.app).get('/scheduled-tasks');
+    const t = list.body.tasks.find(
+      (x: { id: string }) => x.id === 'legacy-run',
+    );
+    expect(t.runs).toEqual([]);
+    expect(t.lastFiredAt).toBe(1_700_000_000_000);
+  });
+
+  it('refuses to enable a legacy guarded task via PATCH (409 task_legacy_unsupported)', async () => {
+    // `toView` reports the task disabled, so the only PATCH the UI sends is the
+    // Enable toggle. Accepting it (200) would read back disabled again — an
+    // Enable control that can never succeed with no error. Reject it instead.
+    await seedTask({
+      id: 'legacy-enable',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      enabled: false,
+      sessionId: 'sess-legacy-enable',
+      condition: 'only when files changed',
+    });
+    const res = await request(h.app)
+      .patch('/scheduled-tasks/legacy-enable')
+      .send({ enabled: true });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('task_legacy_unsupported');
+    // The task stays disabled on disk (no write) and still reads back disabled.
+    const list = await request(h.app).get('/scheduled-tasks');
+    const t = list.body.tasks.find(
+      (x: { id: string }) => x.id === 'legacy-enable',
+    );
+    expect(t.enabled).toBe(false);
   });
 
   it('removes a ONE-SHOT task on manual run (so the scheduler cannot fire it again)', async () => {
@@ -609,6 +644,68 @@ describe('scheduled-tasks routes', () => {
     });
     expect(badEnabled.status).toBe(400);
     expect(badEnabled.body.code).toBe('invalid_enabled');
+  });
+
+  it('rejects a POST carrying the removed `runMode` field (400 unsupported_field, nothing created)', async () => {
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      runMode: 'isolated',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('unsupported_field');
+    // The message names the field and points to the create_sub_session path.
+    expect(res.body.error).toContain('runMode');
+    expect(res.body.error).toContain('create_sub_session');
+    // The task must not land on disk, and no session is spawned for it.
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks).toEqual([]);
+    expect(h.bridge.spawned).toEqual([]);
+  });
+
+  it('rejects a POST carrying the removed `condition` field (400 unsupported_field, nothing created)', async () => {
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      condition: 'only when files changed',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('unsupported_field');
+    expect(res.body.error).toContain('condition');
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks).toEqual([]);
+    expect(h.bridge.spawned).toEqual([]);
+  });
+
+  it('rejects a PATCH carrying the removed `runMode` field (400 unsupported_field, task unchanged)', async () => {
+    const created = await create({ cron: '0 9 * * *', prompt: 'orig' });
+    const id = created.body.id as string;
+
+    const patch = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ prompt: 'updated', runMode: 'isolated' });
+    expect(patch.status).toBe(400);
+    expect(patch.body.code).toBe('unsupported_field');
+    expect(patch.body.error).toContain('runMode');
+
+    // The rejected PATCH must not have mutated the stored task.
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].prompt).toBe('orig');
+  });
+
+  it('rejects a PATCH carrying the removed `condition` field (400 unsupported_field, task unchanged)', async () => {
+    const created = await create({ cron: '0 9 * * *', prompt: 'orig' });
+    const id = created.body.id as string;
+
+    const patch = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ prompt: 'updated', condition: 'x' });
+    expect(patch.status).toBe(400);
+    expect(patch.body.code).toBe('unsupported_field');
+    expect(patch.body.error).toContain('condition');
+
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].prompt).toBe('orig');
   });
 
   // Seeds the on-disk file directly so a task can carry a real prior fire.

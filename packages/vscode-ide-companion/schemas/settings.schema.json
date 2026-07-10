@@ -668,6 +668,11 @@
               "type": "boolean",
               "default": true
             },
+            "forceGlobalCacheScope": {
+              "description": "Force scope:'global' on Anthropic cache_control entries even when the base URL is not an Anthropic-native origin (e.g. proxy providers like Routify, OpenRouter). Requires the proxy to forward cache_control fields and the prompt-caching-scope-2026-01-05 beta.",
+              "type": "boolean",
+              "default": false
+            },
             "splitToolMedia": {
               "description": "When true, media (images / audio / video / files) returned by tool calls — including the built-in read_file and MCP tools — is split into a follow-up user message instead of being embedded in the `role: \"tool\"` message. The OpenAI Chat Completions spec only permits text on tool messages, so strict OpenAI-compatible servers (e.g., doubao / new-api / LM Studio) silently drop or reject embedded media and the model never sees an image read via read_file (QwenLM/qwen-code#4876, #3616). Default true is spec-compliant and safe for permissive providers; set false only to restore the legacy embed-in-tool-message behavior.",
               "type": "boolean",
@@ -801,7 +806,7 @@
           "type": "number",
           "minimum": 0.01,
           "maximum": 1,
-          "description": "Fraction of context window at which auto-compaction triggers (greater than 0, up to 1). Default is 0.7 (70%)."
+          "description": "Target fraction of the context window at which auto-compaction triggers (greater than 0, up to 1). Acts as a ceiling on the trigger: on large windows this is the effective trigger (~85%); on smaller windows compaction may fire earlier to leave room to summarize. Default is 0.85 (85%)."
         }
       }
     },

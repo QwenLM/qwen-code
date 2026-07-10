@@ -46,12 +46,11 @@ const rootDir = join(__dirname, '..');
 // Bumped from 138KB to 139KB for EventBus byte-backlog telemetry validation.
 // Bumped from 139KB to 140KB for history_truncated event validation and
 // transcript status projection.
-// Bumped from 138KB to 139KB for workspace ACP status/preheat APIs.
-// Bumped from 139KB to 141KB after merging main (ACP status/preheat) into
-// the history_truncated/transcript-status branch.
-// Bumped from 141KB to 150KB for WorkspaceDaemonClient's workspace-qualified
-// core REST helpers, including Phase 3 file/status/settings/agents/session APIs.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 150 * 1024;
+// Bumped from 140KB to 150KB after merging main: workspace ACP status/preheat
+// plus WorkspaceDaemonClient's workspace-qualified core REST helpers (Phase 3
+// file/status/settings/agents/session APIs).
+// Bumped from 150KB to 151KB for the paged session transcript REST helper.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 151 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't

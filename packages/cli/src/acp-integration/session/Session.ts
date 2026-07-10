@@ -35,7 +35,6 @@ import type {
   LoopTickResult,
   ToolArtifact,
   VisionBridgeResult,
-  SubSessionSpawner,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -214,6 +213,7 @@ import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import {
   buildPermissionRequestContent,
+  interactionMetaFields,
   toPermissionOptions,
 } from './permissionUtils.js';
 import {
@@ -602,6 +602,19 @@ interface BackgroundNotificationQueueItem {
   status: string;
   kind: 'agent' | 'monitor' | 'shell';
   toolUseId?: string;
+}
+
+/** The slice of `CronJob` a fire delivers to this session. Structural, not the
+ * imported type, so core stays a type-only dependency of the fire path. */
+interface CronFire {
+  id?: string;
+  prompt: string;
+  cronExpr?: string;
+  missed?: boolean;
+  /** The minute this fire was stamped for. The scheduler assigns it before
+   * calling `onFire` and writes the run record under the same value, so it
+   * identifies this fire's entry in `runs[]`. */
+  lastFiredAt?: number;
 }
 
 interface CronQueueItem {
@@ -1025,10 +1038,9 @@ export class Session implements SessionContext {
 
   /**
    * Wire the sub-session spawner to the daemon over the ACP `extMethod` request
-   * channel. Two callers: the `create_sub_session` tool (model-initiated) and
-   * `#dispatchIsolatedCronFire` (scheduler-initiated). ONLY the ACP/daemon
-   * session wires it, so the tool is inert (reports daemon-only) in interactive
-   * TUI / headless, where no bridge exists.
+   * channel. The `create_sub_session` tool (model-initiated) is its caller. ONLY
+   * the ACP/daemon session wires it, so the tool is inert (reports daemon-only)
+   * in interactive TUI / headless, where no bridge exists.
    *
    * A tool-initiated request runs while the caller's turn is suspended in the
    * tool await — safe because the ACP channel supports concurrent bidirectional
@@ -1058,6 +1070,9 @@ export class Session implements SessionContext {
           : {}),
         ...(typeof resp['stopReason'] === 'string'
           ? { stopReason: resp['stopReason'] }
+          : {}),
+        ...(typeof resp['parentSessionPersisted'] === 'boolean'
+          ? { parentSessionPersisted: resp['parentSessionPersisted'] }
           : {}),
       };
     });
@@ -2919,77 +2934,15 @@ export class Session implements SessionContext {
 
     if (!scheduler.hasPendingWork) return;
 
-    scheduler.start(
-      (job: {
-        prompt: string;
-        cronExpr?: string;
-        missed?: boolean;
-        runMode?: 'shared' | 'isolated';
-      }) => {
-        if (this.cronDisabledByTokenLimit) return;
-        if (job.missed && detectAutonomousSentinel(job.prompt)) return;
-        // An `isolated` task gets a FRESH sub-session per fire instead of
-        // accumulating in this bound session. Dispatch it straight to the
-        // daemon rather than asking the model to call `create_sub_session`:
-        // that tool's permission is 'ask', and under the default approval mode
-        // an unattended fire has nobody to answer the prompt — the call would
-        // hang until the daemon's permission timeout cancels it. A `missed`
-        // one-shot keeps the in-session confirm-first path.
-        if (!job.missed && job.runMode === 'isolated') {
-          const spawner = this.config.getSubSessionSpawner();
-          if (spawner) {
-            void this.#dispatchIsolatedCronFire(spawner, job.prompt);
-            return;
-          }
-          // Defensive: an isolated task can only be created through the daemon's
-          // REST route, which binds it to a session that always has a spawner
-          // (and a bound task fires nowhere else). Should that ever change, run
-          // the fire in-session — losing the task is worse than losing isolation.
-        }
-        this.cronQueue.push({
-          prompt: job.prompt,
-          source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
-        });
-        void this.#drainCronQueue();
-      },
-    );
-  }
-
-  /**
-   * Runs one `isolated` scheduled fire in a fresh sub-session. Fire-and-forget:
-   * `'sent'` resolves once the prompt is dispatched, and the daemon-side
-   * launcher holds a concurrency slot until that sub-session's turn drains.
-   *
-   * A dispatch failure (concurrency cap reached, bridge gone, daemon shutting
-   * down) is logged and the fire is dropped. It deliberately does NOT fall back
-   * to an in-session run: the prompt may already have been dispatched, and
-   * silently running an isolated task inside the bound session would defeat the
-   * isolation the user asked for.
-   */
-  async #dispatchIsolatedCronFire(
-    spawner: SubSessionSpawner,
-    prompt: string,
-  ): Promise<void> {
-    try {
-      const { sessionId } = await spawner({ prompt, completion: 'sent' });
-      debugLogger.info(
-        `Isolated scheduled task dispatched into sub-session ${sessionId} [session ${this.sessionId}]`,
-      );
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      // Must reach stderr. `debugLogger.warn` writes nothing unless a debug log
-      // session is active, and the scheduler has already persisted this fire as
-      // a run — so a dropped dispatch would otherwise look like a successful
-      // one, with no trace anywhere. The daemon forwards child stderr.
-      writeStderrLine(
-        `qwen serve: isolated scheduled task dispatch failed — the fire was ` +
-          `dropped [session ${this.sessionId}]: ${detail}`,
-      );
-      debugLogger.warn(
-        `Isolated scheduled task dispatch failed — the fire was dropped ` +
-          `[session ${this.sessionId}]: ${detail}`,
-      );
-    }
+    scheduler.start((job: CronFire) => {
+      if (this.cronDisabledByTokenLimit) return;
+      if (job.missed && detectAutonomousSentinel(job.prompt)) return;
+      this.cronQueue.push({
+        prompt: job.prompt,
+        source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
+      });
+      void this.#drainCronQueue();
+    });
   }
 
   /**
@@ -4975,7 +4928,10 @@ export class Session implements SessionContext {
                   // (e.g. the Agent tool) dedicated permission UI without
                   // relying on a protocol `kind` ACP can't carry. The tool_call
                   // frame already ships _meta.toolName; mirror it here.
-                  _meta: { toolName },
+                  _meta: {
+                    toolName,
+                    ...interactionMetaFields(confirmationDetails),
+                  },
                 },
               };
               const stopAfterPermissionCancel = () => {
