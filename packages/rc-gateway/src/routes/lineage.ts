@@ -12,7 +12,7 @@ import { walkLineage } from '../sessions/lineage.js';
 import { readSessionTitle } from '../sessions/sessionList.js';
 
 /**
- * GET /rc/session/:id/lineage — the fork lineage chain of a session, from the
+ * GET /session/:id/lineage — the fork lineage chain of a session, from the
  * session itself up to its root ancestor.
  *
  * OWNER-scoped at the mount (a lineage chain enumerates ancestor session ids; a

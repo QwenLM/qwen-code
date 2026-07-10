@@ -19,7 +19,7 @@
 
 import type { BridgeMarkdownSupport } from './registry.js';
 
-/** A parsed SSE frame from `/rc/session/:id/events`. */
+/** A parsed SSE frame from `/session/:id/events`. */
 export interface BridgeEvent {
   id?: number;
   type?: string;
@@ -73,7 +73,10 @@ export class BridgeClient {
     supportsMarkdown?: BridgeMarkdownSupport;
     supportsThreads?: boolean;
     supportsEdits?: boolean;
+    /** Byte limit (legacy; prefer maxMessageChars). */
     maxMessageBytes?: number;
+    /** Character limit — the preferred alternative to maxMessageBytes. */
+    maxMessageChars?: number;
   }): Promise<WriteResult> {
     return this.postJson('/rc/bridges', reg);
   }
@@ -105,14 +108,14 @@ export class BridgeClient {
     );
   }
 
-  /** Send a prompt on behalf of a chat user (POST /rc/session/:id/prompt). */
+  /** Send a prompt on behalf of a chat user (POST /session/:id/prompt). */
   async sendPrompt(
     sessionId: string,
     prompt: string,
     subActor: string,
   ): Promise<WriteResult> {
     return this.postJson(
-      `/rc/session/${encodeURIComponent(sessionId)}/prompt`,
+      `/session/${encodeURIComponent(sessionId)}/prompt`,
       { prompt },
       subActor,
     );
@@ -129,7 +132,7 @@ export class BridgeClient {
     const body: Record<string, unknown> = { outcome };
     if (optionId !== undefined) body['optionId'] = optionId;
     return this.postJson(
-      `/rc/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestId)}`,
+      `/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestId)}`,
       body,
       subActor,
     );
@@ -159,7 +162,7 @@ export class BridgeClient {
   }
 
   /**
-   * Subscribe to a session's event stream (GET /rc/session/:id/events) and invoke
+   * Subscribe to a session's event stream (GET /session/:id/events) and invoke
    * `onEvent` for each parsed SSE frame (including `bridgeHints` on
    * permission_request). Resolves when the stream ends or `signal` aborts; never
    * throws on a normal abort. The caller owns reconnection.
@@ -185,7 +188,7 @@ export class BridgeClient {
     let res: Response;
     try {
       res = await this.fetchImpl(
-        `${this.baseUrl}/rc/session/${encodeURIComponent(sessionId)}/events`,
+        `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`,
         { headers, signal },
       );
     } catch {

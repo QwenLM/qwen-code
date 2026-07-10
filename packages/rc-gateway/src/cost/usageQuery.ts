@@ -69,20 +69,56 @@ export function usageAttributionFilter(client: {
   return client.scopes.includes(OWNER) ? undefined : client.id;
 }
 
-/** A response row (store aggregate row + a human display label). */
+/** Microcents → cents conversion factor. */
+const MICROCENTS_PER_CENT = 1_000_000;
+
+/**
+ * Efficiency metrics derived at presentation time from microcent totals and
+ * token counts. Computed only when there are output tokens and a non-zero cost;
+ * both fields are `null` when the denominator is zero.
+ */
+export interface EfficiencyMetrics {
+  /** Cost in cents per 1000 output tokens (null when no output tokens). */
+  costCentsPer1kOutputTokens: number | null;
+  /** Output tokens per dollar of spend (null when cost is zero). */
+  tokensPerDollar: number | null;
+}
+
+/**
+ * Compute efficiency metrics from raw microcent cost and output-token counts.
+ * Pure function — no rounding is applied so callers can decide precision.
+ */
+export function computeEfficiency(
+  costMicrocents: number,
+  tokensOut: number,
+): EfficiencyMetrics {
+  const costCents = costMicrocents / MICROCENTS_PER_CENT;
+  const costCentsPer1kOutputTokens =
+    tokensOut > 0 ? (costCents / tokensOut) * 1000 : null;
+  // 100 cents per dollar
+  const tokensPerDollar = costCents > 0 ? (tokensOut / costCents) * 100 : null;
+  return { costCentsPer1kOutputTokens, tokensPerDollar };
+}
+
+/** A response row (store aggregate row + a human display label + efficiency). */
 export interface UsageResponseRow {
   key: string;
   displayLabel: string;
   tokensIn: number;
   tokensOut: number;
   tokensCached: number;
+  /** Cost in microcents (integer). */
+  costMicrocents: number;
+  /** Cost in cents (floating point, derived from costMicrocents at presentation). */
   costCents: number;
+  efficiency: EfficiencyMetrics;
 }
 
 export const USAGE_CSV_HEADER =
-  'key,displayLabel,tokensIn,tokensOut,tokensCached,costCents';
+  'key,displayLabel,tokensIn,tokensOut,tokensCached,costMicrocents,costCents,costCentsPer1kOutputTokens,tokensPerDollar';
 
-function csvCell(v: string | number): string {
+function csvCell(v: string | number | null): string {
+  if (v === null) return '';
   const s = String(v);
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
@@ -98,7 +134,10 @@ export function formatUsageCsv(rows: UsageResponseRow[]): string {
         csvCell(r.tokensIn),
         csvCell(r.tokensOut),
         csvCell(r.tokensCached),
+        csvCell(r.costMicrocents),
         csvCell(r.costCents),
+        csvCell(r.efficiency.costCentsPer1kOutputTokens),
+        csvCell(r.efficiency.tokensPerDollar),
       ].join(','),
     );
   }

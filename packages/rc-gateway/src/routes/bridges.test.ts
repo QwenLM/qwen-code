@@ -120,13 +120,54 @@ describe('POST /rc/bridges (register/heartbeat)', () => {
     expect(second.json.registeredAt).toBeGreaterThan(first.json.registeredAt);
   });
 
-  it('defaults capabilities conservatively and clamps maxMessageBytes', async () => {
-    const { json } = await post({ id: 'discord', displayName: 'Discord' });
+  it('defaults capability flags conservatively when message limit is supplied', async () => {
+    const { json } = await post({
+      id: 'discord',
+      displayName: 'Discord',
+      maxMessageChars: 2000,
+    });
     expect(json.supportsActions).toBe(false);
     expect(json.supportsMarkdown).toBe('none'); // enum default, not boolean
     expect(json.supportsThreads).toBe(false);
     expect(json.supportsEdits).toBe(false);
     expect(json.maxMessageBytes).toBe(0);
+    expect(json.maxMessageChars).toBe(2000);
+  });
+
+  it('400s capabilities_invalid when neither maxMessageBytes nor maxMessageChars is provided', async () => {
+    const { status, json } = await post({
+      id: 'discord',
+      displayName: 'Discord',
+    });
+    expect(status).toBe(400);
+    expect(json.code).toBe('capabilities_invalid');
+  });
+
+  it('accepts maxMessageChars and returns it in the response', async () => {
+    const { status, json } = await post({
+      ...VALID,
+      id: 'discord',
+      maxMessageBytes: 0,
+      maxMessageChars: 2000,
+    });
+    expect(status).toBe(200);
+    expect(json.maxMessageChars).toBe(2000);
+    expect(json.maxMessageBytes).toBe(0);
+  });
+
+  it('400s invalid_max_message_chars on a negative value', async () => {
+    const r = await post({ ...VALID, maxMessageChars: -1 });
+    expect(r.status).toBe(400);
+    expect(r.json.code).toBe('invalid_max_message_chars');
+  });
+
+  it('audits bridge_registration_rejected on a bad registration', async () => {
+    await post({ id: 'discord', displayName: 'Discord' }); // no limits → rejected
+    const rec = audit.calls.find(
+      (c) => c.action === 'bridge_registration_rejected',
+    );
+    expect(rec).toBeDefined();
+    expect(rec?.detail).toMatchObject({ code: 'capabilities_invalid' });
   });
 
   it('accepts the markdown enum and the thread/edit flags', async () => {
@@ -265,6 +306,7 @@ describe('BridgeRegistry', () => {
       supportsThreads: false,
       supportsEdits: false,
       maxMessageBytes: 0,
+      maxMessageChars: 4096,
       registeredAt: 1,
     });
     r.register({
@@ -276,6 +318,7 @@ describe('BridgeRegistry', () => {
       supportsThreads: false,
       supportsEdits: false,
       maxMessageBytes: 0,
+      maxMessageChars: 4096,
       registeredAt: 2,
     });
     expect(r.list().map((x) => x.id)).toEqual(['b', 'a']); // newest first
@@ -297,6 +340,7 @@ describe('BridgeRegistry', () => {
         supportsThreads: false,
         supportsEdits: false,
         maxMessageBytes: 0,
+        maxMessageChars: 4096,
         registeredAt: at,
       });
     mk('fresh', 1000);
@@ -325,6 +369,7 @@ describe('pruneStaleBridges (reaper helper)', () => {
       supportsThreads: false,
       supportsEdits: false,
       maxMessageBytes: 0,
+      maxMessageChars: 4096,
       registeredAt: 0,
     });
     const removed = pruneStaleBridges(r, BRIDGE_STALE_MS + 1, audit);
@@ -353,6 +398,7 @@ describe('POST /rc/bridges/:id/heartbeat', () => {
       supportsThreads: false,
       supportsEdits: false,
       maxMessageBytes: 4096,
+      maxMessageChars: 0,
       registeredAt: 1,
     });
     const app = express();

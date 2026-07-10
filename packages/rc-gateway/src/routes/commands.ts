@@ -91,7 +91,7 @@ export function createListCommandsRoute(loader: CommandLoader): RequestHandler {
 }
 
 /**
- * POST /rc/session/:id/command/:name — resolve a command's body template and
+ * POST /session/:id/command/:name — resolve a command's body template and
  * post it as a normal session prompt via `daemon.prompt()`. Mounted behind the
  * session pipeline (requireScope(WRITE) → recordActivity → enforceSessionLock).
  */

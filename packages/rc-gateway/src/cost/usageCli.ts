@@ -98,6 +98,7 @@ export function formatUsageTable(
     String(r.tokensCached),
     r.costCents.toFixed(2),
   ]);
+  // Note: costCents is derived from costMicrocents at presentation time in the route.
   const widths = header.map((h, c) =>
     Math.max(h.length, ...body.map((row) => row[c].length)),
   );

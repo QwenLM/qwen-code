@@ -26,7 +26,7 @@ export interface TelegramUpdate {
   callback_query?: {
     id: string;
     from: { id: number };
-    message?: { chat: { id: number } };
+    message?: { message_id: number; chat: { id: number } };
     data?: string;
   };
 }
@@ -110,6 +110,27 @@ export class TelegramBotApi {
       body['reply_markup'] = { inline_keyboard: opts.inlineKeyboard };
     }
     return this.call('sendMessage', body);
+  }
+
+  /**
+   * Edit an existing message in place — used to clear the inline keyboard and
+   * append the outcome when a `permission_resolved` event arrives.
+   */
+  async editMessageText(
+    chatId: number,
+    messageId: number,
+    text: string,
+    opts: { inlineKeyboard?: TgButton[][] } = {},
+  ): Promise<TgApiResult> {
+    const body: Record<string, unknown> = {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+    };
+    if (opts.inlineKeyboard !== undefined) {
+      body['reply_markup'] = { inline_keyboard: opts.inlineKeyboard };
+    }
+    return this.call('editMessageText', body);
   }
 
   /** Acknowledge a button tap (clears the client-side spinner). */

@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildPayload, buildDigestPayload } from './payload.js';
+import {
+  buildPayload,
+  buildDigestPayload,
+  enforcePayloadBudget,
+  MAX_PAYLOAD_BYTES,
+} from './payload.js';
 
 describe('buildDigestPayload', () => {
   it('summarizes the total with a metadata-only payload (no session content)', () => {
@@ -145,5 +150,57 @@ describe('buildPayload', () => {
       { sessionId: 'a/b c' },
     );
     expect(p!.url).toBe('/ui/?session=a%2Fb%20c');
+  });
+});
+
+describe('enforcePayloadBudget', () => {
+  function makePayload(summary: string) {
+    return {
+      v: 1 as const,
+      kind: 'permission.required',
+      sessionId: 'ses-1',
+      summary,
+      url: '/ui/?session=ses-1',
+    };
+  }
+
+  it('returns the payload unchanged when it is within budget', () => {
+    const payload = makePayload('short summary');
+    const result = enforcePayloadBudget(payload);
+    expect(result.truncated).toBe(false);
+    expect(result.payload).toBe(payload); // same reference (not mutated)
+    expect(
+      Buffer.byteLength(JSON.stringify(result.payload), 'utf8'),
+    ).toBeLessThanOrEqual(MAX_PAYLOAD_BYTES);
+  });
+
+  it('truncates the summary with … when the payload exceeds 3800 bytes', () => {
+    // Build an oversized summary: ~4000 chars will push the payload well over
+    const bigSummary = 'x'.repeat(4000);
+    const payload = makePayload(bigSummary);
+    expect(Buffer.byteLength(JSON.stringify(payload), 'utf8')).toBeGreaterThan(
+      MAX_PAYLOAD_BYTES,
+    );
+
+    const result = enforcePayloadBudget(payload);
+    expect(result.truncated).toBe(true);
+    expect(result.payload.summary.endsWith('…')).toBe(true);
+    expect(result.payload.summary.length).toBeLessThan(bigSummary.length);
+    expect(
+      Buffer.byteLength(JSON.stringify(result.payload), 'utf8'),
+    ).toBeLessThanOrEqual(MAX_PAYLOAD_BYTES);
+  });
+
+  it('does not mutate the original payload', () => {
+    const bigSummary = 'y'.repeat(4000);
+    const payload = makePayload(bigSummary);
+    enforcePayloadBudget(payload);
+    expect(payload.summary).toBe(bigSummary); // original unchanged
+  });
+
+  it('returns truncated:false for a normal-length summary', () => {
+    const payload = makePayload('Permission needed: run_shell_command');
+    const result = enforcePayloadBudget(payload);
+    expect(result.truncated).toBe(false);
   });
 });

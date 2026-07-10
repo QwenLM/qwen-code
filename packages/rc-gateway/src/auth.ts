@@ -6,7 +6,7 @@
 
 import type { RequestHandler } from 'express';
 import type { TokenStore } from './tokenStore.js';
-import { BRIDGE, type RcScope } from './scopes.js';
+import { BRIDGE, hasScope, type RcScope } from './scopes.js';
 import type { AuditRecorder } from './auditLog.js';
 import type { SubActorRateLimiter } from './bridges/subActorRateLimiter.js';
 import type { SubActorBanStore } from './bridges/subActorBans.js';
@@ -58,6 +58,28 @@ export function resolveSubActor(): RequestHandler {
   };
 }
 
+/**
+ * Reject a non-bridge authenticated token that sends `X-RC-SubActor`. Bridges
+ * use this header to name the chat user acting through them; any other token
+ * sending it is either confused or attempting to spoof attribution. Unauthenticated
+ * requests (no `rcClient`) pass through — they'll fail auth downstream anyway.
+ * Mount BEFORE `resolveSubActor`.
+ */
+export function enforceSubActorScope(): RequestHandler {
+  return (req, res, next) => {
+    const headerVal = req.header('x-rc-subactor');
+    const hasHeader = headerVal !== undefined && headerVal !== '';
+    if (hasHeader && req.rcClient && !req.rcClient.scopes.includes(BRIDGE)) {
+      res.status(400).json({
+        error: 'X-RC-SubActor requires the bridge scope',
+        code: 'sub_actor_forbidden_scope',
+      });
+      return;
+    }
+    next();
+  };
+}
+
 /** Resolve the bearer token to `req.rcClient`, or 401 (+ audit auth_failed). */
 export function bearerResolve(
   store: TokenStore,
@@ -65,19 +87,43 @@ export function bearerResolve(
 ): RequestHandler {
   return (req, res, next) => {
     const header = req.headers.authorization ?? '';
-    const resolved = store.resolve(header);
-    if (!resolved) {
-      void audit?.record({ action: 'auth_failed', detail: { path: req.path } });
-      res.status(401).json({ error: 'Unauthorized', code: 'unauthorized' });
+    const cred = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+    const result = cred
+      ? store.verifyTokenDetailed(cred)
+      : { ok: false as const, reason: 'not_found' as const };
+
+    if (!result.ok) {
+      if (result.reason === 'token_expired_max_age') {
+        void audit?.record({
+          action: 'token_expired_max_age',
+          detail: { path: req.path },
+        });
+        res.status(401).json({
+          error: 'Token exceeded maximum age',
+          code: 'token_expired_max_age',
+        });
+      } else {
+        void audit?.record({
+          action: 'auth_failed',
+          detail: { path: req.path },
+        });
+        res.status(401).json({ error: 'Unauthorized', code: 'unauthorized' });
+      }
       return;
     }
-    req.rcClient = resolved;
+
+    req.rcClient = {
+      id: result.id,
+      scopes: result.scopes,
+      sessionLockId: result.sessionLockId,
+      shareLabel: result.shareLabel,
+    };
     // A share token (the only kind with a session lock) gets its id + label
     // surfaced so guest-action routes can stamp audit rows with the share's
     // identity at action time. Normal tokens never get these fields.
-    if (resolved.sessionLockId !== undefined) {
-      req.rcClient.shareId = resolved.id;
-      req.rcClient.shareLabel = resolved.shareLabel;
+    if (result.sessionLockId !== undefined) {
+      req.rcClient.shareId = result.id;
+      req.rcClient.shareLabel = result.shareLabel;
     }
     next();
   };
@@ -170,13 +216,17 @@ export function enforceSubActorRateLimit(
   };
 }
 
-/** Require a scope on the resolved client, or 403 (+ audit scope_denied). */
+/**
+ * Require a scope on the resolved client, or 403 (+ audit scope_denied).
+ * Uses {@link hasScope} for transitive implication: a token with `owner`
+ * passes a check for `write`, `approve`, or `session:read`.
+ */
 export function requireScope(
   scope: RcScope,
   audit?: AuditRecorder,
 ): RequestHandler {
   return (req, res, next) => {
-    if (!req.rcClient || !req.rcClient.scopes.includes(scope)) {
+    if (!req.rcClient || !hasScope(req.rcClient.scopes, scope)) {
       void audit?.record({
         action: 'scope_denied',
         actorTokenId: req.rcClient?.id,
@@ -186,7 +236,7 @@ export function requireScope(
       });
       res
         .status(403)
-        .json({ error: 'Insufficient scope', code: 'insufficient_scope' });
+        .json({ error: 'Insufficient scope', code: 'scope_required' });
       return;
     }
     next();

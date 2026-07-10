@@ -13,10 +13,9 @@ import { matchesAny } from '../policy/glob.js';
  * The match clause of a routing rule. Both fields are optional; an absent field
  * does not constrain (AND semantics across present fields).
  *
- * This slice honors `kind` + `sessionTag` (event-global) and `scopeIn` +
- * `tokenIdsIn` (per-subscription, cycle 33); later cycles add
- * `policy.decisionSource`/`originatingClientScope`/`subActor`/`mentionPatterns`/
- * `urgencyAtLeast`/`deviceTagsIn` (see the design's deferred list).
+ * This slice honors `kind` + `sessionTag` (event-global), `scopeIn` +
+ * `tokenIdsIn` (per-subscription, cycle 33), `urgencyAtLeast` (cycle 96), and
+ * the deferred operators now implemented below.
  */
 export interface RoutingRuleMatch {
   /** Event kind: a single kind (equality) or a list (membership). */
@@ -42,6 +41,34 @@ export interface RoutingRuleMatch {
    * exactly that band. Derivable from `kind` alone, so it needs no event content.
    */
   urgencyAtLeast?: RoutingUrgency;
+  /**
+   * Per-event: the scope of the token that originated the client request which
+   * triggered this event (e.g. `'owner'`/`'write'`/`'share'`/…). Exact
+   * string or list membership. Absent → matches any scope.
+   */
+  originatingClientScope?: string | string[];
+  /**
+   * Per-event: the policy decision source (e.g. `'file'`/`'default'`/`'api'`).
+   * Exact string or list membership. Absent → matches any source.
+   */
+  'policy.decisionSource'?: string | string[];
+  /**
+   * Per-event: the policy action (`'allow'`/`'deny'`/`'ask'`). Exact string or
+   * list membership. Absent → matches any action.
+   */
+  'policy.action'?: string | string[];
+  /**
+   * Per-event: the sub-actor identifier (bridge delegate id). Exact string or
+   * list membership. Absent (or event carries no sub-actor) → not constrained.
+   */
+  subActor?: string | string[];
+  /**
+   * Per-subscription: when `true`, the rule additionally requires the
+   * subscription's owning-token to be considered a "working device" (token
+   * posted recently) for the match to fire. When `false` or absent, no
+   * working-device constraint is applied.
+   */
+  suppressIfWorkingDevice?: boolean;
 }
 
 /** Routing urgency band, low→high. Derived from event kind (no content needed). */
@@ -102,6 +129,24 @@ export interface RoutingSubscription {
   scopes: readonly string[];
 }
 
+/**
+ * Event-level context available at routing-decision time. Extends the bare
+ * `{ kind, sessionName }` shape with per-event metadata for the deferred
+ * operators so matching is still pure / context-free from the notifier's POV.
+ */
+export interface RoutingEvent {
+  kind: string;
+  sessionName?: string;
+  /** Scope of the token that originated the request (for originatingClientScope). */
+  originatingClientScope?: string;
+  /** Policy decision source (`'file'`/`'default'`/`'api'`). */
+  policyDecisionSource?: string;
+  /** Policy action (`'allow'`/`'deny'`/`'ask'`). */
+  policyAction?: string;
+  /** Sub-actor identifier (bridge delegate). */
+  subActor?: string;
+}
+
 /** A compiled, pure decision over the fields the notifier has. */
 export interface RoutingMatcher {
   /**
@@ -110,7 +155,9 @@ export interface RoutingMatcher {
    * carrying a per-subscription field (`scopeIn`/`tokenIdsIn`) are EXCLUDED here
    * by construction — they can never suppress the whole fan-out.
    */
-  firstDrop(ev: { kind: string; sessionName?: string }): string | null;
+  firstDrop(
+    ev: RoutingEvent | { kind: string; sessionName?: string },
+  ): string | null;
   /**
    * The id of the first PER-SUBSCRIPTION `drop` rule matching this (event,
    * subscription) pair, or `null`. Only rules carrying `scopeIn`/`tokenIdsIn`
@@ -119,8 +166,9 @@ export interface RoutingMatcher {
    * satisfies the interface (the notifier calls it with `?.`).
    */
   firstDropForSubscription?(
-    ev: { kind: string; sessionName?: string },
+    ev: RoutingEvent | { kind: string; sessionName?: string },
     sub: RoutingSubscription,
+    isWorkingDevice?: boolean,
   ): string | null;
 }
 
@@ -142,6 +190,11 @@ const MATCH_HONORED = new Set([
   'scopeIn',
   'tokenIdsIn',
   'urgencyAtLeast',
+  'originatingClientScope',
+  'policy.decisionSource',
+  'policy.action',
+  'subActor',
+  'suppressIfWorkingDevice',
 ]);
 const ROUTE_HONORED = new Set(['drop']);
 
@@ -225,6 +278,52 @@ export function loadRoutingConfig(text: string): RoutingConfig {
         );
       }
       match.urgencyAtLeast = u as RoutingUrgency;
+    }
+    if (matchRaw['originatingClientScope'] !== undefined) {
+      if (!isStringOrStringArray(matchRaw['originatingClientScope'])) {
+        throw new RoutingError(
+          `rule[${i}].match.originatingClientScope must be a string or string list`,
+        );
+      }
+      match.originatingClientScope = matchRaw['originatingClientScope'] as
+        | string
+        | string[];
+    }
+    if (matchRaw['policy.decisionSource'] !== undefined) {
+      if (!isStringOrStringArray(matchRaw['policy.decisionSource'])) {
+        throw new RoutingError(
+          `rule[${i}].match.'policy.decisionSource' must be a string or string list`,
+        );
+      }
+      match['policy.decisionSource'] = matchRaw['policy.decisionSource'] as
+        | string
+        | string[];
+    }
+    if (matchRaw['policy.action'] !== undefined) {
+      if (!isStringOrStringArray(matchRaw['policy.action'])) {
+        throw new RoutingError(
+          `rule[${i}].match.'policy.action' must be a string or string list`,
+        );
+      }
+      match['policy.action'] = matchRaw['policy.action'] as string | string[];
+    }
+    if (matchRaw['subActor'] !== undefined) {
+      if (!isStringOrStringArray(matchRaw['subActor'])) {
+        throw new RoutingError(
+          `rule[${i}].match.subActor must be a string or string list`,
+        );
+      }
+      match.subActor = matchRaw['subActor'] as string | string[];
+    }
+    if (matchRaw['suppressIfWorkingDevice'] !== undefined) {
+      if (typeof matchRaw['suppressIfWorkingDevice'] !== 'boolean') {
+        throw new RoutingError(
+          `rule[${i}].match.suppressIfWorkingDevice must be a boolean`,
+        );
+      }
+      match.suppressIfWorkingDevice = matchRaw[
+        'suppressIfWorkingDevice'
+      ] as boolean;
     }
 
     const route: { drop?: boolean } = {};
@@ -460,6 +559,20 @@ export function formatResolvedRouting(rules: ResolvedRoutingRule[]): string {
         parts.push(`tokenIdsIn=${fmtSpec(m.tokenIdsIn)}`);
       if (m.urgencyAtLeast !== undefined)
         parts.push(`urgencyAtLeast=${m.urgencyAtLeast}`);
+      if (m.originatingClientScope !== undefined)
+        parts.push(
+          `originatingClientScope=${fmtSpec(m.originatingClientScope)}`,
+        );
+      if (m['policy.decisionSource'] !== undefined)
+        parts.push(
+          `policy.decisionSource=${fmtSpec(m['policy.decisionSource'])}`,
+        );
+      if (m['policy.action'] !== undefined)
+        parts.push(`policy.action=${fmtSpec(m['policy.action'])}`);
+      if (m.subActor !== undefined)
+        parts.push(`subActor=${fmtSpec(m.subActor)}`);
+      if (m.suppressIfWorkingDevice !== undefined)
+        parts.push(`suppressIfWorkingDevice=${m.suppressIfWorkingDevice}`);
       const match = parts.length > 0 ? parts.join(' ') : 'any';
       return `${source}  ${id}  match: ${match}  drop:${rule.route.drop === true}`;
     })
@@ -507,9 +620,23 @@ function matchTokenIdsIn(
   return Array.isArray(spec) ? spec.includes(tokenId) : spec === tokenId;
 }
 
-/** A rule targets specific subscriptions iff it carries scopeIn or tokenIdsIn. */
+/** Match a string-or-list spec against a value (exact string or membership). */
+function matchStringSpec(
+  spec: string | string[] | undefined,
+  value: string | undefined,
+): boolean {
+  if (spec === undefined) return true;
+  if (value === undefined) return false;
+  return Array.isArray(spec) ? spec.includes(value) : spec === value;
+}
+
+/** A rule targets specific subscriptions iff it carries scopeIn, tokenIdsIn, or suppressIfWorkingDevice. */
 function hasPerSubMatch(r: RoutingRule): boolean {
-  return r.match.scopeIn !== undefined || r.match.tokenIdsIn !== undefined;
+  return (
+    r.match.scopeIn !== undefined ||
+    r.match.tokenIdsIn !== undefined ||
+    r.match.suppressIfWorkingDevice !== undefined
+  );
 }
 
 /**
@@ -525,14 +652,30 @@ export function compileRouting(config: RoutingConfig): RoutingMatcher {
   const dropRules = config.rules.filter((r) => r.route.drop === true);
   const globalDropRules = dropRules.filter((r) => !hasPerSubMatch(r));
   const perSubDropRules = dropRules.filter(hasPerSubMatch);
+
+  function matchEventFields(r: RoutingRule, ev: RoutingEvent): boolean {
+    return (
+      matchKind(r.match.kind, ev.kind) &&
+      matchSessionTag(r.match.sessionTag, ev.sessionName) &&
+      matchUrgencyAtLeast(r.match.urgencyAtLeast, ev.kind) &&
+      matchStringSpec(
+        r.match.originatingClientScope,
+        ev.originatingClientScope,
+      ) &&
+      matchStringSpec(
+        r.match['policy.decisionSource'],
+        ev.policyDecisionSource,
+      ) &&
+      matchStringSpec(r.match['policy.action'], ev.policyAction) &&
+      matchStringSpec(r.match.subActor, ev.subActor)
+    );
+  }
+
   return {
     firstDrop(ev) {
+      const richEv = ev as RoutingEvent;
       for (const r of globalDropRules) {
-        if (
-          matchKind(r.match.kind, ev.kind) &&
-          matchSessionTag(r.match.sessionTag, ev.sessionName) &&
-          matchUrgencyAtLeast(r.match.urgencyAtLeast, ev.kind)
-        ) {
+        if (matchEventFields(r, richEv)) {
           // `||` not `??`: a non-null return signals "matched", and the notifier
           // gates on truthiness — an empty-string id (`id: ""`) must still
           // suppress, reported under the '<unnamed>' label.
@@ -541,14 +684,16 @@ export function compileRouting(config: RoutingConfig): RoutingMatcher {
       }
       return null;
     },
-    firstDropForSubscription(ev, sub) {
+    firstDropForSubscription(ev, sub, isWorkingDevice = false) {
+      const richEv = ev as RoutingEvent;
       for (const r of perSubDropRules) {
         if (
-          matchKind(r.match.kind, ev.kind) &&
-          matchSessionTag(r.match.sessionTag, ev.sessionName) &&
-          matchUrgencyAtLeast(r.match.urgencyAtLeast, ev.kind) &&
+          matchEventFields(r, richEv) &&
           matchScopeIn(r.match.scopeIn, sub.scopes) &&
-          matchTokenIdsIn(r.match.tokenIdsIn, sub.tokenId)
+          matchTokenIdsIn(r.match.tokenIdsIn, sub.tokenId) &&
+          // suppressIfWorkingDevice: true → only suppresses when the device IS working
+          (r.match.suppressIfWorkingDevice === undefined ||
+            r.match.suppressIfWorkingDevice === isWorkingDevice)
         ) {
           return r.id || '<unnamed>';
         }

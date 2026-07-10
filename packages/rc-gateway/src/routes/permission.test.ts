@@ -48,7 +48,7 @@ async function mount(daemon: DaemonClient): Promise<string> {
   app.use(express.json());
   app.use(bearerResolve(store, audit));
   app.post(
-    '/rc/session/:id/permission/:requestId',
+    '/session/:id/permission/:requestId',
     requireScope(APPROVE, audit),
     createPermissionVoteRoute(daemon, audit),
   );
@@ -65,7 +65,7 @@ async function postVote(
   token: string,
   body: unknown,
 ): Promise<Response> {
-  return fetch(`${url}/rc/session/sess-1/permission/req-1`, {
+  return fetch(`${url}/session/sess-1/permission/req-1`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

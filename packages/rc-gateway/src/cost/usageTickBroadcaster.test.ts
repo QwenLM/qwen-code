@@ -10,8 +10,8 @@ import type { UsageTick } from './ingester.js';
 
 const tick = (sessionId: string, total = 1): UsageTick => ({
   sessionId,
-  costCentsSessionTotal: total,
-  costCentsPromptTotal: total,
+  costMicrocentsSesTotal: total,
+  costMicrocentsPromptTotal: total,
   tokensInTotal: 0,
   tokensOutTotal: 0,
 });
@@ -26,7 +26,7 @@ describe('UsageTickBroadcaster', () => {
     b.emit(tick('s1', 5));
     expect(a).toHaveLength(1);
     expect(c).toHaveLength(1);
-    expect(a[0].costCentsSessionTotal).toBe(5);
+    expect(a[0].costMicrocentsSesTotal).toBe(5);
   });
 
   it('does not deliver to other sessions', () => {

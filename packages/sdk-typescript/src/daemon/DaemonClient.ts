@@ -1453,6 +1453,31 @@ export class DaemonClient {
       },
     );
   }
+
+  /**
+   * POST /session/:id/end — request the daemon to terminate the session.
+   *
+   * On success the daemon emits `session_died { reason: "ended_by_client" }`
+   * on the session's event stream and returns 200. Any non-2xx response is
+   * surfaced as a {@link DaemonHttpError}.
+   *
+   * Pre-flight `caps.features.session_end` if strict backward compat matters —
+   * older daemons may return 404 on this path.
+   */
+  async endSession(sessionId: string, clientId?: string): Promise<void> {
+    await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/end`,
+      {
+        method: 'POST',
+        headers: this.headers({}, clientId),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/end');
+        }
+      },
+    );
+  }
 }
 
 /**

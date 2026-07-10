@@ -57,7 +57,7 @@ async function mount(opts: MountOpts): Promise<string> {
   const app = express();
   app.use(express.json());
   app.get(
-    '/rc/session/:id/lineage',
+    '/session/:id/lineage',
     createLineageRoute(async () => opts.cwd, opts.audit),
   );
   await new Promise<void>((resolve) => {
@@ -83,14 +83,14 @@ afterEach(async () => {
   await rm(runtimeBase, { recursive: true, force: true });
 });
 
-describe('GET /rc/session/:id/lineage', () => {
+describe('GET /session/:id/lineage', () => {
   it('returns the chain self-first to root for a fork', async () => {
     await writeTranscript(PARENT);
     await writeTranscript(FORK, PARENT);
     const audit = fakeAudit();
     const base = await mount({ audit, cwd: CWD });
 
-    const res = await fetch(`${base}/rc/session/${FORK}/lineage`);
+    const res = await fetch(`${base}/session/${FORK}/lineage`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       sessionId: FORK,
@@ -122,7 +122,7 @@ describe('GET /rc/session/:id/lineage', () => {
       { flag: 'a' },
     );
     const base = await mount({ audit: fakeAudit(), cwd: CWD });
-    const res = await fetch(`${base}/rc/session/${FORK}/lineage`);
+    const res = await fetch(`${base}/session/${FORK}/lineage`);
     expect(await res.json()).toEqual({
       sessionId: FORK,
       // FORK has no title key; PARENT carries its title.
@@ -136,7 +136,7 @@ describe('GET /rc/session/:id/lineage', () => {
     const audit = fakeAudit();
     const base = await mount({ audit, cwd: CWD });
 
-    const res = await fetch(`${base}/rc/session/${PARENT}/lineage`);
+    const res = await fetch(`${base}/session/${PARENT}/lineage`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       sessionId: PARENT,
@@ -148,7 +148,7 @@ describe('GET /rc/session/:id/lineage', () => {
   it('404s when the session transcript is missing', async () => {
     const audit = fakeAudit();
     const base = await mount({ audit, cwd: CWD });
-    const res = await fetch(`${base}/rc/session/${FORK}/lineage`);
+    const res = await fetch(`${base}/session/${FORK}/lineage`);
     expect(res.status).toBe(404);
     expect((await res.json()).code).toBe('session_not_found');
     expect(audit.calls).toHaveLength(0);
@@ -157,7 +157,7 @@ describe('GET /rc/session/:id/lineage', () => {
   it('404s on a syntactically invalid session id', async () => {
     const audit = fakeAudit();
     const base = await mount({ audit, cwd: CWD });
-    const res = await fetch(`${base}/rc/session/not-valid/lineage`);
+    const res = await fetch(`${base}/session/not-valid/lineage`);
     expect(res.status).toBe(404);
     expect((await res.json()).code).toBe('session_not_found');
   });
@@ -166,7 +166,7 @@ describe('GET /rc/session/:id/lineage', () => {
     await writeTranscript(PARENT);
     const audit = fakeAudit();
     const base = await mount({ audit, cwd: undefined });
-    const res = await fetch(`${base}/rc/session/${PARENT}/lineage`);
+    const res = await fetch(`${base}/session/${PARENT}/lineage`);
     expect(res.status).toBe(502);
     expect((await res.json()).code).toBe('daemon_unavailable');
   });
@@ -186,7 +186,7 @@ async function mountGuarded(
     next();
   });
   app.get(
-    '/rc/session/:id/lineage',
+    '/session/:id/lineage',
     requireScope(OWNER, audit),
     createLineageRoute(async () => CWD, audit),
   );
@@ -197,12 +197,12 @@ async function mountGuarded(
   return `http://127.0.0.1:${port}`;
 }
 
-describe('GET /rc/session/:id/lineage — OWNER gate', () => {
+describe('GET /session/:id/lineage — OWNER gate', () => {
   it('403s a non-owner (session:read) token before the handler runs', async () => {
     await writeTranscript(PARENT);
     const audit = fakeAudit();
     const base = await mountGuarded([SESSION_READ], audit);
-    const res = await fetch(`${base}/rc/session/${PARENT}/lineage`);
+    const res = await fetch(`${base}/session/${PARENT}/lineage`);
     expect(res.status).toBe(403);
     // Handler never ran -> no lineage read was audited.
     expect(audit.calls.some((c) => c.action === 'session_lineage_read')).toBe(
@@ -214,7 +214,7 @@ describe('GET /rc/session/:id/lineage — OWNER gate', () => {
     await writeTranscript(PARENT);
     const audit = fakeAudit();
     const base = await mountGuarded([OWNER], audit);
-    const res = await fetch(`${base}/rc/session/${PARENT}/lineage`);
+    const res = await fetch(`${base}/session/${PARENT}/lineage`);
     expect(res.status).toBe(200);
     expect((await res.json()).sessionId).toBe(PARENT);
   });

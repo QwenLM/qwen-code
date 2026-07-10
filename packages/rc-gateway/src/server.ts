@@ -18,6 +18,7 @@ import {
   requireScope,
   enforceSessionLock,
   resolveSubActor,
+  enforceSubActorScope,
   enforceSubActorRateLimit,
   enforceSubActorBan,
 } from './auth.js';
@@ -37,8 +38,20 @@ import {
 import { ConnectionRegistry } from './connectionRegistry.js';
 import { AuditLog, type AuditRecorder } from './auditLog.js';
 import { createPairRedeemRoute } from './routes/pair.js';
+import {
+  createListCorsOriginsRoute,
+  createAddCorsOriginRoute,
+  createRemoveCorsOriginRoute,
+} from './routes/cors.js';
+import type { CorsAllowlist } from './cors.js';
+import {
+  allowlistFromRecords,
+  evaluatePreflight,
+  corsHeadersForActualRequest,
+} from './cors.js';
 import { createPermissionVoteRoute } from './routes/permission.js';
 import { createPromptRoute, type PromptAcceptedHook } from './routes/prompt.js';
+import { PromptEventBroadcaster } from './routes/promptEventBroadcaster.js';
 import { createUsageRoute, type UsageReader } from './routes/usage.js';
 import { createCapabilityRoute } from './routes/capabilities.js';
 import { createClientsManifestRoute } from './routes/clientsManifest.js';
@@ -78,6 +91,7 @@ import { InviteStore } from './bridges/inviteStore.js';
 import { createLineageRoute } from './routes/lineage.js';
 import { createSessionListRoute } from './routes/sessions.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
+import { createSessionEndRoute } from './routes/sessionEnd.js';
 import {
   createListTokensRoute,
   createMintTokenRoute,
@@ -90,6 +104,7 @@ import { OwnerEventBus } from './ownerEvents.js';
 import { createPushRouter } from './routes/push.js';
 import { createRoutingRouter } from './routes/routing.js';
 import { createSearchRoute, type RankedSearch } from './routes/search.js';
+import { versionCheckMiddleware } from './middleware/versionCheck.js';
 import {
   resolveChatsDir,
   resolveSearchIndexDir,
@@ -211,6 +226,29 @@ export interface GatewayDeps {
    * `null` → 404 (the shell falls back to a Custom Tab).
    */
   assetLinks?: () => Array<Record<string, unknown>> | null;
+  /**
+   * Owner-configured CORS origins (read-only; sourced from config file, not
+   * the store).  These are merged at load into the allowlist as `source:
+   * 'config'` entries and cannot be deleted via the API (409).
+   */
+  /**
+   * Per-session prompt queue configuration (spec "Per-session FIFO preserved").
+   * `queueWaitMs`: max ms a prompt POST may wait for the slot before returning
+   * 503 `queue_timeout` (default 120_000).
+   * `promptTimeoutMs`: max ms the daemon turn may run before it is cancelled
+   * and a synthetic `stream_error { code: "prompt_timeout" }` is broadcast to
+   * SSE subscribers (default 600_000).
+   */
+  queueWaitMs?: number;
+  promptTimeoutMs?: number;
+  corsConfigOrigins?: readonly string[];
+  /**
+   * The gateway's own UI origin, used as the unconditional CORS admission
+   * bypass at redemption.  Format: `scheme://host[:port]` (RFC 6454 serialized
+   * origin).  When omitted, the admisssion gate still runs but the
+   * "own-UI-origin bypass" never fires.
+   */
+  ownUiOrigin?: string;
 }
 
 export interface GatewayApp {
@@ -227,7 +265,7 @@ export interface GatewayApp {
   ownerEvents: OwnerEventBus;
   /**
    * Per-session idle-suggestion overrides backing POST
-   * /rc/session/:id/idle-suggest-toggle. Exposed so the boot wiring (cli.ts) can
+   * /session/:id/idle-suggest-toggle. Exposed so the boot wiring (cli.ts) can
    * feed the idle handler's `getSessionEnabled` from the same store the route
    * writes to.
    */
@@ -246,6 +284,12 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   app.use(express.json());
 
   const registry = new ConnectionRegistry();
+
+  // Per-session prompt queue broadcaster — wired to both the prompt route
+  // (emit) and the events relay (register/write). Created here so both routes
+  // share the same instance without requiring the caller to instantiate it.
+  const promptEventBroadcaster = new PromptEventBroadcaster();
+
   // Owner-level event bus (cycle 49): every durably-appended audit record is
   // fanned out to OWNER subscribers of GET /rc/events. Internal to the app — the
   // enforcer/reloader broadcast for free because they share this `audit`
@@ -256,6 +300,64 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     undefined,
     { onRecord: (record) => ownerEvents.publish({ type: 'audit', record }) },
   );
+
+  // ---------------------------------------------------------------------------
+  // CORS allowlist — built from persisted db origins + config overrides.
+  // The `corsAllowlist` instance is mutated live as origins are admitted/removed.
+  // ---------------------------------------------------------------------------
+  const corsInitialRecords = deps.store.listOrigins(
+    deps.corsConfigOrigins ?? [],
+  );
+  const corsAllowlist: CorsAllowlist = allowlistFromRecords(corsInitialRecords);
+
+  // Owner-configured origins are in-memory overrides (config-sourced).
+  for (const o of deps.corsConfigOrigins ?? []) corsAllowlist.add(o);
+
+  // CORS preflight handler — runs BEFORE auth middleware so browsers can
+  // complete the preflight without sending credentials.
+  app.options('*', (req, res) => {
+    const decision = evaluatePreflight(
+      {
+        method: req.method,
+        origin: req.headers['origin'] as string | undefined,
+        requestMethod: req.headers['access-control-request-method'] as
+          | string
+          | undefined,
+        requestHeaders: req.headers['access-control-request-headers'] as
+          | string
+          | undefined,
+      },
+      corsAllowlist,
+    );
+    for (const [k, v] of Object.entries(decision.headers)) res.setHeader(k, v);
+    if (decision.allowed) {
+      res.status(204).end();
+    } else {
+      void audit.record({
+        action: 'cors_denied',
+        detail: {
+          origin: decision.origin,
+          phase: 'preflight',
+        },
+      });
+      res.status(403).end();
+    }
+  });
+
+  // Actual-request CORS header middleware — runs before auth so browsers
+  // receive the CORS headers even on 401/403 responses.
+  app.use((req, res, next) => {
+    if (req.method === 'OPTIONS') {
+      next();
+      return;
+    }
+    const cors = corsHeadersForActualRequest(
+      req.headers['origin'] as string | undefined,
+      corsAllowlist,
+    );
+    for (const [k, v] of Object.entries(cors.headers)) res.setHeader(k, v);
+    next();
+  });
   // Process-local activity tracker: feeds the notifier's working-device
   // suppression and is touched by recordActivity on the human-action POSTs.
   const workingDevice = new WorkingDeviceTracker();
@@ -320,7 +422,14 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
 
   app.post(
     '/rc/pair/redeem',
-    createPairRedeemRoute(deps.pairing, deps.store, audit),
+    createPairRedeemRoute(
+      deps.pairing,
+      deps.store,
+      audit,
+      deps.ownUiOrigin
+        ? { ownUiOrigin: deps.ownUiOrigin, allowlist: corsAllowlist }
+        : undefined,
+    ),
   );
 
   const webRoot =
@@ -363,9 +472,17 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   app.use('/ui', express.static(webRoot, { fallthrough: false }));
 
   app.use(bearerResolve(deps.store, audit));
+  // Reject a non-bridge authenticated token that sends X-RC-SubActor (would
+  // otherwise silently pollute attribution). Must follow bearerResolve.
+  app.use(enforceSubActorScope());
   // Resolve an asserted sub-actor (bridge "acting for @human") onto rcClient —
   // only honored for bridge-scope tokens. Must follow bearerResolve.
   app.use(resolveSubActor());
+  // Protocol version gate: if the client sends X-RC-Version and it does not
+  // match RC_PROTOCOL_VERSION, respond 426 before any route handler runs.
+  // Absent header → pass through (backward-compatible clients that don't
+  // negotiate the version header).
+  app.use(versionCheckMiddleware);
   // APNs registration for the iOS native shell (add-native-mobile-shells).
   // Gated at SESSION_READ to mirror the webpush router's floor (a notification
   // channel carries session-read-class payload data, so a zero-scope or guest
@@ -378,8 +495,11 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       createNativePushRouter(deps.apnsStore, audit),
     );
   }
+  // Transparent-proxy topology: the gateway claims the BARE /session/:id/*
+  // namespace so a remote client's URL is the same whether it talks to the
+  // daemon directly or goes through the gateway.
   app.get(
-    '/rc/session/:id/events',
+    '/session/:id/events',
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createSessionEventsRoute(
@@ -387,10 +507,20 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       registry,
       audit,
       deps.usageBroadcaster,
+      undefined,
+      promptEventBroadcaster,
     ),
   );
+  // POST /session/:id/end — write-scope; tells the daemon to terminate the
+  // session. On success the daemon emits `session_died` on the event stream.
   app.post(
-    '/rc/session/:id/permission/:requestId',
+    '/session/:id/end',
+    requireScope(WRITE, audit),
+    enforceSessionLock(audit),
+    createSessionEndRoute(deps.daemon, audit),
+  );
+  app.post(
+    '/session/:id/permission/:requestId',
     requireScope(APPROVE, audit),
     recordActivity(workingDevice),
     enforceSessionLock(audit),
@@ -399,13 +529,17 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     createPermissionVoteRoute(deps.daemon, audit),
   );
   app.post(
-    '/rc/session/:id/prompt',
+    '/session/:id/prompt',
     requireScope(WRITE, audit),
     recordActivity(workingDevice),
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (before consuming rate budget)
     subActorRateLimit, // bridge fan-in: cap prompts per chat user
-    createPromptRoute(deps.daemon, audit, deps.onPromptAccepted),
+    createPromptRoute(deps.daemon, audit, deps.onPromptAccepted, {
+      queueWaitMs: deps.queueWaitMs,
+      promptTimeoutMs: deps.promptTimeoutMs,
+      promptEventBroadcaster,
+    }),
   );
   // GET /rc/usage (add-cost-tracking) — any authenticated token; the route applies
   // owner-sees-all / lesser-sees-own scope filtering internally. Mounted only when
@@ -423,18 +557,23 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // GET /rc/capabilities — always mounted (mDNS reports here even when cost
   // tracking is off). costTracking sub-block is present only when a usage store
   // is wired, so it never claims enabled:true while disabled.
-  app.get(
-    '/rc/capabilities',
-    createCapabilityRoute({
+  // GET /capabilities — bare-namespace alias for the transparent-proxy topology
+  // so a remote client can discover the gateway's remoteControl capabilities at
+  // the same path regardless of whether it speaks directly to the daemon or to
+  // the gateway (which merges the daemon's own capabilities with remoteControl).
+  {
+    const capabilityRoute = createCapabilityRoute({
       costTracking: deps.usageReader
         ? { currencyLabel: deps.costCurrencyLabel ?? (() => 'USD') }
         : undefined,
       mdnsStatus: deps.mdnsStatus,
       nativeShells: deps.nativeShellsCapability,
-    }),
-  );
+    });
+    app.get('/rc/capabilities', capabilityRoute);
+    app.get('/capabilities', capabilityRoute);
+  }
   app.post(
-    '/rc/session/:id/fork',
+    '/session/:id/fork',
     requireScope(WRITE, audit),
     recordActivity(workingDevice),
     enforceSessionLock(audit),
@@ -456,7 +595,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // marking the device working here would wrongly suppress a real permission push.
   const idleStatusResolver = deps.idleStatus ?? (() => undefined);
   app.post(
-    '/rc/session/:id/idle-suggest-toggle',
+    '/session/:id/idle-suggest-toggle',
     requireScope(WRITE, audit),
     enforceSessionLock(audit),
     createIdleToggleRoute(idleToggles, idleStatusResolver, audit),
@@ -464,7 +603,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // GET the same path reports EFFECTIVE idle state (`/suggest status`). SESSION_READ
   // (a read) + session-lock so a confined share token sees only its own session.
   app.get(
-    '/rc/session/:id/idle-suggest-toggle',
+    '/session/:id/idle-suggest-toggle',
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createIdleStatusRoute(idleToggles, idleStatusResolver),
@@ -526,7 +665,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // Read-only fork lineage chain. OWNER-scoped (NOT session-locked): the chain
   // enumerates ancestor session ids, which a confined share token must not see.
   app.get(
-    '/rc/session/:id/lineage',
+    '/session/:id/lineage',
     requireScope(OWNER, audit),
     createLineageRoute(async () => {
       try {
@@ -551,8 +690,23 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       }
     }, audit),
   );
+  // GET /workspace/:cwd/sessions — bare-namespace proxy for the transparent-proxy
+  // topology. The daemon exposes this path; the gateway re-exposes it (OWNER-gated)
+  // so remote clients can enumerate sessions at the same URL shape they would use
+  // against the daemon directly.
+  app.get(
+    '/workspace/:cwd/sessions',
+    requireScope(OWNER, audit),
+    createSessionListRoute(async () => {
+      try {
+        return (await deps.daemon.capabilities()).workspaceCwd;
+      } catch {
+        return undefined;
+      }
+    }, audit),
+  );
   app.post(
-    '/rc/session/:id/command/:name',
+    '/session/:id/command/:name',
     requireScope(WRITE, audit),
     recordActivity(workingDevice),
     enforceSessionLock(audit),
@@ -562,6 +716,39 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/rc/commands',
     requireScope(SESSION_READ, audit),
     createListCommandsRoute(commandLoader),
+  );
+  // CORS allowlist CRUD (owner-only; wire-protocol: "Browser CORS allowlist
+  // derived from pairing"). GET lists db+config origins; POST manually admits;
+  // DELETE removes db-admitted origins (409 for config-sourced).
+  app.get(
+    '/rc/cors',
+    requireScope(OWNER, audit),
+    createListCorsOriginsRoute({
+      store: deps.store,
+      allowlist: corsAllowlist,
+      audit,
+      configOrigins: deps.corsConfigOrigins,
+    }),
+  );
+  app.post(
+    '/rc/cors',
+    requireScope(OWNER, audit),
+    createAddCorsOriginRoute({
+      store: deps.store,
+      allowlist: corsAllowlist,
+      audit,
+      configOrigins: deps.corsConfigOrigins,
+    }),
+  );
+  app.delete(
+    '/rc/cors/:origin',
+    requireScope(OWNER, audit),
+    createRemoveCorsOriginRoute({
+      store: deps.store,
+      allowlist: corsAllowlist,
+      audit,
+      configOrigins: deps.corsConfigOrigins,
+    }),
   );
   app.get(
     '/rc/tokens',

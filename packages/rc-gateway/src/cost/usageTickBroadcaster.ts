@@ -8,7 +8,7 @@
  * Per-session fan-out for `usage_tick` frames (`add-cost-tracking`: "`usage_tick`
  * SSE event" — subscribers receive the unmodified `session_update` AND a separate
  * `usage_tick`). The ingester (driven by the always-on session subscriber) writes
- * the row and pushes a coalesced tick here; each `/rc/session/:id/events` relay
+ * the row and pushes a coalesced tick here; each `/session/:id/events` relay
  * registers a writer for its session and forwards ticks onto its own SSE stream.
  *
  * This decouples ingestion (once per event, subscriber-independent) from delivery

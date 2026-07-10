@@ -34,13 +34,15 @@ beforeEach(async () => {
   usage = UsageStore.open(join(dir, 'usage.db'));
 });
 
+const MICRO = 1_000_000;
+
 const row = (over: Partial<UsageRowInput> = {}): UsageRowInput => ({
   sessionId: 'sess_1',
   ts: 1000,
   tokensIn: 1000,
   tokensOut: 500,
   tokensCached: 0,
-  costCents: 0.6,
+  costMicrocents: 0.6 * MICRO,
   modelServiceId: 'qwen',
   modelId: 'qwen3-coder-plus',
   attributionTokenId: 'tkn_x',
@@ -75,8 +77,8 @@ describe('GET /rc/usage', () => {
 
   it('owner sees all rows grouped by session', async () => {
     const owner = await tokenWith([OWNER]);
-    usage.record(row({ sessionId: 's1', ts: 4000, costCents: 5 }));
-    usage.record(row({ sessionId: 's2', ts: 4000, costCents: 3 }));
+    usage.record(row({ sessionId: 's1', ts: 4000, costMicrocents: 5 * MICRO }));
+    usage.record(row({ sessionId: 's2', ts: 4000, costMicrocents: 3 * MICRO }));
     const base = await mount();
     const r = await fetch(`${base}/rc/usage?group_by=session`, {
       headers: { Authorization: `Bearer ${owner.token}` },
@@ -84,6 +86,41 @@ describe('GET /rc/usage', () => {
     expect(r.status).toBe(200);
     const body = (await r.json()) as { rows: Array<{ key: string }> };
     expect(body.rows.map((x) => x.key).sort()).toEqual(['s1', 's2']);
+  });
+
+  it('response rows carry costMicrocents + costCents + efficiency', async () => {
+    const owner = await tokenWith([OWNER]);
+    // 500 output tokens, 5 cents = 5_000_000 microcents
+    usage.record(
+      row({
+        sessionId: 's1',
+        ts: 4000,
+        costMicrocents: 5 * MICRO,
+        tokensOut: 500,
+      }),
+    );
+    const base = await mount();
+    const r = await fetch(`${base}/rc/usage?group_by=session`, {
+      headers: { Authorization: `Bearer ${owner.token}` },
+    });
+    const body = (await r.json()) as {
+      rows: Array<{
+        key: string;
+        costMicrocents: number;
+        costCents: number;
+        efficiency: {
+          costCentsPer1kOutputTokens: number | null;
+          tokensPerDollar: number | null;
+        };
+      }>;
+    };
+    const s1 = body.rows.find((x) => x.key === 's1')!;
+    expect(s1.costMicrocents).toBe(5 * MICRO);
+    expect(s1.costCents).toBeCloseTo(5, 5);
+    // 5 cents / 500 out * 1000 = 10 cents per 1k output tokens
+    expect(s1.efficiency.costCentsPer1kOutputTokens).toBeCloseTo(10, 5);
+    // 500 out / (5 / 100) dollars = 500 / 0.05 = 10000 tokens/dollar
+    expect(s1.efficiency.tokensPerDollar).toBeCloseTo(10000, 0);
   });
 
   it('a write-scope token sees only its own attributed rows', async () => {
@@ -105,8 +142,10 @@ describe('GET /rc/usage', () => {
 
   it('honors the since window (default 24h excludes ancient rows)', async () => {
     const owner = await tokenWith([OWNER]);
-    usage.record(row({ sessionId: 'old', ts: 1, costCents: 9 })); // before now-24h? now=5000
-    usage.record(row({ sessionId: 'new', ts: 4000, costCents: 1 }));
+    usage.record(row({ sessionId: 'old', ts: 1, costMicrocents: 9 * MICRO })); // before now-24h? now=5000
+    usage.record(
+      row({ sessionId: 'new', ts: 4000, costMicrocents: 1 * MICRO }),
+    );
     const base = await mount();
     // since=1s → window [4000,5000]; the ts=1 row is excluded.
     const r = await fetch(`${base}/rc/usage?group_by=session&since=1s`, {
@@ -118,7 +157,7 @@ describe('GET /rc/usage', () => {
 
   it('exports CSV with the spec header and content-type', async () => {
     const owner = await tokenWith([OWNER]);
-    usage.record(row({ sessionId: 's1', ts: 4000, costCents: 5 }));
+    usage.record(row({ sessionId: 's1', ts: 4000, costMicrocents: 5 * MICRO }));
     const base = await mount();
     const r = await fetch(`${base}/rc/usage?group_by=session&format=csv`, {
       headers: { Authorization: `Bearer ${owner.token}` },
@@ -126,7 +165,7 @@ describe('GET /rc/usage', () => {
     expect(r.headers.get('content-type')).toContain('text/csv');
     const text = await r.text();
     expect(text.split('\n')[0]).toBe(
-      'key,displayLabel,tokensIn,tokensOut,tokensCached,costCents',
+      'key,displayLabel,tokensIn,tokensOut,tokensCached,costMicrocents,costCents,costCentsPer1kOutputTokens,tokensPerDollar',
     );
   });
 

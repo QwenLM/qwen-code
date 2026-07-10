@@ -19,6 +19,7 @@ import {
   createListTokensRoute,
   createMintTokenRoute,
   createRevokeTokenRoute,
+  createRevokeAllTokensRoute,
 } from './tokens.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 
@@ -62,6 +63,11 @@ async function mount(): Promise<string> {
     '/rc/tokens/:id',
     requireScope(OWNER, audit),
     createRevokeTokenRoute(store, registry, audit),
+  );
+  app.post(
+    '/rc/tokens/revoke-all',
+    requireScope(OWNER, audit),
+    createRevokeAllTokensRoute(store, registry, audit),
   );
   const s: Server = await new Promise((resolve) => {
     const sv = app.listen(0, '127.0.0.1', () => resolve(sv));
@@ -253,5 +259,116 @@ describe('/rc/tokens routes', () => {
     const revoked = audit.calls.find((c) => c.action === 'token_revoked');
     expect(revoked).toBeDefined();
     expect(revoked!.target).toBe(victim.id);
+  });
+});
+
+describe('POST /rc/tokens/revoke-all', () => {
+  it('revokes all tokens and returns 200 with revokedIds', async () => {
+    const owner = await store.issue([OWNER, SESSION_READ], 'owner');
+    const b = await store.issue([SESSION_READ], 'b');
+    const c = await store.issue([SESSION_READ], 'c');
+    const url = await mount();
+    const res = await fetch(`${url}/rc/tokens/revoke-all`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${owner.token}`,
+      },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { revokedIds: string[] };
+    // All three tokens are revoked (owner included since no except)
+    expect(body.revokedIds.sort()).toEqual([owner.id, b.id, c.id].sort());
+  });
+
+  it('revoke-all with { except: "self" } spares the caller\'s token', async () => {
+    const owner = await store.issue([OWNER, SESSION_READ], 'owner');
+    const b = await store.issue([SESSION_READ], 'b');
+    const url = await mount();
+    const res = await fetch(`${url}/rc/tokens/revoke-all`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${owner.token}`,
+      },
+      body: JSON.stringify({ except: 'self' }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { revokedIds: string[] };
+    expect(body.revokedIds).toEqual([b.id]);
+    // owner token still resolves
+    expect(store.resolve(`Bearer ${owner.token}`)).not.toBeNull();
+    // b is revoked
+    expect(store.resolve(`Bearer ${b.token}`)).toBeNull();
+  });
+
+  it('revoke-all evicts registered connections for each revoked token', async () => {
+    const owner = await store.issue([OWNER, SESSION_READ], 'owner');
+    const b = await store.issue([SESSION_READ], 'b');
+    const ctrlB = new AbortController();
+    registry.register(b.id, ctrlB);
+    const url = await mount();
+    await fetch(`${url}/rc/tokens/revoke-all`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${owner.token}`,
+      },
+      body: JSON.stringify({}),
+    });
+    expect(ctrlB.signal.aborted).toBe(true);
+  });
+
+  it('revoke-all records one token_revoked audit entry per revoked token', async () => {
+    const owner = await store.issue([OWNER, SESSION_READ], 'owner');
+    const b = await store.issue([SESSION_READ], 'b');
+    const url = await mount();
+    await fetch(`${url}/rc/tokens/revoke-all`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${owner.token}`,
+      },
+      body: JSON.stringify({ except: 'self' }),
+    });
+    const revokedCalls = audit.calls.filter(
+      (c) => c.action === 'token_revoked',
+    );
+    expect(revokedCalls).toHaveLength(1);
+    expect(revokedCalls[0].target).toBe(b.id);
+    expect(revokedCalls[0].actorTokenId).toBe(owner.id);
+  });
+
+  it('revoke-all is forbidden for a non-owner token (403)', async () => {
+    const weak = await store.issue([SESSION_READ], 'phone');
+    const url = await mount();
+    const res = await fetch(`${url}/rc/tokens/revoke-all`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${weak.token}`,
+      },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('revoke-all with no tokens returns 200 and empty revokedIds', async () => {
+    const owner = await store.issue([OWNER, SESSION_READ], 'owner');
+    // revoke everything first so only the caller's token might remain but we
+    // use except:self and there is only the owner — empty result.
+    const url = await mount();
+    const res = await fetch(`${url}/rc/tokens/revoke-all`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${owner.token}`,
+      },
+      body: JSON.stringify({ except: 'self' }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { revokedIds: string[] };
+    expect(body.revokedIds).toEqual([]);
   });
 });

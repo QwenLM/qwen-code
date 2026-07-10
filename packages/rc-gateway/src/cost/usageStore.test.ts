@@ -21,13 +21,16 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+/** 1 cent = 1_000_000 microcents */
+const MICRO = 1_000_000;
+
 const row = (over: Partial<UsageRowInput> = {}): UsageRowInput => ({
   sessionId: 'sess_1',
   ts: 1000,
   tokensIn: 1000,
   tokensOut: 500,
   tokensCached: 0,
-  costCents: 0.6,
+  costMicrocents: 0.6 * MICRO,
   modelServiceId: 'qwen',
   modelId: 'qwen3-coder-plus',
   attributionTokenId: 'tkn_abc',
@@ -36,12 +39,12 @@ const row = (over: Partial<UsageRowInput> = {}): UsageRowInput => ({
   ...over,
 });
 
-describe('UsageStore record + sessionTotals', () => {
-  it('accumulates a session running total', () => {
-    store.record(row({ costCents: 12 }));
-    store.record(row({ costCents: 3, ts: 2000 }));
+describe('UsageStore record + sessionTotals (microcents)', () => {
+  it('accumulates a session running total in microcents', () => {
+    store.record(row({ costMicrocents: 12 * MICRO }));
+    store.record(row({ costMicrocents: 3 * MICRO, ts: 2000 }));
     expect(store.sessionTotals('sess_1')).toEqual({
-      costCentsSessionTotal: 15,
+      costMicrocentsSesTotal: 15 * MICRO,
       tokensInTotal: 2000,
       tokensOutTotal: 1000,
       tokensCachedTotal: 0,
@@ -49,29 +52,45 @@ describe('UsageStore record + sessionTotals', () => {
   });
 
   it('counts a NULL cost (rate-table miss) as 0 cost but keeps tokens', () => {
-    store.record(row({ costCents: null, tokensIn: 10, tokensOut: 5 }));
+    store.record(row({ costMicrocents: null, tokensIn: 10, tokensOut: 5 }));
     expect(store.sessionTotals('sess_1')).toMatchObject({
-      costCentsSessionTotal: 0,
+      costMicrocentsSesTotal: 0,
       tokensInTotal: 10,
       tokensOutTotal: 5,
     });
   });
 
   it('isolates totals per session', () => {
-    store.record(row({ sessionId: 'a', costCents: 5 }));
-    store.record(row({ sessionId: 'b', costCents: 9 }));
-    expect(store.sessionTotals('a').costCentsSessionTotal).toBe(5);
-    expect(store.sessionTotals('b').costCentsSessionTotal).toBe(9);
+    store.record(row({ sessionId: 'a', costMicrocents: 5 * MICRO }));
+    store.record(row({ sessionId: 'b', costMicrocents: 9 * MICRO }));
+    expect(store.sessionTotals('a').costMicrocentsSesTotal).toBe(5 * MICRO);
+    expect(store.sessionTotals('b').costMicrocentsSesTotal).toBe(9 * MICRO);
+  });
+
+  it('stores as INTEGER — fractional microcents are rounded', () => {
+    // 0.6 microcents fractional part (sub-microcent) is rounded away
+    store.record(row({ costMicrocents: 1.7 }));
+    // We don't care about the exact value, only that it stored something
+    const totals = store.sessionTotals('sess_1');
+    expect(Number.isInteger(totals.costMicrocentsSesTotal)).toBe(true);
   });
 });
 
-describe('UsageStore aggregate', () => {
+describe('UsageStore aggregate (microcents)', () => {
   beforeEach(() => {
     store.record(
-      row({ sessionId: 's1', attributionTokenId: 't1', costCents: 5 }),
+      row({
+        sessionId: 's1',
+        attributionTokenId: 't1',
+        costMicrocents: 5 * MICRO,
+      }),
     );
     store.record(
-      row({ sessionId: 's2', attributionTokenId: 't1', costCents: 3 }),
+      row({
+        sessionId: 's2',
+        attributionTokenId: 't1',
+        costMicrocents: 3 * MICRO,
+      }),
     );
     store.record(
       row({
@@ -79,20 +98,22 @@ describe('UsageStore aggregate', () => {
         attributionTokenId: 't2',
         subActor: 'telegram:42',
         modelId: 'qwen3-coder-flash',
-        costCents: 10,
+        costMicrocents: 10 * MICRO,
       }),
     );
   });
 
-  it('groups by session (one row per session, summed cost)', () => {
+  it('groups by session (one row per session, summed cost in microcents)', () => {
     const rows = store.aggregate({
       sinceMs: 0,
       untilMs: 9999,
       groupBy: 'session',
     });
     expect(rows).toHaveLength(3);
-    const byKey = Object.fromEntries(rows.map((r) => [r.key, r.costCents]));
-    expect(byKey).toEqual({ s1: 5, s2: 3, s3: 10 });
+    const byKey = Object.fromEntries(
+      rows.map((r) => [r.key, r.costMicrocents]),
+    );
+    expect(byKey).toEqual({ s1: 5 * MICRO, s2: 3 * MICRO, s3: 10 * MICRO });
   });
 
   it('groups by client (attribution token id)', () => {
@@ -101,8 +122,10 @@ describe('UsageStore aggregate', () => {
       untilMs: 9999,
       groupBy: 'client',
     });
-    const byKey = Object.fromEntries(rows.map((r) => [r.key, r.costCents]));
-    expect(byKey).toEqual({ t1: 8, t2: 10 });
+    const byKey = Object.fromEntries(
+      rows.map((r) => [r.key, r.costMicrocents]),
+    );
+    expect(byKey).toEqual({ t1: 8 * MICRO, t2: 10 * MICRO });
   });
 
   it('groups by model as service/model', () => {
@@ -111,10 +134,12 @@ describe('UsageStore aggregate', () => {
       untilMs: 9999,
       groupBy: 'model',
     });
-    const byKey = Object.fromEntries(rows.map((r) => [r.key, r.costCents]));
+    const byKey = Object.fromEntries(
+      rows.map((r) => [r.key, r.costMicrocents]),
+    );
     expect(byKey).toEqual({
-      'qwen/qwen3-coder-plus': 8,
-      'qwen/qwen3-coder-flash': 10,
+      'qwen/qwen3-coder-plus': 8 * MICRO,
+      'qwen/qwen3-coder-flash': 10 * MICRO,
     });
   });
 
@@ -124,8 +149,10 @@ describe('UsageStore aggregate', () => {
       untilMs: 9999,
       groupBy: 'sub_actor',
     });
-    const byKey = Object.fromEntries(rows.map((r) => [r.key, r.costCents]));
-    expect(byKey).toEqual({ '': 8, 'telegram:42': 10 });
+    const byKey = Object.fromEntries(
+      rows.map((r) => [r.key, r.costMicrocents]),
+    );
+    expect(byKey).toEqual({ '': 8 * MICRO, 'telegram:42': 10 * MICRO });
   });
 
   it('orders rows by descending cost', () => {
@@ -138,7 +165,7 @@ describe('UsageStore aggregate', () => {
   });
 
   it('honors the time window', () => {
-    store.record(row({ sessionId: 'old', ts: 50, costCents: 99 }));
+    store.record(row({ sessionId: 'old', ts: 50, costMicrocents: 99 * MICRO }));
     const rows = store.aggregate({
       sinceMs: 100,
       untilMs: 9999,

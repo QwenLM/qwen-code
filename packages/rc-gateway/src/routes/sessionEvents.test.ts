@@ -20,6 +20,7 @@ import { SHARE, SESSION_READ, BRIDGE } from '../scopes.js';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { SessionWal } from '../wal.js';
 
 let gateway: Server | undefined;
 let stub: StubDaemon | undefined;
@@ -39,11 +40,18 @@ function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
 async function mountGateway(
   daemon: DaemonClient,
   audit?: AuditRecorder,
+  walDir?: string,
 ): Promise<string> {
   const app = express();
   app.get(
-    '/rc/session/:id/events',
-    createSessionEventsRoute(daemon, new ConnectionRegistry(), audit),
+    '/session/:id/events',
+    createSessionEventsRoute(
+      daemon,
+      new ConnectionRegistry(),
+      audit,
+      undefined,
+      walDir,
+    ),
   );
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -80,12 +88,14 @@ describe('session-events proxy', () => {
     stub = await startStubDaemon();
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const url = await mountGateway(daemon);
-    const res = await fetch(`${url}/rc/session/sess-1/events`);
+    const res = await fetch(`${url}/session/sess-1/events`);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/event-stream');
     const frames = await readFrames(res);
-    expect(frames.map((f) => f.id)).toEqual(['1', '2']);
-    expect(frames[0].data).toContain('"text":"one"');
+    // Filter to daemon frames only (presence frames have no id).
+    const daemonFrames = frames.filter((f) => f.id !== undefined);
+    expect(daemonFrames.map((f) => f.id)).toEqual(['1', '2']);
+    expect(daemonFrames[0].data).toContain('"text":"one"');
   });
 
   it('injects a usage_tick frame to the session subscriber', async () => {
@@ -97,7 +107,7 @@ describe('session-events proxy', () => {
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const app = express();
     app.get(
-      '/rc/session/:id/events',
+      '/session/:id/events',
       createSessionEventsRoute(
         daemon,
         new ConnectionRegistry(),
@@ -111,7 +121,7 @@ describe('session-events proxy', () => {
     gateway = server;
     const { port } = server.address() as AddressInfo;
 
-    const resP = fetch(`http://127.0.0.1:${port}/rc/session/sess-1/events`);
+    const resP = fetch(`http://127.0.0.1:${port}/session/sess-1/events`);
     // Wait for the relay to register its tick listener, then emit one.
     const start = Date.now();
     while (broadcaster.listenerCount('sess-1') === 0) {
@@ -120,8 +130,8 @@ describe('session-events proxy', () => {
     }
     broadcaster.emit({
       sessionId: 'sess-1',
-      costCentsSessionTotal: 15,
-      costCentsPromptTotal: 3,
+      costMicrocentsSesTotal: 15,
+      costMicrocentsPromptTotal: 3,
       tokensInTotal: 100,
       tokensOutTotal: 50,
     });
@@ -130,7 +140,7 @@ describe('session-events proxy', () => {
     const tick = frames.find((f) => f.data.includes('usage_tick'));
     expect(tick).toBeDefined();
     expect(tick!.id).toBeUndefined(); // synthetic — must not advance the cursor
-    expect(tick!.data).toContain('"costCentsSessionTotal":15');
+    expect(tick!.data).toContain('"costMicrocentsSesTotal":15');
   });
 
   it('enriches a permission_request frame with bridgeHints; leaves others untouched', async () => {
@@ -157,9 +167,12 @@ describe('session-events proxy', () => {
     });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const url = await mountGateway(daemon);
-    const res = await fetch(`${url}/rc/session/sess-1/events`);
+    const res = await fetch(`${url}/session/sess-1/events`);
     const frames = await readFrames(res);
-    const parsed = frames.map((f) => JSON.parse(f.data));
+    // Filter to daemon frames only (presence frames have no id).
+    const parsed = frames
+      .filter((f) => f.id !== undefined)
+      .map((f) => JSON.parse(f.data));
     // Non-permission frame: no bridgeHints added.
     expect(parsed[0].data.bridgeHints).toBeUndefined();
     // Clean tool-call → inline surface (run_shell is a mutating tool → medium).
@@ -185,7 +198,7 @@ describe('session-events proxy', () => {
         next();
       });
       app.get(
-        '/rc/session/:id/events',
+        '/session/:id/events',
         createSessionEventsRoute(daemon, new ConnectionRegistry(), audit),
       );
       const s: Server = await new Promise((resolve) => {
@@ -199,7 +212,7 @@ describe('session-events proxy', () => {
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
     const url = await mountWithClient(daemon, [BRIDGE, SESSION_READ], audit);
-    await readFrames(await fetch(`${url}/rc/session/sess-1/events`));
+    await readFrames(await fetch(`${url}/session/sess-1/events`));
     const attached = audit.calls.find((c) => c.action === 'session_attached');
     const detached = audit.calls.find((c) => c.action === 'session_detached');
     expect(attached?.detail).toEqual({ kind: 'bridge' });
@@ -210,7 +223,7 @@ describe('session-events proxy', () => {
     stub = await startStubDaemon();
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const url = await mountGateway(daemon);
-    await fetch(`${url}/rc/session/sess-1/events`, {
+    await fetch(`${url}/session/sess-1/events`, {
       headers: { 'Last-Event-ID': '5' },
     });
     expect(stub.lastEventIdHeader).toBe('5');
@@ -220,7 +233,7 @@ describe('session-events proxy', () => {
     stub = await startStubDaemon({ eventsStatus: 500 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const url = await mountGateway(daemon);
-    const res = await fetch(`${url}/rc/session/sess-1/events`);
+    const res = await fetch(`${url}/session/sess-1/events`);
     expect(res.status).toBe(502);
   });
 
@@ -230,7 +243,7 @@ describe('session-events proxy', () => {
     const url = await mountGateway(daemon);
 
     const ac = new AbortController();
-    const res = await fetch(`${url}/rc/session/sess-1/events`, {
+    const res = await fetch(`${url}/session/sess-1/events`, {
       signal: ac.signal,
     });
     // Read the first chunk so the stream is established, then disconnect.
@@ -254,7 +267,7 @@ describe('session-events proxy', () => {
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
     const url = await mountGateway(daemon, audit);
-    const res = await fetch(`${url}/rc/session/sess-1/events`);
+    const res = await fetch(`${url}/session/sess-1/events`);
     await res.text();
     const deadline = Date.now() + 2000;
     while (
@@ -292,7 +305,7 @@ describe('session-events proxy', () => {
     const app = express();
     app.use(bearerResolve(store, audit));
     app.get(
-      '/rc/session/:id/events',
+      '/session/:id/events',
       createSessionEventsRoute(daemon, new ConnectionRegistry(), audit),
     );
     const server: Server = await new Promise((resolve) => {
@@ -300,12 +313,9 @@ describe('session-events proxy', () => {
     });
     gateway = server;
     const { port } = server.address() as AddressInfo;
-    const res = await fetch(
-      `http://127.0.0.1:${port}/rc/session/sess-1/events`,
-      {
-        headers: { Authorization: `Bearer ${share.token}` },
-      },
-    );
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-1/events`, {
+      headers: { Authorization: `Bearer ${share.token}` },
+    });
     await res.text();
     const deadline = Date.now() + 2000;
     while (
@@ -319,5 +329,144 @@ describe('session-events proxy', () => {
       expect(row!.shareId).toBe(share.id);
       expect(row!.shareLabel).toBe('review for Sam');
     }
+  });
+});
+
+describe('session-events presence frames', () => {
+  it('emits a synthetic client_joined frame as the first SSE frame on attach', async () => {
+    stub = await startStubDaemon({
+      frames: [{ id: 1, type: 'session_update', data: { text: 'hello' } }],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url = await mountGateway(daemon);
+    const res = await fetch(`${url}/session/sess-1/events`);
+    expect(res.status).toBe(200);
+    const frames = await readFrames(res);
+    // First frame must be the synthetic client_joined (no id: line).
+    const first = frames[0];
+    expect(first).toBeDefined();
+    const parsed = JSON.parse(first!.data);
+    expect(parsed.type).toBe('client_joined');
+    expect(first!.id).toBeUndefined(); // synthetic — no id
+    expect(typeof parsed.data.attachedAt).toBe('string');
+  });
+
+  it('emits a synthetic client_left frame after the connection closes', async () => {
+    stub = await startStubDaemon({
+      frames: [{ id: 1, type: 'session_update', data: { text: 'bye' } }],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const url = await mountGateway(daemon, audit);
+
+    // We can verify client_left indirectly via the writable SSE response: the
+    // stub ends the stream, so the gateway's finally block runs synchronously
+    // and the audit record for 'session_detached' fires. The SSE client_left
+    // frame goes to the client BEFORE the stream closes (written in finally).
+    // Since the stream already ended, the response body is all we have;
+    // verify that the frames include client_left at the end.
+    const res = await fetch(`${url}/session/sess-1/events`);
+    const frames = await readFrames(res);
+    const lastFrame = frames[frames.length - 1];
+    expect(lastFrame).toBeDefined();
+    const parsed = JSON.parse(lastFrame!.data);
+    expect(parsed.type).toBe('client_left');
+    expect(parsed.data.reason).toBe('disconnect');
+    expect(lastFrame!.id).toBeUndefined();
+  });
+});
+
+describe('session-events WAL integration', () => {
+  it('appends daemon frames to WAL and replays them on reconnect', async () => {
+    // Use a unique session id to avoid collisions with walRegistry singleton.
+    const sessionId = 'wal-replay-sess';
+    stub = await startStubDaemon({
+      frames: [
+        { id: 1, type: 'session_update', data: { text: 'one' } },
+        { id: 2, type: 'session_update', data: { text: 'two' } },
+      ],
+    });
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-wal-'));
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url = await mountGateway(daemon, undefined, walDir);
+
+    // First connection: consume all frames (writes to WAL).
+    const res1 = await fetch(`${url}/session/${sessionId}/events`);
+    expect(res1.status).toBe(200);
+    const frames1 = await readFrames(res1);
+    // Filter to daemon frames only (presence frames have no id).
+    const daemonFrames1 = frames1.filter((f) => f.id !== undefined);
+    expect(daemonFrames1.map((f) => f.id)).toEqual(['1', '2']);
+
+    // Verify WAL has the events.
+    const wal = new SessionWal({ dir: walDir, sessionId });
+    expect(wal.count()).toBe(2);
+    wal.close();
+
+    // Second connection with Last-Event-ID=1: should replay frame 2 from WAL.
+    // Stub now has no frames to emit (daemon stream ends immediately).
+    await stub.close();
+    stub = await startStubDaemon({ frames: [] });
+    const daemon2 = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url2 = await mountGateway(daemon2, undefined, walDir);
+
+    const res2 = await fetch(`${url2}/session/${sessionId}/events`, {
+      headers: { 'Last-Event-ID': '1' },
+    });
+    expect(res2.status).toBe(200);
+    const frames2 = await readFrames(res2);
+    // Filter to daemon frames only (presence frames have no id).
+    const daemonFrames2 = frames2.filter((f) => f.id !== undefined);
+    expect(daemonFrames2.map((f) => f.id)).toEqual(['2']);
+    expect(daemonFrames2[0]!.data).toContain('"text":"two"');
+  });
+
+  it('returns 412 with replay_truncated when Last-Event-ID is before WAL horizon', async () => {
+    const sessionId = 'wal-truncated-sess';
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-wal-'));
+
+    // Seed the WAL with events starting at id=10 so that a resume from id=5
+    // is clearly before the WAL's earliest event. The route creates its own
+    // SessionWal with default options, so we use the same defaults here.
+    const wal = new SessionWal({ dir: walDir, sessionId });
+    wal.append({ id: 10, v: 1, type: 'session_update', data: {} });
+    wal.append({ id: 11, v: 1, type: 'session_update', data: {} });
+    wal.close();
+
+    stub = await startStubDaemon({ frames: [] });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    // Mount with a fresh app so the walRegistry picks up the pre-seeded dir.
+    const app = express();
+    app.get(
+      '/session/:id/events',
+      createSessionEventsRoute(
+        daemon,
+        new ConnectionRegistry(),
+        undefined,
+        undefined,
+        walDir,
+      ),
+    );
+    const server: Server = await new Promise((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    gateway = server;
+    const { port } = server.address() as AddressInfo;
+
+    // Resume from id=5 which is before the earliest retained (10) by > 1.
+    const res = await fetch(
+      `http://127.0.0.1:${port}/session/${sessionId}/events`,
+      {
+        headers: { 'Last-Event-ID': '5' },
+      },
+    );
+    expect(res.status).toBe(412);
+    const body = (await res.json()) as {
+      type: string;
+      data: { earliestAvailableId: number | null; reason: string };
+    };
+    expect(body.type).toBe('replay_truncated');
+    expect(body.data.reason).toBe('older_than_wal_horizon');
+    expect(body.data.earliestAvailableId).toBe(10);
   });
 });

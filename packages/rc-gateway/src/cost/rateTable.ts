@@ -174,6 +174,33 @@ export function computeCostCents(
   );
 }
 
+/**
+ * Compute the cost in INTEGER microcents (1 cent = 1 000 000 microcents) for a
+ * usage block, or `null` on a lookup miss. Uses integer arithmetic at the end
+ * (Math.round) to avoid floating-point accumulation errors in the store.
+ *
+ * Formula: microcents = round((in*input + out*output + cached*cachedRead) / 1e6 * 1e6)
+ *                     = round(in*input + out*output + cached*cachedRead)
+ * (The /1e6 * 1e6 for the per-million pricing cancels to a simple round of the
+ *  raw weighted token sum.)
+ */
+export function computeCostMicrocents(
+  table: RateTable,
+  modelServiceId: string | undefined,
+  modelId: string,
+  usage: UsageTokens,
+): number | null {
+  const entry = lookupRate(table, modelServiceId, modelId);
+  if (!entry) return null;
+  // token_count * rate_per_MTok / 1e6 cents * 1e6 microcents/cent
+  // = token_count * rate_per_MTok (the 1e6 factors cancel exactly)
+  return Math.round(
+    usage.in * entry.inputPerMTok +
+      usage.out * entry.outputPerMTok +
+      usage.cached * entry.cachedReadPerMTok,
+  );
+}
+
 /** Read + parse the rate-table file; rejects if unreadable or malformed. */
 export async function loadRateTableFile(path: string): Promise<RateTable> {
   const text = await readFile(path, 'utf8');

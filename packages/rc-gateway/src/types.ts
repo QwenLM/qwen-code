@@ -6,6 +6,19 @@
 
 import type { RcScope } from './scopes.js';
 
+/**
+ * A browser origin admitted to the CORS allowlist.  Origins admitted at
+ * pairing-code redemption are persisted (`source: 'db'`); origins from
+ * server config are merged in at read time and never stored (`source: 'config'`).
+ */
+export interface CorsOriginRecord {
+  origin: string;
+  admittedByTokenId: string | null;
+  admittedAt: string | null;
+  /** Derived at read time; not a stored field. */
+  source: 'db' | 'config';
+}
+
 declare global {
   namespace Express {
     interface Request {

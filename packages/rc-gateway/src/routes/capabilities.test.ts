@@ -55,6 +55,22 @@ describe('GET /rc/capabilities', () => {
     }
   });
 
+  it('always includes the six required remoteControl fields', async () => {
+    const { base, close } = await mount({});
+    try {
+      const body = await (await fetch(`${base}/rc/capabilities`)).json();
+      const rc = body.remoteControl;
+      expect(rc.supportedTransports).toEqual(['sse', 'ws']);
+      expect(rc.supportedScopes).toEqual(['owner', 'write', 'approve', 'read']);
+      expect(rc.pairingEnabled).toBe(true);
+      expect(rc.auditEnabled).toBe(true);
+      expect(rc.walHorizonSec).toBe(86400);
+      expect(rc.walMaxEvents).toBe(10000);
+    } finally {
+      await close();
+    }
+  });
+
   it('includes costTracking only when wired', async () => {
     const { base, close } = await mount({
       costTracking: { currencyLabel: () => 'EUR' },

@@ -33,6 +33,7 @@ const BRIDGE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9:._@-]*$/;
 const BRIDGE_ID_MAX = 128;
 const DISPLAY_NAME_MAX = 200;
 const MAX_MESSAGE_BYTES_CAP = 100_000_000;
+const MAX_MESSAGE_CHARS_CAP = 100_000_000;
 
 /** Reject control characters that could corrupt a JSONL audit line / UI. */
 // eslint-disable-next-line no-control-regex
@@ -53,6 +54,7 @@ interface ParsedRegistration {
   supportsThreads: boolean;
   supportsEdits: boolean;
   maxMessageBytes: number;
+  maxMessageChars: number;
 }
 
 /** Validate a registration body. Returns the parsed shape or an error code. */
@@ -96,6 +98,19 @@ function parseRegistration(
     }
     maxMessageBytes = Math.min(MAX_MESSAGE_BYTES_CAP, Math.trunc(n));
   }
+  // maxMessageChars: optional non-negative integer, clamped; 0 = unknown.
+  let maxMessageChars = 0;
+  if (b['maxMessageChars'] !== undefined) {
+    const n = b['maxMessageChars'];
+    if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) {
+      return { ok: false, code: 'invalid_max_message_chars' };
+    }
+    maxMessageChars = Math.min(MAX_MESSAGE_CHARS_CAP, Math.trunc(n));
+  }
+  // At least one message-size limit must be provided (spec: capabilities_invalid).
+  if (maxMessageBytes === 0 && maxMessageChars === 0) {
+    return { ok: false, code: 'capabilities_invalid' };
+  }
   return {
     ok: true,
     value: {
@@ -106,6 +121,7 @@ function parseRegistration(
       supportsThreads,
       supportsEdits,
       maxMessageBytes,
+      maxMessageChars,
     },
   };
 }
@@ -127,6 +143,11 @@ export function createRegisterBridgeRoute(
   return (req, res) => {
     const parsed = parseRegistration(req.body);
     if (!parsed.ok) {
+      void audit?.record({
+        action: 'bridge_registration_rejected',
+        actorTokenId: req.rcClient?.id,
+        detail: { code: parsed.code },
+      });
       res
         .status(400)
         .json({ error: 'Invalid bridge registration', code: parsed.code });
@@ -159,6 +180,7 @@ export function createRegisterBridgeRoute(
         supportsThreads: reg.supportsThreads,
         supportsEdits: reg.supportsEdits,
         maxMessageBytes: reg.maxMessageBytes,
+        maxMessageChars: reg.maxMessageChars,
       },
     });
     // Spec response carries heartbeatIntervalSec; we return the full reg too

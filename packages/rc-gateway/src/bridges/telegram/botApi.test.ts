@@ -81,6 +81,24 @@ describe('TelegramBotApi', () => {
     expect(r.retryAfterSec).toBe(12);
   });
 
+  it('editMessageText POSTs chat_id + message_id + text + cleared reply_markup', async () => {
+    const { calls, fetchImpl } = mockFetch(() => ({
+      status: 200,
+      json: { ok: true, result: { message_id: 9 } },
+    }));
+    const r = await api(fetchImpl).editMessageText(123, 9, 'updated text', {
+      inlineKeyboard: [],
+    });
+    expect(r.ok).toBe(true);
+    expect(calls[0].url).toContain('/editMessageText');
+    expect(calls[0].body).toMatchObject({
+      chat_id: 123,
+      message_id: 9,
+      text: 'updated text',
+      reply_markup: { inline_keyboard: [] },
+    });
+  });
+
   it('answerCallbackQuery posts the query id', async () => {
     const { calls, fetchImpl } = mockFetch(() => ({
       status: 200,

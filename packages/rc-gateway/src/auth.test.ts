@@ -15,11 +15,12 @@ import {
   requireScope,
   enforceSessionLock,
   resolveSubActor,
+  enforceSubActorScope,
   parseSubActor,
   enforceSubActorRateLimit,
   enforceSubActorBan,
 } from './auth.js';
-import { SESSION_READ, APPROVE, WRITE, BRIDGE } from './scopes.js';
+import { SESSION_READ, APPROVE, WRITE, BRIDGE, OWNER } from './scopes.js';
 import { SubActorRateLimiter } from './bridges/subActorRateLimiter.js';
 import { SubActorBanStore } from './bridges/subActorBans.js';
 import type { AuditEntry, AuditRecorder } from './auditLog.js';
@@ -95,7 +96,28 @@ describe('auth middleware', () => {
     });
     expect(called).toBe(false);
     expect(res._status).toBe(403);
-    expect(res._json).toMatchObject({ code: 'insufficient_scope' });
+    expect(res._json).toMatchObject({ code: 'scope_required' });
+  });
+
+  it('requireScope passes when a higher scope implies the required scope (implication hierarchy)', () => {
+    // owner implies write, approve, and session:read
+    const req = { rcClient: { id: 'x', scopes: [OWNER] } } as Request;
+    const res = fakeRes();
+    let called = false;
+    requireScope(SESSION_READ)(req, res, () => {
+      called = true;
+    });
+    expect(called).toBe(true);
+  });
+
+  it('requireScope passes when write implies session:read', () => {
+    const req = { rcClient: { id: 'x', scopes: [WRITE] } } as Request;
+    const res = fakeRes();
+    let called = false;
+    requireScope(SESSION_READ)(req, res, () => {
+      called = true;
+    });
+    expect(called).toBe(true);
   });
 
   it('records auth_failed on a bad token', () => {
@@ -116,6 +138,57 @@ describe('auth middleware', () => {
     const req = { headers: { authorization: `Bearer ${token}` } } as Request;
     bearerResolve(store, audit)(req, fakeRes(), () => {});
     expect(audit.calls).toHaveLength(0);
+  });
+
+  it('bearerResolve 401s with token_expired_max_age when past max age', async () => {
+    const DAY_MS = 86_400_000;
+    let now = 1_000_000;
+    const path2 = join(
+      mkdtempSync(join(tmpdir(), 'rc-auth-age-')),
+      'tokens.json',
+    );
+    const { TokenStore: TS } = await import('./tokenStore.js');
+    const ageStore = await TS.open(path2, () => now);
+    const { token } = await ageStore.issue([SESSION_READ], 'phone');
+    now = 1_000_000 + 181 * DAY_MS;
+    const req = {
+      headers: { authorization: `Bearer ${token}` },
+      path: '/rc/tokens',
+    } as Request;
+    const res = fakeRes();
+    let called = false;
+    bearerResolve(ageStore)(req, res, () => {
+      called = true;
+    });
+    expect(called).toBe(false);
+    expect(res._status).toBe(401);
+    expect((res._json as Record<string, unknown>).code).toBe(
+      'token_expired_max_age',
+    );
+  });
+
+  it('bearerResolve records token_expired_max_age audit action when max age exceeded', async () => {
+    const DAY_MS = 86_400_000;
+    let now = 1_000_000;
+    const path3 = join(
+      mkdtempSync(join(tmpdir(), 'rc-auth-age2-')),
+      'tokens.json',
+    );
+    const { TokenStore: TS } = await import('./tokenStore.js');
+    const ageStore = await TS.open(path3, () => now);
+    const { token } = await ageStore.issue([SESSION_READ], 'phone');
+    now = 1_000_000 + 181 * DAY_MS;
+    const audit2 = fakeAudit();
+    const req = {
+      headers: { authorization: `Bearer ${token}` },
+      path: '/rc/tokens',
+    } as Request;
+    bearerResolve(ageStore, audit2)(req, fakeRes(), () => {});
+    expect(audit2.calls).toHaveLength(1);
+    expect(audit2.calls[0]).toMatchObject({
+      action: 'token_expired_max_age',
+      detail: { path: '/rc/tokens' },
+    });
   });
 
   it('records scope_denied with actor and required scope', () => {
@@ -154,7 +227,7 @@ describe('auth middleware', () => {
     const req2 = {
       ...req,
       params: { id: 's2' },
-      path: '/rc/session/s2/events',
+      path: '/session/s2/events',
     } as unknown as Request;
     enforceSessionLock(audit)(req2, fakeRes(), () => {});
     const locked = audit.calls.find(
@@ -192,7 +265,7 @@ describe('auth middleware', () => {
     const req = {
       rcClient: { id: 'x', scopes: [SESSION_READ], sessionLockId: 's1' },
       params: { id: 's1' },
-      path: '/rc/session/s1/events',
+      path: '/session/s1/events',
     } as unknown as Request;
     const res = fakeRes();
     let called = false;
@@ -207,7 +280,7 @@ describe('auth middleware', () => {
     const req = {
       rcClient: { id: 'x', scopes: [SESSION_READ], sessionLockId: 's1' },
       params: { id: 's2' },
-      path: '/rc/session/s2/events',
+      path: '/session/s2/events',
     } as unknown as Request;
     const res = fakeRes();
     let called = false;
@@ -221,7 +294,7 @@ describe('auth middleware', () => {
     expect(audit.calls[0]).toMatchObject({
       action: 'scope_denied',
       actorTokenId: 'x',
-      detail: { reason: 'session_locked', path: '/rc/session/s2/events' },
+      detail: { reason: 'session_locked', path: '/session/s2/events' },
     });
   });
 
@@ -229,7 +302,7 @@ describe('auth middleware', () => {
     const req = {
       rcClient: { id: 'x', scopes: [SESSION_READ] },
       params: { id: 's2' },
-      path: '/rc/session/s2/events',
+      path: '/session/s2/events',
     } as unknown as Request;
     const res = fakeRes();
     let called = false;
@@ -286,6 +359,47 @@ describe('parseSubActor', () => {
     expect(parseSubActor('has space')).toBeNull();
     expect(parseSubActor(':leading')).toBeNull();
     expect(parseSubActor('<script>')).toBeNull();
+  });
+});
+
+describe('enforceSubActorScope middleware', () => {
+  it('400s sub_actor_forbidden_scope when a non-bridge token sends X-RC-SubActor', () => {
+    const req = subReq([APPROVE, WRITE, SESSION_READ], 'telegram:alice');
+    const res = fakeRes();
+    let called = false;
+    enforceSubActorScope()(req, res, () => {
+      called = true;
+    });
+    expect(called).toBe(false);
+    expect(res._status).toBe(400);
+    expect(res._json).toMatchObject({ code: 'sub_actor_forbidden_scope' });
+  });
+
+  it('passes through a non-bridge token with NO X-RC-SubActor header', () => {
+    const req = subReq([APPROVE, WRITE, SESSION_READ], undefined);
+    let called = false;
+    enforceSubActorScope()(req, fakeRes(), () => {
+      called = true;
+    });
+    expect(called).toBe(true);
+  });
+
+  it('passes through a bridge token with X-RC-SubActor (allowed to assert sub-actor)', () => {
+    const req = subReq([BRIDGE, SESSION_READ], 'telegram:alice');
+    let called = false;
+    enforceSubActorScope()(req, fakeRes(), () => {
+      called = true;
+    });
+    expect(called).toBe(true);
+  });
+
+  it('passes through an unauthenticated request (no rcClient)', () => {
+    const req = subReq(undefined, 'telegram:alice');
+    let called = false;
+    enforceSubActorScope()(req, fakeRes(), () => {
+      called = true;
+    });
+    expect(called).toBe(true);
   });
 });
 

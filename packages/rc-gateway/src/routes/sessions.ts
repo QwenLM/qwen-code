@@ -15,7 +15,7 @@ import { listSessions } from '../sessions/sessionList.js';
  * reverse index, so a client can render the fork tree. `truncated` flags a
  * partial scan (the file-count cap was hit).
  *
- * OWNER-scoped at the mount (same posture as `/rc/session/:id/lineage`): a flat
+ * OWNER-scoped at the mount (same posture as `/session/:id/lineage`): a flat
  * topology enumerates sibling/ancestor ids a session-locked share token must
  * never see. Read-only and daemon-light — `resolveWorkspaceCwd` yields the
  * trusted `workspaceCwd`, then the listing scans the on-disk chats dir (the

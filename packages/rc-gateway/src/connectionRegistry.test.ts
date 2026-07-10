@@ -40,4 +40,28 @@ describe('ConnectionRegistry', () => {
     const reg = new ConnectionRegistry();
     expect(() => reg.evict('nobody')).not.toThrow();
   });
+
+  it('calls onEvict callback with the tokenId when a token is evicted', () => {
+    const evicted: string[] = [];
+    const reg = new ConnectionRegistry({ onEvict: (id) => evicted.push(id) });
+    const ctrl = new AbortController();
+    reg.register('tok-ev', ctrl);
+    reg.evict('tok-ev');
+    expect(evicted).toEqual(['tok-ev']);
+  });
+
+  it('does not call onEvict when the token has no registered controllers', () => {
+    const evicted: string[] = [];
+    const reg = new ConnectionRegistry({ onEvict: (id) => evicted.push(id) });
+    reg.evict('tok-nobody');
+    expect(evicted).toEqual([]);
+  });
+
+  it('does not call onEvict when constructed without the callback', () => {
+    const reg = new ConnectionRegistry();
+    const ctrl = new AbortController();
+    reg.register('tok-1', ctrl);
+    // Must not throw even though there is no callback.
+    expect(() => reg.evict('tok-1')).not.toThrow();
+  });
 });

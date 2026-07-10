@@ -47,6 +47,16 @@ export interface DiscordBridgeConfig {
   makeGateway: (handlers: GatewayHandlers) => GatewayController;
   /** User-facing gateway URL for deeplinks (QWEN_DAEMON_URL). */
   baseUrl: string;
+  /**
+   * Durable cursor store for SSE resume positions. When provided, the bridge
+   * persists `lastEventId` per session so cursors survive restarts.
+   */
+  cursors?: CursorStore;
+  /**
+   * The bridge's own token id (used as the cursor-store partition key). Required
+   * when `cursors` is set.
+   */
+  tokenId?: string;
   /** Logger for boot/error lines (default no-op). */
   log?: (msg: string) => void;
   /** Injectable backoff sleep (tests). Resolves early on abort. */
@@ -140,10 +150,10 @@ export class DiscordBridge {
       id: DISCORD_BRIDGE_ID,
       displayName: 'Discord',
       supportsActions: true, // Approve/Deny buttons
-      supportsMarkdown: 'full', // Discord renders full markdown
+      supportsMarkdown: 'limited', // Discord renders a limited markdown subset
       supportsThreads: true, // threads on long streams
       supportsEdits: true, // edits the message on resolve
-      maxMessageBytes: 2000,
+      maxMessageChars: 2000,
     });
   }
 
@@ -152,6 +162,13 @@ export class DiscordBridge {
    * sessions, then start the inbound gateway. Resolves when the gateway loop ends.
    */
   async start(signal: AbortSignal): Promise<void> {
+    // Load durable cursors so SSE subscriptions resume from where they left off.
+    if (this.cfg.cursors && this.cfg.tokenId) {
+      for (const sessionId of this.cfg.channels.boundSessions()) {
+        const entry = this.cfg.cursors.get(this.cfg.tokenId, sessionId);
+        if (entry) this.lastEventId.set(sessionId, entry.lastEventId);
+      }
+    }
     const reg = await this.registerSelf();
     this.log(
       reg.ok
@@ -218,8 +235,17 @@ export class DiscordBridge {
         await this.cfg.client.subscribeEvents(
           sessionId,
           (ev) => {
-            if (typeof ev.id === 'number')
+            if (typeof ev.id === 'number') {
               this.lastEventId.set(sessionId, ev.id);
+              // Persist the cursor so restarts resume from here.
+              if (this.cfg.cursors && this.cfg.tokenId) {
+                void this.cfg.cursors.setLastEventId(
+                  this.cfg.tokenId,
+                  sessionId,
+                  ev.id,
+                );
+              }
+            }
             this.deliverEvent(sessionId, ev);
           },
           signal,

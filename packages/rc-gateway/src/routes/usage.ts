@@ -12,6 +12,7 @@ import {
   parseGroupBy,
   usageAttributionFilter,
   formatUsageCsv,
+  computeEfficiency,
   type UsageResponseRow,
 } from '../cost/usageQuery.js';
 
@@ -39,6 +40,10 @@ export interface UsageRouteDeps {
  * filter is derived from the resolved `rcClient`, never a query param, so a caller
  * cannot widen its own view. `format=csv` returns `text/csv` with the spec header;
  * default is JSON `{ rows }`.
+ *
+ * Each response row includes `costMicrocents` (raw integer from the store),
+ * `costCents` (derived presentation float), and `efficiency` metrics computed at
+ * presentation time so the store stays free of floating-point values.
  */
 export function createUsageRoute(deps: UsageRouteDeps): RequestHandler {
   return (req, res) => {
@@ -88,14 +93,20 @@ export function createUsageRoute(deps: UsageRouteDeps): RequestHandler {
     });
 
     const label = deps.labelFor ?? ((_g, key) => key);
-    const out: UsageResponseRow[] = rows.map((r) => ({
-      key: r.key,
-      displayLabel: label(groupBy, r.key),
-      tokensIn: r.tokensIn,
-      tokensOut: r.tokensOut,
-      tokensCached: r.tokensCached,
-      costCents: r.costCents,
-    }));
+    const MICRO = 1_000_000;
+    const out: UsageResponseRow[] = rows.map((r) => {
+      const costCents = r.costMicrocents / MICRO;
+      return {
+        key: r.key,
+        displayLabel: label(groupBy, r.key),
+        tokensIn: r.tokensIn,
+        tokensOut: r.tokensOut,
+        tokensCached: r.tokensCached,
+        costMicrocents: r.costMicrocents,
+        costCents,
+        efficiency: computeEfficiency(r.costMicrocents, r.tokensOut),
+      };
+    });
 
     if (format === 'csv') {
       res.status(200).type('text/csv').send(formatUsageCsv(out));

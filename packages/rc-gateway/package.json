@@ -16,6 +16,7 @@
     "lint": "eslint src"
   },
   "dependencies": {
+    "@noble/hashes": "^1.8.0",
     "@qwen-code/sdk": "*",
     "discord.js": "^14.16.3",
     "express": "^4.21.2",

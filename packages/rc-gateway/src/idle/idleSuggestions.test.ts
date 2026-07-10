@@ -44,16 +44,17 @@ function harness(
     maxSuggestions: 3,
     ...opts.config,
   };
-  const handler = createIdleSuggestionHandler({
-    chat,
-    bus,
-    audit,
-    getConfig: () => config,
-    resolveDir: (cwd) => `/chats/${cwd}`,
-    readTurns: async () => TURNS,
-    ...opts.over,
-  });
-  return { handler, events, audited, config };
+  const { onSessionIdle: handler, cancelForSession } =
+    createIdleSuggestionHandler({
+      chat,
+      bus,
+      audit,
+      getConfig: () => config,
+      resolveDir: (cwd) => `/chats/${cwd}`,
+      readTurns: async () => TURNS,
+      ...opts.over,
+    });
+  return { handler, cancelForSession, events, audited, config };
 }
 
 describe('resolveIdleEnabled', () => {
@@ -70,20 +71,41 @@ describe('resolveIdleEnabled', () => {
 });
 
 describe('createIdleSuggestionHandler', () => {
-  it('publishes an idle_suggestions frame and a count-only audit row on the happy path', async () => {
-    const { handler, events, audited } = harness();
+  it('publishes an idle_suggestions frame with expiresAt and rateLimitState on the happy path', async () => {
+    const nowMs = 1_700_000_000_000;
+    const { handler, events, audited } = harness({
+      over: { now: () => nowMs, suggestionsTtlSec: 1800 },
+    });
     handler('sess-1', '/w');
     await flush();
-    expect(events).toEqual([
-      {
-        type: 'idle_suggestions',
-        sessionId: 'sess-1',
-        suggestions: ['Run the tests', 'Commit the fix'],
-      },
-    ]);
+    expect(events).toHaveLength(1);
+    const ev = events[0];
+    expect(ev.type).toBe('idle_suggestions');
+    if (ev.type !== 'idle_suggestions') return;
+    expect(ev.sessionId).toBe('sess-1');
+    expect(ev.suggestions).toEqual(['Run the tests', 'Commit the fix']);
+    // expiresAt: now + 1800s
+    expect(ev.expiresAt).toBe(new Date(nowMs + 1800 * 1000).toISOString());
+    // rateLimitState: no limiter wired → remaining = maxSuggestionsPerHour (5)
+    expect(ev.rateLimitState).toEqual({ remaining: 5, max: 5 });
     expect(audited).toEqual([
       { action: 'idle_suggested', target: 'sess-1', detail: { count: 2 } },
     ]);
+  });
+
+  it('rateLimitState.remaining decrements after consuming a slot (limiter wired)', async () => {
+    const limiter = new PushRateLimiter();
+    const clock = 1_000_000;
+    const { handler, events } = harness({
+      config: { maxSuggestionsPerHour: 5 },
+      over: { limiter, now: () => clock },
+    });
+    handler('sess-1', '/w');
+    await flush();
+    // After first fire, 4 remain
+    const ev = events[0];
+    if (ev.type !== 'idle_suggestions') throw new Error('wrong type');
+    expect(ev.rateLimitState).toEqual({ remaining: 4, max: 5 });
   });
 
   it('DISABLED config → zero side effects: no tail read, no model call, no frame, no audit', async () => {
@@ -205,9 +227,10 @@ describe('createIdleSuggestionHandler', () => {
     });
     handler('sess-1', '/w');
     await flush();
-    expect(events).toEqual([
-      { type: 'idle_suggestions', sessionId: 'sess-1', suggestions: ['a'] },
-    ]);
+    expect(events).toHaveLength(1);
+    const ev = events[0];
+    if (ev.type !== 'idle_suggestions') throw new Error('wrong type');
+    expect(ev.suggestions).toEqual(['a']);
   });
 
   it('rate-limits per session: over the hourly cap → skip generation + ONE deduped audit', async () => {
@@ -242,5 +265,67 @@ describe('createIdleSuggestionHandler', () => {
     expect(limited).toEqual([
       { action: 'idle_suggest_rate_limited', target: 's' },
     ]);
+  });
+
+  describe('AbortController cancellation', () => {
+    it('cancelForSession aborts in-flight generation so no frame is published', async () => {
+      // The chat transport resolves only after cancelForSession is called,
+      // so the AbortSignal will be aborted before generateSuggestions completes.
+      let resolveChatFn: ((v: string) => void) | undefined;
+      const chat: ChatTransport = () =>
+        new Promise((resolve) => {
+          resolveChatFn = resolve;
+        });
+      const { handler, cancelForSession, events } = harness({
+        over: { chat },
+      });
+      handler('sess-1', '/w');
+      // Let the async body reach the chat call.
+      await flush();
+      // Cancel BEFORE the chat resolves.
+      cancelForSession('sess-1');
+      // Now let chat settle (even though cancelled, resolve so it doesn't hang).
+      resolveChatFn?.('["x"]');
+      await flush();
+      expect(events).toEqual([]);
+    });
+
+    it('cancelForSession is a no-op for an unknown session (never throws)', () => {
+      const { cancelForSession } = harness();
+      expect(() => cancelForSession('unknown')).not.toThrow();
+    });
+
+    it('a second onSessionIdle call cancels the previous in-flight and starts fresh', async () => {
+      // Fire twice rapidly — second call should cancel the first (abort its signal),
+      // so only the second round publishes.
+      let firstResolve: ((v: string) => void) | undefined;
+      let secondResolve: ((v: string) => void) | undefined;
+      let chatCallN = 0;
+      const chat: ChatTransport = () =>
+        new Promise((resolve) => {
+          chatCallN++;
+          if (chatCallN === 1) firstResolve = resolve;
+          else secondResolve = resolve;
+        });
+      const { handler, events } = harness({ over: { chat } });
+      handler('sess-1', '/w');
+      // Let the first async body reach the chat call.
+      await flush();
+      // Fire the second call (cancels first).
+      handler('sess-1', '/w');
+      // Let the second async body reach the chat call.
+      await flush();
+      // Now resolve both; the first's signal is aborted so its suggestions are
+      // dropped, only the second publishes.
+      firstResolve?.('["stale"]');
+      secondResolve?.('["fresh"]');
+      await flush();
+      // Exactly one event from the second round.
+      const idle = events.filter((e) => e.type === 'idle_suggestions');
+      expect(idle).toHaveLength(1);
+      const ev = idle[0];
+      if (ev?.type !== 'idle_suggestions') throw new Error('wrong type');
+      expect(ev.suggestions).toEqual(['fresh']);
+    });
   });
 });

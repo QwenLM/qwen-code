@@ -13,21 +13,26 @@
  * Like {@link SearchIndex}, this is a NATIVE `better-sqlite3` consumer; the daemon
  * loads it dynamically so a missing native build disables cost tracking rather
  * than breaking the gateway (mirrors the search-index isolation). A NULL
- * `cost_cents` records an unpriced (rate-table-miss) row — visibly unpriced.
+ * `cost_microcents` records an unpriced (rate-table-miss) row — visibly unpriced.
+ *
+ * Costs are stored as INTEGER microcents (1 cent = 1 000 000 microcents) to avoid
+ * floating-point accumulation errors and allow exact integer arithmetic at write
+ * time. Presentation-layer helpers in {@link usageQuery} convert back to cents.
  */
 
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
 
-/** A row to insert. `costCents` is null on a rate-table miss. `ts` is unix ms. */
+/** A row to insert. `costMicrocents` is null on a rate-table miss. `ts` is unix ms. */
 export interface UsageRowInput {
   sessionId: string;
   ts: number;
   tokensIn: number;
   tokensOut: number;
   tokensCached: number;
-  costCents: number | null;
+  /** Cost in microcents (1 cent = 1 000 000 microcents), or null on miss. */
+  costMicrocents: number | null;
   modelServiceId: string;
   modelId: string;
   attributionTokenId: string;
@@ -37,7 +42,8 @@ export interface UsageRowInput {
 
 /** Running totals for a session (the `usage_tick` payload's source). */
 export interface SessionTotals {
-  costCentsSessionTotal: number;
+  /** Sum of cost in microcents (NULL rows count as 0). */
+  costMicrocentsSesTotal: number;
   tokensInTotal: number;
   tokensOutTotal: number;
   tokensCachedTotal: number;
@@ -60,7 +66,8 @@ export interface AggregateRow {
   tokensIn: number;
   tokensOut: number;
   tokensCached: number;
-  costCents: number;
+  /** Sum of cost in microcents for this group. */
+  costMicrocents: number;
 }
 
 const GROUP_COLUMN: Record<GroupBy, string> = {
@@ -96,7 +103,7 @@ export class UsageStore {
          tokens_in INTEGER NOT NULL,
          tokens_out INTEGER NOT NULL,
          tokens_cached INTEGER NOT NULL,
-         cost_cents REAL,
+         cost_microcents INTEGER,
          model_service_id TEXT NOT NULL,
          model_id TEXT NOT NULL,
          attribution_token_id TEXT NOT NULL,
@@ -119,7 +126,7 @@ export class UsageStore {
     this.db
       .prepare(
         `INSERT INTO usage_events (
-           session_id, ts, tokens_in, tokens_out, tokens_cached, cost_cents,
+           session_id, ts, tokens_in, tokens_out, tokens_cached, cost_microcents,
            model_service_id, model_id, attribution_token_id, sub_actor, stage
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
@@ -129,7 +136,7 @@ export class UsageStore {
         row.tokensIn,
         row.tokensOut,
         row.tokensCached,
-        row.costCents,
+        row.costMicrocents !== null ? Math.round(row.costMicrocents) : null,
         row.modelServiceId,
         row.modelId,
         row.attributionTokenId,
@@ -143,7 +150,7 @@ export class UsageStore {
     const r = this.db
       .prepare(
         `SELECT
-           COALESCE(SUM(cost_cents), 0) AS cost,
+           COALESCE(SUM(cost_microcents), 0) AS cost,
            COALESCE(SUM(tokens_in), 0) AS tin,
            COALESCE(SUM(tokens_out), 0) AS tout,
            COALESCE(SUM(tokens_cached), 0) AS tcached
@@ -156,7 +163,7 @@ export class UsageStore {
       tcached: number;
     };
     return {
-      costCentsSessionTotal: r.cost,
+      costMicrocentsSesTotal: r.cost,
       tokensInTotal: r.tin,
       tokensOutTotal: r.tout,
       tokensCachedTotal: r.tcached,
@@ -187,7 +194,7 @@ export class UsageStore {
            COALESCE(SUM(tokens_in), 0) AS tin,
            COALESCE(SUM(tokens_out), 0) AS tout,
            COALESCE(SUM(tokens_cached), 0) AS tcached,
-           COALESCE(SUM(cost_cents), 0) AS cost
+           COALESCE(SUM(cost_microcents), 0) AS cost
          FROM usage_events
          WHERE ${where}
          GROUP BY ${col}
@@ -205,7 +212,7 @@ export class UsageStore {
       tokensIn: r.tin,
       tokensOut: r.tout,
       tokensCached: r.tcached,
-      costCents: r.cost,
+      costMicrocents: r.cost,
     }));
   }
 

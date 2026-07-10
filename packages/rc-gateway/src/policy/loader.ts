@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 
@@ -223,6 +223,38 @@ export function mergePolicies(workspace: Policy | null, user: Policy): Policy {
 }
 
 /**
+ * Log keyword emitted when the user-scope policy file is group- or
+ * world-readable (mode bits 0o044). Workspace policy files never trigger this
+ * warning — only the file that holds the operator's personal tool-permission
+ * rules is flagged.
+ */
+export const POLICY_PERMISSIONS_WARNING_KEYWORD = 'policy_permissions_warning';
+
+/**
+ * Group-read (0o040) | world-read (0o004). A group/world-readable policy file
+ * leaks the operator's personal tool-permission rules (which tools are allowed,
+ * denied, or rate-limited) to any account in the file's group or to any user on
+ * the system. We warn once per load so the operator can tighten the permissions.
+ */
+const NON_OWNER_READ_MASK = 0o044;
+
+/**
+ * Best-effort check: is the user-scope policy file group- or world-readable?
+ * Returns the mode (permission bits only) when yes, `null` when no or on any
+ * stat error (missing file is normal, non-fatal).
+ */
+async function checkUserPolicyReadable(
+  userPath: string,
+): Promise<number | null> {
+  try {
+    const { mode } = await stat(userPath);
+    return (mode & NON_OWNER_READ_MASK) !== 0 ? mode & 0o7777 : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Load the user policy and, when a workspace cwd is given, the workspace override
  * `<workspaceCwd>/.qwen/policy.yaml`, then merge (workspace prepended). The user
  * file is loaded with cycle-14 semantics UNCHANGED: absent (ENOENT) → the
@@ -232,6 +264,11 @@ export function mergePolicies(workspace: Policy | null, user: Policy): Policy {
  * `warn` and IGNORED (keep the user policy — never apply unparseable `allow`s,
  * never crash boot). So at boot this function throws ONLY on a malformed user
  * file. `warn` defaults to a no-op (the CLI passes a `console.warn` wrapper).
+ *
+ * Readability warning (spec-alignment): emits a `policy_permissions_warning` log
+ * line (via `warn`) when the user-scope file is group- or world-readable.
+ * Workspace policy files DO NOT trigger this warning — only the user-scope file
+ * holds personal tool-permission data. The check is best-effort and never throws.
  *
  * **`strictWorkspace` (cycle 45, for HOT-RELOAD):** when true, a malformed/
  * unreadable workspace file THROWS instead of being silently dropped. At boot,
@@ -250,6 +287,16 @@ export async function loadLayeredPolicy(
   opts: { strictWorkspace?: boolean } = {},
 ): Promise<Policy> {
   const user = (await loadPolicyFile(userPath)) ?? DEFAULT_PROMPT_POLICY;
+  // Readability warning: emitted once per load for the user-scope file only.
+  const readableMode = await checkUserPolicyReadable(userPath);
+  if (readableMode !== null) {
+    const octal = readableMode.toString(8).padStart(3, '0');
+    warn(
+      `${POLICY_PERMISSIONS_WARNING_KEYWORD}: ${userPath} is group/world-readable (mode 0${octal}) — ` +
+        `anyone who can read this file can see which tools are allowed or denied; ` +
+        `run: chmod go-r ${userPath}`,
+    );
+  }
   let workspace: Policy | null = null;
   if (workspaceCwd) {
     try {

@@ -29,9 +29,11 @@ export type RankedSearch = (
   opts: {
     kind?: string;
     sessionId?: string;
+    lineage?: string;
     limit?: number;
     since?: number;
     until?: number;
+    visibleSessionIds?: ReadonlySet<string>;
   },
 ) => Promise<SearchResult | null>;
 
@@ -57,7 +59,17 @@ const SEARCH_TIMEOUT_MS = 2000;
 export function createSearchRoute(
   resolveDir: () => Promise<string | undefined>,
   audit?: AuditRecorder,
-  opts?: { timeoutMs?: number; now?: () => number; ranked?: RankedSearch },
+  opts?: {
+    timeoutMs?: number;
+    now?: () => number;
+    ranked?: RankedSearch;
+    /**
+     * Resolve the set of session ids visible to a given token id (for
+     * non-owner callers). Returns undefined when the provider is absent (→ no
+     * session-set restriction applied, which is the pre-cycle behavior).
+     */
+    visibleSessions?: (tokenId: string) => Promise<ReadonlySet<string>>;
+  },
 ): RequestHandler {
   return async (req, res) => {
     // Authorization FIRST, before any query processing, so an unauthorized
@@ -134,6 +146,13 @@ export function createSearchRoute(
       ? Math.min(Math.max(1, Math.trunc(parsedLimit)), 200)
       : 50;
 
+    // Optional lineage filter: restrict to a session's fork lineage (ancestors +
+    // descendants + self). The handler resolves the actual session set inline via
+    // walkLineage; the route just reads the raw parameter and passes it through.
+    const rawLineage = req.query.lineage;
+    const lineage =
+      typeof rawLineage === 'string' && rawLineage ? rawLineage : undefined;
+
     // Optional inclusive ISO-8601 time bounds (cycle 79). A present-but-
     // unparseable value is a 400 (mirrors invalid_kind); absent → no bound.
     const parseBound = (
@@ -190,14 +209,35 @@ export function createSearchRoute(
     // index makes the block matter).
     let mode: 'scan' | 'bm25' = 'scan';
     let result: SearchResult | undefined;
+    // Compute visible-session set for non-owner callers. An owner (or a
+    // session-locked share which already forced sessionId above) gets
+    // `undefined` (= no restriction). A non-owner non-share token gets a set
+    // from `token_session_history`; the ranked search provider resolves it.
+    // The scan path ignores this field (the scanner never crosses session
+    // boundaries without an explicit sessionId filter anyway, and the scan is
+    // a fallback-only path for the BM25 provider).
+    const visibleSessionIds: ReadonlySet<string> | undefined =
+      lock !== undefined
+        ? // Share: already forced to one session via sessionId; no extra set needed
+          undefined
+        : req.rcClient?.scopes.includes(OWNER)
+          ? // Owner: no restriction
+            undefined
+          : // Non-owner: pass visibility set (provider resolves from DB)
+            opts?.visibleSessions
+            ? await opts.visibleSessions(req.rcClient?.id ?? '')
+            : undefined;
+
     if (wantRank && opts?.ranked) {
       try {
         const ranked = await opts.ranked(q, {
           kind,
           sessionId,
+          lineage,
           limit,
           since: since.ms,
           until: until.ms,
+          visibleSessionIds,
         });
         if (ranked) {
           result = ranked;
@@ -213,9 +253,11 @@ export function createSearchRoute(
         result = await searchTranscriptsDetailed(dir, q, {
           kind,
           sessionId,
+          lineage,
           limit,
           since: since.ms,
           until: until.ms,
+          visibleSessionIds,
           timeoutMs: opts?.timeoutMs ?? SEARCH_TIMEOUT_MS,
           now: opts?.now,
         });

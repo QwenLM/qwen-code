@@ -292,7 +292,7 @@ describe('POST /rc/session/:id/command/:name', () => {
     const app = express();
     app.use(express.json());
     app.post(
-      '/rc/session/:id/command/:name',
+      '/session/:id/command/:name',
       fakeClient(opts.scopes),
       requireScope(WRITE, opts.audit),
       enforceSessionLock(opts.audit),
@@ -304,7 +304,7 @@ describe('POST /rc/session/:id/command/:name', () => {
 
   it('404s an unknown command', async () => {
     const { url } = await bootInvoke({ scopes: [SESSION_READ, WRITE] });
-    const res = await fetch(`${url}/rc/session/s1/command/nope`, {
+    const res = await fetch(`${url}/session/s1/command/nope`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
@@ -320,7 +320,7 @@ describe('POST /rc/session/:id/command/:name', () => {
     const { url } = await bootInvoke({
       scopes: [SESSION_READ, WRITE, APPROVE],
     });
-    const res = await fetch(`${url}/rc/session/s1/command/t`, {
+    const res = await fetch(`${url}/session/s1/command/t`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
@@ -339,7 +339,7 @@ describe('POST /rc/session/:id/command/:name', () => {
     const audit = new FakeAudit();
     // Caller has WRITE (passes the route gate) but not APPROVE (fails the clamp).
     const { url } = await bootInvoke({ scopes: [SESSION_READ, WRITE], audit });
-    const res = await fetch(`${url}/rc/session/s1/command/a`, {
+    const res = await fetch(`${url}/session/s1/command/a`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
@@ -367,7 +367,7 @@ describe('POST /rc/session/:id/command/:name', () => {
       audit,
       stubOpts: { promptStopReason: 'end_turn' },
     });
-    const res = await fetch(`${url}/rc/session/s1/command/echo`, {
+    const res = await fetch(`${url}/session/s1/command/echo`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ args: ['hello', 'world'] }),
@@ -394,7 +394,7 @@ describe('POST /rc/session/:id/command/:name', () => {
     await writeFile(join(workspaceDir, 'echo.md'), cmd('echo'));
     const audit = new FakeAudit();
     const { url } = await bootInvoke({ scopes: [SESSION_READ, WRITE], audit });
-    const res = await fetch(`${url}/rc/session/s1/command/echo`, {
+    const res = await fetch(`${url}/session/s1/command/echo`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ args: 'a b c' }),
@@ -412,7 +412,7 @@ describe('POST /rc/session/:id/command/:name', () => {
       scopes: [SESSION_READ, WRITE],
       stubOpts: { promptStatus: 500 },
     });
-    const res = await fetch(`${url}/rc/session/s1/command/echo`, {
+    const res = await fetch(`${url}/session/s1/command/echo`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
@@ -442,7 +442,7 @@ describe('POST /rc/session/:id/command/:name', () => {
     const app = express();
     app.use(express.json());
     app.post(
-      '/rc/session/:id/command/:name',
+      '/session/:id/command/:name',
       fakeClient(scopes),
       requireScope(WRITE, audit),
       enforceSessionLock(audit),
@@ -458,7 +458,7 @@ describe('POST /rc/session/:id/command/:name', () => {
     await writeFile(join(workspaceDir, 'fix.md'), ARG_CMD);
     const audit = new FakeAudit();
     const { url, calls } = await bootCapturing([SESSION_READ, WRITE], audit);
-    const res = await fetch(`${url}/rc/session/s1/command/fix`, {
+    const res = await fetch(`${url}/session/s1/command/fix`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ args: [] }),
@@ -477,7 +477,7 @@ describe('POST /rc/session/:id/command/:name', () => {
   it('auto-fills a declared default for an absent positional arg', async () => {
     await writeFile(join(workspaceDir, 'fix.md'), ARG_CMD);
     const { url, calls } = await bootCapturing([SESSION_READ, WRITE]);
-    const res = await fetch(`${url}/rc/session/s1/command/fix`, {
+    const res = await fetch(`${url}/session/s1/command/fix`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ args: ['123'] }), // branch omitted → default 'main'
@@ -489,7 +489,7 @@ describe('POST /rc/session/:id/command/:name', () => {
   it('a provided positional value overrides the declared default', async () => {
     await writeFile(join(workspaceDir, 'fix.md'), ARG_CMD);
     const { url, calls } = await bootCapturing([SESSION_READ, WRITE]);
-    await fetch(`${url}/rc/session/s1/command/fix`, {
+    await fetch(`${url}/session/s1/command/fix`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ args: ['123', 'dev'] }),
@@ -500,7 +500,7 @@ describe('POST /rc/session/:id/command/:name', () => {
   it('a command with no args declaration is unaffected (back-compat)', async () => {
     await writeFile(join(workspaceDir, 'echo.md'), cmd('echo'));
     const { url, calls } = await bootCapturing([SESSION_READ, WRITE]);
-    const res = await fetch(`${url}/rc/session/s1/command/echo`, {
+    const res = await fetch(`${url}/session/s1/command/echo`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ args: ['x', 'y'] }),

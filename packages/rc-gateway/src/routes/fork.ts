@@ -13,6 +13,7 @@ import {
   forkRecords,
   serializeForked,
   buildForkTitleRecord,
+  buildForkHeader,
 } from '../sessions/forkTranscript.js';
 import {
   readParentRecords,
@@ -20,6 +21,8 @@ import {
   removeFork,
   ForkExistsError,
 } from '../sessions/forkStore.js';
+import type { OwnerEventBus } from '../ownerEvents.js';
+import { SessionWal } from '../wal.js';
 
 /** The daemon surface this route needs: just `loadSession`. */
 type ForkDaemon = Pick<DaemonClient, 'loadSession'>;
@@ -30,10 +33,24 @@ export interface ForkRouteDeps {
   now?: () => Date;
   /** New session id generator (injectable for tests; defaults to randomUUID). */
   randomId?: () => string;
+  /**
+   * Owner-event bus: when provided, publishes `session_event` frames for
+   * `session_forked` (parent) and `child_forked` (child) after a successful
+   * fork so SSE subscribers observe fork lifecycle in real time.
+   */
+  bus?: OwnerEventBus;
+  /**
+   * Root directory for WAL files. When provided (together with or without
+   * `bus`), the fork route seeds two WAL entries:
+   *  - `session_forked` on the parent session WAL at id = `fromEventId + 1`
+   *    (defaults to 1 when no `fromEventId` is supplied).
+   *  - `child_forked` on the child session WAL at id = 1 (the child is fresh).
+   */
+  walDir?: string;
 }
 
 /**
- * POST /rc/session/:id/fork — fork a settled session into a brand-new
+ * POST /session/:id/fork — fork a settled session into a brand-new
  * daemon-hosted session that inherits the parent's full on-disk transcript.
  *
  * Replicates core `SessionService.forkSession` from OUTSIDE the daemon: read
@@ -44,9 +61,19 @@ export interface ForkRouteDeps {
  * core `/branch` TUI command does internally.
  *
  * `resolveWorkspaceCwd` yields the trusted `workspaceCwd` (no request input
- * ever reaches a filesystem path). Only full-copy `include` mode is supported
- * this slice; `transcript` other than `include`, or any `fromEventId`, is
- * rejected up front so deferred modes fail clearly.
+ * ever reaches a filesystem path). Supported transcript modes:
+ *  - `include` (default): full copy of the parent transcript up to
+ *    `fromEventId` records (all records when absent).
+ *  - `empty`: no transcript records copied (fork header only).
+ *  - `summary`: not yet implemented (returns 400).
+ *
+ * Fork header: the very first JSONL line of every fork is a
+ * `{type:"fork", parentSessionId, ...}` record that provides machine-readable
+ * lineage without interfering with core's `reconstructHistory`.
+ *
+ * WAL seeding: when `walDir` is provided, seeds `session_forked` on the parent
+ * WAL (id = fromEventId + 1) and `child_forked` on the child WAL (id = 1) so
+ * SSE subscribers reconnecting at any cursor see the fork event.
  */
 export function createForkRoute(
   daemon: ForkDaemon,
@@ -55,7 +82,7 @@ export function createForkRoute(
 ): RequestHandler {
   const now = deps.now ?? (() => new Date());
   const randomId = deps.randomId ?? randomUUID;
-  const { audit } = deps;
+  const { audit, bus, walDir } = deps;
 
   return async (req, res) => {
     try {
@@ -89,17 +116,32 @@ export function createForkRoute(
     const name =
       typeof body.name === 'string' ? body.name.trim().slice(0, 200) : '';
 
-    // 1. Reject deferred fork modes explicitly (don't silently full-copy).
-    if (
-      (body.transcript !== undefined && body.transcript !== 'include') ||
-      body.fromEventId !== undefined
-    ) {
+    // Resolve transcript mode. Default is 'include' (full copy).
+    // 'summary' is deferred and returns 400. 'empty' is supported (header only).
+    const transcriptMode =
+      body.transcript === undefined || body.transcript === 'include'
+        ? 'include'
+        : body.transcript === 'empty'
+          ? 'empty'
+          : null;
+
+    if (transcriptMode === null) {
       res.status(400).json({
         error: 'Unsupported fork mode',
         code: 'unsupported_fork_mode',
       });
       return;
     }
+
+    // fromEventId: optional non-negative integer. When provided, the transcript
+    // slice is capped at this many records (0 = empty body; n = first n records).
+    // Validated as a non-negative integer; anything else is ignored (full copy).
+    const fromEventId =
+      typeof body.fromEventId === 'number' &&
+      Number.isInteger(body.fromEventId) &&
+      body.fromEventId >= 0
+        ? body.fromEventId
+        : undefined;
 
     // 2. An invalid id can't name a file → treat as a missing parent.
     const parentId = req.params.id;
@@ -122,14 +164,24 @@ export function createForkRoute(
     const chatsDir = resolveChatsDir(cwd);
 
     // 4. Read the parent transcript (missing/empty/all-corrupt → 404).
-    const records = await readParentRecords(chatsDir, parentId);
-    if (!records) {
+    const allRecords = await readParentRecords(chatsDir, parentId);
+    if (!allRecords) {
       res.status(404).json({
         error: 'Parent transcript not found',
         code: 'parent_transcript_not_found',
       });
       return;
     }
+
+    // Apply fromEventId slicing: when present, take only the first fromEventId
+    // records (so fromEventId=0 gives an empty slice, =1 takes the first record).
+    // Empty mode always yields an empty slice regardless.
+    const records =
+      transcriptMode === 'empty'
+        ? []
+        : fromEventId !== undefined
+          ? allRecords.slice(0, fromEventId)
+          : allRecords;
 
     // 5. Replicate forkSession's copy and write the new file exclusively.
     const newId = randomId();
@@ -140,6 +192,17 @@ export function createForkRoute(
       res.status(500).json({ error: 'Fork failed', code: 'fork_failed' });
       return;
     }
+
+    const forkedAt = now().toISOString();
+
+    // Build the fork header — the very first JSONL line of the fork transcript.
+    const forkHeader = buildForkHeader({
+      parentSessionId: parentId,
+      ...(fromEventId !== undefined ? { parentEventId: fromEventId } : {}),
+      transcriptMode,
+      forkedAt,
+    });
+
     const forkedRecords = forkRecords(records, parentId, newId);
     // When named, append a core-faithful custom_title record (chained onto the
     // tail) so the fork shows its name in the picker, on resume, and via
@@ -149,11 +212,14 @@ export function createForkRoute(
       forkedRecords.push(
         buildForkTitleRecord(forkedRecords, name, {
           uuid: randomUUID(),
-          timestamp: now().toISOString(),
+          timestamp: forkedAt,
         }),
       );
     }
-    const forked = serializeForked(forkedRecords);
+
+    // Prepend the fork header, then the copied (and optionally named) records.
+    const allForked = [forkHeader, ...forkedRecords];
+    const forked = serializeForked(allForked);
     try {
       await writeFork(chatsDir, newId, forked);
     } catch (err) {
@@ -176,7 +242,56 @@ export function createForkRoute(
       return;
     }
 
-    // 7. Audit ids + count only — never transcript content.
+    // 7. Seed the WAL and publish SSE events when deps are wired.
+    //    session_forked id = fromEventId + 1 (defaults to 1 when absent).
+    //    child_forked id = 1 (the child WAL is always fresh).
+    const parentEventId = fromEventId ?? 0;
+    const sessionForkedId = parentEventId + 1;
+
+    if (walDir) {
+      const parentWal = new SessionWal({ dir: walDir, sessionId: parentId });
+      parentWal.append({
+        id: sessionForkedId,
+        v: 1,
+        type: 'session_forked',
+        data: { childSessionId: newId, forkedAt },
+      });
+      parentWal.close();
+
+      const childWal = new SessionWal({ dir: walDir, sessionId: newId });
+      childWal.append({
+        id: 1,
+        v: 1,
+        type: 'child_forked',
+        data: { parentSessionId: parentId, forkedAt },
+      });
+      childWal.close();
+    }
+
+    if (bus) {
+      bus.publish({
+        type: 'session_event',
+        sessionId: parentId,
+        event: {
+          id: sessionForkedId,
+          v: 1,
+          type: 'session_forked',
+          data: { childSessionId: newId, forkedAt },
+        },
+      });
+      bus.publish({
+        type: 'session_event',
+        sessionId: newId,
+        event: {
+          id: 1,
+          v: 1,
+          type: 'child_forked',
+          data: { parentSessionId: parentId, forkedAt },
+        },
+      });
+    }
+
+    // 8. Audit ids + count only — never transcript content.
     void audit?.record({
       action: 'session_forked',
       actorTokenId: req.rcClient?.id,
@@ -191,7 +306,7 @@ export function createForkRoute(
     res.status(200).json({
       sessionId: newId,
       parentSessionId: parentId,
-      forkedAt: now().toISOString(),
+      forkedAt,
     });
   }
 }

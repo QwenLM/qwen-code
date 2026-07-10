@@ -107,3 +107,41 @@ export function createRevokeTokenRoute(
     res.status(204).end();
   };
 }
+
+/**
+ * POST /rc/tokens/revoke-all → batch-revoke all tokens (owner-scoped).
+ *
+ * Body: `{ "except": "self" }` (optional) — when present, spares the calling
+ * token from revocation so the owner retains access. Without this field, ALL
+ * tokens (including the caller's) are revoked.
+ *
+ * Response 200: `{ revokedIds: string[] }` — ids of every newly-revoked token.
+ * One `token_revoked` audit entry is written per revoked id.
+ * Live SSE/WS streams are evicted for every revoked token.
+ */
+export function createRevokeAllTokensRoute(
+  store: TokenStore,
+  registry: ConnectionRegistry,
+  audit?: AuditRecorder,
+): RequestHandler {
+  return async (req, res) => {
+    const body = (req.body ?? {}) as { except?: unknown };
+    const exceptSelf = body.except === 'self';
+    const callerTokenId = req.rcClient?.id;
+    const exceptTokenId =
+      exceptSelf && callerTokenId ? callerTokenId : undefined;
+
+    const { revokedIds } = await store.revokeAll({ exceptTokenId });
+
+    for (const id of revokedIds) {
+      registry.evict(id);
+      void audit?.record({
+        action: 'token_revoked',
+        actorTokenId: callerTokenId,
+        target: id,
+      });
+    }
+
+    res.status(200).json({ revokedIds });
+  };
+}

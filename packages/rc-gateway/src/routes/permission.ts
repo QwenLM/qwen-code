@@ -13,7 +13,7 @@ import type {
 } from '@qwen-code/sdk';
 import type { AuditRecorder } from '../auditLog.js';
 
-/** POST /rc/session/:id/permission/:requestId { outcome, optionId? } → vote. */
+/** POST /session/:id/permission/:requestId { outcome, optionId? } → vote. */
 export function createPermissionVoteRoute(
   daemon: DaemonClient,
   audit?: AuditRecorder,

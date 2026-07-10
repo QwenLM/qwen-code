@@ -8,7 +8,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import {
   mkdtempSync,
   readFileSync,
-  existsSync,
+  readdirSync,
   mkdirSync,
   writeFileSync,
   rmSync,
@@ -97,9 +97,34 @@ async function boot(
 }
 
 function readAudit(path: string): Array<Record<string, unknown>> {
-  if (!existsSync(path)) return [];
-  const body = readFileSync(path, 'utf8').trim();
-  return body ? body.split('\n').map((l) => JSON.parse(l)) : [];
+  // With daily rotation, records land in audit-YYYY-MM-DD.log files in
+  // dirname(path). Read all of them (the AuditLog dir = dirname(path)).
+  const dir = path.endsWith('.log')
+    ? path.slice(0, path.lastIndexOf('/'))
+    : path;
+  let files: string[];
+  try {
+    files = readdirSync(dir)
+      .filter((f) => /^audit-.*\.log$/.test(f))
+      .sort();
+  } catch {
+    return [];
+  }
+  const rows: Array<Record<string, unknown>> = [];
+  for (const name of files) {
+    try {
+      const body = readFileSync(`${dir}/${name}`, 'utf8').trim();
+      if (body)
+        rows.push(
+          ...body
+            .split('\n')
+            .map((l) => JSON.parse(l) as Record<string, unknown>),
+        );
+    } catch {
+      // skip unreadable file
+    }
+  }
+  return rows;
 }
 
 async function pollAudit(
@@ -131,7 +156,7 @@ describe('gateway app', () => {
     };
     expect(scopes).toEqual([SESSION_READ]);
 
-    const events = await fetch(`${url}/rc/session/sess-1/events`, {
+    const events = await fetch(`${url}/session/sess-1/events`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(events.status).toBe(200);
@@ -158,7 +183,7 @@ describe('gateway app', () => {
     expect([...scopes].sort()).toEqual(
       [BRIDGE, SESSION_READ, APPROVE, WRITE].sort(),
     );
-    const events = await fetch(`${url}/rc/session/sess-1/events`, {
+    const events = await fetch(`${url}/session/sess-1/events`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(events.status).toBe(200); // session:read satisfied by the bundle
@@ -176,7 +201,7 @@ describe('gateway app', () => {
 
   it('401s the events route without a token', async () => {
     const { url } = await boot();
-    const res = await fetch(`${url}/rc/session/sess-1/events`);
+    const res = await fetch(`${url}/session/sess-1/events`);
     expect(res.status).toBe(401);
   });
 
@@ -189,7 +214,7 @@ describe('gateway app', () => {
       body: JSON.stringify({ code, label: 'weak' }),
     });
     const { token } = (await redeem.json()) as { token: string };
-    const res = await fetch(`${url}/rc/session/sess-1/events`, {
+    const res = await fetch(`${url}/session/sess-1/events`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(res.status).toBe(403);
@@ -215,7 +240,7 @@ describe('gateway app', () => {
     const victim = (await victimRedeem.json()) as { id: string; token: string };
 
     const ac = new AbortController();
-    const stream = await fetch(`${url}/rc/session/sess-1/events`, {
+    const stream = await fetch(`${url}/session/sess-1/events`, {
       headers: { Authorization: `Bearer ${victim.token}` },
       signal: ac.signal,
     });
@@ -243,7 +268,7 @@ describe('gateway app', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code, label: 'owner' }),
     });
-    await fetch(`${url}/rc/session/sess-1/events`, {
+    await fetch(`${url}/session/sess-1/events`, {
       headers: { Authorization: 'Bearer not-a-token' },
     });
 
@@ -256,7 +281,12 @@ describe('gateway app', () => {
     const actions = rows.map((r) => r.action);
     expect(actions).toContain('pairing_redeemed');
     expect(actions).toContain('auth_failed');
-    const auditText = readFileSync(auditPath, 'utf8');
+    // Read all daily audit files from the audit dir (daily rotation).
+    const auditDir = auditPath.slice(0, auditPath.lastIndexOf('/'));
+    const auditText = readdirSync(auditDir)
+      .filter((f) => /^audit-.*\.log$/.test(f))
+      .map((f) => readFileSync(`${auditDir}/${f}`, 'utf8'))
+      .join('');
     expect(auditText).not.toContain('not-a-token');
     // Structural no-secret guarantee: no bearer material ever lands in audit.
     expect(auditText).not.toContain('Bearer');
@@ -511,7 +541,7 @@ describe('gateway app', () => {
     expect(mint.status).toBe(200);
     const approveToken = ((await mint.json()) as { token: string }).token;
 
-    const vote = await fetch(`${url}/rc/session/sess-1/permission/req-1`, {
+    const vote = await fetch(`${url}/session/sess-1/permission/req-1`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -550,7 +580,7 @@ describe('gateway app', () => {
 
     // Votes on its locked session → passes requireScope(APPROVE)+enforceSessionLock
     // and reaches the daemon (stub answers 200).
-    const ok = await fetch(`${url}/rc/session/sess-1/permission/req-1`, {
+    const ok = await fetch(`${url}/session/sess-1/permission/req-1`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -561,7 +591,7 @@ describe('gateway app', () => {
     expect(ok.status).toBe(200);
 
     // Votes on a DIFFERENT session → 403 session_locked (the lock backstop).
-    const wrong = await fetch(`${url}/rc/session/sess-2/permission/req-1`, {
+    const wrong = await fetch(`${url}/session/sess-2/permission/req-1`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -585,7 +615,7 @@ describe('gateway app', () => {
     });
     const writeToken = ((await redeem.json()) as { token: string }).token;
 
-    const res = await fetch(`${url}/rc/session/s1/prompt`, {
+    const res = await fetch(`${url}/session/s1/prompt`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -607,7 +637,7 @@ describe('gateway app', () => {
     });
     const bridgeToken = ((await redeem.json()) as { token: string }).token;
 
-    const res = await fetch(`${url}/rc/session/s1/prompt`, {
+    const res = await fetch(`${url}/session/s1/prompt`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -718,8 +748,8 @@ describe('gateway app', () => {
     expect(redeem.status).toBe(403);
   });
 
-  it('a NON-bridge write token cannot stamp subActor (header ignored)', async () => {
-    const { url, pairing, auditPath } = await boot();
+  it('a NON-bridge write token sending X-RC-SubActor gets 400 sub_actor_forbidden_scope', async () => {
+    const { url, pairing } = await boot();
     const { code } = pairing.mint([SESSION_READ, WRITE]); // no bridge
     const redeem = await fetch(`${url}/rc/pair/redeem`, {
       method: 'POST',
@@ -728,21 +758,18 @@ describe('gateway app', () => {
     });
     const writeToken = ((await redeem.json()) as { token: string }).token;
 
-    const res = await fetch(`${url}/rc/session/s1/prompt`, {
+    const res = await fetch(`${url}/session/s1/prompt`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${writeToken}`,
-        'X-RC-SubActor': 'telegram:victim', // spoof attempt
+        'X-RC-SubActor': 'telegram:victim', // non-bridge scope → rejected
       },
       body: JSON.stringify({ prompt: 'hi' }),
     });
-    expect(res.status).toBe(200);
-    const rows = await pollAudit(auditPath, (r) =>
-      r.some((x) => x.action === 'prompt_sent'),
-    );
-    const sent = rows.find((x) => x.action === 'prompt_sent');
-    expect(sent?.subActor).toBeUndefined();
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { code: string };
+    expect(json.code).toBe('sub_actor_forbidden_scope');
   });
 
   it('403s the fork route for a token lacking write', async () => {
@@ -756,7 +783,7 @@ describe('gateway app', () => {
     const token = ((await redeem.json()) as { token: string }).token;
 
     const res = await fetch(
-      `${url}/rc/session/11111111111111111111111111111111/fork`,
+      `${url}/session/11111111111111111111111111111111/fork`,
       {
         method: 'POST',
         headers: {
@@ -782,7 +809,7 @@ describe('gateway app', () => {
     // A syntactically-valid but nonexistent parent id under the stub's
     // /stub/workspace chats dir → 404 parent_transcript_not_found.
     const res = await fetch(
-      `${url}/rc/session/22222222222222222222222222222222/fork`,
+      `${url}/session/22222222222222222222222222222222/fork`,
       {
         method: 'POST',
         headers: {
@@ -806,7 +833,7 @@ describe('gateway app', () => {
     });
     const token = ((await redeem.json()) as { token: string }).token;
 
-    const res = await fetch(`${url}/rc/session/s1/prompt`, {
+    const res = await fetch(`${url}/session/s1/prompt`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -830,7 +857,7 @@ describe('gateway app', () => {
     });
     const readToken = ((await redeem.json()) as { token: string }).token;
 
-    const res = await fetch(`${url}/rc/session/s1/prompt`, {
+    const res = await fetch(`${url}/session/s1/prompt`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1039,13 +1066,13 @@ describe('gateway app', () => {
     expect(share.url).toBe('/ui/share/' + share.token);
 
     // The share token reaches its own locked session (passes the lock — not 403).
-    const ok = await fetch(`${url}/rc/session/s1/events`, {
+    const ok = await fetch(`${url}/session/s1/events`, {
       headers: { Authorization: `Bearer ${share.token}` },
     });
     expect(ok.status).not.toBe(403);
 
     // The share token on a DIFFERENT session → 403 session_locked.
-    const wrong = await fetch(`${url}/rc/session/s2/events`, {
+    const wrong = await fetch(`${url}/session/s2/events`, {
       headers: { Authorization: `Bearer ${share.token}` },
     });
     expect(wrong.status).toBe(403);
@@ -1054,7 +1081,7 @@ describe('gateway app', () => {
     );
 
     // The share token on the prompt route (its own session) → 403: no write scope.
-    const prompt = await fetch(`${url}/rc/session/s1/prompt`, {
+    const prompt = await fetch(`${url}/session/s1/prompt`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1179,11 +1206,14 @@ describe('gateway app', () => {
 
   it('403s GET /rc/commands for a token lacking session:read', async () => {
     const { url, pairing } = await boot();
-    const { code } = pairing.mint([WRITE]); // no session:read
+    // `share` is a pure marker scope with no functional implications — it does
+    // NOT imply session:read (unlike write/approve/owner which all do via the
+    // implication hierarchy). Use it to exercise the 403 path.
+    const { code } = pairing.mint([SHARE]);
     const redeem = await fetch(`${url}/rc/pair/redeem`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code, label: 'writer-only' }),
+      body: JSON.stringify({ code, label: 'share-marker-only' }),
     });
     const token = ((await redeem.json()) as { token: string }).token;
     const res = await fetch(`${url}/rc/commands`, {
@@ -1192,7 +1222,7 @@ describe('gateway app', () => {
     expect(res.status).toBe(403);
   });
 
-  it('404s POST /rc/session/:id/command/:name for an unknown command (route wired)', async () => {
+  it('404s POST /session/:id/command/:name for an unknown command (route wired)', async () => {
     const { url, pairing } = await boot();
     const { code } = pairing.mint([SESSION_READ, WRITE]);
     const redeem = await fetch(`${url}/rc/pair/redeem`, {
@@ -1201,7 +1231,7 @@ describe('gateway app', () => {
       body: JSON.stringify({ code, label: 'writer' }),
     });
     const token = ((await redeem.json()) as { token: string }).token;
-    const res = await fetch(`${url}/rc/session/s1/command/nope`, {
+    const res = await fetch(`${url}/session/s1/command/nope`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1215,7 +1245,7 @@ describe('gateway app', () => {
     );
   });
 
-  it('403s POST /rc/session/:id/command/:name for a session:read-only token', async () => {
+  it('403s POST /session/:id/command/:name for a session:read-only token', async () => {
     const { url, pairing } = await boot();
     const { code } = pairing.mint([SESSION_READ]); // no write
     const redeem = await fetch(`${url}/rc/pair/redeem`, {
@@ -1224,7 +1254,7 @@ describe('gateway app', () => {
       body: JSON.stringify({ code, label: 'reader' }),
     });
     const token = ((await redeem.json()) as { token: string }).token;
-    const res = await fetch(`${url}/rc/session/s1/command/whatever`, {
+    const res = await fetch(`${url}/session/s1/command/whatever`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1237,11 +1267,14 @@ describe('gateway app', () => {
 
   it('403s the push vapid route for a token lacking session:read', async () => {
     const { url, pairing } = await boot();
-    const { code } = pairing.mint([OWNER]); // owner lacks session:read
+    // `share` is a pure marker scope with no functional implications — it does
+    // NOT imply session:read (unlike owner/write/approve which all do). Use it
+    // to exercise the 403 path on the vapid route.
+    const { code } = pairing.mint([SHARE]);
     const redeem = await fetch(`${url}/rc/pair/redeem`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code, label: 'owner-only' }),
+      body: JSON.stringify({ code, label: 'share-marker-only' }),
     });
     const token = ((await redeem.json()) as { token: string }).token;
 
@@ -1503,5 +1536,94 @@ describe('APNs token-revoke cascade (native-mobile-shells)', () => {
     });
 
     rmSync(apnsDir, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CORS preflight + actual-request middleware (Task 1.4)
+// ---------------------------------------------------------------------------
+
+describe('CORS preflight and actual-request middleware', () => {
+  it('OPTIONS from an unlisted origin returns 403 with no ACAO header', async () => {
+    const { url } = await boot();
+    const res = await fetch(`${url}/rc/health`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://unlisted.evil.com',
+        'Access-Control-Request-Method': 'GET',
+      },
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  it('OPTIONS from an allowlisted origin returns 204 with ACAO + credentials + Vary', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-cors-srv-'));
+    const s = await TokenStore.open(join(dir, 'tokens.json'));
+    await s.admitOrigin('https://app.example.com', 'tok1');
+    const { url: url2 } = await boot(undefined, {
+      store: s,
+    });
+    const res = await fetch(`${url2}/rc/health`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://app.example.com',
+        'Access-Control-Request-Method': 'GET',
+      },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get('access-control-allow-origin')).toBe(
+      'https://app.example.com',
+    );
+    expect(res.headers.get('access-control-allow-credentials')).toBe('true');
+    expect(res.headers.get('vary')).toBe('Origin');
+  });
+
+  it('actual GET from an unlisted origin has no ACAO header (still 200 for public routes)', async () => {
+    const { url } = await boot();
+    const res = await fetch(`${url}/rc/health`, {
+      headers: { Origin: 'https://unlisted.evil.com' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  it('actual GET from an allowlisted origin gets ACAO + credentials + Vary', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-cors-srv2-'));
+    const s = await TokenStore.open(join(dir, 'tokens.json'));
+    await s.admitOrigin('https://app.example.com', 'tok1');
+    const { url: url2 } = await boot(undefined, { store: s });
+    const res = await fetch(`${url2}/rc/health`, {
+      headers: { Origin: 'https://app.example.com' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBe(
+      'https://app.example.com',
+    );
+    expect(res.headers.get('access-control-allow-credentials')).toBe('true');
+    expect(res.headers.get('vary')).toBe('Origin');
+  });
+
+  it('GET /rc/cors returns 200 with origins array for owner token', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-cors-srv3-'));
+    const s = await TokenStore.open(join(dir, 'tokens.json'));
+    const p = new PairingService();
+    const { url } = await boot(undefined, { store: s, pairing: p });
+    const { code } = p.mint(['owner']);
+    const redeemRes = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner' }),
+    });
+    const { token: ownerToken } = (await redeemRes.json()) as { token: string };
+    await s.admitOrigin('https://app.example.com', 'tok1');
+    const res = await fetch(`${url}/rc/cors`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { origins: Array<{ origin: string }> };
+    expect(
+      body.origins.some((o) => o.origin === 'https://app.example.com'),
+    ).toBe(true);
   });
 });

@@ -75,7 +75,9 @@ describe('formatUsageTable', () => {
       tokensIn: 1000,
       tokensOut: 500,
       tokensCached: 0,
+      costMicrocents: 600_000,
       costCents: 0.6,
+      efficiency: { costCentsPer1kOutputTokens: 1.2, tokensPerDollar: 83333 },
     },
   ];
 

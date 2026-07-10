@@ -9,12 +9,21 @@ import type { PairingService } from '../pairing.js';
 import type { TokenStore } from '../tokenStore.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { expandScopes } from '../scopes.js';
+import { evaluateAdmission, type CorsAllowlist } from '../cors.js';
+
+export interface PairRedeemCorsOpts {
+  /** The gateway's own UI origin (used as an unconditional admission bypass). */
+  ownUiOrigin: string;
+  /** Live allowlist to update on successful admission. */
+  allowlist: CorsAllowlist;
+}
 
 /** POST /rc/pair/redeem { code, label } → { id, token, scopes }. */
 export function createPairRedeemRoute(
   pairing: PairingService,
   store: TokenStore,
   audit?: AuditRecorder,
+  corsOpts?: PairRedeemCorsOpts,
 ): RequestHandler {
   return async (req, res) => {
     const body = (req.body ?? {}) as { code?: unknown; label?: unknown };
@@ -37,6 +46,29 @@ export function createPairRedeemRoute(
       target: id,
       detail: { scopes: granted },
     });
+
+    // CORS admission gate (wire-protocol: "Browser CORS allowlist derived from
+    // pairing").  Failure is silent: the token is still issued.
+    if (corsOpts) {
+      const origin = req.headers['origin'] as string | undefined;
+      const secFetchSite = req.headers['sec-fetch-site'] as string | undefined;
+      const decision = evaluateAdmission({
+        origin,
+        secFetchSite,
+        codeAllowOrigin: grant.allowOrigin,
+        ownUiOrigin: corsOpts.ownUiOrigin,
+      });
+      if (decision.admit && origin) {
+        await store.admitOrigin(origin, id);
+        corsOpts.allowlist.add(origin);
+        void audit?.record({
+          action: 'cors_origin_admitted',
+          target: id,
+          detail: { origin, reason: decision.reason },
+        });
+      }
+    }
+
     res.status(200).json({ id, token, scopes: granted });
   };
 }

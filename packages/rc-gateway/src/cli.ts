@@ -5,7 +5,8 @@
  */
 
 import { watch, readFileSync, type FSWatcher } from 'node:fs';
-import { createPrivateKey } from 'node:crypto';
+import { createPrivateKey, createHash } from 'node:crypto';
+import { writeBootstrapCode, displayHint } from './bootstrap.js';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSecureContext } from 'node:tls';
 import { homedir, hostname } from 'node:os';
@@ -24,7 +25,11 @@ import {
   formatDaemonsJson,
   type MdnsSuppressReason,
 } from './mdns/advert.js';
-import { MdnsAdvertiser, type BonjourFactory } from './mdns/advertiser.js';
+import {
+  MdnsAdvertiser,
+  MDNS_UNAVAILABLE_KEYWORD,
+  type BonjourFactory,
+} from './mdns/advertiser.js';
 import { browseDaemons, type BrowserFactory } from './mdns/browser.js';
 import { startDaemon } from './daemonSupervisor.js';
 import { buildAcmeManager } from './tls/acme/buildAcmeStack.js';
@@ -126,6 +131,7 @@ import {
   formatSearchResults,
   formatSearchResultsJson,
 } from './search/searchCli.js';
+import { AuditLog } from './auditLog.js';
 
 export interface ServeOptions {
   gatewayPort?: number;
@@ -190,6 +196,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // and no side effect. (A key that simply doesn't match the cert is only caught
   // at handshake time and is out of scope here.)
   let tlsMaterial: { cert: Buffer; key: Buffer } | undefined;
+  // PEM text of the leaf cert (first PEM block) used for fingerprinting in the
+  // pairing banner. Set for both native-TLS and ACME paths.
+  let tlsCertPem: string | undefined;
   if (bind.mode === 'tls') {
     let cert: Buffer;
     let key: Buffer;
@@ -209,6 +218,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       );
     }
     tlsMaterial = { cert, key };
+    tlsCertPem = cert.toString('utf8');
   }
   // ACME (auto Let's Encrypt): obtain the cert BEFORE spawning the daemon so an
   // issuance failure fails fast without orphaning a daemon (same contract as the
@@ -245,6 +255,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     );
     const initial = await acmeManager.start();
     acmeTls = createLiveTlsContext(initial);
+    tlsCertPem = initial.cert;
     // eslint-disable-next-line no-console
     console.log(
       `acme: certificate ready for ${opts.acmeDomains!.join(', ')} ` +
@@ -724,6 +735,10 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       APPROVE,
       WRITE,
     ]);
+    // Write the bootstrap code to the secrets dir (0700) as a 0600 file; print
+    // only the path to stdout — never the code (pairing-auth spec invariant).
+    const rcDir = join(homedir(), '.qwen', 'rc');
+    const { path: bootstrapPath } = writeBootstrapCode(rcDir, code);
     const banner = [
       `qwen-rc gateway listening on ${scheme}://${bind.host}:${port}`,
       `web viewer: ${scheme}://${bind.host}:${port}/ui/`,
@@ -741,13 +756,22 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         `TLS: auto Let's Encrypt (${opts.acmeStaging ? 'staging' : 'production'}), auto-renewing`,
       );
     }
+    // TLS fingerprint: SHA-256 of the DER-encoded leaf cert, formatted as
+    // uppercase hex pairs separated by spaces (e.g. "A1B2 C3D4 …"). Included
+    // in the pairing banner so the owner can pin the cert out-of-band.
+    if (tlsCertPem) {
+      const fingerprint = tlsCertFingerprint(tlsCertPem);
+      if (fingerprint) {
+        banner.push(`TLS fingerprint (SHA-256): ${fingerprint}`);
+      }
+    }
     banner.push(
       `webpush: enabled (key ${vapid.getApplicationServerKey().slice(0, 8)}…)`,
       `policy: ${policy.rules.length === 0 ? 'default-prompt' : `${policy.rules.length} rule(s)`}`,
       `routing: ${routingRuleCount === 0 ? 'none' : `${routingRuleCount} rule(s)`}`,
-      `owner pairing code: ${code}`,
+      displayHint(bootstrapPath),
       `  (expires ${new Date(expiresAt).toISOString()}, grants [${OWNER}, ${SESSION_READ}, ${APPROVE}, ${WRITE}])`,
-      `redeem: POST /rc/pair/redeem { "code": "${code}", "label": "<name>" }`,
+      `redeem: POST /rc/pair/redeem { "code": "<see ${bootstrapPath}>", "label": "<name>" }`,
     );
     banner.push(`mDNS: ${mdnsBannerLine(mdns.reason)}`);
     // eslint-disable-next-line no-console
@@ -776,7 +800,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
           if (!factory) {
             // eslint-disable-next-line no-console
             console.warn(
-              'mDNS: advertising skipped — optional bonjour-service dependency not installed',
+              `${MDNS_UNAVAILABLE_KEYWORD}: optional bonjour-service dependency not installed`,
             );
             return;
           }
@@ -812,7 +836,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     | ((sessionId: string, workspaceCwd: string) => void)
     | undefined;
   if (suggestCfg) {
-    onSessionIdle = createIdleSuggestionHandler({
+    const idleHandle = createIdleSuggestionHandler({
       chat: createChatTransport(suggestCfg),
       bus: ownerEvents,
       audit,
@@ -822,6 +846,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       // global egress gate above).
       getSessionEnabled: (id) => idleToggles.get(id),
     });
+    onSessionIdle = idleHandle.onSessionIdle;
     // eslint-disable-next-line no-console
     console.log(
       idleConfig.enabled
@@ -1084,6 +1109,32 @@ async function openUsageStore(): Promise<
     }
     // eslint-disable-next-line no-console
     console.warn('cost tracking disabled: failed to open usage store:', msg);
+    return undefined;
+  }
+}
+
+/**
+ * Compute the SHA-256 fingerprint of a PEM certificate's DER bytes, formatted
+ * as uppercase hex pairs separated by spaces (e.g. `A1B2 C3D4 …`).  Returns
+ * `undefined` when the PEM cannot be parsed (rather than throwing), so a
+ * malformed cert never crashes the startup banner.
+ *
+ * Algorithm: strip the PEM armor, base64-decode to DER, SHA-256 the DER, format
+ * as `XX XX …` using only the FIRST PEM block (the leaf certificate).
+ */
+function tlsCertFingerprint(pem: string): string | undefined {
+  try {
+    // Extract the first PEM block body (leaf cert, before any intermediates).
+    const match =
+      /-----BEGIN CERTIFICATE-----\r?\n([\s\S]+?)\r?\n-----END CERTIFICATE-----/.exec(
+        pem,
+      );
+    if (!match) return undefined;
+    const der = Buffer.from(match[1].replace(/\r?\n/g, ''), 'base64');
+    const hash = createHash('sha256').update(der).digest('hex').toUpperCase();
+    // Group into 4-char chunks separated by spaces: "A1B2 C3D4 E5F6 …"
+    return hash.match(/.{1,4}/g)!.join(' ');
+  } catch {
     return undefined;
   }
 }
@@ -1487,13 +1538,25 @@ if (process.argv[2] === 'serve') {
       subActor: args.subActor,
     });
     store.close();
+    const MICRO = 1_000_000;
     const out: UsageResponseRow[] = rows.map((r) => ({
       key: r.key,
       displayLabel: r.key,
       tokensIn: r.tokensIn,
       tokensOut: r.tokensOut,
       tokensCached: r.tokensCached,
-      costCents: r.costCents,
+      costMicrocents: r.costMicrocents,
+      costCents: r.costMicrocents / MICRO,
+      efficiency: {
+        costCentsPer1kOutputTokens:
+          r.tokensOut > 0
+            ? (r.costMicrocents / MICRO / r.tokensOut) * 1000
+            : null,
+        tokensPerDollar:
+          r.costMicrocents > 0
+            ? (r.tokensOut / (r.costMicrocents / MICRO)) * 100
+            : null,
+      },
     }));
     // eslint-disable-next-line no-console
     console.log(
@@ -1547,4 +1610,31 @@ if (process.argv[2] === 'serve') {
     console.error(`daemons discover: ${(err as Error).message}`);
     process.exit(1);
   });
+} else if (process.argv[2] === 'audit' && process.argv[3] === 'verify') {
+  // `qwen-rc audit verify [--dir <path>]` -- walk all retained audit-*.log
+  // files in the audit directory and verify the prevHash chain of each file.
+  // Exits 0 when all chains are intact, 1 when any chain is broken (with a
+  // human-readable report on stdout), 2 on a usage error. Daemon-free and
+  // read-only: the verify pass never modifies any file.
+  const argv = process.argv.slice(4);
+  const dirFlag = argv.find((a) => a.startsWith('--dir='));
+  const auditDir = dirFlag
+    ? dirFlag.slice('--dir='.length)
+    : join(homedir(), '.qwen', 'rc');
+  const result = AuditLog.verifyChain(auditDir);
+  if (result.ok) {
+    // eslint-disable-next-line no-console
+    console.log(`audit verify: OK (directory: ${auditDir})`);
+    process.exit(0);
+  } else {
+    // eslint-disable-next-line no-console
+    console.error(
+      `audit verify: FAILED - ${result.failures.length} broken chain(s):`,
+    );
+    for (const { file, line } of result.failures) {
+      // eslint-disable-next-line no-console
+      console.error(`  ${file}:${line}`);
+    }
+    process.exit(1);
+  }
 }

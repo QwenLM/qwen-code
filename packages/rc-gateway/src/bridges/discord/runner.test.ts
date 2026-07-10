@@ -146,9 +146,10 @@ describe('DiscordBridge runner', () => {
     expect(h.registration()).toMatchObject({
       id: 'discord',
       supportsActions: true,
-      supportsMarkdown: 'full',
+      supportsMarkdown: 'limited',
       supportsThreads: true, // threads on long streams (built this cycle)
       supportsEdits: true,
+      maxMessageChars: 2000,
     });
     expect(h.subscribed).toContain('sess_q');
   });

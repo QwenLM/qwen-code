@@ -23,7 +23,7 @@
  */
 
 import type { RateTableHolder } from './rateTable.js';
-import { computeCostCents } from './rateTable.js';
+import { computeCostMicrocents } from './rateTable.js';
 import type { UsageStore } from './usageStore.js';
 
 /** What `extractUsage` pulls from a usage-bearing `session_update`. */
@@ -45,8 +45,10 @@ export interface UsageAttribution {
 /** The `usage_tick` SSE payload. */
 export interface UsageTick {
   sessionId: string;
-  costCentsSessionTotal: number;
-  costCentsPromptTotal: number;
+  /** Running session cost total in microcents (integer). */
+  costMicrocentsSesTotal: number;
+  /** Current prompt cost total in microcents (integer). */
+  costMicrocentsPromptTotal: number;
   tokensInTotal: number;
   tokensOutTotal: number;
 }
@@ -185,7 +187,7 @@ export interface UsageIngesterDeps {
  */
 export class UsageIngester {
   private readonly deps: UsageIngesterDeps;
-  /** sessionId → cost cents accumulated since the last prompt boundary. */
+  /** sessionId → cost microcents accumulated since the last prompt boundary. */
   private readonly promptTotals = new Map<string, number>();
 
   constructor(deps: UsageIngesterDeps) {
@@ -199,8 +201,8 @@ export class UsageIngester {
 
   /**
    * Ingest a `session_update` frame's `data`. No-op when the frame carries no
-   * usage. Returns the row's cost (cents, or null on a rate-table miss) for tests;
-   * production callers ignore the return.
+   * usage. Returns the row's cost in microcents (or null on a rate-table miss) for
+   * tests; production callers ignore the return.
    */
   ingest(
     sessionId: string,
@@ -210,7 +212,7 @@ export class UsageIngester {
     const usage = extractUsage(data);
     if (!usage) return undefined;
     const table = this.deps.rates.current();
-    const costCents = computeCostCents(
+    const costMicrocents = computeCostMicrocents(
       table,
       usage.modelServiceId,
       usage.modelId,
@@ -220,7 +222,7 @@ export class UsageIngester {
         cached: usage.tokensCached,
       },
     );
-    if (costCents === null) {
+    if (costMicrocents === null) {
       this.deps.onRateMiss?.(usage.modelServiceId, usage.modelId);
     }
     this.deps.store.record({
@@ -229,7 +231,7 @@ export class UsageIngester {
       tokensIn: usage.tokensIn,
       tokensOut: usage.tokensOut,
       tokensCached: usage.tokensCached,
-      costCents,
+      costMicrocents,
       modelServiceId: usage.modelServiceId ?? table.defaultModelServiceId ?? '',
       modelId: usage.modelId,
       attributionTokenId: attribution.attributionTokenId,
@@ -237,16 +239,16 @@ export class UsageIngester {
       stage: usage.stage,
     });
     const promptTotal =
-      (this.promptTotals.get(sessionId) ?? 0) + (costCents ?? 0);
+      (this.promptTotals.get(sessionId) ?? 0) + (costMicrocents ?? 0);
     this.promptTotals.set(sessionId, promptTotal);
     const totals = this.deps.store.sessionTotals(sessionId);
     this.deps.coalescer.push({
       sessionId,
-      costCentsSessionTotal: totals.costCentsSessionTotal,
-      costCentsPromptTotal: promptTotal,
+      costMicrocentsSesTotal: totals.costMicrocentsSesTotal,
+      costMicrocentsPromptTotal: promptTotal,
       tokensInTotal: totals.tokensInTotal,
       tokensOutTotal: totals.tokensOutTotal,
     });
-    return costCents;
+    return costMicrocents;
   }
 }
