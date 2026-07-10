@@ -76,6 +76,51 @@ function stripClosedAnalysisBlocks(text: string): string {
   }
 }
 
+/**
+ * Find the top-level `</summary>` that closes an already-open visible summary
+ * within `text`, returning the regexp match (with `.index`) or null when the
+ * closer has not arrived yet. Nested literal `<summary>...</summary>` pairs are
+ * balanced so their closers are not mistaken for the wrapper close. The scan
+ * starts at depth 0 because `text` excludes the opening wrapper tag.
+ */
+function findTopLevelSummaryClose(text: string): RegExpExecArray | null {
+  const tagPattern = /<\/?summary(?=[\s/>])[^>]*>/gi;
+  let depth = 0;
+
+  while (true) {
+    const match = tagPattern.exec(text);
+    if (!match) {
+      return null;
+    }
+
+    const tag = match[0].toLowerCase();
+    if (tag.startsWith('</')) {
+      if (depth === 0) {
+        return match;
+      }
+      depth -= 1;
+    } else if (!isSelfClosingTag(tag)) {
+      depth += 1;
+    }
+  }
+}
+
+/**
+ * Resolve the tail of a visible summary that turned out to contain
+ * `<analysis>`-shaped text, reusing the batch analysis stripper so the
+ * streaming and non-streaming paths agree on which occurrences are protocol
+ * scratchpad (paired `<analysis>...</analysis>`, dropped) versus literal
+ * visible text (an unmatched `<analysis>` opener before the summary close,
+ * kept). The trailing `</summary>` reproduces the batch look-ahead that
+ * distinguishes those two cases.
+ */
+function sanitizeVisibleSummaryTail(tail: string): string {
+  return stripClosedAnalysisBlocks(tail + '</summary>').replace(
+    /<\/summary(?=[\s/>])[^>]*>$/i,
+    '',
+  );
+}
+
 function stripVisibleTags(text: string): string {
   const tagPattern = /<\/?summary(?=[\s/>])[^>]*>/gi;
   const stripped = stripClosedAnalysisBlocks(text);
@@ -252,6 +297,11 @@ export class TopLevelProtocolTagStreamFilter {
   private recoverySummaryOpened = false;
   private recoverySummaryDepth = 0;
   private recoveryComplete = false;
+  // Set once an `<analysis>`-shaped token appears inside a visible summary. From
+  // that point the summary tail is buffered raw (rather than emitted char by
+  // char) so it can be resolved with the batch stripper, keeping the streaming
+  // and non-streaming paths in agreement on paired-vs-literal analysis tokens.
+  private visibleSummaryTailBuffer: string | undefined;
 
   accept(text: string): string {
     if (this.mode === 'passthrough') return text;
@@ -287,6 +337,15 @@ export class TopLevelProtocolTagStreamFilter {
       return out;
     }
 
+    // A visible summary whose analysis tail never received a closing
+    // `</summary>`: resolve whatever was buffered with the batch stripper so an
+    // unclosed literal `<analysis>` mention is still preserved as visible text.
+    if (this.visibleSummaryTailBuffer !== undefined) {
+      const tail = sanitizeVisibleSummaryTail(this.visibleSummaryTailBuffer);
+      this.resetToPassthrough();
+      return tail;
+    }
+
     const out =
       this.tagCandidate &&
       classifyTagStart(this.tagCandidate).type === 'none' &&
@@ -317,6 +376,7 @@ export class TopLevelProtocolTagStreamFilter {
     this.recoverySummaryOpened = false;
     this.recoverySummaryDepth = 0;
     this.recoveryComplete = false;
+    this.visibleSummaryTailBuffer = undefined;
   }
 
   private acceptProtocolText(text: string): string {
@@ -325,6 +385,22 @@ export class TopLevelProtocolTagStreamFilter {
     for (const char of text) {
       if (this.recoveryBuffer !== undefined && !this.recoveryComplete) {
         this.recoveryBuffer += char;
+      }
+
+      // Inside a visible summary that contains `<analysis>`-shaped text, buffer
+      // the tail until its top-level `</summary>` arrives, then resolve it with
+      // the batch stripper so paired analysis blocks drop while literal
+      // `<analysis>` mentions survive — matching the non-streaming path.
+      if (this.visibleSummaryTailBuffer !== undefined) {
+        this.visibleSummaryTailBuffer += char;
+        if (char !== '>') continue;
+        const close = findTopLevelSummaryClose(this.visibleSummaryTailBuffer);
+        if (!close) continue;
+        const tail = this.visibleSummaryTailBuffer.slice(0, close.index);
+        out += sanitizeVisibleSummaryTail(tail);
+        this.visibleSummaryTailBuffer = undefined;
+        this.visibleSummaryOpen = false;
+        continue;
       }
 
       if (this.protocolTag) {
@@ -372,6 +448,19 @@ export class TopLevelProtocolTagStreamFilter {
               this.literalSummaryOpeningLastChar = char;
             }
             this.literalTag = char !== '>';
+            this.tagCandidate = '';
+            continue;
+          }
+          if (
+            classification.name === 'analysis' &&
+            !classification.closing &&
+            this.analysisDepth === 0 &&
+            this.visibleSummaryOpen
+          ) {
+            // An `<analysis>`-shaped token inside visible summary content is
+            // ambiguous until its scope is known: switch to buffering the
+            // summary tail and let the batch stripper resolve it on close.
+            this.visibleSummaryTailBuffer = this.tagCandidate;
             this.tagCandidate = '';
             continue;
           }
@@ -482,5 +571,6 @@ export class TopLevelProtocolTagStreamFilter {
     this.recoverySummaryOpened = false;
     this.recoverySummaryDepth = 0;
     this.recoveryComplete = false;
+    this.visibleSummaryTailBuffer = undefined;
   }
 }

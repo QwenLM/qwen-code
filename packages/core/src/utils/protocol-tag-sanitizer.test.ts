@@ -193,4 +193,56 @@ describe('protocol tag sanitizer', () => {
     expect(stripAnalysisSummaryProtocolTags(input)).toBe('visible');
     expect(filter.accept(input) + filter.flush()).toBe('visible');
   });
+
+  it('streams literal analysis mentions inside visible summary content', () => {
+    const filter = new TopLevelProtocolTagStreamFilter();
+    const input =
+      '<summary>Fix: replace <analysis> tag in src/app.tsx line 42</summary>';
+
+    expect(filter.accept(input) + filter.flush()).toBe(
+      'Fix: replace <analysis> tag in src/app.tsx line 42',
+    );
+  });
+
+  it('streams literal analysis mentions split across chunk boundaries', () => {
+    const filter = new TopLevelProtocolTagStreamFilter();
+
+    const out =
+      filter.accept('<summary>Fix: replace <ana') +
+      filter.accept('lysis> tag in line 42</summary>') +
+      filter.flush();
+
+    expect(out).toBe('Fix: replace <analysis> tag in line 42');
+  });
+
+  it('keeps streaming and batch sanitizers aligned on summary-internal analysis', () => {
+    const inputs = [
+      '<summary>Fix: replace <analysis> tag in src/app.tsx line 42</summary>',
+      '<summary>visible <analysis>hidden scratch</analysis></summary>',
+      '<summary>Done<analysis/>leaked</summary>',
+      '<analysis>hidden</analysis><summary>ref <analysis> tag</summary>',
+      '<summary>a <analysis>x</analysis> b <analysis> lit c</summary>',
+      '<summary><details><summary>Title</summary><p>Body</p></details></summary>',
+    ];
+
+    for (const input of inputs) {
+      const batch = stripAnalysisSummaryProtocolTags(input);
+
+      const whole = new TopLevelProtocolTagStreamFilter();
+      expect((whole.accept(input) + whole.flush()).trim()).toBe(batch);
+
+      const perChar = new TopLevelProtocolTagStreamFilter();
+      let out = '';
+      for (const char of input) out += perChar.accept(char);
+      out += perChar.flush();
+      expect(out.trim()).toBe(batch);
+    }
+  });
+
+  it('preserves an unclosed literal analysis mention when the summary never closes', () => {
+    const filter = new TopLevelProtocolTagStreamFilter();
+    const input = '<summary>see <analysis> here';
+
+    expect(filter.accept(input) + filter.flush()).toBe('see <analysis> here');
+  });
 });
