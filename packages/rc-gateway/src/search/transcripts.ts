@@ -18,6 +18,16 @@ export interface SearchResult {
   truncated: boolean;
 }
 
+/**
+ * UTF-8 byte offset pair for a highlight range within `snippet`.
+ * `start` is inclusive, `end` is exclusive (like Buffer.slice semantics).
+ * NO HTML markup is emitted — clients apply styling from these offsets.
+ */
+export interface HighlightRange {
+  start: number;
+  end: number;
+}
+
 /** One search result: a matched transcript record. */
 export interface SearchHit {
   sessionId: string;
@@ -29,6 +39,12 @@ export interface SearchHit {
   ts: string;
   /** A single-line snippet (<=200 chars) centered on the first matched term. */
   snippet: string;
+  /**
+   * UTF-8 byte offsets of matched terms in `snippet`. Empty when the scanner
+   * mode can't cheaply produce them (the scan already reports them via the
+   * plan's seed; the BM25 ranked path will populate these).
+   */
+  highlights?: HighlightRange[];
 }
 
 export interface SearchOptions {
@@ -36,6 +52,18 @@ export interface SearchOptions {
   kind?: string;
   /** Restrict to a single session. */
   sessionId?: string;
+  /**
+   * When present, restrict hits to the fork lineage of the given session id.
+   * Computed in-process by the search handler; the scanner ignores it (lineage
+   * filtering requires session records unavailable to the transcript scanner).
+   */
+  lineage?: string;
+  /**
+   * Explicit visible-session set for non-owner callers (permission filtering).
+   * `undefined` = owner scope = no restriction applied.
+   * An empty Set = caller can see nothing = 0 hits.
+   */
+  visibleSessionIds?: ReadonlySet<string>;
   /** Max hits (default 50, clamped to 1..200). */
   limit?: number;
   /**
