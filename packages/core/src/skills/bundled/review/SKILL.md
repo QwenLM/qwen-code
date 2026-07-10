@@ -612,6 +612,16 @@ List every chunk that returned `Uncoverable` in Step 3, with the files it spans.
 
 If there are none, omit this section.
 
+### Before an Approve or a zero-Critical verdict: re-check the open Criticals
+
+A `C=0` outcome — Approve, or a Comment with no Critical — is a claim that nothing blocks the merge. It is not the default you fall back to when your own agents surfaced nothing. Before you commit to it, take **each unresolved `**[Critical]**` already on the PR** (they are in the context file's "Open inline comments" section) and check it against the code as it stands at the reviewed commit. Record one verdict per Critical:
+
+- **still stands** — the defect is present in the code you just read. It blocks: the event is `REQUEST_CHANGES`, and the finding goes inline (or into the body if it cannot be anchored).
+- **fixed by this diff** — you read the lines and the fix is there. Say nothing; do not re-report it. A GitHub thread can read `isResolved: false, isOutdated: false` for a bug a later commit fixed on an adjacent line — the flag tracks the anchored line, not the fix, so the flag is not evidence either way. Only the code is.
+- **cannot tell** — you could not reach a verdict from the code. Put it in the body under "unresolved, please confirm"; it does not silently vanish.
+
+Two failure modes this closes, both observed in this repo's own dogfood: reporting a Critical that cites code **not present** at the reviewed commit (a fabricated blocker), and submitting `C=0` while a **live, already-filed** Critical still stands (a dropped blocker). The event must follow from reading the code, never from the finding count or the thread flags.
+
 ### Verdict
 
 Based on **high-confidence findings only** (low-confidence findings do not influence the verdict — they are terminal-only and "Needs Human Review"):
