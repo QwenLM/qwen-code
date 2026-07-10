@@ -1367,6 +1367,44 @@ describe('FeishuChannel', () => {
       expect(cardSessions.get('inbound_1')?.accumulatedText).toBe('');
     });
 
+    it('cancels pending card updates at response boundary', () => {
+      vi.useFakeTimers();
+      try {
+        const channel = createChannel();
+        const cardSessions = getPrivateMethod<
+          Map<
+            string,
+            {
+              accumulatedText: string;
+              stopped: boolean;
+              pendingUpdateTimer?: ReturnType<typeof setTimeout>;
+            }
+          >
+        >(channel, 'cardSessions');
+        const timer = setTimeout(() => {}, 1000);
+        cardSessions.set('inbound_1', {
+          accumulatedText: 'intermediate response',
+          stopped: false,
+          pendingUpdateTimer: timer,
+        });
+        getPrivateMethod<Map<string, string>>(
+          channel,
+          'sessionToInboundMsg',
+        ).set('session_1', 'inbound_1');
+
+        getPrivateMethod<(chatId: string, sessionId: string) => void>(
+          channel,
+          'onResponseBoundary',
+        ).call(channel, 'oc_chat_id', 'session_1');
+
+        expect(
+          cardSessions.get('inbound_1')?.pendingUpdateTimer,
+        ).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('records failed lifecycle state for prompt-end card finalization', async () => {
       const channel = createChannel();
       const cardSessions = getPrivateMethod<Map<string, unknown>>(

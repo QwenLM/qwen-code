@@ -700,6 +700,7 @@ export class QQChannel extends ChannelBase {
       clearTimeout(state.timer);
     }
     this.streamState.delete(sessionId);
+    this.flushingSessions.delete(sessionId);
     this.pendingStreamDelete.delete(sessionId);
     this.flushedSessions.delete(sessionId);
   }

@@ -491,6 +491,17 @@ describe('onResponseComplete', () => {
     expect((body.markdown as Record<string, string>).content).toBe('final');
   });
 
+  it('clears an in-flight flush marker at response boundary', () => {
+    const ch = makeChannel();
+    const channel = ch as unknown as Record<string, unknown>;
+    const flushingSessions = channel['flushingSessions'] as Set<string>;
+    flushingSessions.add('sess-1');
+
+    onResponseBoundary(ch, 'test-chat', 'sess-1');
+
+    expect(flushingSessions.has('sess-1')).toBe(false);
+  });
+
   it('does not send when buffer is empty (already flushed)', async () => {
     const ch = makeChannel();
     onResponseChunk(ch, 'test-chat', 'all flushed', 'sess-1');

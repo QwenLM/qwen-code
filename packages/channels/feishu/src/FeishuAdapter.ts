@@ -1071,6 +1071,10 @@ export class FeishuChannel extends ChannelBase {
     if (!inboundMsgId) return;
     const cardState = this.cardSessions.get(inboundMsgId);
     if (!cardState || cardState.stopped) return;
+    if (cardState.pendingUpdateTimer) {
+      clearTimeout(cardState.pendingUpdateTimer);
+      cardState.pendingUpdateTimer = undefined;
+    }
     cardState.accumulatedText = '';
   }
 
