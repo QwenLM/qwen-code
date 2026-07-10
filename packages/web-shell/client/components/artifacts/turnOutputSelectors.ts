@@ -201,11 +201,11 @@ function getScheduledTask(tool: ACPToolCall): TurnOutputScheduledTask | null {
   const cron = getStringField(tool.args, 'cron');
   const prompt = getStringField(tool.args, 'prompt');
   if (!cron || !prompt) return null;
-  const outputText = collectText(tool.rawOutput);
-  const display =
-    getStringField(raw, 'returnDisplay') || getFirstLine(outputText);
+  const outputText =
+    getStringField(raw, 'returnDisplay') ?? getStringField(raw, 'llmContent');
+  const display = outputText ? getFirstLine(outputText) : undefined;
   return {
-    id: getCronTaskId(outputText) ?? tool.callId,
+    id: outputText ? (getCronTaskId(outputText) ?? tool.callId) : tool.callId,
     toolCallId: tool.callId,
     title: getScheduledTaskTitle(prompt),
     cron,
@@ -398,26 +398,6 @@ function getScheduledTaskTitle(prompt: string) {
   return firstLine.length > 36 ? `${firstLine.slice(0, 36)}...` : firstLine;
 }
 
-function collectText(
-  value: unknown,
-  seen = new WeakSet<object>(),
-  depth = 0,
-): string {
-  if (depth > 100) return '';
-  if (typeof value === 'string') return value;
-  if (Array.isArray(value)) {
-    if (seen.has(value)) return '';
-    seen.add(value);
-    return value.map((item) => collectText(item, seen, depth + 1)).join('\n');
-  }
-  if (!value || typeof value !== 'object') return '';
-  if (seen.has(value)) return '';
-  seen.add(value);
-  return Object.values(value as Record<string, unknown>)
-    .map((item) => collectText(item, seen, depth + 1))
-    .join('\n');
-}
-
 function upsertFileChange(
   list: TurnOutputFileChange[],
   change: TurnOutputFileChange,
@@ -474,8 +454,11 @@ function mergeFileDiffs(
 }
 
 function getFinalFullContentDiff(diffs: TurnOutputFileChange['diffs']) {
-  const finalDiff = diffs.at(-1);
-  return finalDiff?.fullContent ? finalDiff : undefined;
+  for (let index = diffs.length - 1; index >= 0; index--) {
+    const diff = diffs[index];
+    if (diff?.fullContent) return diff;
+  }
+  return undefined;
 }
 
 function countChangedLines(oldText: string, newText: string) {

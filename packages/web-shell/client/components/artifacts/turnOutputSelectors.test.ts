@@ -182,8 +182,10 @@ describe('turnOutputSelectors', () => {
     ];
 
     const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
-    expect(change?.additions).toBeUndefined();
-    expect(change?.deletions).toBeUndefined();
+    expect(change).toMatchObject({
+      additions: 1,
+      deletions: 0,
+    });
     expect(change?.diffs).toEqual([
       { oldText: '', newText: 'one\n', fullContent: true },
       { oldText: 'one\n', newText: 'two\n' },
@@ -502,6 +504,31 @@ describe('turnOutputSelectors', () => {
           args: { cron: '0 9 * * *', prompt: 'standup', recurring: true },
           rawOutput: {
             llmContent: 'Scheduled cleanup completed.',
+          },
+        },
+      ]),
+    ];
+
+    expect(getScheduledTasksByTurn(messages).get('u1')?.[0]).toMatchObject({
+      id: 'cron-call',
+      title: 'standup',
+    });
+  });
+
+  it('does not extract cron ids from nested raw output text', () => {
+    const messages = [
+      userMessage('u1', 'schedule'),
+      toolGroup('tg1', [
+        {
+          callId: 'cron-call',
+          toolName: 'cron_create',
+          status: 'completed',
+          args: { cron: '0 9 * * *', prompt: 'standup', recurring: true },
+          rawOutput: {
+            llmContent: 'Scheduled cleanup completed.',
+            debug: {
+              prompt: 'Scheduled recurring job cron_wrong (0 9 * * *).',
+            },
           },
         },
       ]),

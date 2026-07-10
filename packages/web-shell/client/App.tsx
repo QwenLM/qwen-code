@@ -1111,6 +1111,16 @@ export function App({
   } = useSessionArtifacts();
   const [artifactPanelExtraArtifacts, setArtifactPanelExtraArtifacts] =
     useState<DaemonSessionArtifact[]>([]);
+  useEffect(() => {
+    if (artifactPanelExtraArtifacts.length === 0 || artifacts.length === 0) {
+      return;
+    }
+    const artifactIds = new Set(artifacts.map((artifact) => artifact.id));
+    setArtifactPanelExtraArtifacts((previous) => {
+      const next = previous.filter((artifact) => !artifactIds.has(artifact.id));
+      return next.length === previous.length ? previous : next;
+    });
+  }, [artifacts, artifactPanelExtraArtifacts.length]);
   const artifactPanelArtifacts = useMemo(() => {
     if (artifactPanelExtraArtifacts.length === 0) return artifacts;
     const merged = [...artifacts];
