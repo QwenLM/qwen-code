@@ -115,6 +115,12 @@ async function waitFor(assertion: () => void): Promise<void> {
   throw lastError;
 }
 
+async function drainMicrotasks(): Promise<void> {
+  for (let index = 0; index < 20; index++) {
+    await Promise.resolve();
+  }
+}
+
 function turnCompleteEvent(sessionId = 'session-1'): DaemonChannelEvent {
   return {
     v: 1,
@@ -1627,6 +1633,60 @@ describe('DaemonChannelBridge', () => {
       }
       expect(session.cancel).toHaveBeenCalledOnce();
       expect(bridge.listSessions()).toEqual([]);
+    },
+  );
+
+  it.each([
+    ['new', 'detach'],
+    ['load', 'cancel'],
+  ] as const)(
+    'rejects stale %s without waiting for hanging %s',
+    async (operation, cleanup) => {
+      const events = new EventQueue();
+      const sessionId =
+        operation === 'new' ? 'new-session' : 'existing-session';
+      const session = createFakeSession(events, sessionId);
+      const neverSettles = vi.fn(() => new Promise<void>(() => undefined));
+      if (cleanup === 'detach') {
+        session.detach = neverSettles;
+      } else {
+        session.cancel = neverSettles;
+      }
+      let finishFactory!: (session: FakeSession) => void;
+      const bridge = new DaemonChannelBridge({
+        cwd: '/repo',
+        sessionFactory: vi.fn(
+          () =>
+            new Promise<DaemonChannelSessionClient>((resolve) => {
+              finishFactory = resolve;
+            }),
+        ),
+      });
+      const sessionDied = vi.fn();
+      bridge.on('sessionDied', sessionDied);
+
+      await bridge.start();
+      const pending =
+        operation === 'new'
+          ? bridge.newSession('/repo')
+          : bridge.loadSession(sessionId, '/repo');
+      let rejection: unknown;
+      void pending.catch((error: unknown) => {
+        rejection = error;
+      });
+      await Promise.resolve();
+      bridge.stop();
+      finishFactory(session);
+      await drainMicrotasks();
+
+      expect(rejection).toEqual(
+        expect.objectContaining({
+          message: 'Daemon channel bridge stopped during session creation',
+        }),
+      );
+      expect(neverSettles).toHaveBeenCalledOnce();
+      expect(bridge.listSessions()).toEqual([]);
+      expect(sessionDied).not.toHaveBeenCalled();
     },
   );
 

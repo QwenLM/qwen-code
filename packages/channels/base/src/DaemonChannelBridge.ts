@@ -503,11 +503,9 @@ export class DaemonChannelBridge
   private async rejectStaleSession(
     session: DaemonChannelSessionClient,
   ): Promise<void> {
-    try {
-      await this.releaseSessionClient(session);
-    } catch (error) {
+    void this.releaseSessionClient(session).catch((error: unknown) => {
       this.lastError = error;
-    }
+    });
     throw new Error('Daemon channel bridge stopped during session creation');
   }
 
