@@ -217,6 +217,7 @@ import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import {
   buildPermissionRequestContent,
+  interactionMetaFields,
   toPermissionOptions,
 } from './permissionUtils.js';
 import {
@@ -5415,7 +5416,10 @@ export class Session implements SessionContext {
                   // (e.g. the Agent tool) dedicated permission UI without
                   // relying on a protocol `kind` ACP can't carry. The tool_call
                   // frame already ships _meta.toolName; mirror it here.
-                  _meta: { toolName },
+                  _meta: {
+                    toolName,
+                    ...interactionMetaFields(confirmationDetails),
+                  },
                 },
               };
               const stopAfterPermissionCancel = () => {

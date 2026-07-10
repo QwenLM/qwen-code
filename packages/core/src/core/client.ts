@@ -34,11 +34,7 @@ import {
 import { abortGoalForStopHookCap } from '../goals/goalHook.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
-import {
-  DEFAULT_TOKEN_LIMIT,
-  escalatedOutputTokenLimit,
-  parsePositiveIntegerEnvValue,
-} from './tokenLimits.js';
+import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
 import { createSessionStartProfiler } from './session-start-profiler.js';
 
 const debugLogger = createDebugLogger('CLIENT');
@@ -2946,22 +2942,7 @@ export class GeminiClient {
     signal?: AbortSignal,
     customInstructions?: string,
   ): Promise<ChatCompressionInfo> {
-    // Compute reservedOutputTokens using the same fallback logic as
-    // GeminiChat.sendMessageStream so the cheap-gate thresholds align with
-    // the real available input budget (issue #5950).
-    const cgConfig = this.config.getContentGeneratorConfig();
     const model = this.config.getModel();
-    const parsedEnvMaxTokens = parsePositiveIntegerEnvValue(
-      process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
-    );
-    const hasUserMaxTokensOverride =
-      (cgConfig?.samplingParams?.max_tokens !== undefined &&
-        cgConfig?.samplingParams?.max_tokens !== null) ||
-      parsedEnvMaxTokens !== undefined;
-    const reservedOutputTokens: number = hasUserMaxTokensOverride
-      ? (cgConfig?.samplingParams?.max_tokens ?? parsedEnvMaxTokens ?? 0)
-      : escalatedOutputTokenLimit(model, cgConfig?.contextWindowSize);
-
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
     const info = await this.getChat().tryCompress(
@@ -2969,10 +2950,7 @@ export class GeminiClient {
       model,
       force,
       signal,
-      {
-        ...(customInstructions ? { customInstructions } : undefined),
-        reservedOutputTokens,
-      },
+      customInstructions ? { customInstructions } : undefined,
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       const chat = this.getChat();

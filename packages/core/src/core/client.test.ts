@@ -3514,14 +3514,15 @@ describe('Gemini Client (client.ts)', () => {
 
       await client.tryCompressChat('p1', true, signal);
 
-      // 5th arg is the `options` bag — always includes reservedOutputTokens
-      // now; no customInstructions when omitted by the caller.
+      // 5th arg is the `options` bag — undefined when the caller supplies no
+      // customInstructions (the output reservation was retired in favor of
+      // the send-path window clamp).
       expect(tryCompress).toHaveBeenCalledWith(
         'p1',
         'the-model',
         true,
         signal,
-        { reservedOutputTokens: expect.any(Number) },
+        undefined,
       );
     });
 
@@ -3544,10 +3545,7 @@ describe('Gemini Client (client.ts)', () => {
         'the-model',
         true,
         undefined,
-        {
-          customInstructions: 'focus on auth bug',
-          reservedOutputTokens: expect.any(Number),
-        },
+        { customInstructions: 'focus on auth bug' },
       );
     });
 
