@@ -15,9 +15,11 @@ import {
   type UIActions,
 } from '../contexts/UIActionsContext.js';
 import { AppContext } from '../contexts/AppContext.js';
-import { CompactModeProvider } from '../contexts/CompactModeContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { ToolCallStatus } from '../types.js';
+
+// Global compact mode was removed (#5666); type-based tool rendering no longer
+// consumes a compact-mode context.
 
 const staticPropsSpy = vi.fn();
 const staticItemsSpy = vi.fn();
@@ -241,15 +243,13 @@ const createUIActions = (): UIActions =>
 const renderMainContent = (uiState: UIState) =>
   render(
     <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
-        <UIActionsContext.Provider value={createUIActions()}>
-          <UIStateContext.Provider value={uiState}>
-            <OverflowProvider>
-              <MainContent />
-            </OverflowProvider>
-          </UIStateContext.Provider>
-        </UIActionsContext.Provider>
-      </CompactModeProvider>
+      <UIActionsContext.Provider value={createUIActions()}>
+        <UIStateContext.Provider value={uiState}>
+          <OverflowProvider>
+            <MainContent />
+          </OverflowProvider>
+        </UIStateContext.Provider>
+      </UIActionsContext.Provider>
     </AppContext.Provider>,
   );
 
@@ -280,22 +280,18 @@ describe('<MainContent />', () => {
 
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider
-          value={{ compactMode: false, compactInline: false }}
-        >
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider
-              value={createUIState({
-                currentModel: 'gpt-5.4',
-                historyRemountKey: 7,
-              })}
-            >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </CompactModeProvider>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({
+              currentModel: 'gpt-5.4',
+              historyRemountKey: 7,
+            })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
       </AppContext.Provider>,
     );
 
@@ -432,25 +428,21 @@ describe('<MainContent />', () => {
     staticItemsSpy.mockClear();
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider
-          value={{ compactMode: false, compactInline: false }}
-        >
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider
-              value={createUIState({
-                history: [
-                  ...history,
-                  { type: 'user' as const, id: 100, text: 'new msg' },
-                ],
-                historyRemountKey: 1,
-              })}
-            >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </CompactModeProvider>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({
+              history: [
+                ...history,
+                { type: 'user' as const, id: 100, text: 'new msg' },
+              ],
+              historyRemountKey: 1,
+            })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
       </AppContext.Provider>,
     );
 
@@ -492,19 +484,15 @@ describe('<MainContent />', () => {
     // meant to avoid.
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider
-          value={{ compactMode: false, compactInline: false }}
-        >
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider
-              value={createUIState({ history, historyRemountKey: 2 })}
-            >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </CompactModeProvider>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({ history, historyRemountKey: 2 })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
       </AppContext.Provider>,
     );
 
@@ -596,23 +584,19 @@ describe('<MainContent />', () => {
     // someone correctly drives the reset off the model dimension instead.
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider
-          value={{ compactMode: false, compactInline: false }}
-        >
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider
-              value={createUIState({
-                history,
-                historyRemountKey: 1,
-                currentModel: 'model-b',
-              })}
-            >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </CompactModeProvider>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({
+              history,
+              historyRemountKey: 1,
+              currentModel: 'model-b',
+            })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
       </AppContext.Provider>,
     );
 
@@ -663,17 +647,13 @@ describe('<MainContent />', () => {
       // Render with compactMode=true and useTerminalBuffer=false (default Static path).
       render(
         <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-          <CompactModeProvider
-            value={{ compactMode: true, compactInline: false }}
-          >
-            <UIActionsContext.Provider value={createUIActions()}>
-              <UIStateContext.Provider value={createUIState({ history })}>
-                <OverflowProvider>
-                  <MainContent />
-                </OverflowProvider>
-              </UIStateContext.Provider>
-            </UIActionsContext.Provider>
-          </CompactModeProvider>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider value={createUIState({ history })}>
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
         </AppContext.Provider>,
       );
 
@@ -734,17 +714,13 @@ describe('<MainContent />', () => {
 
       render(
         <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-          <CompactModeProvider
-            value={{ compactMode: true, compactInline: false }}
-          >
-            <UIActionsContext.Provider value={createUIActions()}>
-              <UIStateContext.Provider value={createUIState({ history })}>
-                <OverflowProvider>
-                  <MainContent />
-                </OverflowProvider>
-              </UIStateContext.Provider>
-            </UIActionsContext.Provider>
-          </CompactModeProvider>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider value={createUIState({ history })}>
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
         </AppContext.Provider>,
       );
 
@@ -875,25 +851,21 @@ describe('<MainContent />', () => {
       // Flip activePtyId; identical re-render except this one streaming-state field.
       rerender(
         <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-          <CompactModeProvider
-            value={{ compactMode: false, compactInline: false }}
-          >
-            <UIActionsContext.Provider value={createUIActions()}>
-              <UIStateContext.Provider
-                value={createUIState({
-                  useTerminalBuffer: true,
-                  activePtyId: 1,
-                  history: stableHistory,
-                  pendingHistoryItems: stablePending,
-                  slashCommands: stableSlashCommands,
-                })}
-              >
-                <OverflowProvider>
-                  <MainContent />
-                </OverflowProvider>
-              </UIStateContext.Provider>
-            </UIActionsContext.Provider>
-          </CompactModeProvider>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({
+                useTerminalBuffer: true,
+                activePtyId: 1,
+                history: stableHistory,
+                pendingHistoryItems: stablePending,
+                slashCommands: stableSlashCommands,
+              })}
+            >
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
         </AppContext.Provider>,
       );
 
