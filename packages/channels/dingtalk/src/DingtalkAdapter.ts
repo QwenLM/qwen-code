@@ -144,6 +144,7 @@ export class DingtalkChannel extends ChannelBase {
     this.client = new DWClient({
       clientId: config.clientId,
       clientSecret: config.clientSecret,
+      keepAlive: true,
     });
     this.installStructuredDownstreamHandler();
   }
