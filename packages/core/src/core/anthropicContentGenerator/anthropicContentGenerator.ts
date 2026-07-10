@@ -517,7 +517,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // the body actually carries a `cache_control: { …, scope: 'global' }`
     // entry. The converter emits those entries on the system text block
     // and the last tool entry when `useGlobalCacheScope` is true (gated
-    // on `enableCacheControl !== false` AND Anthropic-native baseURL).
+    // on `enableCacheControl !== false` AND (Anthropic-native baseURL OR `forceGlobalCacheScope`)).
     // Scan the assembled request body for that field rather than
     // re-deriving the gate here, so:
     //   1. The beta and the body-side field share a single source of
@@ -661,9 +661,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // ContentGenerator. (Non-qwen-oauth providers refresh via generator
     // recreation, so `baseUrl` is captured fresh at construct time, not
     // mutated mid-session — defensive per-request reads on both fields
-    // cover both paths.) `useGlobalCacheScope` is a strict subset of
-    // `enableCacheControl` (true only when caching is on AND the resolved
-    // baseURL is Anthropic-native) and governs whether the body's
+    // cover both paths.) `useGlobalCacheScope` requires
+    // `enableCacheControl` (true only when caching is on AND either the resolved
+    // baseURL is Anthropic-native OR `forceGlobalCacheScope` is set) and governs whether the body's
     // `cache_control` entries carry `scope: 'global'`. The matching
     // `prompt-caching-scope-2026-01-05` beta isn't passed through this
     // sample — `buildPerRequestHeaders` instead scans the assembled body
