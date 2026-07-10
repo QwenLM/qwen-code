@@ -115,7 +115,7 @@ describe('collectContextData (contextCommand)', () => {
 
     expect(getLastPromptTokenCount).toHaveBeenCalled();
     expect(data.totalTokens).toBe(50_000);
-    // 50K < warn(147K); if the 999K global had leaked through it would be `hard`.
+    // 50K < warn(150K); if the 999K global had leaked through it would be `hard`.
     expect(data.breakdown.currentTier).toBe('safe');
   });
 
@@ -234,8 +234,8 @@ describe('/context shows three-tier thresholds', () => {
     // 200K window. computeThresholds(200K) = {
     //   warn: 147,000, auto: 167,000, hard: 177,000, effectiveWindow: 180,000
     // }
-    // lastPromptTokenCount = 150K → between warn and auto → tier = warn.
-    mockGetLastPromptTokenCount.mockReturnValue(150_000);
+    // lastPromptTokenCount = 160K → between warn and auto → tier = warn.
+    mockGetLastPromptTokenCount.mockReturnValue(160_000);
     const data = await collectContextData(makeMockConfig(200_000), false);
     const text = formatContextUsageText(data);
 
@@ -270,7 +270,7 @@ describe('/context shows three-tier thresholds', () => {
 
   it('classifies usage between auto and hard as the auto tier', async () => {
     // 200K window — between 167K (auto) and 177K (hard) → tier = auto.
-    mockGetLastPromptTokenCount.mockReturnValue(170_000);
+    mockGetLastPromptTokenCount.mockReturnValue(173_000);
     const data = await collectContextData(makeMockConfig(200_000), false);
     expect(data.breakdown.currentTier).toBe('auto');
     const text = formatContextUsageText(data);
@@ -298,7 +298,8 @@ describe('/context shows three-tier thresholds', () => {
 
   it('propagates custom autoCompactThreshold through to /context thresholds', async () => {
     // config.getAutoCompactThreshold() returns 0.5 → computeThresholds(32000, 0.5)
-    // = { warn: 16,000, auto: 16,000, hard: 19,000, effectiveWindow: 12,000 }
+    // = { warn: 0, auto: 16,000, hard: 19,000, effectiveWindow: 12,000 }
+    // (32K ceiling degenerates, so auto = proportional floor = 0.5 * 32K)
     const config = makeMockConfig(32_000);
     vi.mocked(config.getAutoCompactThreshold).mockReturnValue(0.5);
     const data = await collectContextData(config, false);
