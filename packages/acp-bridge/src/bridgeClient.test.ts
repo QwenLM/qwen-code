@@ -930,6 +930,7 @@ describe('BridgeClient — artifact ingress', () => {
           workspaceCwd: workspace,
         }),
         pendingPermissionIds: new Set<string>(),
+        pendingInteractions: new Map(),
         midTurnMessageQueue: [] as MidTurnQueueEntry[],
         promptActive: true,
       };
@@ -1013,6 +1014,7 @@ describe('BridgeClient — artifact ingress', () => {
         upsertMany,
       },
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
       promptActive: true,
     };
@@ -1084,6 +1086,7 @@ describe('BridgeClient — artifact ingress', () => {
         upsertMany,
       },
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
       promptActive: true,
     };
@@ -1146,6 +1149,7 @@ describe('BridgeClient — artifact ingress', () => {
         upsertMany,
       },
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
       promptActive: true,
     };
@@ -1194,6 +1198,7 @@ describe('BridgeClient — artifact ingress', () => {
           workspaceCwd: workspace,
         }),
         pendingPermissionIds: new Set<string>(),
+        pendingInteractions: new Map(),
         midTurnMessageQueue: [] as MidTurnQueueEntry[],
         promptActive: true,
       };
@@ -1256,6 +1261,7 @@ describe('BridgeClient — artifact ingress', () => {
           workspaceCwd: workspace,
         }),
         pendingPermissionIds: new Set<string>(),
+        pendingInteractions: new Map(),
         midTurnMessageQueue: [] as MidTurnQueueEntry[],
         promptActive: true,
       };
@@ -1325,6 +1331,7 @@ describe('BridgeClient — artifact ingress', () => {
               upsertMany: vi.fn().mockResolvedValue({ changes: [] }),
             },
             pendingPermissionIds: new Set<string>(),
+            pendingInteractions: new Map(),
             midTurnMessageQueue: [] as MidTurnQueueEntry[],
           }
         : undefined,
@@ -1377,6 +1384,7 @@ describe('BridgeClient — artifact ingress', () => {
               upsertMany,
             },
             pendingPermissionIds: new Set<string>(),
+            pendingInteractions: new Map(),
             midTurnMessageQueue: [] as MidTurnQueueEntry[],
           }
         : undefined,
@@ -1478,6 +1486,7 @@ describe('BridgeClient — artifact ingress', () => {
         upsertMany,
       },
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
     };
     const client = new BridgeClient(
@@ -1533,6 +1542,7 @@ describe('BridgeClient — artifact ingress', () => {
           .mockRejectedValue(new Error('artifact store unavailable')),
       },
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
       promptActive: true,
     };
@@ -1575,6 +1585,7 @@ describe('BridgeClient — artifact ingress', () => {
         upsertMany,
       },
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
       promptActive: true,
     };
@@ -1633,6 +1644,7 @@ describe('BridgeClient — artifact ingress', () => {
         workspaceCwd: workspace,
       }),
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
       promptActive: false,
     };
@@ -1711,6 +1723,7 @@ describe('BridgeClient — artifact ingress', () => {
         workspaceCwd: process.cwd(),
       }),
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
       promptActive: true,
     }));
@@ -1768,6 +1781,7 @@ describe('BridgeClient — requestPermission pre-publish collision guard', () =>
     const fakeEntry = {
       sessionId: 'sess:test',
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       events: { publish },
       activePromptOriginatorClientId: undefined,
     };
@@ -1936,6 +1950,62 @@ describe('BridgeClient — pending interaction classification', () => {
     await request;
     expect(pendingInteractions.size).toBe(0);
     expect(entry.pendingPermissionIds.size).toBe(0);
+  });
+
+  it('uses rawInput questions and assigns sequential answer keys', async () => {
+    const pendingInteractions = new Map<string, BridgePendingInteraction>();
+    let resolveRequest:
+      | ((value: { kind: 'cancelled'; reason: 'agent_cancelled' }) => void)
+      | undefined;
+    const entry = {
+      sessionId: 'sess:raw-input-questions',
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      activePromptOriginatorClientId: undefined,
+    };
+    const client = new BridgeClient(
+      ((sessionId: string) =>
+        sessionId === entry.sessionId ? entry : undefined) as never,
+      (() => undefined) as never,
+      {
+        request: () =>
+          new Promise((resolve) => {
+            resolveRequest = resolve as typeof resolveRequest;
+          }),
+      } as never,
+      0,
+      Infinity,
+    );
+
+    const request = client.requestPermission({
+      sessionId: entry.sessionId,
+      toolCall: {
+        toolCallId: 'ask-raw-input',
+        _meta: { qwenInteractionKind: 'user_question' },
+        rawInput: {
+          questions: [
+            { header: 'One', question: 'First question?' },
+            { header: 'Two', question: 'Second question?' },
+          ],
+        },
+      },
+      options: [{ optionId: 'answer', name: 'Answer', kind: 'allow_once' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(pendingInteractions.size).toBe(1);
+    });
+    expect([...pendingInteractions.values()][0]).toMatchObject({
+      kind: 'user_question',
+      questions: [
+        { answerKey: '0', question: 'First question?' },
+        { answerKey: '1', question: 'Second question?' },
+      ],
+    });
+
+    resolveRequest!({ kind: 'cancelled', reason: 'agent_cancelled' });
+    await request;
   });
 
   it('keeps a generic permission snapshot when detail normalization fails', async () => {

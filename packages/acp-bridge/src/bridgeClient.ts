@@ -94,6 +94,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function pendingInteractionOptions(
+  options: RequestPermissionRequest['options'],
+): BridgePendingInteraction['options'] {
+  return options.map((option) => ({
+    optionId: String((option as { optionId?: unknown }).optionId ?? ''),
+    ...(typeof (option as { name?: unknown }).name === 'string'
+      ? { label: (option as { name: string }).name }
+      : {}),
+    ...(typeof (option as { kind?: unknown }).kind === 'string'
+      ? { kind: (option as { kind: string }).kind }
+      : {}),
+  }));
+}
+
 function pendingInteractionFromRequest(
   requestId: string,
   params: RequestPermissionRequest,
@@ -101,16 +115,8 @@ function pendingInteractionFromRequest(
   const toolCall = params.toolCall as unknown as Record<string, unknown>;
   const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
   const rawInput = toolCall['rawInput'];
-  const options = (Array.isArray(params.options) ? params.options : []).map(
-    (option) => ({
-      optionId: String((option as { optionId?: unknown }).optionId ?? ''),
-      ...(typeof (option as { name?: unknown }).name === 'string'
-        ? { label: (option as { name: string }).name }
-        : {}),
-      ...(typeof (option as { kind?: unknown }).kind === 'string'
-        ? { kind: (option as { kind: string }).kind }
-        : {}),
-    }),
+  const options = pendingInteractionOptions(
+    Array.isArray(params.options) ? params.options : [],
   );
   const isUserQuestion = meta?.['qwenInteractionKind'] === 'user_question';
 
@@ -166,15 +172,7 @@ function fallbackPendingPermissionInteraction(
     kind: 'permission',
     createdAt: new Date().toISOString(),
     action: {},
-    options: options.map((option) => ({
-      optionId: String((option as { optionId?: unknown }).optionId ?? ''),
-      ...(typeof (option as { name?: unknown }).name === 'string'
-        ? { label: (option as { name: string }).name }
-        : {}),
-      ...(typeof (option as { kind?: unknown }).kind === 'string'
-        ? { kind: (option as { kind: string }).kind }
-        : {}),
-    })),
+    options: pendingInteractionOptions(options),
   };
 }
 
