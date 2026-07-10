@@ -2007,20 +2007,47 @@ export function registerSessionRoutes(
           }
           archiveState = rawArchiveState;
         }
+        const rawParentSessionId = req.query['parentSessionId'];
+        let parentSessionId: string | undefined;
+        if (rawParentSessionId !== undefined) {
+          if (
+            typeof rawParentSessionId !== 'string' ||
+            rawParentSessionId.length === 0
+          ) {
+            res.status(400).json({
+              error: '`parentSessionId` must be a non-empty string',
+              code: 'invalid_parent_session_id',
+            });
+            return;
+          }
+          if (view === 'organized') {
+            res.status(400).json({
+              error: '`parentSessionId` is not supported with `view=organized`',
+              code: 'invalid_parent_session_filter',
+            });
+            return;
+          }
+          parentSessionId = rawParentSessionId;
+        }
         const options = {
           ...(cursor !== undefined ? { cursor } : {}),
           ...(size !== undefined ? { size } : {}),
           ...(archiveState !== undefined ? { archiveState } : {}),
           ...(view !== undefined ? { view } : {}),
           ...(group !== undefined ? { group } : {}),
+          ...(parentSessionId !== undefined ? { parentSessionId } : {}),
         };
         // Organized/archived views always need the persisted store: organized
         // cursors are opaque (non-numeric) and archived-only workspaces have no
         // active persisted sessions, so the live-only fallback would drop them.
+        // A parentSessionId filter joins them: it gathers the whole workspace
+        // (persisted + live) to filter completely and paginates with an opaque
+        // activity cursor, so the numeric-cursor live fallback can't serve it.
         const usePersisted =
           runtime.primary ||
           view === 'organized' ||
           archiveState === 'archived' ||
+          parentSessionId !== undefined ||
           (cursor !== undefined && cursor !== ''
             ? isNumericSessionCursor(cursor)
             : await hasActivePersistedSessions(key));

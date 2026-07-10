@@ -27,6 +27,15 @@ export interface ListWorkspaceSessionsOptions {
   archiveState?: SessionArchiveState;
   view?: 'organized';
   group?: string;
+  /**
+   * Restrict the result to sessions spawned by this parent (via
+   * `create_sub_session`), matched exactly against each session's
+   * `parentSessionId`. When set on the default (non-organized) path the whole
+   * workspace is gathered and filtered before pagination, so a page is never
+   * silently short of matches; the returned cursor is opaque and activity-based
+   * (not the numeric storage cursor). Absent = no parent filter.
+   */
+  parentSessionId?: string;
 }
 
 export interface ListWorkspaceSessionsResult {
@@ -427,6 +436,104 @@ async function listOrganizedWorkspaceSessionsForResponse(
   };
 }
 
+/**
+ * Lists only the sessions spawned by `parentSessionId`. Unlike the default
+ * storage-paginated path, this gathers the whole workspace (capped, like the
+ * organized view) and filters before paginating, so a page is never short of
+ * matches and the client can page to completion without wading through empty
+ * pages. Sorted newest-activity-first and paginated with the same opaque
+ * activity cursor as the live-only path.
+ */
+async function listWorkspaceSessionsByParentForResponse(
+  bridge: AcpSessionBridge,
+  workspaceCwd: string,
+  options: ListWorkspaceSessionsOptions,
+  pageSize: number,
+  parentSessionId: string,
+): Promise<ListWorkspaceSessionsResult> {
+  const archiveState = options.archiveState ?? 'active';
+  const sessionService = new SessionService(workspaceCwd);
+  const bySessionId = new Map<string, BridgeSessionSummary>();
+  const persisted = await listAllPersistedSummaries(
+    sessionService,
+    archiveState,
+  );
+  for (const session of persisted.sessions) {
+    bySessionId.set(session.sessionId, session);
+  }
+
+  let liveMergeFailed = false;
+  if (archiveState !== 'archived') {
+    try {
+      for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
+        const existing = bySessionId.get(live.sessionId);
+        if (existing) {
+          bySessionId.set(live.sessionId, {
+            ...existing,
+            ...live,
+            createdAt: existing.createdAt,
+            displayName: live.displayName ?? existing.displayName,
+            parentSessionId: existing.parentSessionId ?? live.parentSessionId,
+            updatedAt: live.updatedAt ?? existing.updatedAt,
+            clientCount: live.clientCount,
+            hasActivePrompt: live.hasActivePrompt,
+            isArchived: false,
+          });
+        } else if (!(await sessionService.sessionExists(live.sessionId))) {
+          bySessionId.set(live.sessionId, {
+            ...live,
+            createdAt: live.createdAt,
+            clientCount: live.clientCount,
+            hasActivePrompt: live.hasActivePrompt,
+            isArchived: false,
+          });
+        }
+      }
+    } catch (error) {
+      liveMergeFailed = true;
+      writeStderrLine(
+        `qwen serve: session-by-parent live merge failed; using persisted sessions only: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  const matches = [...bySessionId.values()]
+    .filter((session) => session.parentSessionId === parentSessionId)
+    .sort((a, b) =>
+      compareLiveSessionCursorKeys(
+        getLiveSessionCursorKey(a),
+        getLiveSessionCursorKey(b),
+      ),
+    );
+  const cursorKey =
+    options.cursor !== undefined && options.cursor !== ''
+      ? parseLiveSessionCursor(options.cursor)
+      : undefined;
+  const afterCursor =
+    cursorKey === undefined
+      ? matches
+      : matches.filter(
+          (session) =>
+            compareLiveSessionCursorKeys(
+              cursorKey,
+              getLiveSessionCursorKey(session),
+            ) < 0,
+        );
+  const page = afterCursor.slice(0, pageSize);
+  const nextCursor =
+    page.length < afterCursor.length
+      ? encodeLiveSessionCursor(getLiveSessionCursorKey(page[page.length - 1]!))
+      : undefined;
+  return {
+    sessions: page,
+    ...(nextCursor !== undefined ? { nextCursor } : {}),
+    ...(liveMergeFailed ? { liveMergeFailed: true } : {}),
+    ...(persisted.truncated ? { truncated: true } : {}),
+  };
+}
+
 export async function listWorkspaceSessionsForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
@@ -445,6 +552,16 @@ export async function listWorkspaceSessionsForResponse(
       workspaceCwd,
       options,
       pageSize,
+    );
+  }
+
+  if (options?.parentSessionId !== undefined) {
+    return listWorkspaceSessionsByParentForResponse(
+      bridge,
+      workspaceCwd,
+      options,
+      pageSize,
+      options.parentSessionId,
     );
   }
 

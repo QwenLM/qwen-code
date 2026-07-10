@@ -631,6 +631,14 @@ export interface DaemonSessionListPageOptions {
   archiveState?: DaemonSessionArchiveState;
   view?: DaemonSessionListView;
   group?: DaemonSessionGroupFilter;
+  /**
+   * Restrict the page to sessions spawned by this parent (via
+   * `create_sub_session`), matched against each session's `parentSessionId`.
+   * Cannot be combined with `view: 'organized'`. The whole workspace is
+   * gathered and filtered before pagination, and the returned `nextCursor` is
+   * opaque and activity-based.
+   */
+  parentSessionId?: string;
 }
 
 export interface DaemonSessionListPage {
