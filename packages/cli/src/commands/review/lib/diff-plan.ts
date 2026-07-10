@@ -48,7 +48,7 @@ export interface DiffHunk {
  * third of PRs are more than half tests, so a topology chosen from raw diff
  * size spends most of its reviewers on the least risky lines.
  */
-export type PathKind = 'source' | 'test' | 'generated';
+export type PathKind = 'source' | 'test' | 'generated' | 'docs';
 
 const TEST_RE =
   /(^|\/)(__tests__|__snapshots__|__mocks__|tests?|spec|integration-tests|e2e)\/|\.(test|spec)\.[cm]?[jt]sx?$|_test\.(go|py|rb)$|(^|\/)test_[^/]+\.py$|(^|\/)src\/test\//;
@@ -57,12 +57,23 @@ const GENERATED_RE =
   /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lock(b)?|Cargo\.lock|go\.sum|poetry\.lock|Gemfile\.lock|composer\.lock|NOTICES\.txt)$|\.snap$|\.min\.(js|css)$|(^|\/)(dist|build|vendor|node_modules)\//;
 
 /**
+ * Prose. Markdown under a documentation tree, or at the repository root.
+ *
+ * Markdown *inside a source tree* stays `source`: this repo's bundled skill
+ * prompts are `packages/core/src/skills/**\/SKILL.md`, and they are executable
+ * behaviour, not documentation. Only the topology gate cares — chunk agents
+ * still cover every line either way.
+ */
+const DOCS_RE = /^(docs|documentation|website)\/|^[^/]+\.(md|mdx|rst|txt)$/;
+
+/**
  * Classify a repo-relative path. Order matters: a generated snapshot under a
  * `__snapshots__/` directory is generated, not a test worth reading.
  */
 export function classifyPath(path: string): PathKind {
   if (GENERATED_RE.test(path)) return 'generated';
   if (TEST_RE.test(path)) return 'test';
+  if (DOCS_RE.test(path)) return 'docs';
   return 'source';
 }
 
@@ -135,6 +146,7 @@ export interface DiffPlan {
   srcDiffLines: number;
   testDiffLines: number;
   generatedDiffLines: number;
+  docsDiffLines: number;
   files: DiffFile[];
   chunks: DiffChunk[];
 }
@@ -679,6 +691,7 @@ export function buildDiffPlan(
     srcDiffLines: linesOf('source'),
     testDiffLines: linesOf('test'),
     generatedDiffLines: linesOf('generated'),
+    docsDiffLines: linesOf('docs'),
     files,
     chunks,
   };

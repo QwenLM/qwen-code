@@ -99,16 +99,18 @@ Based on the remaining arguments:
 
 `read_file` is not unlimited either: **a single call returns at most ~25 000 characters**, then sets `isTruncated` and expects you to page with `offset`/`limit`. Reading a 211 000-character diff in one `read_file` call yields only its first ~600 lines. What makes the file approach work is the **chunk plan** below: each chunk is sized to fit inside one un-truncated read, and the chunks tile the whole diff. Any agent reading a range wider than a chunk — or reading a large source file whole — must check `isTruncated` and page until it has all of it.
 
-For **PR reviews**, `qwen review fetch-pr` (above) has already written the diff to `diffPath` and partitioned it. Read from the fetch report:
+For **PR reviews**, `qwen review fetch-pr` (above) has already written the diff to `diffPath` and partitioned it. Read from the fetch report — and **page it**: the report is read with the same `read_file` that truncates at ~25 000 characters, and on a PR of any size it is larger than that. Keep reading with a larger `offset` until `isTruncated` is false. A half-read report loses the tail of `chunks[]`, which is the coverage hole this design closes, reappearing one level up. `fetch-pr` prints a note to stderr when the report exceeds one read.
+
+Read from it:
 
 - `diffPathAbsolute` — pass this to `read_file` (it rejects relative paths)
-- `diffLines`, `diffChars`, and `srcDiffLines` / `testDiffLines` / `generatedDiffLines`
+- `diffLines`, `diffChars`, and `srcDiffLines` / `testDiffLines` / `docsDiffLines` / `generatedDiffLines`
 - `chunks[]` — contiguous, non-overlapping line ranges tiling the whole diff. Each entry has `id`, `startLine`, `endLine` (1-based, inclusive), `lines`, `chars`, an `oversized` flag, and `files[]` naming the source files and new-side line ranges it covers. A chunk with `oversized: true` may exceed what one `read_file` call returns.
-- `files[]` — per-file `kind` (`source` / `test` / `generated`), `hunks[]` new-side ranges (Step 7 validates comment anchors against these), `addedRanges[]` (the exact lines the PR wrote — what Step 3B's invariant agents gate on), change counts, and the `heavy` flag
+- `files[]` — per-file `kind` (`source` / `test` / `generated`), `hunks[]` new-side ranges (Step 7 validates comment anchors against these), `addedRanges[]` (the exact lines the PR wrote — present only on `heavy` files, which are its only consumer), change counts, and the `heavy` flag
 
 A chunk is read with `read_file(file_path=diffPathAbsolute, offset=startLine - 1, limit=endLine - startLine + 1)` — `offset` is 0-based.
 
-For **local-diff and file-path reviews**, capture the diff to a file the same way before launching agents, and count its source lines yourself to choose the topology. Pin the same flags `fetch-pr` pins — a user's `color.diff=always` alone makes the diff unparseable, and `diff.mnemonicPrefix` rewrites every path:
+For **local-diff and file-path reviews**, capture the diff to a file and plan it. Pin the same flags `fetch-pr` pins — a user's `color.diff=always` alone makes the diff unparseable, and `diff.mnemonicPrefix` rewrites every path:
 
 ```bash
 git diff --no-ext-diff --no-textconv --no-color --unified=3 \
@@ -116,9 +118,22 @@ git diff --no-ext-diff --no-textconv --no-color --unified=3 \
   --ignore-submodules=none --submodule=short \
   HEAD > .qwen/tmp/qwen-review-local-diff.txt        # staged AND unstaged
 # for a file-path review, append: -- <file>
+
+qwen review plan-diff .qwen/tmp/qwen-review-local-diff.txt \
+  --out .qwen/tmp/qwen-review-local-plan.json
 ```
 
 `git diff HEAD` is what covers the whole local scope; a bare `git diff` omits staged changes.
+
+For **cross-repo lightweight reviews**, do the same with the diff GitHub hands you. Redirecting to a file is what keeps the 30 000-char shell cap out of it:
+
+```bash
+gh pr diff <pr_number> --repo <owner>/<repo> > .qwen/tmp/qwen-review-pr-<n>-diff.txt
+qwen review plan-diff .qwen/tmp/qwen-review-pr-<n>-diff.txt \
+  --out .qwen/tmp/qwen-review-pr-<n>-plan.json
+```
+
+`plan-diff` emits the same `diffPathAbsolute`, `chunks[]`, `files[]` and topology counts as `fetch-pr`, so Steps 3A, 3B and 7 work identically on all four review paths. It cannot decide `heavy` — that needs a tree to read the post-change file from — so no invariant agents run on a bare diff.
 
 If `diffPath` is `null` (merge-base could not be resolved), fall back to giving agents the `git diff` command and **tell the user coverage will be partial on a large diff**.
 
@@ -127,7 +142,7 @@ If `diffPath` is `null` (merge-base could not be resolved), fall back to giving 
 - **`srcDiffLines` ≤ 500 and `diffLines` ≤ 2400** — use the dimension fan-out in Step 3A.
 - **otherwise** — use the territory × dimension fan-out in Step 3B, and inform the user: "This is a large changeset (N source lines of M total, K chunks). The review may take a few minutes."
 
-Test code is where diff size lies. Across this repo's last 40 merged PRs the median diff is **41% test code**, and a third of them are more than half tests. A change of 173 production lines that ships 489 lines of new tests is a small change; carving it into territories spends most of the reviewers on test files and leaves the production code with **one** agent instead of the eight lenses it deserves. Territory fan-out earns its keep when there is a lot of _risky_ code to divide, not a lot of _lines_.
+Test code is where diff size lies. Across this repo's last 40 merged PRs the median diff is **41% test code**, and a third of them are more than half tests. Prose and lockfiles are excluded for the same reason — a translation PR carries no runtime risk. Markdown _inside a source tree_ still counts as source: this skill is one such file. A change of 173 production lines that ships 489 lines of new tests is a small change; carving it into territories spends most of the reviewers on test files and leaves the production code with **one** agent instead of the eight lenses it deserves. Territory fan-out earns its keep when there is a lot of _risky_ code to divide, not a lot of _lines_.
 
 The second clause is a delivery bound, not a risk one: past roughly 2400 diff lines the territory fan-out needs fewer agents than ten anyway (`ceil(diffLines / 400) + 4 > 10`), and asking ten agents each to read a diff that large dilutes them all. It is the safety valve for a changeset dominated by tests or generated files.
 

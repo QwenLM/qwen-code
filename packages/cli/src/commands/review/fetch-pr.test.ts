@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { classifyHeavy } from './fetch-pr.js';
+import { classifyHeavy } from './lib/heavy.js';
 
 describe('classifyHeavy', () => {
   it('flags a substantially rewritten existing file', () => {

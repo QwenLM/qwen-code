@@ -75,6 +75,18 @@ describe('classifyPath', () => {
     expect(kinds(paths)).toEqual(all(paths, 'source'));
   });
 
+  it('classifies prose as docs, but not markdown inside a source tree', () => {
+    // The topology gate should not fan chunk agents across a translation PR.
+    // A bundled skill prompt, though, is executable behaviour, not prose.
+    expect(kinds(['docs/users/features/code-review.md', 'README.md'])).toEqual({
+      'docs/users/features/code-review.md': 'docs',
+      'README.md': 'docs',
+    });
+    expect(
+      classifyPath('packages/core/src/skills/bundled/review/SKILL.md'),
+    ).toBe('source');
+  });
+
   it('classifies a generated snapshot as generated, not as a test', () => {
     // It lives under __snapshots__/, which also matches the test pattern, so
     // the generated check has to run first.
@@ -606,10 +618,11 @@ describe('planChunks', () => {
 });
 
 describe('per-kind diff line totals', () => {
-  it('splits the diff into source, test, and generated lines', () => {
+  it('splits the diff into source, test, docs, and generated lines', () => {
     const diff = [
       ...fileSection('src/a.ts', [[1, 40]]),
       ...fileSection('src/a.test.ts', [[1, 200]]),
+      ...fileSection('docs/guide.md', [[1, 300]]),
       ...fileSection('package-lock.json', [[1, 500]]),
     ].join('\n');
 
@@ -617,10 +630,29 @@ describe('per-kind diff line totals', () => {
     // Each section is its 4 header lines + 1 hunk header + N body lines.
     expect(plan.srcDiffLines).toBe(45);
     expect(plan.testDiffLines).toBe(205);
+    expect(plan.docsDiffLines).toBe(305);
     expect(plan.generatedDiffLines).toBe(505);
     expect(
-      plan.srcDiffLines + plan.testDiffLines + plan.generatedDiffLines,
+      plan.srcDiffLines +
+        plan.testDiffLines +
+        plan.docsDiffLines +
+        plan.generatedDiffLines,
     ).toBe(plan.diffLines);
+  });
+
+  it('keeps a docs-heavy PR out of the territory fan-out', () => {
+    // A translation PR: 40 source lines, 3 000 lines of prose. Gating on raw
+    // size would carve it into territories and spend chunk agents on markdown.
+    const diff = [
+      ...fileSection('src/a.ts', [[1, 40]]),
+      ...fileSection('docs/a.md', [[1, 1500]]),
+      ...fileSection('docs/b.md', [[1, 1500]]),
+    ].join('\n');
+    const plan = buildDiffPlan(diff, 400);
+    expect(plan.srcDiffLines).toBeLessThan(500);
+    expect(plan.docsDiffLines).toBeGreaterThan(3000);
+    // Coverage is unaffected: the prose is still chunked and receipted.
+    expect(chunksCoverDiff(plan.chunks, plan.diffLines)).toBe(true);
   });
 
   it('is what separates a small production change from a big test diff', () => {

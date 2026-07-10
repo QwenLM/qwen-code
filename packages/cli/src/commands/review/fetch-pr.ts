@@ -40,10 +40,13 @@ import {
 import {
   buildDiffPlan,
   DEFAULT_MAX_CHUNK_LINES,
-  type DiffChunk,
-  type DiffPlan,
-  type PathKind,
+  READ_FILE_CHAR_CAP,
 } from './lib/diff-plan.js';
+import {
+  buildPlanReport,
+  warnOnReportSize,
+  type PlanReport,
+} from './lib/report.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -64,7 +67,7 @@ interface FetchPrArgs {
   maxChunkLines: number;
 }
 
-interface FetchPrResult {
+type FetchPrResult = PlanReport & {
   prNumber: string;
   ownerRepo: string;
   remote: string;
@@ -79,116 +82,11 @@ interface FetchPrResult {
   mergeBaseSha: string | null;
   /** True when the base branch could not be fetched; `mergeBaseSha` may be stale. */
   baseFetchFailed: boolean;
-  /** Project-relative path to the captured diff (null if capture failed). */
+  /** Project-relative path to the captured diff (null if capture or planning failed). */
   diffPath: string | null;
   /** Absolute path — `read_file` rejects relative paths. Agents use this. */
   diffPathAbsolute: string | null;
-  diffLines: number;
-  diffChars: number;
-  /**
-   * Diff lines in `source` files. The review topology is chosen from this, not
-   * from `diffLines` — a 150-line production change shipping 800 lines of new
-   * tests carries the risk of a small change.
-   */
-  srcDiffLines: number;
-  testDiffLines: number;
-  generatedDiffLines: number;
-  /** Contiguous, non-overlapping line ranges tiling the whole diff file. */
-  chunks: DiffChunk[];
-  /** Per-file rewrite metrics. `heavy` files get whole-file invariant agents. */
-  files: FileMetric[];
-}
-
-interface FileMetric {
-  path: string;
-  kind: PathKind;
-  /**
-   * New-side line ranges this file's hunks occupy, 1-based inclusive.
-   *
-   * Two uses, both exact. Step 7 anchors an inline comment at `(path, line)`
-   * and GitHub rejects the whole review with a 422 if any line falls outside
-   * every hunk, so validation is a lookup here rather than trial-and-error
-   * against the API. Step 3B's whole-file invariant agents use the same ranges
-   * to know which lines are *new*, so they do not report pre-existing defects.
-   *
-   * Pure-deletion hunks (`@@ -3,4 +2,0 @@`) are omitted: they occupy no new-side
-   * line, nothing can be anchored in them, and nothing in them is new.
-   *
-   * These are **hunk** ranges, which include the three context lines git prints
-   * around every change. For "which lines did this PR write", use
-   * `addedRanges` — see there.
-   */
-  hunks: Array<{ newStart: number; newEnd: number }>;
-  /**
-   * New-side ranges the PR actually wrote. Step 3B's whole-file invariant
-   * agents gate on these, so they cannot report a defect in a context line
-   * that has been there for years.
-   */
-  addedRanges: Array<{ start: number; end: number }>;
-  addedLines: number;
-  removedLines: number;
-  changedLines: number;
-  /** Lines in the pre-change file; 0 when the PR creates it. */
-  preLines: number;
-  /** Lines in the post-change file; 0 for a deletion or a binary blob. */
-  fileLines: number;
-  /** changedLines / fileLines, rounded to 2dp. 0 when fileLines is 0. */
-  rewriteRatio: number;
-  /**
-   * True when the change is large enough that reviewing it hunk-by-hunk is the
-   * wrong frame: the interactions are between the new lines themselves, which
-   * may sit hundreds of lines apart. Such a file gets an agent that reads it
-   * whole and checks lifecycle invariants. See SKILL.md Step 3B.
-   */
-  heavy: boolean;
-  binary: boolean;
-}
-
-/**
- * Heaviness thresholds.
- *
- * Only `source` files qualify. The invariant checklist is about a long-lived
- * stateful object — its fields, timers, collections, error taxonomy. A test
- * file has none of that, and three whole-file agents on one would be spent
- * for nothing.
- *
- * A file must already have existed at some real size (`HEAVY_MIN_PRE_LINES`) —
- * a brand-new file has `rewriteRatio` 1.0 by definition but is not a *rewrite*,
- * and its chunk agents already own every line of it. On top of that it must be
- * either mostly-new (`HEAVY_REWRITE_RATIO`) or changed in sheer volume
- * (`HEAVY_CHANGED_LINES`), which catches a big edit to a very large file whose
- * ratio stays low.
- */
-const HEAVY_MIN_PRE_LINES = 300;
-const HEAVY_REWRITE_RATIO = 0.4;
-const HEAVY_CHANGED_LINES = 800;
-
-/**
- * Pure heaviness rule, extracted so it can be tested without a git repo.
- *
- * The threshold is compared against the **exact** ratio; only the reported
- * `rewriteRatio` is rounded to 2dp. Rounding first would smear the boundary —
- * 399/1000 rounds to 0.40 and would clear a 0.40 threshold it does not meet.
- */
-export function classifyHeavy(input: {
-  preLines: number;
-  fileLines: number;
-  changedLines: number;
-  binary: boolean;
-  kind: PathKind;
-}): { rewriteRatio: number; heavy: boolean } {
-  const { preLines, fileLines, changedLines, binary, kind } = input;
-  const exactRatio = fileLines > 0 ? changedLines / fileLines : 0;
-  const heavy =
-    !binary &&
-    kind === 'source' &&
-    // A deletion clears the volume threshold trivially but has no post-image,
-    // and the whole-file invariant agents are told to read exactly that.
-    fileLines > 0 &&
-    preLines >= HEAVY_MIN_PRE_LINES &&
-    (exactRatio >= HEAVY_REWRITE_RATIO || changedLines >= HEAVY_CHANGED_LINES);
-  return { rewriteRatio: Math.round(exactRatio * 100) / 100, heavy };
-}
+};
 
 /** Count lines of `<ref>:<path>`, or 0 if it does not exist there. */
 function fileLineCount(ref: string, path: string): number {
@@ -202,44 +100,6 @@ function fileLineCount(ref: string, path: string): number {
   } catch {
     return 0; // absent at this ref: created by the PR, or deleted by it
   }
-}
-
-function fileMetrics(plan: DiffPlan, headSha: string): FileMetric[] {
-  return plan.files.map((f) => {
-    const changedLines = f.addedLines + f.removedLines;
-    const fileLines = f.binary ? 0 : fileLineCount(headSha, f.path);
-    // Derived, not measured. `git show <base>:<path>` would need a second
-    // process per file and, worse, would return nothing for a **renamed**
-    // file — whose new path does not exist at the base — silently reporting
-    // preLines 0 and classifying a wholesale rewrite as "not heavy". The
-    // identity is exact for a complete unified diff (verified against every
-    // file of PR #6457) and stays correct for creations, deletions, and
-    // renames alike.
-    const preLines = Math.max(0, fileLines - f.addedLines + f.removedLines);
-    const { rewriteRatio, heavy } = classifyHeavy({
-      preLines,
-      fileLines,
-      changedLines,
-      binary: f.binary,
-      kind: f.kind,
-    });
-    return {
-      path: f.path,
-      kind: f.kind,
-      hunks: f.hunks
-        .filter((h) => h.newCount > 0)
-        .map((h) => ({ newStart: h.newStart, newEnd: h.newEnd })),
-      addedRanges: f.addedRanges,
-      addedLines: f.addedLines,
-      removedLines: f.removedLines,
-      changedLines,
-      preLines,
-      fileLines,
-      rewriteRatio,
-      heavy,
-      binary: f.binary,
-    };
-  });
 }
 
 /**
@@ -416,7 +276,23 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `agents will have to fall back to running \`git diff\` themselves.`,
     );
   }
-  const plan = buildDiffPlan(diffText, args.maxChunkLines);
+  // `buildDiffPlan` throws when the chunks do not tile the diff — a coverage
+  // hole. That must be loud, but it must not take the whole review with it: the
+  // throw would fire after the worktree exists and before any report is
+  // written. Degrade to the documented `diffPath: null` path instead, which
+  // tells the skill to fall back and warn the user that coverage is partial.
+  let plan;
+  try {
+    plan = buildDiffPlan(diffText, args.maxChunkLines);
+  } catch (err) {
+    writeStderrLine(
+      `WARNING: could not partition the diff (${(err as Error).message}). ` +
+        `Falling back to a diff-less report; coverage will be partial.`,
+    );
+    diffPath = null;
+    diffPathAbsolute = null;
+    plan = buildDiffPlan('', args.maxChunkLines);
+  }
 
   // 6. Emit the report.
   const result: FetchPrResult = {
@@ -438,13 +314,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     baseFetchFailed,
     diffPath,
     diffPathAbsolute,
-    diffLines: plan.diffLines,
-    diffChars: plan.diffChars,
-    srcDiffLines: plan.srcDiffLines,
-    testDiffLines: plan.testDiffLines,
-    generatedDiffLines: plan.generatedDiffLines,
-    chunks: plan.chunks,
-    files: fileMetrics(plan, fetchedSha),
+    ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path)),
   };
 
   writeFileSync(out, JSON.stringify(result, null, 2) + '\n', 'utf8');
@@ -455,9 +325,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   writeStderrLine(
     `PR #${prNumber} (${ownerRepo}): ${meta.changedFiles} files, +${meta.additions}/-${meta.deletions}, base=${meta.baseRefName}, head=${meta.headRefName}`,
   );
+  warnOnReportSize(out, READ_FILE_CHAR_CAP);
   writeStderrLine(
     `Diff: ${plan.diffLines} lines (${plan.srcDiffLines} source, ` +
-      `${plan.testDiffLines} test, ${plan.generatedDiffLines} generated) ` +
+      `${plan.testDiffLines} test, ${plan.docsDiffLines} docs, ` +
+      `${plan.generatedDiffLines} generated) ` +
       `/ ${plan.diffChars} chars -> ${plan.chunks.length} review chunk(s)`,
   );
   const heavy = result.files.filter((f) => f.heavy);

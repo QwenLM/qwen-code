@@ -84,6 +84,16 @@ Re-gating moves 6 of those 40 PRs from 3B back to 3A and costs 22 extra agents i
 
 Chunking itself is unchanged: the plan still tiles every line, tests and generated files included. Only the count of reviewers and their brief change. `heavy` is likewise restricted to `source` files — the invariant checklist asks about fields, timers, collections, and error taxonomies, and a rewritten test file has none of those.
 
+### Why `plan-diff` exists
+
+Step 3B's chunk agents are defined as "one per entry in `chunks[]`", and only `fetch-pr` produced a chunk plan. A local-diff review, or a cross-repo review in lightweight mode, therefore routed into a topology it had no chunk list for: no receipts, no tiling guarantee, and the orchestrator left to improvise line ranges. Two of the four review paths were promised a mechanism the skill could not deliver.
+
+`qwen review plan-diff <diff-file>` reads a captured diff and emits the same `chunks[]`, `files[]` and topology counts. Redirecting `git diff` or `gh pr diff` to a file already bypasses the 30 000-char shell cap, so all four paths now share one code path. It cannot decide `heavy` — that needs a tree to read the post-change file from — so a bare diff gets chunk agents but no invariant agents.
+
+### Why the topology gate ignores prose
+
+`docs/**` and root-level markdown classify as `docs` and stay out of `srcDiffLines`. A translation PR carries no runtime risk, and gating on raw size would fan chunk agents across it. Markdown _inside a source tree_ stays `source`: this repo's bundled skill prompts are `packages/core/src/skills/**/SKILL.md`, and they are executable behaviour. Coverage is unaffected either way — every line is still chunked and receipted.
+
 ### Why the invariant checklist is split across three agents
 
 Measured on PR #6457's `QQChannel.ts` (1551 → 2643 lines, 65% rewritten), at its first commit, against the nine defects maintainers later confirmed in that commit:

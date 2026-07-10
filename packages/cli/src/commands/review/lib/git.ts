@@ -13,9 +13,22 @@ import { execFileSync } from 'node:child_process';
 /** Deadline for a single `git` invocation. Generous; a hang must still end. */
 const GIT_TIMEOUT_MS = 120_000;
 
+/**
+ * Options every wrapper shares.
+ *
+ * `git fetch` is a network operation, and on a headless machine a missing
+ * credential turns into a terminal prompt that never gets an answer. Without a
+ * deadline and `GIT_TERMINAL_PROMPT=0` the process waits forever with no output
+ * — indistinguishable from a deadlock.
+ */
+const GIT_OPTS = {
+  timeout: GIT_TIMEOUT_MS,
+  env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+} as const;
+
 /** Run `git` with args. Returns stdout, trimmed and CRLF-normalised. */
 export function git(...args: string[]): string {
-  return execFileSync('git', args, { encoding: 'utf8' })
+  return execFileSync('git', args, { ...GIT_OPTS, encoding: 'utf8' })
     .replace(/\r\n/g, '\n')
     .trim();
 }
@@ -31,6 +44,7 @@ export function git(...args: string[]): string {
 export function gitOpt(...args: string[]): string | null {
   try {
     return execFileSync('git', args, {
+      ...GIT_OPTS,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -57,11 +71,8 @@ export function refExists(ref: string): boolean {
  */
 export function gitRaw(...args: string[]): Buffer {
   return execFileSync('git', args, {
+    ...GIT_OPTS,
     maxBuffer: 512 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'],
-    // Without a deadline a hung `git` — a credential prompt on headless CI, a
-    // stalled network fetch, a corrupt pack — blocks the event loop forever,
-    // indistinguishable from a deadlock and with no diagnostic.
-    timeout: GIT_TIMEOUT_MS,
   });
 }
