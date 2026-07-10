@@ -34,6 +34,7 @@ import {
 
 const MAX_UNFINISHED_EXTENSION_OPERATIONS = 10;
 const EXTENSION_PREPARATION_CONCURRENCY = 2;
+const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
 const RECONCILE_SLOW_MS = 30_000;
 
 /**
@@ -120,6 +121,10 @@ export interface ExtensionsController {
   ): ExtensionManager;
   buildLocalExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
   invalidateStatusCache(): void;
+  refreshExtensionsForAllSessions(): Promise<{
+    refreshed: number;
+    failed: number;
+  }>;
   getOperation(operationId: string): ExtensionOperationStatus | undefined;
   preparationQueue: FifoTaskQueue;
   validateExtensionMutationClient(
@@ -261,6 +266,43 @@ export function createExtensionsController(
   let extensionsStatusCache:
     | { expiresAt: number; value: ServeWorkspaceExtensionsStatus }
     | undefined;
+
+  const refreshExtensionsForAllSessions = async (): Promise<{
+    refreshed: number;
+    failed: number;
+  }> => {
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const queued = commitQueue.run(
+      async () => {
+        const result = await workspace.refreshExtensionsForAllSessions();
+        extensionsStatusCache = undefined;
+        return result;
+      },
+      { onStart: () => markStarted?.() },
+    );
+    await started;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        queued,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            reject(
+              new Error(
+                `extension refresh timed out after ${EXTENSION_REFRESH_TIMEOUT_MS}ms`,
+              ),
+            );
+          }, EXTENSION_REFRESH_TIMEOUT_MS);
+          timer.unref();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
 
   const runQueuedExtensionMutation = (
     operation: string,
@@ -763,6 +805,7 @@ export function createExtensionsController(
     invalidateStatusCache: () => {
       extensionsStatusCache = undefined;
     },
+    refreshExtensionsForAllSessions,
     getOperation: (operationId) => extensionOperations.get(operationId),
     preparationQueue,
     validateExtensionMutationClient,

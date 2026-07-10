@@ -534,8 +534,7 @@ export function registerWorkspaceExtensionRoutes(
         ) {
           return;
         }
-        const result = await ctrl.workspace.refreshExtensionsForAllSessions();
-        ctrl.invalidateStatusCache();
+        const result = await ctrl.refreshExtensionsForAllSessions();
         res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, { route: `POST ${base}/refresh` });

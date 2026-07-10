@@ -343,6 +343,31 @@ describe('ExtensionStore', () => {
     });
   });
 
+  it('preserves V2 activation policy across a sequential downgrade write', async () => {
+    const store = makeStore();
+    const identity = { id: 'e4'.repeat(32), name: 'demo' };
+    await store.ensureInitialized([identity]);
+    await store.setDefaultActivation(identity, 'disabled');
+    await store.setWorkspaceActivation(
+      identity,
+      '/workspace/enabled',
+      'enabled',
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({ demo: { overrides: ['!/workspace/legacy/*'] } }),
+    );
+
+    const imported = await store.ensureInitialized([identity]);
+
+    expect(imported.extensions[identity.id]).toMatchObject({
+      defaultActivation: 'disabled',
+      workspaceOverrides: { '/workspace/enabled': 'enabled' },
+      legacyPathRules: ['!/workspace/legacy/*'],
+    });
+  });
+
   it('fails closed when the V2 state is corrupt', async () => {
     await fsp.mkdir(storeDir, { recursive: true });
     await fsp.writeFile(path.join(storeDir, 'state.json'), '{not-json');

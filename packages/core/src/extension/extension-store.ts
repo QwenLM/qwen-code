@@ -272,15 +272,22 @@ export class ExtensionStore {
         for (const identity of extensions) {
           assertIdentity(identity);
           const rules = legacy[identity.name]?.overrides ?? [];
-          const artifactGeneration =
-            existing.extensions[identity.id]?.artifactGeneration;
-          existing.extensions[identity.id] = {
-            name: identity.name,
-            ...(artifactGeneration === undefined ? {} : { artifactGeneration }),
-            defaultActivation: 'enabled',
-            workspaceOverrides: {},
-            ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
-          };
+          const existingPolicy = existing.extensions[identity.id];
+          if (existingPolicy) {
+            existingPolicy.name = identity.name;
+            if (rules.length > 0) {
+              existingPolicy.legacyPathRules = [...rules];
+            } else {
+              delete existingPolicy.legacyPathRules;
+            }
+          } else {
+            existing.extensions[identity.id] = {
+              name: identity.name,
+              defaultActivation: 'enabled',
+              workspaceOverrides: {},
+              ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
+            };
+          }
         }
         changed = true;
       } else {

@@ -4963,6 +4963,67 @@ describe('createServeApp', () => {
       }
     });
 
+    it('serializes manual refresh behind an extension commit', async () => {
+      let releaseEnable: (() => void) | undefined;
+      const restore = mockExtensionManagerMethods({
+        enableExtension: async () => {
+          await new Promise<void>((resolve) => {
+            releaseEnable = resolve;
+          });
+          return { generation: 1 };
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const enable = await request(app)
+          .post('/workspace/extensions/test-ext/enable')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ scope: 'workspace' });
+        expect(enable.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(
+            vi.mocked(ExtensionManager.prototype.enableExtension),
+          ).toHaveBeenCalled();
+        });
+
+        const refreshRequest = request(app)
+          .post('/workspace/extensions/refresh')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({});
+        const requestStarted = new Promise<void>((resolve) => {
+          refreshRequest.on('request', () => resolve());
+        });
+        const refresh = refreshRequest.then((response) => response);
+        await requestStarted;
+        const state = await Promise.race([
+          refresh.then(() => 'settled'),
+          new Promise<'pending'>((resolve) =>
+            setTimeout(() => resolve('pending'), 50),
+          ),
+        ]);
+        expect(state).toBe('pending');
+
+        releaseEnable?.();
+        const res = await refresh;
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ refreshed: 1, failed: 0 });
+      } finally {
+        releaseEnable?.();
+        restore();
+      }
+    });
+
     it('rejects extension update from an unknown workspace client id', async () => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const bridge = fakeBridge({ knownClientIds: ['client-1'] });
