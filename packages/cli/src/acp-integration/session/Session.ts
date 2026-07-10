@@ -43,6 +43,7 @@ import {
   CompressionStatus,
   detectLoopSentinel,
   detectAutonomousSentinel,
+  markCronRunWithheld,
   LoopTickResolver,
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
@@ -625,6 +626,10 @@ interface CronFire {
   missed?: boolean;
   runMode?: 'shared' | 'isolated';
   condition?: string;
+  /** The minute this fire was stamped for. The scheduler assigns it before
+   * calling `onFire` and writes the run record under the same value, so it
+   * identifies this fire's entry in `runs[]`. */
+  lastFiredAt?: number;
 }
 
 interface CronQueueItem {
@@ -684,17 +689,29 @@ export function wrapCronConditionPrompt(condition: string): string {
 }
 
 /**
- * Reads the verdict off a precondition turn's final assistant text. Takes the
- * LAST verdict line so a model that reasons out loud ("...that would be
- * DECISION: NO, but...") is judged on its conclusion, not its scratch work.
+ * Reads the verdict off a precondition turn's final assistant text.
+ *
+ * Only the LAST non-empty line is considered. The prompt asks the model to *end*
+ * its reply with the verdict, so a verdict merely present somewhere is not one:
+ * a model that answers "DECISION: YES" and then walks it back on the next line
+ * has not decided, and scanning the whole text would read its conclusion off the
+ * wrong line. This also subsumes the reasoning-out-loud case ("…that would be
+ * DECISION: NO, but…"), which never lands on the final line.
  *
  * Fail-closed: no parseable verdict means "do not run". A precondition exists to
  * withhold an unattended run, so an ambiguous answer must withhold it too.
  */
 export function isCronConditionMet(finalText: string): boolean {
+  const finalLine = finalText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .at(-1);
+  if (!finalLine) return false;
+
   let verdict: string | undefined;
   // matchAll on a /g regex; lastIndex is reset by matchAll's internal clone.
-  for (const match of finalText.matchAll(CRON_CONDITION_VERDICT_RE)) {
+  for (const match of finalLine.matchAll(CRON_CONDITION_VERDICT_RE)) {
     verdict = match[1]?.toUpperCase();
   }
   return verdict === 'YES';
@@ -3044,6 +3061,7 @@ export class Session implements SessionContext {
               debugLogger.debug(
                 `Precondition skipped (session gone) [task ${job.id ?? '?'}]`,
               );
+              this.#markCronRunWithheld(job);
               return;
             }
             if (outcome !== 'ok') {
@@ -3060,6 +3078,7 @@ export class Session implements SessionContext {
                 `Precondition turn ended '${outcome}' — fire withheld ` +
                   `[session ${this.sessionId}]`,
               );
+              this.#markCronRunWithheld(job);
               return;
             }
             if (!isCronConditionMet(finalText)) {
@@ -3069,6 +3088,7 @@ export class Session implements SessionContext {
                 `Precondition verdict is not YES — fire withheld ` +
                   `[session ${this.sessionId}]`,
               );
+              this.#markCronRunWithheld(job);
               return;
             }
             debugLogger.info(
@@ -3083,6 +3103,28 @@ export class Session implements SessionContext {
 
       this.#deliverCronFire(job);
     });
+  }
+
+  /**
+   * Marks this fire's run record as withheld, so the run history distinguishes
+   * "the precondition said no" from "the task ran". The scheduler books the run
+   * the moment it fires, before any verdict exists; without this amendment a
+   * guarded task that deliberately did nothing reports a clean run.
+   *
+   * Fire-and-forget and never awaited: the write is a cosmetic marker on a fire
+   * that has already been decided, and it must not delay or fail the decision.
+   * A session-only job (no `id`) or an unstamped fire has no record to amend.
+   */
+  #markCronRunWithheld(job: CronFire): void {
+    const projectRoot = this.config.getProjectRoot();
+    if (!projectRoot || !job.id || job.lastFiredAt === undefined) return;
+    void markCronRunWithheld(projectRoot, job.id, job.lastFiredAt).catch(
+      (err) => {
+        debugLogger.warn(
+          `Failed to mark scheduled-task run as withheld [task ${job.id}]: ${err}`,
+        );
+      },
+    );
   }
 
   /**
@@ -3513,8 +3555,20 @@ export class Session implements SessionContext {
                     toolRun,
                     ac.signal,
                   );
-                  if (toolRun.loopDetected) {
+                  // A tool run that yields no follow-up message is a tool loop
+                  // cut short — today `loopDetected` and
+                  // `repeatedDuplicateProviderToolCall`, both of which end the
+                  // turn through the ordinary `nextMessage === null` exit with
+                  // no error recorded. Marked HERE, at the single choke point,
+                  // rather than per-flag: enumerating the reasons is how the
+                  // duplicate-tool-call sibling was missed the first time, and
+                  // the next reason added would be missed the same way. A turn
+                  // that ends normally never reaches this branch — it exits the
+                  // loop with no function calls at all.
+                  if (nextMessage === null) {
                     cronTurnIncomplete = true;
+                  }
+                  if (toolRun.loopDetected) {
                     await this.#preserveStoppedToolRun(toolRun, ac.signal);
                     return;
                   }

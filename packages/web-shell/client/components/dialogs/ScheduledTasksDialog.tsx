@@ -71,7 +71,9 @@ function safeLocaleString(ms: number): string {
   }
 }
 
-/** Formats one run-history entry: localized timestamp + a kind tag. */
+/** Formats one run-history entry: localized timestamp + a kind tag, plus a
+ * "skipped" tag when the task's precondition withheld the fire — otherwise a
+ * guarded task that deliberately did nothing reads as a clean run. */
 function describeRun(run: DaemonScheduledTaskRun, t: TranslateFn): string {
   const kind =
     run.kind === 'catch-up'
@@ -79,7 +81,10 @@ function describeRun(run: DaemonScheduledTaskRun, t: TranslateFn): string {
       : run.kind === 'manual'
         ? ` · ${t('scheduledTasks.runKind.manual')}`
         : '';
-  return `${safeLocaleString(run.at)}${kind}`;
+  const withheld = run.withheld
+    ? ` · ${t('scheduledTasks.runKind.withheld')}`
+    : '';
+  return `${safeLocaleString(run.at)}${kind}${withheld}`;
 }
 
 interface ScheduledTasksDialogProps {

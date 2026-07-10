@@ -44,6 +44,11 @@ import { MessageType } from '../../ui/types.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
+// Stamps a withheld fire onto the on-disk run history. Spied, not real: the
+// real one writes to the per-project tasks file.
+const markCronRunWithheldSpy = vi.hoisted(() =>
+  vi.fn().mockResolvedValue(true),
+);
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
 const transcribeVoiceAudioSpy = vi.hoisted(() => vi.fn());
 // Records every LoopTickResolver construction's deps so a test can assert what
@@ -61,6 +66,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       warn: debugLoggerWarnSpy,
       error: vi.fn(),
     }),
+    markCronRunWithheld: markCronRunWithheldSpy,
     generatePromptSuggestion: vi.fn(),
     logPromptSuggestion: vi.fn(),
     runVisionBridge: runVisionBridgeSpy,
@@ -461,6 +467,7 @@ describe('Session', () => {
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      getProjectRoot: vi.fn().mockReturnValue('/repo'),
       // Folder trust gates the project `.qwen/loop.md`; default trusted (the
       // production default). Untrusted-folder tests override to false.
       isTrustedFolder: vi.fn().mockReturnValue(true),
@@ -8826,11 +8833,13 @@ describe('Session', () => {
     describe('isolated scheduled tasks', () => {
       /** Mock scheduler that delivers exactly one job through `start`. */
       function schedulerFiring(job: {
+        id?: string;
         prompt: string;
         cronExpr?: string;
         missed?: boolean;
         runMode?: 'shared' | 'isolated';
         condition?: string;
+        lastFiredAt?: number;
       }) {
         return {
           size: 1,
@@ -9034,12 +9043,19 @@ describe('Session', () => {
         function fireGuarded(
           spawner: ReturnType<typeof vi.fn>,
           verdict: () => AsyncGenerator<unknown>,
-          job: { missed?: boolean; runMode?: 'shared' | 'isolated' } = {},
+          job: {
+            missed?: boolean;
+            runMode?: 'shared' | 'isolated';
+            id?: string;
+            lastFiredAt?: number;
+          } = {},
         ) {
           const scheduler = schedulerFiring({
             prompt: 'nightly report',
             runMode: 'isolated',
             condition: 'Has anything landed on main since yesterday?',
+            id: 'task-1',
+            lastFiredAt: 1_718_000_400_000,
             ...job,
           });
           mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
@@ -9158,8 +9174,8 @@ describe('Session', () => {
           await fireGuarded(
             spawner,
             assistantTurn(
-              { text: 'Weighing it up.\nDECISION: YES\n', thought: true },
-              { text: 'Let me get back to you on that.' },
+              { text: 'Let me get back to you on that.\n' },
+              { text: 'Weighing it up.\nDECISION: YES', thought: true },
             ),
           );
 
@@ -9225,21 +9241,9 @@ describe('Session', () => {
                   },
                 },
               ]),
-            () =>
-              createStreamWithChunks([
-                {
-                  type: core.StreamEventType.CHUNK,
-                  value: {
-                    candidates: [
-                      {
-                        content: {
-                          parts: [{ text: 'The log is empty; I am not sure.' }],
-                        },
-                      },
-                    ],
-                  },
-                },
-              ]),
+            // Round 2 emits NO text at all: only a reset can keep round 1's
+            // verdict from becoming this turn's answer.
+            () => createEmptyStream(),
           );
 
           await session.prompt({
@@ -9333,6 +9337,141 @@ describe('Session', () => {
           expect(spawner).not.toHaveBeenCalled();
         });
 
+        it('withholds the fire when a duplicate provider tool-call truncates the turn', async () => {
+          // Sibling of the loop-detected path: `repeatedDuplicateProviderToolCall`
+          // makes `#buildNextMessageAfterToolRun` return null, so the turn ends
+          // through the ORDINARY `nextMessage === null` exit — no early return,
+          // no error flag. Without marking that exit, a YES already streamed in
+          // the same round releases the fire on a truncated investigation.
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockToolRegistry.getTool.mockReturnValue({
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { file_path: '/tmp/git.log' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Read file'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute: vi
+                .fn()
+                .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+            }),
+          });
+          // One provider id, already answered earlier in the turn, arriving
+          // TWICE in the same batch — findRepeatedDuplicateProviderToolCall
+          // needs both conditions to fire.
+          vi.mocked(mockChat.getHistoryFunctionResponseIds).mockReturnValue(
+            new Set(['shell_1']),
+          );
+          const duplicateParts = core.normalizeModelToolCallIds(
+            [
+              {
+                functionCall: {
+                  id: 'shell_1',
+                  name: 'read_file',
+                  args: { file_path: '/tmp/git.log' },
+                },
+              },
+              {
+                functionCall: {
+                  id: 'shell_1',
+                  name: 'read_file',
+                  args: { file_path: '/tmp/git.log' },
+                },
+              },
+            ],
+            new Set(['shell_1']),
+            new Set<string>(),
+          );
+          const duplicateCalls = duplicateParts.map((p) => p.functionCall!);
+
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          await fireGuarded(spawner, () =>
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'Looks good.\nDECISION: YES\n' }],
+                      },
+                    },
+                  ],
+                  functionCalls: duplicateCalls,
+                },
+              },
+            ]),
+          );
+
+          // `fireGuarded` repeats the last stream, so the same batch arrives
+          // twice. The FIRST occurrence is answered with a synthetic response
+          // (registering the id as a duplicate); the SECOND trips
+          // `repeatedDuplicateProviderToolCall` and truncates the turn — with a
+          // complete "DECISION: YES" already in that round's text.
+          // 1 = the user's own turn, 2-3 = the precondition turn's two rounds.
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3),
+          );
+          expect(spawner).not.toHaveBeenCalled();
+        });
+
+        it('stamps the run history when the turn ends non-ok, not just on a NO', async () => {
+          // The `outcome !== 'ok'` branch withholds the fire too, so it must
+          // amend the run record as well — otherwise a turn that errored is
+          // reported in the history as a clean run.
+          markCronRunWithheldSpy.mockClear();
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          await fireGuarded(spawner, () =>
+            (async function* () {
+              yield {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'DECISION: YES' }] } },
+                  ],
+                },
+              };
+              throw new Error('stream reset mid-turn');
+            })(),
+          );
+
+          await vi.waitFor(() =>
+            expect(markCronRunWithheldSpy).toHaveBeenCalledTimes(1),
+          );
+          expect(spawner).not.toHaveBeenCalled();
+        });
+
+        it('stamps the run history when the precondition withholds the fire', async () => {
+          // The scheduler books the run before any verdict exists, so a withheld
+          // fire would otherwise be indistinguishable from a real one.
+          markCronRunWithheldSpy.mockClear();
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          await fireGuarded(spawner, assistantTurn({ text: 'DECISION: NO' }));
+
+          await vi.waitFor(() =>
+            expect(markCronRunWithheldSpy).toHaveBeenCalledTimes(1),
+          );
+          // Addressed by the FIRE's own minute, not "the newest run".
+          expect(markCronRunWithheldSpy).toHaveBeenCalledWith(
+            '/repo',
+            'task-1',
+            1_718_000_400_000,
+          );
+          expect(spawner).not.toHaveBeenCalled();
+        });
+
+        it('does not stamp the run history when the fire is dispatched', async () => {
+          markCronRunWithheldSpy.mockClear();
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          await fireGuarded(spawner, assistantTurn({ text: 'DECISION: YES' }));
+
+          await vi.waitFor(() => expect(spawner).toHaveBeenCalledTimes(1));
+          expect(markCronRunWithheldSpy).not.toHaveBeenCalled();
+        });
+
         it('never evaluates a condition on a shared task', async () => {
           // The REST route rejects the combination, but the fire path must not
           // depend on that: a condition stranded on a shared task is inert, and
@@ -9404,10 +9543,29 @@ describe('Session', () => {
         expect(isCronConditionMet('DECISION: NO, unless you disagree')).toBe(
           false,
         );
-        // A clean verdict line followed by prose on LATER lines still counts.
-        expect(isCronConditionMet('DECISION: YES\n\nI will proceed.')).toBe(
-          true,
-        );
+      });
+
+      it('reads ONLY the final non-empty line', () => {
+        // The prompt asks the model to END its reply with the verdict. A verdict
+        // that is merely present somewhere is not one: walking it back on a
+        // later line is exactly the ambiguity a precondition must fail closed
+        // on. (An earlier revision scanned the whole text and let this through.)
+        expect(
+          isCronConditionMet('DECISION: YES\n\nBut I could not verify it.'),
+        ).toBe(false);
+        expect(
+          isCronConditionMet(
+            'DECISION: YES\nActually, hold on — the remote is unreachable.',
+          ),
+        ).toBe(false);
+        // Trailing blank lines are not content.
+        expect(isCronConditionMet('DECISION: YES\n\n  \n')).toBe(true);
+        // Reasoning above the verdict is fine — it never lands on the last line.
+        expect(
+          isCronConditionMet(
+            'It could be DECISION: NO.\nOn balance:\nDECISION: YES',
+          ),
+        ).toBe(true);
       });
 
       it('asks for a verdict without leaking the command into the check', () => {

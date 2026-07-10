@@ -171,6 +171,10 @@ export interface DaemonScheduledTaskRun {
    * daemon's `CronTaskRun.sessionId` so run-attribution isn't silently dropped
    * on the client (not surfaced in the UI yet). */
   sessionId?: string;
+  /** The fire was delivered but its prompt never ran: the task's precondition
+   * did not release it. Absent = the fire was dispatched. Without this a
+   * withheld fire is indistinguishable from a real run in the history. */
+  withheld?: boolean;
 }
 
 export interface DaemonScheduledTask {

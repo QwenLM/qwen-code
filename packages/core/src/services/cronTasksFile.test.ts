@@ -8,6 +8,7 @@ import {
   appendCronRun,
   generateCronTaskId,
   getCronFilePath,
+  markCronRunWithheld,
   MAX_TASK_RUNS,
   readCronTasks,
   removeCronTasks,
@@ -212,6 +213,27 @@ describe('cronTasksFile', () => {
       await seedTasksFile(
         tmpDir,
         JSON.stringify([{ ...makeTask(), runMode: 'isolated', condition: '' }]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('round-trips a withheld run marker', async () => {
+      const task = makeTask({
+        runs: [
+          { at: 1718000300000, kind: 'scheduled' },
+          { at: 1718000400000, kind: 'scheduled', withheld: true },
+        ],
+      });
+      await writeCronTasks(tmpDir, [task]);
+      expect(await readCronTasks(tmpDir)).toEqual([task]);
+    });
+
+    it('rejects a run whose withheld is not a boolean', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([
+          { ...makeTask(), runs: [{ at: 1718000300000, withheld: 'yes' }] },
+        ]),
       );
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
     });
@@ -524,6 +546,58 @@ describe('cronTasksFile', () => {
       // 36^8 space — 200 draws essentially never collide (P ~ 1e-8). Assert
       // near-uniqueness with a tiny margin so this can't flake.
       expect(ids.size).toBeGreaterThan(195);
+    });
+  });
+
+  describe('markCronRunWithheld', () => {
+    const A = 1718000300000;
+    const B = 1718000400000;
+
+    it('stamps the run recorded for that exact fire, not the newest one', async () => {
+      // The scheduler stamps `runs[].at` from the same `lastFiredAt` it hands to
+      // onFire, so the evaluating session addresses its OWN record. Matching
+      // "the newest run" instead would mislabel the wrong fire whenever a later
+      // one has already landed.
+      await writeCronTasks(tmpDir, [
+        makeTask({
+          runs: [
+            { at: A, kind: 'scheduled' },
+            { at: B, kind: 'scheduled' },
+          ],
+        }),
+      ]);
+
+      expect(await markCronRunWithheld(tmpDir, 'test001', A)).toBe(true);
+
+      const runs = (await readCronTasks(tmpDir))[0]!.runs!;
+      expect(runs[0]).toEqual({ at: A, kind: 'scheduled', withheld: true });
+      expect(runs[1]).toEqual({ at: B, kind: 'scheduled' });
+    });
+
+    it('is idempotent and leaves the file untouched on a second call', async () => {
+      await writeCronTasks(tmpDir, [
+        makeTask({ runs: [{ at: A, kind: 'scheduled' }] }),
+      ]);
+      expect(await markCronRunWithheld(tmpDir, 'test001', A)).toBe(true);
+      expect(await markCronRunWithheld(tmpDir, 'test001', A)).toBe(false);
+      expect((await readCronTasks(tmpDir))[0]!.runs).toEqual([
+        { at: A, kind: 'scheduled', withheld: true },
+      ]);
+    });
+
+    it('is a no-op for an unknown task, an unknown fire, or no history', async () => {
+      // The scheduler persists the run asynchronously; losing a cosmetic marker
+      // must never throw on a path the fire decision does not depend on.
+      await writeCronTasks(tmpDir, [
+        makeTask({ runs: [{ at: A, kind: 'scheduled' }] }),
+        makeTask({ id: 'noruns' }),
+      ]);
+      expect(await markCronRunWithheld(tmpDir, 'missing', A)).toBe(false);
+      expect(await markCronRunWithheld(tmpDir, 'test001', B)).toBe(false);
+      expect(await markCronRunWithheld(tmpDir, 'noruns', A)).toBe(false);
+      expect((await readCronTasks(tmpDir))[0]!.runs).toEqual([
+        { at: A, kind: 'scheduled' },
+      ]);
     });
   });
 });

@@ -44,6 +44,17 @@ export interface CronTaskRun {
    * owner id was known.
    */
   sessionId?: string;
+  /**
+   * Set when this fire was delivered but its prompt never ran, because the
+   * task's precondition did not release it. The scheduler books the run the
+   * moment it fires — before the bound session has evaluated anything — so
+   * without this a withheld fire and a dispatched one are the same record, and
+   * a management UI reports "ran at 02:00" for a task that deliberately did
+   * nothing. Stamped afterwards by the evaluating session
+   * ({@link markCronRunWithheld}). Absent means the fire was dispatched, or
+   * predates the field.
+   */
+  withheld?: boolean;
 }
 
 /** Cap on a task's on-disk run history. A ring, newest kept — this bounds the
@@ -391,9 +402,48 @@ function isValidRuns(value: unknown): value is CronTaskRun[] {
     return (
       isFiniteTimestamp(run['at']) &&
       (run['kind'] === undefined || typeof run['kind'] === 'string') &&
-      (run['sessionId'] === undefined || typeof run['sessionId'] === 'string')
+      (run['sessionId'] === undefined ||
+        typeof run['sessionId'] === 'string') &&
+      (run['withheld'] === undefined || typeof run['withheld'] === 'boolean')
     );
   });
+}
+
+/**
+ * Stamps the run recorded for `at` on task `taskId` as withheld — the fire was
+ * delivered, but its precondition did not release the prompt.
+ *
+ * Matched on the exact fire timestamp rather than "the newest run": the
+ * scheduler stamps `runs[].at` from the very `lastFiredAt` it hands to `onFire`,
+ * so the evaluating session knows precisely which record is its own, and a
+ * concurrent fire of the same task cannot be mislabelled.
+ *
+ * Best-effort and idempotent. A no-op when the task, the run, or the field is
+ * already gone/set — the scheduler persists the run asynchronously, and losing
+ * a cosmetic marker must never fail a fire. Callers should not await it on any
+ * path that gates behaviour.
+ */
+export async function markCronRunWithheld(
+  projectRoot: string,
+  taskId: string,
+  at: number,
+): Promise<boolean> {
+  let marked = false;
+  await updateCronTasks(projectRoot, (tasks) => {
+    const index = tasks.findIndex((t) => t.id === taskId);
+    if (index === -1) return tasks;
+    const task = tasks[index]!;
+    const runs = task.runs;
+    if (!Array.isArray(runs)) return tasks;
+    const runIndex = runs.findIndex((r) => r.at === at);
+    if (runIndex === -1 || runs[runIndex]!.withheld === true) return tasks;
+    marked = true;
+    const nextRuns = runs.map((run, i) =>
+      i === runIndex ? { ...run, withheld: true } : run,
+    );
+    return tasks.map((t, i) => (i === index ? { ...t, runs: nextRuns } : t));
+  });
+  return marked;
 }
 
 function isValidTask(value: unknown): value is DurableCronTask {
