@@ -21,7 +21,9 @@ let latestOnSubmit:
   | undefined;
 let latestChatEditorProps: any;
 let latestFollowupAccept: ((suggestion: string) => void) | undefined;
+let sendPromptAdmit: (() => void) | undefined;
 const clearFollowup = vi.fn();
+const insertText = vi.fn();
 const transcriptDispatch = vi.fn();
 const sendPrompt = vi.fn(async () => ({}) as any);
 const submitPermission = vi.fn(async () => {});
@@ -111,7 +113,7 @@ vi.mock('./ChatEditor', () => ({
     latestOnSubmit = props.onSubmit;
     latestChatEditorProps = props;
     useImperativeHandle(ref, () => ({
-      insertText: vi.fn(),
+      insertText,
     }));
     return (
       <div>
@@ -199,6 +201,7 @@ let container: HTMLDivElement | null = null;
 
 beforeEach(() => {
   connectionState = {
+    status: 'connected',
     sessionId: 'sess-1',
     displayName: 'Refactor core',
     workspaceCwd: '/w',
@@ -211,11 +214,16 @@ beforeEach(() => {
   latestOnSubmit = undefined;
   latestChatEditorProps = undefined;
   latestFollowupAccept = undefined;
+  sendPromptAdmit = undefined;
   queuedPromptsMock = [];
   queuedTextsMock = [];
   sendPrompt.mockReset();
-  sendPrompt.mockResolvedValue({} as any);
+  sendPrompt.mockImplementation(async (_text: string, options?: any) => {
+    sendPromptAdmit = options?.onAdmitted;
+    return {} as any;
+  });
   clearFollowup.mockClear();
+  insertText.mockClear();
   submitPermission.mockClear();
   cancel.mockClear();
   setApprovalMode.mockClear();
@@ -276,18 +284,37 @@ describe('ChatPane', () => {
       ),
     );
     expect(sendPrompt).toHaveBeenCalledTimes(1);
-    expect(sendPrompt).toHaveBeenCalledWith('hello there', {});
-    expect(clearFollowup).toHaveBeenCalledTimes(1);
+    expect(sendPrompt).toHaveBeenCalledWith('hello there', {
+      onAdmitted: expect.any(Function),
+    });
+    expect(clearFollowup).not.toHaveBeenCalled();
     expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
-  it('accepts an idle prompt so the editor commits the draft immediately', () => {
+  it('commits an idle prompt only after daemon admission', () => {
     render();
+    const commit = vi.fn();
     let returned: boolean | undefined;
     act(() => {
-      returned = latestOnSubmit!('hi');
+      returned = latestOnSubmit!('hi', undefined, commit);
     });
-    expect(returned).toBe(true);
+    expect(returned).toBe(false);
+    expect(commit).not.toHaveBeenCalled();
+    act(() => sendPromptAdmit!());
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(clearFollowup).toHaveBeenCalledTimes(1);
+  });
+
+  it('forwards images with an idle prompt', () => {
+    const images = [{ data: 'image-data', media_type: 'image/png' }];
+    render();
+    act(() => {
+      latestOnSubmit!('with image', images);
+    });
+    expect(sendPrompt).toHaveBeenCalledWith('with image', {
+      images,
+      onAdmitted: expect.any(Function),
+    });
   });
 
   it('queues a prompt while the pane is already running', () => {
@@ -303,27 +330,39 @@ describe('ChatPane', () => {
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 
-  it('preserves the draft when the busy queue rejects the prompt', () => {
+  it('forwards images with a queued prompt', () => {
     streamingStateValue = 'responding';
-    enqueuePrompt.mockReturnValueOnce(false);
+    const images = [{ data: 'image-data', media_type: 'image/png' }];
     render();
-    const commit = vi.fn();
+    act(() => {
+      latestOnSubmit!('queued image', images);
+    });
+    expect(enqueuePrompt).toHaveBeenCalledWith('queued image', images);
+  });
+
+  it('does not submit while the pane is disconnected', () => {
+    connectionState.status = 'disconnected';
+    render();
     let returned: boolean | undefined;
     act(() => {
-      returned = latestOnSubmit!('hi', undefined, commit);
+      returned = latestOnSubmit!('hi');
     });
     expect(returned).toBe(false);
-    expect(commit).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
   it('reports an idle prompt failure to the pane error handler', async () => {
     const onError = vi.fn();
     sendPrompt.mockRejectedValueOnce(new Error('disconnected'));
     render({ onError });
+    const commit = vi.fn();
     await act(async () => {
-      latestOnSubmit!('hi');
+      latestOnSubmit!('hi', undefined, commit);
       await Promise.resolve();
     });
+    expect(commit).not.toHaveBeenCalled();
+    expect(clearFollowup).not.toHaveBeenCalled();
     expect(onError).toHaveBeenCalledWith(
       expect.any(Error),
       'Failed to send prompt',
@@ -424,6 +463,8 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.onAcceptFollowup).toBeTypeOf('function');
     expect(latestChatEditorProps.onDismissFollowup).toBeTypeOf('function');
     expect(latestFollowupAccept).toBeTypeOf('function');
+    act(() => latestFollowupAccept!('test suggestion'));
+    expect(insertText).toHaveBeenCalledWith('test suggestion');
   });
 
   it('surfaces a connection-loss banner when the pane connection drops', () => {

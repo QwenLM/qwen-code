@@ -42,6 +42,9 @@
 .actionButton:disabled {
   opacity: 0.55;
   cursor: default;
+  border-color: var(--border);
+  background: transparent;
+  color: var(--muted-foreground);
 }
 
 .refreshButton {

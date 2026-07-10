@@ -17,7 +17,10 @@ import { useI18n } from '../i18n';
 import { useMessages } from '../hooks/useMessages';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptImage } from '../adapters/promptTypes';
-import type { EditorHandle } from '../hooks/useComposerCore';
+import type {
+  ComposerSubmitCommit,
+  EditorHandle,
+} from '../hooks/useComposerCore';
 import { useQueuedPrompts } from '../hooks/useQueuedPrompts';
 import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
@@ -69,6 +72,8 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
   const blocks = useTranscriptBlocks();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
+  const streamingStateRef = useRef(streamingState);
+  streamingStateRef.current = streamingState;
   const editorRef = useRef<EditorHandle | null>(null);
   const {
     followupState,
@@ -87,6 +92,10 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
       else console.error(fallback, error);
     },
     [onError],
+  );
+  const notifySuccess = useCallback(
+    (message: string) => store.dispatch([{ type: 'status', text: message }]),
+    [store],
   );
 
   const pendingApproval = useMemo(
@@ -124,8 +133,7 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
     store,
     editorRef,
     reportError,
-    notifySuccess: (message) =>
-      store.dispatch([{ type: 'status', text: message }]),
+    notifySuccess,
     t,
   });
 
@@ -142,23 +150,31 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
   }, [messages, isResponding]);
 
   const handleSubmit = useCallback(
-    (text: string, images?: PromptImage[]): boolean => {
+    (
+      text: string,
+      images?: PromptImage[],
+      commitAccepted?: ComposerSubmitCommit,
+    ): boolean => {
       const trimmed = text.trim();
       if (!trimmed) return false;
-      if (streamingState === 'idle') {
-        clearFollowup();
+      if (connection.status !== 'connected') return false;
+      if (streamingStateRef.current === 'idle') {
         actions
           .sendPrompt(trimmed, {
             ...(images && images.length ? { images } : {}),
+            onAdmitted: () => {
+              clearFollowup();
+              commitAccepted?.();
+            },
           })
           .catch((error: unknown) =>
             reportError(error, 'Failed to send prompt'),
           );
-        return true;
+        return false;
       }
       return enqueuePrompt(trimmed, images);
     },
-    [actions, clearFollowup, enqueuePrompt, reportError, streamingState],
+    [actions, clearFollowup, connection.status, enqueuePrompt, reportError],
   );
 
   const handleConfirm = useCallback(
