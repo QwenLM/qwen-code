@@ -221,6 +221,8 @@ If your independent proposal was materially simpler — say so. Not as a blocker
 
 **Step 2: Act on the verdict.**
 
+**Re-runs (manually triggered via `@qwen-code /triage`):** hygiene concerns (scope mismatch, undocumented changes, naming) that don't block the PR are not a valid reason to defer. Note them in the comment and approve. Only defer if you have genuine blocking uncertainty — something you cannot resolve from the diff, tests, and PR description.
+
 All stages genuinely clean — approve:
 
 ```bash
@@ -233,4 +235,14 @@ Reflection shows it shouldn't merge — request changes immediately, citing the 
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "Needs some rethinking — see my notes above. 🙏"
 ```
 
-Genuinely unsure — **don't approve or reject**. Ask the maintainer to weigh in. Use `$QWEN_MAINTAINER_HANDLE` if set.
+Genuinely unsure — **don't approve or reject**, but **never defer silently**. Post an explicit defer comment that:
+
+1. States you are escalating to the maintainer.
+2. Names the specific reason(s) for uncertainty — what you cannot resolve from the diff, tests, and PR description.
+3. @mentions the maintainer (use `$QWEN_MAINTAINER_HANDLE` if set, or the most recent human reviewer).
+
+```bash
+gh pr comment "$PR_NUMBER" --repo "$REPO" --body "⏸️ Deferring to @$MAINTAINER_HANDLE — <reason>. Needs a human call on this one."
+```
+
+A defer without an explicit comment is invisible — the maintainer won't know they're needed.
