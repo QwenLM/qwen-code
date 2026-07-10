@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TelegramChatStore } from './chatStore.js';
 import { TelegramBridge } from './runner.js';
+import { CursorStore } from '../cursorStore.js';
 import type { BridgeClient } from '../client.js';
 import type { TelegramBotApi, TelegramUpdate } from './botApi.js';
 
@@ -126,5 +127,91 @@ describe('TelegramBridge runner', () => {
     });
     await new Promise((r) => setTimeout(r, 0));
     expect(f.sent).toHaveLength(0);
+  });
+});
+
+describe('TelegramBridge — cursor persistence', () => {
+  it('loads cursor from store on start and passes it as Last-Event-ID on subscribe', async () => {
+    await chats.bind(7, 'sess-q');
+    const cursors = await CursorStore.open(join(dir, 'cursors.json'));
+    await cursors.setLastEventId('tok_a', 'sess-q', 77);
+
+    const passedCursors: Array<number | undefined> = [];
+    const ac = new AbortController();
+    const botApi = {
+      getUpdates: async () => {
+        ac.abort();
+        return [];
+      },
+      sendMessage: async () => ({ ok: true, status: 200 }),
+      answerCallbackQuery: async () => ({ ok: true, status: 200 }),
+    } as unknown as TelegramBotApi;
+    const client = {
+      register: async () => ({ ok: true, status: 200 }),
+      heartbeat: async () => ({ ok: true, status: 200 }),
+      subscribeEvents: async (
+        _sid: string,
+        _cb: unknown,
+        _signal: unknown,
+        cursor?: number,
+      ) => {
+        passedCursors.push(cursor);
+      },
+    } as unknown as BridgeClient;
+
+    const bridge = new TelegramBridge({
+      botApi,
+      client,
+      chats,
+      cursors,
+      tokenId: 'tok_a',
+      baseUrl: 'http://127.0.0.1:4170',
+      pollTimeoutSec: 0,
+    });
+    await bridge.start(ac.signal);
+    // The cursor loaded from the store must be passed to subscribeEvents.
+    expect(passedCursors).toContain(77);
+  });
+
+  it('persists cursor to the store when an SSE frame arrives', async () => {
+    await chats.bind(7, 'sess-q');
+    const cursors = await CursorStore.open(join(dir, 'cursors.json'));
+
+    const ac = new AbortController();
+    let eventCb: ((ev: unknown) => void) | undefined;
+    const botApi = {
+      getUpdates: async () => {
+        ac.abort();
+        return [];
+      },
+      sendMessage: async () => ({ ok: true, status: 200 }),
+      answerCallbackQuery: async () => ({ ok: true, status: 200 }),
+    } as unknown as TelegramBotApi;
+    const client = {
+      register: async () => ({ ok: true, status: 200 }),
+      heartbeat: async () => ({ ok: true, status: 200 }),
+      subscribeEvents: async (_sid: string, cb: (ev: unknown) => void) => {
+        eventCb = cb;
+      },
+    } as unknown as BridgeClient;
+
+    const bridge = new TelegramBridge({
+      botApi,
+      client,
+      chats,
+      cursors,
+      tokenId: 'tok_b',
+      baseUrl: 'http://127.0.0.1:4170',
+      pollTimeoutSec: 0,
+    });
+    const startDone = bridge.start(ac.signal);
+    // Yield so reconcileSubscriptions fires and eventCb is captured.
+    await new Promise((r) => setTimeout(r, 0));
+    eventCb?.({ id: 42, type: 'session_update', data: {} });
+    // Allow the async persist to settle.
+    await new Promise((r) => setTimeout(r, 10));
+    await startDone;
+    const entry = cursors.get('tok_b', 'sess-q');
+    expect(entry?.lastEventId).toBe(42);
   });
 });

@@ -7,6 +7,7 @@
 import type { BridgeClient, BridgeEvent } from '../client.js';
 import type { MatrixRoomStore } from './roomStore.js';
 import { runHeartbeatLoop, heartbeatIntervalMsOf } from '../heartbeat.js';
+import type { CursorStore } from '../cursorStore.js';
 import { extractAgentText } from '../sessionUpdateText.js';
 import { markdownToHtml } from './markdownHtml.js';
 import { MatrixStreamRouter, type MatrixStreamPoster } from './streamRouter.js';
@@ -73,6 +74,16 @@ export interface MatrixBridgeConfig {
    */
   health?: MatrixHealthState;
   log?: (msg: string) => void;
+  /**
+   * Durable cursor store for SSE resume positions. When provided, the bridge
+   * persists `lastEventId` per session so cursors survive restarts.
+   */
+  cursors?: CursorStore;
+  /**
+   * The bridge's own token id (used as the cursor-store partition key). Required
+   * when `cursors` is set.
+   */
+  tokenId?: string;
 }
 
 /** SSE reconnect backoff per the spec: initial 1s, max 30s, jitter ±20%. */
@@ -114,6 +125,8 @@ export class MatrixBridge {
   private readonly tracked = new Map<string, TrackedEvent>();
   /** requestId → the sent messages that rendered it (for the resolve edit). */
   private readonly sent = new Map<string, SentRequest[]>();
+  /** requestIds for which the deeplink-guidance reply has already been sent. */
+  private readonly deeplinkGuidanceSent = new Set<string>();
   /** Streams agent prose into rooms (buffer + m.thread on long streams). */
   private readonly stream: MatrixStreamRouter;
   private readonly ctx: RoomStateCtx;
@@ -229,6 +242,13 @@ export class MatrixBridge {
   /** Register, heartbeat, subscribe to bound sessions, then run the sync loop. */
   async start(signal: AbortSignal): Promise<void> {
     this.signal = signal;
+    // Load durable cursors so SSE subscriptions resume from where they left off.
+    if (this.cfg.cursors && this.cfg.tokenId) {
+      for (const sessionId of this.cfg.rooms.boundSessions()) {
+        const entry = this.cfg.cursors.get(this.cfg.tokenId, sessionId);
+        if (entry) this.lastEventId.set(sessionId, entry.lastEventId);
+      }
+    }
     const reg = await this.registerSelf();
     if (reg.ok && this.cfg.health) {
       this.cfg.health.registeredId = MATRIX_BRIDGE_ID;
@@ -333,8 +353,17 @@ export class MatrixBridge {
         await this.cfg.client.subscribeEvents(
           sessionId,
           (ev) => {
-            if (typeof ev.id === 'number')
+            if (typeof ev.id === 'number') {
               this.lastEventId.set(sessionId, ev.id);
+              // Persist the cursor so restarts resume from here.
+              if (this.cfg.cursors && this.cfg.tokenId) {
+                void this.cfg.cursors.setLastEventId(
+                  this.cfg.tokenId,
+                  sessionId,
+                  ev.id,
+                );
+              }
+            }
             this.deliverEvent(sessionId, ev);
           },
           signal,

@@ -162,6 +162,13 @@ export class DiscordBridge {
    * sessions, then start the inbound gateway. Resolves when the gateway loop ends.
    */
   async start(signal: AbortSignal): Promise<void> {
+    // Load durable cursors so SSE subscriptions resume from where they left off.
+    if (this.cfg.cursors && this.cfg.tokenId) {
+      for (const sessionId of this.cfg.channels.boundSessions()) {
+        const entry = this.cfg.cursors.get(this.cfg.tokenId, sessionId);
+        if (entry) this.lastEventId.set(sessionId, entry.lastEventId);
+      }
+    }
     const reg = await this.registerSelf();
     this.log(
       reg.ok
@@ -228,8 +235,17 @@ export class DiscordBridge {
         await this.cfg.client.subscribeEvents(
           sessionId,
           (ev) => {
-            if (typeof ev.id === 'number')
+            if (typeof ev.id === 'number') {
               this.lastEventId.set(sessionId, ev.id);
+              // Persist the cursor so restarts resume from here.
+              if (this.cfg.cursors && this.cfg.tokenId) {
+                void this.cfg.cursors.setLastEventId(
+                  this.cfg.tokenId,
+                  sessionId,
+                  ev.id,
+                );
+              }
+            }
             this.deliverEvent(sessionId, ev);
           },
           signal,

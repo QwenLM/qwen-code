@@ -10,11 +10,22 @@ import type { TelegramChatStore } from './chatStore.js';
 import { handleUpdate, type DispatchDeps } from './dispatch.js';
 import { renderPermissionRequest } from './render.js';
 import { runHeartbeatLoop, heartbeatIntervalMsOf } from '../heartbeat.js';
+import type { CursorStore } from '../cursorStore.js';
 
 export interface TelegramBridgeConfig {
   botApi: TelegramBotApi;
   client: BridgeClient;
   chats: TelegramChatStore;
+  /**
+   * Durable cursor store for SSE resume positions. When provided, the bridge
+   * persists `lastEventId` per session so cursors survive restarts.
+   */
+  cursors?: CursorStore;
+  /**
+   * The bridge's own token id (used as the cursor-store partition key so
+   * multiple bridge instances don't collide). Required when `cursors` is set.
+   */
+  tokenId?: string;
   /** User-facing gateway URL for deeplinks (QWEN_DAEMON_URL). */
   baseUrl: string;
   /** getUpdates long-poll seconds (default 25; short in tests). */
@@ -43,7 +54,11 @@ export class TelegramBridge {
   private readonly cfg: TelegramBridgeConfig;
   private readonly bans = new Set<string>();
   private readonly subscribed = new Set<string>();
-  /** sessionId → highest SSE frame id seen (resume cursor on reconnect). */
+  /**
+   * sessionId → highest SSE frame id seen (in-memory mirror of the durable
+   * cursor store). Populated from the cursor store on start; updated on each
+   * frame and flushed to the store when `cursors` is configured.
+   */
   private readonly lastEventId = new Map<string, number>();
   private readonly log: (msg: string) => void;
 
@@ -80,6 +95,13 @@ export class TelegramBridge {
    * reconciles SSE subscriptions each tick) until `signal` aborts.
    */
   async start(signal: AbortSignal): Promise<void> {
+    // Load durable cursors so SSE subscriptions resume from where they left off.
+    if (this.cfg.cursors && this.cfg.tokenId) {
+      for (const sessionId of this.cfg.chats.boundSessions()) {
+        const entry = this.cfg.cursors.get(this.cfg.tokenId, sessionId);
+        if (entry) this.lastEventId.set(sessionId, entry.lastEventId);
+      }
+    }
     const reg = await this.registerSelf();
     this.log(
       reg.ok
@@ -122,8 +144,17 @@ export class TelegramBridge {
         .subscribeEvents(
           sessionId,
           (ev) => {
-            if (typeof ev.id === 'number')
+            if (typeof ev.id === 'number') {
               this.lastEventId.set(sessionId, ev.id);
+              // Persist the cursor so restarts resume from here.
+              if (this.cfg.cursors && this.cfg.tokenId) {
+                void this.cfg.cursors.setLastEventId(
+                  this.cfg.tokenId,
+                  sessionId,
+                  ev.id,
+                );
+              }
+            }
             this.deliverEvent(sessionId, ev);
           },
           signal,
