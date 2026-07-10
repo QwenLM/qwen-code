@@ -1300,6 +1300,22 @@ describe('EnhancedMarkdownTable', () => {
     expect(teamHandle.tabIndex).toBe(0);
   });
 
+  it('keeps the active column while clicking inside the first-column context menu', () => {
+    const container = renderWideTable();
+    const teamHandle = button(container, 'Move Team');
+
+    openColumnMenu(container, 'Team');
+    expect(teamHandle.className).toContain('reorderHandleVisible');
+
+    act(() => {
+      textButton(container, 'Freeze first column').dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+    });
+
+    expect(teamHandle.className).toContain('reorderHandleVisible');
+  });
+
   it('dismisses the first-column context menu on outside click, scroll, and resize', () => {
     const container = renderWideTable();
 
@@ -1514,6 +1530,33 @@ describe('EnhancedMarkdownTable', () => {
     click(textButton(container, 'Confirm'));
 
     expect(rowTexts(container)).toEqual(['Short|ok']);
+    expect(container.textContent).not.toContain('Expand text');
+  });
+
+  it('only shows the long text toolbar action for visible columns', () => {
+    const longText =
+      'A hidden long note should not keep the expand text toolbar action visible.';
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Team</th>
+          <th>Note</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Alpha</td>
+          <td>{longText}</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    expect(textButton(container, 'Expand text')).toBeDefined();
+
+    click(button(container, 'Filter Note'));
+    click(textButton(container, 'Hide column'));
+
+    expect(rowTexts(container)).toEqual(['Alpha']);
     expect(container.textContent).not.toContain('Expand text');
   });
 

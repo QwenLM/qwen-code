@@ -1482,7 +1482,11 @@ export function EnhancedTable({
   useEffect(() => {
     const clearActiveColumnOnOutsideMouseDown = (event: MouseEvent) => {
       const target = event.target;
-      if (target instanceof Node && !shellRef.current?.contains(target)) {
+      if (
+        target instanceof Node &&
+        !shellRef.current?.contains(target) &&
+        !columnContextMenuRef.current?.contains(target)
+      ) {
         setActiveColumn(null);
       }
     };
@@ -2024,9 +2028,12 @@ export function EnhancedTable({
   const hasLongText = useMemo(
     () =>
       visibleRows.some((row) =>
-        row.cells.some((cell) => isLongCellText(cellReadableText(cell))),
+        orderedVisibleColumnIndexes.some((columnIndex) => {
+          const cell = row.cells[columnIndex];
+          return cell ? isLongCellText(cellReadableText(cell)) : false;
+        }),
       ),
-    [visibleRows],
+    [orderedVisibleColumnIndexes, visibleRows],
   );
   const rowSummary =
     visibleRows.length === table.rows.length
