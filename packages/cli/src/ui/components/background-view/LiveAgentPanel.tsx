@@ -461,9 +461,11 @@ const AgentRow: React.FC<{
   // chosen) and `recentActivities[].description` is LLM-generated;
   // both can carry terminal control sequences that would otherwise
   // bleed through Ink's `<Text>` and corrupt the panel chrome.
-  // HistoryItemDisplay applies the same `escapeAnsiCtrlCodes` to its
-  // user-facing content for the same reason.
-  const label = escapeAnsiCtrlCodes(descriptionWithoutPrefix(entry));
+  // `sanitizeMultilineForDisplay` (not just `escapeAnsiCtrlCodes`): the
+  // task description is model-generated and bare C0 controls (\r, BS, BEL)
+  // pass through the ANSI-sequence escape — matches the `activity` line
+  // below and the hardened dialog Progress rows.
+  const label = sanitizeMultilineForDisplay(descriptionWithoutPrefix(entry));
   // Note: foreground vs background is intentionally not surfaced here.
   // BackgroundTasksDialog tags foreground rows with `[blocking]`
   // (formerly `[in turn]`) to warn that cancelling will end the
