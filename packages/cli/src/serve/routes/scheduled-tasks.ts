@@ -297,6 +297,11 @@ export function registerScheduledTasksRoutes(
       });
       return;
     }
+    const removedField = findRemovedTaskField(body);
+    if (removedField) {
+      res.status(400).json(removedFieldError(removedField));
+      return;
+    }
     const recurring = body['recurring'] !== false;
     const enabled = body['enabled'] !== false;
 
@@ -439,6 +444,12 @@ export function registerScheduledTasksRoutes(
     // would mean holding the lock to reject a bad request.
     const patch: Partial<DurableCronTask> = {};
     let clearName = false;
+
+    const removedPatchField = findRemovedTaskField(body);
+    if (removedPatchField) {
+      res.status(400).json(removedFieldError(removedPatchField));
+      return;
+    }
 
     if ('cron' in body) {
       const cron = typeof body['cron'] === 'string' ? body['cron'].trim() : '';
@@ -758,6 +769,30 @@ export function registerScheduledTasksRoutes(
     if (!updated.recurring) view.nextRunAt = null;
     res.status(200).json(view);
   });
+}
+
+/**
+ * Fields that a previous version accepted but this one has removed (the
+ * isolated run mode and its precondition). A body that still carries one comes
+ * from a stale SDK, a cached Web Shell, or a hand-written client that believes
+ * it is installing a per-run / guarded task. Left unvalidated they would be
+ * ignored as unknown keys and the caller would silently get a plain,
+ * unconditional shared task — a materially different task from the one it asked
+ * for. Detected on both POST and PATCH so those clients fail closed.
+ */
+const REMOVED_TASK_FIELDS = ['runMode', 'condition'] as const;
+
+function findRemovedTaskField(
+  body: Record<string, unknown>,
+): (typeof REMOVED_TASK_FIELDS)[number] | undefined {
+  return REMOVED_TASK_FIELDS.find((field) => field in body);
+}
+
+function removedFieldError(field: string): { error: string; code: string } {
+  return {
+    error: `\`${field}\` is no longer supported: the isolated scheduled-task run mode was removed. Every task now runs in its bound session; call the \`create_sub_session\` tool from the task prompt for per-run isolation.`,
+    code: 'unsupported_field',
+  };
 }
 
 /**

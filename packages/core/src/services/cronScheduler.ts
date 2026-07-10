@@ -257,6 +257,10 @@ export class CronScheduler {
   // the live job away (or clear its pendingRemoval guard) as if it had
   // been deleted on disk.
   private pendingAdd = new Set<string>();
+  // Ids of legacy tasks (a pre-removal `isolated` task with a `condition`
+  // precondition) already reported as skipped, so the fail-closed remediation
+  // breadcrumb is logged once per task rather than on every file reload.
+  private warnedLegacyConditionIds = new Set<string>();
   // Durable ids whose lastFiredAt persist is in flight after a fire — the tick
   // (on-time) OR a catch-up delivery. A reload racing that async write reads the
   // stale disk stamp, so it must not re-detect and re-fire the same slot. Only
@@ -710,9 +714,30 @@ export class CronScheduler {
     // is no longer in this filtered set, so toggling off removes the job,
     // and toggling on reinstalls it on the next watcher reload. Absent
     // `enabled` counts as enabled, so tool-created tasks keep firing.
-    const tasks = read.filter(
-      (t) => hasParseableCron(t) && t.enabled !== false,
-    );
+    // Legacy safety gate — FAIL CLOSED. A task written by an older version as
+    // `runMode: 'isolated'` with a `condition` precondition only fired when the
+    // guard evaluated YES. That mode is gone, and `durableTaskToJob` no longer
+    // carries `condition`, so such a task would now fire inline and
+    // UNCONDITIONALLY — silently changing a safety gate ("only run if X") into
+    // "always run", with no user edit. Skip these entirely (left on disk, like
+    // an unparseable-cron entry) so the removal can never turn a guarded task
+    // into a runaway one; the user re-creates it if they still want it.
+    const tasks = read.filter((t) => {
+      if (!hasParseableCron(t) || t.enabled === false) return false;
+      if (hasLegacyCondition(t)) {
+        if (!this.warnedLegacyConditionIds.has(t.id)) {
+          this.warnedLegacyConditionIds.add(t.id);
+          // eslint-disable-next-line no-console -- operator-facing remediation breadcrumb for a silently-disabled task
+          console.warn(
+            `CronScheduler: scheduled task ${t.id} carries a legacy precondition ` +
+              `(isolated run mode was removed) and will NOT fire — recreate it if ` +
+              `you still want it to run.`,
+          );
+        }
+        return false;
+      }
+      return true;
+    });
 
     const now = Date.now();
     const missedOneShots: DurableCronTask[] = [];
@@ -1484,6 +1509,18 @@ function hasParseableCron(task: DurableCronTask): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * True for a task written by a pre-removal version as an `isolated` task with a
+ * `condition` precondition. The field is no longer part of {@link
+ * DurableCronTask}, so it is read off the raw object — `isValidTask` accepts the
+ * unknown key, and the loader uses this to fail such a task closed rather than
+ * firing it unconditionally. A blank/absent condition is not a gate.
+ */
+function hasLegacyCondition(task: DurableCronTask): boolean {
+  const condition = (task as unknown as Record<string, unknown>)['condition'];
+  return typeof condition === 'string' && condition.length > 0;
 }
 
 function durableTaskToJob(

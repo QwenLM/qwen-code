@@ -552,6 +552,68 @@ describe('scheduled-tasks routes', () => {
     expect(badEnabled.body.code).toBe('invalid_enabled');
   });
 
+  it('rejects a POST carrying the removed `runMode` field (400 unsupported_field, nothing created)', async () => {
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      runMode: 'isolated',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('unsupported_field');
+    // The message names the field and points to the create_sub_session path.
+    expect(res.body.error).toContain('runMode');
+    expect(res.body.error).toContain('create_sub_session');
+    // The task must not land on disk, and no session is spawned for it.
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks).toEqual([]);
+    expect(h.bridge.spawned).toEqual([]);
+  });
+
+  it('rejects a POST carrying the removed `condition` field (400 unsupported_field, nothing created)', async () => {
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      condition: 'only when files changed',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('unsupported_field');
+    expect(res.body.error).toContain('condition');
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks).toEqual([]);
+    expect(h.bridge.spawned).toEqual([]);
+  });
+
+  it('rejects a PATCH carrying the removed `runMode` field (400 unsupported_field, task unchanged)', async () => {
+    const created = await create({ cron: '0 9 * * *', prompt: 'orig' });
+    const id = created.body.id as string;
+
+    const patch = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ prompt: 'updated', runMode: 'isolated' });
+    expect(patch.status).toBe(400);
+    expect(patch.body.code).toBe('unsupported_field');
+    expect(patch.body.error).toContain('runMode');
+
+    // The rejected PATCH must not have mutated the stored task.
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].prompt).toBe('orig');
+  });
+
+  it('rejects a PATCH carrying the removed `condition` field (400 unsupported_field, task unchanged)', async () => {
+    const created = await create({ cron: '0 9 * * *', prompt: 'orig' });
+    const id = created.body.id as string;
+
+    const patch = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ prompt: 'updated', condition: 'x' });
+    expect(patch.status).toBe(400);
+    expect(patch.body.code).toBe('unsupported_field');
+    expect(patch.body.error).toContain('condition');
+
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].prompt).toBe('orig');
+  });
+
   // Seeds the on-disk file directly so a task can carry a real prior fire.
   const seedTask = async (task: Record<string, unknown>) => {
     const file = getCronFilePath(h.workspace);

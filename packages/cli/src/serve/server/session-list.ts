@@ -48,7 +48,7 @@ export interface ListWorkspaceSessionsResult {
 export class InvalidCursorError extends Error {
   constructor(
     cursor: string,
-    kind: 'numeric' | 'organized' | 'live' = 'numeric',
+    kind: 'numeric' | 'organized' | 'live' | 'parent' = 'numeric',
   ) {
     super(`Invalid cursor: "${cursor}" is not a valid ${kind} cursor`);
     this.name = 'InvalidCursorError';
@@ -157,6 +157,60 @@ function parseLiveSessionCursor(
 
 function encodeLiveSessionCursor(last: LiveSessionCursorKey): string {
   return Buffer.from(JSON.stringify(last), 'utf8').toString('base64url');
+}
+
+/**
+ * Decodes a `?parentSessionId=` page cursor, binding it to the query that
+ * produced it. The cursor carries the `parentSessionId` and `archiveState` it
+ * was minted for, and decode REJECTS a cursor whose scope differs from the
+ * current request — otherwise a cursor from parent A (or from the active set)
+ * replayed against parent B (or the archived set) would be accepted and
+ * silently skip every session newer than that unrelated key. Same
+ * bind-and-validate contract as {@link parseOrganizedCursor}.
+ */
+function parseParentSessionCursor(
+  cursor: string,
+  expected: { parentSessionId: string; archiveState: SessionArchiveState },
+): LiveSessionCursorKey | undefined {
+  if (cursor === '') return undefined;
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(cursor, 'base64url').toString('utf8'),
+    ) as unknown;
+    const last = (parsed as { last?: LiveSessionCursorKey }).last;
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed) ||
+      typeof last !== 'object' ||
+      last === null ||
+      Array.isArray(last) ||
+      typeof last.activityTime !== 'number' ||
+      !Number.isFinite(last.activityTime) ||
+      typeof last.sessionId !== 'string' ||
+      last.sessionId.length === 0 ||
+      (parsed as { parentSessionId?: unknown }).parentSessionId !==
+        expected.parentSessionId ||
+      (parsed as { archiveState?: unknown }).archiveState !==
+        expected.archiveState
+    ) {
+      throw new Error('invalid parent cursor');
+    }
+    return { activityTime: last.activityTime, sessionId: last.sessionId };
+  } catch {
+    throw new InvalidCursorError(cursor, 'parent');
+  }
+}
+
+function encodeParentSessionCursor(
+  last: LiveSessionCursorKey,
+  parentSessionId: string,
+  archiveState: SessionArchiveState,
+): string {
+  return Buffer.from(
+    JSON.stringify({ parentSessionId, archiveState, last }),
+    'utf8',
+  ).toString('base64url');
 }
 
 function toSummary(item: {
@@ -509,7 +563,10 @@ async function listWorkspaceSessionsByParentForResponse(
     );
   const cursorKey =
     options.cursor !== undefined && options.cursor !== ''
-      ? parseLiveSessionCursor(options.cursor)
+      ? parseParentSessionCursor(options.cursor, {
+          parentSessionId,
+          archiveState,
+        })
       : undefined;
   const afterCursor =
     cursorKey === undefined
@@ -524,7 +581,11 @@ async function listWorkspaceSessionsByParentForResponse(
   const page = afterCursor.slice(0, pageSize);
   const nextCursor =
     page.length < afterCursor.length
-      ? encodeLiveSessionCursor(getLiveSessionCursorKey(page[page.length - 1]!))
+      ? encodeParentSessionCursor(
+          getLiveSessionCursorKey(page[page.length - 1]!),
+          parentSessionId,
+          archiveState,
+        )
       : undefined;
   return {
     sessions: page,

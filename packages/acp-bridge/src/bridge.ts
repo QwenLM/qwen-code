@@ -2077,22 +2077,41 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       seedSnapshotCaches(entry, newSessionResp);
       const clientId = registerClient(entry, requestedClientId);
       // Persist the parent lineage into the child's transcript so it survives a
-      // daemon restart (rehydrated by `listSessions`, same path as the display
-      // title). Fire-and-forget: a missing parent link is cosmetic and must not
-      // fail or delay the spawn. Only sub-sessions carry a parent.
+      // daemon restart (rehydrated by `listSessions`). The live `SessionEntry`
+      // already exposes `parentSessionId`, so the session filter works this run
+      // either way — but WITHOUT the transcript record the link vanishes from
+      // the persisted list on the next restart. So this is awaited and its
+      // `persisted` result checked, not fire-and-forget: a dropped write must be
+      // surfaced loudly rather than silently degrading to live-only. The child
+      // is not rolled back on failure (it exists and is linked in memory, and
+      // losing the whole sub-session over a transcript hiccup is worse) — the
+      // failure is written to stderr so it is diagnosable. Only sub-sessions
+      // carry a parent.
       if (entry.parentSessionId) {
-        entry.connection
-          .extMethod(SERVE_CONTROL_EXT_METHODS.sessionParent, {
-            sessionId: entry.sessionId,
-            parentSessionId: entry.parentSessionId,
-          })
-          .catch((err: unknown) => {
+        try {
+          const parentResult = await entry.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.sessionParent,
+            {
+              sessionId: entry.sessionId,
+              parentSessionId: entry.parentSessionId,
+            },
+          );
+          const persisted = (
+            parentResult as { persisted?: boolean } | undefined
+          )?.persisted;
+          if (persisted === false) {
             writeStderrLine(
-              `qwen serve: failed to persist parentSessionId for ${entry.sessionId}: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
+              `qwen serve: parentSessionId for ${entry.sessionId} was not persisted ` +
+                `(recording service unavailable) — the parent link is live-only until restart`,
             );
-          });
+          }
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: failed to persist parentSessionId for ${entry.sessionId}: ${
+              err instanceof Error ? err.message : String(err)
+            } — the parent link is live-only until restart`,
+          );
+        }
       }
       // `defaultEntry` is the single-scope attach target — only sessions
       // SPAWNED UNDER `'single'` may claim it. A thread-scope spawn must

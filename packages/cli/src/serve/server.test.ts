@@ -8508,6 +8508,101 @@ describe('createServeApp', () => {
         expect(new Set(seen)).toEqual(expected);
       });
 
+      // Seeds `count` children of `parent` and returns parent's first-page
+      // nextCursor (page size 2, so >2 children guarantees a next page).
+      async function firstPageCursorFor(
+        parent: string,
+        count = 3,
+      ): Promise<string> {
+        for (let i = 0; i < count; i++) {
+          const timestamp = new Date(
+            Date.UTC(2026, 4, 17, 12, i, 0),
+          ).toISOString();
+          await writeStoredSession({
+            sessionId: childId(i),
+            cwd: WS_BOUND,
+            timestamp,
+            prompt: `child ${i}`,
+            mtime: new Date(timestamp),
+            parentSessionId: parent,
+          });
+        }
+        const page1 = await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { parentSessionId: parent, size: 2 },
+        );
+        expect(page1.nextCursor).toBeDefined();
+        return page1.nextCursor!;
+      }
+
+      it("rejects parent A's cursor replayed against parent B (cursor is parent-scoped)", async () => {
+        const cursor = await firstPageCursorFor(PARENT);
+        // The cursor is bound to parent A; replaying it against parent B would
+        // otherwise silently skip every B session newer than A's key.
+        await expect(
+          listWorkspaceSessionsForResponse(fakeBridge(), WS_BOUND, {
+            parentSessionId: OTHER_PARENT,
+            size: 2,
+            cursor,
+          }),
+        ).rejects.toThrow(/not a valid parent cursor/);
+      });
+
+      it('rejects a parent cursor reused across archiveState (active → archived)', async () => {
+        const cursor = await firstPageCursorFor(PARENT);
+        // Same parent, but the cursor was minted for the active set — the
+        // archiveState is bound into it, so reusing it on the archived set is
+        // rejected rather than skipping archived matches by an unrelated key.
+        await expect(
+          listWorkspaceSessionsForResponse(fakeBridge(), WS_BOUND, {
+            parentSessionId: PARENT,
+            archiveState: 'archived',
+            size: 2,
+            cursor,
+          }),
+        ).rejects.toThrow(/not a valid parent cursor/);
+      });
+
+      it("HTTP: 400 invalid_cursor when parent A's cursor is replayed against parent B", async () => {
+        for (let i = 0; i < 3; i++) {
+          const timestamp = new Date(
+            Date.UTC(2026, 4, 17, 12, i, 0),
+          ).toISOString();
+          await writeStoredSession({
+            sessionId: childId(i),
+            cwd: WS_BOUND,
+            timestamp,
+            prompt: `child ${i}`,
+            mtime: new Date(timestamp),
+            parentSessionId: PARENT,
+          });
+        }
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+        const page1 = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?parentSessionId=${PARENT}&size=2`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(page1.status).toBe(200);
+        expect(page1.body.nextCursor).toBeDefined();
+
+        const reused = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?parentSessionId=${OTHER_PARENT}&size=2&cursor=${encodeURIComponent(
+              page1.body.nextCursor as string,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(reused.status).toBe(400);
+        expect(reused.body.code).toBe('invalid_cursor');
+      });
+
       it('HTTP: returns the filtered list for ?parentSessionId=P', async () => {
         await writeStoredSession({
           sessionId: childId(1),
