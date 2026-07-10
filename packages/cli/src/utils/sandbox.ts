@@ -632,7 +632,7 @@ export async function start_sandbox(
     'QWEN_DEBUG_LOG_FILE',
     'QWEN_CODE_LEGACY_MCP_BLOCKING',
   ] as const) {
-    if (process.env[envVar]) {
+    if (process.env[envVar] !== undefined) {
       args.push('--env', `${envVar}=${process.env[envVar]}`);
     }
   }
