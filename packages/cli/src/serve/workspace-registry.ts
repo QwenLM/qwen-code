@@ -193,7 +193,9 @@ export function createWorkspaceRegistry(
 
   return {
     primary,
-    list: () => runtimes,
+    // Return a frozen snapshot: `runtimes` is mutable internally (see `add`),
+    // but callers must not be able to push/splice into the registry's state.
+    list: () => Object.freeze([...runtimes]) as readonly WorkspaceRuntime[],
     getByWorkspaceCwd: (workspaceCwd) => byCwd.get(workspaceCwd),
     getByWorkspaceId: (workspaceId) => byId.get(workspaceId),
     resolveWorkspaceCwd: (workspaceCwd) =>

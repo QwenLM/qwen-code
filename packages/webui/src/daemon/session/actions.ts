@@ -636,7 +636,9 @@ export function createDaemonSessionActions({
       } catch (error) {
         throw dispatchActionError(
           addNotice,
-          'Create session failed',
+          `Create session failed${
+            options?.workspaceCwd ? ` (workspace: ${options.workspaceCwd})` : ''
+          }`,
           error,
           'create_session',
         );

@@ -129,6 +129,12 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
 }
 
+function getWorkspaceName(workspaceCwd: string | undefined): string {
+  if (!workspaceCwd) return '';
+  const parts = workspaceCwd.split(/[\\/]+/).filter(Boolean);
+  return parts.at(-1) ?? workspaceCwd;
+}
+
 function getSessionLabel(session: DaemonSessionSummary): string {
   const displayName = session.displayName?.trim();
   return displayName || session.sessionId.slice(0, 8);
@@ -233,6 +239,33 @@ function IconQwenLogo() {
         fill="#6D44E8"
         d="m140.93 85-16.35-28.33-1.93-3.34 8.66-15a3.323 3.323 0 0 0 0-3.34l-9.62-16.67c-.3-.51-.72-.93-1.22-1.22s-1.07-.45-1.67-.45H82.23l-8.66-15a3.33 3.33 0 0 0-2.89-1.67H51.43c-.59 0-1.17.16-1.66.45-.5.29-.92.71-1.22 1.22L32.19 29.98l-1.92 3.33H12.96c-.59 0-1.17.16-1.66.45-.5.29-.93.71-1.22 1.22L.45 51.66a3.323 3.323 0 0 0 0 3.34l18.28 31.67-8.66 15a3.32 3.32 0 0 0 0 3.34l9.62 16.67c.3.51.72.93 1.22 1.22s1.07.45 1.67.45h36.56l8.66 15a3.35 3.35 0 0 0 2.89 1.67h19.25a3.34 3.34 0 0 0 2.89-1.67l18.28-31.67h17.32c.6 0 1.17-.16 1.67-.45s.92-.71 1.22-1.22l9.62-16.67a3.323 3.323 0 0 0 0-3.34ZM51.44 3.33 61.07 20l-9.63 16.66h76.98l-9.62 16.66H45.67l-11.54-20zM57.21 120H22.58l9.63-16.67h19.25l-38.5-66.67h19.25l9.62 16.67L68.78 100l-11.55 20Zm61.59-33.34-9.62-16.67-38.49 66.67-9.63-16.67 9.63-16.66 26.94-46.67h23.1l17.32 30z"
       />
+    </svg>
+  );
+}
+
+function IconFolder({ expanded }: { expanded: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      {expanded ? (
+        <>
+          <path d="M3.25 8.6V7.4A2.4 2.4 0 0 1 5.65 5h4.1l2.1 2.1h6.5a2.4 2.4 0 0 1 2.4 2.4v1.1" />
+          <path d="M4.3 10.6h14.9a1.75 1.75 0 0 1 1.68 2.24l-1.32 4.5A2.4 2.4 0 0 1 17.25 19H5.05a2.4 2.4 0 0 1-2.34-2.94l.86-3.75A2.2 2.2 0 0 1 5.72 10.6" />
+        </>
+      ) : (
+        <>
+          <path d="M3.25 8.2V7.4A2.4 2.4 0 0 1 5.65 5h4.1l2.1 2.1h6.5a2.4 2.4 0 0 1 2.4 2.4v.7" />
+          <path d="M3.25 8.2h17.5v7.9a2.4 2.4 0 0 1-2.4 2.4H5.65a2.4 2.4 0 0 1-2.4-2.4V8.2Z" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+function IconSearch() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="11" cy="11" r="7" />
+      <path d="m16.5 16.5 4 4" />
     </svg>
   );
 }
@@ -588,6 +621,8 @@ export function WebShellSidebar({
   const currentSessionId = connection.sessionId;
   const canExportSessions =
     connection.capabilities?.features?.includes('session_export') ?? false;
+  const projectName =
+    getWorkspaceName(connection.workspaceCwd) || t('sidebar.projectFallback');
   const qwenCodeVersion = connection.capabilities?.qwenCodeVersion || '';
   // Numeric releases render as "v1.2.3"; a non-semver fallback such as
   // "unknown" is shown as-is so we never produce a bogus "vunknown".
@@ -2489,6 +2524,40 @@ export function WebShellSidebar({
         )}
 
         <div className={styles.body}>
+          {!collapsed && workspaces.length <= 1 && (
+            <div className={styles.projectRow}>
+              <span className={`${styles.navIcon} ${styles.projectFolderIcon}`}>
+                <IconFolder expanded={projectExpanded} />
+              </span>
+              <span className={styles.projectName}>{projectName}</span>
+              <button
+                className={styles.projectIconButton}
+                type="button"
+                aria-label={t('sidebar.search')}
+                onClick={() => {
+                  setSearchOpen((open) => {
+                    if (open) setSearchQuery('');
+                    return !open;
+                  });
+                  setProjectExpanded(true);
+                }}
+              >
+                <IconSearch />
+              </button>
+              <button
+                className={styles.projectIconButton}
+                type="button"
+                aria-label={
+                  projectExpanded
+                    ? t('sidebar.collapseProject')
+                    : t('sidebar.expandProject')
+                }
+                onClick={() => setProjectExpanded((expanded) => !expanded)}
+              >
+                <IconChevron expanded={projectExpanded} />
+              </button>
+            </div>
+          )}
           {searchOpen && !collapsed && (
             <input
               className={styles.searchInput}
