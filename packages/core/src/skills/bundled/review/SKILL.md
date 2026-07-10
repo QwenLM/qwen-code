@@ -440,7 +440,13 @@ This agent runs deterministic build and test commands to verify the code compile
 
 ### Cross-file impact analysis (applies to Agents 1-6, same-repo reviews only)
 
-For same-repo reviews (where local files are available), each review agent (1-6) MUST perform cross-file impact analysis for modified functions, classes, or interfaces. Skip this for cross-repo lightweight mode (no local codebase to search). If the diff modifies more than 10 exported symbols, prioritize those with **signature changes** (parameter/return type modifications, renamed/removed members) and skip unchanged-signature modifications to avoid excessive search overhead.
+For same-repo reviews (where local files are available), each review agent (1-6) MUST perform cross-file impact analysis for modified functions, classes, or interfaces. Skip this for cross-repo lightweight mode (no local codebase to search).
+
+An edge has two ends, and a review that walks it in one direction only sees half the defects. Walk both.
+
+#### Consumer direction — do the existing readers still work?
+
+If the diff modifies more than 10 exported symbols, prioritize those with **signature changes** (parameter/return type modifications, renamed/removed members) and skip unchanged-signature modifications to avoid excessive search overhead. That budget rule applies **here only** — never to the producer direction below, where an unchanged signature is the whole point.
 
 1. Use `grep_search` to find all callers/importers of each modified function/class/interface
 2. Check whether callers are compatible with the modified signature/behavior
@@ -451,6 +457,16 @@ For same-repo reviews (where local files are available), each review agent (1-6)
    - Removed or renamed public methods/properties
    - Breaking changes to exported APIs
 4. If `grep_search` results are ambiguous, also use `run_shell_command` with fixed-string grep (`grep -F`) for precise reference matching — do NOT use `-E` regex with unescaped symbol names, as symbols may contain regex metacharacters (e.g., `$` in JS). Run separate searches for each access pattern: `grep -rnF --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist --exclude-dir=build "functionName(" .` and `.functionName` and `import { functionName` etc. (use the project root; always exclude common non-source directories)
+
+#### Producer direction — does the new thing ever get a value?
+
+For every field, option, or optional parameter the diff **adds**, `grep_search` its **read sites** — including files the diff never touches — and ask what happens when it arrives `undefined` or defaulted. Nothing here trips a type-check and no caller breaks; the reader's `if (!x)` guard simply becomes unreachable-through, and the feature the field gates silently does nothing. Severity is decided at the read site, not the declaration: if a live path reads it and the diff never populates it, the code does something wrong, and that is **Critical**.
+
+Expect the three ends to be far apart. The declaration, the pass-through, and the read routinely land in three different chunks, and the read is often in a file outside the diff entirely — where no chunk agent will ever look unless it is told to grep.
+
+**Never explain an unpopulated field with author intent you cannot observe.** "Reserved for future use", "intentionally deferred to a later milestone", "wired up in a follow-up PR" are claims about a person, not about code, and an agent that reaches for one is filling a hole in its own field of view. The observable facts are who reads the field and what that read does. Go get them before you assign a severity.
+
+This is not hypothetical. On PR #6621 an agent saw a new `deviceFlowRegistry?` field on `WorkspaceRuntime`, found nothing that assigned it, concluded "intentionally deferred to a later milestone", and filed a **Suggestion to fix the JSDoc**. The consumer was `AcpDispatcher`, two files away and outside the diff, where `if (!this.deviceFlowRegistry)` made `auth/device_flow/start` return `INTERNAL_ERROR` and `auth/status` report an empty list on every non-primary workspace. Workspace-qualified ACP was the feature that PR existed to ship, its authentication was dead on arrival, and the review called it a documentation nit. A second reviewer filed the same observation as Critical and the author fixed it with code.
 
 ## Step 4: Deduplicate, verify, and aggregate
 
