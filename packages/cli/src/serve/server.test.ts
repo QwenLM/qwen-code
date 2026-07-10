@@ -20,6 +20,7 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
+import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
 import {
   resolveWebShellDir,
@@ -66,6 +67,7 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   RestoreInProgressError,
+  SessionArtifactAuthorizationError,
   SessionArtifactValidationError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -304,6 +306,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_hooks',
   'workspace_extensions',
   'session_branch',
+  'workspace_qualified_rest_core',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -326,7 +329,11 @@ const EXPECTED_REGISTERED_FEATURES = [
   // All four conditional tags filtered from the stage1 baseline so
   // they appear here in their registry-declaration order, not the
   // stage1 order.
-  ...EXPECTED_STAGE1_FEATURES.filter(
+  ...EXPECTED_STAGE1_FEATURES.flatMap((feature) =>
+    feature === 'session_artifacts'
+      ? [feature, 'session_artifacts_persistence']
+      : [feature],
+  ).filter(
     (f) =>
       f !== 'workspace_init' &&
       f !== 'workspace_github_setup' &&
@@ -344,6 +351,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'session_hooks' &&
       f !== 'workspace_extensions' &&
       f !== 'session_branch' &&
+      f !== 'workspace_qualified_rest_core' &&
       f !== 'voice_transcribe',
   ),
   'workspace_settings',
@@ -374,7 +382,9 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_branch',
   'rate_limit',
   'workspace_reload',
+  'channel_reload',
   'multi_workspace_sessions',
+  'workspace_qualified_rest_core',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
   'browser_automation_mcp',
@@ -665,7 +675,10 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   listCalls: string[];
   summaryCalls: string[];
-  sessionArtifactsCalls: string[];
+  sessionArtifactsCalls: Array<{
+    sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
   addSessionArtifactCalls: Array<{
     sessionId: string;
     artifact: Parameters<AcpSessionBridge['addSessionArtifact']>[1];
@@ -820,7 +833,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionPermissionVotes: FakeBridge['sessionPermissionVotes'] = [];
   const listCalls: string[] = [];
   const summaryCalls: string[] = [];
-  const sessionArtifactsCalls: string[] = [];
+  const sessionArtifactsCalls: FakeBridge['sessionArtifactsCalls'] = [];
   const addSessionArtifactCalls: FakeBridge['addSessionArtifactCalls'] = [];
   const removeSessionArtifactCalls: FakeBridge['removeSessionArtifactCalls'] =
     [];
@@ -947,6 +960,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
             ...(artifact.workspacePath
               ? { workspacePath: artifact.workspacePath }
               : {}),
+            retention: artifact.retention ?? 'ephemeral',
             clientRetained: true,
             createdAt: '2026-01-01T00:00:00.000Z',
             updatedAt: '2026-01-01T00:00:00.000Z',
@@ -1478,9 +1492,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       summaryCalls.push(sessionId);
       return summaryImpl(sessionId);
     },
-    async getSessionArtifacts(sessionId) {
-      sessionArtifactsCalls.push(sessionId);
-      return getSessionArtifactsImpl(sessionId);
+    async getSessionArtifacts(sessionId, context) {
+      sessionArtifactsCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+      });
+      return getSessionArtifactsImpl(sessionId, context);
     },
     async addSessionArtifact(sessionId, artifact, context) {
       addSessionArtifactCalls.push({
@@ -2088,6 +2105,24 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'session_artifacts_persistence') {
+          expect(
+            predicate({ sessionArtifactsPersistenceAvailable: true }),
+          ).toBe(true);
+          expect(
+            predicate({ sessionArtifactsPersistenceAvailable: false }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              sessionArtifactsPersistenceAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'workspace_reload') {
           expect(predicate({ reloadAvailable: true })).toBe(true);
           expect(predicate({ reloadAvailable: false })).toBe(false);
@@ -2095,6 +2130,20 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               reloadAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'channel_reload') {
+          expect(predicate({ channelReloadAvailable: true })).toBe(true);
+          expect(predicate({ channelReloadAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              channelReloadAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -2521,12 +2570,24 @@ describe('createServeApp', () => {
       expect(res.body.features).toEqual(
         getAdvertisedServeFeatures(undefined, {
           mcpPoolActive: true,
+          sessionArtifactsPersistenceAvailable: true,
         }),
       );
       expect(res.body.modelServices).toEqual([]);
       expect(res.body.limits).toMatchObject({
         maxPendingPromptsPerSession: 5,
       });
+    });
+
+    it('omits artifact persistence when the durable sink is unavailable', async () => {
+      const app = createServeApp(baseOpts, undefined, {
+        sessionArtifactsPersistenceAvailable: false,
+      });
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.features).not.toContain('session_artifacts_persistence');
     });
 
     it('advertises workspace voice transcription when a batch ASR model is configured', async () => {
@@ -2991,6 +3052,104 @@ describe('createServeApp', () => {
         resetHomeEnvBootstrapForTesting();
         await fsp.rm(tempHome, { recursive: true, force: true });
       }
+    });
+
+    it('rejects workspace ACP preheat timeouts above the route cap', async () => {
+      const bridge = fakeBridge();
+      const opts = { ...baseOpts, workspace: WS_BOUND, token: 'secret' };
+      const app = createServeApp(opts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/workspace/acp/preheat?timeoutMs=60001')
+        .set('Host', `127.0.0.1:${opts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_timeout',
+        error: '`timeoutMs` must be a positive integer no greater than 60000',
+      });
+    });
+
+    it('returns workspace ACP preheat status without a timeout override', async () => {
+      const bridge = fakeBridge();
+      const opts = { ...baseOpts, workspace: WS_BOUND, token: 'secret' };
+      const app = createServeApp(opts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/workspace/acp/preheat')
+        .set('Host', `127.0.0.1:${opts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        ready: false,
+        channelLive: false,
+      });
+      expect(typeof res.body.durationMs).toBe('number');
+    });
+
+    it('returns workspace ACP preheat status with a valid timeout override', async () => {
+      const bridge = fakeBridge();
+      const opts = { ...baseOpts, workspace: WS_BOUND, token: 'secret' };
+      const app = createServeApp(opts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/workspace/acp/preheat?timeoutMs=5000')
+        .set('Host', `127.0.0.1:${opts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        ready: false,
+        channelLive: false,
+      });
+      expect(typeof res.body.durationMs).toBe('number');
+    });
+
+    it('allows loopback mutation auth before preheating the ACP child', async () => {
+      const preheatAcpChild = vi.fn().mockResolvedValue({
+        ready: true,
+        channelLive: true,
+        durationMs: 0,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge: fakeBridge(),
+          workspace: {
+            preheatAcpChild,
+          } as unknown as DaemonWorkspaceService,
+        },
+      );
+
+      const res = await request(app)
+        .post('/workspace/acp/preheat')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        ready: true,
+        channelLive: true,
+      });
+      expect(preheatAcpChild).toHaveBeenCalledOnce();
+    });
+
+    it('returns workspace ACP channel status', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/workspace/acp/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ channelLive: false });
     });
 
     it('returns workspace tools status from the bridge', async () => {
@@ -4445,6 +4604,44 @@ describe('createServeApp', () => {
         expect(
           vi.mocked(ExtensionManager.prototype.disableExtension),
         ).toHaveBeenCalledWith('test-ext', expect.anything(), WS_BOUND);
+      } finally {
+        restore();
+      }
+    });
+
+    it('queues extension enable and disable without a workspace client id', async () => {
+      const restore = mockExtensionManagerMethods();
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const enable = await request(app)
+          .post('/workspace/extensions/TEST-EXT/enable')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ scope: 'workspace' });
+        expect(enable.status).toBe(202);
+
+        const disable = await request(app)
+          .post('/workspace/extensions/TEST-EXT/disable')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ scope: 'user' });
+        expect(disable.status).toBe(202);
+
+        await vi.waitFor(() => {
+          expect(
+            vi.mocked(ExtensionManager.prototype.enableExtension),
+          ).toHaveBeenCalledWith('test-ext', expect.anything(), WS_BOUND);
+          expect(
+            vi.mocked(ExtensionManager.prototype.disableExtension),
+          ).toHaveBeenCalledWith('test-ext', expect.anything(), WS_BOUND);
+        });
       } finally {
         restore();
       }
@@ -6228,6 +6425,7 @@ describe('createServeApp', () => {
 
         expect(res.status).toBe(400);
         expect(res.body.code).toBe('workspace_mismatch');
+        expect(res.body.boundWorkspace).toBe(process.cwd());
         expect(res.body.requestedWorkspace).toBe(missingCwd);
         expect(bridge.loadCalls).toHaveLength(0);
         expect(bridge.resumeCalls).toHaveLength(0);
@@ -8079,6 +8277,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('workspace_mismatch');
       expect(res.body.boundWorkspace).toBe(WS_BOUND);
+      expect(res.body.requestedWorkspace).toBe(WS_DIFFERENT);
       expect(bridge.listCalls).toHaveLength(0);
     });
 
@@ -8193,7 +8392,9 @@ describe('createServeApp', () => {
       });
       const app = createServeApp(tokenOpts, undefined, { bridge });
 
-      const res = await auth(request(app).get('/session/session-A/artifacts'));
+      const res = await auth(
+        request(app).get('/session/session-A/artifacts'),
+      ).set('X-Qwen-Client-Id', 'client-1');
 
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
@@ -8201,7 +8402,26 @@ describe('createServeApp', () => {
         sessionId: 'session-A',
         artifacts: [{ id: 'artifact-1', title: 'Lineage' }],
       });
-      expect(bridge.sessionArtifactsCalls).toEqual(['session-A']);
+      expect(bridge.sessionArtifactsCalls).toEqual([
+        { sessionId: 'session-A', context: { clientId: 'client-1' } },
+      ]);
+    });
+
+    it('GET /session/:id/artifacts allows missing client id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(request(app).get('/session/session-A/artifacts'));
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        v: 1,
+        sessionId: 'session-A',
+        artifacts: [],
+      });
+      expect(bridge.sessionArtifactsCalls).toEqual([
+        { sessionId: 'session-A' },
+      ]);
     });
 
     it('GET /session/:id/artifacts returns 404 for an unknown session', async () => {
@@ -8212,11 +8432,16 @@ describe('createServeApp', () => {
       });
       const app = createServeApp(tokenOpts, undefined, { bridge });
 
-      const res = await auth(request(app).get('/session/ghost/artifacts'));
+      const res = await auth(request(app).get('/session/ghost/artifacts')).set(
+        'X-Qwen-Client-Id',
+        'client-1',
+      );
 
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('ghost');
-      expect(bridge.sessionArtifactsCalls).toEqual(['ghost']);
+      expect(bridge.sessionArtifactsCalls).toEqual([
+        { sessionId: 'ghost', context: { clientId: 'client-1' } },
+      ]);
     });
 
     it('POST /session/:id/artifacts requires strict mutation auth', async () => {
@@ -8233,13 +8458,31 @@ describe('createServeApp', () => {
       expect(bridge.addSessionArtifactCalls).toHaveLength(0);
     });
 
+    it('POST /session/:id/artifacts requires a client id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).post('/session/session-A/artifacts'),
+      ).send({ title: 'Lineage', url: 'https://example.com/lineage' });
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('client_id_required');
+      expect(bridge.addSessionArtifactCalls).toEqual([]);
+    });
+
     it('POST /session/:id/artifacts forwards body and client context', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
 
       const res = await auth(request(app).post('/session/session-A/artifacts'))
         .set('X-Qwen-Client-Id', 'client-1')
-        .send({ title: 'Lineage', url: 'https://example.com/lineage' });
+        .send({
+          title: 'Lineage',
+          url: 'https://example.com/lineage',
+          retention: 'ephemeral',
+          clientRetained: false,
+        });
 
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
@@ -8258,6 +8501,8 @@ describe('createServeApp', () => {
           artifact: {
             title: 'Lineage',
             url: 'https://example.com/lineage',
+            retention: 'ephemeral',
+            clientRetained: false,
           },
           context: { clientId: 'client-1' },
         },
@@ -8275,9 +8520,9 @@ describe('createServeApp', () => {
       });
       const app = createServeApp(tokenOpts, undefined, { bridge });
 
-      const res = await auth(
-        request(app).post('/session/session-A/artifacts'),
-      ).send({ title: 'Bad link', url: 'javascript:alert(1)' });
+      const res = await auth(request(app).post('/session/session-A/artifacts'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ title: 'Bad link', url: 'javascript:alert(1)' });
 
       expect(res.status).toBe(400);
       expect(res.body).toEqual({
@@ -8303,6 +8548,19 @@ describe('createServeApp', () => {
       expect(bridge.removeSessionArtifactCalls).toHaveLength(0);
     });
 
+    it('DELETE /session/:id/artifacts/:artifactId requires a client id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).delete('/session/session-A/artifacts/artifact-1'),
+      );
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('client_id_required');
+      expect(bridge.removeSessionArtifactCalls).toEqual([]);
+    });
+
     it('DELETE /session/:id/artifacts/:artifactId is idempotent for missing artifacts', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
@@ -8324,6 +8582,50 @@ describe('createServeApp', () => {
           context: { clientId: 'client-1' },
         },
       ]);
+    });
+
+    it('DELETE /session/:id/artifacts/:artifactId forwards client context', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).delete('/session/session-A/artifacts/artifact-1'),
+      ).set('X-Qwen-Client-Id', 'client-1');
+
+      expect(res.status).toBe(200);
+      expect(bridge.removeSessionArtifactCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          artifactId: 'artifact-1',
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it('DELETE /session/:id/artifacts/:artifactId maps artifact authorization errors', async () => {
+      const bridge = fakeBridge({
+        removeSessionArtifactImpl: async () => {
+          throw new SessionArtifactAuthorizationError(
+            'session-A',
+            'artifact-1',
+            'client-a',
+            'client-b',
+          );
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).delete('/session/session-A/artifacts/artifact-1'),
+      ).set('X-Qwen-Client-Id', 'client-b');
+
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({
+        error: 'artifact artifact-1 is owned by a different client',
+        code: 'session_artifact_forbidden',
+        sessionId: 'session-A',
+        artifactId: 'artifact-1',
+      });
     });
   });
 
@@ -9367,6 +9669,149 @@ describe('createServeApp', () => {
           route: 'POST /workspace/reload',
         }),
       );
+    });
+  });
+
+  describe('POST /workspace/channel/reload', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+    const runningSnapshot: ChannelWorkerSnapshot = {
+      enabled: true,
+      state: 'running',
+      channels: ['telegram'],
+      pid: 4321,
+    };
+    const disabledSnapshot: ChannelWorkerSnapshot = {
+      enabled: false,
+      state: 'disabled',
+      channels: [],
+    };
+
+    it('requires strict mutation auth before reloading', async () => {
+      const reloadChannelWorker = vi.fn(async () => runningSnapshot);
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        reloadChannelWorker,
+      });
+
+      const res = await request(app)
+        .post('/workspace/channel/reload')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(reloadChannelWorker).not.toHaveBeenCalled();
+    });
+
+    it('reloads the channel worker and returns the post-reload snapshot', async () => {
+      const reloadedSnapshot: ChannelWorkerSnapshot = {
+        ...runningSnapshot,
+        pid: 9999,
+        restartCount: 1,
+      };
+      const reloadChannelWorker = vi.fn(async () => reloadedSnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ reloaded: true, worker: reloadedSnapshot });
+      expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns 409 when no channel worker is enabled', async () => {
+      const reloadChannelWorker = vi.fn(async () => disabledSnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => disabledSnapshot,
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('channel_worker_not_enabled');
+      expect(reloadChannelWorker).not.toHaveBeenCalled();
+    });
+
+    it('maps relaunch failures through sendBridgeError', async () => {
+      const reloadChannelWorker = vi.fn(async () => {
+        throw new Error('relaunch failed');
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: 'relaunch failed' });
+      expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
+    });
+
+    it('advertises channel_reload only when the reload dep is wired', async () => {
+      const withWorker = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        reloadChannelWorker: vi.fn(async () => runningSnapshot),
+      });
+      const withCaps = await auth(request(withWorker).get('/capabilities'));
+      expect(withCaps.body.features).toContain('channel_reload');
+
+      const withoutWorker = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+      });
+      const withoutCaps = await auth(
+        request(withoutWorker).get('/capabilities'),
+      );
+      expect(withoutCaps.body.features).not.toContain('channel_reload');
+
+      // Asymmetric deps must NOT advertise: the route needs both
+      // getChannelWorkerSnapshot and reloadChannelWorker, so the capability
+      // must not appear when only one is wired (else it would advertise while
+      // the route 404s).
+      const onlyReload = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        reloadChannelWorker: vi.fn(async () => runningSnapshot),
+      });
+      const onlyReloadCaps = await auth(
+        request(onlyReload).get('/capabilities'),
+      );
+      expect(onlyReloadCaps.body.features).not.toContain('channel_reload');
+
+      const onlySnapshot = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+      });
+      const onlySnapshotCaps = await auth(
+        request(onlySnapshot).get('/capabilities'),
+      );
+      expect(onlySnapshotCaps.body.features).not.toContain('channel_reload');
     });
   });
 

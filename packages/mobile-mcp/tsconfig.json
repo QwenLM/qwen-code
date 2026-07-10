@@ -8,7 +8,5 @@
     "module": "CommonJS",
     "outDir": "./lib"
   },
-  "include": [
-    "src",
-  ],
+  "include": ["src"]
 }

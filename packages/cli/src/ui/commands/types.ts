@@ -430,6 +430,7 @@ export interface SlashCommand {
     body?: string;
     filePath?: string;
     level?: string;
+    extensionName?: string;
   };
 
   // The action to run. Optional for parent commands that only group sub-commands.

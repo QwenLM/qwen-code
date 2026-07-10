@@ -203,6 +203,7 @@ export async function startInteractiveUI(
   // after this — it carries the `config_initialize_*` and
   // `input_enabled` checkpoints that complete the first-screen picture.
   profileCheckpoint('first_paint');
+
   startPostRenderPrefetches(config, settings, {
     connectIde: options.postRenderConnectIde ?? false,
     initializeTelemetry:
