@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { buildDiffPlan } from './diff-plan.js';
-import { buildPlanReport } from './report.js';
+import { buildPlanReport, stringifyPlanReport } from './report.js';
 
 /** A diff adding `n` lines to `path`, shaped so the planner can cut it. */
 function addFile(path: string, n: number): string {
@@ -161,5 +161,58 @@ describe('buildPlanReport', () => {
     expect(report.docsDiffLines).toBe(plan.docsDiffLines);
     expect(report.generatedDiffLines).toBe(plan.generatedDiffLines);
     expect(report.chunks).toBe(plan.chunks);
+  });
+});
+
+describe('stringifyPlanReport', () => {
+  it('round-trips: the collapsed text parses back to the same object', () => {
+    const diff = editFile('src/heavy.ts', 3, 900) + addFile('src/light.ts', 20);
+    const report = buildPlanReport(buildDiffPlan(diff, 400), (p) =>
+      p === 'src/heavy.ts' ? 6000 : 30,
+    );
+    expect(JSON.parse(stringifyPlanReport(report))).toEqual(report);
+  });
+
+  it('keeps every range on one line, and stays pageable', () => {
+    const report = buildPlanReport(
+      buildDiffPlan(editFile('src/heavy.ts', 3, 900), 400),
+      () => 6000,
+    );
+    const text = stringifyPlanReport(report);
+    // Not one giant line: `read_file` pages at line boundaries, so a compact
+    // one-line report could never be paged at all.
+    expect(text.split('\n').length).toBeGreaterThan(10);
+    // No range is split across lines.
+    expect(text).not.toMatch(/\{\s*\n\s*"start":/);
+    expect(text).not.toMatch(/\{\s*\n\s*"newStart":/);
+    expect(text).toMatch(/\{ "start": \d+, "end": \d+ \}/);
+    expect(text).toMatch(/\{ "newStart": \d+, "newEnd": \d+ \}/);
+  });
+
+  it('is smaller than the indenting serializer it replaced', () => {
+    const report = buildPlanReport(
+      buildDiffPlan(editFile('src/heavy.ts', 3, 900), 400),
+      () => 6000,
+    );
+    const collapsed = stringifyPlanReport(report).length;
+    const indented = JSON.stringify(report, null, 2).length + 1;
+    expect(collapsed).toBeLessThan(indented);
+  });
+
+  it('never mistakes a path for a range', () => {
+    // A path that spells a range. JSON escapes its quotes, so the collapse
+    // patterns — which require unescaped quotes — cannot touch it.
+    const weird = 'src/{ "newStart": 1, "newEnd": 2 }.ts';
+    const diff = [
+      `diff --git "a/${weird}" "b/${weird}"`,
+      '--- /dev/null',
+      `+++ "b/${weird}"`,
+      '@@ -0,0 +1,1 @@',
+      '+x',
+      '',
+    ].join('\n');
+    const report = buildPlanReport(buildDiffPlan(diff, 400), () => 1);
+    const parsed = JSON.parse(stringifyPlanReport(report)) as typeof report;
+    expect(parsed.files[0].path).toBe(weird);
   });
 });

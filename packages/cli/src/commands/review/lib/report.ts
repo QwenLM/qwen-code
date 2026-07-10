@@ -176,3 +176,44 @@ export function warnOnReportSize(path: string, cap: number): void {
     );
   }
 }
+
+/**
+ * Serialize a plan report so it is both **pageable** and **small**.
+ *
+ * Those pull in opposite directions. Compact JSON is one enormous line, and
+ * `read_file` pages at line boundaries, so a report that does not fit in one
+ * call could never be read at all. Fully indented JSON pages fine but spends
+ * four lines on `{ "startLine": 812, "endLine": 815 }`, and a heavily rewritten
+ * file contributes hundreds of those: on PR #6457 — 7 files, one of them
+ * rewritten — indentation alone pushed the report to 25 070 bytes, past the
+ * ~25 000 a single read returns. The report that tells an agent how to page
+ * everything else could not itself be read in one call.
+ *
+ * So indent the structure and inline the leaves. Same JSON, same semantics,
+ * one range per line, 12% smaller.
+ */
+export function stringifyPlanReport(report: unknown): string {
+  const indented = JSON.stringify(report, null, 2);
+  // Collapse each two-field range onto one line. The patterns require unescaped
+  // double quotes, and JSON escapes every quote inside a string value as `\"`,
+  // so no path, ref, or message can be mistaken for a range.
+  return (
+    indented
+      .replace(
+        /\{\s*"start": (\d+),\s*"end": (\d+)\s*\}/g,
+        '{ "start": $1, "end": $2 }',
+      )
+      .replace(
+        /\{\s*"startLine": (\d+),\s*"endLine": (\d+)\s*\}/g,
+        '{ "startLine": $1, "endLine": $2 }',
+      )
+      .replace(
+        /\{\s*"newStart": (\d+),\s*"newEnd": (\d+)\s*\}/g,
+        '{ "newStart": $1, "newEnd": $2 }',
+      )
+      .replace(
+        /\{\s*"path": ("(?:[^"\\]|\\.)*"),\s*"newStart": (\d+),\s*"newEnd": (\d+)\s*\}/g,
+        '{ "path": $1, "newStart": $2, "newEnd": $3 }',
+      ) + '\n'
+  );
+}

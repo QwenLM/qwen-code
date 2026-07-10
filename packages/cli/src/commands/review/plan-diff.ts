@@ -28,6 +28,7 @@ import {
   buildPlanReport,
   warnOnReportSize,
   type PlanReport,
+  stringifyPlanReport,
 } from './lib/report.js';
 
 interface PlanDiffArgs {
@@ -66,7 +67,7 @@ function runPlanDiff(args: PlanDiffArgs): void {
   };
 
   mkdirSync(REVIEW_TMP_DIR, { recursive: true });
-  writeFileSync(out, JSON.stringify(result, null, 2) + '\n', 'utf8');
+  writeFileSync(out, stringifyPlanReport(result), 'utf8');
   writeStdoutLine(`Wrote diff plan to ${out}`);
   if (plan.diffLines === 0) {
     // A file-path review of an unchanged file lands here. An empty plan gives

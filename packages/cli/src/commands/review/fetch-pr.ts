@@ -46,6 +46,7 @@ import {
   buildPlanReport,
   warnOnReportSize,
   type PlanReport,
+  stringifyPlanReport,
 } from './lib/report.js';
 import { resolveMergeBase, type GitProbe } from './lib/merge-base.js';
 
@@ -306,7 +307,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path)),
   };
 
-  writeFileSync(out, JSON.stringify(result, null, 2) + '\n', 'utf8');
+  writeFileSync(out, stringifyPlanReport(result), 'utf8');
   writeStdoutLine(`Wrote fetch-pr report to ${out}`);
   if (diffPath) writeStdoutLine(`Wrote review diff to ${diffPath}`);
   // Surface diff stats to stderr so a human running the command interactively
