@@ -1,3 +1,5 @@
+import { ActionableError } from './robot';
+
 // coord-norm.ts — Opt-in 0–1000 relative-coordinate shim for mobile-mcp.
 //
 // Mirrors packages/cua-driver's coord_norm.rs design. Default off = pixel
@@ -93,6 +95,12 @@ export function denormalizeArgs(
 
   for (const { field, isX } of fields) {
     if (typeof args[field] === 'number') {
+      if (args[field] < 0 || args[field] > scale) {
+        throw new ActionableError(
+          `Coordinate '${field}' value ${args[field]} is out of the normalized range [0, ${scale}]. ` +
+            `Use normalized coordinates (0-${scale}), not pixel coordinates.`,
+        );
+      }
       const dim = isX ? screenWidth : screenHeight;
       args[field] = normToPx(args[field], dim, scale);
     }
@@ -103,6 +111,12 @@ export function denormalizeArgs(
     toolName === 'mobile_swipe_on_screen' &&
     typeof args.distance === 'number'
   ) {
+    if (args.distance < 0 || args.distance > scale) {
+      throw new ActionableError(
+        `Swipe 'distance' value ${args.distance} is out of the normalized range [0, ${scale}]. ` +
+          `Use normalized coordinates (0-${scale}), not pixel values.`,
+      );
+    }
     const dir = args.direction;
     const dim = dir === 'up' || dir === 'down' ? screenHeight : screenWidth;
     args.distance = normToPx(args.distance, dim, scale);
