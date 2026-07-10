@@ -297,6 +297,7 @@ describe('ChatPane', () => {
     });
 
     expect(onPaneArtifactsChange).toHaveBeenLastCalledWith(
+      'sess-1',
       [artifact],
       expect.any(Object),
     );

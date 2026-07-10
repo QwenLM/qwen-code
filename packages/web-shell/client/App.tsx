@@ -270,6 +270,10 @@ interface ArtifactPanelSessionState {
   extraArtifacts: DaemonSessionArtifact[];
   width: number;
 }
+interface PaneArtifactSnapshot {
+  artifacts: readonly DaemonSessionArtifact[];
+  workspaceActions: DaemonWorkspaceActions;
+}
 // Cap on how long a manual "run now" waits for its bound session to become
 // active before giving up, so the scheduled-tasks UI can't stay stuck disabled
 // if the switch never completes.
@@ -1112,6 +1116,9 @@ export function App({
   } = useSessionArtifacts();
   const [artifactPanelExtraArtifacts, setArtifactPanelExtraArtifacts] =
     useState<DaemonSessionArtifact[]>([]);
+  const [paneArtifactSnapshots, setPaneArtifactSnapshots] = useState<
+    Map<string, PaneArtifactSnapshot>
+  >(() => new Map());
   const [artifactPanelTabs, setArtifactPanelTabs] = useState<
     ArtifactPanelTab[]
   >([]);
@@ -1133,40 +1140,62 @@ export function App({
       return next.length === previous.length ? previous : next;
     });
   }, [artifacts, artifactPanelExtraArtifacts.length, artifactPanelTabs]);
+  const paneArtifactExtras = useMemo(
+    () =>
+      Array.from(paneArtifactSnapshots.values()).flatMap((snapshot) => [
+        ...snapshot.artifacts,
+      ]),
+    [paneArtifactSnapshots],
+  );
   const artifactPanelArtifacts = useMemo(() => {
-    if (artifactPanelExtraArtifacts.length === 0) return artifacts;
+    if (
+      artifactPanelExtraArtifacts.length === 0 &&
+      paneArtifactExtras.length === 0
+    ) {
+      return artifacts;
+    }
     const merged = [...artifacts];
-    for (const artifact of artifactPanelExtraArtifacts) {
+    for (const artifact of [
+      ...artifactPanelExtraArtifacts,
+      ...paneArtifactExtras,
+    ]) {
       const index = merged.findIndex((item) => item.id === artifact.id);
       if (index < 0) {
         merged.push(artifact);
       }
     }
     return merged;
-  }, [artifacts, artifactPanelExtraArtifacts]);
+  }, [artifacts, artifactPanelExtraArtifacts, paneArtifactExtras]);
   const handlePaneArtifactsChange = useCallback(
     (
+      paneSessionId: string,
       paneArtifacts: readonly DaemonSessionArtifact[],
       paneWorkspaceActions: DaemonWorkspaceActions,
     ) => {
-      if (paneArtifacts.length === 0) return;
-      setArtifactPanelExtraArtifacts((current) => {
-        const next = [...current];
-        let changed = false;
-        for (const artifact of paneArtifacts) {
-          const index = next.findIndex((item) => item.id === artifact.id);
-          if (index < 0) {
-            next.push(artifact);
-            changed = true;
-          } else if (
-            next[index]?.updatedAt !== artifact.updatedAt ||
-            next[index]?.sizeBytes !== artifact.sizeBytes
-          ) {
-            next[index] = artifact;
-            changed = true;
-          }
+      setPaneArtifactSnapshots((current) => {
+        const previous = current.get(paneSessionId);
+        const unchanged =
+          previous?.workspaceActions === paneWorkspaceActions &&
+          previous.artifacts.length === paneArtifacts.length &&
+          previous.artifacts.every((artifact, index) => {
+            const nextArtifact = paneArtifacts[index];
+            return (
+              nextArtifact?.id === artifact.id &&
+              nextArtifact.updatedAt === artifact.updatedAt &&
+              nextArtifact.sizeBytes === artifact.sizeBytes
+            );
+          });
+        if (unchanged) return current;
+        const next = new Map(current);
+        if (paneArtifacts.length === 0) {
+          next.delete(paneSessionId);
+        } else {
+          next.set(paneSessionId, {
+            artifacts: [...paneArtifacts],
+            workspaceActions: paneWorkspaceActions,
+          });
         }
-        return changed ? next : current;
+        return next;
       });
       const artifactIds = new Set(paneArtifacts.map((artifact) => artifact.id));
       setArtifactPanelTabs((tabs) => {
@@ -1418,15 +1447,17 @@ export function App({
         return;
       }
 
-      setArtifactPanelExtraArtifacts((current) => {
-        const index = current.findIndex(
-          (artifact) => artifact.id === request.artifact.id,
-        );
-        if (index < 0) return [...current, request.artifact];
-        const next = [...current];
-        next[index] = request.artifact;
-        return next;
-      });
+      if (!request.workspaceActions) {
+        setArtifactPanelExtraArtifacts((current) => {
+          const index = current.findIndex(
+            (artifact) => artifact.id === request.artifact.id,
+          );
+          if (index < 0) return [...current, request.artifact];
+          const next = [...current];
+          next[index] = request.artifact;
+          return next;
+        });
+      }
       const tab: ArtifactPanelTab = {
         id: request.id,
         kind: 'artifact',
@@ -1466,6 +1497,7 @@ export function App({
     setReviewChanges([]);
     setSelectedReviewPath(null);
     setArtifactPanelExtraArtifacts([]);
+    setPaneArtifactSnapshots(new Map());
   }, []);
   useLayoutEffect(() => {
     if (!artifactPanelOpen) return;

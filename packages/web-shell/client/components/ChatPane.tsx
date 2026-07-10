@@ -71,6 +71,7 @@ export interface ChatPaneProps {
   onError?: (error: unknown, fallback: string) => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onPaneArtifactsChange?: (
+    sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
     workspaceActions: DaemonWorkspaceActions,
   ) => void;
@@ -102,8 +103,18 @@ export function ChatPane({
   const streamingState = useStreamingState();
   const { artifacts } = useSessionArtifacts();
   useEffect(() => {
-    onPaneArtifactsChange?.(artifacts, workspaceActions);
-  }, [artifacts, onPaneArtifactsChange, workspaceActions]);
+    const sessionId = connection.sessionId;
+    if (!sessionId) return;
+    onPaneArtifactsChange?.(sessionId, artifacts, workspaceActions);
+    return () => {
+      onPaneArtifactsChange?.(sessionId, [], workspaceActions);
+    };
+  }, [
+    artifacts,
+    connection.sessionId,
+    onPaneArtifactsChange,
+    workspaceActions,
+  ]);
   const streamingStateRef = useRef(streamingState);
   streamingStateRef.current = streamingState;
   const editorRef = useRef<EditorHandle | null>(null);

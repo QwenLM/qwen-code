@@ -44,6 +44,7 @@ export interface SplitViewProps {
   onError?: (error: unknown, fallback: string) => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onPaneArtifactsChange?: (
+    sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
     workspaceActions: DaemonWorkspaceActions,
   ) => void;

@@ -372,8 +372,33 @@ vi.doMock('./components/SplitView', async () => {
       onExit?: () => void;
       sessionIds?: string[];
       onPanesChange?: (ids: string[]) => void;
-    }) =>
-      React.createElement(
+      onPaneArtifactsChange?: (
+        sessionId: string,
+        artifacts: unknown[],
+        workspaceActions: unknown,
+      ) => void;
+      onRightPanelOpen?: (request: unknown) => void;
+    }) => {
+      const paneActions = {
+        readWorkspaceFile: vi.fn().mockResolvedValue('<p>pane</p>'),
+      };
+      const artifact = {
+        id: 'pane-artifact',
+        kind: 'report',
+        storage: 'memory',
+        source: 'tool',
+        status: 'available',
+        title: 'Pane artifact',
+        updatedAt: '2026-07-10T00:00:00Z',
+        sizeBytes: 10,
+      };
+      const updatedArtifact = {
+        ...artifact,
+        title: 'Updated pane artifact',
+        updatedAt: '2026-07-10T00:01:00Z',
+        sizeBytes: 20,
+      };
+      return React.createElement(
         'div',
         { 'data-testid': 'split-view-mock' },
         // Surface the seed so a test can assert the App preserved / restored it.
@@ -395,13 +420,71 @@ vi.doMock('./components/SplitView', async () => {
         React.createElement(
           'button',
           {
+            'data-testid': 'split-report-artifact',
+            type: 'button',
+            onClick: () =>
+              props.onPaneArtifactsChange?.(
+                'pane-session',
+                [artifact],
+                paneActions,
+              ),
+          },
+          'artifact',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-report-updated-artifact',
+            type: 'button',
+            onClick: () =>
+              props.onPaneArtifactsChange?.(
+                'pane-session',
+                [updatedArtifact],
+                paneActions,
+              ),
+          },
+          'updated artifact',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-clear-artifacts',
+            type: 'button',
+            onClick: () =>
+              props.onPaneArtifactsChange?.('pane-session', [], paneActions),
+          },
+          'clear artifacts',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-open-artifact',
+            type: 'button',
+            onClick: () =>
+              props.onRightPanelOpen?.({
+                id: 'artifact:pane-artifact:pane-session',
+                kind: 'artifact',
+                title: artifact.title,
+                turnId: 'turn-1',
+                artifactId: artifact.id,
+                artifact,
+                workspaceActions: paneActions,
+                previewContent: '<p>stale</p>',
+              }),
+          },
+          'open artifact',
+        ),
+        React.createElement(
+          'button',
+          {
             'data-testid': 'split-back',
             type: 'button',
             onClick: props.onExit,
           },
           'back',
         ),
-      ),
+      );
+    },
   };
 });
 // Capturing mock: stores the onRunPrompt handler (App's real runTaskManually)
@@ -1454,6 +1537,57 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="split-initial"]')?.textContent,
     ).toBe('s1,s2,s3');
+  });
+
+  it('reconciles split pane artifact snapshots in the right panel', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-report-artifact"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-open-artifact"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Pane artifact');
+    expect(container.textContent).toContain('10 B');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-report-updated-artifact"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('20 B');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-clear-artifacts"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Artifact not found.');
   });
 
   it('enters the split view from a ?split= URL and consumes the param', async () => {
