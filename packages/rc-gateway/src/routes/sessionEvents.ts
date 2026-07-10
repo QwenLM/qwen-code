@@ -121,6 +121,8 @@ export function createSessionEventsRoute(
             usageBroadcaster?.register(sessionId, (tick) =>
               writeUsageTick(res, tick),
             ) ?? (() => {});
+          // Emit synthetic client_joined as the first SSE frame.
+          writePresenceJoined(res, actorTokenId, req.rcClient?.scopes ?? []);
           // Emit the WAL-replayed events first.
           for (const ev of replay.events) {
             writeFrame(res, ev);
@@ -130,9 +132,12 @@ export function createSessionEventsRoute(
           for await (const ev of iterator) {
             writeFrame(res, ev);
           }
+          // Daemon stream ended gracefully: emit client_left before closing.
+          writePresenceLeft(res, actorTokenId, 'disconnect');
           res.end();
         } catch {
           if (abort.signal.aborted) {
+            writePresenceLeft(res, actorTokenId, 'disconnect');
             res.end();
           } else if (!res.headersSent) {
             res.status(502).json({
@@ -198,6 +203,9 @@ export function createSessionEventsRoute(
         usageBroadcaster?.register(sessionId, (tick) =>
           writeUsageTick(res, tick),
         ) ?? (() => {});
+      // Emit synthetic client_joined as the first SSE frame on this stream.
+      // No id: line — synthetic frames must not advance the Last-Event-ID cursor.
+      writePresenceJoined(res, actorTokenId, req.rcClient?.scopes ?? []);
       if (!first.done) {
         appendToWal(wal, first.value);
         writeFrame(res, first.value);
@@ -206,9 +214,14 @@ export function createSessionEventsRoute(
         appendToWal(wal, ev);
         writeFrame(res, ev);
       }
+      // Daemon stream ended gracefully: emit client_left before closing.
+      writePresenceLeft(res, actorTokenId, 'disconnect');
       res.end();
     } catch {
       if (abort.signal.aborted) {
+        // Client disconnected (or token evicted): try to emit client_left
+        // before the socket disappears. Guard: socket may already be gone.
+        writePresenceLeft(res, actorTokenId, 'disconnect');
         res.end();
       } else if (!res.headersSent) {
         res.status(502).json({
@@ -269,6 +282,51 @@ function writeFrame(
  */
 function writeUsageTick(res: Response, tick: UsageTick): void {
   res.write(`data: ${JSON.stringify({ type: 'usage_tick', data: tick })}\n\n`);
+}
+
+/**
+ * Write a synthetic `client_joined` frame (no `id:` line) as the very first
+ * SSE frame on a newly attached stream. The client sees itself join. Synthetic:
+ * must not advance the Last-Event-ID cursor.
+ */
+function writePresenceJoined(
+  res: Response,
+  tokenId: string | undefined,
+  scopes: string[],
+): void {
+  res.write(
+    `data: ${JSON.stringify({
+      type: 'client_joined',
+      data: {
+        tokenId: tokenId ?? null,
+        scopes,
+        attachedAt: new Date().toISOString(),
+      },
+    })}\n\n`,
+  );
+}
+
+/**
+ * Write a synthetic `client_left` frame (no `id:` line) just before the stream
+ * closes. Must be called BEFORE `res.end()` so the frame reaches the client.
+ * Guards against writing to an already-ended response.
+ */
+function writePresenceLeft(
+  res: Response,
+  tokenId: string | undefined,
+  reason: 'disconnect' | 'revoked' | 'evicted',
+): void {
+  if (res.writableEnded) return;
+  try {
+    res.write(
+      `data: ${JSON.stringify({
+        type: 'client_left',
+        data: { tokenId: tokenId ?? null, reason },
+      })}\n\n`,
+    );
+  } catch {
+    // Socket already closed; ignore.
+  }
 }
 
 /**

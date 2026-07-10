@@ -50,6 +50,7 @@ import {
 } from './cors.js';
 import { createPermissionVoteRoute } from './routes/permission.js';
 import { createPromptRoute, type PromptAcceptedHook } from './routes/prompt.js';
+import { PromptEventBroadcaster } from './routes/promptEventBroadcaster.js';
 import { createUsageRoute, type UsageReader } from './routes/usage.js';
 import { createCapabilityRoute } from './routes/capabilities.js';
 import { createClientsManifestRoute } from './routes/clientsManifest.js';
@@ -89,6 +90,7 @@ import { InviteStore } from './bridges/inviteStore.js';
 import { createLineageRoute } from './routes/lineage.js';
 import { createSessionListRoute } from './routes/sessions.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
+import { createSessionEndRoute } from './routes/sessionEnd.js';
 import {
   createListTokensRoute,
   createMintTokenRoute,
@@ -228,6 +230,16 @@ export interface GatewayDeps {
    * the store).  These are merged at load into the allowlist as `source:
    * 'config'` entries and cannot be deleted via the API (409).
    */
+  /**
+   * Per-session prompt queue configuration (spec "Per-session FIFO preserved").
+   * `queueWaitMs`: max ms a prompt POST may wait for the slot before returning
+   * 503 `queue_timeout` (default 120_000).
+   * `promptTimeoutMs`: max ms the daemon turn may run before it is cancelled
+   * and a synthetic `stream_error { code: "prompt_timeout" }` is broadcast to
+   * SSE subscribers (default 600_000).
+   */
+  queueWaitMs?: number;
+  promptTimeoutMs?: number;
   corsConfigOrigins?: readonly string[];
   /**
    * The gateway's own UI origin, used as the unconditional CORS admission
@@ -271,6 +283,12 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   app.use(express.json());
 
   const registry = new ConnectionRegistry();
+
+  // Per-session prompt queue broadcaster — wired to both the prompt route
+  // (emit) and the events relay (register/write). Created here so both routes
+  // share the same instance without requiring the caller to instantiate it.
+  const promptEventBroadcaster = new PromptEventBroadcaster();
+
   // Owner-level event bus (cycle 49): every durably-appended audit record is
   // fanned out to OWNER subscribers of GET /rc/events. Internal to the app — the
   // enforcer/reloader broadcast for free because they share this `audit`
@@ -485,7 +503,17 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       registry,
       audit,
       deps.usageBroadcaster,
+      undefined,
+      promptEventBroadcaster,
     ),
+  );
+  // POST /session/:id/end — write-scope; tells the daemon to terminate the
+  // session. On success the daemon emits `session_died` on the event stream.
+  app.post(
+    '/session/:id/end',
+    requireScope(WRITE, audit),
+    enforceSessionLock(audit),
+    createSessionEndRoute(deps.daemon, audit),
   );
   app.post(
     '/session/:id/permission/:requestId',
@@ -503,7 +531,11 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (before consuming rate budget)
     subActorRateLimit, // bridge fan-in: cap prompts per chat user
-    createPromptRoute(deps.daemon, audit, deps.onPromptAccepted),
+    createPromptRoute(deps.daemon, audit, deps.onPromptAccepted, {
+      queueWaitMs: deps.queueWaitMs,
+      promptTimeoutMs: deps.promptTimeoutMs,
+      promptEventBroadcaster,
+    }),
   );
   // GET /rc/usage (add-cost-tracking) — any authenticated token; the route applies
   // owner-sees-all / lesser-sees-own scope filtering internally. Mounted only when

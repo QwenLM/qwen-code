@@ -92,8 +92,10 @@ describe('session-events proxy', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/event-stream');
     const frames = await readFrames(res);
-    expect(frames.map((f) => f.id)).toEqual(['1', '2']);
-    expect(frames[0].data).toContain('"text":"one"');
+    // Filter to daemon frames only (presence frames have no id).
+    const daemonFrames = frames.filter((f) => f.id !== undefined);
+    expect(daemonFrames.map((f) => f.id)).toEqual(['1', '2']);
+    expect(daemonFrames[0].data).toContain('"text":"one"');
   });
 
   it('injects a usage_tick frame to the session subscriber', async () => {
@@ -167,7 +169,10 @@ describe('session-events proxy', () => {
     const url = await mountGateway(daemon);
     const res = await fetch(`${url}/session/sess-1/events`);
     const frames = await readFrames(res);
-    const parsed = frames.map((f) => JSON.parse(f.data));
+    // Filter to daemon frames only (presence frames have no id).
+    const parsed = frames
+      .filter((f) => f.id !== undefined)
+      .map((f) => JSON.parse(f.data));
     // Non-permission frame: no bridgeHints added.
     expect(parsed[0].data.bridgeHints).toBeUndefined();
     // Clean tool-call → inline surface (run_shell is a mutating tool → medium).
@@ -327,6 +332,50 @@ describe('session-events proxy', () => {
   });
 });
 
+describe('session-events presence frames', () => {
+  it('emits a synthetic client_joined frame as the first SSE frame on attach', async () => {
+    stub = await startStubDaemon({
+      frames: [{ id: 1, type: 'session_update', data: { text: 'hello' } }],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url = await mountGateway(daemon);
+    const res = await fetch(`${url}/session/sess-1/events`);
+    expect(res.status).toBe(200);
+    const frames = await readFrames(res);
+    // First frame must be the synthetic client_joined (no id: line).
+    const first = frames[0];
+    expect(first).toBeDefined();
+    const parsed = JSON.parse(first!.data);
+    expect(parsed.type).toBe('client_joined');
+    expect(first!.id).toBeUndefined(); // synthetic — no id
+    expect(typeof parsed.data.attachedAt).toBe('string');
+  });
+
+  it('emits a synthetic client_left frame after the connection closes', async () => {
+    stub = await startStubDaemon({
+      frames: [{ id: 1, type: 'session_update', data: { text: 'bye' } }],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const url = await mountGateway(daemon, audit);
+
+    // We can verify client_left indirectly via the writable SSE response: the
+    // stub ends the stream, so the gateway's finally block runs synchronously
+    // and the audit record for 'session_detached' fires. The SSE client_left
+    // frame goes to the client BEFORE the stream closes (written in finally).
+    // Since the stream already ended, the response body is all we have;
+    // verify that the frames include client_left at the end.
+    const res = await fetch(`${url}/session/sess-1/events`);
+    const frames = await readFrames(res);
+    const lastFrame = frames[frames.length - 1];
+    expect(lastFrame).toBeDefined();
+    const parsed = JSON.parse(lastFrame!.data);
+    expect(parsed.type).toBe('client_left');
+    expect(parsed.data.reason).toBe('disconnect');
+    expect(lastFrame!.id).toBeUndefined();
+  });
+});
+
 describe('session-events WAL integration', () => {
   it('appends daemon frames to WAL and replays them on reconnect', async () => {
     // Use a unique session id to avoid collisions with walRegistry singleton.
@@ -345,7 +394,9 @@ describe('session-events WAL integration', () => {
     const res1 = await fetch(`${url}/session/${sessionId}/events`);
     expect(res1.status).toBe(200);
     const frames1 = await readFrames(res1);
-    expect(frames1.map((f) => f.id)).toEqual(['1', '2']);
+    // Filter to daemon frames only (presence frames have no id).
+    const daemonFrames1 = frames1.filter((f) => f.id !== undefined);
+    expect(daemonFrames1.map((f) => f.id)).toEqual(['1', '2']);
 
     // Verify WAL has the events.
     const wal = new SessionWal({ dir: walDir, sessionId });
@@ -364,8 +415,10 @@ describe('session-events WAL integration', () => {
     });
     expect(res2.status).toBe(200);
     const frames2 = await readFrames(res2);
-    expect(frames2.map((f) => f.id)).toEqual(['2']);
-    expect(frames2[0]!.data).toContain('"text":"two"');
+    // Filter to daemon frames only (presence frames have no id).
+    const daemonFrames2 = frames2.filter((f) => f.id !== undefined);
+    expect(daemonFrames2.map((f) => f.id)).toEqual(['2']);
+    expect(daemonFrames2[0]!.data).toContain('"text":"two"');
   });
 
   it('returns 412 with replay_truncated when Last-Event-ID is before WAL horizon', async () => {

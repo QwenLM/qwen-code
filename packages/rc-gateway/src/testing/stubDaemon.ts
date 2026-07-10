@@ -15,6 +15,8 @@ export interface StubDaemon {
   lastEventIdHeader: string | undefined;
   /** True once an /events request socket closed before the stub ended it. */
   eventsAbortedByClient: boolean;
+  /** Session id passed to the most recent POST /session/:id/end request. */
+  lastEndedSessionId: string | undefined;
   close: () => Promise<void>;
 }
 
@@ -35,6 +37,12 @@ export interface StubDaemonOptions {
   promptStatus?: number;
   /** stopReason returned by POST /session/:id/prompt on success (default 'end_turn'). */
   promptStopReason?: string;
+  /**
+   * Artificial delay (ms) before the stub daemon responds to a prompt POST.
+   * Lets tests drive queue-wait and prompt-execution timeout scenarios without
+   * real timing dependencies in the production code path.
+   */
+  promptDelayMs?: number;
   /** workspaceCwd reported by GET /capabilities (default '/stub/workspace'). */
   workspaceCwd?: string;
   /**
@@ -45,6 +53,8 @@ export interface StubDaemonOptions {
   sessions?: DaemonSessionSummary[];
   /** Status for GET /capabilities (default 200). Non-200 → { error }. */
   capabilitiesStatus?: number;
+  /** Status for POST /session/:id/end (default 200). Non-200 → { error }. */
+  endSessionStatus?: number;
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -58,6 +68,7 @@ export async function startStubDaemon(
   const state = {
     lastEventIdHeader: undefined as string | undefined,
     eventsAbortedByClient: false,
+    lastEndedSessionId: undefined as string | undefined,
   };
   const app = express();
   app.use(express.json());
@@ -129,12 +140,44 @@ export async function startStubDaemon(
     res.status(status).json(status === 200 ? {} : { error: 'no pending' });
   });
 
-  app.post('/session/:id/prompt', (_req, res) => {
-    const status = opts.promptStatus ?? 200;
+  app.post('/session/:id/end', (req, res) => {
+    state.lastEndedSessionId = req.params.id;
+    const status = opts.endSessionStatus ?? 200;
     if (status === 200) {
-      res.status(200).json({ stopReason: opts.promptStopReason ?? 'end_turn' });
+      res.status(200).json({ sessionId: req.params.id, ended: true });
     } else {
       res.status(status).json({ error: 'stub error' });
+    }
+  });
+
+  app.post('/session/:id/prompt', (req, res) => {
+    const status = opts.promptStatus ?? 200;
+    const respond = () => {
+      if (status === 200) {
+        res
+          .status(200)
+          .json({ stopReason: opts.promptStopReason ?? 'end_turn' });
+      } else {
+        res.status(status).json({ error: 'stub error' });
+      }
+    };
+    if (opts.promptDelayMs) {
+      // Respect client abort so tests don't leak open handles.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const abort = () => {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+        if (!res.writableEnded) res.destroy();
+      };
+      req.on('close', abort);
+      timer = setTimeout(() => {
+        req.off('close', abort);
+        respond();
+      }, opts.promptDelayMs);
+    } else {
+      respond();
     }
   });
 
@@ -149,6 +192,9 @@ export async function startStubDaemon(
     },
     get eventsAbortedByClient() {
       return state.eventsAbortedByClient;
+    },
+    get lastEndedSessionId() {
+      return state.lastEndedSessionId;
     },
     close: () =>
       new Promise<void>((resolve, reject) =>
