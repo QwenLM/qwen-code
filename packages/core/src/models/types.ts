@@ -32,6 +32,7 @@ export type ModelGenerationConfig = Pick<
   | 'maxRetries'
   | 'retryErrorCodes'
   | 'enableCacheControl'
+  | 'forceGlobalCacheScope'
   | 'schemaCompliance'
   | 'reasoning'
   | 'customHeaders'

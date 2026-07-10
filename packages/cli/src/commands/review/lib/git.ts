@@ -9,10 +9,27 @@
 // across platforms.
 
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+
+/** Deadline for a single `git` invocation. Generous; a hang must still end. */
+const GIT_TIMEOUT_MS = 120_000;
+
+/**
+ * Options every wrapper shares.
+ *
+ * `git fetch` is a network operation, and on a headless machine a missing
+ * credential turns into a terminal prompt that never gets an answer. Without a
+ * deadline and `GIT_TERMINAL_PROMPT=0` the process waits forever with no output
+ * — indistinguishable from a deadlock.
+ */
+const GIT_OPTS = {
+  timeout: GIT_TIMEOUT_MS,
+  env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+} as const;
 
 /** Run `git` with args. Returns stdout, trimmed and CRLF-normalised. */
 export function git(...args: string[]): string {
-  return execFileSync('git', args, { encoding: 'utf8' })
+  return execFileSync('git', args, { ...GIT_OPTS, encoding: 'utf8' })
     .replace(/\r\n/g, '\n')
     .trim();
 }
@@ -28,6 +45,7 @@ export function git(...args: string[]): string {
 export function gitOpt(...args: string[]): string | null {
   try {
     return execFileSync('git', args, {
+      ...GIT_OPTS,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -41,4 +59,48 @@ export function gitOpt(...args: string[]): string | null {
 /** True iff a ref (branch / tag / commit) exists locally. */
 export function refExists(ref: string): boolean {
   return gitOpt('rev-parse', '--verify', '--quiet', ref) !== null;
+}
+
+/**
+ * Free a review worktree's path **and** its branch. Returns whether a live
+ * worktree was there to remove.
+ *
+ * `git worktree remove` needs the directory. A user reclaiming disk with
+ * `rm -rf .qwen/tmp` leaves the worktree *registered but missing*, and from then
+ * on git refuses both of the things the next review needs:
+ *
+ *     $ git worktree add .qwen/tmp/review-pr-6457 qwen-review/pr-6457
+ *     fatal: '...' is a missing but already registered worktree;
+ *     use 'add -f' to override, or 'prune' or 'remove' to clear
+ *
+ * and `git branch -D qwen-review/pr-6457`, because the branch is still checked
+ * out in that phantom. So `/review <same PR>` never runs again until someone
+ * prunes by hand. `git worktree prune` is the only thing that clears the
+ * registration and a no-op when nothing is stale — run it unconditionally, and
+ * **before** the branch delete that depends on it.
+ */
+export function releaseWorktree(worktreePath: string): boolean {
+  const existed = existsSync(worktreePath);
+  if (existed) {
+    gitOpt('worktree', 'remove', worktreePath, '--force');
+  }
+  gitOpt('worktree', 'prune');
+  return existed;
+}
+
+/**
+ * Run `git` and return stdout as raw bytes.
+ *
+ * `git` above is wrong for diffs on two counts: it CRLF-normalises (which
+ * rewrites the content of every hunk touching a CRLF file) and it `.trim()`s
+ * (which eats the trailing newline a patch needs). It also inherits
+ * `execFileSync`'s 1 MB `maxBuffer` default, so any diff past ~1 MB dies with
+ * ENOBUFS rather than returning a short read. Diff capture uses this instead.
+ */
+export function gitRaw(...args: string[]): Buffer {
+  return execFileSync('git', args, {
+    ...GIT_OPTS,
+    maxBuffer: 512 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
 }

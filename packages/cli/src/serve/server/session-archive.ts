@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SessionService } from '@qwen-code/qwen-code-core';
+import {
+  SessionService,
+  type SessionLocation,
+} from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
   SessionArchivedError,
@@ -202,7 +205,7 @@ export async function deleteDaemonSessions(params: {
 export async function assertSessionLoadable(
   workspaceCwd: string,
   sessionId: string,
-): Promise<void> {
+): Promise<SessionLocation> {
   const location = await new SessionService(workspaceCwd).getSessionLocation(
     sessionId,
   );
@@ -212,6 +215,7 @@ export async function assertSessionLoadable(
   if (location === 'conflict') {
     throw new SessionConflictError(sessionId);
   }
+  return location;
 }
 
 function isSessionNotFoundError(err: unknown): boolean {
