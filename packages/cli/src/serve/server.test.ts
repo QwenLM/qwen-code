@@ -2553,30 +2553,43 @@ describe('createServeApp', () => {
 
   describe('GET /capabilities', () => {
     it('returns the v1 envelope', async () => {
-      const app = createServeApp(baseOpts);
-      const res = await request(app)
-        .get('/capabilities')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(res.status).toBe(200);
-      expect(res.body.v).toBe(CAPABILITIES_SCHEMA_VERSION);
-      expect(res.body.protocolVersions).toEqual(getServeProtocolVersions());
-      expect(res.body.mode).toBe('http-bridge');
-      // F2 (#4175 commit 5): the server.ts call site flips
-      // `mcpPoolActive` to default-ON via `opts.mcpPoolActive !== false`
-      // (so a daemon booted without the kill switch advertises the F2
-      // pool surface by default). Voice transcription is conditional on
-      // a usable batch ASR model, so the default isolated test settings
-      // do not advertise it.
-      expect(res.body.features).toEqual(
-        getAdvertisedServeFeatures(undefined, {
-          mcpPoolActive: true,
-          sessionArtifactsPersistenceAvailable: true,
-        }),
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-capabilities-'),
       );
-      expect(res.body.modelServices).toEqual([]);
-      expect(res.body.limits).toMatchObject({
-        maxPendingPromptsPerSession: 5,
-      });
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        resetHomeEnvBootstrapForTesting();
+
+        const app = createServeApp(baseOpts);
+        const res = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(200);
+        expect(res.body.v).toBe(CAPABILITIES_SCHEMA_VERSION);
+        expect(res.body.protocolVersions).toEqual(getServeProtocolVersions());
+        expect(res.body.mode).toBe('http-bridge');
+        // F2 (#4175 commit 5): the server.ts call site flips
+        // `mcpPoolActive` to default-ON via `opts.mcpPoolActive !== false`
+        // (so a daemon booted without the kill switch advertises the F2
+        // pool surface by default). Voice transcription is conditional on
+        // a usable batch ASR model, so the isolated test settings do not
+        // advertise it.
+        expect(res.body.features).toEqual(
+          getAdvertisedServeFeatures(undefined, {
+            mcpPoolActive: true,
+            sessionArtifactsPersistenceAvailable: true,
+          }),
+        );
+        expect(res.body.modelServices).toEqual([]);
+        expect(res.body.limits).toMatchObject({
+          maxPendingPromptsPerSession: 5,
+        });
+      } finally {
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
     });
 
     it('omits artifact persistence when the durable sink is unavailable', async () => {
@@ -6312,6 +6325,35 @@ describe('createServeApp', () => {
       }
     });
 
+    it('releases restore ownership after invalid approvalMode', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const invalid = await request(app)
+        .post('/session/persisted-approval/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ approvalMode: 'YOLO' });
+      expect(invalid.status).toBe(400);
+      expect(invalid.body.code).toBe('invalid_approval_mode');
+
+      const valid = await request(app)
+        .post('/session/persisted-approval/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(valid.status).toBe(200);
+      expect(bridge.loadCalls).toEqual([
+        {
+          sessionId: 'persisted-approval',
+          workspaceCwd: WS_BOUND,
+          historyReplay: 'response',
+        },
+      ]);
+    });
+
     it('passes explicit primary cwd through to the bridge', async () => {
       const bridge = fakeBridge({
         loadImpl: async (req) => ({
@@ -7128,6 +7170,58 @@ describe('createServeApp', () => {
         ]),
       );
       expect(bridge.listCalls).toEqual([WS_BOUND]);
+    });
+
+    it('returns runtime state and pending interaction details', async () => {
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: 's-pending',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: true,
+            isWaitingForPermission: true,
+            pendingInteractionCount: 1,
+            hasTurnError: true,
+            turnError: { message: 'internal path: /private/workspace' },
+            pendingInteractions: [
+              {
+                requestId: 'request-1',
+                kind: 'permission',
+                createdAt: '2026-05-17T12:00:01.000Z',
+                action: { input: { command: 'secret command' } },
+                options: [],
+              },
+            ],
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+
+      const res = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toEqual([
+        expect.objectContaining({
+          sessionId: 's-pending',
+          isWaitingForPermission: true,
+          pendingInteractionCount: 1,
+          turnError: { message: 'internal path: /private/workspace' },
+          pendingInteractions: [
+            expect.objectContaining({
+              requestId: 'request-1',
+              action: { input: { command: 'secret command' } },
+            }),
+          ],
+        }),
+      ]);
     });
 
     it('supports plural /workspaces/:workspace/sessions for non-primary live sessions', async () => {
@@ -8339,6 +8433,42 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect('displayName' in res.body).toBe(false);
+    });
+
+    it('200 includes pending interaction details for a single session', async () => {
+      const summary: BridgeSessionSummary = {
+        sessionId: 's-pending',
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: true,
+        isWaitingForUserQuestion: true,
+        pendingInteractionCount: 1,
+        pendingInteractions: [
+          {
+            requestId: 'question-1',
+            kind: 'user_question',
+            createdAt: '2026-05-17T12:00:01.000Z',
+            title: 'Choose a direction',
+            questions: [{ question: 'Which path?' }],
+            options: [{ optionId: 'answer', label: 'Answer' }],
+          },
+        ],
+      };
+      const bridge = fakeBridge({ summaryImpl: () => summary });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-pending/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.pendingInteractions).toEqual(summary.pendingInteractions);
+      expect(res.body.pendingInteractionCount).toBe(1);
     });
 
     it('404 when the session id is unknown to the daemon', async () => {
@@ -12975,6 +13105,345 @@ describe('createServeApp', () => {
         ]),
       );
       expect(bridge.workspaceMcpCalls).toBe(1);
+    });
+  });
+
+  describe('POST /channels/:channelName/webhooks/:source', () => {
+    it('is only mounted when enqueueChannelWebhookTask is available', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-'),
+      );
+      const workspace = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-workspace-'),
+      );
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        await fsp.writeFile(
+          path.join(tempHome, 'settings.json'),
+          JSON.stringify({
+            channels: {
+              'dingtalk-main': {
+                type: 'dingtalk',
+                webhooks: {
+                  sources: {
+                    'github-ci': {
+                      secret: 'secret-value',
+                      targets: {
+                        default: {
+                          chatId: 'group-1',
+                          senderId: 'webhook:github-ci',
+                          isGroup: true,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          }),
+          'utf8',
+        );
+        resetHomeEnvBootstrapForTesting();
+
+        const withoutEnqueue = createServeApp(
+          { ...baseOpts, workspace },
+          undefined,
+          { bridge: fakeBridge() },
+        );
+        const notMounted = await request(withoutEnqueue)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+        expect(notMounted.status).toBe(404);
+
+        const enqueueChannelWebhookTask = vi.fn(async () => ({
+          accepted: true as const,
+        }));
+        const withEnqueue = createServeApp(
+          { ...baseOpts, workspace },
+          undefined,
+          {
+            bridge: fakeBridge(),
+            enqueueChannelWebhookTask,
+          },
+        );
+        const mounted = await request(withEnqueue)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+
+        expect(mounted.status).toBe(202);
+        expect(mounted.body).toEqual({ accepted: true });
+        expect(enqueueChannelWebhookTask).toHaveBeenCalledWith({
+          channelName: 'dingtalk-main',
+          source: 'github-ci',
+          eventType: 'ci_failed',
+          targetRef: 'default',
+          title: 'CI failed',
+          payload: {},
+        });
+
+        const withBearerAuth = createServeApp(
+          { ...baseOpts, workspace, token: 'secret' },
+          undefined,
+          {
+            bridge: fakeBridge(),
+            enqueueChannelWebhookTask,
+          },
+        );
+        const webhookSecretOnly = await request(withBearerAuth)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+        expect(webhookSecretOnly.status).toBe(202);
+
+        const invalidSecretMalformedJson = await request(withBearerAuth)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Content-Type', 'application/json')
+          .set('x-qwen-webhook-secret', 'wrong')
+          .send('{');
+        expect(invalidSecretMalformedJson.status).toBe(401);
+
+        const withBothSecrets = await request(withBearerAuth)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+        expect(withBothSecrets.status).toBe(202);
+
+        const withCors = createServeApp(
+          {
+            ...baseOpts,
+            workspace,
+            allowOrigins: ['https://hooks.example'],
+          },
+          undefined,
+          {
+            bridge: fakeBridge(),
+            enqueueChannelWebhookTask,
+          },
+        );
+        const preflight = await request(withCors)
+          .options('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Origin', 'https://hooks.example')
+          .set('Access-Control-Request-Method', 'POST')
+          .set(
+            'Access-Control-Request-Headers',
+            'X-Qwen-Webhook-Secret, Content-Type',
+          );
+        expect(preflight.status).toBe(204);
+        expect(preflight.headers['access-control-allow-headers']).not.toContain(
+          'X-Qwen-Webhook-Secret',
+        );
+
+        const rateLimited = createServeApp(
+          {
+            ...baseOpts,
+            workspace,
+            rateLimit: true,
+            rateLimitMutation: 1,
+            rateLimitWindowMs: 60_000,
+          },
+          undefined,
+          {
+            bridge: fakeBridge(),
+            enqueueChannelWebhookTask,
+          },
+        );
+        const firstWebhook = await request(rateLimited)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+        expect(firstWebhook.status).toBe(202);
+        const secondWebhook = await request(rateLimited)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('X-Qwen-Client-Id', 'rotated-client')
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+        expect(secondWebhook.status).toBe(429);
+      } finally {
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        await fsp.rm(workspace, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+
+    it('skips malformed webhook config instead of crashing the server', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-bad-'),
+      );
+      const workspace = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-workspace-'),
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((() => true) as typeof process.stderr.write);
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        await fsp.writeFile(
+          path.join(tempHome, 'settings.json'),
+          JSON.stringify({
+            channels: {
+              'dingtalk-main': {
+                type: 'dingtalk',
+                webhooks: 'invalid',
+              },
+            },
+          }),
+          'utf8',
+        );
+        resetHomeEnvBootstrapForTesting();
+
+        const enqueueChannelWebhookTask = vi.fn(async () => ({
+          accepted: true as const,
+        }));
+        const app = createServeApp({ ...baseOpts, workspace }, undefined, {
+          bridge: fakeBridge(),
+          enqueueChannelWebhookTask,
+        });
+        const res = await request(app)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+
+        expect(res.status).toBe(401);
+        expect(enqueueChannelWebhookTask).not.toHaveBeenCalled();
+        expect(
+          stderrSpy.mock.calls.some(([chunk]) =>
+            String(chunk).includes(
+              'Skipping malformed webhook config for channel "dingtalk-main"',
+            ),
+          ),
+        ).toBe(true);
+      } finally {
+        stderrSpy.mockRestore();
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        await fsp.rm(workspace, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+
+    it('keeps valid webhook sources when a sibling source is malformed', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-bad-source-'),
+      );
+      const workspace = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-workspace-'),
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((() => true) as typeof process.stderr.write);
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        await fsp.writeFile(
+          path.join(tempHome, 'settings.json'),
+          JSON.stringify({
+            channels: {
+              'dingtalk-main': {
+                type: 'dingtalk',
+                webhooks: {
+                  sources: {
+                    'github-ci': {
+                      secret: 'secret-value',
+                      targets: {
+                        default: {
+                          chatId: 'group-1',
+                          senderId: 'webhook:github-ci',
+                        },
+                      },
+                    },
+                    jenkins: {
+                      secretEnv: 'QWEN_MISSING_WEBHOOK_SECRET',
+                      targets: {
+                        default: {
+                          chatId: 'group-1',
+                          senderId: 'webhook:jenkins',
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          }),
+          'utf8',
+        );
+        resetHomeEnvBootstrapForTesting();
+
+        const enqueueChannelWebhookTask = vi.fn(async () => ({
+          accepted: true as const,
+        }));
+        const app = createServeApp({ ...baseOpts, workspace }, undefined, {
+          bridge: fakeBridge(),
+          enqueueChannelWebhookTask,
+        });
+        const res = await request(app)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+
+        expect(res.status).toBe(202);
+        expect(enqueueChannelWebhookTask).toHaveBeenCalledTimes(1);
+        expect(
+          stderrSpy.mock.calls.some(([chunk]) =>
+            String(chunk).includes(
+              'Skipping malformed webhook source "jenkins" for channel "dingtalk-main"',
+            ),
+          ),
+        ).toBe(true);
+      } finally {
+        stderrSpy.mockRestore();
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        await fsp.rm(workspace, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
     });
   });
 

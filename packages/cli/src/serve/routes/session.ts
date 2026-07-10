@@ -133,6 +133,28 @@ function sendSessionOrganizationError(res: Response, err: unknown): boolean {
   return true;
 }
 
+function parseOptionalApprovalMode(
+  body: Record<string, unknown>,
+  res: Response,
+): ApprovalMode | undefined | null {
+  const rawApprovalMode = body['approvalMode'];
+  if (rawApprovalMode === undefined) {
+    return undefined;
+  }
+  if (
+    typeof rawApprovalMode !== 'string' ||
+    !APPROVAL_MODES.includes(rawApprovalMode as ApprovalMode)
+  ) {
+    res.status(400).json({
+      error: '`approvalMode` must be a known approval mode when provided',
+      code: 'invalid_approval_mode',
+      allowed: APPROVAL_MODES,
+    });
+    return null;
+  }
+  return rawApprovalMode as ApprovalMode;
+}
+
 export function registerSessionRoutes(
   app: Application,
   deps: RegisterSessionRoutesDeps,
@@ -642,6 +664,8 @@ export function registerSessionRoutes(
       }
       sessionScope = rawSessionScope;
     }
+    const approvalMode = parseOptionalApprovalMode(body, res);
+    if (approvalMode === null) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
@@ -650,6 +674,7 @@ export function registerSessionRoutes(
         modelServiceId,
         ...(clientId !== undefined ? { clientId } : {}),
         ...(sessionScope !== undefined ? { sessionScope } : {}),
+        ...(approvalMode !== undefined ? { approvalMode } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
@@ -754,6 +779,11 @@ export function registerSessionRoutes(
         runtime,
       );
       if (!releaseRestoreOwner) return;
+      const approvalMode = parseOptionalApprovalMode(body, res);
+      if (approvalMode === null) {
+        releaseRestoreOwner();
+        return;
+      }
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) {
         releaseRestoreOwner();
@@ -770,11 +800,13 @@ export function registerSessionRoutes(
                   workspaceCwd,
                   historyReplay: 'response',
                   ...(clientId !== undefined ? { clientId } : {}),
+                  ...(approvalMode !== undefined ? { approvalMode } : {}),
                 })
               : await runtime.bridge.resumeSession({
                   sessionId,
                   workspaceCwd,
                   ...(clientId !== undefined ? { clientId } : {}),
+                  ...(approvalMode !== undefined ? { approvalMode } : {}),
                 });
           },
         );
@@ -2007,14 +2039,6 @@ export function registerSessionRoutes(
           }
           archiveState = rawArchiveState;
         }
-        if (!runtime.primary && (archiveState === 'archived' || view)) {
-          res.status(400).json({
-            error:
-              'Non-primary workspace session listing only supports active recent view in this phase.',
-            code: 'non_primary_session_list_option_not_supported',
-          });
-          return;
-        }
         const options = {
           ...(cursor !== undefined ? { cursor } : {}),
           ...(size !== undefined ? { size } : {}),
@@ -2022,11 +2046,28 @@ export function registerSessionRoutes(
           ...(view !== undefined ? { view } : {}),
           ...(group !== undefined ? { group } : {}),
         };
+        // Organized/archived views always need the persisted store: organized
+        // cursors are opaque (non-numeric) and archived-only workspaces have no
+        // active persisted sessions, so the live-only fallback would drop them.
         const usePersisted =
           runtime.primary ||
+          view === 'organized' ||
+          archiveState === 'archived' ||
           (cursor !== undefined && cursor !== ''
             ? isNumericSessionCursor(cursor)
             : await hasActivePersistedSessions(key));
+        // The live path only reads cursor/size; persisted-only options
+        // (organized view or archived state) would be silently dropped there.
+        // usePersisted already routes those to the persisted path — assert it so
+        // a future option added to validation but not to that gate fails loudly.
+        if (
+          !usePersisted &&
+          (view !== undefined || archiveState === 'archived')
+        ) {
+          throw new Error(
+            'session list live path received persisted-only options',
+          );
+        }
         const result = usePersisted
           ? await listWorkspaceSessionsForResponse(runtime.bridge, key, options)
           : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
@@ -2050,7 +2091,15 @@ export function registerSessionRoutes(
         writeStderrLine(
           `qwen serve: failed to list sessions for workspace ${safeLogValue(
             key,
-          )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
+          )} (options=${safeLogValue(
+            JSON.stringify({
+              view: req.query['view'],
+              archiveState: req.query['archiveState'],
+              group: req.query['group'],
+            }),
+          )}): ${safeLogValue(
+            err instanceof Error ? err.message : String(err),
+          )}`,
         );
         res.status(500).json({
           error: 'Failed to list sessions',

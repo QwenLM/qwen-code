@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { WebShellCustomizationProvider } from '../../customization';
@@ -63,5 +63,226 @@ describe('UserMessage', () => {
 
     expect(container.querySelector('[data-testid="tag-chip"]')).not.toBeNull();
     expect(container.textContent).toContain('.husky/_/husky.sh xuyao');
+  });
+
+  it('renders parsed user-message tag parts', () => {
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          parseUserMessageContent: () => [
+            { type: 'text', text: 'open ' },
+            {
+              type: 'tag',
+              tag: {
+                id: 'ctx-1',
+                label: 'Table',
+                value: 'orders',
+                serialized: '<context />',
+              },
+            },
+          ],
+        }}
+      >
+        <UserMessage content="open <context />" />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(container.textContent).toContain('open ');
+    expect(container.textContent).toContain('Table');
+    expect(container.textContent).toContain('orders');
+  });
+
+  it('guards parsed tag mask icon sources', () => {
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          parseUserMessageContent: () => [
+            {
+              type: 'tag',
+              tag: {
+                id: 'ctx-1',
+                label: 'Table',
+                value: 'orders',
+                icon: 'javascript:alert(1)',
+              },
+            },
+          ],
+        }}
+      >
+        <UserMessage content="<context />" />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(container.textContent).toContain('orders');
+    expect(container.innerHTML).not.toContain('javascript:alert');
+    expect(
+      container.querySelector('[style*="--user-message-tag-icon-url"]'),
+    ).toBeNull();
+  });
+
+  it('renders kind-based tags like composer chips without the raw label', () => {
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          parseUserMessageContent: () => [
+            { type: 'text', text: 'explain ' },
+            {
+              type: 'tag',
+              tag: {
+                id: 'ctx-1',
+                label: '@',
+                value: 'project.orders',
+                kind: 'table',
+                serialized: '<context />',
+              },
+            },
+            { type: 'text', text: ' now' },
+          ],
+        }}
+      >
+        <UserMessage content="explain <context /> now" />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(container.textContent).toBe('explain project.orders now');
+    expect(container.querySelector('[title="project.orders"]')).not.toBeNull();
+  });
+
+  it('uses custom composer tag icons for parsed user-message tags', () => {
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          composerTagIcons: {
+            table: 'https://example.test/table.svg',
+          },
+          parseUserMessageContent: () => [
+            {
+              type: 'tag',
+              tag: {
+                id: 'ctx-1',
+                value: 'project.orders',
+                kind: 'table',
+                serialized: '<context />',
+              },
+            },
+          ],
+        }}
+      >
+        <UserMessage content="<context />" />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(
+      container.querySelector('[style*="https://example.test/table.svg"]'),
+    ).not.toBeNull();
+  });
+
+  it('fires user-message tag clicks with the user-message placement', () => {
+    const onComposerTagClick = vi.fn();
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          onComposerTagClick,
+          parseUserMessageContent: () => [
+            {
+              type: 'tag',
+              tag: {
+                id: 'ctx-1',
+                value: 'project.orders',
+                kind: 'table',
+                serialized: '<context />',
+              },
+            },
+          ],
+        }}
+      >
+        <UserMessage content="<context />" />
+      </WebShellCustomizationProvider>,
+    );
+    const chip = container.querySelector('[role="button"]') as HTMLElement;
+
+    act(() => chip.click());
+    expect(onComposerTagClick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        placement: 'user-message',
+        readonly: true,
+        tag: expect.objectContaining({ id: 'ctx-1' }),
+        anchorRect: expect.any(Object),
+      }),
+    );
+
+    act(() => {
+      chip.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    expect(onComposerTagClick).toHaveBeenCalledTimes(2);
+    expect(onComposerTagClick).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        placement: 'user-message',
+        readonly: true,
+      }),
+    );
+  });
+
+  it('falls back to raw content when user-message parsing throws', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          parseUserMessageContent: () => {
+            throw new Error('bad host payload');
+          },
+        }}
+      >
+        <UserMessage content="raw <broken /> content" />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(container.textContent).toBe('raw <broken /> content');
+    warn.mockRestore();
+  });
+
+  it('falls back when user-message tag rendering throws', () => {
+    const renderError = new Error('bad tag renderer');
+    const tooltipError = new Error('bad tag tooltip');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          parseUserMessageContent: () => [
+            {
+              type: 'tag',
+              tag: {
+                id: 'ctx-1',
+                label: 'Table',
+                value: 'orders',
+                serialized: '<context />',
+              },
+            },
+          ],
+          renderComposerTag: () => {
+            throw renderError;
+          },
+          renderComposerTagTooltip: () => {
+            throw tooltipError;
+          },
+        }}
+      >
+        <UserMessage content="<context />" />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(container.textContent).toContain('Table');
+    expect(container.textContent).toContain('orders');
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] user message tag render failed',
+      renderError,
+    );
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] user message tag tooltip render failed',
+      tooltipError,
+    );
+    warn.mockRestore();
   });
 });
