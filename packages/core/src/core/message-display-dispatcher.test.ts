@@ -236,10 +236,9 @@ describe('MessageDisplayDispatcher', () => {
         ? Promise.resolve({})
         : Promise.reject(new Error('hook process failed'));
     });
-    const dispatcher = createDispatcher(
-      { request } as unknown as MessageBus,
-      { warn },
-    );
+    const dispatcher = createDispatcher({ request } as unknown as MessageBus, {
+      warn,
+    });
 
     dispatcher.addChunk('text', PAST_DEBOUNCE); // this delivery fails
     // Let the failure settle while the message is still streaming — a
@@ -274,10 +273,9 @@ describe('MessageDisplayDispatcher', () => {
             rejectMidStream = reject;
           });
     });
-    const dispatcher = createDispatcher(
-      { request } as unknown as MessageBus,
-      { warn },
-    );
+    const dispatcher = createDispatcher({ request } as unknown as MessageBus, {
+      warn,
+    });
 
     dispatcher.addChunk('text', PAST_DEBOUNCE); // in flight, held
     await dispatcher.finish(); // final dispatched alongside, settles fine
@@ -292,6 +290,82 @@ describe('MessageDisplayDispatcher', () => {
 
     expect(warn).not.toHaveBeenCalled();
     expect(consoleWarnSpy).not.toHaveBeenCalled();
+  });
+
+  it('resolves the drain via the delivery settling just before the timeout, without warning', async () => {
+    vi.useFakeTimers();
+    const warn = vi.fn();
+    const { bus, release } = createControlledBus();
+    const dispatcher = createDispatcher(bus, { warn });
+
+    dispatcher.addChunk('text', PAST_DEBOUNCE); // in flight, held
+    let finishResolved = false;
+    const finished = dispatcher.finish().then(() => {
+      finishResolved = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS - 1);
+    expect(finishResolved).toBe(false);
+
+    // Settle the final delivery (index 1: dispatched alongside the stale
+    // mid-stream one) one tick before the drain timer would fire — the
+    // drain must resolve via delivery.finally clearing the timer, not via
+    // the timeout warning path.
+    await release(1);
+    await finished;
+
+    expect(finishResolved).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
+    expect(consoleWarnSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not shorten an already-started drain wait when the signal aborts afterward', async () => {
+    // drainWithTimeout() has no abort check of its own — once finish() has
+    // captured `finalDelivery` and started the drain, an abort arriving
+    // later does not cut the wait short; only an abort present when
+    // finish() itself runs affects dispatch (see the "suppresses the final
+    // flush ... when aborted" test above).
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const { bus } = createControlledBus();
+    const dispatcher = createDispatcher(bus, { signal: controller.signal });
+
+    dispatcher.addChunk('text', PAST_DEBOUNCE); // in flight, never released
+    let finishResolved = false;
+    const finished = dispatcher.finish().then(() => {
+      finishResolved = true;
+    });
+
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS - 1);
+    expect(finishResolved).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await finished;
+    expect(finishResolved).toBe(true);
+  });
+
+  it('does not suppress a mid-stream flush from addChunk called after abort but before finish()', async () => {
+    // Neither addChunk nor dispatch() consult the abort signal — only
+    // finish()'s is_final dispatch does. Callers rely on their own
+    // streaming loop's abort check before calling addChunk (see Session.ts's
+    // `if (signal.aborted) return` guards); the dispatcher in isolation
+    // still fires a due mid-stream flush after the signal has aborted.
+    const controller = new AbortController();
+    const { bus, sent, release } = createControlledBus();
+    const dispatcher = createDispatcher(bus, { signal: controller.signal });
+
+    controller.abort();
+    dispatcher.addChunk('text', PAST_DEBOUNCE);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ displayed_text: 'text', is_final: false });
+
+    await release();
+    await dispatcher.finish();
+
+    // finish() itself still suppresses is_final once aborted.
+    expect(sent.filter((payload) => payload.is_final)).toHaveLength(0);
   });
 
   it('shares one drain budget across concurrent finish() calls', async () => {
