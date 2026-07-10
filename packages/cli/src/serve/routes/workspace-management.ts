@@ -16,6 +16,13 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 
+// Upper bound on total registered workspaces (startup + dynamic). Each
+// registration allocates a full runtime (bridge, channel factory, sub-session
+// launcher), so an unbounded POST /workspaces would let an authenticated
+// client exhaust memory / file descriptors. There is no DELETE yet, so this is
+// the sole backpressure.
+const MAX_REGISTERED_WORKSPACES = 25;
+
 export interface WorkspaceManagementRouteDeps {
   workspaceRegistry: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
@@ -141,6 +148,17 @@ export function registerWorkspaceManagementRoutes(
           });
           return;
         }
+      }
+
+      if (
+        workspaceRegistry.list().length + inFlight.size >=
+        MAX_REGISTERED_WORKSPACES
+      ) {
+        res.status(409).json({
+          error: 'Workspace registration limit reached',
+          code: 'workspace_limit_reached',
+        });
+        return;
       }
 
       inFlight.add(canonical);

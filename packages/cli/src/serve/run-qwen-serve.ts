@@ -3269,9 +3269,6 @@ export async function runQwenServe(
           }),
       });
       wsBridgeRef = wsBridge;
-      runtimeBridges.push(wsBridge);
-      internalRuntimeBridgesForCleanup.push(wsBridge);
-      subSessionStoppers.push(wsSubSessionLauncher.stop);
       const wsService = runtime.createDaemonWorkspaceService({
         boundWorkspace: cwd,
         contextFilename: contextFilenameForInit ?? 'QWEN.md',
@@ -3349,6 +3346,12 @@ export async function runQwenServe(
           wsBridge.refreshExtensionsForAllSessions(),
         publishWorkspaceEvent: (event) => wsBridge.publishWorkspaceEvent(event),
       });
+      // Register shared-array cleanup only after the runtime is fully built, so
+      // a throw during createDaemonWorkspaceService (or any later step) can't
+      // leave an orphaned bridge/channel in the shutdown arrays.
+      runtimeBridges.push(wsBridge);
+      internalRuntimeBridgesForCleanup.push(wsBridge);
+      subSessionStoppers.push(wsSubSessionLauncher.stop);
       return {
         workspaceId: wsHash,
         workspaceCwd: cwd,

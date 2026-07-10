@@ -1711,6 +1711,10 @@ export function App({
           modeId,
           workspaceCwd: selectedWorkspaceCwdRef.current,
         });
+        // One-shot: the picker targets only the *next* new session, so clear
+        // it after creation. The next new chat defaults back to the primary
+        // workspace unless the user picks one again.
+        setSelectedWorkspaceCwd(undefined);
       })().catch((error: unknown) => {
         createSessionPromiseRef.current = null;
         throw error;
