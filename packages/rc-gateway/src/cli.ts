@@ -1537,13 +1537,25 @@ if (process.argv[2] === 'serve') {
       subActor: args.subActor,
     });
     store.close();
+    const MICRO = 1_000_000;
     const out: UsageResponseRow[] = rows.map((r) => ({
       key: r.key,
       displayLabel: r.key,
       tokensIn: r.tokensIn,
       tokensOut: r.tokensOut,
       tokensCached: r.tokensCached,
-      costCents: r.costCents,
+      costMicrocents: r.costMicrocents,
+      costCents: r.costMicrocents / MICRO,
+      efficiency: {
+        costCentsPer1kOutputTokens:
+          r.tokensOut > 0
+            ? (r.costMicrocents / MICRO / r.tokensOut) * 1000
+            : null,
+        tokensPerDollar:
+          r.costMicrocents > 0
+            ? (r.tokensOut / (r.costMicrocents / MICRO)) * 100
+            : null,
+      },
     }));
     // eslint-disable-next-line no-console
     console.log(

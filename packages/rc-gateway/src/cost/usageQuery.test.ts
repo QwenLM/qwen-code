@@ -11,12 +11,14 @@ import {
   parseGroupBy,
   usageAttributionFilter,
   formatUsageCsv,
+  computeEfficiency,
   USAGE_CSV_HEADER,
   type UsageResponseRow,
 } from './usageQuery.js';
 import { OWNER, WRITE, SESSION_READ, BRIDGE } from '../scopes.js';
 
 const NOW = 1_000_000_000_000;
+const MICRO = 1_000_000;
 
 describe('parseSince', () => {
   it('subtracts relative durations from now', () => {
@@ -78,6 +80,31 @@ describe('usageAttributionFilter', () => {
   });
 });
 
+describe('computeEfficiency', () => {
+  it('computes costCentsPer1kOutputTokens and tokensPerDollar', () => {
+    // 5 cents total, 500 output tokens
+    const eff = computeEfficiency(5 * MICRO, 500);
+    expect(eff.costCentsPer1kOutputTokens).toBeCloseTo(10, 5); // 5/500*1000
+    expect(eff.tokensPerDollar).toBeCloseTo(10000, 0); // 500/(5/100)
+  });
+
+  it('returns null costCentsPer1kOutputTokens when tokensOut is 0', () => {
+    const eff = computeEfficiency(5 * MICRO, 0);
+    expect(eff.costCentsPer1kOutputTokens).toBeNull();
+  });
+
+  it('returns null tokensPerDollar when cost is 0', () => {
+    const eff = computeEfficiency(0, 500);
+    expect(eff.tokensPerDollar).toBeNull();
+  });
+
+  it('both null when both zero', () => {
+    const eff = computeEfficiency(0, 0);
+    expect(eff.costCentsPer1kOutputTokens).toBeNull();
+    expect(eff.tokensPerDollar).toBeNull();
+  });
+});
+
 describe('formatUsageCsv', () => {
   const rows: UsageResponseRow[] = [
     {
@@ -86,19 +113,36 @@ describe('formatUsageCsv', () => {
       tokensIn: 10,
       tokensOut: 5,
       tokensCached: 0,
+      costMicrocents: 600000,
       costCents: 0.6,
+      efficiency: { costCentsPer1kOutputTokens: 120, tokensPerDollar: 833.33 },
     },
   ];
 
   it('emits the exact spec header', () => {
     expect(formatUsageCsv([]).split('\n')[0]).toBe(USAGE_CSV_HEADER);
     expect(USAGE_CSV_HEADER).toBe(
-      'key,displayLabel,tokensIn,tokensOut,tokensCached,costCents',
+      'key,displayLabel,tokensIn,tokensOut,tokensCached,costMicrocents,costCents,costCentsPer1kOutputTokens,tokensPerDollar',
     );
   });
 
-  it('renders a row', () => {
-    expect(formatUsageCsv(rows).split('\n')[1]).toBe('s1,s1,10,5,0,0.6');
+  it('renders a row with all fields', () => {
+    const line = formatUsageCsv(rows).split('\n')[1];
+    expect(line).toContain('s1');
+    expect(line).toContain('600000');
+    expect(line).toContain('0.6');
+  });
+
+  it('renders null efficiency fields as empty', () => {
+    const noEff: UsageResponseRow[] = [
+      {
+        ...rows[0],
+        efficiency: { costCentsPer1kOutputTokens: null, tokensPerDollar: null },
+      },
+    ];
+    const line = formatUsageCsv(noEff).split('\n')[1];
+    // Two trailing empty cells (null → '')
+    expect(line.endsWith(',,')).toBe(true);
   });
 
   it('quotes and escapes cells with commas or quotes', () => {

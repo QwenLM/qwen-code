@@ -130,8 +130,8 @@ describe('session-events proxy', () => {
     }
     broadcaster.emit({
       sessionId: 'sess-1',
-      costCentsSessionTotal: 15,
-      costCentsPromptTotal: 3,
+      costMicrocentsSesTotal: 15,
+      costMicrocentsPromptTotal: 3,
       tokensInTotal: 100,
       tokensOutTotal: 50,
     });
@@ -140,7 +140,7 @@ describe('session-events proxy', () => {
     const tick = frames.find((f) => f.data.includes('usage_tick'));
     expect(tick).toBeDefined();
     expect(tick!.id).toBeUndefined(); // synthetic — must not advance the cursor
-    expect(tick!.data).toContain('"costCentsSessionTotal":15');
+    expect(tick!.data).toContain('"costMicrocentsSesTotal":15');
   });
 
   it('enriches a permission_request frame with bridgeHints; leaves others untouched', async () => {

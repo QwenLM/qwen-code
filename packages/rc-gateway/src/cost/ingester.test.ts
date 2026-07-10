@@ -115,8 +115,8 @@ describe('UsageTickCoalescer', () => {
 
   const tick = (over: Partial<UsageTick> = {}): UsageTick => ({
     sessionId: 'sess_1',
-    costCentsSessionTotal: 0,
-    costCentsPromptTotal: 0,
+    costMicrocentsSesTotal: 0,
+    costMicrocentsPromptTotal: 0,
     tokensInTotal: 0,
     tokensOutTotal: 0,
     ...over,
@@ -130,11 +130,11 @@ describe('UsageTickCoalescer', () => {
       schedule: t.schedule,
       cancel: t.cancel,
     });
-    for (let i = 1; i <= 10; i++) c.push(tick({ costCentsSessionTotal: i }));
+    for (let i = 1; i <= 10; i++) c.push(tick({ costMicrocentsSesTotal: i }));
     expect(t.armed).toHaveLength(1); // only one timer armed for the session
     t.fireAll();
     expect(emitted).toHaveLength(1);
-    expect(emitted[0].costCentsSessionTotal).toBe(10); // latest wins
+    expect(emitted[0].costMicrocentsSesTotal).toBe(10); // latest wins
   });
 
   it('coalesces per session independently', () => {
@@ -145,8 +145,8 @@ describe('UsageTickCoalescer', () => {
       schedule: t.schedule,
       cancel: t.cancel,
     });
-    c.push(tick({ sessionId: 'a', costCentsSessionTotal: 1 }));
-    c.push(tick({ sessionId: 'b', costCentsSessionTotal: 2 }));
+    c.push(tick({ sessionId: 'a', costMicrocentsSesTotal: 1 }));
+    c.push(tick({ sessionId: 'b', costMicrocentsSesTotal: 2 }));
     t.fireAll();
     expect(emitted.map((e) => e.sessionId).sort()).toEqual(['a', 'b']);
   });
@@ -184,21 +184,23 @@ describe('UsageIngester', () => {
     return { ingester, ticks };
   }
 
-  it('prices a usage frame, writes a row, and emits a usage_tick', () => {
+  it('prices a usage frame, writes a row, and emits a usage_tick (microcents)', () => {
     const { ingester, ticks } = makeIngester();
+    // 1000 in * 200/MTok + 500 out * 800/MTok = 200000 + 400000 = 600000 microcents = 0.6 cents
+    const MICRO = 1_000_000;
     const cost = ingester.ingest(
       'sess_1',
       frame({ inputTokens: 1000, outputTokens: 500 }),
       { attributionTokenId: 'tkn_abc', subActor: null },
     );
-    expect(cost).toBeCloseTo(0.6, 10);
-    expect(store.sessionTotals('sess_1').costCentsSessionTotal).toBeCloseTo(
-      0.6,
+    expect(cost).toBe(Math.round(0.6 * MICRO));
+    expect(store.sessionTotals('sess_1').costMicrocentsSesTotal).toBe(
+      Math.round(0.6 * MICRO),
     );
     expect(ticks).toHaveLength(1);
     expect(ticks[0]).toMatchObject({
       sessionId: 'sess_1',
-      costCentsPromptTotal: expect.closeTo(0.6, 5),
+      costMicrocentsPromptTotal: Math.round(0.6 * MICRO),
     });
   });
 
@@ -245,6 +247,7 @@ describe('UsageIngester', () => {
 
   it('resets the prompt total on a prompt boundary but keeps the session total', () => {
     const { ingester, ticks } = makeIngester();
+    const MICRO = 1_000_000;
     ingester.ingest('sess_1', frame({ inputTokens: 1000, outputTokens: 500 }), {
       attributionTokenId: 't',
       subActor: null,
@@ -255,7 +258,7 @@ describe('UsageIngester', () => {
       subActor: null,
     });
     const last = ticks[ticks.length - 1];
-    expect(last.costCentsPromptTotal).toBeCloseTo(0.6, 5); // reset, just this prompt
-    expect(last.costCentsSessionTotal).toBeCloseTo(1.2, 5); // both prompts
+    expect(last.costMicrocentsPromptTotal).toBe(Math.round(0.6 * MICRO)); // reset, just this prompt
+    expect(last.costMicrocentsSesTotal).toBe(Math.round(1.2 * MICRO)); // both prompts
   });
 });

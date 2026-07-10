@@ -113,10 +113,10 @@ describe('cost ingestion through the real pump', () => {
     });
     await pump.start();
 
-    await waitFor(() => store.sessionTotals('s1').costCentsSessionTotal > 0);
+    await waitFor(() => store.sessionTotals('s1').costMicrocentsSesTotal > 0);
 
-    // qwen3-coder-plus @ (200,800,20)/Mtok: 1000*200/1e6 + 500*800/1e6 = 0.6
-    expect(store.sessionTotals('s1').costCentsSessionTotal).toBeCloseTo(0.6, 6);
+    // qwen3-coder-plus @ (200,800,20)/Mtok: 1000*200/1e6 + 500*800/1e6 = 600000 microcents
+    expect(store.sessionTotals('s1').costMicrocentsSesTotal).toBe(600000);
     const rows = store.aggregate({
       sinceMs: 0,
       untilMs: 2000,
