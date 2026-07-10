@@ -33,8 +33,10 @@ function installMatchMedia(initial: boolean) {
     },
     media: '',
     onchange: null,
-    addEventListener: (_type: string, cb: (event: MediaQueryListEvent) => void) =>
-      listeners.push(cb),
+    addEventListener: (
+      _type: string,
+      cb: (event: MediaQueryListEvent) => void,
+    ) => listeners.push(cb),
     removeEventListener: (
       _type: string,
       cb: (event: MediaQueryListEvent) => void,
@@ -45,7 +47,9 @@ function installMatchMedia(initial: boolean) {
     removeListener: () => {},
     dispatchEvent: () => true,
   };
-  window.matchMedia = vi.fn().mockReturnValue(mql) as unknown as typeof window.matchMedia;
+  window.matchMedia = vi
+    .fn()
+    .mockReturnValue(mql) as unknown as typeof window.matchMedia;
   return {
     set(next: boolean) {
       matches = next;
@@ -69,7 +73,9 @@ function render(): void {
 }
 
 function value(): string | undefined {
-  return container?.querySelector('[data-testid="value"]')?.textContent ?? undefined;
+  return (
+    container?.querySelector('[data-testid="value"]')?.textContent ?? undefined
+  );
 }
 
 describe('useIsLargeScreen', () => {

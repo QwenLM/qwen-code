@@ -175,6 +175,7 @@ import {
   type ToolHeaderExtraRenderer,
   type UserMessageContentRenderer,
   type UserMessageContentParser,
+  type AssistantTurnFooterRenderer,
   type WelcomeHeaderRenderer,
   type WelcomeFooterRenderer,
   type ComposerToolbarStartRenderer,
@@ -440,6 +441,8 @@ export interface WebShellProps {
   renderComposerTagTooltip?: ComposerTagRenderer;
   /** Click handler for composer and user-message tags. */
   onComposerTagClick?: ComposerTagClickHandler;
+  /** Custom renderer displayed after the final assistant message of each turn. */
+  renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
   /** Custom renderer inserted before the built-in chat composer toolbar controls. */
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   /** Custom renderer inserted after the built-in composer toolbar controls. */
@@ -861,6 +864,7 @@ export function App({
   renderComposerTag,
   renderComposerTagTooltip,
   onComposerTagClick,
+  renderAssistantTurnFooter,
   renderComposerToolbarStart,
   renderComposerToolbarEnd,
   renderComposerToolbarRight,
@@ -982,6 +986,7 @@ export function App({
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
+      renderAssistantTurnFooter,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
@@ -1002,6 +1007,7 @@ export function App({
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
+      renderAssistantTurnFooter,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
