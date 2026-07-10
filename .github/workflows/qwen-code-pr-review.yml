@@ -387,7 +387,7 @@ jobs:
 
       # SECURITY: checkout trusted base code; /review fetches PR diff context.
       - name: 'Checkout base branch'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
           ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
@@ -895,7 +895,7 @@ jobs:
           echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
 
       - name: 'Checkout base branch'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
           ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
@@ -1037,7 +1037,7 @@ jobs:
       - name: 'Resolve conflicts'
         if: "steps.prepare.outputs.decision == 'run'"
         id: 'resolve_conflicts'
-        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
+        uses: 'QwenLM/qwen-code-action@6d08e91aa807257b9c8af60edb5bb6bb2d7d951f'
         env:
           PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
           BASE_REF: '${{ steps.prepare.outputs.base_ref }}'

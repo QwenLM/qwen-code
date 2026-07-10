@@ -34,9 +34,12 @@ import {
 import {
   createDuplicateProviderToolCallResponse,
   findRepeatedDuplicateProviderToolCall,
+  GeminiEventType,
   markDuplicateProviderToolCallResponseSent,
+  type ServerGeminiStreamEvent,
   type ToolCallRequestInfo,
 } from '../../core/turn.js';
+import { LoopDetectionService } from '../../services/loopDetectionService.js';
 import {
   CoreToolScheduler,
   type ToolCall,
@@ -88,6 +91,8 @@ import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
+import { getResponseText } from '../../utils/partUtils.js';
+import { getThoughtSummary } from '../../utils/thoughtUtils.js';
 import {
   isTeammate,
   getTeammateContext,
@@ -758,6 +763,19 @@ export class AgentCore {
     // provider id would keep deterministic providers in a tool-result loop.
     const duplicateProviderToolCallResponseIds = new Set<string>();
     let stickyMaxOutputTokens: number | undefined;
+    const loopDetector = new LoopDetectionService(this.runtimeContext);
+    loopDetector.reset(
+      `${this.runtimeContext.getSessionId()}#${this.subagentId}`,
+    );
+    const checkSubagentLoop = (event: ServerGeminiStreamEvent): boolean => {
+      if (loopDetector.checkAlwaysOnSafeties(event)) {
+        return true;
+      }
+      return (
+        !this.runtimeContext.getSkipLoopDetection() &&
+        loopDetector.addAndCheckHeuristicLoops(event)
+      );
+    };
 
     while (true) {
       // Check abort before starting a new round — prevents unnecessary API
@@ -821,6 +839,7 @@ export class AgentCore {
           undefined;
         let currentResponseId: string | undefined = undefined;
         let wasOutputTruncated = false;
+        let loopDetectedInStream = false;
 
         for await (const streamEvent of responseStream) {
           if (roundAbortController.signal.aborted) {
@@ -835,6 +854,11 @@ export class AgentCore {
           // retry does not inherit stale data (e.g. wasOutputTruncated) from a
           // previous attempt that may have hit MAX_TOKENS.
           if (streamEvent.type === 'retry') {
+            if (checkSubagentLoop({ type: GeminiEventType.Retry })) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
+            }
             if (streamEvent.maxOutputTokensEscalated !== undefined) {
               stickyMaxOutputTokens = streamEvent.maxOutputTokensEscalated;
             }
@@ -866,7 +890,8 @@ export class AgentCore {
             if (resp.responseId) {
               currentResponseId = resp.responseId;
             }
-            if (resp.functionCalls) functionCalls.push(...resp.functionCalls);
+            const chunkFunctionCalls = resp.functionCalls ?? [];
+            functionCalls.push(...chunkFunctionCalls);
             if (
               resp.candidates?.[0]?.finishReason === FinishReason.MAX_TOKENS
             ) {
@@ -908,7 +933,79 @@ export class AgentCore {
                 timestamp: Date.now(),
               });
             if (resp.usageMetadata) lastUsage = resp.usageMetadata;
+
+            const thoughtSummary = getThoughtSummary(resp);
+            if (
+              thoughtSummary &&
+              checkSubagentLoop({
+                type: GeminiEventType.Thought,
+                value: thoughtSummary,
+              })
+            ) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
+            }
+
+            const responseText = getResponseText(resp);
+            if (
+              responseText &&
+              checkSubagentLoop({
+                type: GeminiEventType.Content,
+                value: responseText,
+              })
+            ) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
+            }
+
+            for (const fc of chunkFunctionCalls) {
+              const toolName = String(fc.name);
+              if (
+                checkSubagentLoop({
+                  type: GeminiEventType.ToolCallRequest,
+                  value: {
+                    callId: fc.id ?? `${toolName}-${Date.now()}`,
+                    providerCallId: getProviderToolCallId(fc),
+                    name: toolName,
+                    args: (fc.args ?? {}) as Record<string, unknown>,
+                    isClientInitiated: false,
+                    prompt_id: promptId,
+                    response_id: currentResponseId,
+                    wasOutputTruncated,
+                  },
+                })
+              ) {
+                terminateMode = AgentTerminateMode.LOOP_DETECTED;
+                loopDetectedInStream = true;
+                break;
+              }
+            }
+            if (loopDetectedInStream) {
+              break;
+            }
+
+            const finishReason = resp.candidates?.[0]?.finishReason;
+            if (
+              finishReason &&
+              checkSubagentLoop({
+                type: GeminiEventType.Finished,
+                value: {
+                  reason: finishReason,
+                  usageMetadata: resp.usageMetadata,
+                },
+              })
+            ) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
+            }
           }
+        }
+
+        if (loopDetectedInStream) {
+          break;
         }
 
         if (roundText || roundThoughtText) {

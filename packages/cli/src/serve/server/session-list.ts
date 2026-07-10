@@ -37,7 +37,10 @@ export interface ListWorkspaceSessionsResult {
 }
 
 export class InvalidCursorError extends Error {
-  constructor(cursor: string, kind: 'numeric' | 'organized' = 'numeric') {
+  constructor(
+    cursor: string,
+    kind: 'numeric' | 'organized' | 'live' = 'numeric',
+  ) {
     super(`Invalid cursor: "${cursor}" is not a valid ${kind} cursor`);
     this.name = 'InvalidCursorError';
   }
@@ -66,6 +69,11 @@ interface OrganizedCursor {
 
 interface OrganizedCursorKey {
   isPinned: boolean;
+  activityTime: number;
+  sessionId: string;
+}
+
+interface LiveSessionCursorKey {
   activityTime: number;
   sessionId: string;
 }
@@ -111,6 +119,35 @@ function encodeOrganizedCursor(
     JSON.stringify({ group, archiveState, last }),
     'utf8',
   ).toString('base64url');
+}
+
+function parseLiveSessionCursor(
+  cursor: string,
+): LiveSessionCursorKey | undefined {
+  if (cursor === '') return undefined;
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(cursor, 'base64url').toString('utf8'),
+    ) as unknown;
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed) ||
+      typeof (parsed as LiveSessionCursorKey).activityTime !== 'number' ||
+      !Number.isFinite((parsed as LiveSessionCursorKey).activityTime) ||
+      typeof (parsed as LiveSessionCursorKey).sessionId !== 'string' ||
+      (parsed as LiveSessionCursorKey).sessionId.length === 0
+    ) {
+      throw new Error('invalid live cursor');
+    }
+    return parsed as LiveSessionCursorKey;
+  } catch {
+    throw new InvalidCursorError(cursor, 'live');
+  }
+}
+
+function encodeLiveSessionCursor(last: LiveSessionCursorKey): string {
+  return Buffer.from(JSON.stringify(last), 'utf8').toString('base64url');
 }
 
 function toSummary(item: {
@@ -172,6 +209,24 @@ async function listAllPersistedSummaries(
 function getSummaryActivityTime(session: BridgeSessionSummary): number {
   const time = Date.parse(session.updatedAt ?? session.createdAt);
   return Number.isFinite(time) ? time : 0;
+}
+
+function getLiveSessionCursorKey(
+  session: BridgeSessionSummary,
+): LiveSessionCursorKey {
+  return {
+    activityTime: getSummaryActivityTime(session),
+    sessionId: session.sessionId,
+  };
+}
+
+function compareLiveSessionCursorKeys(
+  a: LiveSessionCursorKey,
+  b: LiveSessionCursorKey,
+): number {
+  const byTime = b.activityTime - a.activityTime;
+  if (byTime !== 0) return byTime;
+  return a.sessionId.localeCompare(b.sessionId);
 }
 
 function compareOrganizedSessions(
@@ -451,6 +506,50 @@ export async function listWorkspaceSessionsForResponse(
     persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
 
   return { sessions, nextCursor };
+}
+
+export function listLiveWorkspaceSessionsForResponse(
+  bridge: AcpSessionBridge,
+  workspaceCwd: string,
+  options?: Pick<ListWorkspaceSessionsOptions, 'cursor' | 'size'>,
+): ListWorkspaceSessionsResult {
+  const rawSize = options?.size;
+  const requestedSize =
+    typeof rawSize === 'number' && Number.isSafeInteger(rawSize)
+      ? rawSize
+      : DEFAULT_SESSION_PAGE_SIZE;
+  const pageSize = Math.min(Math.max(requestedSize, 1), MAX_SESSION_PAGE_SIZE);
+  const cursorKey =
+    options?.cursor !== undefined
+      ? parseLiveSessionCursor(options.cursor)
+      : undefined;
+  const sessions = bridge
+    .listWorkspaceSessions(workspaceCwd)
+    .sort((a, b) =>
+      compareLiveSessionCursorKeys(
+        getLiveSessionCursorKey(a),
+        getLiveSessionCursorKey(b),
+      ),
+    );
+  const afterCursor =
+    cursorKey === undefined
+      ? sessions
+      : sessions.filter(
+          (session) =>
+            compareLiveSessionCursorKeys(
+              cursorKey,
+              getLiveSessionCursorKey(session),
+            ) < 0,
+        );
+  const page = afterCursor.slice(0, pageSize);
+  const nextCursor =
+    page.length < afterCursor.length
+      ? encodeLiveSessionCursor(getLiveSessionCursorKey(page[page.length - 1]!))
+      : undefined;
+  return {
+    sessions: page,
+    ...(nextCursor !== undefined ? { nextCursor } : {}),
+  };
 }
 
 export function parseSessionPageSizeQuery(raw: unknown): number | undefined {

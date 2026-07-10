@@ -1,0 +1,80 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import {
+  TotalSessionLimitExceededError,
+  type BridgeFreshSessionAdmission,
+  type BridgeFreshSessionAdmissionContext,
+  type BridgeFreshSessionReservation,
+} from './acp-session-bridge.js';
+
+interface SessionCountSource {
+  readonly sessionCount: number;
+}
+
+export interface TotalSessionAdmissionOptions {
+  readonly maxTotalSessions?: number;
+  readonly getBridges: () => readonly SessionCountSource[];
+}
+
+export interface TotalSessionAdmissionSnapshot {
+  readonly liveCount: number;
+  readonly inFlight: number;
+}
+
+export interface TotalSessionAdmissionController {
+  readonly admit: BridgeFreshSessionAdmission;
+  readonly snapshot: () => TotalSessionAdmissionSnapshot;
+}
+
+export function createTotalSessionAdmissionController({
+  maxTotalSessions,
+  getBridges,
+}: TotalSessionAdmissionOptions): TotalSessionAdmissionController {
+  let inFlight = 0;
+  const limit =
+    maxTotalSessions === undefined ||
+    maxTotalSessions === 0 ||
+    maxTotalSessions === Number.POSITIVE_INFINITY
+      ? Number.POSITIVE_INFINITY
+      : maxTotalSessions;
+
+  return {
+    admit(
+      context: BridgeFreshSessionAdmissionContext,
+    ): BridgeFreshSessionReservation {
+      if (limit !== Number.POSITIVE_INFINITY) {
+        if (getLiveCount(getBridges()) + inFlight >= limit) {
+          throw Object.assign(new TotalSessionLimitExceededError(limit), {
+            operation: context.operation,
+            workspaceCwd: context.workspaceCwd,
+            ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+            ...(context.sourceSessionId
+              ? { sourceSessionId: context.sourceSessionId }
+              : {}),
+          });
+        }
+      }
+
+      inFlight++;
+      let released = false;
+      return {
+        release() {
+          if (released) return;
+          released = true;
+          inFlight--;
+        },
+      };
+    },
+    snapshot() {
+      return { liveCount: getLiveCount(getBridges()), inFlight };
+    },
+  };
+}
+
+function getLiveCount(bridges: readonly SessionCountSource[]): number {
+  return bridges.reduce((sum, bridge) => sum + bridge.sessionCount, 0);
+}

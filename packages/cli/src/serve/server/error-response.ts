@@ -27,6 +27,7 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   RestoreInProgressError,
+  SessionArtifactAuthorizationError,
   SessionArchivedError,
   SessionArchivingError,
   SessionBusyError,
@@ -40,6 +41,7 @@ import {
   WorkspaceInitRaceError,
   WorkspaceInitSymlinkError,
   WorkspaceMismatchError,
+  TotalSessionLimitExceededError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 
@@ -278,6 +280,15 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof SessionArtifactAuthorizationError) {
+    res.status(403).json({
+      error: err.message,
+      code: 'session_artifact_forbidden',
+      sessionId: err.sessionId,
+      artifactId: err.artifactId,
+    });
+    return;
+  }
   if (err instanceof SessionShellDisabledError) {
     res.status(403).json({
       error: err.message,
@@ -368,6 +379,37 @@ export function sendBridgeError(
       error: err.message,
       code: 'session_limit_exceeded',
       limit: err.limit,
+      scope: 'workspace',
+    });
+    return;
+  }
+  if (err instanceof TotalSessionLimitExceededError) {
+    const totalSessionError = err as TotalSessionLimitExceededError & {
+      operation?: string;
+      workspaceCwd?: string;
+      sourceSessionId?: string;
+    };
+    daemonLog?.warn('total session admission rejected', {
+      ...(ctx?.route ? { route: ctx.route } : {}),
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+      limit: totalSessionError.limit,
+      scope: totalSessionError.scope,
+      ...(totalSessionError.operation
+        ? { operation: totalSessionError.operation }
+        : {}),
+      ...(totalSessionError.workspaceCwd
+        ? { workspaceCwd: totalSessionError.workspaceCwd }
+        : {}),
+      ...(totalSessionError.sourceSessionId
+        ? { sourceSessionId: totalSessionError.sourceSessionId }
+        : {}),
+    });
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'session_limit_exceeded',
+      limit: err.limit,
+      scope: err.scope,
     });
     return;
   }
