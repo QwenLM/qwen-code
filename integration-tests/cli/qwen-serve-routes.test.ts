@@ -22,6 +22,7 @@ import {
   mkdtempSync,
   realpathSync,
   rmSync,
+  truncateSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -33,7 +34,11 @@ import {
   DaemonHttpError,
   type DaemonSessionSummary,
 } from '@qwen-code/sdk';
-import { Storage, type ChatRecord } from '@qwen-code/qwen-code-core';
+import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  Storage,
+  type ChatRecord,
+} from '@qwen-code/qwen-code-core';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Match the rest of the integration suite: prefer the bundled CLI
@@ -58,18 +63,25 @@ let client: DaemonClient;
 function writePersistedTranscript(
   sessionId: string,
   records: ChatRecord[],
-): void {
+  state: 'active' | 'archived' = 'active',
+): string {
   const qwenHome = path.join(homeDir, '.qwen');
   const projectDir = Storage.runWithRuntimeBaseDir(qwenHome, REPO_ROOT, () =>
     new Storage(REPO_ROOT).getProjectDir(),
   );
-  const chatsDir = path.join(projectDir, 'chats');
+  const chatsDir = path.join(
+    projectDir,
+    'chats',
+    ...(state === 'archived' ? ['archive'] : []),
+  );
   mkdirSync(chatsDir, { recursive: true });
+  const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
   writeFileSync(
-    path.join(chatsDir, `${sessionId}.jsonl`),
+    filePath,
     records.map((record) => JSON.stringify(record)).join('\n') + '\n',
     'utf8',
   );
+  return filePath;
 }
 
 function chatRecord(
@@ -367,6 +379,11 @@ describe('qwen serve — capabilities envelope', () => {
 });
 
 describe('qwen serve — transcript paging route', () => {
+  const getTranscript = (sessionId: string, query = '') =>
+    fetch(`${base}/session/${sessionId}/transcript${query}`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+
   it('serves persisted transcript pages through the SDK helper', async () => {
     const sessionId = '99999999-aaaa-bbbb-cccc-111111111111';
     writePersistedTranscript(sessionId, [
@@ -398,6 +415,86 @@ describe('qwen serve — transcript paging route', () => {
       second.events.every((event) => event.type === 'session_update'),
     ).toBe(true);
     expect(second.events.some((event) => 'id' in event)).toBe(false);
+  });
+
+  it('maps transcript request validation errors through the real daemon', async () => {
+    const sessionId = '99999999-aaaa-bbbb-cccc-222222222222';
+    writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u1', null, 'validation transcript'),
+    ]);
+
+    const invalidLimit = await getTranscript(sessionId, '?limit=0');
+    expect(invalidLimit.status).toBe(400);
+    await expect(invalidLimit.json()).resolves.toMatchObject({
+      code: 'invalid_transcript_limit',
+    });
+
+    const invalidCursor = await getTranscript(
+      sessionId,
+      '?cursor=not-a-cursor',
+    );
+    expect(invalidCursor.status).toBe(400);
+    await expect(invalidCursor.json()).resolves.toMatchObject({
+      code: 'invalid_transcript_cursor',
+    });
+
+    const missing = await getTranscript('99999999-aaaa-bbbb-cccc-333333333333');
+    expect(missing.status).toBe(404);
+  });
+
+  it('maps archived, conflicting, and unavailable transcript snapshots to 409', async () => {
+    const archivedId = '99999999-aaaa-bbbb-cccc-444444444444';
+    const archivedRecord = chatRecord(
+      archivedId,
+      'u1',
+      null,
+      'archived transcript',
+    );
+    writePersistedTranscript(archivedId, [archivedRecord], 'archived');
+    const archived = await getTranscript(archivedId);
+    expect(archived.status).toBe(409);
+    await expect(archived.json()).resolves.toMatchObject({
+      code: 'session_archived',
+    });
+
+    const conflictId = '99999999-aaaa-bbbb-cccc-555555555555';
+    const conflictRecord = chatRecord(
+      conflictId,
+      'u1',
+      null,
+      'conflicting transcript',
+    );
+    writePersistedTranscript(conflictId, [conflictRecord]);
+    writePersistedTranscript(conflictId, [conflictRecord], 'archived');
+    const conflict = await getTranscript(conflictId);
+    expect(conflict.status).toBe(409);
+    await expect(conflict.json()).resolves.toMatchObject({
+      code: 'session_conflict',
+    });
+
+    const unavailable = await getTranscript(
+      '99999999-aaaa-bbbb-cccc-666666666666',
+      '?cursor=stale',
+    );
+    expect(unavailable.status).toBe(409);
+    await expect(unavailable.json()).resolves.toMatchObject({
+      code: 'transcript_snapshot_unavailable',
+    });
+  });
+
+  it('rejects oversized transcript snapshots with 413', async () => {
+    const sessionId = '99999999-aaaa-bbbb-cccc-777777777777';
+    const filePath = writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u1', null, 'oversized transcript'),
+    ]);
+    truncateSync(filePath, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
+
+    const response = await getTranscript(sessionId);
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'transcript_too_large',
+      maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+    });
   });
 });
 

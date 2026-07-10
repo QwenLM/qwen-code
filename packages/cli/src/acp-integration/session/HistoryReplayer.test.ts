@@ -442,6 +442,45 @@ describe('HistoryReplayer', () => {
       });
     });
 
+    it('should match a pending function call with its result on the next page', async () => {
+      const callRecord: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-123',
+                name: 'read_file',
+                args: { path: '/test.ts' },
+              },
+            },
+          ],
+        },
+      };
+      const firstPage = await replayer.replayPage([callRecord], {
+        finalizeDangling: false,
+      });
+
+      sendUpdateSpy.mockClear();
+      const resultRecord = createToolResultRecord(
+        'read_file',
+        'File contents here',
+      );
+      const secondPage = await replayer.replayPage([resultRecord], {
+        pendingToolCalls: firstPage.pendingToolCalls,
+        finalizeDangling: true,
+      });
+
+      expect(secondPage.pendingToolCalls).toEqual([]);
+      expect(sentUpdates()).toHaveLength(1);
+      expect(sentUpdates()[0]).toMatchObject({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-123',
+        status: 'completed',
+      });
+    });
+
     it('should expose pending function calls when replayPage throws mid-page', async () => {
       const record: ChatRecord = {
         ...createAssistantRecord(''),

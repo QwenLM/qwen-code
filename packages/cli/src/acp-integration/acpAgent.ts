@@ -8600,7 +8600,16 @@ class QwenAgent implements Agent {
       const config = await pending;
       const current = this.transcriptReplayConfigCache.get(key);
       if (current !== entry) {
-        return config;
+        this.disposeTranscriptReplayConfig(config);
+        if (current?.config) {
+          return current.config;
+        }
+        if (current?.pending) {
+          return current.pending;
+        }
+        throw new Error(
+          'Transcript replay config was invalidated while loading',
+        );
       }
       entry.config = config;
       entry.pending = undefined;

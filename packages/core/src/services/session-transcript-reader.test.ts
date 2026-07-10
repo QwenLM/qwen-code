@@ -8,6 +8,18 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const { mockDebugLogger } = vi.hoisted(() => ({
+  mockDebugLogger: {
+    debug: vi.fn(),
+    warn: vi.fn(),
+  },
+}));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => mockDebugLogger,
+}));
+
 import { Storage } from '../config/storage.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import {
@@ -15,6 +27,7 @@ import {
   getSessionTranscriptIndexCacheStatsForTest,
   InvalidSessionTranscriptCursorError,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  SESSION_TRANSCRIPT_MAX_LIMIT,
   resetSessionTranscriptIndexCacheForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
   SessionTranscriptSnapshotUnavailableError,
@@ -27,6 +40,7 @@ describe('SessionTranscriptReader', () => {
   const sessionId = '550e8400-e29b-41d4-a716-446655440000';
 
   beforeEach(async () => {
+    vi.clearAllMocks();
     runtimeDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-transcript-reader-'),
     );
@@ -97,6 +111,37 @@ describe('SessionTranscriptReader', () => {
     return encodeSessionTranscriptCursor(state, workspaceDir);
   }
 
+  it('rejects an empty transcript snapshot', async () => {
+    await writeRawTranscript('');
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readPage(sessionId),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+  });
+
+  it('returns a single-record transcript without a continuation cursor', async () => {
+    await writeRecords([record('u1', null, 'only record')]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual(['u1']);
+    expect(page.hasMore).toBe(false);
+    expect(page.nextCursorState).toBeUndefined();
+  });
+
+  it.each([0, -1, SESSION_TRANSCRIPT_MAX_LIMIT + 1, 1.5])(
+    'rejects invalid page limit %s',
+    async (limit) => {
+      await expect(
+        new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+          limit,
+        }),
+      ).rejects.toBeInstanceOf(RangeError);
+    },
+  );
+
   it('pages only the active parentUuid chain and skips abandoned branches', async () => {
     await writeRecords([
       record('u1', null, 'root'),
@@ -160,6 +205,27 @@ describe('SessionTranscriptReader', () => {
       reader.readPage(otherSessionId, {
         cursor: encodeCursor(first.nextCursorState!),
       }),
+    ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+  });
+
+  it('rejects malformed and unsupported-version cursors', async () => {
+    const reader = new SessionTranscriptReader(workspaceDir);
+    await expect(
+      reader.readPage(sessionId, { cursor: 'not-a-cursor' }),
+    ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+    ]);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const wrongVersion = encodeCursor({
+      ...first.nextCursorState!,
+      v: 99 as 1,
+    });
+
+    await expect(
+      reader.readPage(sessionId, { cursor: wrongVersion }),
     ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
   });
 
@@ -302,6 +368,34 @@ describe('SessionTranscriptReader', () => {
     expect(second.hasMore).toBe(true);
   });
 
+  it('warns and replaces a corrupt persisted cursor signing key', async () => {
+    const projectDir = new Storage(workspaceDir).getProjectDir();
+    const keyPath = path.join(projectDir, 'session-transcript-cursor-key');
+    await fs.mkdir(projectDir, { recursive: true });
+    await fs.writeFile(keyPath, 'corrupt-key\n', 'utf8');
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      {
+        limit: 1,
+      },
+    );
+    encodeCursor(page.nextCursorState!);
+
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('invalid cursor signing key'),
+    );
+    const replacement = Buffer.from(
+      (await fs.readFile(keyPath, 'utf8')).trim(),
+      'base64url',
+    );
+    expect(replacement).toHaveLength(32);
+  });
+
   it('rejects cursors signed for another workspace', async () => {
     await writeRecords([
       record('u1', null, 'hello'),
@@ -336,6 +430,20 @@ describe('SessionTranscriptReader', () => {
       { text: 'hello' },
       { text: ' world' },
     ]);
+  });
+
+  it('skips non-ChatRecord JSON lines while indexing', async () => {
+    await writeRawTranscript(
+      `${JSON.stringify({ event: 'metadata' })}\n${JSON.stringify(
+        record('u1', null, 'hello'),
+      )}\n`,
+    );
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual(['u1']);
   });
 
   it('raises snapshot-unavailable when a same-size in-place rewrite reuses a cached segment', async () => {
@@ -438,10 +546,34 @@ describe('SessionTranscriptReader', () => {
     expect(second.records.map((r) => r.uuid)).toEqual(['a1']);
   });
 
+  it('evicts the least-recently-used index after 32 cached sessions', async () => {
+    const reader = new SessionTranscriptReader(workspaceDir);
+    for (let index = 0; index < 33; index++) {
+      const targetSessionId = `00000000-0000-0000-0000-${index
+        .toString(16)
+        .padStart(12, '0')}`;
+      await writeRecords(
+        [record(`u${index}`, null, `record ${index}`, targetSessionId)],
+        targetSessionId,
+      );
+      await reader.readPage(targetSessionId);
+    }
+
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(32);
+  });
+
   it('rejects path-like session ids before building a transcript path', async () => {
     const reader = new SessionTranscriptReader(workspaceDir);
 
     await expect(reader.readPage('../escape')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('returns ENOENT for a valid session id without a transcript file', async () => {
+    const reader = new SessionTranscriptReader(workspaceDir);
+
+    await expect(reader.readPage(sessionId)).rejects.toMatchObject({
       code: 'ENOENT',
     });
   });

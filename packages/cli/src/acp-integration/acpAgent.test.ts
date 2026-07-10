@@ -681,6 +681,8 @@ import {
   applyProviderInstallPlan,
   Storage,
   SessionTranscriptReader,
+  InvalidSessionTranscriptCursorError,
+  SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   encodeSessionTranscriptCursor,
   unregisterGoalHook,
@@ -6437,6 +6439,151 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('disposes a pending transcript config superseded by newer settings', async () => {
+    const oldSettings = makeCoreSettings('English');
+    const newSettings = makeCoreSettings('Japanese');
+    mockRunExitCleanup.mockResolvedValue(undefined);
+    const oldToolRegistry = { stop: vi.fn().mockResolvedValue(undefined) };
+    let releaseOldInitialize!: () => void;
+    const oldInitialize = new Promise<void>((resolve) => {
+      releaseOldInitialize = resolve;
+    });
+    const oldConfig = {
+      ...makeInnerConfig(),
+      initialize: vi.fn(() => oldInitialize),
+      getToolRegistry: vi.fn(() => oldToolRegistry),
+    } as unknown as Config;
+    const newToolRegistry = { stop: vi.fn().mockResolvedValue(undefined) };
+    const newConfig = {
+      ...makeInnerConfig(),
+      getToolRegistry: vi.fn(() => newToolRegistry),
+    } as unknown as Config;
+    vi.mocked(loadCliConfig)
+      .mockResolvedValueOnce(oldConfig)
+      .mockResolvedValueOnce(newConfig);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage: vi.fn().mockResolvedValue({
+            sessionId: VALID_SESSION_ID,
+            records: [],
+            hasMore: false,
+            startTime: 'start',
+            lastUpdated: 'end',
+          }),
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(oldSettings);
+
+    const first = agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+    });
+    await vi.waitFor(() => expect(loadCliConfig).toHaveBeenCalledTimes(1));
+
+    vi.mocked(loadSettings).mockReturnValue(newSettings);
+    const second = agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+    });
+    await vi.waitFor(() => expect(loadCliConfig).toHaveBeenCalledTimes(2));
+
+    releaseOldInitialize();
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    await vi.waitFor(() => expect(oldToolRegistry.stop).toHaveBeenCalledOnce());
+
+    mockConnectionState.resolve();
+    await agentPromise;
+    expect(newToolRegistry.stop).toHaveBeenCalledOnce();
+  });
+
+  it('coalesces concurrent transcript config creation for the same settings', async () => {
+    const settings = makeCoreSettings();
+    mockRunExitCleanup.mockResolvedValue(undefined);
+    let releaseInitialize!: () => void;
+    const initializeGate = new Promise<void>((resolve) => {
+      releaseInitialize = resolve;
+    });
+    const toolRegistry = { stop: vi.fn().mockResolvedValue(undefined) };
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...makeInnerConfig(),
+      initialize: vi.fn(() => initializeGate),
+      getToolRegistry: vi.fn(() => toolRegistry),
+    } as unknown as Config);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage: vi.fn().mockResolvedValue({
+            sessionId: VALID_SESSION_ID,
+            records: [],
+            hasMore: false,
+            startTime: 'start',
+            lastUpdated: 'end',
+          }),
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const first = agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+    });
+    const second = agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+    });
+    await vi.waitFor(() => expect(loadCliConfig).toHaveBeenCalledOnce());
+
+    releaseInitialize();
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    expect(loadCliConfig).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+    expect(toolRegistry.stop).toHaveBeenCalledOnce();
+  });
+
+  it('disposes a pending transcript config that finishes after agent shutdown', async () => {
+    const settings = makeCoreSettings();
+    mockRunExitCleanup.mockResolvedValue(undefined);
+    let releaseInitialize!: () => void;
+    const initializeGate = new Promise<void>((resolve) => {
+      releaseInitialize = resolve;
+    });
+    const toolRegistry = { stop: vi.fn().mockResolvedValue(undefined) };
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...makeInnerConfig(),
+      initialize: vi.fn(() => initializeGate),
+      getToolRegistry: vi.fn(() => toolRegistry),
+    } as unknown as Config);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage: vi.fn().mockResolvedValue({
+            sessionId: VALID_SESSION_ID,
+            records: [],
+            hasMore: false,
+            startTime: 'start',
+            lastUpdated: 'end',
+          }),
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const request = agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      { sessionId: VALID_SESSION_ID },
+    );
+    await vi.waitFor(() => expect(loadCliConfig).toHaveBeenCalledOnce());
+
+    mockConnectionState.resolve();
+    await agentPromise;
+    releaseInitialize();
+
+    await expect(request).rejects.toThrow(
+      'Transcript replay config was invalidated while loading',
+    );
+    await vi.waitFor(() => expect(toolRegistry.stop).toHaveBeenCalledOnce());
+  });
+
   it('qwen/status/session/transcript rejects malformed cursor and limit params before reading', async () => {
     const settings = makeCoreSettings();
     const readPage = vi.fn();
@@ -6567,6 +6714,121 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     });
     expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {});
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it.each([
+    {
+      name: 'invalid cursors',
+      error: new InvalidSessionTranscriptCursorError(),
+      cursor: undefined,
+      expected: {
+        code: -32602,
+        data: { errorKind: 'invalid_transcript_cursor' },
+      },
+    },
+    {
+      name: 'unavailable snapshots',
+      error: new SessionTranscriptSnapshotUnavailableError(VALID_SESSION_ID),
+      cursor: undefined,
+      expected: {
+        code: -32010,
+        data: {
+          errorKind: 'transcript_snapshot_unavailable',
+          sessionId: VALID_SESSION_ID,
+        },
+      },
+    },
+    {
+      name: 'missing cursor snapshots',
+      error: Object.assign(new Error('missing'), { code: 'ENOENT' }),
+      cursor: 'cursor-1',
+      expected: {
+        code: -32010,
+        data: {
+          errorKind: 'transcript_snapshot_unavailable',
+          sessionId: VALID_SESSION_ID,
+        },
+      },
+    },
+    {
+      name: 'missing first-page transcripts',
+      error: Object.assign(new Error('missing'), { code: 'ENOENT' }),
+      cursor: undefined,
+      expected: {
+        code: -32002,
+        data: { uri: `session:${VALID_SESSION_ID}` },
+      },
+    },
+  ])(
+    'qwen/status/session/transcript maps $name',
+    async ({ error, cursor, expected }) => {
+      const settings = makeCoreSettings();
+      vi.mocked(SessionTranscriptReader).mockImplementation(
+        () =>
+          ({
+            readPage: vi.fn().mockRejectedValue(error),
+          }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+      );
+      const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+      await expect(
+        agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+          sessionId: VALID_SESSION_ID,
+          ...(cursor ? { cursor } : {}),
+        }),
+      ).rejects.toMatchObject(expected);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it('logs and drops malformed pending tool calls from transcript replay state', async () => {
+    const settings = makeCoreSettings();
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...makeInnerConfig(),
+      getToolRegistry: vi.fn(() => undefined),
+    } as unknown as Config);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage: vi.fn().mockResolvedValue({
+            sessionId: VALID_SESSION_ID,
+            records: [],
+            replay: {
+              pendingToolCalls: [
+                { callId: 'valid', toolName: 'Read', recordId: 'u1' },
+                { callId: 123, toolName: 'Read', recordId: 'u2' },
+              ],
+            },
+            hasMore: false,
+            startTime: 'start',
+            lastUpdated: 'end',
+          }),
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+    });
+
+    expect(mockHistoryReplayPage).toHaveBeenCalledWith(
+      expect.anything(),
+      [],
+      expect.objectContaining({
+        pendingToolCalls: [
+          { callId: 'valid', toolName: 'Read', recordId: 'u1' },
+        ],
+      }),
+    );
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      '[transcript] replay state dropped 1 of 2 malformed pending tool calls',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

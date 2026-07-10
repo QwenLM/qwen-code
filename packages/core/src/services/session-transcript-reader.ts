@@ -169,6 +169,9 @@ function cursorPayload(
 }
 
 function getCursorHmacKeyPath(workspaceCwd: string): string {
+  // This key binds cursors to one workspace and prevents remote cursor
+  // tampering or cross-workspace replay. It is not intended to protect against
+  // a local user who can already read the project directory and transcripts.
   return path.join(
     new Storage(workspaceCwd).getProjectDir(),
     CURSOR_HMAC_KEY_FILENAME,
@@ -181,7 +184,13 @@ function readCursorHmacKey(keyPath: string): Buffer | undefined {
       fs.readFileSync(keyPath, 'utf8').trim(),
       'base64url',
     );
-    return key.length === CURSOR_HMAC_KEY_BYTES ? key : undefined;
+    if (key.length === CURSOR_HMAC_KEY_BYTES) {
+      return key;
+    }
+    debugLogger.warn(
+      `invalid cursor signing key at ${keyPath}; replacing persisted key`,
+    );
+    return undefined;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return undefined;
@@ -571,6 +580,10 @@ function aggregateRecords(records: ChatRecord[]): ChatRecord {
 
   const base = { ...records[0] };
 
+  // Match SessionService.aggregateRecords so paged replay and /load restore
+  // interpret append-only same-uuid fragments identically: message parts are
+  // appended, latest usage/timestamp win, and stable identity/result fields
+  // keep their first populated value.
   for (let i = 1; i < records.length; i++) {
     const record = records[i];
     if (record.message !== undefined) {

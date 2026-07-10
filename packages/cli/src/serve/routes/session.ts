@@ -705,7 +705,12 @@ export function registerSessionRoutes(
           activeRuntimes.push(runtime);
         }
       } catch (err) {
-        loadError ??= err;
+        if (
+          loadError === undefined ||
+          shouldPreserveTranscriptResolutionError(err)
+        ) {
+          loadError = err;
+        }
       }
     }
     if (activeRuntimes.length === 1) {
@@ -726,10 +731,14 @@ export function registerSessionRoutes(
       const runtimes = workspaceRegistry.list();
       const firstError =
         loadError instanceof Error ? loadError.message : String(loadError);
+      daemonLog?.warn('transcript session resolution failed', {
+        route,
+        sessionId,
+        workspaceCount: runtimes.length,
+        error: firstError,
+      });
       throw new Error(
-        `Transcript session resolution failed across ${runtimes.length} workspace(s) ` +
-          `(${runtimes.map((runtime) => runtime.workspaceCwd).join(', ')}): ` +
-          firstError,
+        `Transcript session resolution failed across ${runtimes.length} workspace(s)`,
       );
     }
     return throwMissingActiveTranscript();

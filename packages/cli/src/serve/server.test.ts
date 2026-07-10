@@ -11361,6 +11361,56 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('rejects transcript requests with ambiguous live session ownership', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-abcdabcdabcd';
+      const secondaryDir = path.join(runtimeDir, 'ambiguous-secondary');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      const summaryFor = (workspaceCwd: string): BridgeSessionSummary => ({
+        sessionId: sid,
+        workspaceCwd,
+        createdAt: '2026-05-28T12:00:00.000Z',
+        clientCount: 0,
+        hasActivePrompt: false,
+      });
+      const primaryBridge = fakeBridge({
+        summaryImpl: () => summaryFor(wsDir),
+      });
+      const secondaryBridge = fakeBridge({
+        summaryImpl: () => summaryFor(secondaryWs),
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(500);
+      expect(res.body).toMatchObject({
+        code: 'ambiguous_session_owner',
+        sessionId: sid,
+        workspaceIds: ['primary', 'secondary'],
+      });
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
+    });
+
     it('rejects transcript pages owned by an untrusted secondary workspace', async () => {
       const sid = '55555555-bbbb-cccc-dddd-acacacacacac';
       const secondaryDir = path.join(runtimeDir, 'untrusted-secondary');
@@ -11441,7 +11491,55 @@ describe('createServeApp', () => {
       expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
     });
 
-    it('wraps multi-workspace transcript scan errors with resolution context', async () => {
+    it('prefers structured transcript errors found after generic scan failures', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-afafafafafaf';
+      const secondaryDir = path.join(runtimeDir, 'archived-after-failure');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockRejectedValueOnce(new Error('EACCES: primary scan failed'))
+        .mockResolvedValueOnce('archived');
+      try {
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          { workspaceRegistry: registry },
+        );
+
+        const res = await request(app)
+          .get(`/session/${sid}/transcript`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({
+          code: 'session_archived',
+          sessionId: sid,
+        });
+        expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+        expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
+      } finally {
+        locationSpy.mockRestore();
+      }
+    });
+
+    it('sanitizes multi-workspace transcript scan errors in HTTP responses', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aeaeaeaeaeae';
       const secondaryDir = path.join(runtimeDir, 'failing-secondary');
       await fsp.mkdir(secondaryDir, { recursive: true });
@@ -11484,9 +11582,9 @@ describe('createServeApp', () => {
         expect(res.body.error).toContain(
           'Transcript session resolution failed across 2 workspace(s)',
         );
-        expect(res.body.error).toContain(wsDir);
-        expect(res.body.error).toContain(secondaryWs);
-        expect(res.body.error).toContain('EACCES: permission denied');
+        expect(res.body.error).not.toContain(wsDir);
+        expect(res.body.error).not.toContain(secondaryWs);
+        expect(res.body.error).not.toContain('EACCES: permission denied');
         expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
         expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
       } finally {
@@ -11548,23 +11646,30 @@ describe('createServeApp', () => {
       expect(bridge.sessionTranscriptCalls).toHaveLength(0);
     });
 
-    it('rejects invalid transcript limit before touching the bridge', async () => {
-      const sid = '55555555-bbbb-cccc-dddd-cccccccccccc';
-      const bridge = fakeBridge();
-      await writeTranscriptSession(sid);
-      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
-        bridge,
-        boundWorkspace: wsDir,
-      });
+    it.each(['501', '0', 'abc', '-1', '1&limit=2'])(
+      'rejects invalid transcript limit query %s before touching the bridge',
+      async (limitQuery) => {
+        const sid = '55555555-bbbb-cccc-dddd-cccccccccccc';
+        const bridge = fakeBridge();
+        await writeTranscriptSession(sid);
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          {
+            bridge,
+            boundWorkspace: wsDir,
+          },
+        );
 
-      const res = await request(app)
-        .get(`/session/${sid}/transcript?limit=501`)
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const res = await request(app)
+          .get(`/session/${sid}/transcript?limit=${limitQuery}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
 
-      expect(res.status).toBe(400);
-      expect(res.body.code).toBe('invalid_transcript_limit');
-      expect(bridge.sessionTranscriptCalls).toHaveLength(0);
-    });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_transcript_limit');
+        expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+      },
+    );
 
     it('maps child invalid cursor errors to 400', async () => {
       const sid = '55555555-bbbb-cccc-dddd-dddddddddddd';
