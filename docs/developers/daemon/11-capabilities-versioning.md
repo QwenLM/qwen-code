@@ -2,11 +2,11 @@
 
 ## Overview
 
-`GET /capabilities` is the daemon preflight endpoint. Every SDK client should read it before calling any other route so it can learn which protocol version the daemon speaks, which feature tags are enabled, and which workspace the daemon is bound to. The contract:
+`GET /capabilities` is the daemon preflight endpoint. Every SDK client should read it before calling any other route so it can learn which protocol version the daemon speaks, which feature tags are enabled, and which workspace runtimes the daemon accepts. The contract:
 
 - **There is one protocol version: `v1`.** `SERVE_PROTOCOL_VERSION = 'v1'` and `SUPPORTED_SERVE_PROTOCOL_VERSIONS = ['v1']`. v1 is additive internally; breaking frame-shape changes are reserved for v2.
 - **Each tag has a `since` version.** Future v2 daemons can advertise both v1 and v2 tags.
-- **Some tags are conditional.** Thirteen tags (`require_auth`, `mcp_workspace_pool`, `mcp_pool_restart`, `allow_origin`, `prompt_absolute_deadline`, `writer_idle_timeout`, `workspace_settings`, `workspace_voice`, `workspace_voice_transcription`, `session_shell_command`, `rate_limit`, `workspace_reload`, `voice_transcribe`) are advertised only when the corresponding deployment toggle is enabled. Tag presence means the behavior exists.
+- **Some tags are conditional.** Tags listed in `CONDITIONAL_SERVE_FEATURES` are advertised only when the corresponding deployment toggle is enabled. Tag presence means the behavior exists.
 - **Capability tag = behavior contract.** Adding new behavior under an existing tag can silently break clients that preflighted the old tag. New behavior needs a new tag.
 
 The complete registry lives in `packages/cli/src/serve/capabilities.ts`.
@@ -30,12 +30,13 @@ The complete registry lives in `packages/cli/src/serve/capabilities.ts`.
   mode: 'http-bridge',
   features: ServeFeature[],
   workspaceCwd: string,
+  workspaces?: Array<{ id: string, cwd: string, primary: boolean, trusted: boolean }>,
   protocol?: { current: 'v1', supported: ['v1'] },
   policy?: { permission: PermissionPolicy },
 }
 ```
 
-`workspaceCwd` is the canonical workspace bound at daemon boot (see [`02-serve-runtime.md`](./02-serve-runtime.md)). `policy.permission` is the active mediator policy.
+`workspaceCwd` is the canonical primary workspace path (see [`02-serve-runtime.md`](./02-serve-runtime.md)). When `multi_workspace_sessions` is advertised, `workspaces[]` lists every registered sessions-only runtime. `policy.permission` is the active mediator policy.
 
 ### `ServeCapabilityDescriptor`
 

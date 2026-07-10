@@ -533,7 +533,6 @@ export function useQueuedPrompts({
     if (streamingState !== 'idle') return;
     const ctrl = midTurnEnqueueAbortRef.current;
     if (!ctrl) return;
-    console.debug('[mid-turn] turn settled; cancelling any in-flight push');
     ctrl.abort();
     midTurnEnqueueAbortRef.current = null;
   }, [streamingState]);
@@ -914,16 +913,6 @@ export function useQueuedPrompts({
     useDaemonMidTurnInjected();
   useEffect(() => {
     if (!sessionId || midTurnInjectedBatches.length === 0) return;
-    if (
-      clientId === undefined &&
-      midTurnInjectedBatches.some(
-        (b) => b.sessionId === sessionId && b.originatorClientId !== undefined,
-      )
-    ) {
-      console.debug(
-        '[mid-turn] originator-stamped batches but no client id; dedupe skipped (may resend next turn)',
-      );
-    }
     const next = removeInjectedFromQueue(
       queuedPromptsRef.current,
       midTurnInjectedBatches,

@@ -112,6 +112,18 @@ describe('qwen-triage tmux workflow', () => {
     expect(runStep).toContain("QWEN_HOME: '${{ runner.temp }}/qwen-home'");
   });
 
+  it('passes triage output through env before bash reads it', () => {
+    const checkStep = step('Check triage response');
+
+    expect(checkStep).toContain(
+      "RESPONSE: '${{ steps.triage.outputs.summary }}'",
+    );
+    expect(checkStep).not.toContain(
+      'RESPONSE="${{ steps.triage.outputs.summary }}"',
+    );
+    expect(checkStep).toContain('if [[ -z "${RESPONSE}"');
+  });
+
   it('reports timeout and infra-error without claiming the flow was exercised', () => {
     const postStep = step('Post tmux result comment');
 

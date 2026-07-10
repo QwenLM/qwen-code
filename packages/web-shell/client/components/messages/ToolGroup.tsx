@@ -1021,6 +1021,45 @@ function areSubToolsEqual(
   return true;
 }
 
+/** Parse `[text](qwen-session://id)` links in plain-text tool output and
+ * replace them with clickable `<a>` elements that dispatch a DOM event.
+ * Keeps the rendering pipeline plain-text-compatible for all other tools. */
+const SESSION_LINK_RE = /\[([^\]]+)\]\(qwen-session:\/\/([^)]+)\)/g;
+
+function renderWithSessionLinks(text: string): ReactNode {
+  if (!text || !text.includes('qwen-session://')) return text;
+  const parts: ReactNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  SESSION_LINK_RE.lastIndex = 0;
+  while ((match = SESSION_LINK_RE.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+    const sessionId = match[2];
+    parts.push(
+      <a
+        key={match.index}
+        href="#"
+        role="button"
+        style={{ textDecoration: 'underline', cursor: 'pointer' }}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          window.dispatchEvent(
+            new CustomEvent('qwen:open-session', { detail: sessionId }),
+          );
+        }}
+      >
+        {match[1]}
+      </a>,
+    );
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) parts.push(text.slice(lastIndex));
+  return parts.length === 1 ? parts[0] : <>{parts}</>;
+}
+
 export const ToolLine = memo(function ToolLine({
   tool,
   approval,
@@ -1083,12 +1122,15 @@ export const ToolLine = memo(function ToolLine({
       ? `${t('agent.label')} (${info.explicitAgentType})`
       : t('agent.label');
     const isComplete = tool.status === 'completed' || tool.status === 'failed';
-    const progressLabel = tool.status === 'pending' ? 'pending' : 'running';
+    const progressLabel =
+      tool.status === 'pending' ? t('subagent.pending') : t('subagent.running');
     const runningMeta = [progressLabel, info.elapsed]
       .filter(Boolean)
       .join(' · ');
     const completeMeta = [
-      info.subToolCount > 0 ? `${info.subToolCount} tools` : '',
+      info.subToolCount > 0
+        ? t('subagent.toolsCount', { count: info.subToolCount })
+        : '',
       info.elapsed,
       info.tokens,
       info.reason ? truncateText(info.reason, 80) : '',
@@ -1264,7 +1306,9 @@ export const ToolLine = memo(function ToolLine({
       {/* Todo tool whose payload couldn't be parsed (e.g. malformed args):
           fall back to the raw result summary so the row isn't blank. */}
       {(!summaryOnly || expanded) && isTodo && !hasTodoList && result && (
-        <div className={styles.lineOutput}>{result}</div>
+        <div className={styles.lineOutput}>
+          {renderWithSessionLinks(result)}
+        </div>
       )}
       {showExpandedSummaryPanel && (
         <ToolExpandedCard title={displayName} detail={expandedCardDetail}>
@@ -1272,7 +1316,7 @@ export const ToolLine = memo(function ToolLine({
             <div
               className={`${styles.lineOutput} ${styles.expandedLineOutput}`}
             >
-              {result}
+              {renderWithSessionLinks(result)}
             </div>
           )}
         </ToolExpandedCard>
@@ -1290,7 +1334,7 @@ export const ToolLine = memo(function ToolLine({
                 : styles.lineOutput
             }
           >
-            {result}
+            {renderWithSessionLinks(result)}
           </div>
         )}
       {!isTodo && expanded && detailView && (

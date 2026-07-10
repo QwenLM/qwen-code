@@ -10,8 +10,7 @@ It does two things:
   daemon serves to the browser. The panel has no UI of its own.
 - **Service worker** — a CDP-tunnel pipe. It connects to the daemon's `/acp`
   WebSocket and bridges `cdp_*` frames into `chrome.debugger`, so the agent can
-  drive the real browser (read page, screenshot, click, …) via
-  chrome-devtools-mcp over the tunnel.
+  drive the real browser when an external CDP MCP adapter is configured.
 
 ## Build
 
@@ -40,6 +39,27 @@ extension's requests. The side panel reads the id at runtime via
 
 Once the daemon is reachable and permits framing, the side panel swaps the
 welcome screen for the chat UI automatically.
+
+## Browser Automation Tools
+
+The command above only makes the side panel and Web Shell available. Browser
+automation tools such as console/network inspection, screenshots, and page
+clicking require an explicit external MCP adapter command:
+
+```bash
+QWEN_CDP_MCP_COMMAND=/path/to/cdp-mcp-adapter \
+qwen serve --allow-origin chrome-extension://<this-extension-id>
+```
+
+No browser automation adapter is bundled with the main `@qwen-code/qwen-code`
+package. When `QWEN_CDP_MCP_COMMAND` is unset, the extension can still open the
+Web Shell, but the daemon will not register browser automation MCP tools.
+Clients can distinguish the states through `/capabilities`:
+
+- `allow_origin` means the extension may frame and call the daemon.
+- `cdp_tunnel_over_ws` means the daemon exposes the reverse CDP tunnel.
+- `browser_automation_mcp` means the external adapter command is configured and
+  browser automation MCP tools can be registered when the CDP bridge connects.
 
 ## Onboarding states
 
