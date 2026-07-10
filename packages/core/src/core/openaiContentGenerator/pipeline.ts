@@ -20,6 +20,7 @@ import type { PipelineConfig, RequestContext } from './types.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
+import { reconcileMaxTokens } from '../tokenLimits.js';
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   MAX_STREAM_IDLE_TIMEOUT_MS,
@@ -111,6 +112,47 @@ export class NonSSEResponseError extends Error {
     this.status = httpStatus;
     this.request_id = requestId;
   }
+}
+
+/**
+ * Provider-specific output-budget keys that stand in for `max_tokens` on the
+ * wire (e.g. GPT-5 / o-series use `max_completion_tokens`). When a user's
+ * samplingParams already carries one of these, the window clamp must not also
+ * inject `max_tokens`: sending the pair double-specifies the output budget and
+ * some endpoints reject it.
+ */
+const PROVIDER_OUTPUT_BUDGET_KEYS = ['max_completion_tokens', 'max_new_tokens'];
+
+function hasProviderOutputBudgetKey(samplingParams: {
+  [key: string]: unknown;
+}): boolean {
+  return PROVIDER_OUTPUT_BUDGET_KEYS.some(
+    (key) => samplingParams[key] !== undefined,
+  );
+}
+
+/**
+ * Clamp any provider-specific output-budget key (e.g. `max_completion_tokens`)
+ * to the window's remaining room, mutating and returning the passed object.
+ * An output budget is subject to `prompt + output ≤ window` regardless of the
+ * key it travels under, so we shrink the key's value to `requestMaxTokens` when
+ * it exceeds it — but we clamp the value in place rather than injecting a
+ * separate `max_tokens`, which would double-specify the budget and be rejected
+ * by endpoints like the o-series. When there is room (or no clamp value is
+ * available), the user's value passes through unchanged.
+ */
+function clampProviderOutputBudgetKeys(
+  samplingParams: { [key: string]: unknown },
+  requestMaxTokens: number | undefined,
+): { [key: string]: unknown } {
+  if (typeof requestMaxTokens !== 'number') return samplingParams;
+  for (const key of PROVIDER_OUTPUT_BUDGET_KEYS) {
+    const value = samplingParams[key];
+    if (typeof value === 'number' && value > requestMaxTokens) {
+      samplingParams[key] = requestMaxTokens;
+    }
+  }
+  return samplingParams;
 }
 
 /**
@@ -794,9 +836,36 @@ export class ContentGenerationPipeline {
     // When samplingParams is set, its keys pass through to the wire verbatim.
     // This lets users target provider-specific parameter names
     // (e.g. `max_completion_tokens` for GPT-5 / o-series) without a client release.
-    // When absent, the historical default behavior applies.
+    // No output budget escapes the window clamp, whatever key it travels under:
+    //   - max_tokens is a ceiling, not an exemption — when both a config
+    //     max_tokens and the (clamped) request maxOutputTokens are present the
+    //     smaller wins; when samplingParams omits max_tokens the clamped request
+    //     value is injected.
+    //   - A provider-specific output-budget key (max_completion_tokens,
+    //     max_new_tokens) is clamped in place to the window instead — we do NOT
+    //     also inject max_tokens, since sending the pair double-specifies the
+    //     budget and some endpoints (o-series) reject it. Its value only shrinks
+    //     when the window is tight; when there is room it passes through as-is.
+    // So `prompt + max_tokens ≤ window` holds for samplingParams users too,
+    // matching the Anthropic path.
     if (configSamplingParams !== undefined) {
-      return { ...configSamplingParams };
+      const requestMaxTokens = request.config?.maxOutputTokens;
+      const maxTokens =
+        reconcileMaxTokens(configSamplingParams.max_tokens, requestMaxTokens) ??
+        configSamplingParams.max_tokens ??
+        (hasProviderOutputBudgetKey(configSamplingParams)
+          ? undefined
+          : requestMaxTokens);
+      // Single exit: whatever the branch decided about max_tokens, any
+      // provider-specific output-budget key in the result is clamped to the
+      // window too — a config carrying both max_tokens and e.g.
+      // max_completion_tokens must not leak the provider key unclamped.
+      return clampProviderOutputBudgetKeys(
+        maxTokens !== undefined
+          ? { ...configSamplingParams, max_tokens: maxTokens }
+          : { ...configSamplingParams },
+        requestMaxTokens,
+      );
     }
 
     const params: Record<string, unknown> = {

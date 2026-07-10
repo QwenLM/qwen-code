@@ -3506,7 +3506,12 @@ export const useGeminiStream = (
       // already ran scheduler.stop(), so do not (re)install onFire.
       if (stopped) return;
       scheduler.start(
-        (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
+        (job: {
+          id?: string;
+          prompt: string;
+          cronExpr?: string;
+          missed?: boolean;
+        }) => {
           const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
           const autonomousMode = detectAutonomousSentinel(job.prompt);
           let label = job.prompt.slice(0, 40);

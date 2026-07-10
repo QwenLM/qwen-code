@@ -78,7 +78,10 @@ function parseField(field: string, min: number, max: number): Set<number> {
         throw new Error(`Value "${base}" out of bounds [${min}-${max}]`);
       }
       rangeStart = val;
-      rangeEnd = val;
+      // Vixie-cron: a step applied to a single value (`N/step`) means
+      // `N-max/step` — start at N and skip forward to the field maximum, e.g.
+      // `5/15` → 5,20,35,50. Without a step, `N` matches only the value N.
+      rangeEnd = stepParts.length === 2 ? max : val;
     }
 
     if (stepParts.length === 2 && !INTEGER_TOKEN_RE.test(stepParts[1]!)) {

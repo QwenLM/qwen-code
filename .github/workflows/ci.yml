@@ -443,6 +443,12 @@ jobs:
       - name: 'Install Playwright Chromium'
         run: 'npx playwright install --with-deps chromium'
 
+      - name: 'Choose web-shell Playwright port'
+        run: |-
+          port="$(node -e "const net=require('node:net');const server=net.createServer();server.listen(0,'127.0.0.1',()=>{console.log(server.address().port);server.close();});")"
+          echo "PLAYWRIGHT_PORT=${port}" >> "${GITHUB_ENV}"
+          echo "Using web-shell Playwright port ${port}"
+
       - name: 'Run web-shell browser smoke'
         run: 'npm run test:e2e:smoke --workspace=packages/web-shell'
 
