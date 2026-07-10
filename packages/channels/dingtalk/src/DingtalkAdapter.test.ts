@@ -64,6 +64,16 @@ vi.mock('@qwen-code/channel-base', async () => {
           }
         ).logDebugPayload.call(this, platform, payload);
       }
+      protected onPromptBufferDropped(
+        _chatId: string,
+        _sessionId: string,
+        _messageIds: string[],
+      ): void {}
+      protected onPromptBufferDrained(
+        _chatId: string,
+        _sessionId: string,
+        _messageIds: string[],
+      ): void {}
 
       constructor(
         name: string,
@@ -132,6 +142,24 @@ function getResponseHook(
   const fn = (channel as unknown as Record<string, unknown>)[
     'sendResponseMessage'
   ] as (chatId: string, text: string, sessionId: string) => Promise<void>;
+  return fn.bind(channel);
+}
+
+function getPromptBufferDropHook(
+  channel: DingtalkChannelInstance,
+): (chatId: string, sessionId: string, messageIds: string[]) => void {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'onPromptBufferDropped'
+  ] as (chatId: string, sessionId: string, messageIds: string[]) => void;
+  return fn.bind(channel);
+}
+
+function getPromptBufferDrainHook(
+  channel: DingtalkChannelInstance,
+): (chatId: string, sessionId: string, messageIds: string[]) => void {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'onPromptBufferDrained'
+  ] as (chatId: string, sessionId: string, messageIds: string[]) => void;
   return fn.bind(channel);
 }
 
@@ -213,6 +241,7 @@ describe('DingtalkChannel prompt reactions', () => {
     } satisfies LifecycleBase;
 
     seedSeenMessage(channel, 'message-1');
+    seedMentionTarget(channel, 'message-1', 'staff-1');
     const lifecycle = getLifecycleHook(channel);
     lifecycle({ ...event, type: 'started' });
     lifecycle({ ...event, type: 'started' });
@@ -223,6 +252,11 @@ describe('DingtalkChannel prompt reactions', () => {
     expect(attachReaction).toHaveBeenCalledWith('message-1', 'cid-123');
     expect(recallReaction).toHaveBeenCalledOnce();
     expect(recallReaction).toHaveBeenCalledWith('message-1', 'cid-123');
+    expect(
+      (
+        channel as unknown as { mentionTargets: Map<string, string> }
+      ).mentionTargets.has('message-1'),
+    ).toBe(false);
   });
 
   it('recalls again when a late lifecycle attach resolves after terminal cleanup', async () => {
@@ -1194,6 +1228,63 @@ describe('DingtalkChannel sender attribution', () => {
 describe('DingtalkChannel reply mentions', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('retains queued mention after dedup cleanup until onPromptStart', async () => {
+    vi.useFakeTimers();
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    (
+      channel as unknown as { seenMessages: Map<string, number> }
+    ).seenMessages.set('m1', Date.now() - 5 * 60 * 1000 - 1);
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    try {
+      await channel.connect();
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+      await getResponseHook(channel)('cid123', 'hello', 'session-1');
+
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      const body = JSON.parse(
+        String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
+      );
+      expect(body.at).toEqual({ atUserIds: ['staff-1'] });
+    } finally {
+      channel.disconnect();
+      vi.useRealTimers();
+    }
+  });
+
+  it('removes mention targets for dropped queued prompts', () => {
+    const channel = createChannel({ atSender: true });
+    seedMentionTarget(channel, 'm1', 'staff-1');
+
+    getPromptBufferDropHook(channel)('cid123', 'session-1', ['m1']);
+
+    expect(
+      (
+        channel as unknown as { mentionTargets: Map<string, string> }
+      ).mentionTargets.has('m1'),
+    ).toBe(false);
+  });
+
+  it('keeps only the final mention target for a coalesced queued prompt', () => {
+    const channel = createChannel({ atSender: true });
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    seedMentionTarget(channel, 'm2', 'staff-2');
+
+    getPromptBufferDrainHook(channel)('cid123', 'session-1', ['m1', 'm2']);
+
+    const mentionTargets = (
+      channel as unknown as { mentionTargets: Map<string, string> }
+    ).mentionTargets;
+    expect(mentionTargets.has('m1')).toBe(false);
+    expect(mentionTargets.get('m2')).toBe('staff-2');
   });
 
   it('mentions the originating group member when atSender is enabled', async () => {

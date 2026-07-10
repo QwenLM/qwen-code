@@ -288,7 +288,6 @@ export class DingtalkChannel extends ChannelBase {
       for (const [id, ts] of this.seenMessages) {
         if (now - ts > DEDUP_TTL_MS) {
           this.seenMessages.delete(id);
-          this.mentionTargets.delete(id);
         }
       }
     }, 60_000);
@@ -661,7 +660,28 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
     if (isTerminalTaskLifecycleType(event.type)) {
+      if (event.messageId) this.mentionTargets.delete(event.messageId);
       this.stopReaction(event.chatId, event.messageId, event.sessionId);
+    }
+  }
+
+  protected override onPromptBufferDropped(
+    _chatId: string,
+    _sessionId: string,
+    messageIds: string[],
+  ): void {
+    for (const messageId of messageIds) {
+      this.mentionTargets.delete(messageId);
+    }
+  }
+
+  protected override onPromptBufferDrained(
+    _chatId: string,
+    _sessionId: string,
+    messageIds: string[],
+  ): void {
+    for (const messageId of messageIds.slice(0, -1)) {
+      this.mentionTargets.delete(messageId);
     }
   }
 
