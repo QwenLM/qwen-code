@@ -368,7 +368,7 @@ Genuinely unsure, or `GUARD` blocked approval — **don't approve or reject**, b
 3. @mentions the maintainer (use `$QWEN_MAINTAINER_HANDLE` if set, or the most recent human reviewer).
 
 ```bash
-gh pr comment "$PR_NUMBER" --repo "$REPO" --body "⏸️ Deferring to @$MAINTAINER_HANDLE — <reason>. Needs a human call on this one."
+gh pr comment "$PR_NUMBER" --repo "$REPO" --body "⏸️ Deferring to @$QWEN_MAINTAINER_HANDLE — <reason>. Needs a human call on this one."
 ```
 
 A defer without an explicit comment is invisible — the maintainer won't know they're needed.
