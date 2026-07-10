@@ -38,8 +38,10 @@ also unchanged because they do not belong to a specific inbound agent prompt.
 The adapter records each inbound group message's staff ID by its DingTalk
 message ID. When `ChannelBase` starts the corresponding prompt, its existing
 `onPromptStart(chatId, sessionId, messageId)` hook binds that ID to the session.
-The adapter's `onResponseComplete` override retrieves the bound staff ID and
-passes it to its own reply sender. Prompt completion clears the session binding.
+`ChannelBase` passes the session ID through a protected response-delivery hook
+for both complete and block-streamed output; the adapter retrieves the bound
+staff ID there and passes it to its own reply sender. Prompt completion clears
+the session binding.
 
 This correlation avoids deriving the recipient from the latest message in a
 chat, which would mention the wrong person when prompts queue or overlap.
