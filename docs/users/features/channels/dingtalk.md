@@ -84,7 +84,7 @@ DingTalk bots work in both DM and group conversations. To enable group support:
 
 By default, the bot requires an @mention in group chats (`requireMention: true`). Set `"requireMention": false` for a specific group to make it respond to all messages. See [Group Chats](./overview#group-chats) for full details.
 
-Set `"atSender": true` to have the bot @mention the member whose group message triggered its response. It is off by default; it only applies to agent replies with a DingTalk staff ID, and only the first message of a long reply contains the mention.
+Set `"atSender": true` to have the bot @mention the member whose group message triggered its response. It is off by default and only applies to agent replies with a DingTalk staff ID. Mentioned replies use plain text so the @ is visible; replies without a mention use Markdown formatting.
 
 ### Finding a Group's Conversation ID
 

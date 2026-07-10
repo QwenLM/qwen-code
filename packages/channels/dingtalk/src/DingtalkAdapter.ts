@@ -11,7 +11,11 @@ import {
   sanitizeLogText,
   sanitizeSenderName,
 } from '@qwen-code/channel-base';
-import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
+import {
+  normalizeDingTalkMarkdown,
+  extractTitle,
+  splitChunks,
+} from './markdown.js';
 import { downloadMedia } from './media.js';
 import type {
   ChannelConfig,
@@ -114,6 +118,7 @@ export class DingtalkChannel extends ChannelBase {
   private seenMessages: Map<string, number> = new Map();
   private mentionTargets = new Map<string, string>();
   private sessionMentionTargets = new Map<string, string>();
+  private textReplySessions = new Set<string>();
   private bufferedMentionTargets = new Set<string>();
   private bufferedMentionTargetsBySession = new Map<string, Set<string>>();
   private dedupTimer?: ReturnType<typeof setInterval>;
@@ -352,44 +357,54 @@ export class DingtalkChannel extends ChannelBase {
     }
   }
 
-  private async sendMention(chatId: string, atUserId: string): Promise<void> {
+  private async sendTextReply(
+    chatId: string,
+    text: string,
+    atUserId?: string,
+  ): Promise<void> {
     const webhook = this.webhooks.get(chatId);
     if (!webhook) return;
 
-    const resp = await fetch(webhook, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        msgtype: 'text',
-        text: { content: `@${atUserId}` },
-        at: { atUserIds: [atUserId] },
-      }),
-    });
+    const chunks = splitChunks(text);
+    for (let i = 0; i < chunks.length; i++) {
+      const isMention = i === 0 && atUserId !== undefined;
+      const resp = await fetch(webhook, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          msgtype: 'text',
+          text: {
+            content: isMention ? `@${atUserId}\n\n${chunks[i]!}` : chunks[i]!,
+          },
+          ...(isMention ? { at: { atUserIds: [atUserId] } } : {}),
+        }),
+      });
 
-    if (process.env['QWEN_CHANNEL_DEBUG_MENTIONS'] === '1') {
-      const payload = (await resp
-        .clone()
-        .json()
-        .catch(() => undefined)) as unknown;
-      const response =
-        payload && typeof payload === 'object'
-          ? (payload as Record<string, unknown>)
-          : {};
-      const value = response['errcode'] ?? response['code'];
-      const code =
-        typeof value === 'number' || typeof value === 'string'
-          ? String(value)
-          : 'unknown';
-      process.stderr.write(
-        `[DingTalk:${this.name}] mention delivery status=${resp.status} code=${code}\n`,
-      );
-    }
+      if (isMention && process.env['QWEN_CHANNEL_DEBUG_MENTIONS'] === '1') {
+        const payload = (await resp
+          .clone()
+          .json()
+          .catch(() => undefined)) as unknown;
+        const response =
+          payload && typeof payload === 'object'
+            ? (payload as Record<string, unknown>)
+            : {};
+        const value = response['errcode'] ?? response['code'];
+        const code =
+          typeof value === 'number' || typeof value === 'string'
+            ? String(value)
+            : 'unknown';
+        process.stderr.write(
+          `[DingTalk:${this.name}] mention delivery status=${resp.status} code=${code}\n`,
+        );
+      }
 
-    if (!resp.ok) {
-      const detail = await resp.text().catch(() => '');
-      process.stderr.write(
-        `[DingTalk:${this.name}] sendMention failed: HTTP ${resp.status} ${detail}\n`,
-      );
+      if (!resp.ok) {
+        const detail = await resp.text().catch(() => '');
+        process.stderr.write(
+          `[DingTalk:${this.name}] sendTextReply failed: HTTP ${resp.status} ${detail}\n`,
+        );
+      }
     }
   }
 
@@ -693,6 +708,7 @@ export class DingtalkChannel extends ChannelBase {
       }
     }
     this.sessionMentionTargets.delete(sessionId);
+    this.textReplySessions.delete(sessionId);
     const keys = this.sessionReactionKeys.get(sessionId);
     if (keys) {
       this.sessionReactionKeys.delete(sessionId);
@@ -770,7 +786,10 @@ export class DingtalkChannel extends ChannelBase {
       this.untrackBufferedMentionTarget(sessionId, messageId);
       const atUserId = this.mentionTargets.get(messageId);
       this.mentionTargets.delete(messageId);
-      if (atUserId) this.sessionMentionTargets.set(sessionId, atUserId);
+      if (atUserId) {
+        this.sessionMentionTargets.set(sessionId, atUserId);
+        this.textReplySessions.add(sessionId);
+      }
     }
     this.startReaction(chatId, messageId, sessionId);
   }
@@ -815,6 +834,7 @@ export class DingtalkChannel extends ChannelBase {
     messageId?: string,
   ): void {
     this.sessionMentionTargets.delete(sessionId);
+    this.textReplySessions.delete(sessionId);
     this.stopReaction(chatId, messageId, sessionId);
   }
 
@@ -827,7 +847,10 @@ export class DingtalkChannel extends ChannelBase {
       ? this.sessionMentionTargets.get(sessionId)
       : undefined;
     if (atUserId) this.sessionMentionTargets.delete(sessionId);
-    if (atUserId) await this.sendMention(chatId, atUserId);
+    if (this.textReplySessions.has(sessionId)) {
+      await this.sendTextReply(chatId, text, atUserId);
+      return;
+    }
     await this.sendReply(chatId, text);
   }
 
