@@ -39,7 +39,7 @@ jobs:
             const highRiskExtension =
               /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|bat|ps1|node|dylib)(?![a-zA-Z0-9])/i;
             const linkPattern =
-              /(?:https?:\/\/|www\.)[^\s"'<>\]]+|\[[^\]]+\]\((?:[^()\s]|\([^()\s]*\))+\)/gi;
+              /(?:https?:\/\/|www\.|\/\/)[^\s"'<>\]]+|\[[^\]]+\]\((?:[^()\s]|\([^()\s]*\))+\)/gi;
             const errorMessage = (error) =>
               `${error?.status ? `${error.status} ` : ''}${error?.message ?? error}`;
             const decodeTarget = (target) => {
@@ -55,18 +55,22 @@ jobs:
                   decoded = decoded.replace(/%[0-9a-f]{2}/gi, (match) =>
                     String.fromCharCode(Number.parseInt(match.slice(1), 16)),
                   );
-                  break;
                 }
               }
-              return decoded.normalize('NFKC');
+              return decoded
+                .replace(/[\u200B-\u200D\uFEFF\u00AD\u2060\u180E]/g, '')
+                .normalize('NFKC');
             };
             const highRiskTarget = (url) => {
               let targets = [url];
-              if (/^(?:https?:\/\/|www\.)/i.test(url)) {
+              if (/^(?:https?:\/\/|www\.|\/\/)/i.test(url)) {
                 try {
-                  const parsedUrl = new URL(
-                    /^www\./i.test(url) ? `https://${url}` : url,
-                  );
+                  const normalizedUrl = /^\/\//.test(url)
+                    ? `https:${url}`
+                    : /^www\./i.test(url)
+                      ? `https://${url}`
+                      : url;
+                  const parsedUrl = new URL(normalizedUrl);
                   targets = [
                     ...parsedUrl.pathname.split('/').filter(Boolean),
                     ...parsedUrl.searchParams.values(),

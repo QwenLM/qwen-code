@@ -143,13 +143,22 @@ describe('comment attachment guard workflow', () => {
 
   it('decodes escaped risky extensions in URL paths', () => {
     expect(workflow).toContain('const next = decodeURIComponent(decoded);');
-    expect(workflow).toContain('decoded.normalize');
+    expect(workflow).toContain(".normalize('NFKC')");
     expect(workflow).toContain('Number.parseInt(match.slice(1), 16)');
+  });
+
+  it('strips zero-width characters before extension matching', () => {
+    expect(workflow).toContain('[\\u200B-\\u200D\\uFEFF\\u00AD\\u2060\\u180E]');
+  });
+
+  it('detects protocol-relative URLs', () => {
+    expect(workflow).toContain('www\\.|\\/\\/');
+    expect(workflow).toContain('/^\\/\\//.test(url)');
   });
 
   it('keeps parenthesized URL segments in link matches', () => {
     expect(workflow).toContain(
-      String.raw`/(?:https?:\/\/|www\.)[^\s"'<>\]]+|\[[^\]]+\]\((?:[^()\s]|\([^()\s]*\))+\)/gi;`,
+      String.raw`/(?:https?:\/\/|www\.|\/\/)[^\s"'<>\]]+|\[[^\]]+\]\((?:[^()\s]|\([^()\s]*\))+\)/gi;`,
     );
   });
 
@@ -182,6 +191,9 @@ describe('comment attachment guard workflow', () => {
     ['malformed percent fallback', 'https://evil.com/file.e%78e%ZZ'],
     ['markdown parentheses', '[patch](https://evil.com/file(1).exe)'],
     ['www autolink', 'www.evil.com/malware.exe'],
+    ['protocol-relative URL', '//evil.com/malware.exe'],
+    ['zero-width space in extension', 'https://evil.com/malware.\u200Bexe'],
+    ['zero-width joiner in extension', 'https://evil.com/malware.\u200Dzip'],
   ])('deletes risky links with %s', async (_name, body) => {
     const { calls } = await runGuard(body);
 
