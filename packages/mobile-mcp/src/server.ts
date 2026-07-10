@@ -19,8 +19,7 @@ import {
   isNormalized,
   coordinateScale,
   denormalizeArgs,
-  normalizeElementResult,
-  normalizeScreenSizeResult,
+  hasCoordFields,
   ingestScreenSizeFromResult,
   getCachedScreenSize,
   cacheScreenSize,
@@ -60,6 +59,11 @@ export const createMcpServer = (): McpServer => {
   const server = new McpServer({
     name: 'mobile-mcp',
     version: getAgentVersion(),
+    ...(isNormalized()
+      ? {
+          instructions: `All x/y coordinate inputs use 0-${coordinateScale()} normalized coordinates (top-left origin), not pixels. Call mobile_get_screen_size to understand the device dimensions.`,
+        }
+      : {}),
   });
 
   const getClientName = (): string => {
@@ -107,6 +111,10 @@ export const createMcpServer = (): McpServer => {
             const size = await ensureScreenSize(args.device);
             if (size) {
               denormalizeArgs(name, args, size.width, size.height);
+            } else if (hasCoordFields(name)) {
+              throw new ActionableError(
+                'Screen size unknown. Call mobile_get_screen_size first so coordinates can be converted correctly.',
+              );
             }
           }
 
@@ -114,23 +122,9 @@ export const createMcpServer = (): McpServer => {
           let response = await cb(args);
           const duration = +new Date() - start;
 
-          // coord shim: ingest screen size from get_screen_size before normalizing
+          // coord shim: ingest screen size from get_screen_size
           if (name === 'mobile_get_screen_size' && args.device) {
             ingestScreenSizeFromResult(args.device, response);
-          }
-
-          // coord shim: normalize output pixels → 0–scale
-          if (isNormalized() && args.device) {
-            const size = getCachedScreenSize(args.device);
-            if (size) {
-              response = normalizeElementResult(
-                name,
-                response,
-                size.width,
-                size.height,
-              );
-            }
-            response = normalizeScreenSizeResult(name, response);
           }
 
           trace(`=> ${response}`);
@@ -601,7 +595,7 @@ export const createMcpServer = (): McpServer => {
   tool(
     'mobile_get_screen_size',
     'Get Screen Size',
-    'Get the screen size of the mobile device in pixels',
+    'Get the screen size of the mobile device (returns width and height in device pixels).',
     {
       device: z
         .string()
@@ -620,7 +614,9 @@ export const createMcpServer = (): McpServer => {
   tool(
     'mobile_click_on_screen_at_coordinates',
     'Click Screen',
-    'Click on the screen at given x,y coordinates. If clicking on an element, use the list_elements_on_screen tool to find the coordinates.',
+    isNormalized()
+      ? 'Click on the screen at given x,y coordinates. Note: mobile_list_elements_on_screen returns coordinates in device pixels — convert them to 0-1000 normalized coordinates before passing to this tool.'
+      : 'Click on the screen at given x,y coordinates. If clicking on an element, use the list_elements_on_screen tool to find the coordinates.',
     {
       device: z
         .string()
@@ -674,7 +670,9 @@ export const createMcpServer = (): McpServer => {
   tool(
     'mobile_long_press_on_screen_at_coordinates',
     'Long Press Screen',
-    'Long press on the screen at given x,y coordinates. If long pressing on an element, use the list_elements_on_screen tool to find the coordinates.',
+    isNormalized()
+      ? 'Long press on the screen at given x,y coordinates. Note: mobile_list_elements_on_screen returns coordinates in device pixels — convert them to 0-1000 normalized coordinates before passing to this tool.'
+      : 'Long press on the screen at given x,y coordinates. If long pressing on an element, use the list_elements_on_screen tool to find the coordinates.',
     {
       device: z
         .string()
@@ -716,7 +714,7 @@ export const createMcpServer = (): McpServer => {
   tool(
     'mobile_list_elements_on_screen',
     'List Screen Elements',
-    'List elements on screen and their coordinates, with display text or accessibility label. Do not cache this result.',
+    'List elements on screen and their coordinates (in device pixels), with display text or accessibility label. Do not cache this result.',
     {
       device: z
         .string()
@@ -844,9 +842,9 @@ export const createMcpServer = (): McpServer => {
         .number()
         .optional()
         .describe(
-          coordParamDesc(
-            'The distance to swipe in pixels. Defaults to 400 pixels for iOS or 30% of screen dimension for Android',
-          ),
+          isNormalized()
+            ? `The distance to swipe in 0-${coordinateScale()} normalized coordinates. If not provided, defaults to a platform-appropriate value.`
+            : 'The distance to swipe in pixels. Defaults to 400 pixels for iOS or 30% of screen dimension for Android',
         ),
     },
     { destructiveHint: true },
@@ -934,7 +932,7 @@ export const createMcpServer = (): McpServer => {
     {
       title: 'Take Screenshot',
       description:
-        "Take a screenshot of the mobile device. Use this to understand what's on screen, if you need to press an element that is available through view hierarchy then you must list elements on screen instead. Do not cache this result.",
+        "Take a screenshot of the mobile device. Use this to understand what's on screen. Do not cache this result.",
       inputSchema: {
         device: z
           .string()
@@ -995,7 +993,7 @@ export const createMcpServer = (): McpServer => {
           const scale = coordinateScale();
           content.push({
             type: 'text',
-            text: `Screenshot dimensions: ${scale}x${scale} (normalized coordinate space)`,
+            text: `Use 0-${scale} normalized coordinates when clicking on positions from this screenshot. The actual image size may differ from the coordinate space.`,
           });
         }
         return { content };
@@ -1224,7 +1222,7 @@ export const createMcpServer = (): McpServer => {
   tool(
     'mobile_ui_dump',
     'UI Hierarchy Dump',
-    '(Android only) Dump the full UI hierarchy as raw XML using uiautomator. Unlike mobile_list_elements_on_screen which returns a filtered flat list of interactive elements as JSON, this returns the complete unfiltered XML tree preserving parent-child hierarchy and all node attributes (class, resource-id, bounds, clickable, scrollable, enabled, etc.). Use when you need the full view tree for debugging, or when mobile_list_elements_on_screen misses an element you can see on screen. Supports --compressed to reduce output size.',
+    '(Android only) Dump the full UI hierarchy as raw XML using uiautomator. Unlike mobile_list_elements_on_screen which returns a filtered flat list of interactive elements as JSON, this returns the complete unfiltered XML tree preserving parent-child hierarchy and all node attributes (class, resource-id, clickable, scrollable, enabled, etc.). Note: bounds attributes are stripped to reduce output size. Use when you need the full view tree for debugging, or when mobile_list_elements_on_screen misses an element you can see on screen. Supports --compressed to reduce output size.',
     {
       device: z
         .string()

@@ -13,6 +13,10 @@ import {
 } from '@qwen-code/channel-base';
 import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
 import { downloadMedia } from './media.js';
+import {
+  DingtalkConnectionManager,
+  type DingtalkManagedSocket,
+} from './DingtalkConnectionManager.js';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
@@ -103,8 +107,13 @@ type DingTalkClientInternals = DWClient & {
   onCallback(message: DWClientDownStream): void;
 };
 
+type DingtalkChannelConfig = ChannelConfig & {
+  useConnectionManager?: unknown;
+};
+
 export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
+  private connectionManager?: DingtalkConnectionManager<DWClient>;
   private seenMessages: Map<string, number> = new Map();
   private dedupTimer?: ReturnType<typeof setInterval>;
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
@@ -141,15 +150,51 @@ export class DingtalkChannel extends ChannelBase {
       );
     }
 
-    this.client = new DWClient({
-      clientId: config.clientId,
-      clientSecret: config.clientSecret,
-    });
-    this.installStructuredDownstreamHandler();
+    const rawUseConnectionManager = (config as DingtalkChannelConfig)
+      .useConnectionManager;
+    if (
+      rawUseConnectionManager !== undefined &&
+      typeof rawUseConnectionManager !== 'boolean'
+    ) {
+      throw new Error(
+        `Channel "${name}" useConnectionManager must be a boolean.`,
+      );
+    }
+    const useConnectionManager = rawUseConnectionManager ?? true;
+
+    this.client = this.createClient(useConnectionManager);
+    if (useConnectionManager) {
+      this.connectionManager = new DingtalkConnectionManager({
+        initialClient: this.client,
+        createClient: () => this.createClient(true),
+        getSocket: (client) =>
+          (client as unknown as { socket?: DingtalkManagedSocket }).socket,
+        onClientChanged: (client) => {
+          this.client = client;
+        },
+        log: (message) => {
+          process.stderr.write(
+            `[DingTalk:${this.name}] ${sanitizeLogText(message, 200)}\n`,
+          );
+        },
+      });
+    }
   }
 
-  private installStructuredDownstreamHandler(): void {
-    const client = this.client as DingTalkClientInternals;
+  private createClient(useConnectionManager: boolean): DWClient {
+    const client = new DWClient({
+      clientId: this.config.clientId!,
+      clientSecret: this.config.clientSecret!,
+      keepAlive: !useConnectionManager,
+    });
+    client.config.autoReconnect = !useConnectionManager;
+    this.installStructuredDownstreamHandler(client);
+    this.registerMessageHandler(client);
+    return client;
+  }
+
+  private installStructuredDownstreamHandler(streamClient: DWClient): void {
+    const client = streamClient as DingTalkClientInternals;
     client.debug = false;
     // Keep raw SDK downstream frames off stdout; this switch mirrors the SDK
     // dispatch table and should be checked when upgrading the DingTalk SDK.
@@ -158,7 +203,18 @@ export class DingtalkChannel extends ChannelBase {
     };
   }
 
+  private registerMessageHandler(client: DWClient): void {
+    client.registerCallbackListener(TOPIC_ROBOT, (msg: DWClientDownStream) => {
+      client.send(msg.headers.messageId, {
+        status: EventAck.SUCCESS,
+        message: 'ok',
+      });
+      this.onMessage(msg);
+    });
+  }
+
   private onDownStream(raw: unknown, client: DingTalkClientInternals): void {
+    this.connectionManager?.noteActivity(client);
     const decoded = this.decodeDownStream(raw);
     let msg: DWClientDownStream;
     try {
@@ -208,6 +264,9 @@ export class DingtalkChannel extends ChannelBase {
     switch (type) {
       case 'SYSTEM':
         this.callDownStreamHandler(client, 'onSystem', normalizedMsg);
+        if (topic === 'disconnect') {
+          this.connectionManager?.requestReconnect(client, 'SYSTEM disconnect');
+        }
         break;
       case 'EVENT':
         this.callDownStreamHandler(client, 'onEvent', normalizedMsg);
@@ -262,19 +321,11 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   async connect(): Promise<void> {
-    this.client.registerCallbackListener(
-      TOPIC_ROBOT,
-      (msg: DWClientDownStream) => {
-        // ACK immediately so DingTalk doesn't retry
-        this.client.send(msg.headers.messageId, {
-          status: EventAck.SUCCESS,
-          message: 'ok',
-        });
-        this.onMessage(msg);
-      },
-    );
-
-    await this.client.connect();
+    if (this.connectionManager) {
+      await this.connectionManager.start();
+    } else {
+      await this.client.connect();
+    }
 
     // Periodically clean up dedup map
     this.dedupTimer = setInterval(() => {
@@ -537,7 +588,11 @@ export class DingtalkChannel extends ChannelBase {
     }
     this.activeReactionKeys.clear();
     this.sessionReactionKeys.clear();
-    this.client.disconnect();
+    if (this.connectionManager) {
+      this.connectionManager.stop();
+    } else {
+      this.client.disconnect();
+    }
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
   }
 

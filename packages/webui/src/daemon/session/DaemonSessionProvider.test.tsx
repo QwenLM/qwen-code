@@ -5378,21 +5378,22 @@ describe('DaemonSessionProvider', () => {
       modelServices: [],
       workspaceCwd: '/mock-workspace',
     });
+    const releaseHeartbeatFailure = createDeferred<void>();
     const heartbeat = vi.fn(async () => {
+      await releaseHeartbeatFailure.promise;
       throw Object.assign(new Error('session gone'), { status: 410 });
     });
+    const submitStarted = createDeferred<void>();
     const session = createMockSession({
       heartbeat,
-      submitPrompt: vi.fn(
-        (_req: unknown, signal?: AbortSignal) =>
-          new Promise<NonBlockingPromptAccepted>((_resolve, reject) => {
-            signal?.addEventListener(
-              'abort',
-              () => reject(createAbortError()),
-              { once: true },
-            );
-          }),
-      ),
+      submitPrompt: vi.fn((_req: unknown, signal?: AbortSignal) => {
+        submitStarted.resolve();
+        return new Promise<NonBlockingPromptAccepted>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(createAbortError()), {
+            once: true,
+          });
+        });
+      }),
       events: createIdleEvents(),
     });
     sdkMocks.sessions.push(session);
@@ -5415,10 +5416,12 @@ describe('DaemonSessionProvider', () => {
     let promptResult: Promise<unknown> | undefined;
     await act(async () => {
       promptResult = providerActions.sendPrompt('still running');
+      await submitStarted.promise;
       await flushPromises();
     });
 
     await act(async () => {
+      releaseHeartbeatFailure.resolve();
       await wait(50);
       await flushPromises();
     });

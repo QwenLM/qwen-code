@@ -95,6 +95,13 @@ export interface CronJob {
    * the field. See {@link DurableCronTask.runMode}.
    */
   runMode?: 'shared' | 'isolated';
+  /**
+   * Precondition guarding an `isolated` fire. Carried from the task so `onFire`
+   * can evaluate it before dispatching. The scheduler never reads it — as with
+   * {@link runMode}, a fire is delivered either way and the consumer decides.
+   * See {@link DurableCronTask.condition}.
+   */
+  condition?: string;
   /** One-shot that was due while no owning session ran — fired late. */
   missed?: boolean;
 }
@@ -928,8 +935,21 @@ export class CronScheduler {
         // "defer to the owning session" path).
         for (const id of skipped) this.pendingRemoval.delete(id);
         if (runnable.length > 0) {
+          // The carrier is SYNTHETIC: its prompt is a notification about every
+          // task in `runnable`, not the command of any one of them. Per-task
+          // guard state must therefore not ride along from `runnable[0]` — a
+          // `condition` here would gate the whole batch's notification behind
+          // one task's precondition, and `removeMissedFromDisk` below has
+          // already deleted them all, so a withheld notice loses them silently.
+          // `runMode` is dropped for the same reason: a notification is never
+          // dispatched into a sub-session.
+          const {
+            condition: _c,
+            runMode: _r,
+            ...carrier
+          } = durableTaskToJob(runnable[0]!, this.recurringMaxAgeMs);
           onFire({
-            ...durableTaskToJob(runnable[0]!, this.recurringMaxAgeMs),
+            ...carrier,
             prompt: buildMissedCronNotification(runnable),
             missed: true,
           });
@@ -1513,6 +1533,7 @@ function durableTaskToJob(
     durable: true,
     ...(task.sessionId ? { boundSessionId: task.sessionId } : {}),
     ...(task.runMode ? { runMode: task.runMode } : {}),
+    ...(task.condition ? { condition: task.condition } : {}),
   };
 }
 
@@ -1526,6 +1547,7 @@ function jobToDurableTask(job: CronJob): DurableCronTask {
     lastFiredAt: job.lastFiredAt ?? null,
     ...(job.boundSessionId ? { sessionId: job.boundSessionId } : {}),
     ...(job.runMode ? { runMode: job.runMode } : {}),
+    ...(job.condition ? { condition: job.condition } : {}),
   };
 }
 
