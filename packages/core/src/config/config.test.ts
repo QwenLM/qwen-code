@@ -2318,6 +2318,46 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('should skip hook, skill, and file checkpointing side effects when requested', async () => {
+      const config = new Config({
+        ...baseParams,
+        fileCheckpointingEnabled: true,
+      });
+
+      await expect(
+        config.initialize({
+          skipMcpDiscovery: true,
+          skipHooks: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(HookSystem).not.toHaveBeenCalled();
+      expect(config.getHookSystem()).toBeUndefined();
+      expect(SkillManager).not.toHaveBeenCalled();
+      expect(config.getSkillManager()).toBeNull();
+      expect(config.getFileCheckpointingEnabled()).toBe(false);
+    });
+
+    it('warms tools strictly by default and leniently when lenientToolWarmup is set', async () => {
+      // Regression guard for the read-only transcript-replay path: a Config that
+      // skips the SkillManager must warm tools leniently, otherwise warmAll()
+      // aborts initialize() when SkillTool's constructor throws.
+      const warmAll = vi.mocked(ToolRegistry.prototype.warmAll);
+
+      warmAll.mockClear();
+      await new Config({ ...baseParams }).initialize();
+      expect(warmAll).toHaveBeenLastCalledWith({ strict: true });
+
+      warmAll.mockClear();
+      await new Config({ ...baseParams }).initialize({
+        skipSkillManager: true,
+        lenientToolWarmup: true,
+      });
+      expect(warmAll).toHaveBeenLastCalledWith({ strict: false });
+    });
+
     it('registers loop_wakeup when cron is enabled', async () => {
       const config = new Config({ ...baseParams, cronEnabled: true });
       await config.initialize();

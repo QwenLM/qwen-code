@@ -39,7 +39,7 @@ When `replayBytes > maxReplayBytes`, the engine drops oldest segments while more
     "retainedEvents": 8,
     "maxBytes": 4194304,
     "truncatedTurns": 3,
-    "fullTranscriptAvailable": false
+    "fullTranscriptAvailable": true
   }
 }
 ```
