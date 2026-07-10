@@ -179,6 +179,10 @@ export function createDaemonChannelBridgeFacade(
     facade.respondToPermission = bridge.respondToPermission.bind(bridge);
   }
 
+  if (bridge.discardSession) {
+    facade.discardSession = bridge.discardSession.bind(bridge);
+  }
+
   if (bridge.getAvailableCommands) {
     facade.getAvailableCommands = bridge.getAvailableCommands.bind(bridge);
   }

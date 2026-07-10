@@ -78,6 +78,7 @@ const mockBridgeNewSession = vi.hoisted(() => vi.fn());
 const mockBridgeLoadSession = vi.hoisted(() => vi.fn());
 const mockBridgePrompt = vi.hoisted(() => vi.fn());
 const mockBridgeCancelSession = vi.hoisted(() => vi.fn());
+const mockBridgeDiscardSession = vi.hoisted(() => vi.fn());
 const mockBridgeRespondToPermission = vi.hoisted(() => vi.fn());
 const mockBridgeShellCommand = vi.hoisted(() => vi.fn());
 const mockBridgeGetAvailableCommands = vi.hoisted(() => vi.fn(() => []));
@@ -93,6 +94,7 @@ const mockDaemonChannelBridge = vi.hoisted(() =>
     loadSession: mockBridgeLoadSession,
     prompt: mockBridgePrompt,
     cancelSession: mockBridgeCancelSession,
+    discardSession: mockBridgeDiscardSession,
     respondToPermission: mockBridgeRespondToPermission,
     shellCommand: mockBridgeShellCommand,
     start: mockBridgeStart,
@@ -516,6 +518,7 @@ describe('createDaemonChannelBridgeFacade', () => {
     });
 
     expect('respondToPermission' in facade).toBe(false);
+    expect('discardSession' in facade).toBe(false);
   });
 
   it('omits listSessions when absent on bridge', () => {
@@ -557,6 +560,36 @@ describe('createDaemonChannelBridgeFacade', () => {
 });
 
 describe('runChannelDaemonWorker', () => {
+  it('forwards router discard through the daemon bridge facade', async () => {
+    const sdk = createSdk();
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    const bridgeFacade = mockSessionRouter.mock.calls[0]![0] as {
+      discardSession?: (
+        sessionId: string,
+        expectedBindingToken?: object,
+      ) => Promise<void>;
+    };
+    const bindingToken = {};
+
+    expect(bridgeFacade.discardSession).toBeTypeOf('function');
+    await bridgeFacade.discardSession?.('orphan-session', bindingToken);
+
+    expect(mockBridgeDiscardSession).toHaveBeenCalledWith(
+      'orphan-session',
+      bindingToken,
+    );
+    expect(mockBridgeDiscardSession.mock.instances[0]).toBe(
+      mockDaemonChannelBridge.mock.results[0]!.value,
+    );
+
+    await handle.close();
+  });
+
   it('starts selected channels through a daemon-backed bridge facade', async () => {
     const sdk = createSdk();
     const ready = vi.fn();
