@@ -37,6 +37,7 @@ import { WorkflowSaveOverlay } from './workflow-save-overlay.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import {
   escapeAnsiCtrlCodes,
+  getCachedStringWidth,
   sanitizeMultilineForDisplay,
 } from '../../utils/textUtils.js';
 import { TOOL_DISPLAY_BY_NAME } from '../../utils/tool-display-map.js';
@@ -61,8 +62,10 @@ import {
 type EntryStatus = DialogEntry['status'];
 
 // Bounds MaxSizedBox's per-tick layout work when a live activity carries a
-// pathological description (e.g. a heredoc script). Exceeds what any
-// terminal budget can show, so it never truncates visible content.
+// pathological description (e.g. a heredoc script). A very large terminal
+// could in principle display more than this, so on such a description the
+// live row is truncated with an ellipsis; the cap trades that rare edge for
+// a hard ceiling on wrap-layout cost.
 const MAX_LIVE_LABEL_CHARS = 4096;
 
 function formatActivityLabel(name: string, description: string | undefined) {
@@ -272,7 +275,11 @@ function elapsedFor(entry: { startTime: number; endTime?: number }): string {
 // others needed ellipsis, breaking the left-column alignment of the prefix.
 function truncateToWidth(text: string, maxWidth: number): string {
   if (maxWidth <= 0) return '';
-  if (stringWidth(text) <= maxWidth) return text;
+  // Cache the full-string measurement: the detail view re-renders every
+  // second and this runs once per (unchanged) history row. The per-char
+  // loop below only executes on the rare row that actually needs an
+  // ellipsis, so it stays on the uncached primitive.
+  if (getCachedStringWidth(text) <= maxWidth) return text;
   const ellipsis = '…';
   const ellipsisWidth = stringWidth(ellipsis);
   const target = Math.max(0, maxWidth - ellipsisWidth);
@@ -715,6 +722,53 @@ const AgentDetailBody: React.FC<{
       `${visiblePromptLines[lastIdx].trimEnd()}\u2026`;
   }
 
+  // The live row (the newest activity) is the whole reason to open this
+  // view, so it always renders in full and wraps. The older history rows
+  // are one-line context. `MaxSizedBox` clips from the *bottom*, so a full
+  // 10-row history would push the live command \u2014 and the Transcript pointer
+  // below it \u2014 off a short terminal, inverting what this view is for. Budget
+  // the always-valuable sections first, then give what's left to the history,
+  // dropping the OLDEST rows first so the live row survives (issue #6569).
+  const liveActivity =
+    activities.length > 0 ? activities[activities.length - 1] : undefined;
+  const historyActivities = activities.slice(0, -1);
+  const liveFullLabel = liveActivity
+    ? sanitizeMultilineForDisplay(
+        formatActivityLabel(liveActivity.name, liveActivity.description),
+      )
+    : '';
+  const liveLabel =
+    liveFullLabel.length > MAX_LIVE_LABEL_CHARS
+      ? `${liveFullLabel.slice(0, MAX_LIVE_LABEL_CHARS)}\u2026`
+      : liveFullLabel;
+  const wrappedRows = (text: string) =>
+    maxWidth > 0
+      ? Math.max(1, Math.ceil(getCachedStringWidth(text) / maxWidth))
+      : 1;
+  // Reserve height for every section that is NOT a history row. Each
+  // `<Box />` spacer is one line, each bold header is one line.
+  let reservedLines = 2; // title + subtitle (no leading spacer)
+  if (parentLine !== undefined) reservedLines += 3; // spacer + header + path
+  if (visibleChildAgents.length > 0) {
+    reservedLines +=
+      2 + visibleChildAgents.length + (hiddenChildCount > 0 ? 1 : 0);
+  }
+  if (liveActivity) reservedLines += 2 + wrappedRows(`> ${liveLabel}`);
+  if (entry.outputFile) {
+    reservedLines += 2 + wrappedRows(`  ${entry.outputFile}`);
+  }
+  if (visiblePromptLines.length > 0) {
+    reservedLines += 2 + visiblePromptLines.length;
+  }
+  // Terminal-state sections (rare, and mutually exclusive with an active
+  // live command); a small fixed reserve keeps the estimate conservative.
+  if (hasBlockedReason) reservedLines += 3;
+  if (hasError) reservedLines += 3;
+  const historyBudget = Math.max(0, maxHeight - reservedLines);
+  const shownHistory = historyActivities.slice(
+    Math.max(0, historyActivities.length - historyBudget),
+  );
+
   return (
     <MaxSizedBox
       maxHeight={maxHeight}
@@ -791,40 +845,22 @@ const AgentDetailBody: React.FC<{
               {t('Progress')}
             </Text>
           </Box>
-          {activities.map((a, i) => {
-            const isLast = i === activities.length - 1;
+          {shownHistory.map((a, i) => {
             // ASCII `>` is unambiguously one cell wide in every terminal
-            // font, so `> ` (2 cells) aligns with a two-space indent on the
-            // other rows. Unicode chevrons rendered with inconsistent width
-            // broke alignment in some fonts.
-            const prefix = isLast ? '> ' : '  ';
+            // font, so `> ` (2 cells) aligns with the two-space indent on
+            // the history rows. Unicode chevrons rendered with inconsistent
+            // width broke alignment in some fonts. History rows stay one
+            // line; only the live row below wraps.
+            const prefix = '  ';
             // `sanitizeMultilineForDisplay` (not just `escapeAnsiCtrlCodes`)
             // because bare C0 controls (\r, BS, BEL, DEL) pass through the
             // ANSI-sequence escape and could still corrupt the row.
             const fullLabel = sanitizeMultilineForDisplay(
               formatActivityLabel(a.name, a.description),
             );
-            if (isLast) {
-              // The live row is the one the user opens this view to
-              // inspect ("is this command stuck or still reasonable?"),
-              // so it renders in full and wraps; MaxSizedBox owns the
-              // overall height budget. Earlier rows stay one-line.
-              // Prefix and label must be ONE string child: MaxSizedBox's
-              // wrap layout drops the prefix's trailing space when they
-              // arrive as separate segments (`> Shell` → `>Shell`).
-              const liveLabel =
-                fullLabel.length > MAX_LIVE_LABEL_CHARS
-                  ? `${fullLabel.slice(0, MAX_LIVE_LABEL_CHARS)}…`
-                  : fullLabel;
-              return (
-                <Box key={`${a.at}-${i}`}>
-                  <Text color={theme.text.primary}>{prefix + liveLabel}</Text>
-                </Box>
-              );
-            }
             const label = truncateToWidth(
               fullLabel,
-              Math.max(0, maxWidth - stringWidth(prefix)),
+              Math.max(0, maxWidth - getCachedStringWidth(prefix)),
             );
             return (
               <Box key={`${a.at}-${i}`}>
@@ -835,6 +871,37 @@ const AgentDetailBody: React.FC<{
               </Box>
             );
           })}
+          {liveActivity && (
+            // The live row is the one the user opens this view to inspect
+            // ("is this command stuck or still reasonable?"), so it renders
+            // in full and wraps; the height budget above keeps it and the
+            // Transcript pointer on-screen by trimming older history first.
+            // Prefix and label must be ONE string child: MaxSizedBox's wrap
+            // layout drops the prefix's trailing space when they arrive as
+            // separate segments (`> Shell` → `>Shell`).
+            <Box key="live">
+              <Text color={theme.text.primary}>{`> ${liveLabel}`}</Text>
+            </Box>
+          )}
+        </Fragment>
+      )}
+
+      {entry.outputFile && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Transcript')}
+            </Text>
+          </Box>
+          <Box>
+            {/* `wrap="wrap"`, not `truncate-end`: a real transcript path is
+                ~130 chars and only exists to be copied / `tail -f`'d, so
+                truncating it withholds the one string the section is for. */}
+            <Text color={theme.text.secondary} wrap="wrap">
+              {`  ${escapeAnsiCtrlCodes(entry.outputFile)}`}
+            </Text>
+          </Box>
         </Fragment>
       )}
 
@@ -853,22 +920,6 @@ const AgentDetailBody: React.FC<{
               </Text>
             </Box>
           ))}
-        </Fragment>
-      )}
-
-      {entry.outputFile && (
-        <Fragment>
-          <Box />
-          <Box>
-            <Text bold dimColor>
-              {t('Transcript')}
-            </Text>
-          </Box>
-          <Box>
-            <Text color={theme.text.secondary} wrap="truncate-end">
-              {`  ${entry.outputFile}`}
-            </Text>
-          </Box>
         </Fragment>
       )}
 
@@ -1277,11 +1328,14 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   } = useBackgroundTaskViewActions();
   const config = useConfig();
 
-  // Progress (10 rows + the wrapped live row) and Prompt (5 rows) are each
-  // self-capped inside DetailBody, so the body never grows unbounded. Use
-  // all available height (minus the dialog chrome) as the MaxSizedBox
-  // budget so nothing gets clipped just because the terminal is short.
-  // Chrome = border(2) + title(1) + two marginTops(2) + hint(1) = 6 rows.
+  // Progress (up to 10 rows + the wrapped live row), Transcript (3 rows:
+  // spacer + label + path) and Prompt (5 rows) are each bounded inside
+  // DetailBody, so the body never grows unbounded. DetailBody also budgets
+  // this height across those sections so the live row and Transcript survive
+  // a short terminal. Pass all available height (minus the dialog chrome) as
+  // the MaxSizedBox budget so nothing gets clipped just because the terminal
+  // is short. Chrome = border(2) + title(1) + two marginTops(2) + hint(1) = 6
+  // rows.
   const detailContentHeight = Math.max(10, availableTerminalHeight - 6);
   // Rounded border + paddingX=1 on the outer Box ≈ 4 horizontal cells.
   const detailContentWidth = Math.max(10, terminalWidth - 4);

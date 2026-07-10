@@ -104,10 +104,20 @@ vi.mock('../../utils/MarkdownDisplay.js', () => ({
   },
 }));
 vi.mock('./ToolConfirmationMessage.js', () => ({
-  ToolConfirmationMessage: function MockToolConfirmationMessage() {
+  ToolConfirmationMessage: function MockToolConfirmationMessage({
+    availableTerminalHeight,
+  }: {
+    availableTerminalHeight?: number;
+  }) {
     // Sentinel string lets the focus-routed approval tests assert
-    // the banner renders (instead of being suppressed).
-    return <Text>MockApprovalPrompt</Text>;
+    // the banner renders (instead of being suppressed). The height is
+    // echoed so the budget test can verify the context lines are
+    // reserved out of the confirmation's height.
+    return (
+      <Text>
+        MockApprovalPrompt:height={availableTerminalHeight ?? 'undef'}
+      </Text>
+    );
   },
 }));
 
@@ -1037,6 +1047,53 @@ describe('<ToolMessage />', () => {
       );
       const output = lastFrame() ?? '';
       expect(output).toContain('✔ Glob');
+    });
+
+    it('reserves the context lines out of the confirmation height budget', () => {
+      // Regression for the short-terminal approval clip: the context
+      // block adds one line per prior call, so that height must be
+      // subtracted from what the confirmation prompt gets — otherwise the
+      // options scroll off-screen and Enter approves blind (issue #6569).
+      // availableHeight = max(2, availableTerminalHeight(20) - 6) = 14;
+      // two prior calls → confirmation gets 14 - 2 = 12.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fg-agent',
+              taskDescription: 'Investigate',
+              taskPrompt: 'Investigate',
+              status: 'running',
+              pendingConfirmation: {} as object,
+              toolCalls: [
+                {
+                  callId: 'c1',
+                  name: 'read_file',
+                  status: 'success',
+                  description: 'a.ts',
+                },
+                {
+                  callId: 'c2',
+                  name: 'read_file',
+                  status: 'success',
+                  description: 'b.ts',
+                },
+                {
+                  callId: 'c3',
+                  name: 'run_shell_command',
+                  status: 'awaiting_approval',
+                  description: 'rm -rf build',
+                },
+              ],
+            },
+            isFocused: true,
+          })}
+          availableTerminalHeight={20}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('MockApprovalPrompt:height=12');
     });
 
     it('pendingConfirmation && !isFocused → renders queued marker (one-line)', () => {

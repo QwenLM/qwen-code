@@ -117,7 +117,10 @@ interface Harness {
   probe: { current: ProbeHandle | null };
 }
 
-function setup(initial: readonly DialogEntry[]): Harness {
+function setup(
+  initial: readonly DialogEntry[],
+  availableTerminalHeight = 30,
+): Harness {
   const handlers: Array<(key: { name?: string; sequence?: string }) => void> =
     [];
   mockedUseKeypress.mockImplementation((cb, opts) => {
@@ -179,7 +182,7 @@ function setup(initial: readonly DialogEntry[]): Harness {
         <BackgroundTaskViewProvider config={config}>
           <Probe entriesSetter={setEntries} />
           <BackgroundTasksDialog
-            availableTerminalHeight={30}
+            availableTerminalHeight={availableTerminalHeight}
             terminalWidth={80}
           />
         </BackgroundTaskViewProvider>
@@ -1207,6 +1210,45 @@ describe('BackgroundTasksDialog', () => {
       h.call(() => h.probe.current!.actions.enterDetail());
       const frame = h.lastFrame() ?? '';
       expect(frame).not.toContain('Progress');
+    });
+
+    it('keeps the live command visible in a short terminal by dropping older rows', () => {
+      // Regression: `MaxSizedBox` clips from the bottom, so a full 10-row
+      // history used to push the live command (and Transcript) off a short
+      // terminal — the opposite of what this view is for. The oldest rows
+      // must yield to the live row instead.
+      const activities = [
+        ...Array.from({ length: 9 }, (_, i) => ({
+          name: 'read_file',
+          description: `history-${i}.ts`,
+          at: i,
+        })),
+        {
+          name: 'run_shell_command',
+          description: 'git log --oneline LIVE_COMMAND_MARKER',
+          at: 9,
+        },
+      ];
+      const h = setup([entry({ recentActivities: activities })], 20);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = (h.lastFrame() ?? '').replace(/\n\s*/g, ' ');
+      // The live row survives...
+      expect(frame).toContain('LIVE_COMMAND_MARKER');
+      // ...at the cost of the oldest history row.
+      expect(frame).not.toContain('history-0.ts');
+    });
+
+    it('renders the full transcript path (wraps instead of truncating)', () => {
+      const longPath =
+        '/home/runner/.qwen/projects/some-workspace-slug/subagents/2f9c1a7b-1234-4a5b-8c9d-abcdef012345/agent-general-purpose-call-9.jsonl';
+      const running = entry({ outputFile: longPath });
+      const h = setup([running]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = (h.lastFrame() ?? '').replace(/\n\s*/g, '');
+      // The whole path is present (the tail is not clipped off).
+      expect(frame).toContain('agent-general-purpose-call-9.jsonl');
     });
   });
 });

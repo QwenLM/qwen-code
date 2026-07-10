@@ -290,6 +290,20 @@ const PlanResultRenderer: React.FC<{
 );
 
 /**
+ * The subagent's most recent tool calls that lead up to a parked
+ * permission request (excluding the call awaiting approval itself,
+ * newest last, capped at `APPROVAL_CONTEXT_CALLS`). Each renders as one
+ * line above the confirmation prompt, so the caller also uses the count
+ * to reserve height for the confirmation.
+ */
+const priorApprovalCalls = (
+  data: AgentResultDisplay,
+): NonNullable<AgentResultDisplay['toolCalls']> =>
+  (data.toolCalls ?? [])
+    .filter((call) => call.status !== 'awaiting_approval')
+    .slice(-APPROVAL_CONTEXT_CALLS);
+
+/**
  * The last few tool calls the subagent made before parking a permission
  * request — rendered between the "Approval requested by" header and the
  * confirmation prompt so the user can judge WHY the agent wants to run
@@ -299,9 +313,7 @@ const PlanResultRenderer: React.FC<{
 const SubagentApprovalContext: React.FC<{
   data: AgentResultDisplay;
 }> = ({ data }) => {
-  const priorCalls = (data.toolCalls ?? [])
-    .filter((call) => call.status !== 'awaiting_approval')
-    .slice(-APPROVAL_CONTEXT_CALLS);
+  const priorCalls = priorApprovalCalls(data);
   if (priorCalls.length === 0) return null;
   return (
     <Box flexDirection="column">
@@ -377,6 +389,16 @@ const SubagentExecutionRenderer: React.FC<{
     // ANSI control sequences; escape before rendering into Ink Text
     // (matches LiveAgentPanel + SubagentScrollbackSummary).
     const agentLabel = escapeAnsiCtrlCodes(data.subagentName || 'agent');
+    // The context block adds one sibling line per prior call. Reserve
+    // that height out of the confirmation's budget so the question and
+    // its options never get clipped off-screen in a short terminal —
+    // approving blind is the exact failure this context is meant to
+    // prevent, so the confirmation prompt must always win.
+    const contextLines = priorApprovalCalls(data).length;
+    const confirmationHeight =
+      availableHeight !== undefined
+        ? Math.max(MINIMUM_MAX_HEIGHT, availableHeight - contextLines)
+        : availableHeight;
     return (
       <Box flexDirection="column" paddingLeft={1}>
         <Box>
@@ -390,7 +412,7 @@ const SubagentExecutionRenderer: React.FC<{
         <ToolConfirmationMessage
           confirmationDetails={data.pendingConfirmation}
           isFocused={isFocused}
-          availableTerminalHeight={availableHeight}
+          availableTerminalHeight={confirmationHeight}
           contentWidth={childWidth - 2}
           compactMode={true}
           config={config}
