@@ -16,6 +16,7 @@ import { isLoopbackBind } from './loopback-binds.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { ServeOptions } from './types.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import type { DaemonMetricsBucket } from './daemon-metrics-ring.js';
 import type {
   DaemonWorkspaceService,
@@ -104,6 +105,7 @@ export interface BuildDaemonStatusOptions {
   sessionShellCommandEnabled: boolean;
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
@@ -173,6 +175,12 @@ interface DaemonStatusRuntime {
   };
   channel: { live: boolean };
   channelWorker: ChannelWorkerSnapshot;
+  /**
+   * Per-workspace channel workers on a multi-workspace daemon. Additive to
+   * `channelWorker` (which stays as the primary workspace snapshot). Absent on
+   * single-workspace daemons.
+   */
+  channelWorkers?: ChannelWorkerGroupSnapshot[];
   transport: {
     restSseActive: number;
     acp: {
@@ -358,6 +366,12 @@ export async function buildDaemonStatusResponse(
     state: 'disabled',
     channels: [],
   };
+  // Per-workspace worker list is multi-workspace only; single-workspace status
+  // keeps the byte-identical `channelWorker` shape.
+  const channelWorkers =
+    (input.workspaceRegistry?.list().length ?? 1) > 1
+      ? input.getChannelWorkerSnapshots?.()
+      : undefined;
   const totalAdmissionSnapshot = input.getTotalSessionAdmissionSnapshot?.();
   const issues: DaemonStatusIssue[] = [];
   let full: FullDaemonStatus | undefined;
@@ -454,6 +468,9 @@ export async function buildDaemonStatusResponse(
       },
       channel: { live: aggregatedChannelLive },
       channelWorker,
+      ...(channelWorkers && channelWorkers.length > 0
+        ? { channelWorkers }
+        : {}),
       transport: {
         restSseActive: input.getRestSseActive(),
         acp: {

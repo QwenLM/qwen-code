@@ -4112,7 +4112,7 @@ describe('runQwenServe channel worker supervisor', () => {
     const worker = makeWorker({
       enabled: true,
       state: 'running',
-      pid: 1234,
+      pid: 5678,
       channels: ['telegram'],
     });
     let onReady: CreateChannelWorkerSupervisorOptions['onReady'];

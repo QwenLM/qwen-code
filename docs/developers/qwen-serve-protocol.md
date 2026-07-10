@@ -415,11 +415,21 @@ number of restart attempts made by this serve process; a running worker with
 whose `requestedChannels` include names missing from `channels` reports
 `channel_worker_partial_connect`.
 
+On a multi-workspace daemon (`--workspace` repeated), `runtime` additionally
+includes `channelWorkers[]` — one entry per owning workspace, each a
+`channelWorker` snapshot annotated with `workspaceId`, `workspaceCwd`, and
+`primary`. `channelWorker` stays populated as the primary workspace's snapshot
+for compatibility. Single-workspace daemons omit `channelWorkers[]`.
+
 `qwen channel status` continues to read pidfile metadata. During a restart
 window the serve-owned pidfile remains reserved, but `workerPid` is omitted so
-clients do not display a stale worker process. Worker stdout/stderr are
-forwarded into the daemon log with bearer tokens, sensitive worker environment
-values, and proxy URL credentials redacted.
+clients do not display a stale worker process. On a multi-workspace daemon the
+pidfile also carries an additive `workers[]` array (per-workspace
+`workspaceId` / `workspaceCwd` / `channels` / live `workerPid`) while the
+top-level `channels` (union) and `workerPid` (primary) stay populated for older
+readers; single-workspace daemons keep the original single-worker shape. Worker
+stdout/stderr are forwarded into the daemon log with bearer tokens, sensitive
+worker environment values, and proxy URL credentials redacted.
 
 Security: the response never includes bearer tokens, client ids, full ACP
 connection ids, device-flow user codes, or verification URLs. `summary` omits

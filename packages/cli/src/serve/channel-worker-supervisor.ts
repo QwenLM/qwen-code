@@ -123,6 +123,13 @@ export interface CreateChannelWorkerSupervisorOptions {
   daemonToken?: string;
   workspace: string;
   selection: ServeChannelSelection;
+  /**
+   * Base environment for the spawned worker. Defaults to `process.env`. In
+   * multi-workspace mode the caller passes the owning runtime's effective env
+   * overlay so the worker inherits that workspace's `.env` instead of the
+   * daemon base env.
+   */
+  workerBaseEnv?: Readonly<NodeJS.ProcessEnv>;
   startupTimeoutMs?: number;
   spawnWorker?: SpawnChannelWorker;
   onExit?: (snapshot: ChannelWorkerSnapshot) => void;
@@ -268,8 +275,9 @@ function createWorkerEnv(opts: {
   daemonUrl: string;
   daemonToken?: string;
   workspace: string;
+  baseEnv?: Readonly<NodeJS.ProcessEnv>;
 }): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  const env: NodeJS.ProcessEnv = { ...(opts.baseEnv ?? process.env) };
   env['QWEN_CODE_NO_RELAUNCH'] = 'true';
   env[CHANNEL_DAEMON_WORKER_SENTINEL] = randomUUID();
   env[QWEN_DAEMON_URL_ENV] = opts.daemonUrl;
@@ -589,6 +597,7 @@ export function createChannelWorkerSupervisor(
       daemonUrl: opts.daemonUrl,
       workspace: opts.workspace,
       ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
+      ...(opts.workerBaseEnv ? { baseEnv: opts.workerBaseEnv } : {}),
     });
     const redaction = workerLogRedactionOptions(opts.daemonToken, env);
     const requestedChannels = requestedChannelNames(opts.selection);

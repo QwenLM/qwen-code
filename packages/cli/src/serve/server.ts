@@ -15,6 +15,7 @@ import type {
   DaemonStartupSnapshot,
 } from './daemon-status.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -256,6 +257,7 @@ export interface ServeAppDeps {
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
   getMetricsSeries?: () => DaemonMetricsBucket[];
@@ -785,6 +787,7 @@ export function createServeApp(
     deviceFlowRegistry,
     sessionShellCommandEnabled,
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
+    getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
     getPerfSnapshot: deps.getPerfSnapshot,
     getMetricsSeries: deps.getMetricsSeries,
     getTotalSessionAdmissionSnapshot:
