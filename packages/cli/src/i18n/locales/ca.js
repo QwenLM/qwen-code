@@ -56,7 +56,7 @@ export default {
   'to search history': "per cercar a l'historial",
   'to paste images': 'per enganxar imatges',
   'for external editor': 'per a editor extern',
-  'to toggle compact mode': 'per canviar el mode compacte',
+  'to view transcript': 'per veure la transcripció',
   'Jump through words in the input': "Saltar entre paraules a l'entrada",
   'Close dialogs, cancel requests, or quit application':
     "Tancar diàlegs, cancel·lar peticions o sortir de l'aplicació",
@@ -251,6 +251,42 @@ export default {
   'Delete {{name}}': 'Eliminar {{name}}',
   'Unknown Step': 'Pas desconegut',
   'Esc to close': 'Esc per tancar',
+  Transcript: 'Transcripció',
+  'to close': 'per tancar',
+  'to scroll': 'per desplaçar',
+  'Failed to render transcript.': 'Error en renderitzar la transcripció.',
+  'Read {{count}} file': 'Ha llegit {{count}} fitxer',
+  'Read {{count}} files': 'Ha llegit {{count}} fitxers',
+  'Reading {{count}} file': 'Llegint {{count}} fitxer',
+  'Reading {{count}} files': 'Llegint {{count}} fitxers',
+  'Edited {{count}} file': 'Ha editat {{count}} fitxer',
+  'Edited {{count}} files': 'Ha editat {{count}} fitxers',
+  'Editing {{count}} file': 'Editant {{count}} fitxer',
+  'Editing {{count}} files': 'Editant {{count}} fitxers',
+  'Wrote {{count}} file': 'Ha escrit {{count}} fitxer',
+  'Wrote {{count}} files': 'Ha escrit {{count}} fitxers',
+  'Writing {{count}} file': 'Escrivint {{count}} fitxer',
+  'Writing {{count}} files': 'Escrivint {{count}} fitxers',
+  'Searched {{count}} pattern': 'Ha cercat {{count}} patró',
+  'Searched {{count}} patterns': 'Ha cercat {{count}} patrons',
+  'Searching {{count}} pattern': 'Cercant {{count}} patró',
+  'Searching {{count}} patterns': 'Cercant {{count}} patrons',
+  'Listed {{count}} directory': 'Ha llistat {{count}} directori',
+  'Listed {{count}} directories': 'Ha llistat {{count}} directoris',
+  'Listing {{count}} directory': 'Llistant {{count}} directori',
+  'Listing {{count}} directories': 'Llistant {{count}} directoris',
+  'Ran {{count}} command': 'Ha executat {{count}} ordre',
+  'Ran {{count}} commands': 'Ha executat {{count}} ordres',
+  'Running {{count}} command': 'Executant {{count}} ordre',
+  'Running {{count}} commands': 'Executant {{count}} ordres',
+  'Ran {{count}} agent': 'Ha executat {{count}} agent',
+  'Ran {{count}} agents': 'Ha executat {{count}} agents',
+  'Running {{count}} agent': 'Executant {{count}} agent',
+  'Running {{count}} agents': 'Executant {{count}} agents',
+  'Used {{count}} tool': 'Ha utilitzat {{count}} eina',
+  'Used {{count}} tools': 'Ha utilitzat {{count}} eines',
+  'Using {{count}} tool': 'Utilitzant {{count}} eina',
+  'Using {{count}} tools': 'Utilitzant {{count}} eines',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter per seleccionar, ↑↓ per navegar, Esc per tancar',
   'Esc to go back': 'Esc per tornar enrere',
@@ -1446,8 +1482,6 @@ export default {
     'Podeu canviar ràpidament el mode de permisos amb Tab o /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Proveu /insight per generar idees personalitzades a partir del vostre historial de xat.',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Premeu Ctrl+O per canviar el mode compacte — amagueu la sortida de les eines i el pensament per a una vista més neta.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Afegiu un fitxer QWEN.md per donar a Qwen Code un context persistent del projecte.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1914,10 +1948,6 @@ export default {
     'El mode raw no està disponible. Executeu en un terminal interactiu.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Useu les fletxes ↑ ↓ per navegar, Enter per seleccionar, Ctrl+C per sortir)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Amagueu la sortida de les eines i el pensament per a una vista més neta (canvieu amb Ctrl+O).',
-  'Press Ctrl+O to show full tool output':
-    'Premeu Ctrl+O per mostrar la sortida completa de les eines',
   'Switch to plan mode or exit plan mode':
     'Canviar al mode de planificació o sortir del mode de planificació',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':

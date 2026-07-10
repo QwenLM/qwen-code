@@ -252,6 +252,42 @@ export default {
   'Delete {{name}}': 'Supprimer {{name}}',
   'Unknown Step': 'Étape inconnue',
   'Esc to close': 'Esc pour fermer',
+  Transcript: 'Transcription',
+  'to close': 'pour fermer',
+  'to scroll': 'pour défiler',
+  'Failed to render transcript.': 'Échec du rendu de la transcription.',
+  'Read {{count}} file': 'Lu {{count}} fichier',
+  'Read {{count}} files': 'Lu {{count}} fichiers',
+  'Reading {{count}} file': 'Lecture de {{count}} fichier',
+  'Reading {{count}} files': 'Lecture de {{count}} fichiers',
+  'Edited {{count}} file': 'Modifié {{count}} fichier',
+  'Edited {{count}} files': 'Modifié {{count}} fichiers',
+  'Editing {{count}} file': 'Modification de {{count}} fichier',
+  'Editing {{count}} files': 'Modification de {{count}} fichiers',
+  'Wrote {{count}} file': 'Écrit {{count}} fichier',
+  'Wrote {{count}} files': 'Écrit {{count}} fichiers',
+  'Writing {{count}} file': 'Écriture de {{count}} fichier',
+  'Writing {{count}} files': 'Écriture de {{count}} fichiers',
+  'Searched {{count}} pattern': 'Recherché {{count}} motif',
+  'Searched {{count}} patterns': 'Recherché {{count}} motifs',
+  'Searching {{count}} pattern': 'Recherche de {{count}} motif',
+  'Searching {{count}} patterns': 'Recherche de {{count}} motifs',
+  'Listed {{count}} directory': 'Listé {{count}} répertoire',
+  'Listed {{count}} directories': 'Listé {{count}} répertoires',
+  'Listing {{count}} directory': 'Liste de {{count}} répertoire',
+  'Listing {{count}} directories': 'Liste de {{count}} répertoires',
+  'Ran {{count}} command': 'Exécuté {{count}} commande',
+  'Ran {{count}} commands': 'Exécuté {{count}} commandes',
+  'Running {{count}} command': 'Exécution de {{count}} commande',
+  'Running {{count}} commands': 'Exécution de {{count}} commandes',
+  'Ran {{count}} agent': 'Exécuté {{count}} agent',
+  'Ran {{count}} agents': 'Exécuté {{count}} agents',
+  'Running {{count}} agent': 'Exécution de {{count}} agent',
+  'Running {{count}} agents': 'Exécution de {{count}} agents',
+  'Used {{count}} tool': 'Utilisé {{count}} outil',
+  'Used {{count}} tools': 'Utilisé {{count}} outils',
+  'Using {{count}} tool': 'Utilisation de {{count}} outil',
+  'Using {{count}} tools': 'Utilisation de {{count}} outils',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter pour sélectionner, ↑↓ pour naviguer, Esc pour fermer',
   'Esc to go back': 'Esc pour revenir',
@@ -1913,10 +1949,6 @@ export default {
     'Mode brut non disponible. Veuillez exécuter dans un terminal interactif.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Utilisez les flèches ↑ ↓ pour naviguer, Enter pour sélectionner, Ctrl+C pour quitter)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Masquer la sortie des outils et la réflexion pour une vue plus nette (basculer avec Ctrl+O).',
-  'Press Ctrl+O to show full tool output':
-    'Appuyez sur Ctrl+O pour afficher la sortie complète des outils',
   'Switch to plan mode or exit plan mode':
     'Passer en mode plan ou quitter le mode plan',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
@@ -2004,7 +2036,7 @@ export default {
     'Afficher le détail de l’utilisation du contexte par élément.',
 
   // === Missing key backfill ===
-  'to toggle compact mode': 'basculer le mode compact',
+  'to view transcript': 'pour voir la transcription',
   'The name of the extension to update.':
     "Le nom de l'extension à mettre à jour.",
   'Session (temporary)': 'Session (temporaire)',
@@ -2030,8 +2062,6 @@ export default {
     "Demande de copie envoyée au terminal. Si le collage est vide, copiez manuellement l'URL ci-dessus.",
   'Cannot write to terminal — copy the URL above manually.':
     "Impossible d'écrire dans le terminal — copiez manuellement l'URL ci-dessus.",
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Appuyez sur Ctrl+O pour basculer le mode compact — masquer la sortie des outils et la réflexion pour une vue plus nette.',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'API Key invalide. Les Coding Plan API Keys commencent par "sk-sp-". Veuillez vérifier.',
   'Lock release warning': 'Avertissement de libération du verrou',
