@@ -427,6 +427,9 @@ export interface ExtraWsRoute {
  * hooks.
  */
 interface RuntimeAcpMount {
+  /** Whether this mount is the daemon's primary runtime. CDP-tunnel claims and
+   *  chrome-devtools MCP wiring are primary-only. */
+  readonly primary: boolean;
   readonly registry: ConnectionRegistry;
   readonly dispatcher: AcpDispatcher;
   readonly ensureChromeDevToolsMcpRegistered: (
@@ -638,6 +641,7 @@ export function mountAcpHttp(
   // this milestone; the HTTP handlers and WS upgrade listener resolve the mount
   // by URL path and delegate to these same helpers.
   const primaryMount: RuntimeAcpMount = {
+    primary: true,
     registry,
     dispatcher,
     ensureChromeDevToolsMcpRegistered,
@@ -1055,6 +1059,7 @@ export function mountAcpHttp(
     );
     secondaryDispatcherRef.current = secondaryDispatcher;
     return {
+      primary: false,
       registry: secondaryRegistry,
       dispatcher: secondaryDispatcher,
       ensureChromeDevToolsMcpRegistered: () => {},
@@ -1127,7 +1132,7 @@ export function mountAcpHttp(
   app.post(pluralAcpPath, (req: Request, res: Response) => {
     const mount = resolvePluralMount(req, res);
     if (!mount) return;
-    void handleAcpPost(mount, req, res);
+    return handleAcpPost(mount, req, res);
   });
   app.get(pluralAcpPath, (req: Request, res: Response) => {
     const mount = resolvePluralMount(req, res);
@@ -1741,6 +1746,7 @@ export function mountAcpHttp(
                   )?.name
                 : undefined;
             if (
+              activeMount.primary &&
               opts.cdpTunnelOverWs === true &&
               opts.cdpTunnelRegistry !== undefined &&
               clientName === CDP_BRIDGE_CLIENT_NAME
