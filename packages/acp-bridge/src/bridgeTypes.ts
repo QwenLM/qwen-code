@@ -89,6 +89,7 @@ export interface BridgeSpawnRequest {
    * top-level session that no other session spawned.
    */
   parentSessionId?: string;
+  approvalMode?: ApprovalMode;
 }
 
 export interface BridgeSession {
@@ -117,6 +118,7 @@ export interface BridgeRestoreSessionRequest {
   clientId?: string;
   /** Internal replay transport for `session/load`; defaults to bulk response. */
   historyReplay?: 'stream' | 'response';
+  approvalMode?: ApprovalMode;
 }
 
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
