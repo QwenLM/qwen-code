@@ -7037,6 +7037,7 @@ describe('createServeApp', () => {
       prompt: string;
       mtime: Date;
       state?: 'active' | 'archived';
+      parentSessionId?: string;
     }): Promise<void> {
       const chatsDir = path.join(
         new Storage(input.cwd).getProjectDir(),
@@ -7054,7 +7055,24 @@ describe('createServeApp', () => {
         message: { role: 'user', parts: [{ text: input.prompt }] },
         cwd: input.cwd,
       };
-      await fsp.writeFile(filePath, `${JSON.stringify(record)}\n`, 'utf8');
+      const lines = [JSON.stringify(record)];
+      if (input.parentSessionId !== undefined) {
+        // Mirror ChatRecordingService.recordParentSession: a single
+        // `parent_session` system record near the head of the transcript that
+        // SessionService rehydrates into the summary's parentSessionId.
+        const parentRecord = {
+          uuid: `${input.sessionId}-parent-1`,
+          parentUuid: `${input.sessionId}-user-1`,
+          sessionId: input.sessionId,
+          timestamp: input.timestamp,
+          type: 'system',
+          subtype: 'parent_session',
+          systemPayload: { parentSessionId: input.parentSessionId },
+          cwd: input.cwd,
+        };
+        lines.push(JSON.stringify(parentRecord));
+      }
+      await fsp.writeFile(filePath, `${lines.join('\n')}\n`, 'utf8');
       await fsp.utimes(filePath, input.mtime, input.mtime);
     }
 
@@ -8341,6 +8359,220 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(400);
       expect(bridge.listCalls).toHaveLength(0);
+    });
+
+    describe('parentSessionId filter', () => {
+      const PARENT = '00000000-0000-4000-8000-0000000000aa';
+      const OTHER_PARENT = '00000000-0000-4000-8000-0000000000bb';
+      // Distinct session ids sharing the writeStoredSessions UUID shape.
+      const childId = (n: number) =>
+        `550e8400-e29b-41d4-a716-44665544${String(n).padStart(4, '0')}`;
+
+      it('returns only the sessions spawned by the given parent', async () => {
+        // Two children of PARENT, one child of OTHER_PARENT, one orphan.
+        await writeStoredSession({
+          sessionId: childId(1),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'child one',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+          parentSessionId: PARENT,
+        });
+        await writeStoredSession({
+          sessionId: childId(2),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:01:00.000Z',
+          prompt: 'child two',
+          mtime: new Date('2026-05-17T12:01:00.000Z'),
+          parentSessionId: PARENT,
+        });
+        await writeStoredSession({
+          sessionId: childId(3),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:02:00.000Z',
+          prompt: 'other parent',
+          mtime: new Date('2026-05-17T12:02:00.000Z'),
+          parentSessionId: OTHER_PARENT,
+        });
+        await writeStoredSession({
+          sessionId: childId(4),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:03:00.000Z',
+          prompt: 'orphan',
+          mtime: new Date('2026-05-17T12:03:00.000Z'),
+        });
+
+        const result = await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { parentSessionId: PARENT },
+        );
+
+        expect(result.sessions.map((s) => s.sessionId).sort()).toEqual([
+          childId(1),
+          childId(2),
+        ]);
+        for (const session of result.sessions) {
+          expect(session.parentSessionId).toBe(PARENT);
+        }
+        expect(result.nextCursor).toBeUndefined();
+      });
+
+      it('returns an empty list when no session has the parent', async () => {
+        await writeStoredSession({
+          sessionId: childId(1),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'orphan',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+        });
+        await writeStoredSession({
+          sessionId: childId(2),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:01:00.000Z',
+          prompt: 'other parent',
+          mtime: new Date('2026-05-17T12:01:00.000Z'),
+          parentSessionId: OTHER_PARENT,
+        });
+
+        const result = await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { parentSessionId: PARENT },
+        );
+
+        expect(result.sessions).toEqual([]);
+        expect(result.nextCursor).toBeUndefined();
+      });
+
+      it('paginates matches with an opaque cursor across pages', async () => {
+        const matchCount = 5;
+        const pageSize = 3;
+        for (let i = 0; i < matchCount; i++) {
+          const timestamp = new Date(
+            Date.UTC(2026, 4, 17, 12, i, 0),
+          ).toISOString();
+          await writeStoredSession({
+            sessionId: childId(i),
+            cwd: WS_BOUND,
+            timestamp,
+            prompt: `child ${i}`,
+            mtime: new Date(timestamp),
+            parentSessionId: PARENT,
+          });
+        }
+        // A non-matching session that must never appear on either page.
+        await writeStoredSession({
+          sessionId: childId(9),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T13:00:00.000Z',
+          prompt: 'other parent',
+          mtime: new Date('2026-05-17T13:00:00.000Z'),
+          parentSessionId: OTHER_PARENT,
+        });
+
+        const page1 = await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { parentSessionId: PARENT, size: pageSize },
+        );
+        expect(page1.sessions).toHaveLength(pageSize);
+        expect(page1.nextCursor).toBeDefined();
+        expect(page1.sessions.every((s) => s.parentSessionId === PARENT)).toBe(
+          true,
+        );
+
+        const page2 = await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          {
+            parentSessionId: PARENT,
+            size: pageSize,
+            cursor: page1.nextCursor,
+          },
+        );
+        expect(page2.sessions).toHaveLength(matchCount - pageSize);
+        expect(page2.nextCursor).toBeUndefined();
+        expect(page2.sessions.every((s) => s.parentSessionId === PARENT)).toBe(
+          true,
+        );
+
+        const seen = [
+          ...page1.sessions.map((s) => s.sessionId),
+          ...page2.sessions.map((s) => s.sessionId),
+        ];
+        expect(new Set(seen).size).toBe(matchCount);
+        const expected = new Set(
+          Array.from({ length: matchCount }, (_, i) => childId(i)),
+        );
+        expect(new Set(seen)).toEqual(expected);
+      });
+
+      it('HTTP: returns the filtered list for ?parentSessionId=P', async () => {
+        await writeStoredSession({
+          sessionId: childId(1),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'child one',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+          parentSessionId: PARENT,
+        });
+        await writeStoredSession({
+          sessionId: childId(2),
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:01:00.000Z',
+          prompt: 'other parent',
+          mtime: new Date('2026-05-17T12:01:00.000Z'),
+          parentSessionId: OTHER_PARENT,
+        });
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?parentSessionId=${PARENT}`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(200);
+        expect(res.body.sessions).toHaveLength(1);
+        expect(res.body.sessions[0].sessionId).toBe(childId(1));
+        expect(res.body.sessions[0].parentSessionId).toBe(PARENT);
+      });
+
+      it('HTTP: 400 invalid_parent_session_filter with view=organized', async () => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?parentSessionId=${PARENT}&view=organized`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_parent_session_filter');
+      });
+
+      it('HTTP: 400 invalid_parent_session_id for an empty parentSessionId', async () => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?parentSessionId=`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_parent_session_id');
+      });
     });
   });
 
