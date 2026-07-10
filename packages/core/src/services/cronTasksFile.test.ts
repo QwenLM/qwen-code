@@ -5,8 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DurableCronTask } from './cronTasksFile.js';
 import {
   addCronTask,
+  appendCronRun,
   generateCronTaskId,
   getCronFilePath,
+  markCronRunWithheld,
+  MAX_TASK_RUNS,
   readCronTasks,
   removeCronTasks,
   updateCronTasks,
@@ -166,6 +169,167 @@ describe('cronTasksFile', () => {
         JSON.stringify([{ ...makeTask(), enabled: 'yes' }]),
       );
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('round-trips the optional runMode field', async () => {
+      const isolated = makeTask({ id: 'iso', runMode: 'isolated' });
+      const shared = makeTask({ id: 'sh', runMode: 'shared' });
+      await writeCronTasks(tmpDir, [isolated, shared]);
+      const result = await readCronTasks(tmpDir);
+      expect(result).toEqual([isolated, shared]);
+    });
+
+    it('accepts legacy tasks with no runMode field', async () => {
+      const legacy = makeTask();
+      await seedTasksFile(tmpDir, JSON.stringify([legacy]));
+      const result = await readCronTasks(tmpDir);
+      expect(result[0]!.runMode).toBeUndefined();
+    });
+
+    it('rejects a task whose runMode is an unknown string', async () => {
+      // A typo must route through fix-or-delete rather than being silently
+      // treated as 'shared' — otherwise per-run isolation would quietly turn off.
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), runMode: 'per-run' }]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('round-trips the optional condition field', async () => {
+      const guarded = makeTask({
+        id: 'guard',
+        runMode: 'isolated',
+        condition: 'anything new on main?',
+      });
+      await writeCronTasks(tmpDir, [guarded]);
+      expect(await readCronTasks(tmpDir)).toEqual([guarded]);
+    });
+
+    it('rejects a task whose condition is an empty string', async () => {
+      // The fire path gates on a truthy `condition`, so an empty one would be
+      // silently ignored: a task the user believes is guarded would fire on
+      // every tick. Absent is the only way to say "no precondition".
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), runMode: 'isolated', condition: '' }]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('round-trips a withheld run marker', async () => {
+      const task = makeTask({
+        runs: [
+          { at: 1718000300000, kind: 'scheduled' },
+          { at: 1718000400000, kind: 'scheduled', withheld: true },
+        ],
+      });
+      await writeCronTasks(tmpDir, [task]);
+      expect(await readCronTasks(tmpDir)).toEqual([task]);
+    });
+
+    it('rejects a run whose withheld is not a boolean', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([
+          { ...makeTask(), runs: [{ at: 1718000300000, withheld: 'yes' }] },
+        ]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('rejects a task whose condition is not a string', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([
+          { ...makeTask(), runMode: 'isolated', condition: { any: true } },
+        ]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('round-trips the optional runs history', async () => {
+      const task = makeTask({
+        lastFiredAt: 1718000300000,
+        runs: [
+          { at: 1718000240000, kind: 'scheduled' },
+          { at: 1718000300000, kind: 'catch-up' },
+        ],
+      });
+      await writeCronTasks(tmpDir, [task]);
+      expect(await readCronTasks(tmpDir)).toEqual([task]);
+    });
+
+    it('accepts a run entry with no kind (defaults on read)', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), runs: [{ at: 1718000240000 }] }]),
+      );
+      const result = await readCronTasks(tmpDir);
+      expect(result[0]!.runs).toEqual([{ at: 1718000240000 }]);
+    });
+
+    it('rejects a task whose runs is not an array', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), runs: 'nope' }]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('rejects a run entry with a non-finite/absent timestamp', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), runs: [{ kind: 'scheduled' }] }]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+      // -Infinity (from -1e999) is typeof number but not finite — must reject.
+      await seedTasksFile(
+        tmpDir,
+        `[{"id":"t1","cron":"* * * * *","prompt":"p","recurring":true,` +
+          `"createdAt":1718000000000,"lastFiredAt":null,"runs":[{"at":-1e999}]}]`,
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('rejects a run entry whose kind is not a string', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([
+          { ...makeTask(), runs: [{ at: 1718000240000, kind: 7 }] },
+        ]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+  });
+
+  describe('appendCronRun', () => {
+    it('appends newest-last, treating absent history as empty', () => {
+      const once = appendCronRun(undefined, { at: 1, kind: 'scheduled' });
+      expect(once).toEqual([{ at: 1, kind: 'scheduled' }]);
+      const twice = appendCronRun(once, { at: 2, kind: 'catch-up' });
+      expect(twice).toEqual([
+        { at: 1, kind: 'scheduled' },
+        { at: 2, kind: 'catch-up' },
+      ]);
+    });
+
+    it('is pure — does not mutate the input array', () => {
+      const input = [{ at: 1, kind: 'scheduled' as const }];
+      const result = appendCronRun(input, { at: 2 });
+      expect(input).toEqual([{ at: 1, kind: 'scheduled' }]);
+      expect(result).toHaveLength(2);
+    });
+
+    it('caps at MAX_TASK_RUNS, dropping the oldest', () => {
+      let runs: ReturnType<typeof appendCronRun> = [];
+      for (let i = 0; i < MAX_TASK_RUNS + 5; i++) {
+        runs = appendCronRun(runs, { at: i });
+      }
+      expect(runs).toHaveLength(MAX_TASK_RUNS);
+      // Oldest five dropped: the window is the last MAX_TASK_RUNS entries.
+      expect(runs[0]!.at).toBe(5);
+      expect(runs[runs.length - 1]!.at).toBe(MAX_TASK_RUNS + 4);
     });
   });
 
@@ -382,6 +546,58 @@ describe('cronTasksFile', () => {
       // 36^8 space — 200 draws essentially never collide (P ~ 1e-8). Assert
       // near-uniqueness with a tiny margin so this can't flake.
       expect(ids.size).toBeGreaterThan(195);
+    });
+  });
+
+  describe('markCronRunWithheld', () => {
+    const A = 1718000300000;
+    const B = 1718000400000;
+
+    it('stamps the run recorded for that exact fire, not the newest one', async () => {
+      // The scheduler stamps `runs[].at` from the same `lastFiredAt` it hands to
+      // onFire, so the evaluating session addresses its OWN record. Matching
+      // "the newest run" instead would mislabel the wrong fire whenever a later
+      // one has already landed.
+      await writeCronTasks(tmpDir, [
+        makeTask({
+          runs: [
+            { at: A, kind: 'scheduled' },
+            { at: B, kind: 'scheduled' },
+          ],
+        }),
+      ]);
+
+      expect(await markCronRunWithheld(tmpDir, 'test001', A)).toBe(true);
+
+      const runs = (await readCronTasks(tmpDir))[0]!.runs!;
+      expect(runs[0]).toEqual({ at: A, kind: 'scheduled', withheld: true });
+      expect(runs[1]).toEqual({ at: B, kind: 'scheduled' });
+    });
+
+    it('is idempotent and leaves the file untouched on a second call', async () => {
+      await writeCronTasks(tmpDir, [
+        makeTask({ runs: [{ at: A, kind: 'scheduled' }] }),
+      ]);
+      expect(await markCronRunWithheld(tmpDir, 'test001', A)).toBe(true);
+      expect(await markCronRunWithheld(tmpDir, 'test001', A)).toBe(false);
+      expect((await readCronTasks(tmpDir))[0]!.runs).toEqual([
+        { at: A, kind: 'scheduled', withheld: true },
+      ]);
+    });
+
+    it('is a no-op for an unknown task, an unknown fire, or no history', async () => {
+      // The scheduler persists the run asynchronously; losing a cosmetic marker
+      // must never throw on a path the fire decision does not depend on.
+      await writeCronTasks(tmpDir, [
+        makeTask({ runs: [{ at: A, kind: 'scheduled' }] }),
+        makeTask({ id: 'noruns' }),
+      ]);
+      expect(await markCronRunWithheld(tmpDir, 'missing', A)).toBe(false);
+      expect(await markCronRunWithheld(tmpDir, 'test001', B)).toBe(false);
+      expect(await markCronRunWithheld(tmpDir, 'noruns', A)).toBe(false);
+      expect((await readCronTasks(tmpDir))[0]!.runs).toEqual([
+        { at: A, kind: 'scheduled' },
+      ]);
     });
   });
 });

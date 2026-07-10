@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   useWorkspaceActions,
   type DaemonScheduledTask,
+  type DaemonScheduledTaskRun,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
@@ -15,18 +16,83 @@ import {
   buildCron,
   describeCron,
   describeLastRun,
+  formatCountdown,
+  parseCronToBuilder,
+  DEFAULT_BUILDER,
   type BuilderState,
   type Frequency,
+  type TranslateFn,
 } from './scheduledTasksSchedule';
 import styles from './ScheduledTasksDialog.module.css';
 
+/** Wrap a prompt for "Run now" on an isolated task — instructs the model to
+ * dispatch via `create_sub_session` rather than running inline.
+ *
+ * A manual run does NOT evaluate the task's precondition, and deliberately so.
+ * The verdict is only observable inside the session that computes it: the client
+ * enqueues a prompt and `onRunPrompt` resolves at ADMISSION, long before the
+ * model decides anything. A client-side guard could therefore never learn its
+ * own outcome — it would record a `manual` run for work that was withheld, and
+ * for a one-shot it would consume (delete) the task before the verdict existed.
+ * So "Run now" means run now: the guard belongs to the scheduler, and a human
+ * clicking the button is overriding it on purpose.
+ *
+ * Only the MANUAL run relays through the model. A scheduled fire evaluates the
+ * condition as its own cron turn and dispatches daemon-side
+ * (`Session.#dispatchIsolatedCronFire`) because it is unattended:
+ * `create_sub_session` asks for permission, and nobody would be there to answer.
+ * A manual run is attended by definition — the user is looking at this dialog —
+ * so the tool's permission gate can do its job. */
+function wrapIsolatedRunPrompt(prompt: string): string {
+  return (
+    'This scheduled task is configured to run in an ISOLATED session. Use the ' +
+    '`create_sub_session` tool with completion "sent" to run the task below in ' +
+    'a fresh sub-session — do NOT perform the task yourself in this session. ' +
+    'After dispatching it, reply with a one-line confirmation.\n\n' +
+    '--- Task ---\n' +
+    prompt
+  );
+}
+
+/** Localized absolute timestamp, resilient to a bad epoch value. */
+function safeLocaleString(ms: number): string {
+  try {
+    return new Date(ms).toLocaleString();
+  } catch {
+    return String(ms);
+  }
+}
+
+/** Formats one run-history entry: localized timestamp + a kind tag, plus a
+ * "skipped" tag when the task's precondition withheld the fire — otherwise a
+ * guarded task that deliberately did nothing reads as a clean run. */
+function describeRun(run: DaemonScheduledTaskRun, t: TranslateFn): string {
+  const kind =
+    run.kind === 'catch-up'
+      ? ` · ${t('scheduledTasks.runKind.catchUp')}`
+      : run.kind === 'manual'
+        ? ` · ${t('scheduledTasks.runKind.manual')}`
+        : '';
+  const withheld = run.withheld
+    ? ` · ${t('scheduledTasks.runKind.withheld')}`
+    : '';
+  return `${safeLocaleString(run.at)}${kind}${withheld}`;
+}
+
 interface ScheduledTasksDialogProps {
-  /** Manual "run now": inject the task's prompt into the current session and
-   * (in the App wiring) close this dialog so the run is visible in the chat. */
-  onRunPrompt: (prompt: string) => void;
+  /** Manual "run now": execute the task's prompt in its bound session (so it
+   * lands in the same transcript as its scheduled runs), or in the current
+   * session for an unbound task. The App wiring switches to that session. */
+  onRunPrompt: (
+    prompt: string,
+    sessionId: string | null,
+  ) => void | Promise<void>;
   /** Switch to the chat view with the composer primed to describe a task, so
    * the agent can create it conversationally via its cron_create tool. */
   onCreateViaChat: () => void;
+  /** Open a task's bound session — its transcript IS the task's run history.
+   * When absent, tasks fall back to the inline fire-timestamp list. */
+  onOpenSession?: (sessionId: string) => void;
   onError: (error: unknown, fallback: string) => void;
 }
 
@@ -39,22 +105,23 @@ const FREQUENCIES: Frequency[] = [
   'custom',
 ];
 
-const DEFAULT_BUILDER: BuilderState = {
-  frequency: 'daily',
-  time: '09:00',
-  weekday: 1,
-  minuteInterval: 30,
-  customCron: '0 9 * * *',
-};
-
 // Divisors of 60 only: a non-divisor `*/N` is anchored to the hour and fires
 // more often than "every N minutes" implies, so the picker offers only values
 // that actually mean "every N minutes".
 const MINUTE_INTERVALS = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30];
+// The largest delay window.setTimeout handles without 32-bit overflow (~24.8
+// days); larger values fire immediately.
+const MAX_SET_TIMEOUT_MS = 2_147_483_647;
+// A task past its nextRunAt reports the same past value on every fetch. Reload
+// promptly this many times (to catch a just-fired task advancing), then fall
+// back to the slow lane so a permanently-stuck task can't spin a 1 Hz GET loop.
+const PAST_DUE_FAST_RELOADS = 3;
+const OVERDUE_RELOAD_INTERVAL_MS = 30_000;
 
 export function ScheduledTasksDialog({
   onRunPrompt,
   onCreateViaChat,
+  onOpenSession,
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
@@ -63,14 +130,36 @@ export function ScheduledTasksDialog({
   const [tasks, setTasks] = useState<DaemonScheduledTask[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // The task whose manual "run now" is mid-flight (switching to its session +
+  // enqueuing). Serialized to one at a time so overlapping runs can't drop a
+  // prompt on the App's single bound-run latch.
+  const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
 
-  // Create form
+  // Create / edit form. `editingId` null = create, otherwise the id of the
+  // task being edited (the form is dual-mode — same fields, different verb).
   const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
   const [builder, setBuilder] = useState<BuilderState>(DEFAULT_BUILDER);
+  // 'shared' = run in the one bound session (runs accumulate); 'isolated' =
+  // spawn a fresh session per fire. Defaults to shared for back-compat.
+  const [runMode, setRunMode] = useState<'shared' | 'isolated'>('shared');
+  // Precondition for an isolated task: the bound session evaluates it on every
+  // fire and only then spawns the sub-session. Empty = fire unconditionally.
+  // Kept in state even while `runMode` is 'shared' (the field is hidden, not
+  // discarded) so toggling the picker back and forth doesn't lose what was
+  // typed; `handleSubmit` is what drops it.
+  const [condition, setCondition] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Which task's run history is expanded inline (only one at a time).
+  const [expandedRunsId, setExpandedRunsId] = useState<string | null>(null);
+
+  // Wall-clock, ticked every second, that the per-task next-run countdowns are
+  // measured against. Only runs while at least one task has a next run.
+  const [now, setNow] = useState(() => Date.now());
 
   // Guard against setState after unmount (loads are async).
   const mountedRef = useRef(true);
@@ -105,6 +194,47 @@ export function ScheduledTasksDialog({
     void reload();
   }, [reload]);
 
+  // Tick the countdown clock once a second, but only while something is
+  // actually counting down — an all-disabled (or empty) list needs no timer.
+  const hasCountdown = !!tasks?.some((task) => task.nextRunAt != null);
+  useEffect(() => {
+    if (!hasCountdown) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [hasCountdown]);
+
+  // Refresh the list shortly after the soonest task is due, so its countdown
+  // rolls to the next occurrence and lastFiredAt / run history refresh too.
+  const pastDueReloadsRef = useRef(0);
+  useEffect(() => {
+    if (!tasks) return;
+    let soonest = Infinity;
+    for (const task of tasks) {
+      if (task.nextRunAt != null && task.nextRunAt < soonest) {
+        soonest = task.nextRunAt;
+      }
+    }
+    if (!Number.isFinite(soonest)) return;
+    const remaining = soonest - Date.now();
+    let delay: number;
+    if (remaining > 0) {
+      pastDueReloadsRef.current = 0;
+      // Reload just after the fire (+2s). Clamp to the 32-bit setTimeout ceiling
+      // (~24.8 days) so a months-away schedule can't overflow to fire-immediately
+      // and re-arm in a tight loop.
+      delay = Math.min(remaining + 2000, MAX_SET_TIMEOUT_MS);
+    } else {
+      // Already past due. A task that just fired advances its nextRunAt within a
+      // couple of prompt reloads; one that stays past due (unbound with no lock
+      // owner, or a bound session that won't revive) never advances — back off
+      // to a slow lane so the page doesn't spin a 1 Hz GET /scheduled-tasks loop.
+      const n = pastDueReloadsRef.current++;
+      delay = n < PAST_DUE_FAST_RELOADS ? 1000 : OVERDUE_RELOAD_INTERVAL_MS;
+    }
+    const id = window.setTimeout(() => void reload(), delay);
+    return () => window.clearTimeout(id);
+  }, [tasks, reload]);
+
   const previewCron = buildCron(builder);
   const previewLabel = previewCron ? describeCron(previewCron, t) : null;
 
@@ -112,11 +242,38 @@ export function ScheduledTasksDialog({
     setName('');
     setPrompt('');
     setBuilder(DEFAULT_BUILDER);
+    setRunMode('shared');
+    setCondition('');
     setFormError(null);
     setShowForm(false);
+    setEditingId(null);
   }, []);
 
-  const handleCreate = useCallback(async () => {
+  const openCreate = useCallback(() => {
+    setEditingId(null);
+    setName('');
+    setPrompt('');
+    setBuilder(DEFAULT_BUILDER);
+    setRunMode('shared');
+    setCondition('');
+    setFormError(null);
+    setShowForm(true);
+  }, []);
+
+  const openEdit = useCallback((task: DaemonScheduledTask) => {
+    setEditingId(task.id);
+    setName(task.name ?? '');
+    setPrompt(task.prompt);
+    // Reverse the cron back onto the pickers; an expression the pickers can't
+    // represent lands in the `custom` field, never silently rewritten.
+    setBuilder(parseCronToBuilder(task.cron));
+    setRunMode(task.runMode ?? 'shared');
+    setCondition(task.condition ?? '');
+    setFormError(null);
+    setShowForm(true);
+  }, []);
+
+  const handleSubmit = useCallback(async () => {
     const cron = buildCron(builder);
     if (!cron) {
       setFormError(t('scheduledTasks.error.invalidSchedule'));
@@ -128,14 +285,35 @@ export function ScheduledTasksDialog({
     }
     setSubmitting(true);
     setFormError(null);
+    // A precondition only gates the isolated dispatch, and the daemon rejects
+    // one on a shared task. Send null (not the hidden field's stale text) so
+    // switching a guarded task to shared clears it in the same request.
+    const conditionField =
+      runMode === 'isolated' ? condition.trim() || null : null;
     try {
-      await actions.createScheduledTask({
-        cron,
-        prompt: prompt.trim(),
-        name: name.trim() || null,
-        recurring: true,
-        enabled: true,
-      });
+      if (editingId) {
+        // Update only the editable fields; `recurring`/`enabled` are omitted so
+        // the PATCH leaves them unchanged (recurring isn't in this form, and
+        // enabled is driven by the card toggle). Empty name clears it. runMode
+        // is sent so the picker can switch a task between shared and isolated.
+        await actions.updateScheduledTask(editingId, {
+          cron,
+          prompt: prompt.trim(),
+          name: name.trim() || null,
+          runMode,
+          condition: conditionField,
+        });
+      } else {
+        await actions.createScheduledTask({
+          cron,
+          prompt: prompt.trim(),
+          name: name.trim() || null,
+          recurring: true,
+          enabled: true,
+          runMode,
+          condition: conditionField,
+        });
+      }
       if (!mountedRef.current) return;
       resetForm();
       await reload();
@@ -145,7 +323,18 @@ export function ScheduledTasksDialog({
     } finally {
       if (mountedRef.current) setSubmitting(false);
     }
-  }, [actions, builder, name, prompt, reload, resetForm, t]);
+  }, [
+    actions,
+    builder,
+    condition,
+    editingId,
+    name,
+    prompt,
+    runMode,
+    reload,
+    resetForm,
+    t,
+  ]);
 
   const handleToggle = useCallback(
     async (task: DaemonScheduledTask) => {
@@ -160,6 +349,78 @@ export function ScheduledTasksDialog({
       }
     },
     [actions, onError, reload, t],
+  );
+
+  const handleRunNow = useCallback(
+    async (task: DaemonScheduledTask) => {
+      // Cheap early exit on the (possibly stale) snapshot, and serialize: only
+      // one manual run in flight, since the App holds a single pending bound-run
+      // latch and overlapping runs could drop a prompt.
+      if (!task.enabled || runningTaskId !== null) return;
+      setRunningTaskId(task.id);
+      try {
+        // Server-authoritative re-check right before running: the dialog's
+        // snapshot can be stale — another tab/API may have disabled or deleted
+        // the task since it loaded. Running then would EXECUTE the prompt in the
+        // session while /run only refuses the RECORD afterward, i.e. a real
+        // unrecorded run. Refresh, bail if gone/disabled, and use the FRESH
+        // prompt/session so we never run an outdated one.
+        const fresh = (await actions.listScheduledTasks()).find(
+          (tk) => tk.id === task.id,
+        );
+        if (!fresh || !fresh.enabled) {
+          await reload().catch(() => {});
+          onError(
+            new Error('This task is no longer runnable.'),
+            t('scheduledTasks.error.runFailed'),
+          );
+          return;
+        }
+        if (fresh.recurring) {
+          // Recurring: enqueue FIRST (onRunPrompt resolves at admission, rejects
+          // if the session can't be opened), record AFTER — so a failed enqueue
+          // leaves no false "ran" entry. A record failure is surfaced but the
+          // history still catches up on the next refresh. For isolated tasks,
+          // wrap the prompt so the model dispatches via create_sub_session.
+          // The precondition is NOT evaluated here — see wrapIsolatedRunPrompt.
+          const runPrompt =
+            fresh.runMode === 'isolated'
+              ? wrapIsolatedRunPrompt(fresh.prompt)
+              : fresh.prompt;
+          await onRunPrompt(runPrompt, fresh.sessionId);
+          try {
+            await actions.runScheduledTask(fresh.id);
+            await reload();
+          } catch (err) {
+            onError(err, t('scheduledTasks.error.runFailed'));
+          }
+        } else {
+          // One-shot: /run IS its single fire — it deletes the task. Consume it
+          // BEFORE enqueuing so it can't ALSO fire at its own scheduled slot (a
+          // silent double execution). The trade-off is that a failed delivery
+          // leaves the task gone AND un-run — and reload() has already dropped it
+          // from the list — so surface THAT explicitly rather than the generic
+          // "run failed", which would hide the deletion.
+          await actions.runScheduledTask(fresh.id);
+          await reload();
+          try {
+            const runPrompt =
+              fresh.runMode === 'isolated'
+                ? wrapIsolatedRunPrompt(fresh.prompt)
+                : fresh.prompt;
+            await onRunPrompt(runPrompt, fresh.sessionId);
+          } catch (err) {
+            onError(err, t('scheduledTasks.error.oneShotConsumedButFailed'));
+            return;
+          }
+        }
+      } catch (err) {
+        onError(err, t('scheduledTasks.error.runFailed'));
+      } finally {
+        setRunningTaskId(null);
+      }
+    },
+    [actions, onError, onRunPrompt, reload, runningTaskId, t],
   );
 
   const handleDelete = useCallback(
@@ -212,7 +473,7 @@ export function ScheduledTasksDialog({
           <button
             type="button"
             className={styles.primaryButton}
-            onClick={() => setShowForm(true)}
+            onClick={openCreate}
           >
             {t('scheduledTasks.new')}
           </button>
@@ -221,7 +482,9 @@ export function ScheduledTasksDialog({
 
       {showForm && (
         <DialogShell
-          title={t('scheduledTasks.new')}
+          title={t(
+            editingId ? 'scheduledTasks.editTitle' : 'scheduledTasks.new',
+          )}
           size="md"
           onClose={resetForm}
         >
@@ -254,6 +517,50 @@ export function ScheduledTasksDialog({
                 onChange={(e) => setPrompt(e.target.value)}
               />
             </label>
+
+            <div className={styles.field}>
+              <span className={styles.fieldLabel}>
+                {t('scheduledTasks.runMode')}
+              </span>
+              <div className={styles.radioGroup} role="radiogroup">
+                {(['shared', 'isolated'] as const).map((mode) => (
+                  <label key={mode} className={styles.radioOption}>
+                    <input
+                      type="radio"
+                      name="runMode"
+                      value={mode}
+                      checked={runMode === mode}
+                      onChange={() => setRunMode(mode)}
+                    />
+                    <span>{t(`scheduledTasks.runMode.${mode}`)}</span>
+                  </label>
+                ))}
+              </div>
+              <span className={styles.fieldHint}>
+                {t(`scheduledTasks.runMode.${runMode}.hint`)}
+              </span>
+            </div>
+
+            {/* Isolated-only: the precondition gates the sub-session dispatch,
+                and the daemon rejects one on a shared task. */}
+            {runMode === 'isolated' && (
+              <label className={styles.field}>
+                <span className={styles.fieldLabel}>
+                  {t('scheduledTasks.condition')}
+                </span>
+                <textarea
+                  className={styles.textarea}
+                  value={condition}
+                  rows={3}
+                  maxLength={10_000}
+                  placeholder={t('scheduledTasks.conditionPlaceholder')}
+                  onChange={(e) => setCondition(e.target.value)}
+                />
+                <span className={styles.fieldHint}>
+                  {t('scheduledTasks.condition.hint')}
+                </span>
+              </label>
+            )}
 
             <div className={styles.scheduleRow}>
               <label className={styles.field}>
@@ -397,12 +704,20 @@ export function ScheduledTasksDialog({
               <button
                 type="button"
                 className={styles.primaryButton}
-                onClick={() => void handleCreate()}
+                onClick={() => void handleSubmit()}
                 disabled={submitting}
               >
                 {submitting
-                  ? t('scheduledTasks.creating')
-                  : t('scheduledTasks.create')}
+                  ? t(
+                      editingId
+                        ? 'scheduledTasks.saving'
+                        : 'scheduledTasks.creating',
+                    )
+                  : t(
+                      editingId
+                        ? 'scheduledTasks.save'
+                        : 'scheduledTasks.create',
+                    )}
               </button>
             </div>
           </div>
@@ -447,11 +762,26 @@ export function ScheduledTasksDialog({
                   <button
                     type="button"
                     className={styles.iconAction}
-                    onClick={() => onRunPrompt(task.prompt)}
-                    title={t('scheduledTasks.runNow')}
+                    onClick={() => void handleRunNow(task)}
+                    disabled={!task.enabled || runningTaskId !== null}
+                    title={
+                      task.condition
+                        ? t('scheduledTasks.runNowIgnoresCondition')
+                        : t('scheduledTasks.runNow')
+                    }
                     aria-label={t('scheduledTasks.runNow')}
                   >
                     ▶
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.iconAction}
+                    onClick={() => openEdit(task)}
+                    disabled={busy}
+                    title={t('scheduledTasks.edit')}
+                    aria-label={t('scheduledTasks.edit')}
+                  >
+                    ✎
                   </button>
                   <button
                     type="button"
@@ -472,6 +802,19 @@ export function ScheduledTasksDialog({
                 </div>
               )}
 
+              {task.condition && (
+                <div
+                  className={styles.cardCondition}
+                  title={task.condition}
+                  data-testid="scheduled-task-condition"
+                >
+                  <span className={styles.cardConditionLabel}>
+                    {t('scheduledTasks.condition.cardPrefix')}
+                  </span>
+                  {task.condition}
+                </div>
+              )}
+
               <div className={styles.cardFooter}>
                 <span className={styles.schedulePill}>
                   <span className={styles.clockIcon} aria-hidden="true">
@@ -486,10 +829,73 @@ export function ScheduledTasksDialog({
                       : 'scheduledTasks.runsOnce',
                   )}
                 </span>
+                {task.nextRunAt != null && (
+                  <span
+                    className={styles.countdown}
+                    data-testid="scheduled-task-next-run"
+                    title={t('scheduledTasks.nextRunTooltip', {
+                      when: safeLocaleString(task.nextRunAt),
+                    })}
+                  >
+                    <span className={styles.hourglassIcon} aria-hidden="true">
+                      ⏳
+                    </span>
+                    {formatCountdown(task.nextRunAt - now, t)}
+                  </span>
+                )}
                 <span className={styles.lastFired}>
                   {describeLastRun(task, t)}
                 </span>
+                {task.sessionId && onOpenSession ? (
+                  // The task's bound session IS its run history — open its
+                  // transcript. Always shown (empty state included) so the
+                  // history is discoverable even before the first run. For an
+                  // isolated task this transcript shows the model dispatching
+                  // each run into a fresh sub-session.
+                  <button
+                    type="button"
+                    className={styles.runsToggle}
+                    onClick={() => onOpenSession(task.sessionId!)}
+                    title={t('scheduledTasks.viewHistoryHint')}
+                  >
+                    {task.runs.length > 0
+                      ? t('scheduledTasks.viewHistory', {
+                          count: task.runs.length,
+                        })
+                      : t('scheduledTasks.viewHistoryEmpty')}
+                  </button>
+                ) : (
+                  // Unbound (tool-created / legacy) task: no session to open, so
+                  // fall back to the inline fire-timestamp list.
+                  task.runs.length > 0 && (
+                    <button
+                      type="button"
+                      className={styles.runsToggle}
+                      aria-expanded={expandedRunsId === task.id}
+                      onClick={() =>
+                        setExpandedRunsId((cur) =>
+                          cur === task.id ? null : task.id,
+                        )
+                      }
+                    >
+                      {t('scheduledTasks.runHistory', {
+                        count: task.runs.length,
+                      })}
+                    </button>
+                  )
+                )}
               </div>
+
+              {expandedRunsId === task.id && task.runs.length > 0 && (
+                <ul className={styles.runsList}>
+                  {/* Newest first — the ring is stored oldest-first. */}
+                  {[...task.runs].reverse().map((run, idx) => (
+                    <li key={`${run.at}-${idx}`} className={styles.runsItem}>
+                      {describeRun(run, t)}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           );
         })}

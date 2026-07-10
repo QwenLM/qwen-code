@@ -3,13 +3,19 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
 import { Markdown } from './Markdown';
 import { CompactModeContext } from '../../App';
+import {
+  useWebShellCustomization,
+  type WebShellAssistantTurnFooterRenderInfo,
+} from '../../customization';
 import { useI18n } from '../../i18n';
 import { formatTimestamp } from '../MessageTimestamp';
+import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './AssistantMessage.module.css';
 
 interface AssistantMessageProps {
@@ -19,6 +25,8 @@ interface AssistantMessageProps {
   onBranchSession?: () => void;
   showFooterActions?: boolean;
   showBranchAction?: boolean;
+  isLocateFlashing?: boolean;
+  customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
 }
 
 export const AssistantMessage = memo(function AssistantMessage({
@@ -28,10 +36,20 @@ export const AssistantMessage = memo(function AssistantMessage({
   onBranchSession,
   showFooterActions = false,
   showBranchAction = false,
+  isLocateFlashing = false,
+  customFooterInfo,
 }: AssistantMessageProps) {
   const { t } = useI18n();
+  const { renderAssistantTurnFooter } = useWebShellCustomization();
   const [copied, setCopied] = useState(false);
   const showFooter = !!content && !isStreaming && showFooterActions;
+  const customFooter = useMemo(
+    () =>
+      customFooterInfo
+        ? renderAssistantTurnFooter?.(customFooterInfo)
+        : undefined,
+    [customFooterInfo, renderAssistantTurnFooter],
+  );
   const handleCopy = useCallback(() => {
     const write = navigator.clipboard?.writeText(content);
     if (!write) {
@@ -47,7 +65,11 @@ export const AssistantMessage = memo(function AssistantMessage({
   return (
     <div className={styles.message}>
       {content && (
-        <div className={styles.content}>
+        <div
+          className={`${styles.content}${
+            isLocateFlashing ? ` ${flashStyles.flash}` : ''
+          }`}
+        >
           <div className={styles.contentBody}>
             <Markdown
               content={content}
@@ -56,6 +78,9 @@ export const AssistantMessage = memo(function AssistantMessage({
             />
           </div>
         </div>
+      )}
+      {customFooter && (
+        <div className={styles.customFooter}>{customFooter}</div>
       )}
       {showFooter && (
         <div className={styles.messageFooter}>
@@ -160,12 +185,14 @@ interface ThinkingMessageProps {
   content: string;
   isStreaming?: boolean;
   timestamp?: number;
+  isLocateFlashing?: boolean;
 }
 
 export const ThinkingMessage = memo(function ThinkingMessage({
   content,
   isStreaming,
   timestamp,
+  isLocateFlashing = false,
 }: ThinkingMessageProps) {
   const { t } = useI18n();
   const compactMode = useContext(CompactModeContext);
@@ -208,7 +235,11 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   }, []);
 
   return (
-    <div className={styles.message}>
+    <div
+      className={`${styles.message}${
+        isLocateFlashing ? ` ${flashStyles.flash}` : ''
+      }`}
+    >
       {content && !compactMode && (
         <div className={styles.thinking}>
           <div className={styles.thinkingBody}>

@@ -65,6 +65,7 @@ export type MarkdownTableMode = 'basic' | 'advanced';
 
 export type ToolHeaderKind =
   | 'agent'
+  | 'ask'
   | 'edit'
   | 'fetch'
   | 'read'
@@ -88,6 +89,40 @@ export type ToolHeaderExtraRenderer = (
 
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
+
+export interface UserMessageContentRenderInfo {
+  content: string;
+  images?: readonly { data: string; mimeType: string }[];
+}
+
+export type UserMessageContentRenderer = (
+  info: UserMessageContentRenderInfo,
+) => ReactNode;
+
+export interface WebShellBottomStatusItem {
+  id: string;
+  label: ReactNode;
+  title?: string;
+  ariaLabel?: string;
+  onClick?: () => void;
+}
+
+export interface WebShellAssistantMessageInfo {
+  id: string;
+  content: string;
+  isStreaming?: boolean;
+  timestamp?: number;
+}
+
+export interface WebShellAssistantTurnFooterRenderInfo {
+  /** User-message id for the head of the completed turn. */
+  turnId: string;
+  message: WebShellAssistantMessageInfo;
+}
+
+export type AssistantTurnFooterRenderer = (
+  info: WebShellAssistantTurnFooterRenderInfo,
+) => ReactNode | null | undefined;
 
 export type WebShellBuiltinComposerTagKind =
   | 'extension'
@@ -276,6 +311,8 @@ export interface WebShellCustomization {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   renderWelcomeFooter?: WelcomeFooterRenderer;
+  renderUserMessageContent?: UserMessageContentRenderer;
+  renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;

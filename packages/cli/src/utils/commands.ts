@@ -4,12 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { type SlashCommand } from '../ui/commands/types.js';
+import { CommandKind, type SlashCommand } from '../ui/commands/types.js';
+
+/** Maximum number of stacked skill commands that can be loaded in one prompt. */
+export const MAX_STACKED_SKILLS = 5;
 
 export type ParsedSlashCommand = {
   commandToExecute: SlashCommand | undefined;
   args: string;
   canonicalPath: string[];
+};
+
+export type ParsedStackedSkillCommands = {
+  /** All matched skill commands (up to MAX_STACKED_SKILLS). */
+  skills: SlashCommand[];
+  /** Text remaining after the last matched skill token. */
+  remainingText: string;
+  /** True when more than MAX_STACKED_SKILLS leading tokens were found. */
+  exceededMax: boolean;
 };
 
 /**
@@ -75,3 +87,86 @@ export const parseSlashCommand = (
 
   return { commandToExecute, args, canonicalPath };
 };
+
+/**
+ * Detects multiple leading `/skill-name` tokens in user input.
+ *
+ * For input like `/feat-dev /e2e-testing implement X`, returns all matched
+ * skill commands (up to MAX_STACKED_SKILLS) and the remaining text.
+ *
+ * Only matches commands with `kind === CommandKind.SKILL`. Stops at the first
+ * non-skill token or unmatched `/token`.
+ *
+ * @param query The raw input string starting with `/`.
+ * @param commands The list of available slash commands.
+ * @returns Matched skill commands and the remaining text after them.
+ */
+export const parseStackedSlashCommands = (
+  query: string,
+  commands: readonly SlashCommand[],
+): ParsedStackedSkillCommands => {
+  const trimmed = query.trim();
+  if (!trimmed.startsWith('/')) {
+    return { skills: [], remainingText: trimmed, exceededMax: false };
+  }
+
+  const commandText = trimmed.substring(1);
+  const skills: SlashCommand[] = [];
+  let pos = 0;
+  let restPos = 0;
+  let exceededMax = false;
+
+  while (pos < commandText.length) {
+    // Skip whitespace between tokens (matches spaces, tabs, etc.).
+    while (pos < commandText.length && /\s/.test(commandText[pos]!)) pos++;
+    if (pos >= commandText.length) {
+      restPos = pos;
+      break;
+    }
+
+    const tokenStart = pos;
+    while (pos < commandText.length && !/\s/.test(commandText[pos]!)) pos++;
+    const token = commandText.slice(tokenStart, pos);
+
+    if (skills.length === 0) {
+      if (token.startsWith('/')) break;
+      const cmd = findCommandByName(token, commands);
+      if (!cmd || cmd.kind !== CommandKind.SKILL) break;
+      skills.push(cmd);
+      restPos = pos;
+      continue;
+    }
+
+    if (!token.startsWith('/')) break;
+    const name = token.substring(1);
+    if (!name) break;
+
+    const cmd = findCommandByName(name, commands);
+    if (!cmd || cmd.kind !== CommandKind.SKILL) break;
+
+    if (skills.length >= MAX_STACKED_SKILLS) {
+      exceededMax = true;
+      break;
+    }
+
+    skills.push(cmd);
+    restPos = pos;
+  }
+
+  if (skills.length < 2) {
+    return { skills: [], remainingText: trimmed, exceededMax: false };
+  }
+
+  const afterSkills = commandText.slice(restPos).trim();
+  return { skills, remainingText: afterSkills, exceededMax };
+};
+
+function findCommandByName(
+  name: string,
+  commands: readonly SlashCommand[],
+): SlashCommand | undefined {
+  return (
+    commands.find((cmd) => cmd.name === name) ??
+    commands.find((cmd) => cmd.altNames?.includes(name))
+  );
+}

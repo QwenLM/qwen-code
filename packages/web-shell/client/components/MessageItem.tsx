@@ -5,6 +5,7 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
+import type { WebShellAssistantTurnFooterRenderInfo } from '../customization';
 import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
@@ -30,7 +31,8 @@ interface MessageItemProps {
   onBranchSession?: () => void;
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
-  shellOutputMaxLines: number;
+  isLocateFlashing?: boolean;
+  assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -44,13 +46,19 @@ export const MessageItem = memo(function MessageItem({
   onBranchSession,
   showAssistantActions = false,
   showAssistantBranch = false,
-  shellOutputMaxLines,
+  isLocateFlashing = false,
+  assistantTurnFooterInfo,
 }: MessageItemProps) {
+  const { t } = useI18n();
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
         return (
-          <UserMessage content={message.content} images={message.images} />
+          <UserMessage
+            content={message.content}
+            images={message.images}
+            isLocateFlashing={isLocateFlashing}
+          />
         );
       case 'assistant':
         return (
@@ -61,6 +69,8 @@ export const MessageItem = memo(function MessageItem({
             onBranchSession={onBranchSession}
             showFooterActions={showAssistantActions}
             showBranchAction={showAssistantBranch}
+            isLocateFlashing={isLocateFlashing}
+            customFooterInfo={assistantTurnFooterInfo}
           />
         );
       case 'thinking':
@@ -69,6 +79,7 @@ export const MessageItem = memo(function MessageItem({
             content={message.content}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
+            isLocateFlashing={isLocateFlashing}
           />
         );
       case 'tool_group':
@@ -77,11 +88,17 @@ export const MessageItem = memo(function MessageItem({
             tools={message.tools}
             pendingApproval={pendingApproval}
             workspaceCwd={workspaceCwd}
-            shellOutputMaxLines={shellOutputMaxLines}
+            isLocateFlashing={isLocateFlashing}
           />
         );
       case 'plan':
-        return <PlanMessage id={message.id} todos={message.todos} />;
+        return (
+          <PlanMessage
+            id={message.id}
+            todos={message.todos}
+            isLocateFlashing={isLocateFlashing}
+          />
+        );
       case 'system':
         return (
           <SystemMessage
@@ -192,7 +209,7 @@ export const MessageItem = memo(function MessageItem({
       timestamp={message.timestamp}
       chatMode={message.role === 'user'}
       copyText={message.role === 'user' ? message.content : undefined}
-      copyTitle="Copy"
+      copyTitle={t('common.copy')}
     >
       {selectableSafeBody}
     </MessageTimestamp>
@@ -239,8 +256,31 @@ function areMessageItemPropsEqual(
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
-  if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
+  if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
+  if (
+    !areAssistantTurnFooterInfosEqual(
+      prev.assistantTurnFooterInfo,
+      next.assistantTurnFooterInfo,
+    )
+  ) {
+    return false;
+  }
   return areMessagesEqual(prev.message, next.message);
+}
+
+function areAssistantTurnFooterInfosEqual(
+  prev?: WebShellAssistantTurnFooterRenderInfo,
+  next?: WebShellAssistantTurnFooterRenderInfo,
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next) return false;
+  return (
+    prev.turnId === next.turnId &&
+    prev.message.id === next.message.id &&
+    prev.message.content === next.message.content &&
+    prev.message.isStreaming === next.message.isStreaming &&
+    prev.message.timestamp === next.message.timestamp
+  );
 }
 
 function areMessagesEqual(prev: Message, next: Message): boolean {

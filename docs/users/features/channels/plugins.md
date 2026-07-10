@@ -55,6 +55,7 @@ All standard channel options work with custom channels:
 | `instructions` | Prepended to the first message of each session |
 | `model`        | Model override for the channel                 |
 | `groupPolicy`  | `disabled`, `allowlist`, or `open`             |
+| `dmPolicy`     | `open` or `disabled`                           |
 | `groups`       | Per-group settings                             |
 
 See [Overview](./overview) for details on each option.

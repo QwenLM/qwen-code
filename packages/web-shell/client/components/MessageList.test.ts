@@ -115,7 +115,9 @@ function makeBackgroundAgentToolGroup(id: string): Message {
   };
 }
 
-function makeMultiToolGroup(id: string): Message {
+function makeMultiToolGroup(
+  id: string,
+): Extract<Message, { role: 'tool_group' }> {
   return {
     id,
     role: 'tool_group',
@@ -126,15 +128,19 @@ function makeMultiToolGroup(id: string): Message {
   };
 }
 
-function makeUserMessage(id: string): Message {
+function makeUserMessage(id: string): Extract<Message, { role: 'user' }> {
   return { id, role: 'user', content: 'hello' };
 }
 
-function makeUserShellMessage(id: string): Message {
-  return { id, role: 'user_shell', command: 'npm test' };
+function makeUserShellMessage(
+  id: string,
+): Extract<Message, { role: 'user_shell' }> {
+  return { id, role: 'user_shell', command: 'npm test', output: '' };
 }
 
-function makeAssistantMessage(id: string): Message {
+function makeAssistantMessage(
+  id: string,
+): Extract<Message, { role: 'assistant' }> {
   return { id, role: 'assistant', content: 'response' };
 }
 
@@ -310,7 +316,9 @@ describe('groupParallelAgents', () => {
 });
 
 describe('getTurnTimelineNode', () => {
-  const item = (message: Message): DisplayItem => ({
+  const item = (
+    message: Message,
+  ): Extract<DisplayItem, { type: 'message' }> => ({
     type: 'message',
     key: message.id,
     message,
@@ -1134,19 +1142,86 @@ describe('applyTurnCollapse', () => {
     expect(collapseOf(out, 0)).toBeUndefined();
   });
 
-  it('folds a turn with no final answer down to just the prompt', () => {
+  it('keeps a turn with no final answer expanded by default', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),
       makeMultiToolGroup('g1'),
       makeMultiToolGroup('g2'),
     ]);
     const out = collapseItems(items);
-    expect(rowIds(out)).toEqual(['u1', 'tc-u1']);
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'u1-content-0']);
+    expect(flattenedRowIds(out)).toEqual(['u1', 'tc-u1', 'g1', 'g2']);
     expect(collapseOf(out, 0)).toEqual({
       turnId: 'u1',
-      collapsed: true,
+      collapsed: false,
       hiddenCount: 2,
       toolCallCount: 4,
+    });
+  });
+
+  it('still allows manually collapsing a turn with no final answer', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeMultiToolGroup('g2'),
+    ]);
+    const out = collapseItems(items, {
+      overrides: new Map([['u1', false]]),
+    });
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1']);
+    expect(collapseOf(out, 0)?.collapsed).toBe(true);
+  });
+
+  it('keeps a turn with a turn error expanded by default', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      {
+        id: 's1',
+        role: 'system',
+        content: 'The turn failed.',
+        variant: 'error',
+        source: 'turn_error',
+      },
+    ]);
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'u1-content-0']);
+    expect(flattenedRowIds(out)).toEqual(['u1', 'tc-u1', 'g1', 's1']);
+    expect(collapseOf(out, 0)).toEqual({
+      turnId: 'u1',
+      collapsed: false,
+      hiddenCount: 1,
+      toolCallCount: 2,
+    });
+  });
+
+  it('keeps a turn error expanded even when a final answer is present', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+      {
+        id: 's1',
+        role: 'system',
+        content: 'The turn failed.',
+        variant: 'error',
+        source: 'turn_error',
+      },
+    ]);
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual([
+      'u1',
+      'tc-u1',
+      'u1-content-0',
+      'a1',
+      'u1-content-1',
+    ]);
+    expect(flattenedRowIds(out)).toEqual(['u1', 'tc-u1', 'g1', 'a1', 's1']);
+    expect(collapseOf(out, 0)).toEqual({
+      turnId: 'u1',
+      collapsed: false,
+      hiddenCount: 1,
+      toolCallCount: 2,
     });
   });
 
@@ -1269,8 +1344,9 @@ describe('applyTurnCollapse', () => {
       { id: 'x', role: 'assistant', content: undefined as unknown as string },
     ]);
     const out = collapseItems(items);
-    // No assistant-with-content → no final answer → fold to just the prompt.
-    expect(rowIds(out)).toEqual(['u1', 'tc-u1']);
+    // No assistant-with-content → no final answer → stays expanded.
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'u1-content-0']);
+    expect(flattenedRowIds(out)).toEqual(['u1', 'tc-u1', 'g1', 'x']);
     expect(collapseOf(out, 0)?.hiddenCount).toBe(2);
   });
 

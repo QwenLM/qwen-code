@@ -1317,10 +1317,19 @@ export const useGeminiStream = (
           tableClampRows,
         );
         if (!clipped) break;
-        // Back up to the last blank line within the kept prefix — the only place
-        // it is safe to end a committed chunk without orphaning a block.
+        // Back up to the last blank line at or before the kept prefix — the only
+        // place it is safe to end a committed chunk without orphaning a block.
+        // Start AT keptLines (not keptLines - 1): when a single block is taller
+        // than the budget, fitPendingSlice charges the whole block and returns
+        // kept = the block's trailing blank line, so the boundary sits exactly at
+        // keptLines. Searching from keptLines - 1 misses it, finds no earlier
+        // blank (the block has none, and the blank before it was already
+        // committed), and stalls — every later block then appends past keptLines,
+        // so nothing ever commits until the stream finalizes and dumps it all at
+        // once. Committing an over-tall completed block to <Static> is fine; only
+        // the live pending frame must stay within the viewport.
         let boundaryLine = -1;
-        for (let k = Math.min(keptLines, bufferLines.length) - 1; k >= 0; k--) {
+        for (let k = Math.min(keptLines, bufferLines.length - 1); k >= 0; k--) {
           if (bufferLines[k]!.trim() === '') {
             boundaryLine = k;
             break;
@@ -2758,8 +2767,17 @@ export const useGeminiStream = (
         newApprovalMode === ApprovalMode.AUTO_EDIT
       ) {
         let awaitingApprovalCalls = toolCalls.filter(
-          (call): call is TrackedWaitingToolCall =>
-            call.status === 'awaiting_approval',
+          (call): call is TrackedWaitingToolCall => {
+            if (call.status !== 'awaiting_approval') {
+              return false;
+            }
+            const { confirmationDetails } = call;
+            return !(
+              confirmationDetails &&
+              'hideAlwaysAllow' in confirmationDetails &&
+              confirmationDetails.hideAlwaysAllow === true
+            );
+          },
         );
 
         // For AUTO_EDIT mode, only approve edit tools (edit/replace, write_file, notebook_edit)
@@ -3478,7 +3496,31 @@ export const useGeminiStream = (
       // already ran scheduler.stop(), so do not (re)install onFire.
       if (stopped) return;
       scheduler.start(
-        (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
+        (job: {
+          id?: string;
+          prompt: string;
+          cronExpr?: string;
+          missed?: boolean;
+          // Declared so a guarded job can be recognized: a structural parameter
+          // type that omits it would let TypeScript narrow the field away and
+          // hide the guard below from the reader.
+          condition?: string;
+        }) => {
+          // Only the ACP/daemon session evaluates a precondition (it owns the
+          // sub-session dispatch the verdict gates). Running the prompt here
+          // would fire a guarded task unconditionally — the exact outcome the
+          // precondition exists to prevent — so fail closed. Reachable only for
+          // a task whose `condition` was hand-written onto an unbound entry in
+          // the tasks file; every writer binds one, and a bound task fires only
+          // in its own session.
+          if (job.condition) {
+            debugLogger.warn(
+              'Skipping a guarded scheduled task: preconditions are not ' +
+                'evaluated in interactive mode',
+              { jobId: job.id },
+            );
+            return;
+          }
           const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
           const autonomousMode = detectAutonomousSentinel(job.prompt);
           let label = job.prompt.slice(0, 40);

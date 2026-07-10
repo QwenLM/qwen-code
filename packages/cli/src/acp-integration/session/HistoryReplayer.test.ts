@@ -13,6 +13,7 @@ import type { SessionContext } from './types.js';
 import type {
   Config,
   ChatRecord,
+  HistoryGap,
   ToolRegistry,
   ToolResultDisplay,
   TodoResultDisplay,
@@ -678,6 +679,25 @@ describe('HistoryReplayer', () => {
       });
     });
 
+    it('should replay structured artifacts from stored tool results', async () => {
+      const record = createToolResultRecord('read_file', 'File contents here');
+      const artifacts = [
+        {
+          title: 'Replay artifact',
+          url: 'https://example.com/replayed',
+        },
+      ];
+      record.toolCallResult!.artifacts = artifacts;
+
+      await replayer.replay([record]);
+
+      expect(sentUpdates()[0]).toMatchObject({
+        _meta: {
+          artifacts,
+        },
+      });
+    });
+
     it('should emit failed status for tool results with errors', async () => {
       const records = [createToolResultRecord('failing_tool', undefined, true)];
 
@@ -883,6 +903,50 @@ describe('HistoryReplayer', () => {
           },
         },
       });
+    });
+  });
+
+  describe('history gaps', () => {
+    const userRec = (uuid: string, text: string): ChatRecord =>
+      ({
+        uuid,
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: '2026-07-05T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text }] },
+        cwd: '/tmp',
+        version: '0',
+      }) as unknown as ChatRecord;
+
+    it('emits a history-gap notice before the gap child record', async () => {
+      const records = [
+        userRec('old', 'older turn'),
+        userRec('new', 'newer turn'),
+      ];
+      const gaps: HistoryGap[] = [
+        { childUuid: 'new', missingParentUuid: 'gone' },
+      ];
+
+      await replayer.replay(records, gaps);
+
+      const texts = sentUpdates().map((u) => {
+        const content = u['content'] as { text?: string } | undefined;
+        return content?.text ?? '';
+      });
+      const gapIdx = texts.findIndex((t) => t.includes('History gap'));
+      const newIdx = texts.findIndex((t) => t.includes('newer turn'));
+      expect(gapIdx).toBeGreaterThanOrEqual(0);
+      expect(newIdx).toBeGreaterThan(gapIdx);
+    });
+
+    it('emits no gap notice when there are no gaps', async () => {
+      await replayer.replay([userRec('a', 'a turn')]);
+      const hasGap = sentUpdates().some((u) => {
+        const content = u['content'] as { text?: string } | undefined;
+        return (content?.text ?? '').includes('History gap');
+      });
+      expect(hasGap).toBe(false);
     });
   });
 });

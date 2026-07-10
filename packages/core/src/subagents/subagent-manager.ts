@@ -678,7 +678,7 @@ export class SubagentManager {
     }
 
     // Nested CC fields. Safe to round-trip with the eemeli/yaml parser; the
-    // previous skip-list carve-out is gone (see docs/yaml-parser-replacement.md).
+    // previous skip-list carve-out is gone (see docs/design/yaml-parser-replacement.md).
     if (config.mcpServers && Object.keys(config.mcpServers).length > 0) {
       frontmatter['mcpServers'] = config.mcpServers;
     }

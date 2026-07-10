@@ -46,7 +46,10 @@ import {
   SessionShellDisabledError,
   WorkspaceMismatchError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
-import { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
+import {
+  SessionArtifactAuthorizationError,
+  SessionArtifactValidationError,
+} from '@qwen-code/acp-bridge/sessionArtifacts';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
@@ -411,6 +414,8 @@ function pickSessionArtifactInput(
     mimeType,
     sizeBytes,
     metadata,
+    retention,
+    clientRetained,
   } = params;
 
   return {
@@ -424,6 +429,8 @@ function pickSessionArtifactInput(
     mimeType,
     sizeBytes,
     metadata,
+    retention,
+    clientRetained,
   } as AddSessionArtifactInput;
 }
 
@@ -533,6 +540,17 @@ function toRpcError(err: unknown): {
       data: { errorKind: 'client_id_required' },
     };
   }
+  if (err instanceof SessionArtifactAuthorizationError) {
+    return {
+      code: RPC.INVALID_REQUEST,
+      message: err.message,
+      data: {
+        errorKind: 'artifact_forbidden',
+        sessionId: err.sessionId,
+        artifactId: err.artifactId,
+      },
+    };
+  }
   if (err instanceof SessionArtifactValidationError) {
     return {
       code: RPC.INVALID_PARAMS,
@@ -578,7 +596,27 @@ function toRpcError(err: unknown): {
     case 'InvalidClientIdError':
       return { code: RPC.INVALID_PARAMS, message: errMsg(err) };
     case 'SessionLimitExceededError':
-      return { code: RPC.INTERNAL_ERROR, message: errMsg(err) };
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: errMsg(err),
+        data: {
+          errorKind: 'session_limit_exceeded',
+          limit: (err as { limit?: unknown }).limit,
+          scope: 'workspace',
+          retryable: true,
+        },
+      };
+    case 'TotalSessionLimitExceededError':
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: errMsg(err),
+        data: {
+          errorKind: 'session_limit_exceeded',
+          limit: (err as { limit?: unknown }).limit,
+          scope: (err as { scope?: unknown }).scope,
+          retryable: true,
+        },
+      };
     case 'PromptQueueFullError': {
       const promptErr = err as {
         sessionId?: unknown;
@@ -2536,7 +2574,10 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/artifacts`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
-          const result = await this.bridge.getSessionArtifacts(sessionId);
+          const result = await this.bridge.getSessionArtifacts(
+            sessionId,
+            this.sessionCtx(conn, sessionId, loopback),
+          );
           this.replyConn(conn, id, result as unknown);
           return;
         }

@@ -892,6 +892,7 @@ export class DingtalkChannel extends ChannelBase {
         typeof downstream.data === 'string'
           ? JSON.parse(downstream.data)
           : (downstream.data as DingTalkMessageData);
+      this.logDebugPayload('DingTalk', data);
       const dataMsgId = typeof data.msgId === 'string' ? data.msgId : undefined;
       const headerMsgId =
         typeof downstream.headers.messageId === 'string'
@@ -976,7 +977,7 @@ export class DingtalkChannel extends ChannelBase {
 
       // Strip first @mention (the bot) from text, keep other @mentions intact
       if (isMentioned) {
-        cleanText = cleanText.replace(/@\S+/, '').trim();
+        cleanText = cleanText.replace(/@[^\s\p{Cf}]+/u, '').trim();
       }
 
       // Extract quoted message context

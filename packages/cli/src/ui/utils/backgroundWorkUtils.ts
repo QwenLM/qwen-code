@@ -8,7 +8,13 @@ import type { Config } from '@qwen-code/qwen-code-core';
 
 export function hasBlockingBackgroundWork(config: Config): boolean {
   return (
-    config.getBackgroundTaskRegistry().hasUnfinalizedTasks() ||
+    // hasRunningTasks, not hasUnfinalizedTasks: a cancelled task whose
+    // finalize callback hasn't fired yet must not block /clear or
+    // session resume — both abort-and-reset the registry right after
+    // this gate, suppressing the pending notification anyway. Gating on
+    // the unfinalized set made /new silently no-op when typed in the
+    // window between cancel and finalize (issue #5949).
+    config.getBackgroundTaskRegistry().hasRunningTasks() ||
     config.getMonitorRegistry().getRunning().length > 0 ||
     config.getBackgroundShellRegistry().hasRunningEntries() ||
     // R7 (wenshao): the WorkflowRunRegistry is a 4th sibling that the

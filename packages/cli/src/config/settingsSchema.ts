@@ -34,6 +34,7 @@ export type SettingsType =
   | 'boolean'
   | 'string'
   | 'number'
+  | 'integer'
   | 'array'
   | 'object'
   | 'enum';
@@ -88,9 +89,9 @@ export interface SettingDefinition {
   options?: readonly SettingEnumOption[];
   /** Schema for array items when type is 'array' */
   items?: SettingItemDefinition;
-  /** Minimum value for number-type settings. */
+  /** Minimum value for number/integer-type settings. */
   minimum?: number;
-  /** Maximum value for number-type settings. */
+  /** Maximum value for number/integer-type settings. */
   maximum?: number;
   /**
    * Primitive shapes a field accepted before it was expanded to its current
@@ -1002,19 +1003,13 @@ const SETTINGS_SCHEMA = {
         category: 'UI',
         requiresRestart: false,
         default: false,
-        description:
-          'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
-        showInDialog: true,
-      },
-      compactInline: {
-        type: 'boolean',
-        label: 'Compact Inline',
-        category: 'UI',
-        requiresRestart: true,
-        default: false,
-        description:
-          'Compact tool display within each group instead of merging across groups. Requires compactMode to be enabled.',
-        showInDialog: true,
+        // Retired from the TUI (compact tool output is now always-on there, and
+        // Ctrl+O opens the transcript instead of toggling this). Kept as a
+        // hidden, schema-only setting so the web shell's independent compact
+        // toggle can still persist via the daemon settings routes (mirrors
+        // `voiceModel`). Not shown in the TUI settings dialog.
+        description: 'Compact view (web shell only; not used by the TUI).',
+        showInDialog: false,
       },
       useTerminalBuffer: {
         type: 'boolean',
@@ -1024,6 +1019,16 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.',
+        showInDialog: true,
+      },
+      showScrollbar: {
+        type: 'boolean',
+        label: 'Show Scrollbar (Virtualized History)',
+        category: 'UI',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Show the auto-hiding scrollbar in the in-app scrollable viewport (Virtualized History). The bar appears while scrolling and fades out when idle. Disable to hide it entirely.',
         showInDialog: true,
       },
       shellOutputMaxLines: {
@@ -1274,6 +1279,21 @@ const SETTINGS_SCHEMA = {
     description:
       'Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.',
     showInDialog: true,
+  },
+
+  visionBridgeTimeoutMs: {
+    type: 'integer',
+    label: 'Vision Bridge Timeout (ms)',
+    category: 'Model',
+    // Read once in the Config constructor with no setter, so a mid-session
+    // change only takes effect on restart.
+    requiresRestart: true,
+    default: undefined as number | undefined,
+    minimum: 1,
+    maximum: 2_147_483_647,
+    description:
+      'Per-attempt timeout in milliseconds for the vision bridge image transcription call (a positive integer up to 2147483647). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints.',
+    showInDialog: false,
   },
 
   modelFallbacks: {
@@ -1815,6 +1835,17 @@ const SETTINGS_SCHEMA = {
           'Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately.',
         showInDialog: false,
       },
+      agentTimeoutMinutes: {
+        type: 'number',
+        label: 'Memory Agent Timeout (minutes)',
+        category: 'Memory',
+        requiresRestart: true,
+        default: undefined as number | undefined,
+        minimum: 0,
+        description:
+          "Max runtime in minutes for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (2–5 minutes); 0 disables the time limit. Useful for slow local models that need longer than the defaults.",
+        showInDialog: false,
+      },
       enableTeamMemory: {
         type: 'boolean',
         label: 'Enable Team Memory',
@@ -2189,9 +2220,9 @@ const SETTINGS_SCHEMA = {
             label: 'Pager',
             category: 'Tools',
             requiresRestart: false,
-            default: 'cat' as string | undefined,
+            default: undefined as string | undefined,
             description:
-              'The pager command to use for shell output. Defaults to `cat`.',
+              'The pager command to use for shell output. Defaults to `cat` on non-Windows platforms and unset on Windows. Set to an empty string to disable pager environment variables.',
             showInDialog: false,
           },
           showColor: {
@@ -2243,6 +2274,17 @@ const SETTINGS_SCHEMA = {
         default: undefined as string[] | undefined,
         description:
           'Tool names hidden from the registry. Differs from permissions.deny: disabled tools are not registered at all, so they never appear in /tools and cannot be discovered by the model. Managed by the daemon mutation route POST /workspace/tools/:name/enable.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+      visible: {
+        type: 'array',
+        label: 'Visible Deferred Tools',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Deferred tool names made visible at startup without requiring tool_search. Listed tools appear alongside core tools in the initial session.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
@@ -2699,6 +2741,21 @@ const SETTINGS_SCHEMA = {
       'Settings for multi-agent collaboration features (Arena, Team, Swarm).',
     showInDialog: false,
     properties: {
+      maxParallelAgents: {
+        type: 'number',
+        label: 'Max Parallel Agents',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as number | undefined,
+        minimum: 1,
+        description:
+          'Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Per-model limits are not supported yet.',
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'integer',
+          minimum: 1,
+        },
+      },
       displayMode: {
         type: 'enum',
         label: 'Display Mode',
@@ -3054,7 +3111,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Generate a short LLM-based label after each tool batch completes. In compact mode the label replaces the generic `Tool × N` header; in full mode it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.',
+          'Generate a short LLM-based label after each tool batch completes. For a completed tool group the label replaces the generic `Tool × N` header; when the group is force-expanded it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.',
         showInDialog: true,
       },
     },

@@ -1,0 +1,224 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--foreground);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.count {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.selectAll {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.actionButton {
+  appearance: none;
+  padding: 4px 12px;
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  background: var(--primary);
+  color: var(--background);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.actionButton:disabled {
+  opacity: 0.55;
+  cursor: default;
+  border-color: var(--border);
+  background: transparent;
+  color: var(--muted-foreground);
+}
+
+.refreshButton {
+  margin-left: auto;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.notice {
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--warning-color);
+  background: color-mix(in srgb, var(--warning-color) 12%, transparent);
+}
+
+/* A responsive grid so the panel fills wide (multi-monitor) screens and still
+   collapses to a single column on narrow ones. */
+.grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--foreground) 3%, transparent);
+}
+
+.cardCurrent {
+  outline: 2px solid color-mix(in srgb, var(--primary) 60%, transparent);
+  outline-offset: -1px;
+}
+
+.cardTop {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cardCheckbox {
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
+.colorDot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 999px;
+}
+
+.cardLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+
+.cardLabel:hover {
+  text-decoration: underline;
+}
+
+.currentBadge {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+}
+
+.cardMeta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.metaItem {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* Status accents — applied both to the card's left border and its badge. */
+.statusApproval {
+  border-left-color: var(--warning-color);
+}
+
+.statusApproval.statusBadge {
+  color: var(--warning-color);
+  background: color-mix(in srgb, var(--warning-color) 14%, transparent);
+}
+
+.statusRunning {
+  border-left-color: var(--primary);
+}
+
+.statusRunning.statusBadge {
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+}
+
+.statusIdle {
+  border-left-color: var(--border);
+}
+
+.statusIdle.statusBadge {
+  color: var(--muted-foreground);
+  background: color-mix(in srgb, var(--muted-foreground) 12%, transparent);
+}
+
+.empty {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+/* Color tags mirror the sidebar's session-group palette. */
+.colorRed {
+  background: #ff5a5f;
+}
+.colorOrange {
+  background: #ff8a2a;
+}
+.colorYellow {
+  background: #f6c431;
+}
+.colorGreen {
+  background: #69c987;
+}
+.colorBlue {
+  background: var(--agent-blue-500);
+}
+.colorPurple {
+  background: var(--agent-purple-600);
+}

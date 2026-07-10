@@ -16,6 +16,52 @@ import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { getProjectHash } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
 
+/**
+ * One entry in a recurring task's bounded run history — a record that the
+ * task actually fired, surfaced by the Web Shell scheduled-tasks page. Only
+ * recurring tasks accrue these: a one-shot is removed from disk the moment it
+ * fires, so there is no surviving entry to attach history to.
+ */
+export interface CronTaskRun {
+  /** Fire time (epoch ms), minute-aligned like `lastFiredAt`. */
+  at: number;
+  /**
+   * How the run was delivered:
+   *  - `'scheduled'` — fired on time by the running scheduler tick.
+   *  - `'catch-up'` — a recurring fire that came due while no session owned
+   *    the schedule, delivered late when a session took over.
+   *  - `'manual'` — triggered by the user via the management UI's "run now",
+   *    not by the scheduler.
+   * Absent is treated as `'scheduled'` by consumers. Typed loosely (any
+   * string is accepted on read) so a future kind can't fail validation on an
+   * older reader.
+   */
+  kind?: 'scheduled' | 'catch-up' | 'manual';
+  /**
+   * Id of the session that owned the schedule when this fire ran — the session
+   * whose transcript contains the run. Lets a management UI link a run back to
+   * the conversation it happened in. Absent on tool-created history or when no
+   * owner id was known.
+   */
+  sessionId?: string;
+  /**
+   * Set when this fire was delivered but its prompt never ran, because the
+   * task's precondition did not release it. The scheduler books the run the
+   * moment it fires — before the bound session has evaluated anything — so
+   * without this a withheld fire and a dispatched one are the same record, and
+   * a management UI reports "ran at 02:00" for a task that deliberately did
+   * nothing. Stamped afterwards by the evaluating session
+   * ({@link markCronRunWithheld}). Absent means the fire was dispatched, or
+   * predates the field.
+   */
+  withheld?: boolean;
+}
+
+/** Cap on a task's on-disk run history. A ring, newest kept — this bounds the
+ * per-task growth of the tasks file (every fire already rewrites it to stamp
+ * `lastFiredAt`, so appending a capped run adds no extra write, only bytes). */
+export const MAX_TASK_RUNS = 20;
+
 export interface DurableCronTask {
   id: string;
   cron: string;
@@ -36,6 +82,71 @@ export interface DurableCronTask {
    * tasks (which never write this field) keep firing.
    */
   enabled?: boolean;
+  /**
+   * Set when a task was disabled BY archiving its bound session (not by the
+   * user's own off-switch). Only such tasks are re-enabled when the session is
+   * unarchived, so a task the user deliberately disabled stays disabled across
+   * an archive/unarchive cycle. Cleared on re-enable.
+   */
+  disabledByArchive?: boolean;
+  /**
+   * Id of the dedicated session this task is bound to. A task created through
+   * the Web Shell management page mints its own session and stores its id here;
+   * the task then fires ONLY inside that session (not via the shared per-project
+   * durable owner), so the session's transcript is the task's run history, and
+   * archiving/deleting that session stops the task. Absent on tool-created
+   * (`cron_create`) and legacy tasks, which keep the shared-owner firing model.
+   */
+  sessionId?: string;
+  /**
+   * How each scheduled fire runs. Absent or `'shared'` = the #6389 model: the
+   * task fires inside its single bound {@link sessionId} session and every run
+   * accumulates in that one transcript. `'isolated'` = the owning session
+   * dispatches each fire straight into a FRESH sub-session (its own clean
+   * context and transcript) and never runs the prompt inline. Absent defaults to
+   * `'shared'` so tool-created and legacy tasks are unchanged. The scheduler
+   * treats both modes identically — it only carries the field to `onFire`, which
+   * is where the routing happens.
+   */
+  runMode?: 'shared' | 'isolated';
+  /**
+   * Optional PRECONDITION guarding each fire of an `isolated` task. When set,
+   * the bound session first runs this text as its own cron turn (a normal model
+   * turn, with tools, under the workspace's approval mode) and only dispatches
+   * {@link prompt} into a fresh sub-session when that turn's verdict is YES. Any
+   * other outcome — NO, an unparseable answer, a tool-loop error, a cancelled or
+   * timed-out turn — skips the fire (fail-closed).
+   *
+   * Only meaningful with `runMode: 'isolated'`; the REST route rejects a
+   * condition on a `'shared'` task, and the scheduler/session consult the field
+   * only on the isolated path. Absent = fire unconditionally, which is what
+   * every tool-created and pre-existing task keeps doing.
+   */
+  condition?: string;
+  /**
+   * Bounded, newest-last history of recent fires (capped at MAX_TASK_RUNS).
+   * Absent on tool-created tasks and on any task that has not fired yet.
+   * Appended at the scheduler's persist sites via {@link appendCronRun}.
+   */
+  runs?: CronTaskRun[];
+}
+
+/**
+ * Appends a run record to a task's bounded history ring (newest last), capping
+ * at {@link MAX_TASK_RUNS} by dropping the oldest. Pure — returns a fresh
+ * array and treats an absent/foreign `runs` as empty, so it is safe on a task
+ * that predates the field. Shared by every scheduler persist site so the cap
+ * is enforced in exactly one place.
+ */
+export function appendCronRun(
+  runs: CronTaskRun[] | undefined,
+  entry: CronTaskRun,
+): CronTaskRun[] {
+  const base = Array.isArray(runs) ? runs : [];
+  const next = [...base, entry];
+  return next.length > MAX_TASK_RUNS
+    ? next.slice(next.length - MAX_TASK_RUNS)
+    : next;
 }
 
 /**
@@ -279,6 +390,62 @@ function isFiniteTimestamp(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
+/** Validates the optional run-history ring. Each entry needs a finite `at`
+ * timestamp; `kind` is optional and accepted as any string (forward-compat
+ * with kinds a newer writer may add). A present-but-malformed `runs` routes
+ * through the same fix-or-delete contract as any other corrupt field. */
+function isValidRuns(value: unknown): value is CronTaskRun[] {
+  if (!Array.isArray(value)) return false;
+  return value.every((entry) => {
+    if (typeof entry !== 'object' || entry === null) return false;
+    const run = entry as Record<string, unknown>;
+    return (
+      isFiniteTimestamp(run['at']) &&
+      (run['kind'] === undefined || typeof run['kind'] === 'string') &&
+      (run['sessionId'] === undefined ||
+        typeof run['sessionId'] === 'string') &&
+      (run['withheld'] === undefined || typeof run['withheld'] === 'boolean')
+    );
+  });
+}
+
+/**
+ * Stamps the run recorded for `at` on task `taskId` as withheld — the fire was
+ * delivered, but its precondition did not release the prompt.
+ *
+ * Matched on the exact fire timestamp rather than "the newest run": the
+ * scheduler stamps `runs[].at` from the very `lastFiredAt` it hands to `onFire`,
+ * so the evaluating session knows precisely which record is its own, and a
+ * concurrent fire of the same task cannot be mislabelled.
+ *
+ * Best-effort and idempotent. A no-op when the task, the run, or the field is
+ * already gone/set — the scheduler persists the run asynchronously, and losing
+ * a cosmetic marker must never fail a fire. Callers should not await it on any
+ * path that gates behaviour.
+ */
+export async function markCronRunWithheld(
+  projectRoot: string,
+  taskId: string,
+  at: number,
+): Promise<boolean> {
+  let marked = false;
+  await updateCronTasks(projectRoot, (tasks) => {
+    const index = tasks.findIndex((t) => t.id === taskId);
+    if (index === -1) return tasks;
+    const task = tasks[index]!;
+    const runs = task.runs;
+    if (!Array.isArray(runs)) return tasks;
+    const runIndex = runs.findIndex((r) => r.at === at);
+    if (runIndex === -1 || runs[runIndex]!.withheld === true) return tasks;
+    marked = true;
+    const nextRuns = runs.map((run, i) =>
+      i === runIndex ? { ...run, withheld: true } : run,
+    );
+    return tasks.map((t, i) => (i === index ? { ...t, runs: nextRuns } : t));
+  });
+  return marked;
+}
+
 function isValidTask(value: unknown): value is DurableCronTask {
   if (typeof value !== 'object' || value === null) return false;
   const obj = value as Record<string, unknown>;
@@ -294,6 +461,26 @@ function isValidTask(value: unknown): value is DurableCronTask {
     // the same fix-or-delete contract as any other corrupt field rather
     // than being silently coerced or dropped.
     (obj['name'] === undefined || typeof obj['name'] === 'string') &&
-    (obj['enabled'] === undefined || typeof obj['enabled'] === 'boolean')
+    (obj['enabled'] === undefined || typeof obj['enabled'] === 'boolean') &&
+    (obj['disabledByArchive'] === undefined ||
+      typeof obj['disabledByArchive'] === 'boolean') &&
+    // A bound sessionId must be a NON-EMPTY string: an empty string would pass
+    // a bare `typeof` check but the scheduler's truthy `task.sessionId` guard
+    // would treat it as unbound, so a "bound" task would silently run unbound.
+    (obj['sessionId'] === undefined ||
+      (typeof obj['sessionId'] === 'string' && obj['sessionId'].length > 0)) &&
+    // Absent = 'shared'. Any string other than the two known modes routes
+    // through fix-or-delete rather than being silently treated as 'shared',
+    // so a typo can't quietly disable per-run isolation.
+    (obj['runMode'] === undefined ||
+      obj['runMode'] === 'shared' ||
+      obj['runMode'] === 'isolated') &&
+    // A precondition must be a NON-EMPTY string: the fire path gates on a
+    // truthy `condition`, so an empty one would validate here and then be
+    // silently ignored — a task the user believes is guarded would fire
+    // unconditionally. Absent is the only way to say "no precondition".
+    (obj['condition'] === undefined ||
+      (typeof obj['condition'] === 'string' && obj['condition'].length > 0)) &&
+    (obj['runs'] === undefined || isValidRuns(obj['runs']))
   );
 }

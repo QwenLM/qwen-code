@@ -271,6 +271,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
   // instead of on every request that needs the downgrade.
   private effortClampWarned = false;
   private budgetDropWarned = false;
+  private temperatureDropWarned = false;
 
   constructor(
     private contentGeneratorConfig: ContentGeneratorConfig,
@@ -749,9 +750,27 @@ export class AnthropicContentGenerator implements ContentGenerator {
       }
     }
 
+    // Claude 4.8+ deprecated temperature — the server rejects it with a 400.
+    // Omit the parameter entirely for those models; older models keep the
+    // default of 1 (Anthropic's documented neutral value).
+    const temperatureDropped = this.modelRejectsTemperature();
+    if (temperatureDropped && !this.temperatureDropWarned) {
+      const userTemp = getParam<number>('temperature', 'temperature');
+      if (userTemp !== undefined) {
+        debugLogger.warn(
+          `temperature=${userTemp} is not supported by '${
+            this.contentGeneratorConfig.model ?? 'unknown'
+          }' (deprecated on 4.8+); ignoring.`,
+        );
+      }
+      this.temperatureDropWarned = true;
+    }
+
     return {
       max_tokens: maxTokens,
-      temperature: getParam<number>('temperature', 'temperature') ?? 1,
+      ...(temperatureDropped
+        ? {}
+        : { temperature: getParam<number>('temperature', 'temperature') ?? 1 }),
       top_p: getParam<number>('top_p', 'topP'),
       top_k: getParam<number>('top_k', 'topK'),
     };
@@ -861,6 +880,23 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (!parsed) return false;
     const { major, minor } = parsed;
     return major > 4 || (major === 4 && minor >= 7);
+  }
+
+  /**
+   * Whether the model rejects the `temperature` sampling parameter with a 400.
+   * Claude Opus 4.8+ deprecated temperature — the server controls sampling
+   * determinism internally and responds with
+   * `"temperature is deprecated for this model."` when the parameter is sent.
+   * Older models (4.7 and below) and unknown/unversioned ids still accept it,
+   * so both return false.
+   */
+  private modelRejectsTemperature(): boolean {
+    const parsed = parseClaudeModelVersion(
+      this.contentGeneratorConfig.model || '',
+    );
+    if (!parsed) return false;
+    const { major, minor } = parsed;
+    return major > 4 || (major === 4 && minor >= 8);
   }
 
   private buildThinkingConfig(

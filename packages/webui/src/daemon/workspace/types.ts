@@ -63,6 +63,8 @@ import type {
   DaemonSessionExportResult,
   DaemonStatusReport,
   DaemonStatusReportDetail,
+  DaemonUsageDashboard,
+  DaemonUsageRange,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
 } from '@qwen-code/sdk/daemon';
@@ -157,6 +159,24 @@ export interface DaemonGlobResult {
 /** A durable scheduled task as returned by the daemon. `name`/`enabled` are
  * normalized (never undefined): `name: null` = unnamed, `enabled` defaults to
  * true for tasks created before the field existed. */
+/** One recorded fire of a recurring scheduled task, newest last in
+ * {@link DaemonScheduledTask.runs}. Mirrors the daemon's wire shape. */
+export interface DaemonScheduledTaskRun {
+  /** Fire time (epoch ms). */
+  at: number;
+  /** `'scheduled'` (on-time), `'catch-up'` (fired late), or `'manual'` (user
+   * "run now"); absent = scheduled. */
+  kind?: 'scheduled' | 'catch-up' | 'manual';
+  /** The session the fire ran in, when the task is bound to one. Mirrors the
+   * daemon's `CronTaskRun.sessionId` so run-attribution isn't silently dropped
+   * on the client (not surfaced in the UI yet). */
+  sessionId?: string;
+  /** The fire was delivered but its prompt never ran: the task's precondition
+   * did not release it. Absent = the fire was dispatched. Without this a
+   * withheld fire is indistinguishable from a real run in the history. */
+  withheld?: boolean;
+}
+
 export interface DaemonScheduledTask {
   id: string;
   name: string | null;
@@ -166,6 +186,27 @@ export interface DaemonScheduledTask {
   enabled: boolean;
   createdAt: number;
   lastFiredAt: number | null;
+  /** Next scheduled fire (epoch ms), or null for a disabled task. A GET-time
+   * snapshot the UI counts down against; it advances on the next reload. */
+  nextRunAt: number | null;
+  /** Id of the dedicated session this task is bound to — its transcript is the
+   * task's run history. Null for unbound tool-created/legacy tasks. */
+  sessionId: string | null;
+  /** How each fire runs. `'shared'` (default) runs in the bound session so runs
+   * accumulate in one transcript; `'isolated'` dispatches each scheduled fire
+   * into a fresh sub-session daemon-side, so the bound session's transcript
+   * stays empty. Normalized (never undefined). Note: `runs[].sessionId` always
+   * records the anchor (bound) session — the sub-session id is not surfaced
+   * here. */
+  runMode: 'shared' | 'isolated';
+  /** Precondition guarding each fire of an isolated task: the bound session runs
+   * it as a normal turn first and only dispatches `prompt` into a sub-session on
+   * a YES verdict. Null when the task fires unconditionally, and always null for
+   * a `'shared'` task (the field only gates the isolated dispatch). */
+  condition: string | null;
+  /** Bounded, newest-last history of recent fires. Empty for tasks that have
+   * not fired (and, by nature, for one-shots — they are deleted on fire). */
+  runs: DaemonScheduledTaskRun[];
 }
 
 export interface DaemonCreateScheduledTaskRequest {
@@ -177,6 +218,12 @@ export interface DaemonCreateScheduledTaskRequest {
   recurring?: boolean;
   /** Defaults to true. */
   enabled?: boolean;
+  /** Defaults to `'shared'` (the #6389 single-session model). `'isolated'`
+   * spawns a fresh session per fire. */
+  runMode?: 'shared' | 'isolated';
+  /** Precondition for the isolated dispatch. Omit or null for none. Rejected
+   * with `condition_requires_isolated` unless `runMode` is `'isolated'`. */
+  condition?: string | null;
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are
@@ -187,6 +234,11 @@ export interface DaemonUpdateScheduledTaskRequest {
   name?: string | null;
   recurring?: boolean;
   enabled?: boolean;
+  runMode?: 'shared' | 'isolated';
+  /** `condition: null` (or '') clears the precondition. The COMBINED post-patch
+   * state is validated, so switching a guarded task to `runMode: 'shared'`
+   * without also clearing the condition is rejected. */
+  condition?: string | null;
 }
 
 export interface DaemonWorkspaceActions {
@@ -245,6 +297,12 @@ export interface DaemonWorkspaceActions {
   loadDaemonStatus(
     detail?: DaemonStatusReportDetail,
   ): Promise<DaemonStatusReport>;
+
+  // Token-usage dashboard (read-only)
+  loadUsageDashboard(opts?: {
+    range?: DaemonUsageRange;
+    heatmapDays?: number;
+  }): Promise<DaemonUsageDashboard>;
 
   // Skills (read-only)
   loadSkillsStatus(): Promise<DaemonWorkspaceSkillsStatus>;
@@ -305,6 +363,9 @@ export interface DaemonWorkspaceActions {
     id: string,
     patch: DaemonUpdateScheduledTaskRequest,
   ): Promise<DaemonScheduledTask>;
+  /** Record a manual run (updates lastFiredAt + appends a 'manual' run). The
+   * prompt itself is executed by the caller in the task's bound session. */
+  runScheduledTask(id: string): Promise<DaemonScheduledTask>;
   deleteScheduledTask(id: string): Promise<void>;
 
   // Providers / env (read-only diagnostics)

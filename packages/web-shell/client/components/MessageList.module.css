@@ -1,7 +1,8 @@
 .list {
   flex: 1;
   overflow-y: auto;
-  padding: 12px 24px;
+  padding: 12px 24px calc(8px + var(--web-shell-bottom-panel-inset, 0px));
+  scroll-padding-bottom: calc(8px + var(--web-shell-bottom-panel-inset, 0px));
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
   min-height: 0;
@@ -147,14 +148,12 @@
   }
 }
 
-.rowFlash {
-  border-radius: 8px;
-  animation: row-flash 1.6s ease-out;
-}
-
 .turnStatusRow,
 .turnAnswerRow {
   max-width: 100%;
+}
+.turnStatusRow {
+  margin-bottom: 4px;
 }
 
 .turnAnswerRow {
@@ -184,7 +183,7 @@
 
 .sessionTimelineLayer {
   position: sticky;
-  top: 50%;
+  top: 50vh;
   z-index: 4;
   width: 0 !important;
   height: 0;
@@ -206,24 +205,65 @@
   transform: translateY(-50%);
 }
 
+.sessionTimelineViewport {
+  width: 70px;
+  max-height: min(640px, max(220px, calc(100vh - 220px)));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: transparent transparent !important;
+  scrollbar-width: none !important;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    rgb(0 0 0 / 18%) 10px,
+    black 34px,
+    black calc(100% - 34px),
+    rgb(0 0 0 / 18%) calc(100% - 10px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    rgb(0 0 0 / 18%) 10px,
+    black 34px,
+    black calc(100% - 34px),
+    rgb(0 0 0 / 18%) calc(100% - 10px),
+    transparent 100%
+  );
+}
+
+.sessionTimelineViewport.sessionTimelineViewport::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  background: transparent !important;
+}
+
+.sessionTimelineViewport.sessionTimelineViewport::-webkit-scrollbar-track,
+.sessionTimelineViewport.sessionTimelineViewport::-webkit-scrollbar-thumb,
+.sessionTimelineViewport.sessionTimelineViewport::-webkit-scrollbar-thumb:hover {
+  border: 0 !important;
+  background: transparent !important;
+}
+
 .sessionTimelineList {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 13px;
+  gap: 12px;
   margin: 0;
-  padding: 0;
+  padding: 32px 0;
   list-style: none;
 }
 
 .sessionTimelineItem {
   position: relative;
-  height: 8px;
+  height: 3px;
 }
 
 .sessionTimelineButton {
   position: relative;
-  top: -4px;
+  top: -6.5px;
   display: flex;
   align-items: center;
   width: 58px;
@@ -249,7 +289,7 @@
 .sessionTimelineTick {
   display: block;
   width: 10px;
-  height: 4px;
+  height: 3px;
   border-radius: 1px;
   background: color-mix(in srgb, var(--muted-foreground) 30%, transparent);
   transform-origin: left center;
@@ -261,7 +301,7 @@
 .sessionTimelineButton:hover .sessionTimelineTick,
 .sessionTimelineButton:focus-visible .sessionTimelineTick {
   background: color-mix(in srgb, var(--foreground) 94%, transparent);
-  transform: scaleX(3.8);
+  transform: scaleX(2.8);
 }
 
 .sessionTimelineItem:has(.sessionTimelineButton:hover)
@@ -276,7 +316,7 @@
     + .sessionTimelineItem .sessionTimelineButton:focus-visible
   )
   .sessionTimelineTick {
-  transform: scaleX(3);
+  transform: scaleX(2.2);
 }
 
 .sessionTimelineItem:has(.sessionTimelineButton:hover)
@@ -297,7 +337,7 @@
       .sessionTimelineButton:focus-visible
   )
   .sessionTimelineTick {
-  transform: scaleX(2.2);
+  transform: scaleX(1.6);
 }
 
 .sessionTimelineItem:has(.sessionTimelineButton:hover)
@@ -324,7 +364,7 @@
       .sessionTimelineButton:focus-visible
   )
   .sessionTimelineTick {
-  transform: scaleX(1.5);
+  transform: scaleX(1.2);
 }
 
 .sessionTimelineButtonInRange .sessionTimelineTick {
@@ -343,10 +383,8 @@
 }
 
 .sessionTimelineDetails {
-  position: absolute;
-  top: 50%;
-  left: 56px;
-  z-index: 1;
+  position: fixed;
+  z-index: 999;
   box-sizing: border-box;
   display: grid;
   gap: 6px;
@@ -356,24 +394,48 @@
   border-radius: 14px;
   background: color-mix(in srgb, var(--background) 96%, white);
   box-shadow: 0 10px 28px color-mix(in srgb, black 10%, transparent);
-  opacity: 0;
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
   pointer-events: none;
   text-align: left;
-  transform: translate3d(-8px, -50%, 0) scale(0.985);
-  transform-origin: left center;
-  transition:
-    opacity 160ms cubic-bezier(0.25, 1, 0.5, 1),
-    transform 180ms cubic-bezier(0.25, 1, 0.5, 1);
-}
-
-.sessionTimelineButton:hover .sessionTimelineDetails,
-.sessionTimelineButton:focus-visible .sessionTimelineDetails {
   opacity: 1;
   transform: translate3d(0, -50%, 0) scale(1);
+  transform-origin: left center;
+  animation: sessionTimelineDetailsIn 120ms ease-out;
 }
 
-.sessionTimelineDetails::before {
-  content: attr(data-title);
+@keyframes sessionTimelineDetailsIn {
+  from {
+    opacity: 0;
+    transform: translate3d(-4px, -50%, 0) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate3d(0, -50%, 0) scale(1);
+  }
+}
+
+.sessionTimelineDetailsTitle {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+}
+
+.sessionTimelineDetailsIcon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: color-mix(in srgb, var(--muted-foreground) 86%, transparent);
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.4;
+}
+
+.sessionTimelineDetailsTitleText {
   overflow: hidden;
   color: var(--foreground);
   font-size: 14px;
@@ -383,36 +445,27 @@
   white-space: nowrap;
 }
 
-.sessionTimelineDetails::after {
-  content: attr(data-detail);
-  display: -webkit-box;
+.sessionTimelineDetailsDetail {
   overflow: hidden;
   color: color-mix(in srgb, var(--muted-foreground) 86%, transparent);
   font-size: 13px;
   line-height: 1.45;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .sessionTimelineTick,
-  .sessionTimelineDetails {
+  .sessionTimelineTick {
     transition-duration: 0.01ms;
+  }
+
+  .sessionTimelineDetails {
+    animation: none;
   }
 }
 
 @media (max-width: 720px) {
   .sessionTimelinePanel {
     display: none;
-  }
-}
-
-@keyframes row-flash {
-  0%,
-  30% {
-    background: color-mix(in srgb, var(--agent-blue-500) 16%, transparent);
-  }
-  100% {
-    background: transparent;
   }
 }

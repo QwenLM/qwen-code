@@ -151,9 +151,13 @@ export function ExtensionsDialog() {
   }, [load, signals?.extensionsVersion]);
 
   const runMutation = useCallback(
-    (name: string, run: (clientId: string) => Promise<unknown>) => {
+    (
+      name: string,
+      run: (clientId?: string) => Promise<unknown>,
+      options: { allowWithoutClientId?: boolean } = {},
+    ) => {
       const clientId = connection.clientId;
-      if (!clientId) {
+      if (!clientId && !options.allowWithoutClientId) {
         setMessage(t('extensions.install.waitForSession'));
         return;
       }
@@ -164,9 +168,12 @@ export function ExtensionsDialog() {
         .catch((error: unknown) => {
           setMessage(error instanceof Error ? error.message : String(error));
         })
-        .finally(() => setBusyName(null));
+        .finally(() => {
+          setBusyName(null);
+          void load();
+        });
     },
-    [connection.clientId, t],
+    [connection.clientId, load, t],
   );
 
   const summary = useMemo(() => {
@@ -277,18 +284,21 @@ export function ExtensionsDialog() {
                     )
                   }
                   onToggleScope={(mutation, scope) =>
-                    runMutation(extension.name, (clientId) =>
-                      mutation === 'enable'
-                        ? actions.enableExtension(
-                            extension.name,
-                            { scope },
-                            clientId,
-                          )
-                        : actions.disableExtension(
-                            extension.name,
-                            { scope },
-                            clientId,
-                          ),
+                    runMutation(
+                      extension.name,
+                      (clientId) =>
+                        mutation === 'enable'
+                          ? actions.enableExtension(
+                              extension.name,
+                              { scope },
+                              clientId,
+                            )
+                          : actions.disableExtension(
+                              extension.name,
+                              { scope },
+                              clientId,
+                            ),
+                      { allowWithoutClientId: true },
                     )
                   }
                   onRequestUninstall={() =>
