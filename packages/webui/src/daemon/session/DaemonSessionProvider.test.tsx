@@ -5378,7 +5378,9 @@ describe('DaemonSessionProvider', () => {
       modelServices: [],
       workspaceCwd: '/mock-workspace',
     });
+    const releaseHeartbeat = createDeferred<void>();
     const heartbeat = vi.fn(async () => {
+      await releaseHeartbeat.promise;
       throw Object.assign(new Error('session gone'), { status: 410 });
     });
     const session = createMockSession({
@@ -5418,6 +5420,7 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
 
+    releaseHeartbeat.resolve();
     await act(async () => {
       await wait(50);
       await flushPromises();
