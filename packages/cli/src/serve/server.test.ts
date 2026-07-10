@@ -16907,6 +16907,59 @@ describe('auth device-flow routes', () => {
     expect(fakeProvider.startCount()).toBe(1);
   });
 
+  it('fans device-flow events out only to primary and trusted workspace bridges', async () => {
+    const fakeProvider = makeFakeProvider();
+    const primaryBridge = fakeBridge();
+    const trustedBridge = fakeBridge();
+    const untrustedBridge = fakeBridge();
+    const primaryPublish = vi.spyOn(primaryBridge, 'publishWorkspaceEvent');
+    const trustedPublish = vi.spyOn(trustedBridge, 'publishWorkspaceEvent');
+    const untrustedPublish = vi.spyOn(untrustedBridge, 'publishWorkspaceEvent');
+    const registry = createWorkspaceRegistry([
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: primaryBridge,
+      }),
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'trusted',
+        workspaceCwd: WS_DIFFERENT,
+        primary: false,
+        bridge: trustedBridge,
+      }),
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'untrusted',
+        workspaceCwd: '/work/untrusted',
+        primary: false,
+        trusted: false,
+        bridge: untrustedBridge,
+      }),
+    ]);
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      workspaceRegistry: registry,
+      deviceFlowProviders: [fakeProvider.provider],
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+
+    expect(res.status).toBe(201);
+    expect(primaryPublish).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'auth_device_flow_started' }),
+    );
+    expect(trustedPublish).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'auth_device_flow_started' }),
+    );
+    expect(untrustedPublish).not.toHaveBeenCalled();
+    (
+      app.locals['deviceFlowRegistry'] as DeviceFlowRegistryType | undefined
+    )?.dispose();
+  });
+
   it('POST is rejected with 401 token_required on token-less loopback (strict gate)', async () => {
     const { app } = buildApp({ token: undefined });
     const res = await request(app)
