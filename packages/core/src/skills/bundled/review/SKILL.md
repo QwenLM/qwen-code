@@ -106,14 +106,17 @@ Read from it:
 - `diffPathAbsolute` — pass this to `read_file` (it rejects relative paths)
 - `diffLines`, `diffChars`, and `srcDiffLines` / `testDiffLines` / `docsDiffLines` / `generatedDiffLines`
 - `chunks[]` — contiguous, non-overlapping line ranges tiling the whole diff. Each entry has `id`, `startLine`, `endLine` (1-based, inclusive), `lines`, `chars`, an `oversized` flag, and `files[]` naming the source files and new-side line ranges it covers. A chunk with `oversized: true` may exceed what one `read_file` call returns.
-- `files[]` — per-file `kind` (`source` / `test` / `generated`), `hunks[]` new-side ranges (Step 7 validates comment anchors against these), `addedRanges[]` (the exact lines the PR wrote — present only on `heavy` files, which are its only consumer), change counts, and the `heavy` flag
+- `files[]` — per-file `kind` (`source` / `test` / `generated`), `hunks[]` new-side ranges (Step 7 validates comment anchors against these), `addedRanges[]` and `diffRange` (present only on `heavy` files — the exact lines the PR wrote, and where that file's own diff lives, so an invariant agent can see what was deleted), change counts, and the `heavy` flag
 
 A chunk is read with `read_file(file_path=diffPathAbsolute, offset=startLine - 1, limit=endLine - startLine + 1)` — `offset` is 0-based.
 
 For **local-diff and file-path reviews**, capture the diff to a file and plan it. Pin the same flags `fetch-pr` pins — a user's `color.diff=always` alone makes the diff unparseable, and `diff.mnemonicPrefix` rewrites every path:
 
 ```bash
-git diff --no-ext-diff --no-textconv --no-color --unified=3 \
+mkdir -p .qwen/tmp   # shell redirection opens the target, it does not create the directory
+
+git -c diff.suppressBlankEmpty=false diff \
+  --no-ext-diff --no-textconv --no-color --unified=3 \
   --src-prefix=a/ --dst-prefix=b/ --find-renames --no-relative \
   --ignore-submodules=none --submodule=short \
   HEAD > .qwen/tmp/qwen-review-local-diff.txt        # staged AND unstaged
@@ -125,9 +128,12 @@ qwen review plan-diff .qwen/tmp/qwen-review-local-diff.txt \
 
 `git diff HEAD` is what covers the whole local scope; a bare `git diff` omits staged changes.
 
+**If the diff comes back empty**, stop and take the no-diff branch. `plan-diff` emits `chunks: []`, every agent is given nothing to read, and the review would return a clean verdict over no code at all. For a **file-path** review of an unchanged file, skip planning entirely: hand every agent the file's absolute path and tell it to read the whole file, paging until `isTruncated` is false. For a **local** review with no changes, tell the user there is nothing to review and stop.
+
 For **cross-repo lightweight reviews**, do the same with the diff GitHub hands you. Redirecting to a file is what keeps the 30 000-char shell cap out of it:
 
 ```bash
+mkdir -p .qwen/tmp
 gh pr diff <pr_number> --repo <owner>/<repo> > .qwen/tmp/qwen-review-pr-<n>-diff.txt
 qwen review plan-diff .qwen/tmp/qwen-review-pr-<n>-diff.txt \
   --out .qwen/tmp/qwen-review-pr-<n>-plan.json
@@ -204,7 +210,15 @@ Ten agents all reading the same diff multiplies redundant reading of the early h
 
 When a file is largely rewritten, reviewing it as a diff is the wrong frame. The bugs are not inside any one hunk; they are **between** the new lines, which can sit two thousand lines apart — a timer armed near the top of the file and a teardown path near the bottom. No chunk agent, and no reader of a diff with three lines of context, can see that pair.
 
-Give each agent the **entire post-change file** (`read_file` on the worktree path, paging until `isTruncated` is false — a 2 500-line source file needs several reads), plus the file's newly written line ranges, taken from **`files[].addedRanges[]`** in the fetch report. It reads the whole file so it can see both ends of an invariant; the added ranges tell it which end is **new**, so it does not report pre-existing defects (an Exclusion Criterion). A violation counts when **at least one** of its two locations is inside an added range. If a defect is caused by a _removal_ rather than an addition, cite the surrounding hunk — that counts too.
+Give each agent three things:
+
+- The **entire post-change file** (`read_file` on the worktree path, paging until `isTruncated` is false — a 2 500-line source file needs several reads). It reads the whole file so it can see both ends of an invariant.
+- The file's newly written line ranges, from **`files[].addedRanges[]`**. These tell it which end is **new**, so it does not report pre-existing defects (an Exclusion Criterion).
+- The file's own slice of the diff, from **`files[].diffRange`** — `read_file(diffPathAbsolute, offset=startLine - 1, limit=endLine - startLine + 1)`, paging as needed.
+
+The third is not optional. **A deletion leaves no trace in the post-change file.** Removing a `clearTimeout()`, a `Map.delete()`, or a retry-counter increment is exactly the class of defect this checklist hunts, and it is invisible in the text the first two items provide — the line is simply not there, and nothing marks where it used to be. The `-` lines in the diff are the only evidence it ever existed.
+
+A violation counts when **at least one** of its two locations is inside an added range, **or** when the diff shows the enabling line was removed.
 
 Three ranges exist in the report and they are not interchangeable. `chunks[].files[]` is a chunk's _coverage span_: hunks at lines 10-12 and 900-902 merge into `10-902`. `files[].hunks[]` is what git calls the change, and it includes the three context lines printed either side — on PR #6457's `QQChannel.ts` those spans cover 1 962 lines of which only 1 403 were written. `files[].addedRanges[]` is the exact set of lines the PR wrote. Gate an invariant agent on the first two and it reports defects that predate the PR; use `hunks[]` only where GitHub needs it, for anchor validation in Step 7.
 
@@ -245,7 +259,7 @@ After all agents return, verify that **every chunk id carries exactly one receip
 - **A chunk with no receipt at all** was never reviewed. Relaunch an agent for it before proceeding to Step 4. Without this check the omission is invisible and the review silently reports "no blockers" on code nobody read.
 - **A chunk with an `Uncoverable` receipt** must not be relaunched — the next agent would fail the same way. Carry its id into Step 6 and list it under "Not reviewed". **The verdict may not be Approve while any chunk is uncoverable**, because the review does not know what is in it.
 
-This accounting applies to Step 3A as well. There the chunks are usually one or two, and a single dimension agent walks all of them — but an over-long line makes a range unreadable there too, and a truncated read must never be reported as a clean one.
+**Step 3A has no receipts, and must not.** There every dimension agent walks every chunk, so "exactly one receipt per chunk" would demand either none or nine of them. Territory ownership is a Step 3B idea. What Step 3A shares is the uncoverable rule, and that needs no agent at all: **a chunk is uncoverable iff its `maxLineChars` exceeds ~25 000**, which the orchestrator reads straight out of the plan before launching anything. Compute that list up front on both paths, carry it into Step 6, and let a Step 3B agent's `Uncoverable` receipt add to it rather than be the only source of it.
 
 **Do not let precision suppress recall in this step.** The "if you're unsure, do NOT report it" rule in the Exclusion Criteria applies to **Suggestion** and **Nice to have** findings. A suspected **Critical** must always be reported, marked `low confidence` if uncertain — Step 4's verifier decides. A Critical dropped here is dropped irreversibly; a Critical dropped there is at least reviewed by a second agent.
 
@@ -700,6 +714,7 @@ For a Suggestion-only review (no Critical findings), the event is `COMMENT`, whi
 Rules:
 
 - `event`: `APPROVE` (no Critical **and** no Suggestion), `REQUEST_CHANGES` (has Critical), `COMMENT` (Suggestion-only, no Critical). Do NOT use `COMMENT` when there are Critical findings. **Apply downgrade decisions from the presubmit JSON above**: if `downgradeApprove=true`, submit `COMMENT` instead of `APPROVE`; if `downgradeRequestChanges=true`, submit `COMMENT` instead of `REQUEST_CHANGES`. The findings still appear as inline `comments` regardless, so substantive feedback is preserved.
+- **Any uncoverable chunk downgrades `APPROVE` to `COMMENT`.** The `body` must then name those chunks and the files they span. Part of the diff was never read, and a public LGTM would misstate what was examined. This bites hardest when the review found nothing, which is exactly when it is easiest to forget.
 - `body`: **empty `""`** for `REQUEST_CHANGES` — the inline comments ARE the review. For `COMMENT`, always supply one line, and never a blank one: the downgrade sentence when the event was actually downgraded from `APPROVE` / `REQUEST_CHANGES`; otherwise `Reviewed — no blockers. Suggestions are inline.` when at least one Suggestion posted as an inline comment, or `Reviewed — no blockers. <N> Suggestion-level finding(s) could not be anchored to the diff; see the terminal output.` when every Suggestion was discarded as unmappable and `comments` is empty. Do not claim "Suggestions are inline" when none were posted, and do not restate the discarded suggestions' text. (GitHub documents `body` as required for `COMMENT`. An empty body is only known to be accepted alongside inline comments on `REQUEST_CHANGES`; do not gamble on `COMMENT` behaving the same, because a 422 drops every inline comment with it.) A **Critical** finding that cannot be mapped to a diff line goes in body as a last resort, whatever the event; a Suggestion never does. Never put section headers, "Review Summary", or analysis in body.
 - `comments`: high-confidence **Critical and Suggestion** findings. Skip Nice to have and low-confidence. Each must reference a line in the diff.
 - Comment body format: `**[Critical]** description\n\n```suggestion\nfix\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_` — use the `**[Suggestion]**` prefix for Suggestion-level findings so the author can tell blockers from recommendations at a glance. The prefix must be the **first thing in the body** and the footer must be present: `.github/workflows/qwen-autofix.yml` keys off both to keep Suggestion findings out of the autofix loop. Changing either string silently makes the autofix bot start applying non-blocking suggestions.

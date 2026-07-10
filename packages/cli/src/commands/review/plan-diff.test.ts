@@ -124,6 +124,20 @@ describe('plan-diff', () => {
     expect(() => run(diffPath, out)).toThrow(/do not tile the diff/);
   });
 
+  it('plans an empty diff without pretending it reviewed anything', () => {
+    // A file-path review of an unchanged file lands here. The plan is empty and
+    // valid; what must not happen is a clean verdict over nothing, so the
+    // command says so and the skill has a no-diff branch.
+    const diffPath = join(dir, 'empty.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, '');
+    run(diffPath, out);
+    const plan = JSON.parse(readFileSync(out, 'utf8'));
+    expect(plan.chunks).toEqual([]);
+    expect(plan.files).toEqual([]);
+    expect(plan.diffLines).toBe(0);
+  });
+
   it('reports a missing diff file by name', () => {
     expect(() => run(join(dir, 'absent.diff'), join(dir, 'p.json'))).toThrow(
       /Cannot read diff file/,

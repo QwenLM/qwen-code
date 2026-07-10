@@ -22,6 +22,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildDiffPlan, chunksCoverDiff, parseDiff } from './diff-plan.js';
 
+/** Config `fetch-pr` pins with `-c`, because no command-line flag exists. */
+const PINNED_CONFIG = ['-c', 'diff.suppressBlankEmpty=false'];
+
 /** The exact flags `fetch-pr` pins on its capture. */
 const CAPTURE_FLAGS = [
   '--no-ext-diff',
@@ -44,6 +47,8 @@ const HOSTILE_CONFIG = [
   'diff.renames=false',
   'diff.submodule=log',
   'diff.ignoreSubmodules=all',
+  // Prints a blank context line as a physically empty record, not a lone space.
+  'diff.suppressBlankEmpty=true',
 ].flatMap((kv) => ['-c', kv]);
 
 let repo: string;
@@ -91,7 +96,7 @@ beforeAll(() => {
 
   init(repo);
   mkdirSync(join(repo, 'd'), { recursive: true });
-  writeFileSync(join(repo, 'plain.ts'), 'a\n');
+  writeFileSync(join(repo, 'plain.ts'), 'a\n\nb\n'); // line 2 is blank context
   writeFileSync(join(repo, 'sub中文.ts'), 'a\n'); // non-ASCII: git C-quotes it
   writeFileSync(join(repo, 'img with space.png'), Buffer.from([0, 1, 2]));
   writeFileSync(join(repo, 'mode file.sh'), 'x\n');
@@ -103,7 +108,7 @@ beforeAll(() => {
   git('update-index', '--add', '--cacheinfo', `160000,${sub1},sub`);
   git('commit', '-qm', 'init', '--no-verify');
 
-  writeFileSync(join(repo, 'plain.ts'), 'a\nb\n');
+  writeFileSync(join(repo, 'plain.ts'), 'a\n\nb\nADDED\n');
   writeFileSync(join(repo, 'sub中文.ts'), 'a\nb\n');
   writeFileSync(join(repo, 'img with space.png'), Buffer.from([0, 9, 9]));
   writeFileSync(join(repo, 'q.sql'), 'SELECT 2;\n');
@@ -135,7 +140,7 @@ afterAll(() => {
 const capture = () =>
   execFileSync(
     'git',
-    [...HOSTILE_CONFIG, 'diff', '--cached', ...CAPTURE_FLAGS],
+    [...HOSTILE_CONFIG, ...PINNED_CONFIG, 'diff', '--cached', ...CAPTURE_FLAGS],
     { cwd: repo, maxBuffer: 1 << 28, env },
   ).toString('utf8');
 
@@ -180,13 +185,27 @@ describe('real git capture', () => {
   });
 
   it('reports added ranges that exclude context lines', () => {
+    // The file is `a`, blank, `b`, and the change appends `ADDED` at line 4.
+    // A blank context line only advances the new-side cursor; it is not new.
+    // Under `diff.suppressBlankEmpty` that blank arrives as an empty record,
+    // and ignoring it would report the addition at line 3.
     const plain = parseDiff(capture()).files.find(
       (f) => f.path === 'plain.ts',
     )!;
-    // `a` is context, `b` is the one added line at new-side line 2.
-    expect(plain.hunks[0].newStart).toBe(1);
-    expect(plain.hunks[0].newEnd).toBe(2);
-    expect(plain.addedRanges).toEqual([{ start: 2, end: 2 }]);
+    expect(plain.addedRanges).toEqual([{ start: 4, end: 4 }]);
+  });
+
+  it('survives diff.suppressBlankEmpty even without the pinned -c', () => {
+    // The parser must not depend on the pin: `gh pr diff` in lightweight mode
+    // and any hand-captured diff can arrive with empty blank records.
+    const unpinned = execFileSync(
+      'git',
+      [...HOSTILE_CONFIG, 'diff', '--cached', ...CAPTURE_FLAGS],
+      { cwd: repo, maxBuffer: 1 << 28, env },
+    ).toString('utf8');
+    expect(unpinned).toContain('\n\n b\n'); // the blank record is empty
+    const plain = parseDiff(unpinned).files.find((f) => f.path === 'plain.ts')!;
+    expect(plain.addedRanges).toEqual([{ start: 4, end: 4 }]);
   });
 
   it('produces a plan that tiles the whole diff', () => {

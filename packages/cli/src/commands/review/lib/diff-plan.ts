@@ -57,14 +57,22 @@ const GENERATED_RE =
   /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lock(b)?|Cargo\.lock|go\.sum|poetry\.lock|Gemfile\.lock|composer\.lock|NOTICES\.txt)$|\.snap$|\.min\.(js|css)$|(^|\/)(dist|build|vendor|node_modules)\//;
 
 /**
- * Prose. Markdown under a documentation tree, or at the repository root.
+ * Prose: a documentation file extension, either under a documentation
+ * directory at any depth or at the repository root.
+ *
+ * Both halves matter. A bare directory match calls `website/src/App.tsx`
+ * documentation, and it is executable code. A root-only match calls
+ * `packages/cua-driver/docs/tool-output-format.md` source, and it is prose.
  *
  * Markdown *inside a source tree* stays `source`: this repo's bundled skill
  * prompts are `packages/core/src/skills/**\/SKILL.md`, and they are executable
- * behaviour, not documentation. Only the topology gate cares — chunk agents
- * still cover every line either way.
+ * behaviour. Only the topology gate cares — chunk agents cover every line
+ * either way.
  */
-const DOCS_RE = /^(docs|documentation|website)\/|^[^/]+\.(md|mdx|rst|txt)$/;
+const DOCS_EXT = String.raw`\.(md|mdx|rst|txt|adoc)$`;
+const DOCS_RE = new RegExp(
+  `(^|/)(docs|doc|documentation|website)/.*${DOCS_EXT}` + `|^[^/]+${DOCS_EXT}`,
+);
 
 /**
  * Classify a repo-relative path. Order matters: a generated snapshot under a
@@ -399,8 +407,12 @@ export function parseDiff(diffText: string): {
         newCursor++;
       } else if (line.startsWith('-')) {
         cur.removedLines++;
-      } else if (line.startsWith(' ')) {
-        newCursor++; // a context line: present on the new side, but not new
+      } else if (line === '' || line.startsWith(' ')) {
+        // A context line: present on the new side, but not new. With
+        // `diff.suppressBlankEmpty` git prints a blank one as a physically
+        // empty record rather than a lone space, and failing to advance the
+        // cursor shifts every later `addedRanges` entry up by one.
+        newCursor++;
       }
     }
   }
@@ -442,11 +454,14 @@ function isSafeSplitPoint(lines: string[], n: number): boolean {
   // Both lines must exist in the post-change file — that is the file an agent
   // reads, and the claim being made is about *it*: a top-level declaration
   // preceded by a blank line. A `-` line is old-side only, so neither the
-  // declaration nor the blank line before it can be one.
-  if (!/^[+ ]/.test(cur) || !/^[+ ]/.test(prev)) return false;
+  // declaration nor the blank line before it can be one. Under
+  // `diff.suppressBlankEmpty` a blank context line is the empty string.
+  const isNewSide = (l: string) => l === '' || /^[+ ]/.test(l);
+  if (!isNewSide(cur) || !isNewSide(prev)) return false;
+  if (cur === '') return false; // an empty line is not a declaration
   const content = cur.slice(1);
   if (content.length === 0 || /^\s/.test(content)) return false;
-  return /^\s*$/.test(prev.slice(1));
+  return prev === '' || /^\s*$/.test(prev.slice(1));
 }
 
 /** Prefix sums of line lengths (incl. newline) for O(1) range char counts. */

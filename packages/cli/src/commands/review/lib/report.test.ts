@@ -125,6 +125,29 @@ describe('buildPlanReport', () => {
     expect(report.files[0].hunks).toEqual([{ newStart: 1, newEnd: 2 }]);
   });
 
+  it('gives a heavy file its own diff range, so deletions are visible', () => {
+    // An invariant agent reads the post-change file, where a removed
+    // `clearTimeout()` leaves nothing behind. This range points it at the `-`
+    // lines that are the only evidence the call ever existed.
+    const diff = editFile('src/heavy.ts', 3, 900);
+    const report = buildPlanReport(buildDiffPlan(diff, 400), () => 6000);
+    const f = report.files[0];
+    expect(f.heavy).toBe(true);
+    expect(f.diffRange).toEqual({
+      startLine: 1,
+      endLine: diff.trimEnd().split('\n').length,
+    });
+  });
+
+  it('withholds the diff range from files no invariant agent will read', () => {
+    const report = buildPlanReport(
+      buildDiffPlan(addFile('src/a.ts', 20), 400),
+      () => 30,
+    );
+    expect(report.files[0].heavy).toBe(false);
+    expect(report.files[0].diffRange).toBeUndefined();
+  });
+
   it('carries the per-kind topology counts through unchanged', () => {
     const diff =
       addFile('src/a.ts', 10) +

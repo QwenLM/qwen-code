@@ -41,6 +41,16 @@ export interface FileMetric {
    * the diff itself.
    */
   addedRanges?: Array<{ start: number; end: number }>;
+  /**
+   * This file's own section of the diff file, 1-based inclusive.
+   *
+   * An invariant agent reads the post-change file, where a deletion leaves no
+   * trace: removing a `clearTimeout()`, a `Map.delete()`, or a counter
+   * increment is invisible in the text it is given. Reading this range of the
+   * diff shows it the `-` lines. Present only on `heavy` files, the only
+   * agents that need it.
+   */
+  diffRange?: { startLine: number; endLine: number };
   addedLines: number;
   removedLines: number;
   changedLines: number;
@@ -114,7 +124,12 @@ export function buildPlanReport(
       hunks: f.hunks
         .filter((h) => h.newCount > 0)
         .map((h) => ({ newStart: h.newStart, newEnd: h.newEnd })),
-      ...(heavy ? { addedRanges: f.addedRanges } : {}),
+      ...(heavy
+        ? {
+            addedRanges: f.addedRanges,
+            diffRange: { startLine: f.diffStart, endLine: f.diffEnd },
+          }
+        : {}),
       addedLines: f.addedLines,
       removedLines: f.removedLines,
       changedLines,

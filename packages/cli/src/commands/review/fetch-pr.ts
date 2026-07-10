@@ -227,6 +227,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // `diff.mnemonicPrefix` renames the `a/`/`b/` prefixes to `i/`/`w/`;
       // `diff.context` changes how many lines each hunk carries.
       const buf = gitRaw(
+        // `diff.suppressBlankEmpty` has no command-line override, only `-c`.
+        // With it set, a blank context line is printed as a physically empty
+        // record instead of a lone space.
+        '-c',
+        'diff.suppressBlankEmpty=false',
         'diff',
         '--no-ext-diff',
         '--no-textconv',

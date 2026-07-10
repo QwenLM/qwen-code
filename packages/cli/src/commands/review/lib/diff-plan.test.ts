@@ -75,16 +75,28 @@ describe('classifyPath', () => {
     expect(kinds(paths)).toEqual(all(paths, 'source'));
   });
 
-  it('classifies prose as docs, but not markdown inside a source tree', () => {
-    // The topology gate should not fan chunk agents across a translation PR.
-    // A bundled skill prompt, though, is executable behaviour, not prose.
-    expect(kinds(['docs/users/features/code-review.md', 'README.md'])).toEqual({
-      'docs/users/features/code-review.md': 'docs',
-      'README.md': 'docs',
-    });
-    expect(
-      classifyPath('packages/core/src/skills/bundled/review/SKILL.md'),
-    ).toBe('source');
+  it('classifies prose as docs, wherever the prose lives', () => {
+    // A root-only rule would call the nested package docs `source`.
+    const docs = [
+      'docs/users/features/code-review.md',
+      'README.md',
+      'packages/cua-driver/docs/tool-output-format.md',
+      'website/docs/intro.mdx',
+      'doc/api.rst',
+    ];
+    expect(kinds(docs)).toEqual(all(docs, 'docs'));
+  });
+
+  it('does not call code documentation because of where it sits', () => {
+    // A bare directory rule would call `website/src/App.tsx` documentation.
+    // A bundled skill prompt is executable behaviour, not prose, even though
+    // it is markdown.
+    const source = [
+      'website/src/App.tsx',
+      'website/build.ts',
+      'packages/core/src/skills/bundled/review/SKILL.md',
+    ];
+    expect(kinds(source)).toEqual(all(source, 'source'));
   });
 
   it('classifies a generated snapshot as generated, not as a test', () => {
@@ -155,6 +167,29 @@ describe('parseDiff', () => {
       '+c',
     ].join('\n');
     expect(parseDiff(diff).files[0].path).toBe('sub/中文文件.ts');
+  });
+
+  it('treats an empty hunk-body record as a blank context line', () => {
+    // `diff.suppressBlankEmpty=true` prints a blank context line as a
+    // physically empty record rather than a lone space. Not advancing the
+    // new-side cursor shifts every later added range up by one.
+    const withSpace = [
+      'diff --git a/f.ts b/f.ts',
+      '--- a/f.ts',
+      '+++ b/f.ts',
+      '@@ -1,3 +1,4 @@',
+      ' a',
+      ' ',
+      ' b',
+      '+ADDED',
+    ].join('\n');
+    const suppressed = withSpace.replace('\n \n', '\n\n');
+    expect(parseDiff(withSpace).files[0].addedRanges).toEqual([
+      { start: 4, end: 4 },
+    ]);
+    expect(parseDiff(suppressed).files[0].addedRanges).toEqual([
+      { start: 4, end: 4 },
+    ]);
   });
 
   it('decodes a C-quoted control character', () => {

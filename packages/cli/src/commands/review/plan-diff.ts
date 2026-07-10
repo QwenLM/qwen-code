@@ -68,6 +68,16 @@ function runPlanDiff(args: PlanDiffArgs): void {
   mkdirSync(REVIEW_TMP_DIR, { recursive: true });
   writeFileSync(out, JSON.stringify(result, null, 2) + '\n', 'utf8');
   writeStdoutLine(`Wrote diff plan to ${out}`);
+  if (plan.diffLines === 0) {
+    // A file-path review of an unchanged file lands here. An empty plan gives
+    // the chunk agents nothing to read, and a review over nothing returns a
+    // clean verdict. The skill has a no-diff branch; say so loudly in case it
+    // is skipped.
+    writeStderrLine(
+      `WARNING: the diff is empty — 0 chunks. Reviewing from this plan would ` +
+        `examine no code. Review the file's current contents instead.`,
+    );
+  }
   writeStderrLine(
     `Diff: ${plan.diffLines} lines (${plan.srcDiffLines} source, ` +
       `${plan.testDiffLines} test, ${plan.docsDiffLines} docs, ` +
