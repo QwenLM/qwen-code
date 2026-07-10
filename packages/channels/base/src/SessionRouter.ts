@@ -1,4 +1,14 @@
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
 import process from 'node:process';
 import type { SessionScope, SessionTarget } from './types.js';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
@@ -458,25 +468,13 @@ export class SessionRouter {
     restored: number;
     failed: number;
   }> {
-    const persistPath = this.persistPath;
-    if (!persistPath || !existsSync(persistPath)) {
-      return { restored: 0, failed: 0 };
-    }
-
-    let entries: Record<string, PersistedEntry>;
-    try {
-      entries = JSON.parse(readFileSync(persistPath, 'utf-8'));
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      process.stderr.write(
-        `[SessionRouter] Corrupted persist file at ${sanitizeLogText(persistPath, 1024)}: ${sanitizeLogText(reason, 512)}\n`,
-      );
-      return { restored: 0, failed: 0 };
-    }
+    const persisted = this.readPersistedEntries();
+    if (!persisted) return { restored: 0, failed: 0 };
+    const entries = persisted.entries;
 
     let restored = 0;
     let failed = 0;
-    let changed = false;
+    let changed = persisted.dropped > 0;
     const reservations = new Map<string, SessionReservation>();
 
     // Reserve every persisted key up front so inbound messages during restart
@@ -573,6 +571,12 @@ export class SessionRouter {
     try {
       parsed = JSON.parse(readFileSync(persistPath, 'utf-8'));
     } catch (error) {
+      const quarantinePath = `${persistPath}.corrupt-${Date.now()}`;
+      try {
+        renameSync(persistPath, quarantinePath);
+      } catch {
+        // Keep startup available even if quarantine itself fails.
+      }
       process.stderr.write(
         `[SessionRouter] Corrupted persist file at ${sanitizeLogText(persistPath, 1024)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 512)}\n`,
       );
@@ -583,6 +587,12 @@ export class SessionRouter {
       parsed === null ||
       Array.isArray(parsed)
     ) {
+      const quarantinePath = `${persistPath}.corrupt-${Date.now()}`;
+      try {
+        renameSync(persistPath, quarantinePath);
+      } catch {
+        // Keep startup available even if quarantine itself fails.
+      }
       process.stderr.write(
         `[SessionRouter] Invalid route store at ${sanitizeLogText(persistPath, 1024)}: expected an object\n`,
       );
@@ -625,19 +635,46 @@ export class SessionRouter {
     const data: Record<string, PersistedEntry> = {};
     for (const [key, sessionId] of this.toSession) {
       const target = this.toTarget.get(sessionId);
-      if (target) {
-        data[key] = {
-          sessionId,
-          target,
-          cwd: this.toCwd.get(sessionId) || this.defaultCwd,
-        };
-      }
+      if (!target) continue;
+      data[key] = {
+        sessionId,
+        target,
+        cwd: this.toCwd.get(sessionId) ?? this.defaultCwd,
+      };
     }
 
+    const dir = dirname(this.persistPath);
+    const tempPath = join(
+      dir,
+      `${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}.tmp`,
+    );
     try {
-      writeFileSync(this.persistPath, JSON.stringify(data, null, 2), 'utf-8');
-    } catch {
-      // best-effort — don't break message flow for persistence failure
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      try {
+        chmodSync(dir, 0o700);
+      } catch {
+        // Windows and some filesystems do not implement POSIX modes.
+      }
+      writeFileSync(tempPath, JSON.stringify(data, null, 2), {
+        encoding: 'utf-8',
+        mode: 0o600,
+      });
+      renameSync(tempPath, this.persistPath);
+      try {
+        chmodSync(this.persistPath, 0o600);
+      } catch {
+        // Windows and some filesystems do not implement POSIX modes.
+      }
+    } catch (error) {
+      process.stderr.write(
+        `[SessionRouter] Failed to persist routes at ${sanitizeLogText(this.persistPath, 1024)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 512)}\n`,
+      );
+    } finally {
+      try {
+        rmSync(tempPath, { force: true });
+      } catch {
+        // best-effort temp cleanup
+      }
     }
   }
 

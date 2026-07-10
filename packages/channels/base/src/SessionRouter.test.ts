@@ -2,7 +2,9 @@ import {
   existsSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -10,6 +12,19 @@ import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SessionRouter } from './SessionRouter.js';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
+
+const mockRenameSync = vi.hoisted(() => vi.fn());
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    renameSync: (from: string, to: string) => {
+      mockRenameSync(from, to);
+      return actual.renameSync(from, to);
+    },
+  };
+});
 
 let sessionCounter = 0;
 
@@ -48,6 +63,7 @@ describe('SessionRouter', () => {
 
   beforeEach(() => {
     sessionCounter = 0;
+    mockRenameSync.mockClear();
     bridge = mockBridge();
     tempDirs = [];
   });
@@ -955,6 +971,82 @@ describe('SessionRouter', () => {
           sessionId: 'restored-alice',
         }),
       });
+    });
+  });
+
+  describe('persistence safety', () => {
+    it('quarantines invalid JSON and starts with no routes', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(persistPath, '{bad');
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath, {
+        recoveryMode: 'lazy',
+      });
+
+      expect(router.restoreRoutes()).toEqual({ restored: 0, dropped: 0 });
+      expect(existsSync(persistPath)).toBe(false);
+      expect(
+        readdirSync(dir).some((name) =>
+          name.startsWith('routes.json.corrupt-'),
+        ),
+      ).toBe(true);
+    });
+
+    it('drops malformed entries but keeps valid siblings', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'valid-session',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+          broken: { sessionId: 42 },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath, {
+        recoveryMode: 'lazy',
+      });
+
+      expect(router.restoreRoutes()).toEqual({ restored: 1, dropped: 1 });
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('valid-session');
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({
+        'ch:alice:chat1': expect.objectContaining({
+          sessionId: 'valid-session',
+        }),
+      });
+    });
+
+    it('persists through a same-directory temporary file and rename', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      await router.resolve('ch', 'alice', 'chat1');
+
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({
+        'ch:alice:chat1': expect.objectContaining({ sessionId: 'session-1' }),
+      });
+      expect(mockRenameSync).toHaveBeenCalledWith(
+        expect.stringMatching(/\.tmp$/),
+        persistPath,
+      );
+      expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual(
+        [],
+      );
+      if (process.platform !== 'win32') {
+        expect(statSync(dir).mode & 0o777).toBe(0o700);
+        expect(statSync(persistPath).mode & 0o777).toBe(0o600);
+      }
     });
   });
 
