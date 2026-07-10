@@ -29,6 +29,7 @@ import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from './workspace-registry.js';
+import { createSessionOrganizationService } from './session-organization-helpers.js';
 
 const PRIMARY_CWD = path.resolve(path.sep, 'work', 'primary');
 const SECONDARY_CWD = path.resolve(path.sep, 'work', 'secondary');
@@ -348,6 +349,7 @@ function makeDaemonLog(): DaemonLogger {
 }
 
 function makeHarness(opts?: {
+  primaryTrusted?: boolean;
   secondaryTrusted?: boolean;
   secondaryChannelLive?: boolean;
   daemonLog?: DaemonLogger;
@@ -370,7 +372,7 @@ function makeHarness(opts?: {
       workspaceId: 'primary-id',
       workspaceCwd: PRIMARY_CWD,
       primary: true,
-      trusted: true,
+      trusted: opts?.primaryTrusted ?? true,
       bridge: primaryBridge,
     }),
     makeRuntime({
@@ -488,6 +490,8 @@ describe('multi-workspace session dispatch', () => {
     expect(unknownRes.status).toBe(400);
     expect(unknownRes.body.code).toBe('workspace_mismatch');
     expect(unknownRes.body.workspaceCount).toBe(2);
+    expect(unknownRes.body.boundWorkspace).toBe(PRIMARY_CWD);
+    expect(unknownRes.body.requestedWorkspace).toBe(UNKNOWN_CWD);
     expect(unknown.primaryBridge.spawnCalls).toEqual([]);
     expect(unknown.secondaryBridge.spawnCalls).toEqual([]);
 
@@ -500,6 +504,9 @@ describe('multi-workspace session dispatch', () => {
 
     expect(untrustedRes.status).toBe(403);
     expect(untrustedRes.body.code).toBe('untrusted_workspace');
+    expect(untrustedRes.body.error).toBe('Workspace is not trusted.');
+    expect(untrustedRes.body.workspaceCwd).toBe(SECONDARY_CWD);
+    expect(untrustedRes.body.workspaceId).toBe('secondary-id');
     expect(untrusted.secondaryBridge.spawnCalls).toEqual([]);
     expect(daemonLog.warn).toHaveBeenCalledWith(
       'session routing failed',
@@ -520,7 +527,10 @@ describe('multi-workspace session dispatch', () => {
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('untrusted_workspace');
+    expect(res.body.error).toBe('Workspace is not trusted.');
+    expect(res.body.sessionId).toBe('secondary-session');
     expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
+    expect(res.body.workspaceId).toBe('secondary-id');
     expect(secondaryBridge.promptCalls).toEqual([]);
   });
 
@@ -720,6 +730,8 @@ describe('multi-workspace session dispatch', () => {
     expect(unknownRes.status).toBe(400);
     expect(unknownRes.body.code).toBe('workspace_mismatch');
     expect(unknownRes.body.workspaceCount).toBe(2);
+    expect(unknownRes.body.boundWorkspace).toBe(PRIMARY_CWD);
+    expect(unknownRes.body.requestedWorkspace).toBe(UNKNOWN_CWD);
     expect(unknown.primaryBridge.restoreCalls).toEqual([]);
     expect(unknown.secondaryBridge.restoreCalls).toEqual([]);
 
@@ -732,6 +744,9 @@ describe('multi-workspace session dispatch', () => {
 
     expect(untrustedRes.status).toBe(403);
     expect(untrustedRes.body.code).toBe('untrusted_workspace');
+    expect(untrustedRes.body.error).toBe('Workspace is not trusted.');
+    expect(untrustedRes.body.workspaceCwd).toBe(SECONDARY_CWD);
+    expect(untrustedRes.body.workspaceId).toBe('secondary-id');
     expect(untrusted.primaryBridge.restoreCalls).toEqual([]);
     expect(untrusted.secondaryBridge.restoreCalls).toEqual([]);
     expect(daemonLog.warn).toHaveBeenCalledWith(
@@ -812,30 +827,213 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
-  it('rejects unsupported non-primary persisted session list views', async () => {
+  it('rejects a group filter without the organized view for non-primary workspaces', async () => {
     const { app } = makeHarness();
-
-    const archived = await request(app)
-      .get('/workspace/secondary-id/sessions?archiveState=archived')
-      .set('Host', host());
-    expect(archived.status).toBe(400);
-    expect(archived.body.code).toBe(
-      'non_primary_session_list_option_not_supported',
-    );
-
-    const organized = await request(app)
-      .get('/workspace/secondary-id/sessions?view=organized')
-      .set('Host', host());
-    expect(organized.status).toBe(400);
-    expect(organized.body.code).toBe(
-      'non_primary_session_list_option_not_supported',
-    );
 
     const group = await request(app)
       .get('/workspace/secondary-id/sessions?group=pinned')
       .set('Host', host());
     expect(group.status).toBe(400);
     expect(group.body.code).toBe('invalid_session_group_filter');
+  });
+
+  it('lists archived non-primary workspace sessions for trusted workspaces', async () => {
+    await withRuntimeDir(async () => {
+      const archivedId = '550e8400-e29b-41d4-a716-446655440130';
+      await writeStoredSession({
+        sessionId: archivedId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:20:00.000Z',
+        prompt: 'secondary archived target',
+        mtime: new Date('2026-07-08T00:20:00.000Z'),
+      });
+      const { app } = makeHarness({ secondarySummaries: [] });
+
+      await request(app)
+        .post('/workspaces/secondary-id/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [archivedId] })
+        .expect(200);
+
+      const active = await request(app)
+        .get('/workspaces/secondary-id/sessions')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        active.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).not.toContain(archivedId);
+
+      const archived = await request(app)
+        .get('/workspaces/secondary-id/sessions?archiveState=archived')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        archived.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual([archivedId]);
+      expect(archived.body.sessions[0]).toMatchObject({
+        sessionId: archivedId,
+        workspaceCwd: SECONDARY_CWD,
+        isArchived: true,
+      });
+    });
+  });
+
+  it('lists organized non-primary workspace sessions with pinned first for trusted workspaces', async () => {
+    await withRuntimeDir(async () => {
+      const pinnedOlderId = '550e8400-e29b-41d4-a716-446655440131';
+      const plainNewerId = '550e8400-e29b-41d4-a716-446655440132';
+      await writeStoredSession({
+        sessionId: pinnedOlderId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'secondary older pinned',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: plainNewerId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T01:00:00.000Z',
+        prompt: 'secondary newer unpinned',
+        mtime: new Date('2026-07-08T01:00:00.000Z'),
+      });
+      await createSessionOrganizationService(
+        SECONDARY_CWD,
+      ).updateSessionOrganization(pinnedOlderId, { isPinned: true });
+      const { app } = makeHarness({ secondarySummaries: [] });
+
+      const organized = await request(app)
+        .get('/workspaces/secondary-id/sessions?view=organized&group=all')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        organized.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual([pinnedOlderId, plainNewerId]);
+      expect(organized.body.sessions[0]).toMatchObject({
+        sessionId: pinnedOlderId,
+        isPinned: true,
+      });
+    });
+  });
+
+  it('lists organized archived non-primary sessions pinned first without merging live sessions', async () => {
+    await withRuntimeDir(async () => {
+      const pinnedArchivedId = '550e8400-e29b-41d4-a716-446655440140';
+      const plainArchivedId = '550e8400-e29b-41d4-a716-446655440141';
+      const liveOnlyId = '550e8400-e29b-41d4-a716-446655440142';
+      await writeStoredSession({
+        sessionId: pinnedArchivedId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'secondary pinned archived',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: plainArchivedId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T01:00:00.000Z',
+        prompt: 'secondary plain archived',
+        mtime: new Date('2026-07-08T01:00:00.000Z'),
+      });
+      const { app } = makeHarness({
+        secondarySummaries: [makeSummary(liveOnlyId, SECONDARY_CWD)],
+      });
+
+      await request(app)
+        .post('/workspaces/secondary-id/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [pinnedArchivedId, plainArchivedId] })
+        .expect(200);
+      await createSessionOrganizationService(
+        SECONDARY_CWD,
+      ).updateSessionOrganization(pinnedArchivedId, { isPinned: true });
+
+      const organized = await request(app)
+        .get(
+          '/workspaces/secondary-id/sessions?view=organized&archiveState=archived&group=all',
+        )
+        .set('Host', host())
+        .expect(200);
+      const ids = organized.body.sessions.map(
+        (s: { sessionId: string }) => s.sessionId,
+      );
+      expect(ids).toEqual([pinnedArchivedId, plainArchivedId]);
+      expect(ids).not.toContain(liveOnlyId);
+      expect(organized.body.sessions[0]).toMatchObject({
+        sessionId: pinnedArchivedId,
+        isPinned: true,
+        isArchived: true,
+      });
+    });
+  });
+
+  it('paginates organized non-primary sessions across an opaque cursor round-trip', async () => {
+    await withRuntimeDir(async () => {
+      const newestId = '550e8400-e29b-41d4-a716-446655440150';
+      const middleId = '550e8400-e29b-41d4-a716-446655440151';
+      const oldestId = '550e8400-e29b-41d4-a716-446655440152';
+      await writeStoredSession({
+        sessionId: newestId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T03:00:00.000Z',
+        prompt: 'secondary newest',
+        mtime: new Date('2026-07-08T03:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: middleId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T02:00:00.000Z',
+        prompt: 'secondary middle',
+        mtime: new Date('2026-07-08T02:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: oldestId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T01:00:00.000Z',
+        prompt: 'secondary oldest',
+        mtime: new Date('2026-07-08T01:00:00.000Z'),
+      });
+      const { app } = makeHarness({ secondarySummaries: [] });
+
+      const firstPage = await request(app)
+        .get(
+          '/workspaces/secondary-id/sessions?view=organized&group=all&size=2',
+        )
+        .set('Host', host())
+        .expect(200);
+      expect(
+        firstPage.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual([newestId, middleId]);
+      expect(firstPage.body.nextCursor).toEqual(expect.any(String));
+
+      const secondPage = await request(app)
+        .get(
+          `/workspaces/secondary-id/sessions?view=organized&group=all&size=2&cursor=${encodeURIComponent(
+            firstPage.body.nextCursor as string,
+          )}`,
+        )
+        .set('Host', host())
+        .expect(200);
+      expect(
+        secondPage.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual([oldestId]);
+      expect(secondPage.body.nextCursor).toBeUndefined();
+    });
+  });
+
+  it('rejects archived and organized non-primary session lists for untrusted workspaces', async () => {
+    const { app } = makeHarness({ secondaryTrusted: false });
+
+    const archived = await request(app)
+      .get('/workspaces/secondary-id/sessions?archiveState=archived')
+      .set('Host', host());
+    expect(archived.status).toBe(403);
+    expect(archived.body.code).toBe('untrusted_workspace');
+
+    const organized = await request(app)
+      .get('/workspaces/secondary-id/sessions?view=organized')
+      .set('Host', host());
+    expect(organized.status).toBe(403);
+    expect(organized.body.code).toBe('untrusted_workspace');
   });
 
   it('returns workspace_mismatch for unknown absolute workspace session lists', async () => {
@@ -847,6 +1045,8 @@ describe('multi-workspace session dispatch', () => {
     expect(unknown.status).toBe(400);
     expect(unknown.body.code).toBe('workspace_mismatch');
     expect(unknown.body.workspaceCount).toBe(2);
+    expect(unknown.body.boundWorkspace).toBe(PRIMARY_CWD);
+    expect(unknown.body.requestedWorkspace).toBe(UNKNOWN_CWD);
   });
 
   it('lists active persisted non-primary sessions by encoded workspace cwd', async () => {
@@ -989,7 +1189,9 @@ describe('multi-workspace session dispatch', () => {
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('untrusted_workspace');
-    expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
+    expect(res.body.error).toBe('Workspace is not trusted.');
+    expect(res.body).not.toHaveProperty('workspaceCwd');
+    expect(res.body).not.toHaveProperty('workspaceId');
     expect(secondaryBridge.listCalls).toEqual([]);
     expect(daemonLog.warn).toHaveBeenCalledWith(
       'session routing failed',
@@ -999,6 +1201,147 @@ describe('multi-workspace session dispatch', () => {
         workspaceCwd: SECONDARY_CWD,
       }),
     );
+  });
+
+  it('rejects untrusted primary workspace on plural session routes', async () => {
+    const daemonLog = makeDaemonLog();
+    const { app } = makeHarness({
+      primaryTrusted: false,
+      daemonLog,
+    });
+
+    const res = await request(app)
+      .get('/workspaces/primary-id/session-groups')
+      .set('Host', host());
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(res.body.error).toBe('Workspace is not trusted.');
+    expect(res.body).not.toHaveProperty('workspaceCwd');
+    expect(res.body).not.toHaveProperty('workspaceId');
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'session routing failed',
+      expect.objectContaining({
+        route: 'GET /workspaces/:workspace/session-groups',
+        resolutionKind: 'untrusted_workspace',
+        workspaceCwd: PRIMARY_CWD,
+      }),
+    );
+  });
+
+  it('routes plural batch archive, unarchive, and delete to the selected workspace', async () => {
+    await withRuntimeDir(async () => {
+      const archiveId = '550e8400-e29b-41d4-a716-446655440120';
+      const deleteId = '550e8400-e29b-41d4-a716-446655440121';
+      await writeStoredSession({
+        sessionId: archiveId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:10:00.000Z',
+        prompt: 'secondary archive target',
+        mtime: new Date('2026-07-08T00:10:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: deleteId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:11:00.000Z',
+        prompt: 'secondary delete target',
+        mtime: new Date('2026-07-08T00:11:00.000Z'),
+      });
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        secondarySummaries: [],
+      });
+
+      const archived = await request(app)
+        .post('/workspaces/secondary-id/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [archiveId] })
+        .expect(200);
+      expect(archived.body).toMatchObject({
+        archived: [archiveId],
+        alreadyArchived: [],
+        notFound: [],
+        errors: [],
+      });
+
+      const unarchived = await request(app)
+        .post('/workspaces/secondary-id/sessions/unarchive')
+        .set('Host', host())
+        .send({ sessionIds: [archiveId] })
+        .expect(200);
+      expect(unarchived.body).toMatchObject({
+        unarchived: [archiveId],
+        alreadyActive: [],
+        notFound: [],
+        errors: [],
+      });
+
+      const deleted = await request(app)
+        .post('/workspaces/secondary-id/sessions/delete')
+        .set('Host', host())
+        .send({ sessionIds: [deleteId] })
+        .expect(200);
+      expect(deleted.body).toMatchObject({
+        removed: [deleteId],
+        notFound: [],
+        errors: [],
+      });
+      expect(primaryBridge.closeCalls).toEqual([]);
+      expect(secondaryBridge.closeCalls).toEqual([archiveId, deleteId]);
+    });
+  });
+
+  it('routes plural session group CRUD to the selected workspace', async () => {
+    await withRuntimeDir(async () => {
+      const { app } = makeHarness();
+
+      const created = await request(app)
+        .post('/workspaces/secondary-id/session-groups')
+        .set('Host', host())
+        .send({ name: 'Secondary Group', color: 'blue' })
+        .expect(201);
+      expect(created.body.group).toMatchObject({
+        name: 'Secondary Group',
+        color: 'blue',
+      });
+      const groupId = created.body.group.id as string;
+
+      const secondaryList = await request(app)
+        .get('/workspaces/secondary-id/session-groups')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        (secondaryList.body.groups as Array<{ id: string }>).map(
+          (group) => group.id,
+        ),
+      ).toContain(groupId);
+
+      const primaryList = await request(app)
+        .get('/workspaces/primary-id/session-groups')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        (primaryList.body.groups as Array<{ id: string }>).map(
+          (group) => group.id,
+        ),
+      ).not.toContain(groupId);
+
+      const updated = await request(app)
+        .patch(`/workspaces/secondary-id/session-groups/${groupId}`)
+        .set('Host', host())
+        .send({ name: 'Secondary Renamed', order: 10 })
+        .expect(200);
+      expect(updated.body.group).toMatchObject({
+        id: groupId,
+        name: 'Secondary Renamed',
+        order: 10,
+      });
+
+      const deleted = await request(app)
+        .delete(`/workspaces/secondary-id/session-groups/${groupId}`)
+        .set('Host', host())
+        .expect(200);
+      expect(deleted.body).toEqual({ deleted: true });
+    });
   });
 
   it('pages live non-primary workspace sessions with a stable cursor', async () => {

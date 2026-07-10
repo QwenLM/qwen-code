@@ -8,6 +8,7 @@ import {
   AuthType,
   type Config,
   InputFormat,
+  isDebugLogFileEnabled,
   isDebugLoggingDegraded,
   isBareMode,
   logUserPrompt,
@@ -913,9 +914,13 @@ export async function main() {
     // Print debug mode notice to stderr for non-interactive mode
     if (config.getDebugMode()) {
       writeStderrLine('Debug mode enabled');
-      writeStderrLine(
-        `Logging to: ${Storage.getDebugLogPath(config.getSessionId())}`,
-      );
+      if (isDebugLogFileEnabled()) {
+        writeStderrLine(
+          `Logging to: ${Storage.getDebugLogPath(config.getSessionId())}`,
+        );
+      } else {
+        writeStderrLine('Debug log file disabled by QWEN_DEBUG_LOG_FILE');
+      }
       if (isDebugLoggingDegraded()) {
         writeStderrLine(
           'Warning: Debug logging is degraded (write failures occurred)',

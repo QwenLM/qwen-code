@@ -58,7 +58,7 @@ export default {
   'to search history': "per cercar a l'historial",
   'to paste images': 'per enganxar imatges',
   'for external editor': 'per a editor extern',
-  'to toggle compact mode': 'per canviar el mode compacte',
+  'to view transcript': 'per veure la transcripció',
   'Jump through words in the input': "Saltar entre paraules a l'entrada",
   'Close dialogs, cancel requests, or quit application':
     "Tancar diàlegs, cancel·lar peticions o sortir de l'aplicació",
@@ -253,6 +253,42 @@ export default {
   'Delete {{name}}': 'Eliminar {{name}}',
   'Unknown Step': 'Pas desconegut',
   'Esc to close': 'Esc per tancar',
+  Transcript: 'Transcripció',
+  'to close': 'per tancar',
+  'to scroll': 'per desplaçar',
+  'Failed to render transcript.': 'Error en renderitzar la transcripció.',
+  'Read {{count}} file': 'Ha llegit {{count}} fitxer',
+  'Read {{count}} files': 'Ha llegit {{count}} fitxers',
+  'Reading {{count}} file': 'Llegint {{count}} fitxer',
+  'Reading {{count}} files': 'Llegint {{count}} fitxers',
+  'Edited {{count}} file': 'Ha editat {{count}} fitxer',
+  'Edited {{count}} files': 'Ha editat {{count}} fitxers',
+  'Editing {{count}} file': 'Editant {{count}} fitxer',
+  'Editing {{count}} files': 'Editant {{count}} fitxers',
+  'Wrote {{count}} file': 'Ha escrit {{count}} fitxer',
+  'Wrote {{count}} files': 'Ha escrit {{count}} fitxers',
+  'Writing {{count}} file': 'Escrivint {{count}} fitxer',
+  'Writing {{count}} files': 'Escrivint {{count}} fitxers',
+  'Searched {{count}} pattern': 'Ha cercat {{count}} patró',
+  'Searched {{count}} patterns': 'Ha cercat {{count}} patrons',
+  'Searching {{count}} pattern': 'Cercant {{count}} patró',
+  'Searching {{count}} patterns': 'Cercant {{count}} patrons',
+  'Listed {{count}} directory': 'Ha llistat {{count}} directori',
+  'Listed {{count}} directories': 'Ha llistat {{count}} directoris',
+  'Listing {{count}} directory': 'Llistant {{count}} directori',
+  'Listing {{count}} directories': 'Llistant {{count}} directoris',
+  'Ran {{count}} command': 'Ha executat {{count}} ordre',
+  'Ran {{count}} commands': 'Ha executat {{count}} ordres',
+  'Running {{count}} command': 'Executant {{count}} ordre',
+  'Running {{count}} commands': 'Executant {{count}} ordres',
+  'Ran {{count}} agent': 'Ha executat {{count}} agent',
+  'Ran {{count}} agents': 'Ha executat {{count}} agents',
+  'Running {{count}} agent': 'Executant {{count}} agent',
+  'Running {{count}} agents': 'Executant {{count}} agents',
+  'Used {{count}} tool': 'Ha utilitzat {{count}} eina',
+  'Used {{count}} tools': 'Ha utilitzat {{count}} eines',
+  'Using {{count}} tool': 'Utilitzant {{count}} eina',
+  'Using {{count}} tools': 'Utilitzant {{count}} eines',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter per seleccionar, ↑↓ per navegar, Esc per tancar',
   'Esc to go back': 'Esc per tornar enrere',
@@ -1448,8 +1484,6 @@ export default {
     'Podeu canviar ràpidament el mode de permisos amb Tab o /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Proveu /insight per generar idees personalitzades a partir del vostre historial de xat.',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Premeu Ctrl+O per canviar el mode compacte — amagueu la sortida de les eines i el pensament per a una vista més neta.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Afegiu un fitxer QWEN.md per donar a Qwen Code un context persistent del projecte.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1916,10 +1950,6 @@ export default {
     'El mode raw no està disponible. Executeu en un terminal interactiu.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Useu les fletxes ↑ ↓ per navegar, Enter per seleccionar, Ctrl+C per sortir)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Amagueu la sortida de les eines i el pensament per a una vista més neta (canvieu amb Ctrl+O).',
-  'Press Ctrl+O to show full tool output':
-    'Premeu Ctrl+O per mostrar la sortida completa de les eines',
   'Switch to plan mode or exit plan mode':
     'Canviar al mode de planificació o sortir del mode de planificació',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
@@ -2062,6 +2092,54 @@ export default {
     'Ús: /history collapse-on-resume|expand-on-resume|expand-now',
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
     'Història reduïda: {{n}} missatges ocults. Utilitzeu /history expand-now per mostrar.',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Comprova les actualitzacions de Qwen Code i instal·la si estan disponibles',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Actualització de Qwen Code disponible! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Hi ha una versió nova de Qwen Code disponible! {{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!':
+    'Qwen Code {{version}} està actualitzat!',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    "No s'han pogut comprovar les actualitzacions. Comproveu la xarxa o la configuració del registre.",
+  'Unable to check for updates: {{reason}}':
+    'No es poden comprovar les actualitzacions: {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    "Actualització correcta! La nova versió s'utilitzarà en la propera execució.",
+  'Update downloaded. It will be applied after you exit this session.':
+    "Actualització descarregada. S'aplicarà després de sortir d'aquesta sessió.",
+  'Update failed: {{error}}': 'Actualització fallida: {{error}}',
+  'Downloading update...': "S'està baixant l'actualització...",
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Actualització correcta! Reinicieu Qwen Code per utilitzar la nova versió. Canviar de proveïdor de models abans de reiniciar pot no funcionar correctament.',
+  'Automatic update failed. Please try updating manually.':
+    "L'actualització automàtica ha fallat. Proveu d'actualitzar manualment.",
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Ha fallat l’actualització automàtica: {{error}}. Torneu a executar l’instal·lador per actualitzar manualment.',
+  'Running from a local git clone. Please update with "git pull".':
+    'S’està executant des d’un clon Git local. Actualitzeu amb "git pull".',
+  'Running via npx, update not applicable.':
+    'S’està executant via npx, l’actualització no és aplicable.',
+  'Running via pnpx, update not applicable.':
+    'S’està executant via pnpx, l’actualització no és aplicable.',
+  'Running via bunx, update not applicable.':
+    'S’està executant via bunx, l’actualització no és aplicable.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Instal·lat via Homebrew. Actualitzeu amb "brew upgrade".',
+  "Locally installed. Please update via your project's package.json.":
+    'Instal·lat localment. Actualitzeu mitjançant el package.json del vostre projecte.',
+  'Update requires sudo. Please run:':
+    'L’actualització requereix sudo. Executeu:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'S’ha detectat una instal·lació independent. S’intenta actualitzar automàticament...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'S’ha detectat una instal·lació independent. Torneu a executar l’instal·lador independent per actualitzar:',
+  'Run the following to update:': 'Executeu el següent per actualitzar:',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'No es pot actualitzar automàticament aquesta instal·lació autònoma. Reinstal·leu des de:',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Actualització manual requerida. Reinstal·leu Qwen Code.',
 
   // ============================================================================
   // reload-plugins command

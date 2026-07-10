@@ -115,6 +115,7 @@ export type {
   ToolHeaderExtraRenderer,
   ToolHeaderExtraRenderInfo,
   ToolHeaderKind,
+  AssistantTurnFooterRenderer,
   UserMessageContentRenderer,
   UserMessageContentRenderInfo,
   ComposerToolbarStartRenderer,
@@ -124,8 +125,11 @@ export type {
   WebShellComposerToolbarRightRenderInfo,
   WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
+  WebShellBottomStatusItem,
   WebShellCodeBlockRenderInfo,
   WebShellMarkdownCustomization,
+  WebShellAssistantMessageInfo,
+  WebShellAssistantTurnFooterRenderInfo,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
 export {

@@ -4,7 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+} from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import * as child_process from 'child_process';
 import { StreamingState } from '../types.js';
@@ -148,7 +156,12 @@ describe('useStatusLine', () => {
   // Must import dynamically after mocks are set up
   let useStatusLine: typeof import('./useStatusLine.js').useStatusLine;
 
-  beforeEach(async () => {
+  beforeAll(async () => {
+    const mod = await import('./useStatusLine.js');
+    useStatusLine = mod.useStatusLine;
+  }, 20_000);
+
+  beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     lastExecCommand = undefined;
@@ -199,10 +212,6 @@ describe('useStatusLine', () => {
     mockConfig.getContentGeneratorConfig.mockReturnValue({
       contextWindowSize: 131072,
     });
-
-    // Dynamic import to get fresh module after mocks
-    const mod = await import('./useStatusLine.js');
-    useStatusLine = mod.useStatusLine;
   });
 
   afterEach(() => {

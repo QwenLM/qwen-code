@@ -9,6 +9,9 @@ import { FatalConfigError } from '@qwen-code/qwen-code-core';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { MAX_TRUST_REASON_LENGTH } from '../validation-limits.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { resolveWorkspaceRuntimeFromParam } from '../workspace-route-runtime.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
+import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 
 export interface WorkspaceTrustRouteDeps {
   boundWorkspace: string;
@@ -115,6 +118,100 @@ export function registerWorkspaceTrustRoutes(
         res.status(202).json(result);
       } catch (err) {
         sendTrustError(res, 'POST /workspace/trust/request', err);
+      }
+    },
+  );
+}
+
+export function registerWorkspaceQualifiedTrustRoutes(
+  app: Application,
+  deps: Pick<WorkspaceTrustRouteDeps, 'mutate' | 'safeBody'> & {
+    workspaceRegistry: WorkspaceRegistry;
+  },
+): void {
+  const { workspaceRegistry, mutate, safeBody } = deps;
+
+  app.get('/workspaces/:workspace/trust', async (req, res) => {
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      workspaceRegistry,
+      req,
+      res,
+    );
+    if (!runtime) return;
+    const route = 'GET /workspaces/:workspace/trust';
+    try {
+      const status = await runtime.workspaceService.getWorkspaceTrustStatus({
+        route,
+        workspaceCwd: runtime.workspaceCwd,
+      });
+      res.status(200).json(status);
+    } catch (err) {
+      sendTrustError(res, route, err);
+    }
+  });
+
+  app.post(
+    '/workspaces/:workspace/trust/request',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime) return;
+      const body = safeBody(req);
+      const desiredState = body['desiredState'];
+      if (desiredState !== 'trusted' && desiredState !== 'untrusted') {
+        res.status(400).json({
+          error: 'desiredState must be "trusted" or "untrusted"',
+          code: 'invalid_desired_state',
+        });
+        return;
+      }
+
+      const reason = body['reason'];
+      if (
+        reason !== undefined &&
+        (typeof reason !== 'string' || reason.length > MAX_TRUST_REASON_LENGTH)
+      ) {
+        res.status(400).json({
+          error: `reason must be a string up to ${MAX_TRUST_REASON_LENGTH} characters`,
+          code: 'invalid_reason',
+        });
+        return;
+      }
+
+      const clientId = parseAndValidateWorkspaceClientId(
+        req,
+        res,
+        runtime.bridge,
+      );
+      if (clientId === null) return;
+      const route = 'POST /workspaces/:workspace/trust/request';
+      const ctx = {
+        route,
+        workspaceCwd: runtime.workspaceCwd,
+        ...(clientId !== undefined ? { originatorClientId: clientId } : {}),
+      };
+      try {
+        const status =
+          await runtime.workspaceService.getWorkspaceTrustStatus(ctx);
+        if (!status.folderTrustEnabled) {
+          res.status(409).json({
+            error: 'Folder trust is disabled for this workspace',
+            code: 'folder_trust_disabled',
+          });
+          return;
+        }
+        const result =
+          await runtime.workspaceService.requestWorkspaceTrustChange(ctx, {
+            desiredState,
+            ...(reason !== undefined ? { reason } : {}),
+          });
+        res.status(202).json(result);
+      } catch (err) {
+        sendTrustError(res, route, err);
       }
     },
   );
