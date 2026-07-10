@@ -1051,6 +1051,16 @@ describe('loadCliConfig', () => {
     expect(process.env['QWEN_DEBUG_LOG_FILE']).toBe('1');
   });
 
+  it('preserves explicit opt-out when --debug is used', async () => {
+    process.env['QWEN_DEBUG_LOG_FILE'] = '0';
+    process.argv = ['node', 'script.js', '--debug'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(process.env['QWEN_DEBUG_LOG_FILE']).toBe('0');
+  });
+
   it('leaves debug file logging unset outside --debug mode', async () => {
     delete process.env['QWEN_DEBUG_LOG_FILE'];
     process.argv = ['node', 'script.js'];
