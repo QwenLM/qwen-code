@@ -124,9 +124,7 @@ type WorkspaceStatusSection = DaemonStatusSection<unknown>;
 
 interface FullDaemonStatus {
   sessions: BridgeDaemonStatusSnapshot['sessions'];
-  acpConnections: NonNullable<
-    ReturnType<AcpHttpHandle['registry']['getSnapshot']>
-  >['connections'];
+  acpConnections: AcpHttpSnapshot['connections'];
   workspace: Record<string, WorkspaceStatusSection>;
   auth: {
     supportedDeviceFlowProviders: string[];
@@ -326,8 +324,8 @@ export async function buildDaemonStatusResponse(
   );
   const acpSnapshot = input.acpHandle?.registry.getSnapshot();
   // Aggregate across all mounts (primary + trusted secondaries) so the transport
-  // summary matches the metrics sampler; the per-connection diagnostics and the
-  // connection cap below stay primary-scoped.
+  // summary matches the metrics sampler; the connection cap below stays
+  // primary-scoped because it is the uniform per-mount cap.
   const acpAggregate = input.acpHandle?.getSnapshot();
   const rateLimitHits = input.rateLimiter?.getHitCounts() ?? zeroRateHits();
   let pendingPrompts = 0;
@@ -380,7 +378,7 @@ export async function buildDaemonStatusResponse(
   if (detail === 'full') {
     full = await buildFullStatus(
       input,
-      acpSnapshot,
+      acpAggregate,
       workspaceSnapshots.flatMap((item) => item.snapshot.sessions),
     );
     pushFullIssues(issues, full);
@@ -528,7 +526,7 @@ function cloneStartup(startup: DaemonStartupSnapshot): DaemonStartupSnapshot {
 
 async function buildFullStatus(
   input: BuildDaemonStatusOptions,
-  acpSnapshot: ReturnType<AcpHttpHandle['registry']['getSnapshot']> | undefined,
+  acpSnapshot: AcpHttpSnapshot | undefined,
   sessions: BridgeDaemonStatusSnapshot['sessions'],
 ): Promise<FullDaemonStatus> {
   const ctx: WorkspaceRequestContext = {

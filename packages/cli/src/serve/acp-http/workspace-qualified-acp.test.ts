@@ -318,7 +318,10 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(server.listenerCount('upgrade')).toBe(listenerCount);
   });
 
-  it('aggregates a connection snapshot across primary + trusted secondary mounts', () => {
+  it('aggregates a connection snapshot across primary + trusted secondary mounts', async () => {
+    const res = await postInitialize('/workspaces/secondary-id/acp');
+    expect(res.status).toBe(200);
+
     const snap = handle!.getSnapshot();
     // primary (workspaceId null) + the trusted secondary only; untrusted
     // workspaces get no mount, so they never appear in the aggregate snapshot.
@@ -327,7 +330,14 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     const ids = snap.mounts.map((m) => m.workspaceId);
     expect(ids).toContain('secondary-id');
     expect(ids).not.toContain('untrusted-id');
-    expect(snap.connectionCount).toBe(0);
+    expect(snap.connectionCount).toBe(1);
+    expect(snap.connections).toEqual([
+      expect.objectContaining({
+        workspaceId: 'secondary-id',
+        workspaceCwd: '/ws-b',
+        primary: false,
+      }),
+    ]);
   });
 
   it('rejects a raw WS upgrade whose selector is a dot-segment (%2e%2e)', async () => {

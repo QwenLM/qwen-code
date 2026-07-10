@@ -30,6 +30,7 @@ import {
 import {
   ConnectionRegistry,
   type AcpConnection,
+  type AcpConnectionDiagnostic,
 } from './connection-registry.js';
 import { SseStream } from './sse-stream.js';
 import { WsStream } from './ws-stream.js';
@@ -431,6 +432,7 @@ interface RuntimeAcpMount {
   /** Whether this mount is the daemon's primary runtime. CDP-tunnel claims and
    *  chrome-devtools MCP wiring are primary-only. */
   readonly primary: boolean;
+  readonly workspaceCwd: string;
   readonly registry: ConnectionRegistry;
   readonly dispatcher: AcpDispatcher;
   readonly ensureChromeDevToolsMcpRegistered: (
@@ -454,6 +456,12 @@ export interface AcpHttpMountSnapshot {
   wsStreams: number;
 }
 
+export interface AcpHttpConnectionDiagnostic extends AcpConnectionDiagnostic {
+  workspaceId: string | null;
+  workspaceCwd: string;
+  primary: boolean;
+}
+
 /** Aggregate ACP HTTP observability across every mounted runtime. */
 export interface AcpHttpSnapshot {
   connectionCount: number;
@@ -463,6 +471,7 @@ export interface AcpHttpSnapshot {
   wsStreams: number;
   pendingClientRequests: number;
   mounts: AcpHttpMountSnapshot[];
+  connections: AcpHttpConnectionDiagnostic[];
 }
 
 export interface AcpHttpHandle {
@@ -680,6 +689,7 @@ export function mountAcpHttp(
   // by URL path and delegate to these same helpers.
   const primaryMount: RuntimeAcpMount = {
     primary: true,
+    workspaceCwd: opts.boundWorkspace,
     registry,
     dispatcher,
     ensureChromeDevToolsMcpRegistered,
@@ -1101,6 +1111,7 @@ export function mountAcpHttp(
     secondaryDispatcherRef.current = secondaryDispatcher;
     return {
       primary: false,
+      workspaceCwd: rt.workspaceCwd,
       registry: secondaryRegistry,
       dispatcher: secondaryDispatcher,
       ensureChromeDevToolsMcpRegistered: () => {},
@@ -1944,6 +1955,7 @@ export function mountAcpHttp(
         {
           workspaceId: null as string | null,
           primary: true,
+          workspaceCwd: primaryMount.workspaceCwd,
           snap: registry.getSnapshot(),
         },
       ];
@@ -1951,6 +1963,7 @@ export function mountAcpHttp(
         perMount.push({
           workspaceId,
           primary: false,
+          workspaceCwd: mount.workspaceCwd,
           snap: mount.registry.getSnapshot(),
         });
       }
@@ -1976,6 +1989,14 @@ export function mountAcpHttp(
           connectionCount: m.snap.connectionCount,
           wsStreams: m.snap.wsStreams,
         })),
+        connections: perMount.flatMap((mount) =>
+          mount.snap.connections.map((connection) => ({
+            ...connection,
+            workspaceId: mount.workspaceId,
+            workspaceCwd: mount.workspaceCwd,
+            primary: mount.primary,
+          })),
+        ),
       };
     },
     attachServer(server: import('node:http').Server) {
