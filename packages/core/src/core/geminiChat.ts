@@ -2584,10 +2584,100 @@ export class GeminiChat {
         // initial request so the retry itself cannot overflow the window.
         // When the initial limit is already at the ceiling (for example the
         // clamp was binding), skip the no-op escalation call but still run
-        // continuation recovery on the partial response.
-        // Placed outside the retry loop so that any errors from the
-        // escalated/recovery streams propagate directly (not caught by retry
-        // logic).
+        // continuation recovery on the partial response. These follow-up
+        // streams still need the same InvalidStreamError retry guard as the
+        // main send loop; otherwise a leaked protocol-tag turn would bypass
+        // the primary rollback/retry path entirely.
+        const rollbackRecoveryAttempt = () => {
+          // Pop the partial `model[fc]` FIRST (if processStreamResponse
+          // pushed one before re-throwing), THEN the recovery user turn.
+          // Reversed order would strand `OUTPUT_RECOVERY_MESSAGE` as a real
+          // user turn. Index-checked pop mirrors `popPartialIfPushed`
+          // above — see the design note above
+          // `ORPHAN_TOOL_USE_REPAIR_REASON` for the wedge mechanism and
+          // the partial-push marker lifecycle.
+          const expectedIdx = self.pendingPartialAssistantTurnIndex;
+          const lastIdx = self.history.length - 1;
+          if (
+            expectedIdx !== null &&
+            self.history.length > 0 &&
+            self.history[lastIdx]?.role === 'model'
+          ) {
+            if (expectedIdx !== lastIdx) {
+              debugLogger.warn(
+                `[RECOVERY_POP] Marker/last-index mismatch: ` +
+                  `marker=${expectedIdx}, lastIdx=${lastIdx}, ` +
+                  `historyLength=${self.history.length}. Popping ` +
+                  `last entry as best-effort rollback — investigate ` +
+                  `any history mutation between processStreamResponse's ` +
+                  `partial push and this catch.`,
+              );
+            }
+            self.history.pop();
+            self.clearPendingPartialState();
+          }
+          if (
+            self.history.length > 0 &&
+            self.history[self.history.length - 1].role === 'user'
+          ) {
+            self.history.pop();
+          }
+        };
+        type InvalidStreamRetryEvent =
+          | Extract<StreamEvent, { type: StreamEventType.CHUNK }>
+          | Extract<StreamEvent, { type: StreamEventType.RETRY }>;
+        const streamWithInvalidStreamRetries = async function* (
+          buildAttempt: () => {
+            requestContents: Content[];
+            params: SendMessageParameters;
+            rollback: () => void;
+          },
+        ): AsyncGenerator<InvalidStreamRetryEvent> {
+          let retryCount = 0;
+          for (;;) {
+            const attemptState = buildAttempt();
+            try {
+              const stream = await self.makeApiCallAndProcessStream(
+                model,
+                attemptState.requestContents,
+                attemptState.params,
+                prompt_id,
+              );
+              for await (const chunk of stream) {
+                yield { type: StreamEventType.CHUNK, value: chunk };
+              }
+              return;
+            } catch (error) {
+              if (!(error instanceof InvalidStreamError)) throw error;
+
+              attemptState.rollback();
+              if (retryCount >= INVALID_STREAM_RETRY_CONFIG.maxRetries) {
+                throw error;
+              }
+
+              retryCount++;
+              const delayMs =
+                INVALID_STREAM_RETRY_CONFIG.initialDelayMs * retryCount;
+              debugLogger.warn(
+                `Invalid stream [${error.type}] during output continuation ` +
+                  `(retry ${retryCount}/${INVALID_STREAM_RETRY_CONFIG.maxRetries}). ` +
+                  `Waiting ${delayMs / 1000}s before retrying...`,
+              );
+              logContentRetry(
+                self.config,
+                new ContentRetryEvent(
+                  retryCount - 1,
+                  error.type,
+                  delayMs,
+                  model,
+                ),
+              );
+              yield { type: StreamEventType.RETRY };
+              await delay(delayMs, attemptState.params.config?.abortSignal)
+                .promise;
+            }
+          }
+        };
         // params.config.maxOutputTokens is always set by the first-send clamp
         // above; the `?? outputCeiling` is a defensive fallback that never
         // fires in practice.
@@ -2639,16 +2729,18 @@ export class GeminiChat {
             };
             recoveryParams = escalatedParams;
             recoveryFinishReason = undefined;
-            const escalatedStream = await self.makeApiCallAndProcessStream(
-              model,
+            for await (const event of streamWithInvalidStreamRetries(() => ({
               requestContents,
-              escalatedParams,
-              prompt_id,
-            );
-            for await (const chunk of escalatedStream) {
-              const fr = chunk.candidates?.[0]?.finishReason;
+              params: escalatedParams,
+              rollback: () => self.popPendingPartialAssistantTurn(),
+            }))) {
+              if (event.type === StreamEventType.RETRY) {
+                yield event;
+                continue;
+              }
+              const fr = event.value.candidates?.[0]?.finishReason;
               if (fr) recoveryFinishReason = fr;
-              yield { type: StreamEventType.CHUNK, value: chunk };
+              yield event;
             }
           } else {
             debugLogger.info(
@@ -2695,13 +2787,10 @@ export class GeminiChat {
             const recoveryUserContent = createUserContent([
               { text: buildOutputRecoveryMessage(lastEntry) },
             ]);
-            self.history.push(recoveryUserContent);
             // Signal UI/turn to clear pending (incomplete) tool calls.
             // isContinuation tells the UI to keep the text buffer so the
             // model's continuation appends to the previous partial output.
             yield { type: StreamEventType.RETRY, isContinuation: true };
-            // Re-send with the updated history (includes partial + recovery)
-            const recoveryContents = self.getRequestHistory(currentUserContent);
             recoveryFinishReason = undefined;
 
             // Re-clamp maxOutputTokens for THIS iteration: the prompt has
@@ -2735,6 +2824,9 @@ export class GeminiChat {
                     recoveryImageTokenEstimate,
                   )
                 : 0;
+            self.history.push(recoveryUserContent);
+            const recoveryContents = self.getRequestHistory(currentUserContent);
+            self.history.pop();
             const walkRecoveryEstimate =
               estimateContentTokens(
                 recoveryContents,
@@ -2762,55 +2854,28 @@ export class GeminiChat {
             };
 
             try {
-              const recoveryStream = await self.makeApiCallAndProcessStream(
-                model,
-                recoveryContents,
-                iterationParams,
-                prompt_id,
-              );
-              for await (const chunk of recoveryStream) {
-                const fr = chunk.candidates?.[0]?.finishReason;
+              for await (const event of streamWithInvalidStreamRetries(() => {
+                self.history.push(recoveryUserContent);
+                return {
+                  requestContents: self.getRequestHistory(currentUserContent),
+                  params: iterationParams,
+                  rollback: rollbackRecoveryAttempt,
+                };
+              })) {
+                if (event.type === StreamEventType.RETRY) {
+                  yield event;
+                  continue;
+                }
+                const fr = event.value.candidates?.[0]?.finishReason;
                 if (fr) recoveryFinishReason = fr;
-                yield { type: StreamEventType.CHUNK, value: chunk };
+                yield event;
               }
               // Iteration fully succeeded: both the user recovery turn and
               // the model continuation turn are now in history and can be
               // coalesced back into the preceding model entry after the loop.
               successfulRecoveries++;
             } catch (recoveryError) {
-              // Pop the partial `model[fc]` FIRST (if processStreamResponse
-              // pushed one before re-throwing), THEN the recovery user
-              // turn. Reversed order would strand `OUTPUT_RECOVERY_MESSAGE`
-              // as a real user turn. Index-checked pop mirrors
-              // `popPartialIfPushed` above — see the design note above
-              // `ORPHAN_TOOL_USE_REPAIR_REASON` for the wedge mechanism
-              // and the partial-push marker lifecycle.
-              const expectedIdx = self.pendingPartialAssistantTurnIndex;
-              const lastIdx = self.history.length - 1;
-              if (
-                expectedIdx !== null &&
-                self.history.length > 0 &&
-                self.history[lastIdx]?.role === 'model'
-              ) {
-                if (expectedIdx !== lastIdx) {
-                  debugLogger.warn(
-                    `[RECOVERY_POP] Marker/last-index mismatch: ` +
-                      `marker=${expectedIdx}, lastIdx=${lastIdx}, ` +
-                      `historyLength=${self.history.length}. Popping ` +
-                      `last entry as best-effort rollback — investigate ` +
-                      `any history mutation between processStreamResponse's ` +
-                      `partial push and this catch.`,
-                  );
-                }
-                self.history.pop();
-                self.clearPendingPartialState();
-              }
-              if (
-                self.history.length > 0 &&
-                self.history[self.history.length - 1].role === 'user'
-              ) {
-                self.history.pop();
-              }
+              rollbackRecoveryAttempt();
               debugLogger.warn(
                 `Recovery attempt ${recoveryCount} failed: ${recoveryError}`,
               );
@@ -3670,15 +3735,7 @@ export class GeminiChat {
           }
         }
 
-        const chunkHasToolCall =
-          chunk.candidates?.[0]?.content?.parts?.some(
-            (part) => part.functionCall,
-          ) ?? false;
-        if (
-          !protocolTextWasSuppressed ||
-          !protocolTagDetector.blockingOutput ||
-          chunkHasToolCall
-        ) {
+        if (!protocolTextWasSuppressed || !protocolTagDetector.blockingOutput) {
           yield chunk;
         }
       }
@@ -3729,7 +3786,7 @@ export class GeminiChat {
       .join('')
       .trim();
 
-    if (streamError === null && !hasToolCall && protocolTagDetector.leaked) {
+    if (streamError === null && protocolTagDetector.leaked) {
       throw new InvalidStreamError(
         'Model response started with leaked protocol tags.',
         'PROTOCOL_TAG_LEAK',

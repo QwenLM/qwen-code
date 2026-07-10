@@ -43,8 +43,10 @@ describe('Interactive protocol tag retry guard', () => {
         if (requestIndex === 1) {
           return {
             contentChunks: [
-              '<analysis>hidden completed attempt</analysis>',
-              '<summary>WRONG_COMPLETED_SUMMARY</summary>',
+              '<ana',
+              'lysis>hidden completed attempt</analysis>',
+              '<sum',
+              'mary>WRONG_COMPLETED_SUMMARY</summary>',
             ],
           };
         }
