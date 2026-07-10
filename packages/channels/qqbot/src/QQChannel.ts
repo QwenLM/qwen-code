@@ -2240,7 +2240,7 @@ export class QQChannel extends ChannelBase {
 
     const effectiveIsAtBot = forceAtMention ?? isAtBot;
 
-    const isSlash = effectiveIsAtBot && cleanText.startsWith('/');
+    const isSlash = effectiveIsAtBot && safeCleanText.startsWith('/');
 
     // Deliberately NOT hard-blocking bot messages — QQ Bot API may deliver
     // self-echoes or other bot messages. Instead, tag with [bot] prefix so the
@@ -2254,10 +2254,14 @@ export class QQChannel extends ChannelBase {
     // caller skips the guard.
 
     const groupBotOpenId = this.botOpenIdByGroup.get(chatId);
-    const openIdSuffix = groupBotOpenId ? ` [botOpenId:${groupBotOpenId}]` : '';
-    const suffixFromBotOpenId = groupBotOpenId
-      ? `\n机器人 OPENID: ${groupBotOpenId}`
-      : '';
+    const openIdSuffix =
+      this.qqConfig.allowMention !== false && groupBotOpenId
+        ? ` [botOpenId:${groupBotOpenId}]`
+        : '';
+    const suffixFromBotOpenId =
+      this.qqConfig.allowMention !== false && groupBotOpenId
+        ? `\n机器人 OPENID: ${groupBotOpenId}`
+        : '';
     const text = isSlash
       ? sanitizePromptText(safeCleanText)
       : `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderOpenId && /^[A-F0-9]+$/i.test(senderOpenId) ? `(${senderOpenId.slice(0, 8)}\u2026)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? safeContent : safeCleanText)}${suffixFromBotOpenId}`;
@@ -2308,7 +2312,7 @@ export class QQChannel extends ChannelBase {
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
       .replace(/\[bot]/g, '');
-    const isSlash = cleanText.startsWith('/');
+    const isSlash = safeContent.startsWith('/');
     const text = isSlash
       ? sanitizePromptText(safeContent)
       : `[atMention=true] [${safeName}]: ${sanitizePromptText(safeContent)}`;
@@ -2373,7 +2377,6 @@ export class QQChannel extends ChannelBase {
     const { isSlash, text, senderName, safeName, cleanText } = result;
 
     // Deduplicate before handleInbound — prepareGroupMessage already ran
-    // so side effects (extractBotOpenId) are applied regardless of dedup.
     // so side effects (extractBotOpenId) are applied regardless of dedup.
     if (this.isDuplicate(event.id)) return;
 
@@ -2587,7 +2590,12 @@ export class QQChannel extends ChannelBase {
 
   private handleGroupDelRobot(event: GroupDelRobotEvent): void {
     const groupId = event.group_openid;
-    if (!groupId) return;
+    if (!groupId) {
+      process.stderr.write(
+        `[QQ:${this.name}] handleGroupDelRobot: missing group_openid\n`,
+      );
+      return;
+    }
     if (!isValidChatId(groupId)) {
       process.stderr.write(
         `[QQ:${this.name}] handleGroupDelRobot: invalid group_openid (length=${groupId.length})\n`,
@@ -2647,7 +2655,12 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    if (!isValidChatId(event.group_openid)) return;
+    if (!isValidChatId(event.group_openid)) {
+      process.stderr.write(
+        `[QQ:${this.name}] Group msg toggle dropped: invalid group_openid\n`,
+      );
+      return;
+    }
     this.groupActiveMsgEnabled.set(event.group_openid, enabled);
     this.saveQQState();
     process.stderr.write(
