@@ -266,19 +266,28 @@ describe('SessionRouter', () => {
     it('passes cwd to bridge.newSession', async () => {
       const router = new SessionRouter(bridge, '/default');
       await router.resolve('ch', 'alice', 'chat1', undefined, '/custom');
-      expect(bridge.newSession).toHaveBeenCalledWith('/custom');
+      expect(bridge.newSession).toHaveBeenCalledWith(
+        '/custom',
+        expect.any(Object),
+      );
     });
 
     it('uses defaultCwd when no cwd provided', async () => {
       const router = new SessionRouter(bridge, '/default');
       await router.resolve('ch', 'alice', 'chat1');
-      expect(bridge.newSession).toHaveBeenCalledWith('/default');
+      expect(bridge.newSession).toHaveBeenCalledWith(
+        '/default',
+        expect.any(Object),
+      );
     });
 
     it('uses defaultCwd when cwd is empty', async () => {
       const router = new SessionRouter(bridge, '/default');
       await router.resolve('ch', 'alice', 'chat1', undefined, '');
-      expect(bridge.newSession).toHaveBeenCalledWith('/default');
+      expect(bridge.newSession).toHaveBeenCalledWith(
+        '/default',
+        expect.any(Object),
+      );
     });
 
     it('deduplicates concurrent session creation for the same route', async () => {
@@ -873,6 +882,7 @@ describe('SessionRouter', () => {
       expect(restartedBridge.loadSession).toHaveBeenCalledWith(
         aliceSession,
         '/tmp',
+        expect.any(Object),
       );
       expect(router.getSession('ch', 'alice', 'chat1')).toBe(aliceSession);
       expect(router.getSession('ch', 'bob', 'chat2')).toBeUndefined();
@@ -1502,6 +1512,49 @@ describe('SessionRouter', () => {
         expect(daemonBridge.listSessions()).toEqual([]);
       },
     );
+
+    it('discards invalidated bindings despite an unrelated hung operation', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      const finishFactories: Array<
+        (session: DaemonChannelSessionClient) => void
+      > = [];
+      const factory = vi.fn(() => {
+        if (factory.mock.calls.length === 1) {
+          return new Promise<DaemonChannelSessionClient>(() => undefined);
+        }
+        return new Promise<DaemonChannelSessionClient>((resolve) => {
+          finishFactories.push(resolve);
+        });
+      });
+      const daemonBridge = new DaemonChannelBridge({
+        cwd: '/tmp',
+        sessionFactory: factory,
+      });
+      await daemonBridge.start();
+      const router = createLazyRouter(persistPath, daemonBridge);
+
+      const hung = router.resolve('ch', 'hung', 'hung-chat');
+      void hung.catch(() => undefined);
+      const first = router.resolve('ch', 'alice', 'chat1');
+      const second = router.resolve('ch', 'bob', 'chat2');
+      await drainMicrotasks();
+      expect(factory).toHaveBeenCalledTimes(3);
+      expect(finishFactories).toHaveLength(2);
+      router.removeSession('ch', 'alice', 'chat1');
+      router.removeSession('ch', 'bob', 'chat2');
+      finishFactories[0]!(daemonSession('late-alice'));
+      finishFactories[1]!(daemonSession('late-bob'));
+
+      await expect(first).rejects.toThrow('invalidated');
+      await expect(second).rejects.toThrow('invalidated');
+      await drainMicrotasks();
+      expect(daemonBridge.listSessions()).toEqual([]);
+
+      router.dispose();
+      expect(daemonBridge.listSessions()).toEqual([]);
+    });
 
     it.each(['removeSession', 'removeSessionId'] as const)(
       'rejects a dormant load invalidated by %s',

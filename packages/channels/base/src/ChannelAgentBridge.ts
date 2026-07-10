@@ -96,11 +96,13 @@ export interface ChannelAgentBridge {
   newSession(
     cwd: string,
     options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
   ): Promise<string>;
   loadSession(
     sessionId: string,
     cwd: string,
     options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
   ): Promise<string>;
   prompt(
     sessionId: string,
@@ -109,7 +111,10 @@ export interface ChannelAgentBridge {
   ): Promise<string>;
   cancelSession(sessionId: string): Promise<void>;
   /** Release a bridge-owned session that will not be routed to a caller. */
-  discardSession?(sessionId: string): Promise<void>;
+  discardSession?(
+    sessionId: string,
+    expectedBindingToken?: object,
+  ): Promise<void>;
   respondToPermission?(
     requestId: string,
     response: RequestPermissionResponse,

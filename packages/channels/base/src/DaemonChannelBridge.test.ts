@@ -1667,6 +1667,55 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('conditionally discards only the binding owned by the expected token', async () => {
+    const firstEvents = new EventQueue();
+    const secondEvents = new EventQueue();
+    const firstSession = createFakeSession(firstEvents, 'shared-session');
+    const secondSession = createFakeSession(secondEvents, 'shared-session');
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi
+        .fn()
+        .mockResolvedValueOnce(firstSession)
+        .mockResolvedValueOnce(secondSession),
+    });
+    const bindingBridge = bridge as unknown as {
+      newSession(
+        cwd: string,
+        options: undefined,
+        bindingToken: object,
+      ): Promise<string>;
+      discardSession(sessionId: string, expectedToken: object): Promise<void>;
+    };
+    const firstToken = {};
+    const secondToken = {};
+
+    await bridge.start();
+    await bindingBridge.newSession('/repo', undefined, firstToken);
+    await bindingBridge.newSession('/repo', undefined, secondToken);
+    await bindingBridge.discardSession('shared-session', firstToken);
+
+    expect(bridge.listSessions()).toEqual([
+      {
+        sessionId: 'shared-session',
+        workspaceCwd: '/repo',
+        hasActivePrompt: false,
+      },
+    ]);
+    expect(secondSession.cancel).not.toHaveBeenCalled();
+
+    await bindingBridge.discardSession('shared-session', secondToken);
+    expect(bridge.listSessions()).toEqual([]);
+    expect(secondSession.cancel).toHaveBeenCalledOnce();
+    expect(
+      (
+        bridge as unknown as {
+          sessionBindingTokens: Map<string, object | undefined>;
+        }
+      ).sessionBindingTokens.size,
+    ).toBe(0);
+  });
+
   it('rejects mismatched daemon session ids while loading', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events, 'different-session');

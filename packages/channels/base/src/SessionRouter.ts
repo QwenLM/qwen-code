@@ -283,6 +283,7 @@ export class SessionRouter {
           savedSessionId,
           savedCwd,
           this.sessionOptions(input.channelName),
+          operation,
         );
         try {
           this.assertOperationCurrent(operation);
@@ -589,6 +590,7 @@ export class SessionRouter {
             entry.sessionId,
             entry.cwd,
             options,
+            operation,
           );
           try {
             this.assertOperationCurrent(operation);
@@ -797,9 +799,7 @@ export class SessionRouter {
     const maxAttempts = 2;
     let lastDeadSessionId: string | undefined;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const sessionId = options
-        ? await this.bridge.newSession(cwd, options)
-        : await this.bridge.newSession(cwd);
+      const sessionId = await this.bridge.newSession(cwd, options, operation);
       try {
         this.assertOperationCurrent(operation);
       } catch (error) {
@@ -901,27 +901,11 @@ export class SessionRouter {
     sessionId: string,
     operation: SessionOperation,
   ): void {
-    void this.discardInvalidatedSessionWhenUnowned(sessionId, operation).catch(
-      () => undefined,
-    );
-  }
-
-  private async discardInvalidatedSessionWhenUnowned(
-    sessionId: string,
-    operation: SessionOperation,
-  ): Promise<void> {
-    for (;;) {
-      const possibleOwners = [...this.creatingSessions.values()].filter(
-        (current) => current !== operation,
-      );
-      if (possibleOwners.length === 0) break;
-      await Promise.allSettled(
-        possibleOwners.map((current) => current.promise),
-      );
-    }
     if ([...this.toSession.values()].includes(sessionId)) return;
     try {
-      void this.bridge.discardSession?.(sessionId).catch(() => undefined);
+      void this.bridge
+        .discardSession?.(sessionId, operation)
+        .catch(() => undefined);
     } catch {
       // Best-effort cleanup must not replace the terminal invalidation.
     }
