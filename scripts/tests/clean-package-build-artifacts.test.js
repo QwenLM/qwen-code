@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { cleanPackageBuildArtifacts } from '../clean-package-build-artifacts.js';
 
 describe('clean package build artifacts', () => {
-  it('removes workspace outputs without deleting dependencies', () => {
+  it('removes CLI package outputs without deleting dependencies or web package outputs', () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'clean-build-artifacts-'));
 
     try {
@@ -28,11 +28,22 @@ describe('clean package build artifacts', () => {
       mkdirSync(join(tempDir, 'packages', 'core', 'dist'), {
         recursive: true,
       });
+      mkdirSync(join(tempDir, 'packages', 'web-shell', 'dist'), {
+        recursive: true,
+      });
       mkdirSync(join(tempDir, 'packages', 'core', 'node_modules', 'dep'), {
         recursive: true,
       });
       writeFileSync(join(tempDir, 'packages', 'core', 'package.json'), '{}');
+      writeFileSync(
+        join(tempDir, 'packages', 'web-shell', 'package.json'),
+        '{}',
+      );
       writeFileSync(join(tempDir, 'packages', 'core', 'dist', 'index.js'), '');
+      writeFileSync(
+        join(tempDir, 'packages', 'web-shell', 'dist', 'index.js'),
+        '',
+      );
       writeFileSync(
         join(tempDir, 'packages', 'core', 'tsconfig.tsbuildinfo'),
         '',
@@ -41,6 +52,9 @@ describe('clean package build artifacts', () => {
       cleanPackageBuildArtifacts({ root: tempDir });
 
       expect(existsSync(join(tempDir, 'packages', 'core', 'dist'))).toBe(false);
+      expect(
+        existsSync(join(tempDir, 'packages', 'web-shell', 'dist', 'index.js')),
+      ).toBe(true);
       expect(
         existsSync(join(tempDir, 'packages', 'core', 'tsconfig.tsbuildinfo')),
       ).toBe(false);
