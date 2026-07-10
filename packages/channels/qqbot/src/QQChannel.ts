@@ -368,16 +368,69 @@ export class QQChannel extends ChannelBase {
                         this.cronBuffer.delete(sessionId);
                     })
                     .catch((retryErr) => {
+                      const retryCode =
+                        retryErr instanceof DeliveryError
+                          ? retryErr.code
+                          : null;
+                      const retryCodeStr = retryCode ? ` (${retryCode})` : '';
                       process.stderr.write(
-                        `[QQ:${this.name}] Cron flush retry failed: ${sanitizeLogText(retryErr instanceof Error ? retryErr.message : String(retryErr), 200)}\n`,
+                        `[QQ:${this.name}] Cron flush retry failed${retryCodeStr}: ${sanitizeLogText(retryErr instanceof Error ? retryErr.message : String(retryErr), 200)}\n`,
                       );
                       entry!.pendingRetry = '';
                       if (
-                        !entry!.buffer &&
-                        this.cronBuffer.get(sessionId) === entry
+                        retryCode === 'RETRY_EXHAUSTED' ||
+                        retryCode === 'ACTIVE_MSG_DISABLED'
                       ) {
-                        this.cronBuffer.delete(sessionId);
+                        if (
+                          !entry!.buffer &&
+                          this.cronBuffer.get(sessionId) === entry
+                        ) {
+                          this.cronBuffer.delete(sessionId);
+                        }
+                        return;
                       }
+                      // Transient error on retry (RATE_LIMITED, FALLBACK_FAILED, etc.) — re-schedule
+                      if (entry!.timer) {
+                        clearTimeout(entry!.timer);
+                      }
+                      entry!.pendingRetry = toFlush;
+                      entry!.timer = setTimeout(() => {
+                        entry!.timer = null;
+                        entry!.pendingRetry = '';
+                        if (this.cronBuffer.get(sessionId) !== entry) {
+                          return;
+                        }
+                        const retryTarget2 = this.router.getTarget(sessionId);
+                        if (!retryTarget2) {
+                          process.stderr.write(
+                            `[QQ:${this.name}] Cron flush dropped after retry: no target for session ${sanitizeLogText(sessionId, 32)}\n`,
+                          );
+                          this.cronBuffer.delete(sessionId);
+                          return;
+                        }
+                        this.sendMessage(retryTarget2.chatId, toFlush)
+                          .then(() => {
+                            entry!.pendingRetry = '';
+                            if (
+                              !entry!.buffer &&
+                              this.cronBuffer.get(sessionId) === entry
+                            )
+                              this.cronBuffer.delete(sessionId);
+                          })
+                          .catch((err2) => {
+                            process.stderr.write(
+                              `[QQ:${this.name}] Cron flush re-retry failed: ${sanitizeLogText(err2 instanceof Error ? err2.message : String(err2), 200)}\n`,
+                            );
+                            entry!.pendingRetry = '';
+                            if (
+                              !entry!.buffer &&
+                              this.cronBuffer.get(sessionId) === entry
+                            ) {
+                              this.cronBuffer.delete(sessionId);
+                            }
+                          });
+                      }, 5000);
+                      entry!.timer.unref();
                     });
                 }, 5000);
                 entry!.timer.unref();
@@ -433,6 +486,7 @@ export class QQChannel extends ChannelBase {
     this.disposed = false;
     this.reconnectAttempts = 0;
     this.serverRequestedReconnect = false;
+    this.tryResume = false;
     if (!this.config.instructions) {
       const parts: string[] = [
         '## QQ Bot Channel',
@@ -1037,21 +1091,10 @@ export class QQChannel extends ChannelBase {
             `[QQ:${this.name}] ${logLabel} delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, dropping ${buffer.length} chars\n`,
           );
           // RETRY_EXHAUSTED / ACTIVE_MSG_DISABLED / FALLBACK_FAILED = permanent failure.
-          // Don't retry — just clean up state.
+          // Drop everything — including any residual buffer that arrived concurrently.
           const current = this.streamState.get(sessionId);
           if (current === state) {
-            current.retryCount = 0;
-            if (!current.buffer) {
-              this.streamState.delete(sessionId);
-            } else if (!current.timer) {
-              // Schedule idleFlush for residual buffer accumulated
-              // during the failed send (new chunks arrived in-flight).
-              const reconnectId = this._reconnectId;
-              current.timer = setTimeout(() => {
-                this.idleFlush(sessionId, reconnectId);
-              }, QQChannel.IDLE_FLUSH_BACKOFF_MS);
-              current.timer.unref?.();
-            }
+            this.streamState.delete(sessionId);
           }
           if (this.pendingStreamDelete.has(sessionId)) {
             this.pendingStreamDelete.delete(sessionId);
@@ -2057,19 +2100,8 @@ export class QQChannel extends ChannelBase {
     if (this.disposed) return;
     if (this.isReconnecting) return;
     this.isReconnecting = true;
-    this.reconnectAttempts++;
     try {
       const myReconnectId = this._reconnectId;
-
-      if (
-        this.maxReconnectAttempts > 0 &&
-        this.reconnectAttempts >= this.maxReconnectAttempts
-      ) {
-        process.stderr.write(
-          `[QQ:${this.name}] RC: reconnect attempts exhausted, giving up\n`,
-        );
-        return;
-      }
 
       const maxGwRetries = this.qqConfig.maxGwRetries ?? 5;
       const unlimitedRetries = maxGwRetries <= 0;
@@ -2079,13 +2111,25 @@ export class QQChannel extends ChannelBase {
         attempt++
       ) {
         if (this.disposed || this._reconnectId !== myReconnectId) return;
+
+        this.reconnectAttempts++;
+
+        if (
+          this.maxReconnectAttempts > 0 &&
+          this.reconnectAttempts >= this.maxReconnectAttempts
+        ) {
+          process.stderr.write(
+            `[QQ:${this.name}] RC: reconnect attempts exhausted, giving up\n`,
+          );
+          return;
+        }
+
         try {
           try {
             await this.fetchToken();
           } catch {
             process.stderr.write(
-              `[QQ:${this.name}] RC: token refresh failed, retrying...\n
-`,
+              `[QQ:${this.name}] RC: token refresh failed, retrying...\n`,
             );
             await this.sleep(2000);
             if (this.disposed) return;

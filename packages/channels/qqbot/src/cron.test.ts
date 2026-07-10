@@ -426,8 +426,10 @@ describe('cronTextHandler', () => {
     mockSendQQMessage.mockRejectedValueOnce(
       new DeliveryError('RATE_LIMITED', 'rate limited'),
     );
-    // Retry also fails
-    mockSendQQMessage.mockRejectedValueOnce(new Error('network error'));
+    // Retry also fails with a permanent error
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('RETRY_EXHAUSTED', 'retries exhausted'),
+    );
 
     const stderrSpy = vi
       .spyOn(process.stderr, 'write')
@@ -443,7 +445,6 @@ describe('cronTextHandler', () => {
 
     const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
     expect(calls.some((c) => c.includes('Cron flush retry failed'))).toBe(true);
-
     stderrSpy.mockRestore();
   });
 });

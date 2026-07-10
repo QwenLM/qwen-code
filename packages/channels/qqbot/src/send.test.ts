@@ -753,7 +753,7 @@ describe('sendMessage', () => {
 
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
-    chp['reconnectAttempts'] = 18;
+    chp['reconnectAttempts'] = 0;
     mockFetchGatewayUrl.mockRejectedValue(new Error('gateway down'));
 
     const reconnect = (chp['reconnectWithRetry'] as () => Promise<void>).call(
@@ -765,21 +765,22 @@ describe('sendMessage', () => {
     }
     await reconnect;
 
+    // 5 gateway attempts counted, each incrementing reconnectAttempts
     expect(mockFetchGatewayUrl).toHaveBeenCalledTimes(5);
-    expect(chp['reconnectAttempts']).toBe(19);
-
+    expect(chp['reconnectAttempts']).toBe(5);
+    // Outer timer fires reconnectWithRetry — 1 more call, then sleeps
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(mockFetchGatewayUrl).toHaveBeenCalledTimes(5);
+    expect(mockFetchGatewayUrl).toHaveBeenCalledTimes(6);
 
     ch.disconnect();
   });
 
-  it('does not count token refresh failures as gateway reconnect attempts', async () => {
+  it('counts token refresh failures as reconnect attempts', async () => {
     vi.useFakeTimers();
 
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
-    chp['reconnectAttempts'] = 18;
+    chp['reconnectAttempts'] = 0;
     mockFetchAccessToken.mockRejectedValue(new Error('token endpoint down'));
 
     const reconnect = (chp['reconnectWithRetry'] as () => Promise<void>).call(
@@ -791,9 +792,10 @@ describe('sendMessage', () => {
     }
     await reconnect;
 
+    // Each loop iteration increments reconnectAttempts, even when token refresh fails
     expect(mockFetchAccessToken).toHaveBeenCalledTimes(5);
     expect(mockFetchGatewayUrl).not.toHaveBeenCalled();
-    expect(chp['reconnectAttempts']).toBe(19);
+    expect(chp['reconnectAttempts']).toBe(5);
 
     ch.disconnect();
   });
