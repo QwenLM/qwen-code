@@ -47,6 +47,7 @@ import {
   warnOnReportSize,
   type PlanReport,
 } from './lib/report.js';
+import { resolveMergeBase, type GitProbe } from './lib/merge-base.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -102,30 +103,12 @@ function fileLineCount(ref: string, path: string): number {
   }
 }
 
-/**
- * Resolve the left side of the review diff.
- *
- * Prefers the remote-tracking ref (`origin/main`) because a CI checkout has no
- * local base branch. Returns null when neither resolves — the caller degrades
- * to a diff-less report rather than failing the whole review.
- */
-function resolveMergeBase(
-  remote: string,
-  baseRefName: string,
-  headRef: string,
-): { sha: string | null; baseFetchFailed: boolean } {
-  // A failed fetch is not fatal — a local tracking ref may still exist — but it
-  // may be stale. If the base branch was force-pushed, `merge-base` resolves
-  // against the old tip and the review silently examines the wrong diff, in a
-  // report that looks structurally complete. Say so.
-  const baseFetchFailed = gitOpt('fetch', remote, baseRefName) === null;
-  for (const candidate of [`${remote}/${baseRefName}`, baseRefName]) {
-    if (!refExists(candidate)) continue;
-    const mb = gitOpt('merge-base', candidate, headRef);
-    if (mb) return { sha: mb, baseFetchFailed };
-  }
-  return { sha: null, baseFetchFailed };
-}
+/** The real git surface `resolveMergeBase` runs against. */
+const gitProbe: GitProbe = {
+  fetch: (remote, ref) => gitOpt('fetch', remote, ref) !== null,
+  refExists,
+  mergeBase: (a, b) => gitOpt('merge-base', a, b),
+};
 
 function tryRemove(action: () => void): void {
   try {
@@ -222,6 +205,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     remote,
     meta.baseRefName,
     ref,
+    gitProbe,
   );
   if (baseFetchFailed) {
     writeStderrLine(
