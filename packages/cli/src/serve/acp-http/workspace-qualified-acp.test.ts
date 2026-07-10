@@ -309,6 +309,15 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(body.code).toBe('server_disposed');
   });
 
+  it('does not reattach a WebSocket listener after disposal', () => {
+    handle!.dispose();
+    const listenerCount = server.listenerCount('upgrade');
+
+    handle!.attachServer(server);
+
+    expect(server.listenerCount('upgrade')).toBe(listenerCount);
+  });
+
   it('aggregates a connection snapshot across primary + trusted secondary mounts', () => {
     const snap = handle!.getSnapshot();
     // primary (workspaceId null) + the trusted secondary only; untrusted

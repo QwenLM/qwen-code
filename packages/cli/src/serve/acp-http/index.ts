@@ -1202,7 +1202,7 @@ export function mountAcpHttp(
   let upgradeServer: import('node:http').Server | undefined;
 
   function setupWebSocket(httpServer: import('node:http').Server): void {
-    if (wss) return;
+    if (disposed || wss) return;
     wss = new WebSocketServer({
       noServer: true,
       maxPayload: 10 * 1024 * 1024,
