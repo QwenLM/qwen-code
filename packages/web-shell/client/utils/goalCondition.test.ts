@@ -73,13 +73,14 @@ describe('isGoalClearCommand', () => {
   });
 });
 
-describe('the CLI is the authority on both of these constants', () => {
+describe('the CLI is the authority on the clear keywords', () => {
   // The Web Shell client bundles for the browser and does not depend on
-  // `@qwen-code/qwen-code-core`, so these constants cannot simply be imported
-  // from the package that enforces them. They are duplicated, and a comment
-  // asking the next person to "keep in sync" is not a mechanism. Read the CLI
-  // source and compare. Drift here is silent and user-visible: the form accepts
-  // a condition the daemon then reads as a command, or rejects one it accepts.
+  // `@qwen-code/qwen-code-core`, so this set cannot simply be imported from the
+  // package that enforces it. It is duplicated, and a comment asking the next
+  // person to "keep in sync" is not a mechanism. Read the CLI source and
+  // compare. Drift here is silent and user-visible: the form would accept a
+  // condition the daemon then reads as a command, clearing the goal it just
+  // set.
   const repoRoot = fileURLToPath(new URL('../../../..', import.meta.url));
   const read = (relative: string) =>
     readFileSync(join(repoRoot, relative), 'utf8');
@@ -99,25 +100,5 @@ describe('the CLI is the authority on both of these constants', () => {
 
     expect(cliKeywords.length).toBeGreaterThan(0);
     expect([...cliKeywords].sort()).toEqual([...GOAL_CLEAR_KEYWORDS].sort());
-  });
-
-  it('agrees with restoreGoal.ts on MAX_GOAL_LENGTH', () => {
-    const source = read('packages/cli/src/ui/utils/restoreGoal.ts');
-    const cliMax = /export const MAX_GOAL_LENGTH = (\d+);/.exec(source);
-    expect(
-      cliMax,
-      'MAX_GOAL_LENGTH not found in restoreGoal.ts',
-    ).not.toBeNull();
-
-    const dialog = read(
-      'packages/web-shell/client/components/dialogs/GoalsDialog.tsx',
-    );
-    const dialogMax = /const MAX_GOAL_LENGTH = (\d+);/.exec(dialog);
-    expect(
-      dialogMax,
-      'MAX_GOAL_LENGTH not found in GoalsDialog.tsx',
-    ).not.toBeNull();
-
-    expect(Number(dialogMax![1])).toBe(Number(cliMax![1]));
   });
 });

@@ -29,7 +29,6 @@ import {
   goalConditionBlockedBy,
   goalRestoreBlockedBy,
   isTranscriptItemRecord,
-  MAX_GOAL_LENGTH,
   parseGoalStatusItem,
   type GoalRestoreBlockedReason,
 } from '../../ui/utils/restoreGoal.js';
@@ -449,7 +448,7 @@ export class HistoryReplayer {
           // `restoreGoalFromHistory` refuses the same card, so skipping it here
           // keeps the card and the hook consistent — neither survives.
           writeStderrLine(
-            `qwen: skipping replay of a goal card whose condition is empty or exceeds ${MAX_GOAL_LENGTH} characters (got ${goalStatus.condition.length}).`,
+            'qwen: skipping replay of a goal card whose condition is empty.',
           );
         } else if (goalStatus.kind !== 'checking') {
           const { type: _type, ...status } = goalStatus;

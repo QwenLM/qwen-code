@@ -21,7 +21,6 @@ import {
   collectGoalStatusItemsFromRecords,
   findGoalToRestore,
   findLastTerminalGoal,
-  MAX_GOAL_LENGTH,
   goalTerminalEventToHistoryItem,
   parseGoalStatusItem,
   recordGoalStatusItem,
@@ -538,33 +537,24 @@ describe('collectGoalStatusItemsFromRecords', () => {
   });
 });
 
-describe('restoreGoalFromHistory condition cap', () => {
+describe('restoreGoalFromHistory has no condition cap', () => {
   beforeEach(() => __resetActiveGoalStoreForTests());
   afterEach(() => __resetActiveGoalStoreForTests());
 
-  it('restores a condition exactly at the cap', () => {
+  it('restores a condition far longer than the old 4,000-char cap', () => {
+    // `/goal` accepts a condition of any length (#6665). A cap here would
+    // refuse, on reload, a goal the user legitimately set — and the replay
+    // drops the card too, so they would never see why it vanished.
     const cfg = makeConfig();
-    const condition = 'x'.repeat(MAX_GOAL_LENGTH);
+    const condition = 'x'.repeat(10_000);
     expect(restoreGoalFromHistory([goalItem({ condition })], cfg)).toEqual({
       restored: true,
       condition,
     });
+    expect(getActiveGoal('sess-1')).toMatchObject({ condition });
   });
 
-  it('refuses a transcript whose condition exceeds the cap', () => {
-    // `/goal` caps the condition at set time, but a transcript is a file on
-    // disk: a corrupted or hand-edited one must not re-register an unbounded
-    // condition that then rides along in every judge call.
-    const cfg = makeConfig();
-    const condition = 'x'.repeat(MAX_GOAL_LENGTH + 1);
-    expect(restoreGoalFromHistory([goalItem({ condition })], cfg)).toEqual({
-      restored: false,
-      blockedBy: 'condition-invalid',
-    });
-    expect(getActiveGoal('sess-1')).toBeUndefined();
-  });
-
-  it('drops a stale in-memory goal when the transcript condition is oversized', () => {
+  it('drops a stale in-memory goal when the transcript condition is empty', () => {
     setActiveGoal('sess-1', {
       condition: 'stale goal',
       iterations: 0,
@@ -573,10 +563,7 @@ describe('restoreGoalFromHistory condition cap', () => {
       hookId: 'stale-hook',
     });
     const cfg = makeConfig();
-    restoreGoalFromHistory(
-      [goalItem({ condition: 'x'.repeat(MAX_GOAL_LENGTH + 1) })],
-      cfg,
-    );
+    restoreGoalFromHistory([goalItem({ condition: '' })], cfg);
     expect(getActiveGoal('sess-1')).toBeUndefined();
   });
 });
@@ -625,13 +612,11 @@ describe('goalTerminalEventToHistoryItem', () => {
   });
 });
 
-describe('parseGoalStatusItem keeps oversized cards so ordering survives', () => {
+describe('parseGoalStatusItem keeps refusable cards so ordering survives', () => {
   beforeEach(() => __resetActiveGoalStoreForTests());
   afterEach(() => __resetActiveGoalStoreForTests());
 
-  const oversized = 'x'.repeat(MAX_GOAL_LENGTH + 1);
-
-  it('parses an oversized card rather than dropping it', () => {
+  it('parses a card whose condition is empty rather than dropping it', () => {
     // Rejecting at parse time looks like a tidy shared gate, but the scanners
     // below decide on the LAST goal card. Dropping one silently promotes the
     // card before it.
@@ -639,12 +624,12 @@ describe('parseGoalStatusItem keeps oversized cards so ordering survives', () =>
       parseGoalStatusItem({
         type: 'goal_status',
         kind: 'cleared',
-        condition: oversized,
+        condition: '',
       }),
     ).toMatchObject({ kind: 'cleared' });
   });
 
-  it('lets an oversized cleared card still cancel an earlier goal', () => {
+  it('lets a card with an empty condition still cancel an earlier goal', () => {
     // If parse dropped the `cleared` card, findGoalToRestore would walk past it
     // to `set` and resurrect a goal the user explicitly cleared — the exact bug
     // persisting `cleared` exists to prevent.
@@ -653,7 +638,7 @@ describe('parseGoalStatusItem keeps oversized cards so ordering survives', () =>
         { type: 'goal_status', kind: 'set', condition: 'goal A' },
       ]),
       slashCommandRecord([
-        { type: 'goal_status', kind: 'cleared', condition: oversized },
+        { type: 'goal_status', kind: 'cleared', condition: '' },
       ]),
     ]);
 
@@ -664,19 +649,17 @@ describe('parseGoalStatusItem keeps oversized cards so ordering survives', () =>
     expect(getActiveGoal('sess-1')).toBeUndefined();
   });
 
-  it('fails closed on an oversized set card instead of restoring an older goal', () => {
+  it('fails closed on an empty set card instead of restoring an older goal', () => {
     const items = collectGoalStatusItemsFromRecords([
       slashCommandRecord([
         { type: 'goal_status', kind: 'set', condition: 'goal A' },
       ]),
-      slashCommandRecord([
-        { type: 'goal_status', kind: 'set', condition: oversized },
-      ]),
+      slashCommandRecord([{ type: 'goal_status', kind: 'set', condition: '' }]),
     ]);
 
-    // The newest card wins the scan, and the length gate then refuses it. Goal
+    // The newest card wins the scan, and the empty gate then refuses it. Goal
     // A must NOT come back to life.
-    expect(findGoalToRestore(items)?.condition).toBe(oversized);
+    expect(findGoalToRestore(items)?.condition).toBe('');
     expect(restoreGoalFromHistory(items, makeConfig())).toEqual({
       restored: false,
       blockedBy: 'condition-invalid',

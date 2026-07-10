@@ -909,25 +909,23 @@ describe('HistoryReplayer', () => {
       expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
     });
 
-    it('refuses to replay a goal card whose condition exceeds the cap', async () => {
+    it('refuses to replay a goal card whose condition is empty', async () => {
       // A transcript is a file: a corrupted or hand-edited condition would
       // otherwise ride out to every client inside `_meta.goalStatus`.
       // `restoreGoalFromHistory` refuses the same card, so neither the card nor
       // the hook survives — they stay consistent.
       await replayer.replay([
-        goalRecord({
-          type: 'goal_status',
-          kind: 'set',
-          condition: 'x'.repeat(4001),
-        }),
+        goalRecord({ type: 'goal_status', kind: 'set', condition: '' }),
       ]);
 
       expect(goalStatuses()).toEqual([]);
       expect(sendUpdateSpy).not.toHaveBeenCalled();
     });
 
-    it('replays a goal card sitting exactly at the cap', async () => {
-      const condition = 'x'.repeat(4000);
+    it('replays a goal card far longer than the old 4,000-char cap', async () => {
+      // `/goal` accepts any length (#6665); dropping the card here would hide a
+      // running goal from every client.
+      const condition = 'x'.repeat(10_000);
       await replayer.replay([
         goalRecord({ type: 'goal_status', kind: 'set', condition }),
       ]);
@@ -1098,15 +1096,11 @@ describe('HistoryReplayer', () => {
     });
 
     it('says nothing when the active card was already dropped as invalid', async () => {
-      // The oversized card never reached the client, so there is no phantom
-      // "running" state to correct — a `cleared` card would name a goal the
-      // user never saw.
+      // The empty-condition card never reached the client, so there is no
+      // phantom "running" state to correct — a `cleared` card would name a goal
+      // the user never saw.
       await replayWithConfig({ isTrustedFolder: () => false }, [
-        goalRecord({
-          type: 'goal_status',
-          kind: 'set',
-          condition: 'x'.repeat(4001),
-        }),
+        goalRecord({ type: 'goal_status', kind: 'set', condition: '' }),
       ]);
       expect(goalStatuses()).toEqual([]);
     });

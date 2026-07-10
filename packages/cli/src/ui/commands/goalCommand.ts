@@ -20,10 +20,7 @@ import {
   type GoalTerminalEvent,
 } from '@qwen-code/qwen-code-core';
 import { MessageType, type HistoryItemGoalStatus } from '../types.js';
-import {
-  installGoalTerminalObserver,
-  MAX_GOAL_LENGTH,
-} from '../utils/restoreGoal.js';
+import { installGoalTerminalObserver } from '../utils/restoreGoal.js';
 import { formatDuration } from '../utils/formatters.js';
 import { t } from '../../i18n/index.js';
 

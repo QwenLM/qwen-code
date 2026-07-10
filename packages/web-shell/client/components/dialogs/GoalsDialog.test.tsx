@@ -240,17 +240,20 @@ describe('GoalsDialog', () => {
     expect(document.body.textContent).toContain('Enter a condition');
   });
 
-  it('rejects a condition longer than MAX_GOAL_LENGTH', async () => {
+  it('accepts a condition far longer than the old 4,000-char cap', async () => {
+    // `/goal` takes a condition of any length (#6665). Rejecting one here that
+    // the daemon would accept splits the two surfaces, and the textarea used to
+    // silently truncate at `maxLength` before the user could even submit it.
     const onCreateGoal = vi.fn();
     await mount([], { onCreateGoal });
 
     click(findButton('New goal'));
-    setTextarea('x'.repeat(4001));
+    const condition = 'x'.repeat(10_000);
+    setTextarea(condition);
     click(findButton('Set goal'));
     await flush();
 
-    expect(onCreateGoal).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain('limited to 4000 characters');
+    expect(onCreateGoal).toHaveBeenCalledWith(condition);
   });
 
   it('rejects a clear keyword, which would drop the goal instead of setting it', async () => {

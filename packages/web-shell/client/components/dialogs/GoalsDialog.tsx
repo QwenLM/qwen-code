@@ -16,12 +16,6 @@ import { isGoalClearKeyword } from '../../utils/goalCondition';
 import styles from './GoalsDialog.module.css';
 
 /**
- * Mirrors MAX_GOAL_LENGTH in packages/cli/src/ui/utils/restoreGoal.ts, which is
- * the authority. `goalCondition.test.ts` reads that source and fails on drift.
- */
-const MAX_GOAL_LENGTH = 4000;
-
-/**
  * Gap between the end of one refetch and the start of the next. Unlike
  * scheduled tasks there is no `nextRunAt` to schedule against: a goal advances
  * whenever its session finishes a turn, which the page can't predict, so it
@@ -137,10 +131,9 @@ export function GoalsDialog({
       setFormError(t('goals.error.emptyCondition'));
       return;
     }
-    if (trimmed.length > MAX_GOAL_LENGTH) {
-      setFormError(t('goals.error.tooLong', { max: MAX_GOAL_LENGTH }));
-      return;
-    }
+    // No length cap: `/goal` accepts a condition of any length, and refusing
+    // one here that the daemon would accept only splits the two surfaces.
+    //
     // The condition travels to the daemon as `/goal <condition>`, so a bare
     // clear keyword arrives as a clear command: the fresh session would drop
     // the goal the instant it was set, with nothing to show for it.
@@ -235,7 +228,6 @@ export function GoalsDialog({
               <textarea
                 className={styles.textarea}
                 value={condition}
-                maxLength={MAX_GOAL_LENGTH}
                 rows={4}
                 placeholder={t('goals.conditionPlaceholder')}
                 onChange={(e) => setCondition(e.target.value)}

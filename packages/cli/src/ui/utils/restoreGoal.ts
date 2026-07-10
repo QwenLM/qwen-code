@@ -24,13 +24,6 @@ import {
 } from '../types.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
-/**
- * Cap on a goal condition, enforced both when `/goal` sets one and when a
- * transcript restores one. Lives here rather than in `goalCommand.ts` because
- * that module already imports this one; the reverse would be a cycle.
- */
-export const MAX_GOAL_LENGTH = 4000;
-
 export interface RestorableGoal {
   condition: string;
   iterations: number;
@@ -288,12 +281,17 @@ export function goalRestoreBlockedBy(
   return null;
 }
 
-/** Mirrors the gates `/goal` applies to a condition at set time. */
+/**
+ * Mirrors the gates `/goal` applies to a condition at set time.
+ *
+ * There is deliberately no length cap: #6665 removed the one `/goal` had, so
+ * capping here would silently destroy a long goal the user legitimately set —
+ * refused on restore, and dropped from the replay so they never see why.
+ */
 export function goalConditionBlockedBy(
   condition: string,
 ): 'condition-invalid' | null {
   if (condition.length === 0) return 'condition-invalid';
-  if (condition.length > MAX_GOAL_LENGTH) return 'condition-invalid';
   return null;
 }
 
@@ -342,11 +340,11 @@ export function restoreGoalFromHistory(
   }
   // `/goal` gates the condition at set time, but a transcript is a file: a
   // corrupted or hand-edited `condition` would otherwise be re-registered —
-  // unbounded, or empty and meaningless — and then embedded verbatim in every
-  // judge call and continuation prompt for the rest of the session.
+  // empty and meaningless — and then embedded verbatim in every judge call and
+  // continuation prompt for the rest of the session.
   if (goalConditionBlockedBy(restorable.condition)) {
     writeStderrLine(
-      `qwen: refusing to restore a goal whose condition is empty or exceeds ${MAX_GOAL_LENGTH} characters (got ${restorable.condition.length}).`,
+      'qwen: refusing to restore a goal whose condition is empty.',
     );
     unregisterGoalHook(config, sessionId);
     return { restored: false, blockedBy: 'condition-invalid' };
