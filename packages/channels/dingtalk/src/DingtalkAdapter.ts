@@ -87,6 +87,11 @@ const GROUP_MSG_API = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
 const GROUP_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
+const mentionTarget = Symbol('mentionTarget');
+
+type MentionTargetEnvelope = Envelope & {
+  [mentionTarget]?: string;
+};
 
 interface DingTalkTokenResponse {
   errcode?: number;
@@ -109,6 +114,7 @@ export class DingtalkChannel extends ChannelBase {
   private seenMessages: Map<string, number> = new Map();
   private mentionTargets = new Map<string, string>();
   private sessionMentionTargets = new Map<string, string>();
+  private bufferedMentionTargets = new Set<string>();
   private dedupTimer?: ReturnType<typeof setInterval>;
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
@@ -640,6 +646,7 @@ export class DingtalkChannel extends ChannelBase {
 
   /** Recall reactions left behind when a session dies without terminal lifecycle events. */
   override onSessionDied(sessionId: string): void {
+    this.sessionMentionTargets.delete(sessionId);
     const keys = this.sessionReactionKeys.get(sessionId);
     if (keys) {
       this.sessionReactionKeys.delete(sessionId);
@@ -671,6 +678,7 @@ export class DingtalkChannel extends ChannelBase {
     messageIds: string[],
   ): void {
     for (const messageId of messageIds) {
+      this.bufferedMentionTargets.delete(messageId);
       this.mentionTargets.delete(messageId);
     }
   }
@@ -680,8 +688,21 @@ export class DingtalkChannel extends ChannelBase {
     _sessionId: string,
     messageIds: string[],
   ): void {
+    for (const messageId of messageIds) {
+      this.bufferedMentionTargets.delete(messageId);
+    }
     for (const messageId of messageIds.slice(0, -1)) {
       this.mentionTargets.delete(messageId);
+    }
+  }
+
+  protected override onPromptBuffered(
+    _chatId: string,
+    _sessionId: string,
+    messageId?: string,
+  ): void {
+    if (messageId && this.mentionTargets.has(messageId)) {
+      this.bufferedMentionTargets.add(messageId);
     }
   }
 
@@ -691,11 +712,30 @@ export class DingtalkChannel extends ChannelBase {
     messageId?: string,
   ): void {
     if (messageId) {
+      this.bufferedMentionTargets.delete(messageId);
       const atUserId = this.mentionTargets.get(messageId);
       this.mentionTargets.delete(messageId);
       if (atUserId) this.sessionMentionTargets.set(sessionId, atUserId);
     }
     this.startReaction(chatId, messageId, sessionId);
+  }
+
+  override async handleInbound(envelope: Envelope): Promise<void> {
+    if (!(await this.preflightInbound(envelope))) return;
+
+    const messageId = envelope.messageId;
+    const atUserId = (envelope as MentionTargetEnvelope)[mentionTarget];
+    if (this.atSender && messageId && atUserId) {
+      this.mentionTargets.set(messageId, atUserId);
+    }
+
+    try {
+      await this.processInbound(envelope);
+    } finally {
+      if (messageId && !this.bufferedMentionTargets.has(messageId)) {
+        this.mentionTargets.delete(messageId);
+      }
+    }
   }
 
   protected override onPromptEnd(
@@ -1061,8 +1101,8 @@ export class DingtalkChannel extends ChannelBase {
       // onPromptStart/onPromptEnd — no extra bookkeeping needed.
       envelope.messageId = msgId;
 
-      if (msgId && isGroup && senderStaffId) {
-        this.mentionTargets.set(msgId, senderStaffId);
+      if (this.atSender && isGroup && senderStaffId) {
+        (envelope as MentionTargetEnvelope)[mentionTarget] = senderStaffId;
       }
 
       const processMessage = async () => {

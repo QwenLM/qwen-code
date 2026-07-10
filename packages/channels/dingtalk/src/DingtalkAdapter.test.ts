@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import type {
   ChannelTaskLifecycleEvent,
@@ -1374,6 +1378,192 @@ describe('DingtalkChannel reply mentions', () => {
     );
     expect(bodies[0]).toMatchObject({ at: { atUserIds: ['staff-1'] } });
     expect(bodies[1]).not.toHaveProperty('at');
+  });
+});
+
+describe('DingtalkChannel mention target lifecycle', () => {
+  it('does not retain a preflight-rejected group candidate', async () => {
+    vi.doUnmock('@qwen-code/channel-base');
+    vi.resetModules();
+    const { DingtalkChannel: RealDingtalkChannel } = await import(
+      './DingtalkAdapter.js'
+    );
+    const bridge = Object.assign(new EventEmitter(), {
+      availableCommands: [],
+      newSession: vi.fn().mockResolvedValue('session-1'),
+      loadSession: vi.fn(),
+      prompt: vi.fn().mockResolvedValue('agent response'),
+      cancelSession: vi.fn().mockResolvedValue(undefined),
+    }) as never;
+    const createRealChannel = (groups: Record<string, unknown>) =>
+      new RealDingtalkChannel(
+        'real-dingtalk',
+        {
+          type: 'dingtalk',
+          token: '',
+          clientId: 'client-id',
+          clientSecret: 'client-secret',
+          senderPolicy: 'open',
+          allowedUsers: [],
+          sessionScope: 'user',
+          cwd: '/tmp',
+          groupPolicy: 'open',
+          dmPolicy: 'open',
+          atSender: true,
+          groups,
+        },
+        bridge,
+        {
+          registerBridgeEvents: false,
+          groupHistoryPath: join(
+            mkdtempSync(join(tmpdir(), 'dingtalk-mention-lifecycle-')),
+            'history.jsonl',
+          ),
+        },
+      );
+    const sendInbound = (
+      channel: InstanceType<typeof RealDingtalkChannel>,
+      msgId: string,
+      text: string,
+      isInAtList: boolean,
+    ) => {
+      (
+        channel as unknown as {
+          onMessage(downstream: DWClientDownStream): void;
+        }
+      ).onMessage({
+        data: JSON.stringify({
+          msgId,
+          conversationType: '2',
+          conversationId: 'cid-123',
+          sessionWebhook:
+            'https://oapi.dingtalk.com/robot/send?access_token=token',
+          senderStaffId: 'staff-123',
+          senderId: 'sender-123',
+          senderNick: 'Alice',
+          isInAtList,
+          text: { content: text },
+        }),
+        headers: { messageId: msgId },
+      } as unknown as DWClientDownStream);
+    };
+    const targetMap = (channel: InstanceType<typeof RealDingtalkChannel>) =>
+      (channel as unknown as { mentionTargets: Map<string, string> })
+        .mentionTargets;
+    const rejected = createRealChannel({ '*': { requireMention: true } });
+    sendInbound(rejected, 'rejected-1', 'not for the bot', false);
+
+    await vi.waitFor(() => {
+      expect(targetMap(rejected).has('rejected-1')).toBe(false);
+    });
+  });
+
+  it('does not retain a local-command candidate', async () => {
+    vi.doUnmock('@qwen-code/channel-base');
+    vi.resetModules();
+    const { DingtalkChannel: RealDingtalkChannel } = await import(
+      './DingtalkAdapter.js'
+    );
+    const bridge = Object.assign(new EventEmitter(), {
+      availableCommands: [],
+      newSession: vi.fn().mockResolvedValue('session-1'),
+      loadSession: vi.fn(),
+      prompt: vi.fn().mockResolvedValue('agent response'),
+      cancelSession: vi.fn().mockResolvedValue(undefined),
+    }) as never;
+    const channel = new RealDingtalkChannel(
+      'real-dingtalk',
+      {
+        type: 'dingtalk',
+        token: '',
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        senderPolicy: 'open',
+        allowedUsers: [],
+        sessionScope: 'user',
+        cwd: '/tmp',
+        groupPolicy: 'open',
+        dmPolicy: 'open',
+        atSender: true,
+        groups: { '*': { requireMention: false } },
+      },
+      bridge,
+      { registerBridgeEvents: false },
+    );
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    (
+      channel as unknown as {
+        onMessage(downstream: DWClientDownStream): void;
+      }
+    ).onMessage({
+      data: JSON.stringify({
+        msgId: 'command-1',
+        conversationType: '2',
+        conversationId: 'cid-123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderStaffId: 'staff-123',
+        senderId: 'sender-123',
+        senderNick: 'Alice',
+        isInAtList: true,
+        text: { content: '/help' },
+      }),
+      headers: { messageId: 'command-1' },
+    } as unknown as DWClientDownStream);
+
+    await vi.waitFor(() => {
+      expect(
+        (
+          channel as unknown as { mentionTargets: Map<string, string> }
+        ).mentionTargets.has('command-1'),
+      ).toBe(false);
+    });
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  it('removes a bound session target when the session dies', async () => {
+    vi.doUnmock('@qwen-code/channel-base');
+    vi.resetModules();
+    const { DingtalkChannel: RealDingtalkChannel } = await import(
+      './DingtalkAdapter.js'
+    );
+    const bridge = Object.assign(new EventEmitter(), {
+      availableCommands: [],
+      newSession: vi.fn(),
+      loadSession: vi.fn(),
+      prompt: vi.fn(),
+      cancelSession: vi.fn(),
+    }) as never;
+    const channel = new RealDingtalkChannel(
+      'real-dingtalk',
+      {
+        type: 'dingtalk',
+        token: '',
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        senderPolicy: 'open',
+        allowedUsers: [],
+        sessionScope: 'user',
+        cwd: '/tmp',
+        groupPolicy: 'open',
+        dmPolicy: 'open',
+        atSender: true,
+        groups: {},
+      },
+      bridge,
+      { registerBridgeEvents: false },
+    );
+    const sessionTargets = (
+      channel as unknown as { sessionMentionTargets: Map<string, string> }
+    ).sessionMentionTargets;
+    sessionTargets.set('session-1', 'staff-123');
+
+    channel.onSessionDied('session-1');
+
+    expect(sessionTargets.has('session-1')).toBe(false);
   });
 });
 
