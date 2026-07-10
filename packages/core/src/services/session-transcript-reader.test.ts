@@ -84,6 +84,12 @@ describe('SessionTranscriptReader', () => {
     return filePath;
   }
 
+  // Monotonic, always-valid ISO 8601 timestamps in call order. Deriving the
+  // seconds field from `text.length` produced invalid values (e.g. `00:00:013`)
+  // once a record's text reached 10+ chars; a base + per-record offset keeps
+  // every timestamp valid and strictly increasing regardless of count.
+  const RECORD_BASE_MS = Date.UTC(2026, 0, 1, 0, 0, 0);
+  let recordSeq = 0;
   function record(
     uuid: string,
     parentUuid: string | null,
@@ -94,7 +100,7 @@ describe('SessionTranscriptReader', () => {
       uuid,
       parentUuid,
       sessionId: targetSessionId,
-      timestamp: `2026-01-01T00:00:0${text.length}.000Z`,
+      timestamp: new Date(RECORD_BASE_MS + recordSeq++ * 1000).toISOString(),
       type: uuid.startsWith('a') ? 'assistant' : 'user',
       cwd: workspaceDir,
       version: '1.0.0',
@@ -120,7 +126,7 @@ describe('SessionTranscriptReader', () => {
   });
 
   it('returns a single-record transcript without a continuation cursor', async () => {
-    await writeRecords([record('u1', null, 'only record')]);
+    const filePath = await writeRecords([record('u1', null, 'only record')]);
 
     const page = await new SessionTranscriptReader(workspaceDir).readPage(
       sessionId,
@@ -129,6 +135,13 @@ describe('SessionTranscriptReader', () => {
     expect(page.records.map((item) => item.uuid)).toEqual(['u1']);
     expect(page.hasMore).toBe(false);
     expect(page.nextCursorState).toBeUndefined();
+    // Required SessionTranscriptRecordPage fields (the strict-ISO checks also
+    // guard against invalid timestamps from the record() helper).
+    expect(page.sessionId).toBe(sessionId);
+    expect(page.filePath).toBe(filePath);
+    const ISO_8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+    expect(page.startTime).toMatch(ISO_8601);
+    expect(page.lastUpdated).toMatch(ISO_8601);
   });
 
   it.each([0, -1, SESSION_TRANSCRIPT_MAX_LIMIT + 1, 1.5])(
