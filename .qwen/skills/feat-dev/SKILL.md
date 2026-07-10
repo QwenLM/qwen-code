@@ -115,8 +115,9 @@ Output: E2E results appended to the test plan.
 
 ## Phase 7: Code Review
 
-Run `/review` with a review task listing all changed files. Triage each comment
-before acting:
+First self-audit the full diff per the self-audit step in AGENTS.md's General
+workflow. Then run `/review` with a review task listing all changed files.
+Triage each comment before acting:
 
 - **Valid**: real bug or meaningful improvement. Fix it.
 - **False positive**: reviewer missed context. Skip it.

@@ -87,9 +87,10 @@ add focused regression coverage for the failure scenario.
 
 ## Step 6: Code Review
 
-Skip this only for a plain one-line or trivial config fix. For anything else,
-run `/review` with a review task listing all changed files. Triage each comment
-with a verdict:
+First self-audit the full diff per the self-audit step in AGENTS.md's General
+workflow. Skip the review below only for a plain one-line or trivial config
+fix. For anything else, run `/review` with a review task listing all changed
+files. Triage each comment with a verdict:
 
 - **Valid**: real bug or meaningful improvement. Fix it.
 - **False positive**: reviewer missed context. Skip it.

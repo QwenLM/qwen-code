@@ -166,20 +166,29 @@ npm run preflight  # Full check: clean → install → format → lint → build
 2. **Test plan for behavioral changes** — write an E2E test plan in
    `.qwen/e2e-tests/` when the change affects user-observable behavior. Dry-run
    against the global `qwen` CLI first to confirm the baseline.
-3. **Build + typecheck before declaring done**:
-   `npm run build && npm run typecheck`.
-4. **Code review** — run `/review` when available. Triage each comment:
-   valid / false positive / overthinking.
+3. **Build, typecheck, and test before declaring done**:
+   `npm run build && npm run typecheck`, plus unit tests for the files you
+   changed.
+4. **Self-audit before declaring done** — read the full diff you are about
+   to ship in open-ended passes, not hunting for anything specific. Then
+   verify each change, and each green test you rely on as evidence, presuming
+   it wrong (a passing test can assert the wrong thing). Stop after two
+   consecutive clean passes — a clean pass is evidence about that pass, not
+   the code — or five passes total (say so rather than claim convergence).
+   A fix re-runs step 3 and resets the clean-pass count. Scale to the diff:
+   one careful pass suffices for a trivial change.
+5. **Code review** — run `/review` when available. Triage each comment:
+   valid / false positive / overthinking. Fixes go back through steps 3-4.
 
 ### Feature development
 
 Use the `/feat-dev` skill for the full workflow: investigate, design, test plan,
-dry-run, implement, verify, code review, and iterate.
+dry-run, implement, verify, self-audit, code review, and iterate.
 
 ### Bugfix
 
 Use the `/bugfix` skill for the reproduce-first workflow: reproduce, fix,
-verify, test, and code review.
+verify, test, self-audit, and code review.
 
 ## Code Review
 
