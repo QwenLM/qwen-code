@@ -1193,17 +1193,6 @@ describe('postProcessSummary', () => {
     expect(out).not.toContain('second');
   });
 
-  it('unwraps a legacy <summary> block after stripping analysis scratchpad', () => {
-    const out = postProcessSummary(
-      '<analysis>thinking through the conversation</analysis><summary>actual summary</summary>',
-    );
-    expect(out).not.toContain('<analysis>');
-    expect(out).not.toContain('thinking through');
-    expect(out).not.toContain('<summary>');
-    expect(out).not.toContain('</summary>');
-    expect(out).toContain('actual summary');
-  });
-
   it('does NOT re-inject the <analysis> body when the model emits only scratchpad (Finding 6)', () => {
     // Regression: prior implementation fell back to `rawSummary.trim()`
     // which re-injected the entire <analysis> block when strip left

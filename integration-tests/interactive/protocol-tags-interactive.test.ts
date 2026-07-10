@@ -12,7 +12,7 @@ import {
 } from '../fake-openai-server.js';
 import { TestRig, type } from '../test-helper.js';
 
-describe('Interactive protocol tag filtering', () => {
+describe('Interactive protocol tag retry guard', () => {
   let fakeServer: FakeOpenAIServer | undefined;
   let rig: TestRig;
 
@@ -27,7 +27,7 @@ describe('Interactive protocol tag filtering', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'retries hidden protocol text across SSE disconnect and completed streams',
+    'retries protocol leaks across SSE disconnect and completed streams',
     async () => {
       fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
         if (requestIndex === 0) {
@@ -42,16 +42,15 @@ describe('Interactive protocol tag filtering', () => {
 
         if (requestIndex === 1) {
           return {
-            contentChunks: ['<analysis>hidden completed attempt</analysis>'],
+            contentChunks: [
+              '<analysis>hidden completed attempt</analysis>',
+              '<summary>WRONG_COMPLETED_SUMMARY</summary>',
+            ],
           };
         }
 
         return {
-          contentChunks: [
-            '<analysis>retry scratchpad that must not render',
-            '</analysis><summary>VISIBLE_TMUX_RETRY_SUMMARY_DONE',
-            '</summary>',
-          ],
+          contentChunks: ['VISIBLE_TMUX_RETRY_RESPONSE_DONE'],
           usage: {
             prompt_tokens: 20,
             completion_tokens: 8,
@@ -93,7 +92,7 @@ describe('Interactive protocol tag filtering', () => {
         await type(ptyProcess, '\r');
 
         const sawVisibleSummary = await rig.waitForText(
-          'VISIBLE_TMUX_RETRY_SUMMARY_DONE',
+          'VISIBLE_TMUX_RETRY_RESPONSE_DONE',
           15000,
         );
         expect(
@@ -109,15 +108,15 @@ describe('Interactive protocol tag filtering', () => {
         );
 
         const renderedOutput = stripAnsi(rig._interactiveOutput);
-        expect(renderedOutput).toContain('VISIBLE_TMUX_RETRY_SUMMARY_DONE');
+        expect(renderedOutput).toContain('VISIBLE_TMUX_RETRY_RESPONSE_DONE');
         expect(renderedOutput).not.toContain('<analysis>');
         expect(renderedOutput).not.toContain('</analysis>');
         expect(renderedOutput).not.toContain('<summary>');
         expect(renderedOutput).not.toContain('</summary>');
-        expect(renderedOutput).not.toContain('retry scratchpad');
         expect(renderedOutput).not.toContain('hidden before disconnect');
         expect(renderedOutput).not.toContain('hidden completed attempt');
         expect(renderedOutput).not.toContain('WRONG_FIRST_ATTEMPT');
+        expect(renderedOutput).not.toContain('WRONG_COMPLETED_SUMMARY');
       } finally {
         ptyProcess.kill();
         await promise;

@@ -5617,199 +5617,6 @@ describe('GeminiChat', async () => {
       ).toBe(true);
     });
 
-    it('retries transport errors after yielding only hidden protocol text', async () => {
-      vi.useFakeTimers();
-      try {
-        const transportError = Object.assign(new TypeError('terminated'), {
-          cause: Object.assign(new Error('other side closed'), {
-            code: 'UND_ERR_SOCKET',
-          }),
-        });
-
-        vi.mocked(mockContentGenerator.generateContentStream)
-          .mockResolvedValueOnce(
-            (async function* () {
-              yield {
-                candidates: [
-                  {
-                    content: {
-                      parts: [{ text: '<analysis>hidden scratchpad' }],
-                    },
-                  },
-                ],
-              } as unknown as GenerateContentResponse;
-              throw transportError;
-            })(),
-          )
-          .mockResolvedValueOnce(
-            (async function* () {
-              yield {
-                candidates: [
-                  {
-                    content: {
-                      parts: [{ text: '<summary>visible answer</summary>' }],
-                    },
-                    finishReason: 'STOP',
-                  },
-                ],
-              } as unknown as GenerateContentResponse;
-            })(),
-          );
-
-        const stream = await chat.sendMessageStream(
-          'test-model',
-          { message: 'test' },
-          'prompt-transport-retry-hidden-protocol',
-        );
-        const events = await collectStreamWithFakeTimers(stream, 5_000);
-
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(2);
-        expect(
-          events.filter((event) => event.type === StreamEventType.RETRY),
-        ).toHaveLength(1);
-        expect(
-          events.filter((event) => event.type === StreamEventType.CHUNK),
-        ).toHaveLength(1);
-        expect(chat.getLastModelMessageText()).toBe('visible answer');
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('retries transport errors after hidden protocol text with a thought signature', async () => {
-      vi.useFakeTimers();
-      try {
-        const transportError = Object.assign(new TypeError('terminated'), {
-          cause: Object.assign(new Error('other side closed'), {
-            code: 'UND_ERR_SOCKET',
-          }),
-        });
-
-        vi.mocked(mockContentGenerator.generateContentStream)
-          .mockResolvedValueOnce(
-            (async function* () {
-              yield {
-                candidates: [
-                  {
-                    content: {
-                      parts: [
-                        {
-                          text: '<analysis>hidden scratchpad',
-                          thoughtSignature: 'hidden-signature',
-                        },
-                      ],
-                    },
-                  },
-                ],
-              } as unknown as GenerateContentResponse;
-              throw transportError;
-            })(),
-          )
-          .mockResolvedValueOnce(
-            (async function* () {
-              yield {
-                candidates: [
-                  {
-                    content: {
-                      parts: [{ text: '<summary>visible answer</summary>' }],
-                    },
-                    finishReason: 'STOP',
-                  },
-                ],
-              } as unknown as GenerateContentResponse;
-            })(),
-          );
-
-        const stream = await chat.sendMessageStream(
-          'test-model',
-          { message: 'test' },
-          'prompt-transport-retry-hidden-protocol-signature',
-        );
-        const events = await collectStreamWithFakeTimers(stream, 5_000);
-
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(2);
-        expect(
-          events.filter((event) => event.type === StreamEventType.RETRY),
-        ).toHaveLength(1);
-        expect(
-          events.filter((event) => event.type === StreamEventType.CHUNK),
-        ).toHaveLength(1);
-        expect(chat.getLastModelMessageText()).toBe('visible answer');
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('retries transport errors after hidden protocol text with usage metadata', async () => {
-      vi.useFakeTimers();
-      try {
-        const transportError = Object.assign(new TypeError('terminated'), {
-          cause: Object.assign(new Error('other side closed'), {
-            code: 'UND_ERR_SOCKET',
-          }),
-        });
-
-        vi.mocked(mockContentGenerator.generateContentStream)
-          .mockResolvedValueOnce(
-            (async function* () {
-              yield {
-                candidates: [
-                  {
-                    content: {
-                      parts: [{ text: '<analysis>hidden scratchpad' }],
-                    },
-                  },
-                ],
-                usageMetadata: {
-                  promptTokenCount: 10,
-                  candidatesTokenCount: 1,
-                  totalTokenCount: 11,
-                },
-              } as unknown as GenerateContentResponse;
-              throw transportError;
-            })(),
-          )
-          .mockResolvedValueOnce(
-            (async function* () {
-              yield {
-                candidates: [
-                  {
-                    content: {
-                      parts: [{ text: '<summary>visible answer</summary>' }],
-                    },
-                    finishReason: 'STOP',
-                  },
-                ],
-              } as unknown as GenerateContentResponse;
-            })(),
-          );
-
-        const stream = await chat.sendMessageStream(
-          'test-model',
-          { message: 'test' },
-          'prompt-transport-retry-hidden-protocol-usage',
-        );
-        const events = await collectStreamWithFakeTimers(stream, 5_000);
-
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(2);
-        expect(
-          events.filter((event) => event.type === StreamEventType.RETRY),
-        ).toHaveLength(1);
-        expect(
-          events.filter((event) => event.type === StreamEventType.CHUNK),
-        ).toHaveLength(1);
-        expect(chat.getLastModelMessageText()).toBe('visible answer');
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
     it('classifies every allow-listed stream transport code as retryable transport', () => {
       // Drift guard: the stream allow-list is a hand-curated subset of the
       // classifier's transport codes. If a code is renamed/removed there, or
@@ -7161,18 +6968,7 @@ describe('GeminiChat', async () => {
     });
   });
 
-  it('should discard tagged partial content from a failed attempt upon retry', async () => {
-    const recordAssistantTurn = vi.fn();
-    const chatWithRecording = new GeminiChat(
-      mockConfig,
-      config,
-      [],
-      {
-        recordAssistantTurn,
-        recordChatCompression: vi.fn(),
-      } as unknown as ConstructorParameters<typeof GeminiChat>[3],
-      uiTelemetryService,
-    );
+  it('should discard valid partial content from a failed attempt upon retry', async () => {
     // Mock the stream to fail on the first attempt after yielding some valid content.
     vi.mocked(mockContentGenerator.generateContentStream)
       .mockImplementationOnce(async () =>
@@ -7182,24 +6978,13 @@ describe('GeminiChat', async () => {
             candidates: [
               {
                 content: {
-                  parts: [
-                    {
-                      text:
-                        '<analysis>failed scratch</analysis>' +
-                        '<summary>FAILED_ATTEMPT_SHOULD_BE_DISCARDED</summary>',
-                    },
-                  ],
+                  parts: [{ text: 'This valid part should be discarded' }],
                 },
               },
             ],
           } as unknown as GenerateContentResponse;
           yield {
             candidates: [{ content: { parts: [{ text: '' }] } }], // Invalid chunk triggers retry
-            usageMetadata: {
-              promptTokenCount: 10,
-              candidatesTokenCount: 5,
-              totalTokenCount: 15,
-            },
           } as unknown as GenerateContentResponse;
         })(),
       )
@@ -7210,13 +6995,7 @@ describe('GeminiChat', async () => {
             candidates: [
               {
                 content: {
-                  parts: [
-                    {
-                      text:
-                        '<analysis>successful scratch</analysis>' +
-                        '<summary>Successful final response</summary>',
-                    },
-                  ],
+                  parts: [{ text: 'Successful final response' }],
                 },
                 finishReason: 'STOP',
               },
@@ -7226,7 +7005,7 @@ describe('GeminiChat', async () => {
       );
 
     // Send a message and consume the stream
-    const stream = await chatWithRecording.sendMessageStream(
+    const stream = await chat.sendMessageStream(
       'test-model',
       { message: 'test' },
       'prompt-id-discard-test',
@@ -7241,7 +7020,7 @@ describe('GeminiChat', async () => {
     expect(events.some((e) => e.type === StreamEventType.RETRY)).toBe(true);
 
     // Check the final recorded history
-    const history = chatWithRecording.getHistory();
+    const history = chat.getHistory();
     expect(history.length).toBe(2); // user turn + final model turn
 
     const modelTurn = history[1]!;
@@ -7249,101 +7028,11 @@ describe('GeminiChat', async () => {
     expect(modelTurn!.parts![0]!.text).toBe('Successful final response');
     // It should NOT contain any text from the failed attempt
     expect(modelTurn!.parts![0]!.text).not.toContain(
-      'FAILED_ATTEMPT_SHOULD_BE_DISCARDED',
+      'This valid part should be discarded',
     );
-    expect(modelTurn!.parts![0]!.text).not.toContain('<analysis>');
-    expect(modelTurn!.parts![0]!.text).not.toContain('</analysis>');
-    expect(modelTurn!.parts![0]!.text).not.toContain('<summary>');
-    expect(modelTurn!.parts![0]!.text).not.toContain('</summary>');
-    expect(modelTurn!.parts![0]!.text).not.toContain('successful scratch');
-    expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
-    expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
-      { text: 'Successful final response' },
-    ]);
   });
 
-  it('retries HTTP 200 responses that contain only hidden protocol text', async () => {
-    vi.useFakeTimers();
-    try {
-      vi.mocked(mockContentGenerator.generateContentStream)
-        .mockImplementationOnce(async () =>
-          (async function* () {
-            yield {
-              candidates: [
-                {
-                  content: {
-                    parts: [
-                      {
-                        text: '<analysis>first failure</analysis>',
-                        thoughtSignature: 'hidden-signature',
-                      },
-                    ],
-                  },
-                  finishReason: 'STOP',
-                },
-              ],
-            } as unknown as GenerateContentResponse;
-          })(),
-        )
-        .mockImplementationOnce(async () =>
-          (async function* () {
-            yield {
-              candidates: [
-                {
-                  content: {
-                    parts: [{ text: '<analysis>second failure</analysis>' }],
-                  },
-                  finishReason: 'STOP',
-                },
-              ],
-            } as unknown as GenerateContentResponse;
-          })(),
-        )
-        .mockImplementationOnce(async () =>
-          (async function* () {
-            yield {
-              candidates: [
-                {
-                  content: {
-                    parts: [{ text: '<summary>visible answer</summary>' }],
-                  },
-                  finishReason: 'STOP',
-                },
-              ],
-            } as unknown as GenerateContentResponse;
-          })(),
-        );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-protocol-filter-empty-retry',
-      );
-      const events = await collectStreamWithFakeTimers(stream);
-
-      expect(
-        events.filter((event) => event.type === StreamEventType.RETRY),
-      ).toHaveLength(2);
-      const chunks = events.filter(
-        (event) => event.type === StreamEventType.CHUNK,
-      );
-      expect(chunks).toHaveLength(1);
-      expect(
-        chunks
-          .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? [])
-          .map((part) => part.text ?? '')
-          .join(''),
-      ).toBe('visible answer');
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-        3,
-      );
-      expect(chat.getLastModelMessageText()).toBe('visible answer');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('sanitizes streamed text before yielding while preserving tool calls', async () => {
+  it('discards a completed protocol-tagged response and retries before persistence', async () => {
     const recordAssistantTurn = vi.fn();
     const chatWithRecording = new GeminiChat(
       mockConfig,
@@ -7355,104 +7044,90 @@ describe('GeminiChat', async () => {
       } as unknown as ConstructorParameters<typeof GeminiChat>[3],
       uiTelemetryService,
     );
-    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-      (async function* () {
-        yield {
-          candidates: [
-            {
-              content: {
-                parts: [
-                  {
-                    text:
-                      '<analysis>hidden scratch</analysis>' +
-                      '<summary>visible',
-                  },
-                ],
+    vi.mocked(mockContentGenerator.generateContentStream)
+      .mockImplementationOnce(async () =>
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: '<ana' }],
+                },
               },
-            },
-          ],
-        } as unknown as GenerateContentResponse;
-        yield {
-          candidates: [
-            {
-              content: {
-                parts: [
-                  { text: ' answer</summary>' },
-                  {
-                    functionCall: {
-                      id: 'call_protocol_filter',
-                      name: 'read_file',
-                      args: { path: '/tmp/example.ts' },
+            ],
+          } as unknown as GenerateContentResponse;
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text:
+                        'lysis>failed scratch</analysis>' +
+                        '<summary>FAILED_ATTEMPT_SHOULD_BE_DISCARDED</summary>',
                     },
-                  },
-                ],
+                  ],
+                },
+                finishReason: 'STOP',
               },
-              finishReason: 'STOP',
-            },
-          ],
-        } as unknown as GenerateContentResponse;
-      })(),
-    );
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      )
+      .mockImplementationOnce(async () =>
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: 'Successful final response' }],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
 
     const stream = await chatWithRecording.sendMessageStream(
       'test-model',
       { message: 'test' },
-      'prompt-protocol-filter-tool-call',
+      'prompt-id-protocol-leak',
     );
-    const visibleChunks: string[] = [];
-    for await (const event of stream) {
-      if (event.type !== StreamEventType.CHUNK) continue;
-      for (const part of event.value.candidates?.[0]?.content?.parts ?? []) {
-        if (part.text && !part.thought) visibleChunks.push(part.text);
-      }
-    }
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
 
-    expect(visibleChunks.join('')).toBe('visible answer');
-    const modelTurn = chatWithRecording
-      .getHistory()
-      .findLast((turn) => turn.role === 'model');
-    expect(modelTurn?.parts?.filter((part) => part.text)).toEqual([
-      { text: 'visible answer' },
-    ]);
-    expect(
-      modelTurn?.parts?.some(
-        (part) => part.functionCall?.id === 'call_protocol_filter',
-      ),
-    ).toBe(true);
-    expect(recordAssistantTurn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        message: expect.arrayContaining([
-          { text: 'visible answer' },
-          expect.objectContaining({
-            functionCall: expect.objectContaining({
-              id: 'call_protocol_filter',
-            }),
-          }),
-        ]),
-      }),
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(2);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      true,
     );
+    const emittedText = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? [])
+      .map((part) => part.text ?? '')
+      .join('');
+    expect(emittedText).toBe('Successful final response');
+    expect(chatWithRecording.getLastModelMessageText()).toBe(
+      'Successful final response',
+    );
+    expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+    expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
+      { text: 'Successful final response' },
+    ]);
   });
 
-  it('sanitizes text on a mixed provider part without dropping its tool call', async () => {
-    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+  it('does not reject normal HTML or protocol tag names in prose', async () => {
+    const response =
+      '<details><summary>Title</summary></details> ' +
+      'Use the literal <analysis> tag in this example.';
+    vi.mocked(
+      mockContentGenerator.generateContentStream,
+    ).mockImplementationOnce(async () =>
       (async function* () {
         yield {
           candidates: [
             {
-              content: {
-                parts: [
-                  {
-                    text:
-                      '<analysis>hidden scratch</analysis>' +
-                      '<summary>visible answer</summary>',
-                    functionCall: {
-                      id: 'call_mixed_protocol_filter',
-                      name: 'read_file',
-                      args: { path: '/tmp/example.ts' },
-                    },
-                  },
-                ],
-              },
+              content: { parts: [{ text: response }] },
               finishReason: 'STOP',
             },
           ],
@@ -7463,66 +7138,15 @@ describe('GeminiChat', async () => {
     const stream = await chat.sendMessageStream(
       'test-model',
       { message: 'test' },
-      'prompt-protocol-filter-mixed-part',
+      'prompt-id-protocol-literal',
     );
-    const chunks: GenerateContentResponse[] = [];
-    for await (const event of stream) {
-      if (event.type === StreamEventType.CHUNK) chunks.push(event.value);
-    }
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
 
-    const part = chunks[0]?.candidates?.[0]?.content?.parts?.[0];
-    expect(part?.text).toBe('visible answer');
-    expect(part?.functionCall?.id).toBe('call_mixed_protocol_filter');
-    const modelTurn = chat
-      .getHistory()
-      .findLast((turn) => turn.role === 'model');
-    expect(modelTurn?.parts?.[0]?.text).toBe('visible answer');
-    expect(modelTurn?.parts?.[0]?.functionCall?.id).toBe(
-      'call_mixed_protocol_filter',
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
     );
-  });
-
-  it('flushes recovered protocol text from a finish-only chunk', async () => {
-    vi.useFakeTimers();
-    try {
-      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
-        async () =>
-          (async function* () {
-            yield {
-              candidates: [
-                {
-                  content: {
-                    parts: [
-                      {
-                        text:
-                          '<analysis>hidden' +
-                          '<summary>visible answer</summary>',
-                      },
-                    ],
-                  },
-                },
-              ],
-            } as unknown as GenerateContentResponse;
-            yield {
-              candidates: [{ finishReason: 'STOP' }],
-            } as unknown as GenerateContentResponse;
-          })(),
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-protocol-filter-finish-only',
-      );
-      const events = await collectStreamWithFakeTimers(stream);
-
-      expect(
-        events.filter((event) => event.type === StreamEventType.RETRY),
-      ).toHaveLength(0);
-      expect(chat.getLastModelMessageText()).toBe('visible answer');
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(chat.getLastModelMessageText()).toBe(response);
   });
 
   describe('stripThoughtsFromHistory', () => {
@@ -8628,51 +8252,6 @@ describe('GeminiChat', async () => {
         ?.map((part) => ('text' in part ? part.text : ''))
         .join('');
       expect(text).toBe('Hello ending.');
-    });
-
-    it('preserves protocol filtering across output continuation', async () => {
-      const streams = [
-        makeStream([
-          makeChunk(
-            [
-              {
-                text:
-                  '<analysis>hidden scratch</analysis>' + '<summary>partial',
-              },
-            ],
-            'MAX_TOKENS',
-          ),
-        ]),
-        makeStream([makeChunk([{ text: ' answer</summary>' }], 'STOP')]),
-      ];
-      let callIndex = 0;
-      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
-        async () => streams[callIndex++]!,
-      );
-
-      const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
-        { message: 'write a long essay' },
-        'prompt-protocol-filter-continuation',
-      );
-      const visibleChunks: string[] = [];
-      for await (const event of stream) {
-        if (event.type !== StreamEventType.CHUNK) continue;
-        for (const part of event.value.candidates?.[0]?.content?.parts ?? []) {
-          if (part.text && !part.thought) visibleChunks.push(part.text);
-        }
-      }
-
-      expect(visibleChunks.join('')).toBe('partial answer');
-      const modelTurn = chat
-        .getHistory()
-        .findLast((turn) => turn.role === 'model');
-      expect(modelTurn?.parts?.map((part) => part.text ?? '').join('')).toBe(
-        'partial answer',
-      );
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-        2,
-      );
     });
 
     it('should coalesce overlapping recovery continuation text', async () => {

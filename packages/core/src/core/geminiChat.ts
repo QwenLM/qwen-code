@@ -100,7 +100,6 @@ import {
   collectToolCallIdsFromHistory,
   normalizeModelToolCallIds,
 } from './toolCallIdUtils.js';
-import { TopLevelProtocolTagStreamFilter } from '../utils/protocol-tag-sanitizer.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
@@ -1036,12 +1035,80 @@ function stripThoughtPartsFromContent(content: Content): Content | null {
  * which should trigger a retry.
  */
 export class InvalidStreamError extends Error {
-  readonly type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT';
+  readonly type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT' | 'PROTOCOL_TAG_LEAK';
 
-  constructor(message: string, type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT') {
+  constructor(
+    message: string,
+    type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT' | 'PROTOCOL_TAG_LEAK',
+  ) {
     super(message);
     this.name = 'InvalidStreamError';
     this.type = type;
+  }
+}
+
+const PROTOCOL_TAG_PREFIXES = [
+  '<analysis',
+  '</analysis',
+  '<summary',
+  '</summary',
+] as const;
+
+class LeadingProtocolTagLeakDetector {
+  private state: 'detecting' | 'clean' | 'leaked' = 'detecting';
+  private buffer = '';
+
+  accept(text: string): string {
+    if (this.state === 'clean') return text;
+    if (this.state === 'leaked') return '';
+
+    this.buffer += text;
+    const candidate = this.buffer.trimStart().toLowerCase();
+    if (!candidate) return '';
+    if (PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(candidate))) {
+      return '';
+    }
+
+    for (const prefix of PROTOCOL_TAG_PREFIXES) {
+      if (
+        candidate.startsWith(prefix) &&
+        /[\s/>]/.test(candidate[prefix.length] ?? '')
+      ) {
+        this.state = 'leaked';
+        this.buffer = '';
+        return '';
+      }
+    }
+
+    this.state = 'clean';
+    const output = this.buffer;
+    this.buffer = '';
+    return output;
+  }
+
+  finish(): string {
+    if (this.state !== 'detecting') return '';
+    const candidate = this.buffer.trimStart().toLowerCase();
+    if (
+      candidate &&
+      PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(candidate))
+    ) {
+      this.state = 'leaked';
+      this.buffer = '';
+      return '';
+    }
+    this.state = 'clean';
+    const output = this.buffer;
+    this.buffer = '';
+    return output;
+  }
+
+  get leaked(): boolean {
+    return this.state === 'leaked';
+  }
+
+  get blockingOutput(): boolean {
+    return this.state !== 'clean';
   }
 }
 
@@ -2115,7 +2182,6 @@ export class GeminiChat {
         let reactiveCompressionAttempted = false;
         let suppressNextRetryEvent = false;
         let streamYieldedAnyChunk = false;
-        const protocolTagFilter = new TopLevelProtocolTagStreamFilter();
 
         // Read per-config overrides; fall back to built-in defaults.
         const cgConfig = self.config.getContentGeneratorConfig();
@@ -2159,7 +2225,6 @@ export class GeminiChat {
               requestContents,
               params,
               prompt_id,
-              protocolTagFilter,
             );
 
             lastFinishReason = undefined;
@@ -2426,7 +2491,6 @@ export class GeminiChat {
                 ),
               );
               yield { type: StreamEventType.RETRY };
-              suppressNextRetryEvent = true;
               // Don't count transient retries against content retry limit.
               attempt--;
               await delay(delayMs, params.config?.abortSignal).promise;
@@ -2539,7 +2603,6 @@ export class GeminiChat {
               requestContents,
               escalatedParams,
               prompt_id,
-              protocolTagFilter,
             );
             for await (const chunk of escalatedStream) {
               const fr = chunk.candidates?.[0]?.finishReason;
@@ -2607,8 +2670,6 @@ export class GeminiChat {
                 recoveryContents,
                 recoveryParams,
                 prompt_id,
-                protocolTagFilter,
-                true,
               );
               for await (const chunk of recoveryStream) {
                 const fr = chunk.candidates?.[0]?.finishReason;
@@ -2812,7 +2873,6 @@ export class GeminiChat {
                     requestContents,
                     params,
                     prompt_id,
-                    protocolTagFilter,
                     fallbackGenerator,
                     fallbackRetryAuthType,
                     fallbackRetryErrorCodes,
@@ -2959,8 +3019,6 @@ export class GeminiChat {
     requestContents: Content[],
     params: SendMessageParameters,
     prompt_id: string,
-    protocolTagFilter: TopLevelProtocolTagStreamFilter,
-    continueProtocolStream = false,
     overrides?: {
       contentGenerator: ContentGenerator;
       retryAuthType?: string;
@@ -3033,8 +3091,7 @@ export class GeminiChat {
       },
     });
 
-    if (!continueProtocolStream) protocolTagFilter.reset();
-    return this.processStreamResponse(model, streamResponse, protocolTagFilter);
+    return this.processStreamResponse(model, streamResponse);
   }
 
   private async *makeFallbackStream(
@@ -3042,7 +3099,6 @@ export class GeminiChat {
     requestContents: Content[],
     params: SendMessageParameters,
     prompt_id: string,
-    protocolTagFilter: TopLevelProtocolTagStreamFilter,
     contentGenerator: ContentGenerator,
     retryAuthType?: string,
     retryErrorCodes?: readonly number[],
@@ -3052,8 +3108,6 @@ export class GeminiChat {
       requestContents,
       params,
       prompt_id,
-      protocolTagFilter,
-      false,
       { contentGenerator, retryAuthType, retryErrorCodes },
     );
 
@@ -3376,7 +3430,6 @@ export class GeminiChat {
   private async *processStreamResponse(
     model: string,
     streamResponse: AsyncGenerator<GenerateContentResponse>,
-    protocolTagFilter: TopLevelProtocolTagStreamFilter,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -3395,6 +3448,8 @@ export class GeminiChat {
 
     let hasToolCall = false;
     let hasFinishReason = false;
+    const protocolTagDetector = new LeadingProtocolTagLeakDetector();
+    let protocolTextWasSuppressed = false;
     // Captured if the upstream stream throws mid-iteration (typical on weak
     // networks: SSE drops between `content_block_stop` of a tool_use and the
     // terminal `message_stop`). We still build / record / push a partial
@@ -3405,7 +3460,6 @@ export class GeminiChat {
 
     try {
       for await (const chunk of streamResponse) {
-        let protocolTextWasSuppressed = false;
         // Use ||= to avoid later usage-only chunks (no candidates) overwriting
         // a finishReason that was already seen in an earlier chunk.
         hasFinishReason ||=
@@ -3415,44 +3469,21 @@ export class GeminiChat {
         if (isValidResponse(chunk)) {
           const candidate = chunk.candidates?.[0];
           const content = candidate?.content;
-          const finishReason = candidate?.finishReason;
           if (content?.parts) {
-            const sanitizedParts: Part[] = [];
-            for (const part of content.parts) {
-              if (typeof part.text === 'string' && !part.thought) {
-                const text = protocolTagFilter.accept(part.text);
-                if (text) {
-                  sanitizedParts.push({ ...part, text });
-                } else {
-                  if (part.text.length > 0 && !protocolTextWasSuppressed) {
-                    debugLogger.debug(
-                      'protocol tag sanitization stripping stream text',
-                      {
-                        rawLen: part.text.length,
-                      },
-                    );
-                  }
-                  protocolTextWasSuppressed ||= part.text.length > 0;
-                  const {
-                    text: _text,
-                    thought: _thought,
-                    thoughtSignature: _thoughtSignature,
-                    ...rest
-                  } = part;
-                  const hasNonTextData = Object.entries(rest).some(
-                    ([, value]) => value !== undefined,
-                  );
-                  if (hasNonTextData) sanitizedParts.push(rest);
-                }
-              } else {
-                sanitizedParts.push(part);
-              }
+            content.parts = content.parts.flatMap((part) => {
+              if (typeof part.text !== 'string' || part.thought) return [part];
+              const text = protocolTagDetector.accept(part.text);
+              if (text) return [{ ...part, text }];
+              protocolTextWasSuppressed ||= part.text.length > 0;
+              const { text: _text, ...rest } = part;
+              return Object.values(rest).some((value) => value !== undefined)
+                ? [rest]
+                : [];
+            });
+            if (candidate?.finishReason) {
+              const text = protocolTagDetector.finish();
+              if (text) content.parts.push({ text });
             }
-            if (finishReason && finishReason !== FinishReason.MAX_TOKENS) {
-              const text = protocolTagFilter.flush();
-              if (text) sanitizedParts.push({ text });
-            }
-            content.parts = sanitizedParts;
             content.parts = normalizeModelToolCallIds(
               content.parts,
               usedToolCallIds,
@@ -3466,12 +3497,6 @@ export class GeminiChat {
 
             // Collect all parts for recording
             allModelParts.push(...content.parts);
-          } else if (finishReason && finishReason !== FinishReason.MAX_TOKENS) {
-            const text = protocolTagFilter.flush();
-            if (text && candidate) {
-              candidate.content = { role: 'model', parts: [{ text }] };
-              allModelParts.push({ text });
-            }
           }
         }
 
@@ -3548,15 +3573,15 @@ export class GeminiChat {
           }
         }
 
-        const suppressEmptyTerminalChunk =
-          Boolean(chunk.candidates?.[0]?.finishReason) &&
-          !hasToolCall &&
-          !allModelParts.some((part) => part.text?.trim());
-        const suppressEmptyProtocolChunk =
-          protocolTextWasSuppressed &&
-          !chunk.candidates?.[0]?.finishReason &&
-          !chunk.candidates?.[0]?.content?.parts?.length;
-        if (!suppressEmptyTerminalChunk && !suppressEmptyProtocolChunk) {
+        const chunkHasToolCall =
+          chunk.candidates?.[0]?.content?.parts?.some(
+            (part) => part.functionCall,
+          ) ?? false;
+        if (
+          !protocolTextWasSuppressed ||
+          !protocolTagDetector.blockingOutput ||
+          chunkHasToolCall
+        ) {
           yield chunk;
         }
       }
@@ -3607,24 +3632,10 @@ export class GeminiChat {
       .join('')
       .trim();
 
-    // Validate normally completed streams before recording them. A failed
-    // attempt may be retried, so persisting it here would make resumed history
-    // diverge from the in-memory history that deliberately drops the attempt.
-    const hasAnyContent = contentText || thoughtText;
-    if (
-      streamError === null &&
-      !hasToolCall &&
-      (!hasFinishReason || !hasAnyContent)
-    ) {
-      if (!hasFinishReason) {
-        throw new InvalidStreamError(
-          'Model stream ended without a finish reason.',
-          'NO_FINISH_REASON',
-        );
-      }
+    if (streamError === null && !hasToolCall && protocolTagDetector.leaked) {
       throw new InvalidStreamError(
-        'Model stream ended with empty response text.',
-        'NO_RESPONSE_TEXT',
+        'Model response started with leaked protocol tags.',
+        'PROTOCOL_TAG_LEAK',
       );
     }
 
@@ -3744,6 +3755,31 @@ export class GeminiChat {
         );
       }
       throw streamError;
+    }
+
+    // Stream validation logic: A stream is considered successful if:
+    // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
+    // 2. There's a finish reason AND we have non-empty response text or thought text
+    //
+    // We throw an error only when there's no tool call AND:
+    // - No finish reason, OR
+    // - Empty response text (e.g., no actual content and no thoughts)
+    //
+    // Note: Thoughts-only responses are valid for models that use thinking modes
+    // These models may send only reasoning content without explicit text output.
+    const hasAnyContent = contentText || thoughtText;
+    if (!hasToolCall && (!hasFinishReason || !hasAnyContent)) {
+      if (!hasFinishReason) {
+        throw new InvalidStreamError(
+          'Model stream ended without a finish reason.',
+          'NO_FINISH_REASON',
+        );
+      } else {
+        throw new InvalidStreamError(
+          'Model stream ended with empty response text.',
+          'NO_RESPONSE_TEXT',
+        );
+      }
     }
 
     this.history.push({
