@@ -710,6 +710,26 @@ export function registerSessionRoutes(
           loadError === undefined ||
           shouldPreserveTranscriptResolutionError(err)
         ) {
+          if (
+            loadError !== undefined &&
+            shouldPreserveTranscriptResolutionError(loadError)
+          ) {
+            // Rare (a session id usually resolves to one workspace): two
+            // workspaces each raised a structured error. We keep the later one
+            // but log the superseded error so it is not lost silently.
+            logSessionRoutingFailure(
+              route,
+              'transcript_resolution_error_superseded',
+              {
+                sessionId,
+                supersededError:
+                  loadError instanceof Error
+                    ? loadError.name
+                    : String(loadError),
+                newError: err instanceof Error ? err.name : String(err),
+              },
+            );
+          }
           loadError = err;
         }
       }

@@ -6883,6 +6883,169 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('preserves already-emitted events when a mid-page replay error occurs', async () => {
+    const settings = makeCoreSettings();
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...makeInnerConfig(),
+      enableFileCheckpointing: vi.fn(),
+    } as unknown as Config);
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId: VALID_SESSION_ID,
+      records: [{ uuid: 'u1' }, { uuid: 'u2' }],
+      hasMore: true,
+      nextCursorState: {
+        v: 1,
+        sessionId: VALID_SESSION_ID,
+        fileIdentity: { dev: 1, ino: 2 },
+        snapshotSize: 123,
+        position: 2,
+        leafUuid: 'u3',
+        startTime: 'start',
+        lastUpdated: 'end',
+      },
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    // First record replays successfully (emitting one update) then the second
+    // throws — mirroring a mid-page conversion failure.
+    mockHistoryReplayPage.mockImplementation(
+      async (context: { sendUpdate: (u: unknown) => Promise<void> }) => {
+        await context.sendUpdate({
+          sessionUpdate: 'user_message_chunk',
+          _meta: { timestamp: 1 },
+        });
+        throw new Error('replay boom on the second record');
+      },
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const result = (await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      {
+        sessionId: VALID_SESSION_ID,
+      },
+    )) as {
+      events: unknown[];
+      nextCursor?: string;
+      hasMore: boolean;
+      partial?: boolean;
+      replayError?: string;
+    };
+
+    // The events emitted before the failure survive…
+    expect(result.events.length).toBeGreaterThanOrEqual(1);
+    expect(result.partial).toBe(true);
+    expect(result.replayError).toBe('Replay conversion failed for this page');
+    // …and the partial page withholds the cursor so the client cannot paginate
+    // past the dropped records.
+    expect(result.nextCursor).toBeUndefined();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('propagates cumulativeUsage across pages via the cursor', async () => {
+    const settings = makeCoreSettings();
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...makeInnerConfig(),
+      enableFileCheckpointing: vi.fn(),
+    } as unknown as Config);
+    // Page 1 carries no incoming replay state; the replay bumps cumulativeUsage
+    // in place, which the handler must fold into the next cursor.
+    const page1 = {
+      sessionId: VALID_SESSION_ID,
+      records: [{ uuid: 'u1' }],
+      hasMore: true,
+      nextCursorState: {
+        v: 1,
+        sessionId: VALID_SESSION_ID,
+        fileIdentity: { dev: 1, ino: 2 },
+        snapshotSize: 123,
+        position: 1,
+        leafUuid: 'u2',
+        startTime: 'start',
+        lastUpdated: 'end',
+      },
+      startTime: 'start',
+      lastUpdated: 'end',
+    };
+    // Page 2's decoded cursor carries the cumulativeUsage produced by page 1.
+    const page2 = {
+      sessionId: VALID_SESSION_ID,
+      records: [{ uuid: 'u2' }],
+      replay: {
+        pendingToolCalls: [],
+        cumulativeUsage: {
+          apiTimeMs: 0,
+          cachedTokens: 0,
+          candidateTokens: 0,
+          promptTokens: 100,
+        },
+      },
+      hasMore: false,
+      startTime: 'start',
+      lastUpdated: 'end',
+    };
+    const readPage = vi
+      .fn()
+      .mockResolvedValueOnce(page1)
+      .mockResolvedValueOnce(page2);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    // Page 1: spend 100 prompt tokens, mutating the shared usage object in
+    // place exactly as the real replayer does.
+    mockHistoryReplayPage.mockImplementation(
+      async (context: { cumulativeUsage: { promptTokens: number } }) => {
+        context.cumulativeUsage.promptTokens += 100;
+        return { pendingToolCalls: [] };
+      },
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+    });
+    // Page 1 folds the bumped usage into the encoded cursor.
+    expect(vi.mocked(encodeSessionTranscriptCursor)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replay: expect.objectContaining({
+          cumulativeUsage: expect.objectContaining({ promptTokens: 100 }),
+        }),
+      }),
+      expect.any(String),
+    );
+
+    // Page 2: a non-mutating replay so the received usage is asserted as-is.
+    mockHistoryReplayPage.mockReset();
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+      cursor: 'cursor-page-2',
+    });
+    // Page 2 decodes that usage and propagates it into the replay context.
+    expect(mockHistoryReplayPage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cumulativeUsage: expect.objectContaining({ promptTokens: 100 }),
+      }),
+      [{ uuid: 'u2' }],
+      expect.anything(),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/providers extension methods list and connect model providers', async () => {
     const settings = makeSessionSettings();
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
