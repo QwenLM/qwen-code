@@ -454,6 +454,34 @@ describe('scheduled-tasks routes', () => {
     expect(t.lastFiredAt).toBe(1_700_000_000_000);
   });
 
+  it('refuses to enable a legacy guarded task via PATCH (409 task_legacy_unsupported)', async () => {
+    // `toView` reports the task disabled, so the only PATCH the UI sends is the
+    // Enable toggle. Accepting it (200) would read back disabled again — an
+    // Enable control that can never succeed with no error. Reject it instead.
+    await seedTask({
+      id: 'legacy-enable',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      enabled: false,
+      sessionId: 'sess-legacy-enable',
+      condition: 'only when files changed',
+    });
+    const res = await request(h.app)
+      .patch('/scheduled-tasks/legacy-enable')
+      .send({ enabled: true });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('task_legacy_unsupported');
+    // The task stays disabled on disk (no write) and still reads back disabled.
+    const list = await request(h.app).get('/scheduled-tasks');
+    const t = list.body.tasks.find(
+      (x: { id: string }) => x.id === 'legacy-enable',
+    );
+    expect(t.enabled).toBe(false);
+  });
+
   it('removes a ONE-SHOT task on manual run (so the scheduler cannot fire it again)', async () => {
     await seedTask({
       id: 'os-run',

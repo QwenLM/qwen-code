@@ -528,12 +528,23 @@ export function registerScheduledTasksRoutes(
     let found = false;
     let updated: DurableCronTask | undefined;
     let blockedByArchive = false;
+    let blockedLegacy = false;
     try {
       await updateCronTasks(boundWorkspace, (tasks) => {
         const idx = tasks.findIndex((t) => t.id === id);
         if (idx === -1) return tasks; // not found → no write
         found = true;
         const current = tasks[idx]!;
+        // A legacy guarded task (isolated + precondition, both removed) can't be
+        // enabled: `toView` reports it disabled, so the only PATCH the Web Shell
+        // sends for it is the Enable toggle — which would 200 here and then read
+        // back disabled again, an Enable control that can never succeed with no
+        // error explaining why. Reject the enable with the recreate remediation
+        // instead of acknowledging an update that changes nothing runnable.
+        if (patch.enabled === true && taskHasLegacyCondition(current)) {
+          blockedLegacy = true;
+          return tasks; // no write
+        }
         // A task disabled BY archiving its session (`disabledByArchive`) can't
         // be re-enabled through this generic PATCH: its bound session is still
         // archived and can't fire, so flipping `enabled: true` here would show
@@ -604,6 +615,14 @@ export function registerScheduledTasksRoutes(
       res.status(500).json({
         error: 'Failed to update scheduled task',
         code: 'scheduled_tasks_write_failed',
+      });
+      return;
+    }
+    if (blockedLegacy) {
+      res.status(409).json({
+        error:
+          'This task uses the removed isolated run mode with a precondition and can no longer be enabled or run. Recreate it (and call the `create_sub_session` tool from the prompt if you need per-run isolation).',
+        code: 'task_legacy_unsupported',
       });
       return;
     }
