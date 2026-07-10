@@ -22,6 +22,7 @@ import { ClientMcpSenderRegistry } from './client-mcp-sender-registry.js';
 import { WorkspaceRememberTaskLane } from '../workspace-remember.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({ writeStderrLine: vi.fn() }));
 
@@ -418,6 +419,33 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       ws.on('error', () => resolve(400));
     });
     expect(status).toBe(400);
+  });
+
+  it('sanitizes decoded selectors before logging WS rejection', async () => {
+    vi.mocked(writeStderrLine).mockClear();
+    await new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${port}/workspaces/evil%0AFORGED/acp`,
+        { handshakeTimeout: 2000 },
+      );
+      ws.on('unexpected-response', () => {
+        ws.terminate();
+        resolve();
+      });
+      ws.on('open', () => {
+        ws.close();
+        reject(new Error('unknown workspace selector should not upgrade'));
+      });
+      ws.on('error', () => resolve());
+    });
+
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('workspace-mismatch evil FORGED'),
+    );
+    for (const [message] of vi.mocked(writeStderrLine).mock.calls) {
+      // eslint-disable-next-line no-control-regex
+      expect(message).not.toMatch(/[\r\n\u001b]/u);
+    }
   });
 
   it('does not let a secondary workspace claim the CDP tunnel', async () => {

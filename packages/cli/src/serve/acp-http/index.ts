@@ -1389,7 +1389,7 @@ export function mountAcpHttp(
             ))
           : undefined;
         if (!rt) {
-          logReject(`workspace-mismatch ${selector}`);
+          logReject(`workspace-mismatch ${logSafe(selector)}`);
           socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
           socket.destroy();
           return;
