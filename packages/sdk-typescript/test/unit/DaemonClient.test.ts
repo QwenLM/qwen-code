@@ -4306,6 +4306,178 @@ describe('DaemonClient', () => {
         );
       }
     });
+
+    it('workspaceById and workspaceByCwd call workspace-qualified agents routes', async () => {
+      const list = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        agents: [],
+      };
+      const detail = {
+        kind: 'agent' as const,
+        name: 'reviewer',
+        description: 'reviews code',
+        level: 'project' as const,
+        isBuiltin: false,
+        hasTools: false,
+        systemPrompt: 'you are a reviewer',
+      };
+      const mutation = { ok: true, agent: detail };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.method === 'DELETE') return new Response(null, { status: 204 });
+        if (req.url.includes('/agents/reviewer')) {
+          return req.method === 'GET'
+            ? jsonResponse(200, detail)
+            : jsonResponse(200, mutation);
+        }
+        if (req.url.endsWith('/agents')) {
+          return req.method === 'POST'
+            ? jsonResponse(201, mutation)
+            : jsonResponse(200, list);
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const byId = client.workspaceById('workspace/id');
+      const byCwd = client.workspaceByCwd('/tmp/work space');
+
+      await expect(byId.listWorkspaceAgents()).resolves.toEqual(list);
+      await expect(
+        byCwd.createWorkspaceAgent(
+          {
+            name: 'reviewer',
+            description: 'reviews code',
+            systemPrompt: 'you are a reviewer',
+          },
+          'client-1',
+        ),
+      ).resolves.toEqual(mutation);
+      await expect(byId.getWorkspaceAgent('reviewer')).resolves.toEqual(detail);
+      await expect(
+        byId.updateWorkspaceAgent(
+          'reviewer',
+          { description: 'new description' },
+          { scope: 'project', clientId: 'client-2' },
+        ),
+      ).resolves.toEqual(mutation);
+      await expect(
+        byId.deleteWorkspaceAgent('reviewer', {
+          scope: 'workspace',
+          clientId: 'client-3',
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspaces/workspace%2Fid/agents'],
+        ['POST', 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/agents'],
+        ['GET', 'http://daemon/workspaces/workspace%2Fid/agents/reviewer'],
+        [
+          'POST',
+          'http://daemon/workspaces/workspace%2Fid/agents/reviewer?scope=project',
+        ],
+        [
+          'DELETE',
+          'http://daemon/workspaces/workspace%2Fid/agents/reviewer?scope=workspace',
+        ],
+      ]);
+      expect(JSON.parse(calls[1]!.body!)).toMatchObject({
+        name: 'reviewer',
+        scope: 'workspace',
+      });
+      expect(calls[1]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(calls[3]?.headers['x-qwen-client-id']).toBe('client-2');
+      expect(calls[4]?.headers['x-qwen-client-id']).toBe('client-3');
+    });
+
+    it('workspace-qualified deleteWorkspaceAgent preserves idempotent structured 404 handling', async () => {
+      {
+        const { fetch } = recordingFetch(() =>
+          jsonResponse(404, { error: 'not found', code: 'agent_not_found' }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await expect(
+          client.workspaceById('workspace-id').deleteWorkspaceAgent('x'),
+        ).resolves.toBeUndefined();
+      }
+      {
+        const { fetch } = recordingFetch(
+          () =>
+            new Response('Not Found', {
+              status: 404,
+              headers: { 'content-type': 'text/plain' },
+            }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await expect(
+          client.workspaceById('workspace-id').deleteWorkspaceAgent('x'),
+        ).rejects.toBeInstanceOf(DaemonHttpError);
+      }
+    });
+
+    it('workspaceById destructive session helpers use workspace-qualified routes', async () => {
+      const replies: Record<string, unknown> = {
+        '/sessions/delete': { removed: ['s-1'], notFound: [], errors: [] },
+        '/sessions/archive': {
+          archived: ['s-1'],
+          alreadyArchived: [],
+          notFound: [],
+          errors: [],
+        },
+        '/sessions/unarchive': {
+          unarchived: ['s-1'],
+          alreadyActive: [],
+          notFound: [],
+          errors: [],
+        },
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        const url = new URL(req.url);
+        const suffix = url.pathname.replace('/workspaces/workspace-id', '');
+        return jsonResponse(200, replies[suffix] ?? { unexpected: suffix });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const workspace = client.workspaceById('workspace-id');
+
+      await expect(
+        workspace.deleteSessionsData(['s-1'], 'client-1'),
+      ).resolves.toEqual(replies['/sessions/delete']);
+      await expect(
+        workspace.archiveSessionsData(['s-1'], 'client-2'),
+      ).resolves.toEqual(replies['/sessions/archive']);
+      await expect(
+        workspace.unarchiveSessionsData(['s-1'], 'client-3'),
+      ).resolves.toEqual(replies['/sessions/unarchive']);
+
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['POST', 'http://daemon/workspaces/workspace-id/sessions/delete'],
+        ['POST', 'http://daemon/workspaces/workspace-id/sessions/archive'],
+        ['POST', 'http://daemon/workspaces/workspace-id/sessions/unarchive'],
+      ]);
+      expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+        'client-1',
+        'client-2',
+        'client-3',
+      ]);
+      for (const call of calls) {
+        expect(JSON.parse(call.body!)).toEqual({ sessionIds: ['s-1'] });
+      }
+    });
+
+    it('workspaceByCwd deleteSessionGroup uses workspace-qualified group route', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { deleted: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.workspaceByCwd('/tmp/work space').deleteSessionGroup('group/1'),
+      ).resolves.toEqual({ deleted: true });
+
+      expect(calls[0]?.method).toBe('DELETE');
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Ftmp%2Fwork%20space/session-groups/group%2F1',
+      );
+    });
   });
 
   describe('addRuntimeMcpServer (T2.8 #4514)', () => {

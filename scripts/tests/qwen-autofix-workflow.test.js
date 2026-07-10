@@ -33,6 +33,8 @@ const routeStep =
   workflow.match(
     /- name: 'Decide phases'[\s\S]*?(?=\n[ ]{2}# ==========)/,
   )?.[0] ?? '';
+const routeJob =
+  workflow.match(/\n {2}route:[\s\S]*?(?=\n[ ]{2}# ==========)/)?.[0] ?? '';
 const reviewScanJob =
   workflow.match(/\n {2}review-scan:[\s\S]*?(?=\n[ ]{2}# ==========)/)?.[0] ??
   '';
@@ -270,13 +272,19 @@ describe('qwen-autofix workflow', () => {
 
   it('keeps label-triggered issue routing guarded and diagnosable', () => {
     expect(workflow).toContain("issues:\n    types:\n      - 'labeled'");
+    expect(workflow).toContain("      - 'assigned'");
     expect(workflow).toContain(
       "ISSUE_LABELS_JSON: '${{ toJSON(github.event.issue.labels.*.name) }}'",
     );
     expect(workflow).toContain(
       "SENDER_LOGIN: '${{ github.event.sender.login }}'",
     );
+    expect(workflow).toContain(
+      "ASSIGNEE_LOGIN: '${{ github.event.assignee.login }}'",
+    );
     expect(workflow).toContain("permissions:\n      contents: 'read'");
+    expect(routeJob).toContain("group: 'qwen-autofix-route'");
+    expect(routeJob).toContain('cancel-in-progress: true');
     expect(workflow).toContain(
       'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
     );
@@ -296,6 +304,10 @@ describe('qwen-autofix workflow', () => {
       '[[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true',
     );
     expect(workflow).toContain(
+      '[[ "${ASSIGNEE_LOGIN}" == "${AUTOFIX_BOT}" ]] && label_is_trigger=true',
+    );
+    expect(routeStep).not.toContain('ROUTE_ISSUE="${ISSUE_NUMBER}"');
+    expect(workflow).toContain(
       'issue event ignored: state_open=$([[ "${ISSUE_STATE}" == \'open\' ]]',
     );
     expect(workflow).toContain('bug=${issue_is_bug}');
@@ -304,7 +316,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('trigger_label=${label_is_trigger}');
     expect(workflow).toContain('trigger_label=false label=');
     expect(workflow).toContain('sender_trusted=${sender_is_trusted}');
-    expect(workflow).toContain(
+    expect(issueAutofixJob).toContain(
       "group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'",
     );
     expect(workflow).toContain(
@@ -363,10 +375,6 @@ describe('qwen-autofix workflow', () => {
     expect(routeStep).not.toContain('comment command accepted');
     expect(routeStep).not.toContain('address-review command accepted');
     expect(routeStep).not.toContain('ROUTE_PR="${ISSUE_NUMBER}"');
-    expect(routeStep).toContain('ROUTE_ISSUE="${ISSUE_NUMBER}"');
-    expect(routeStep).toContain(
-      'issue #${ISSUE_NUMBER} assigned to ${AUTOFIX_BOT} → issue phase',
-    );
   });
 
   it('gates real-time review triggers on bot author, trusted sender, and in-repo PR', () => {

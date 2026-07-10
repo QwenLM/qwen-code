@@ -138,7 +138,6 @@ export function buildReattachParts(
   ];
 }
 
-
 export function prepareImagePayloadsForRequest(
   contents: Content[],
   options: {

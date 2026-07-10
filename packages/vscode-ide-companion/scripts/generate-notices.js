@@ -221,6 +221,11 @@ async function main() {
       noticeText += `${dep.license}\n\n`;
     }
 
+    // Normalize line endings to LF. Third-party license files may use CRLF,
+    // which would otherwise be embedded verbatim and produce spurious diffs
+    // (the file is declared `eol=lf` in .gitattributes).
+    noticeText = noticeText.replace(/\r\n/g, '\n');
+
     await fs.writeFile(noticeFilePath, noticeText);
     console.log(`NOTICES.txt generated at ${noticeFilePath}`);
     console.log(`Total dependencies: ${dependencyEntries.length}`);
