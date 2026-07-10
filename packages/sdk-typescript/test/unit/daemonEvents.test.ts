@@ -2660,12 +2660,21 @@ describe('PR 21 — auth device-flow events', () => {
           retainedEvents: 2,
           maxBytes: 512,
           truncatedTurns: 2,
-          fullTranscriptAvailable: false,
+          fullTranscriptAvailable: true,
         },
       } satisfies DaemonEvent;
 
       const known = asKnownDaemonEvent(event);
       expect(known?.type).toBe('history_truncated');
+      expect(
+        asKnownDaemonEvent({
+          ...event,
+          data: {
+            ...event.data,
+            fullTranscriptAvailable: false,
+          },
+        })?.type,
+      ).toBe('history_truncated');
 
       const state = reduceDaemonSessionEvent(
         createDaemonSessionViewState(),
@@ -2685,7 +2694,7 @@ describe('PR 21 — auth device-flow events', () => {
             reason: 'replay_window_exceeded',
             retainedEvents: 2,
             maxBytes: 512,
-            fullTranscriptAvailable: false,
+            fullTranscriptAvailable: true,
           },
         }),
       ).toBeUndefined();
@@ -2698,7 +2707,7 @@ describe('PR 21 — auth device-flow events', () => {
             truncatedEvents: -1,
             retainedEvents: 2,
             maxBytes: 512,
-            fullTranscriptAvailable: false,
+            fullTranscriptAvailable: true,
           },
         }),
       ).toBeUndefined();
@@ -2711,7 +2720,7 @@ describe('PR 21 — auth device-flow events', () => {
             truncatedEvents: 4,
             retainedEvents: 2.5,
             maxBytes: 512,
-            fullTranscriptAvailable: false,
+            fullTranscriptAvailable: true,
           },
         }),
       ).toBeUndefined();
@@ -2725,7 +2734,7 @@ describe('PR 21 — auth device-flow events', () => {
             retainedEvents: 2,
             maxBytes: 512,
             truncatedTurns: -1,
-            fullTranscriptAvailable: false,
+            fullTranscriptAvailable: true,
           },
         }),
       ).toBeUndefined();
@@ -2738,7 +2747,20 @@ describe('PR 21 — auth device-flow events', () => {
             truncatedEvents: 4,
             retainedEvents: 2,
             maxBytes: 512,
-            fullTranscriptAvailable: false,
+            fullTranscriptAvailable: true,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: 4,
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: 'yes',
           },
         }),
       ).toBeUndefined();

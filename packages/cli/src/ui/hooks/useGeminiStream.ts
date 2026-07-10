@@ -3501,26 +3501,7 @@ export const useGeminiStream = (
           prompt: string;
           cronExpr?: string;
           missed?: boolean;
-          // Declared so a guarded job can be recognized: a structural parameter
-          // type that omits it would let TypeScript narrow the field away and
-          // hide the guard below from the reader.
-          condition?: string;
         }) => {
-          // Only the ACP/daemon session evaluates a precondition (it owns the
-          // sub-session dispatch the verdict gates). Running the prompt here
-          // would fire a guarded task unconditionally — the exact outcome the
-          // precondition exists to prevent — so fail closed. Reachable only for
-          // a task whose `condition` was hand-written onto an unbound entry in
-          // the tasks file; every writer binds one, and a bound task fires only
-          // in its own session.
-          if (job.condition) {
-            debugLogger.warn(
-              'Skipping a guarded scheduled task: preconditions are not ' +
-                'evaluated in interactive mode',
-              { jobId: job.id },
-            );
-            return;
-          }
           const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
           const autonomousMode = detectAutonomousSentinel(job.prompt);
           let label = job.prompt.slice(0, 40);

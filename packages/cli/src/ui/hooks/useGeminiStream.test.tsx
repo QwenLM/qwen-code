@@ -713,49 +713,6 @@ describe('useGeminiStream', () => {
     });
   });
 
-  it('skips a guarded scheduled task instead of firing it unconditionally', async () => {
-    // Only the ACP/daemon session evaluates a precondition. If this consumer
-    // simply ran the prompt, a guarded task would fire with its guard ignored —
-    // the exact outcome the precondition exists to prevent. Fail closed.
-    const scheduler = {
-      hasPendingWork: true,
-      enableDurable: vi.fn().mockResolvedValue(undefined),
-      start: vi.fn(
-        (
-          callback: (job: {
-            id?: string;
-            prompt: string;
-            cronExpr?: string;
-            missed?: boolean;
-            condition?: string;
-          }) => void,
-        ) => {
-          callback({
-            id: 'guarded-1',
-            prompt: 'nightly report',
-            condition: 'only when the release flag is set',
-          });
-        },
-      ),
-      stop: vi.fn(),
-      getExitSummary: vi.fn().mockReturnValue(undefined),
-    };
-    (mockConfig.isCronEnabled as unknown as Mock).mockReturnValue(true);
-    (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue(scheduler);
-
-    const { mockSendMessageStream } = renderTestHook();
-
-    await waitFor(() => expect(scheduler.start).toHaveBeenCalled());
-    // No notification queued, and above all no model turn for the task's prompt.
-    expect(mockAddItem).not.toHaveBeenCalledWith(
-      expect.objectContaining({
-        text: expect.stringContaining('nightly report'),
-      }),
-      expect.any(Number),
-    );
-    expect(mockSendMessageStream).not.toHaveBeenCalled();
-  });
-
   it('labels loop wakeup cron notifications as Loop', async () => {
     const scheduler = {
       hasPendingWork: true,
