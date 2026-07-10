@@ -11,6 +11,7 @@ import type { AddressInfo } from 'node:net';
 import WebSocket from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { type AcpHttpHandle, mountAcpHttp } from './index.js';
+import { DeviceFlowRegistry } from '../auth/device-flow.js';
 import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
@@ -70,6 +71,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
   let base: string;
   let port: number;
   let handle: AcpHttpHandle | undefined;
+  let deviceFlowRegistry: DeviceFlowRegistry | undefined;
 
   beforeEach(async () => {
     const primaryBridge = makeBridge();
@@ -100,6 +102,13 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       }),
     ]);
 
+    deviceFlowRegistry = new DeviceFlowRegistry({
+      events: { publish: () => {} },
+      resolveProvider: () => undefined,
+      scheduleInterval: () => 0 as unknown as ReturnType<typeof setInterval>,
+      clearScheduledInterval: () => {},
+    });
+
     const app = express();
     app.use(express.json());
     handle = mountAcpHttp(app, primaryBridge, {
@@ -107,6 +116,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       workspace: {} as unknown as DaemonWorkspaceService,
       enabled: true,
       workspaceRegistry: registry,
+      deviceFlowRegistry,
       workspaceRememberLane: new WorkspaceRememberTaskLane(primaryBridge),
     });
 
@@ -122,6 +132,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
 
   afterEach(async () => {
     handle?.dispose();
+    deviceFlowRegistry?.dispose();
     server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
   });
@@ -270,5 +281,51 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       },
     );
     expect(outcome).toBe('closed');
+  });
+
+  it('serves device-flow on a trusted secondary workspace via the shared registry', async () => {
+    // Regression for the reviewer Critical: an earlier per-runtime device-flow
+    // registry left secondary mounts unauthenticated ("Device flow not
+    // configured"). With the daemon-global registry shared into every mount, the
+    // request reaches provider resolution instead — an unsupported-provider
+    // error here — which proves the registry is wired (never "not configured").
+    const reply = await new Promise<{
+      error?: { message?: string; data?: { errorKind?: string } };
+    }>((resolve, reject) => {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${port}/workspaces/secondary-id/acp`,
+        { handshakeTimeout: 2000 },
+      );
+      ws.on('open', () => ws.send(INITIALIZE));
+      ws.on('message', (data: WebSocket.RawData) => {
+        try {
+          const msg = JSON.parse(data.toString()) as { id?: number };
+          if (msg.id === 1) {
+            ws.send(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: 2,
+                method: '_qwen/workspace/auth/device_flow/start',
+                params: { providerId: 'qwen' },
+              }),
+            );
+            return;
+          }
+          if (msg.id === 2) {
+            ws.close();
+            resolve(
+              msg as {
+                error?: { message?: string; data?: { errorKind?: string } };
+              },
+            );
+          }
+        } catch (err) {
+          reject(err as Error);
+        }
+      });
+      ws.on('error', reject);
+    });
+    expect(reply.error?.message ?? '').not.toContain('not configured');
+    expect(reply.error?.data?.errorKind).toBe('unsupported_provider');
   });
 });
