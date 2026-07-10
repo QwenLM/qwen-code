@@ -39,6 +39,7 @@ export type ServeFastPathSettings = Pick<
   Settings,
   'advanced' | 'context' | 'env' | 'security' | 'tools'
 > & {
+  general?: Pick<NonNullable<Settings['general']>, 'chatRecording'>;
   policy?: ServeFastPathPolicyInput;
 };
 const V2_SETTINGS_VERSION = 2;
@@ -439,6 +440,19 @@ function pickFastPathSettings(
     out.env = pickStringRecord(env);
   }
 
+  const general = value['general'];
+  if (isPlainObject(general)) {
+    const chatRecording = general['chatRecording'];
+    if (chatRecording !== undefined && typeof chatRecording !== 'boolean') {
+      throw new Error(
+        'Serve fast path settings general.chatRecording must be a boolean.',
+      );
+    }
+    if (chatRecording !== undefined) {
+      out.general = { chatRecording };
+    }
+  }
+
   const advanced = value['advanced'];
   if (isPlainObject(advanced)) {
     const pickedAdvanced: NonNullable<ServeFastPathSettings['advanced']> = {};
@@ -620,6 +634,9 @@ function mergeFastPathSettings(
   for (const source of sources) {
     if (source.env) {
       merged.env = { ...(merged.env ?? {}), ...source.env };
+    }
+    if (source.general) {
+      merged.general = { ...(merged.general ?? {}), ...source.general };
     }
     if (source.advanced?.excludedEnvVars) {
       merged.advanced = {

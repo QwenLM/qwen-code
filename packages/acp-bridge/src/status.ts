@@ -138,6 +138,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionRewind: 'qwen/control/session/rewind',
   sessionContinue: 'qwen/control/session/continue',
   sessionTitle: 'qwen/control/session/title',
+  sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
@@ -172,6 +173,15 @@ export const SERVE_CONTROL_EXT_METHODS = {
    */
   clientMcpMessage: 'qwen/control/client_mcp/message',
   sessionCd: 'qwen/control/session/cd',
+  /**
+   * Also called by the CHILD UP into the parent (like `clientMcpMessage`): the
+   * `create_sub_session` tool, running inside a child's agent turn, asks the
+   * daemon to spawn a fresh top-level sub-session and run a prompt in it. Params:
+   * `{ prompt, completion:'sent'|'first-turn', model?, name?, callerSessionId? }`;
+   * result: `{ sessionId, result?, stopReason? }` (result present only for the
+   * `first-turn` mode, which waits for the sub-session's first turn to finish).
+   */
+  createSubSession: 'qwen/control/create-sub-session',
 } as const;
 
 export type ServeStatus =

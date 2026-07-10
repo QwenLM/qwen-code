@@ -23,7 +23,9 @@ describe('isAskUserPermission', () => {
 
   it('is true when questions are present and no tool name is given', () => {
     expect(
-      isAskUserPermission(req({ rawInput: { questions: [{ question: 'q' }] } })),
+      isAskUserPermission(
+        req({ rawInput: { questions: [{ question: 'q' }] } }),
+      ),
     ).toBe(true);
   });
 

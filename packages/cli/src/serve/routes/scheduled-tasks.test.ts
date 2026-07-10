@@ -148,6 +148,35 @@ describe('scheduled-tasks routes', () => {
     const list = await request(h.app).get('/scheduled-tasks');
     expect(list.body.tasks).toHaveLength(1);
     expect(list.body.tasks[0].id).toBe(res.body.id);
+    // runMode defaults to 'shared' when omitted (the #6389 model).
+    expect(res.body.runMode).toBe('shared');
+    expect(list.body.tasks[0].runMode).toBe('shared');
+  });
+
+  it('creates an isolated task, persisting runMode and still minting an anchor', async () => {
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      runMode: 'isolated',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.runMode).toBe('isolated');
+    // The anchor (ticker) session is still minted for an isolated task — it is
+    // what fires the cron; the runs happen in fresh siblings the daemon spawns.
+    expect(h.bridge.spawned).toHaveLength(1);
+    expect(res.body.sessionId).toBe(h.bridge.spawned[0]);
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].runMode).toBe('isolated');
+  });
+
+  it('rejects an invalid runMode on create', async () => {
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      runMode: 'per-run',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_run_mode');
   });
 
   it('binds a created task to a freshly minted session', async () => {
@@ -290,6 +319,36 @@ describe('scheduled-tasks routes', () => {
 
     const list = await request(h.app).get('/scheduled-tasks');
     expect(list.body.tasks[0].enabled).toBe(false);
+  });
+
+  it('switches runMode via PATCH, and rejects an invalid value', async () => {
+    const created = await create({ cron: '0 9 * * *', prompt: 'x' });
+    const id = created.body.id as string;
+    expect(created.body.runMode).toBe('shared');
+
+    const patch = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ runMode: 'isolated' });
+    expect(patch.status).toBe(200);
+    expect(patch.body.runMode).toBe('isolated');
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].runMode).toBe('isolated');
+
+    // Reverse direction: isolated → shared clears the on-disk field (regression
+    // for PATCH runMode=undefined spread-overwrite subtlety).
+    const revert = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ runMode: 'shared' });
+    expect(revert.status).toBe(200);
+    expect(revert.body.runMode).toBe('shared');
+    const listAfterRevert = await request(h.app).get('/scheduled-tasks');
+    expect(listAfterRevert.body.tasks[0].runMode).toBe('shared');
+
+    const bad = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ runMode: 'per-run' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.code).toBe('invalid_run_mode');
   });
 
   it('clears the name when patched to an empty string', async () => {
