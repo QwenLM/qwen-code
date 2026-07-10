@@ -238,7 +238,7 @@ describe('serve fast-path bundle check', () => {
       /Could not find bundled outputs for serve pre-listen roots/,
     );
     expect(() => findServeFastPathBundleOffenders(metafile)).toThrow(
-      /npm run build -- --cli-only && cross-env DEV=true npm run bundle/,
+      /node scripts\/clean-package-build-artifacts\.js && npm run build -- --cli-only && cross-env DEV=true npm run bundle/,
     );
   });
 
@@ -313,7 +313,7 @@ describe('serve fast-path bundle check', () => {
           metafilePath: join(tempDir, 'dist', 'esbuild.json'),
         }),
       ).toThrow(
-        /npm run build -- --cli-only && cross-env DEV=true npm run bundle/,
+        /node scripts\/clean-package-build-artifacts\.js && npm run build -- --cli-only && cross-env DEV=true npm run bundle/,
       );
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
@@ -331,7 +331,7 @@ describe('serve fast-path bundle check', () => {
         /Invalid esbuild metafile at .*dist[/\\]esbuild\.json/,
       );
       expect(() => checkServeFastPathBundle({ metafilePath })).toThrow(
-        /Run `npm run build -- --cli-only && cross-env DEV=true npm run bundle` to regenerate it/,
+        /Run `node scripts\/clean-package-build-artifacts\.js && npm run build -- --cli-only && cross-env DEV=true npm run bundle` to regenerate it/,
       );
     } finally {
       rmSync(tempDir, { recursive: true, force: true });

@@ -25,25 +25,6 @@ import {
 } from './scheduledTasksSchedule';
 import styles from './ScheduledTasksDialog.module.css';
 
-/** Wrap a prompt for "Run now" on an isolated task — instructs the model to
- * dispatch via `create_sub_session` rather than running inline.
- *
- * Only the MANUAL run relays through the model. A scheduled fire is dispatched
- * daemon-side (`Session.#dispatchIsolatedCronFire`) because it is unattended:
- * `create_sub_session` asks for permission, and nobody would be there to answer.
- * A manual run is attended by definition — the user is looking at this dialog —
- * so the tool's permission gate can do its job. */
-function wrapIsolatedRunPrompt(prompt: string): string {
-  return (
-    'This scheduled task is configured to run in an ISOLATED session. Use the ' +
-    '`create_sub_session` tool with completion "sent" to run the task below in ' +
-    'a fresh sub-session — do NOT perform the task yourself in this session. ' +
-    'After dispatching it, reply with a one-line confirmation.\n\n' +
-    '--- Task ---\n' +
-    prompt
-  );
-}
-
 /** Localized absolute timestamp, resilient to a bad epoch value. */
 function safeLocaleString(ms: number): string {
   try {
@@ -53,7 +34,10 @@ function safeLocaleString(ms: number): string {
   }
 }
 
-/** Formats one run-history entry: localized timestamp + a kind tag. */
+/** Formats one run-history entry: localized timestamp + a kind tag, plus a
+ * "skipped" tag for a legacy `withheld` entry (a fire whose precondition
+ * prevented it, from before the isolated mode was removed) so it isn't shown as
+ * an ordinary successful run. */
 function describeRun(run: DaemonScheduledTaskRun, t: TranslateFn): string {
   const kind =
     run.kind === 'catch-up'
@@ -61,7 +45,10 @@ function describeRun(run: DaemonScheduledTaskRun, t: TranslateFn): string {
       : run.kind === 'manual'
         ? ` · ${t('scheduledTasks.runKind.manual')}`
         : '';
-  return `${safeLocaleString(run.at)}${kind}`;
+  const withheld = run.withheld
+    ? ` · ${t('scheduledTasks.runKind.withheld')}`
+    : '';
+  return `${safeLocaleString(run.at)}${kind}${withheld}`;
 }
 
 interface ScheduledTasksDialogProps {
@@ -127,9 +114,6 @@ export function ScheduledTasksDialog({
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
   const [builder, setBuilder] = useState<BuilderState>(DEFAULT_BUILDER);
-  // 'shared' = run in the one bound session (runs accumulate); 'isolated' =
-  // spawn a fresh session per fire. Defaults to shared for back-compat.
-  const [runMode, setRunMode] = useState<'shared' | 'isolated'>('shared');
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -221,7 +205,6 @@ export function ScheduledTasksDialog({
     setName('');
     setPrompt('');
     setBuilder(DEFAULT_BUILDER);
-    setRunMode('shared');
     setFormError(null);
     setShowForm(false);
     setEditingId(null);
@@ -232,7 +215,6 @@ export function ScheduledTasksDialog({
     setName('');
     setPrompt('');
     setBuilder(DEFAULT_BUILDER);
-    setRunMode('shared');
     setFormError(null);
     setShowForm(true);
   }, []);
@@ -244,7 +226,6 @@ export function ScheduledTasksDialog({
     // Reverse the cron back onto the pickers; an expression the pickers can't
     // represent lands in the `custom` field, never silently rewritten.
     setBuilder(parseCronToBuilder(task.cron));
-    setRunMode(task.runMode ?? 'shared');
     setFormError(null);
     setShowForm(true);
   }, []);
@@ -265,13 +246,11 @@ export function ScheduledTasksDialog({
       if (editingId) {
         // Update only the editable fields; `recurring`/`enabled` are omitted so
         // the PATCH leaves them unchanged (recurring isn't in this form, and
-        // enabled is driven by the card toggle). Empty name clears it. runMode
-        // is sent so the picker can switch a task between shared and isolated.
+        // enabled is driven by the card toggle). Empty name clears it.
         await actions.updateScheduledTask(editingId, {
           cron,
           prompt: prompt.trim(),
           name: name.trim() || null,
-          runMode,
         });
       } else {
         await actions.createScheduledTask({
@@ -280,7 +259,6 @@ export function ScheduledTasksDialog({
           name: name.trim() || null,
           recurring: true,
           enabled: true,
-          runMode,
         });
       }
       if (!mountedRef.current) return;
@@ -292,17 +270,7 @@ export function ScheduledTasksDialog({
     } finally {
       if (mountedRef.current) setSubmitting(false);
     }
-  }, [
-    actions,
-    builder,
-    editingId,
-    name,
-    prompt,
-    runMode,
-    reload,
-    resetForm,
-    t,
-  ]);
+  }, [actions, builder, editingId, name, prompt, reload, resetForm, t]);
 
   const handleToggle = useCallback(
     async (task: DaemonScheduledTask) => {
@@ -348,13 +316,8 @@ export function ScheduledTasksDialog({
           // Recurring: enqueue FIRST (onRunPrompt resolves at admission, rejects
           // if the session can't be opened), record AFTER — so a failed enqueue
           // leaves no false "ran" entry. A record failure is surfaced but the
-          // history still catches up on the next refresh. For isolated tasks,
-          // wrap the prompt so the model dispatches via create_sub_session.
-          const runPrompt =
-            fresh.runMode === 'isolated'
-              ? wrapIsolatedRunPrompt(fresh.prompt)
-              : fresh.prompt;
-          await onRunPrompt(runPrompt, fresh.sessionId);
+          // history still catches up on the next refresh.
+          await onRunPrompt(fresh.prompt, fresh.sessionId);
           try {
             await actions.runScheduledTask(fresh.id);
             await reload();
@@ -371,11 +334,7 @@ export function ScheduledTasksDialog({
           await actions.runScheduledTask(fresh.id);
           await reload();
           try {
-            const runPrompt =
-              fresh.runMode === 'isolated'
-                ? wrapIsolatedRunPrompt(fresh.prompt)
-                : fresh.prompt;
-            await onRunPrompt(runPrompt, fresh.sessionId);
+            await onRunPrompt(fresh.prompt, fresh.sessionId);
           } catch (err) {
             onError(err, t('scheduledTasks.error.oneShotConsumedButFailed'));
             return;
@@ -484,29 +443,6 @@ export function ScheduledTasksDialog({
                 onChange={(e) => setPrompt(e.target.value)}
               />
             </label>
-
-            <div className={styles.field}>
-              <span className={styles.fieldLabel}>
-                {t('scheduledTasks.runMode')}
-              </span>
-              <div className={styles.radioGroup} role="radiogroup">
-                {(['shared', 'isolated'] as const).map((mode) => (
-                  <label key={mode} className={styles.radioOption}>
-                    <input
-                      type="radio"
-                      name="runMode"
-                      value={mode}
-                      checked={runMode === mode}
-                      onChange={() => setRunMode(mode)}
-                    />
-                    <span>{t(`scheduledTasks.runMode.${mode}`)}</span>
-                  </label>
-                ))}
-              </div>
-              <span className={styles.fieldHint}>
-                {t(`scheduledTasks.runMode.${runMode}.hint`)}
-              </span>
-            </div>
 
             <div className={styles.scheduleRow}>
               <label className={styles.field}>
@@ -778,9 +714,7 @@ export function ScheduledTasksDialog({
                 {task.sessionId && onOpenSession ? (
                   // The task's bound session IS its run history — open its
                   // transcript. Always shown (empty state included) so the
-                  // history is discoverable even before the first run. For an
-                  // isolated task this transcript shows the model dispatching
-                  // each run into a fresh sub-session.
+                  // history is discoverable even before the first run.
                   <button
                     type="button"
                     className={styles.runsToggle}

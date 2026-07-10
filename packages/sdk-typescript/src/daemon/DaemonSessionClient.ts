@@ -29,6 +29,7 @@ import type {
   DaemonSessionContextUsageStatus,
   DaemonSessionLspStatus,
   DaemonSessionRecapResult,
+  DaemonSessionSummary,
   DaemonShellCommandResult,
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
@@ -157,18 +158,21 @@ export class DaemonSessionClient {
     //   guardrail events advertised via `mcp_guardrail_events` are
     //   useless without this seed because they predate any live
     //   subscription.
-    // - **Carve-out**: `modelServiceId` switch failures are
-    //   reported on SSE, not the create/attach HTTP response. The
-    //   original carve-out covered just this case; the unified rule
-    //   below subsumes it (newly-created sessions always seed) while
-    //   preserving the semantics for re-attached sessions where the
-    //   caller may have an existing event cursor it doesn't want to
-    //   reset.
+    // - **Carve-out**: attach-time `modelServiceId` and
+    //   `approvalMode` changes are reported on SSE, not only the
+    //   create/attach HTTP response. The original carve-out covered
+    //   just model changes; approval-mode changes have the same
+    //   pre-subscription event window. The unified rule below subsumes
+    //   newly-created sessions while preserving re-attach semantics for
+    //   callers without attach-time state changes.
     //
     // The daemon treats Last-Event-ID: 0 as "replay from the beginning
     // of the bounded ring"; if older events have already been evicted,
     // clients receive the retained suffix and continue live from there.
-    const lastEventId = !session.attached || req.modelServiceId ? 0 : undefined;
+    const lastEventId =
+      !session.attached || req.modelServiceId || req.approvalMode
+        ? 0
+        : undefined;
     return new DaemonSessionClient({
       client,
       session,
@@ -560,6 +564,10 @@ export class DaemonSessionClient {
 
   async context(): Promise<DaemonSessionContextStatus> {
     return await this.client.sessionContext(this.sessionId, this.clientId);
+  }
+
+  async status(): Promise<DaemonSessionSummary> {
+    return await this.client.sessionStatus(this.sessionId, this.clientId);
   }
 
   async contextUsage(

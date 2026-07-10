@@ -156,6 +156,18 @@ function onResponseComplete(
   ).onResponseComplete(chatId, fullText, sessionId);
 }
 
+function onResponseBoundary(
+  ch: QQChannelClass,
+  chatId: string,
+  sessionId: string,
+) {
+  return (
+    ch as unknown as {
+      onResponseBoundary: (c: string, s: string) => void;
+    }
+  ).onResponseBoundary(chatId, sessionId);
+}
+
 function toolCall(sessionId: string): ToolCallEvent {
   return {
     sessionId,
@@ -466,6 +478,30 @@ describe('onResponseComplete', () => {
     expect((body.markdown as Record<string, string>).content).toBe('nothing');
   });
 
+  it('drops accumulated buffer at response boundary', async () => {
+    const ch = makeChannel();
+    onResponseChunk(ch, 'test-chat', 'intermediate ', 'sess-1');
+
+    onResponseBoundary(ch, 'test-chat', 'sess-1');
+    await onResponseComplete(ch, 'test-chat', 'final', 'sess-1');
+
+    expect(streamState(ch).has('sess-1')).toBe(false);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect((body.markdown as Record<string, string>).content).toBe('final');
+  });
+
+  it('clears an in-flight flush marker at response boundary', () => {
+    const ch = makeChannel();
+    const channel = ch as unknown as Record<string, unknown>;
+    const flushingSessions = channel['flushingSessions'] as Set<string>;
+    flushingSessions.add('sess-1');
+
+    onResponseBoundary(ch, 'test-chat', 'sess-1');
+
+    expect(flushingSessions.has('sess-1')).toBe(false);
+  });
+
   it('does not send when buffer is empty (already flushed)', async () => {
     const ch = makeChannel();
     onResponseChunk(ch, 'test-chat', 'all flushed', 'sess-1');
@@ -591,7 +627,7 @@ describe('streaming guards', () => {
     onResponseChunk(ch, 'test-chat', 'stale text', 'sess-1');
 
     const chp = ch as unknown as Record<string, unknown>;
-    chp['reconnectId'] = (chp['reconnectId'] as number) + 1;
+    chp['_reconnectId'] = (chp['_reconnectId'] as number) + 1;
 
     vi.advanceTimersByTime(2000);
     await drain();
@@ -626,7 +662,7 @@ describe('streaming guards', () => {
 
     (chp['idleFlush'] as (sid: string, rid: number) => void)(
       'sess-1',
-      chp['reconnectId'] as number,
+      chp['_reconnectId'] as number,
     );
 
     resolveSend!(mockResponse(true));
@@ -952,7 +988,7 @@ describe('idleFlush guard re-schedule (#5)', () => {
     const prevTimer = st.timer;
     (chp['idleFlush'] as (sid: string, rid: number) => void)(
       'sess-1',
-      chp['reconnectId'] as number,
+      chp['_reconnectId'] as number,
     );
 
     // A new timer should have been set for re-schedule

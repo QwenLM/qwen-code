@@ -28,6 +28,7 @@ import {
   updateCronTasks,
   generateCronTaskId,
   appendCronRun,
+  taskHasLegacyCondition,
   parseCron,
   nextFireTime,
   nextDurableFireMs,
@@ -125,7 +126,6 @@ interface ScheduledTaskView {
   lastFiredAt: number | null;
   nextRunAt: number | null;
   sessionId: string | null;
-  runMode: 'shared' | 'isolated';
   runs: CronTaskRun[];
 }
 
@@ -151,19 +151,21 @@ function toView(task: DurableCronTask): ScheduledTaskView {
     prompt: task.prompt,
     recurring: task.recurring,
     // Absent enabled defaults to enabled — tool-created tasks never write it.
-    enabled: task.enabled !== false,
+    // A legacy guarded task (isolated run mode + precondition, both removed) is
+    // reported as NOT runnable — `enabled: false` with no `nextRunAt` — so the
+    // management UI never shows it as active or offers a Run affordance for a
+    // task the scheduler refuses to fire. Fail closed on the read path too, not
+    // just the tick. `POST /:id/run` rejects it as a second guard.
+    enabled: task.enabled !== false && !taskHasLegacyCondition(task),
     createdAt: task.createdAt,
     lastFiredAt: task.lastFiredAt,
-    nextRunAt: computeNextRunAt(task),
+    nextRunAt: taskHasLegacyCondition(task) ? null : computeNextRunAt(task),
     // The task's bound session (its run-history transcript), or null for an
     // unbound tool-created/legacy task.
     sessionId:
       typeof task.sessionId === 'string' && task.sessionId.length > 0
         ? task.sessionId
         : null,
-    // Absent runMode normalizes to 'shared' so the client never special-cases
-    // undefined (tool-created / legacy tasks omit it).
-    runMode: task.runMode === 'isolated' ? 'isolated' : 'shared',
     // Absent runs (tool-created / never-fired) normalizes to [] so the client
     // never special-cases undefined.
     runs: Array.isArray(task.runs) ? task.runs : [],
@@ -301,20 +303,13 @@ export function registerScheduledTasksRoutes(
       });
       return;
     }
-    if (
-      body['runMode'] !== undefined &&
-      body['runMode'] !== 'shared' &&
-      body['runMode'] !== 'isolated'
-    ) {
-      res.status(400).json({
-        error: "`runMode` must be 'shared' or 'isolated'",
-        code: 'invalid_run_mode',
-      });
+    const removedField = findRemovedTaskField(body);
+    if (removedField) {
+      res.status(400).json(removedFieldError(removedField));
       return;
     }
     const recurring = body['recurring'] !== false;
     const enabled = body['enabled'] !== false;
-    const runMode = body['runMode'] === 'isolated' ? 'isolated' : 'shared';
 
     // Mint the task's dedicated session up front. The task is BOUND to it and
     // fires only inside it — its transcript becomes the task's run history, and
@@ -388,8 +383,6 @@ export function registerScheduledTasksRoutes(
       enabled,
       ...(boundSessionId !== undefined ? { sessionId: boundSessionId } : {}),
       ...(nameResult.value !== undefined ? { name: nameResult.value } : {}),
-      // Omit when 'shared' so tool-created / default tasks stay byte-identical.
-      ...(runMode === 'isolated' ? { runMode } : {}),
     };
 
     // Best-effort teardown of the just-minted session when the create can't be
@@ -458,6 +451,12 @@ export function registerScheduledTasksRoutes(
     const patch: Partial<DurableCronTask> = {};
     let clearName = false;
 
+    const removedPatchField = findRemovedTaskField(body);
+    if (removedPatchField) {
+      res.status(400).json(removedFieldError(removedPatchField));
+      return;
+    }
+
     if ('cron' in body) {
       const cron = typeof body['cron'] === 'string' ? body['cron'].trim() : '';
       if (cron.length === 0 || cron.length > MAX_CRON_LENGTH) {
@@ -518,22 +517,6 @@ export function registerScheduledTasksRoutes(
       }
       patch.enabled = body['enabled'];
     }
-    if ('runMode' in body) {
-      if (body['runMode'] !== 'shared' && body['runMode'] !== 'isolated') {
-        res.status(400).json({
-          error: "`runMode` must be 'shared' or 'isolated'",
-          code: 'invalid_run_mode',
-        });
-        return;
-      }
-      // Switching mode only changes fire behavior; the child scheduler picks up
-      // the new runMode on its next file-watch reload (via durableTaskToJob). No
-      // anchor re-seat needed — the schedule itself is unchanged. Setting to
-      // 'shared' explicitly clears the field (same on-disk representation as
-      // legacy / default tasks — absent means 'shared').
-      patch.runMode = body['runMode'] === 'isolated' ? 'isolated' : undefined;
-    }
-
     if (Object.keys(patch).length === 0 && !clearName) {
       res.status(400).json({
         error: 'No updatable fields provided',
@@ -545,12 +528,23 @@ export function registerScheduledTasksRoutes(
     let found = false;
     let updated: DurableCronTask | undefined;
     let blockedByArchive = false;
+    let blockedLegacy = false;
     try {
       await updateCronTasks(boundWorkspace, (tasks) => {
         const idx = tasks.findIndex((t) => t.id === id);
         if (idx === -1) return tasks; // not found → no write
         found = true;
         const current = tasks[idx]!;
+        // A legacy guarded task (isolated + precondition, both removed) can't be
+        // enabled: `toView` reports it disabled, so the only PATCH the Web Shell
+        // sends for it is the Enable toggle — which would 200 here and then read
+        // back disabled again, an Enable control that can never succeed with no
+        // error explaining why. Reject the enable with the recreate remediation
+        // instead of acknowledging an update that changes nothing runnable.
+        if (patch.enabled === true && taskHasLegacyCondition(current)) {
+          blockedLegacy = true;
+          return tasks; // no write
+        }
         // A task disabled BY archiving its session (`disabledByArchive`) can't
         // be re-enabled through this generic PATCH: its bound session is still
         // archived and can't fire, so flipping `enabled: true` here would show
@@ -621,6 +615,14 @@ export function registerScheduledTasksRoutes(
       res.status(500).json({
         error: 'Failed to update scheduled task',
         code: 'scheduled_tasks_write_failed',
+      });
+      return;
+    }
+    if (blockedLegacy) {
+      res.status(409).json({
+        error:
+          'This task uses the removed isolated run mode with a precondition and can no longer be enabled or run. Recreate it (and call the `create_sub_session` tool from the prompt if you need per-run isolation).',
+        code: 'task_legacy_unsupported',
       });
       return;
     }
@@ -727,6 +729,7 @@ export function registerScheduledTasksRoutes(
     const now = Date.now();
     let found = false;
     let blockedDisabled = false;
+    let blockedLegacy = false;
     let updated: DurableCronTask | undefined;
     try {
       await updateCronTasks(boundWorkspace, (tasks) => {
@@ -734,6 +737,16 @@ export function registerScheduledTasksRoutes(
         if (idx === -1) return tasks; // not found → no write
         found = true;
         const current = tasks[idx]!;
+        // A legacy guarded task (isolated + precondition, both removed) must not
+        // run from ANY path. The scheduler already skips it and the list view
+        // reports it disabled; reject a direct `/run` too — its on-disk
+        // `enabled` may still be true, so the disabled check below is not enough.
+        // Executing it here would run the prompt with its safety gate ignored,
+        // which is exactly what the removal must never allow.
+        if (taskHasLegacyCondition(current)) {
+          blockedLegacy = true;
+          return tasks; // no write
+        }
         // A disabled task must not record a manual run: it's paused (and if it
         // was disabled by archiving its session, that session can't even fire),
         // so stamping lastFiredAt + a 'manual' entry would write a phantom "ran"
@@ -772,6 +785,14 @@ export function registerScheduledTasksRoutes(
       });
       return;
     }
+    if (blockedLegacy) {
+      res.status(409).json({
+        error:
+          'This task uses the removed isolated run mode with a precondition and can no longer run. Recreate it (and call the `create_sub_session` tool from the prompt if you need per-run isolation).',
+        code: 'task_legacy_unsupported',
+      });
+      return;
+    }
     if (blockedDisabled) {
       res.status(409).json({
         error:
@@ -792,6 +813,30 @@ export function registerScheduledTasksRoutes(
     if (!updated.recurring) view.nextRunAt = null;
     res.status(200).json(view);
   });
+}
+
+/**
+ * Fields that a previous version accepted but this one has removed (the
+ * isolated run mode and its precondition). A body that still carries one comes
+ * from a stale SDK, a cached Web Shell, or a hand-written client that believes
+ * it is installing a per-run / guarded task. Left unvalidated they would be
+ * ignored as unknown keys and the caller would silently get a plain,
+ * unconditional shared task — a materially different task from the one it asked
+ * for. Detected on both POST and PATCH so those clients fail closed.
+ */
+const REMOVED_TASK_FIELDS = ['runMode', 'condition'] as const;
+
+function findRemovedTaskField(
+  body: Record<string, unknown>,
+): (typeof REMOVED_TASK_FIELDS)[number] | undefined {
+  return REMOVED_TASK_FIELDS.find((field) => field in body);
+}
+
+function removedFieldError(field: string): { error: string; code: string } {
+  return {
+    error: `\`${field}\` is no longer supported: the isolated scheduled-task run mode was removed. Every task now runs in its bound session; call the \`create_sub_session\` tool from the task prompt for per-run isolation.`,
+    code: 'unsupported_field',
+  };
 }
 
 /**
