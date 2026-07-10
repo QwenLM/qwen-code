@@ -1231,7 +1231,7 @@ describe('AnthropicContentGenerator', () => {
       expect(capturedSignal!.aborted).toBe(true);
     });
 
-    it('builds request with config sampling params (config overrides request) and thinking budget', async () => {
+    it('builds request with config sampling params (config overrides request; max_tokens takes the smaller) and thinking budget', async () => {
       const { AnthropicContentConverter } = await importConverter();
       const { AnthropicContentGenerator } = await importGenerator();
 
@@ -1302,7 +1302,10 @@ describe('AnthropicContentGenerator', () => {
       expect(anthropicRequest).toEqual(
         expect.objectContaining({
           model: 'claude-test',
-          max_tokens: 1000,
+          // Sampling params override the request — EXCEPT max_tokens, where
+          // the smaller of config (1000) and request (200) wins so the
+          // send-path window clamp can never be overridden upward.
+          max_tokens: 200,
           temperature: 0.7,
           top_p: 0.9,
           top_k: 20,
@@ -2251,7 +2254,7 @@ describe('AnthropicContentGenerator', () => {
         const [anthropicRequest] =
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect(anthropicRequest).toEqual(
-          expect.objectContaining({ max_tokens: 65536 }),
+          expect.objectContaining({ max_tokens: 64000 }),
         );
       });
 
@@ -2286,7 +2289,7 @@ describe('AnthropicContentGenerator', () => {
           const [anthropicRequest] =
             anthropicState.lastCreateArgs as AnthropicCreateArgs;
           expect(anthropicRequest).toEqual(
-            expect.objectContaining({ max_tokens: 65536 }),
+            expect.objectContaining({ max_tokens: 64000 }),
           );
         }
       });
@@ -2385,7 +2388,7 @@ describe('AnthropicContentGenerator', () => {
         const [anthropicRequest] =
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect(anthropicRequest).toEqual(
-          expect.objectContaining({ max_tokens: 65536 }),
+          expect.objectContaining({ max_tokens: 64000 }),
         );
       });
     });
