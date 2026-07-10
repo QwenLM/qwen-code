@@ -61,6 +61,10 @@ describe('Interactive protocol tag retry guard', () => {
 
       await rig.setup('interactive-protocol-tag-filtering-http-retry', {
         settings: {
+          memory: {
+            enableManagedAutoMemory: false,
+            enableManagedAutoDream: false,
+          },
           security: {
             auth: {
               selectedType: 'openai',
