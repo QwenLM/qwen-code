@@ -3339,6 +3339,73 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('workspace-qualified extensions', () => {
+    it('routes extension methods to /workspaces/:workspace/extensions/*', async () => {
+      const status = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        initialized: true,
+        extensions: [],
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.includes('/extensions/operations/')) {
+          return jsonResponse(200, {
+            v: 1,
+            operationId: 'op-1',
+            operation: 'install',
+            status: 'succeeded',
+            createdAt: 1,
+            updatedAt: 2,
+          });
+        }
+        if (req.url.endsWith('/extensions')) return jsonResponse(200, status);
+        return jsonResponse(202, { accepted: true, operationId: 'op-2' });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ws = client.workspaceByCwd('/work/a');
+
+      await expect(ws.workspaceExtensions()).resolves.toEqual(status);
+      await ws.extensionOperationStatus('op-1');
+      await ws.installExtension(
+        { source: 'owner/repo', consent: true },
+        'client-1',
+      );
+      await ws.checkExtensionUpdates('client-1');
+      await ws.refreshExtensions('client-1');
+      await ws.enableExtension('ext-a', { scope: 'workspace' }, 'client-1');
+      await ws.disableExtension('ext-a', { scope: 'workspace' }, 'client-1');
+      await ws.updateExtension('ext-a', 'client-1');
+      await ws.uninstallExtension('ext-a', 'client-1');
+
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspaces/%2Fwork%2Fa/extensions'],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fa/extensions/operations/op-1',
+        ],
+        ['POST', 'http://daemon/workspaces/%2Fwork%2Fa/extensions/install'],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Fwork%2Fa/extensions/check-updates',
+        ],
+        ['POST', 'http://daemon/workspaces/%2Fwork%2Fa/extensions/refresh'],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Fwork%2Fa/extensions/ext-a/enable',
+        ],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Fwork%2Fa/extensions/ext-a/disable',
+        ],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Fwork%2Fa/extensions/ext-a/update',
+        ],
+        ['DELETE', 'http://daemon/workspaces/%2Fwork%2Fa/extensions/ext-a'],
+      ]);
+    });
+  });
+
   describe('error coercion', () => {
     it('falls back to text body when the response is not JSON', async () => {
       const { fetch } = recordingFetch(

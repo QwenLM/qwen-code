@@ -940,6 +940,7 @@ export function createServeApp(
     mutate,
     safeBody,
     sendBridgeError,
+    workspaceRegistry,
     ...(deps.maxExtensionOperationHistory === undefined
       ? {}
       : { maxExtensionOperationHistory: deps.maxExtensionOperationHistory }),

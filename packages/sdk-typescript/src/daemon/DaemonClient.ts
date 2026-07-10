@@ -3815,6 +3815,101 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  workspaceExtensions(): Promise<DaemonWorkspaceExtensionsStatus> {
+    return this.get('/extensions', 'GET /workspaces/:workspace/extensions');
+  }
+
+  extensionOperationStatus(
+    operationId: string,
+  ): Promise<ExtensionOperationStatus> {
+    return this.get(
+      `/extensions/operations/${urlEncode(operationId)}`,
+      'GET /workspaces/:workspace/extensions/operations/:operationId',
+    );
+  }
+
+  installExtension(
+    params: ExtensionInstallRequest,
+    clientId?: string,
+  ): Promise<ExtensionInstallResponse> {
+    return this.post(
+      '/extensions/install',
+      'POST /workspaces/:workspace/extensions/install',
+      params,
+      clientId,
+    );
+  }
+
+  checkExtensionUpdates(
+    clientId?: string,
+  ): Promise<ExtensionUpdateCheckResponse> {
+    return this.post(
+      '/extensions/check-updates',
+      'POST /workspaces/:workspace/extensions/check-updates',
+      {},
+      clientId,
+    );
+  }
+
+  refreshExtensions(clientId?: string): Promise<ExtensionRefreshResponse> {
+    return this.post(
+      '/extensions/refresh',
+      'POST /workspaces/:workspace/extensions/refresh',
+      {},
+      clientId,
+    );
+  }
+
+  enableExtension(
+    name: string,
+    params: ExtensionScopeRequest,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return this.post(
+      `/extensions/${urlEncode(name)}/enable`,
+      'POST /workspaces/:workspace/extensions/:name/enable',
+      params,
+      clientId,
+    );
+  }
+
+  disableExtension(
+    name: string,
+    params: ExtensionScopeRequest,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return this.post(
+      `/extensions/${urlEncode(name)}/disable`,
+      'POST /workspaces/:workspace/extensions/:name/disable',
+      params,
+      clientId,
+    );
+  }
+
+  updateExtension(
+    name: string,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return this.post(
+      `/extensions/${urlEncode(name)}/update`,
+      'POST /workspaces/:workspace/extensions/:name/update',
+      {},
+      clientId,
+    );
+  }
+
+  uninstallExtension(
+    name: string,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return this.client.workspaceJsonRequest<ExtensionMutationResponse>(
+      this.workspaceSelector,
+      `/extensions/${urlEncode(name)}`,
+      'DELETE /workspaces/:workspace/extensions/:name',
+      { method: 'DELETE', clientId },
+    );
+  }
+
   private get<T>(path: string, label: string, clientId?: string): Promise<T> {
     return this.client.workspaceJsonRequest<T>(
       this.workspaceSelector,
