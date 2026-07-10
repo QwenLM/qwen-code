@@ -581,7 +581,7 @@ export class DaemonChannelBridge
             ? update['rawInput']
             : undefined,
         };
-        if (event.status === 'pending') {
+        if (event.status === 'pending' || event.status === 'in_progress') {
           this.emitResponseBoundary(sessionId);
         }
         this.emit('toolCall', event);

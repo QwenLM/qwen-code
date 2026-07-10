@@ -289,6 +289,35 @@ describe('AcpBridge', () => {
     );
   });
 
+  it('returns only the final turn text after auto-approved tool calls', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.emit('textChunk', 's-1', 'Let me inspect. ');
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            kind: 'read',
+            title: 'Read',
+            status: 'in_progress',
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'Final answer.');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Final answer.',
+    );
+  });
+
   it('preserves text when tool calls are not pending', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',

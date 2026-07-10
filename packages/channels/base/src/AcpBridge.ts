@@ -321,7 +321,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           status: (update['status'] as string) || 'pending',
           rawInput: update['rawInput'] as Record<string, unknown> | undefined,
         };
-        if (event.status === 'pending') {
+        if (event.status === 'pending' || event.status === 'in_progress') {
           this.emitResponseBoundary(sessionId);
         }
         this.emit('toolCall', event);
