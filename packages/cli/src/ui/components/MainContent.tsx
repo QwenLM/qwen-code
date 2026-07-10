@@ -7,6 +7,7 @@
 import { Box, Static, type DOMElement, useBoxMetrics } from 'ink';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
+import { isHistoryItemVisibleAfterRestore } from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
@@ -104,7 +105,7 @@ export const MainContent = () => {
 
   // Filter out items whose display is suppressed (e.g. /history collapse).
   const visibleHistory = useMemo(
-    () => uiState.history.filter((item) => !item.display?.suppressOnRestore),
+    () => uiState.history.filter(isHistoryItemVisibleAfterRestore),
     [uiState.history],
   );
 
