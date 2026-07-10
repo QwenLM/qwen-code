@@ -10,6 +10,7 @@ import type { ConnectionRegistry } from '../connectionRegistry.js';
 import type { AuditRecorder } from '../auditLog.js';
 import type { UsageTickBroadcaster } from '../cost/usageTickBroadcaster.js';
 import type { UsageTick } from '../cost/ingester.js';
+import type { PromptEventBroadcaster } from './promptEventBroadcaster.js';
 import { computeBridgeHints } from '../bridges/hints.js';
 import { BRIDGE } from '../scopes.js';
 import { SessionWal } from '../wal.js';
@@ -44,6 +45,7 @@ export function createSessionEventsRoute(
   audit?: AuditRecorder,
   usageBroadcaster?: UsageTickBroadcaster,
   walDir?: string,
+  promptEventBroadcaster?: PromptEventBroadcaster,
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
@@ -95,6 +97,7 @@ export function createSessionEventsRoute(
 
         let attached = false;
         let unregisterUsage = (): void => {};
+        let unregisterPromptEventsWal = (): void => {};
         try {
           const iterator = daemon.subscribeEvents(sessionId, {
             lastEventId: latestReplayed,
@@ -120,6 +123,11 @@ export function createSessionEventsRoute(
           unregisterUsage =
             usageBroadcaster?.register(sessionId, (tick) =>
               writeUsageTick(res, tick),
+            ) ?? (() => {});
+          // Inject gateway-side events (e.g. stream_error / prompt_timeout).
+          unregisterPromptEventsWal =
+            promptEventBroadcaster?.register(sessionId, (ev) =>
+              writeGatewayEvent(res, ev),
             ) ?? (() => {});
           // Emit synthetic client_joined as the first SSE frame.
           writePresenceJoined(res, actorTokenId, req.rcClient?.scopes ?? []);
@@ -148,6 +156,7 @@ export function createSessionEventsRoute(
             res.end();
           }
         } finally {
+          unregisterPromptEventsWal();
           unregisterUsage();
           unregister();
           if (attached) {
@@ -175,6 +184,7 @@ export function createSessionEventsRoute(
 
     let attached = false;
     let unregisterUsage = (): void => {};
+    let unregisterPromptEvents = (): void => {};
     try {
       const iterator = daemon.subscribeEvents(sessionId, {
         lastEventId: Number.isFinite(lastEventId) ? lastEventId : undefined,
@@ -202,6 +212,12 @@ export function createSessionEventsRoute(
       unregisterUsage =
         usageBroadcaster?.register(sessionId, (tick) =>
           writeUsageTick(res, tick),
+        ) ?? (() => {});
+      // Inject gateway-side events (e.g. stream_error / prompt_timeout) emitted
+      // by the prompt route when the execution deadline fires.
+      unregisterPromptEvents =
+        promptEventBroadcaster?.register(sessionId, (ev) =>
+          writeGatewayEvent(res, ev),
         ) ?? (() => {});
       // Emit synthetic client_joined as the first SSE frame on this stream.
       // No id: line — synthetic frames must not advance the Last-Event-ID cursor.
@@ -232,6 +248,7 @@ export function createSessionEventsRoute(
         res.end();
       }
     } finally {
+      unregisterPromptEvents();
       unregisterUsage();
       unregister();
       if (attached) {
@@ -282,6 +299,24 @@ function writeFrame(
  */
 function writeUsageTick(res: Response, tick: UsageTick): void {
   res.write(`data: ${JSON.stringify({ type: 'usage_tick', data: tick })}\n\n`);
+}
+
+/**
+ * Write a gateway-injected event (no `id:` line — synthetic frames must not
+ * advance the Last-Event-ID cursor) to the SSE stream. Used to deliver events
+ * such as `stream_error` with `{ code: "prompt_timeout" }` that originate from
+ * the gateway rather than the daemon. Guards against writing after stream end.
+ */
+function writeGatewayEvent(
+  res: Response,
+  ev: { type: string; data: unknown },
+): void {
+  if (res.writableEnded) return;
+  try {
+    res.write(`data: ${JSON.stringify(ev)}\n\n`);
+  } catch {
+    // Socket already closed; ignore.
+  }
 }
 
 /**

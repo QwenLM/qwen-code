@@ -162,18 +162,25 @@ export async function startStubDaemon(
       }
     };
     if (opts.promptDelayMs) {
-      // Respect client abort so tests don't leak open handles.
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const abort = () => {
-        if (timer !== undefined) {
-          clearTimeout(timer);
-          timer = undefined;
+      // Detect real client disconnection via the socket — NOT req, which emits
+      // 'close' immediately after the POST body is consumed by express.json(),
+      // even though the TCP connection is still open.
+      let settled = false;
+      // Box the timer so socketClose (defined before the setTimeout call) can
+      // reference and clear it without a let/reassignment lint error.
+      const timerRef: { id?: ReturnType<typeof setTimeout> } = {};
+      const socketClose = () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timerRef.id);
+          // Socket is gone; nothing to send back.
         }
-        if (!res.writableEnded) res.destroy();
       };
-      req.on('close', abort);
-      timer = setTimeout(() => {
-        req.off('close', abort);
+      req.socket?.on('close', socketClose);
+      timerRef.id = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        req.socket?.off('close', socketClose);
         respond();
       }, opts.promptDelayMs);
     } else {
