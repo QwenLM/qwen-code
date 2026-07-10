@@ -174,6 +174,7 @@ import {
   type WebShellMarkdownCustomization,
   type ToolHeaderExtraRenderer,
   type UserMessageContentRenderer,
+  type AssistantTurnFooterRenderer,
   type WelcomeHeaderRenderer,
   type WelcomeFooterRenderer,
   type ComposerToolbarStartRenderer,
@@ -426,6 +427,8 @@ export interface WebShellProps {
   renderWelcomeFooter?: WelcomeFooterRenderer;
   /** Custom renderer for the inside of user chat bubbles. Defaults to plain text. */
   renderUserMessageContent?: UserMessageContentRenderer;
+  /** Custom renderer displayed after the final assistant message of each turn. */
+  renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
   /** Custom renderer inserted before the built-in chat composer toolbar controls. */
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   /** Custom renderer inserted after the built-in composer toolbar controls. */
@@ -842,6 +845,7 @@ export function App({
   renderWelcomeHeader,
   renderWelcomeFooter,
   renderUserMessageContent,
+  renderAssistantTurnFooter,
   renderComposerToolbarStart,
   renderComposerToolbarEnd,
   renderComposerToolbarRight,
@@ -958,6 +962,7 @@ export function App({
       renderWelcomeHeader,
       renderWelcomeFooter,
       renderUserMessageContent,
+      renderAssistantTurnFooter,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
@@ -973,6 +978,7 @@ export function App({
       renderWelcomeHeader,
       renderWelcomeFooter,
       renderUserMessageContent,
+      renderAssistantTurnFooter,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,

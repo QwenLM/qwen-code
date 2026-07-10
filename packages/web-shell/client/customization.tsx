@@ -107,6 +107,23 @@ export interface WebShellBottomStatusItem {
   onClick?: () => void;
 }
 
+export interface WebShellAssistantMessageInfo {
+  id: string;
+  content: string;
+  isStreaming?: boolean;
+  timestamp?: number;
+}
+
+export interface WebShellAssistantTurnFooterRenderInfo {
+  /** User-message id for the head of the completed turn. */
+  turnId: string;
+  message: WebShellAssistantMessageInfo;
+}
+
+export type AssistantTurnFooterRenderer = (
+  info: WebShellAssistantTurnFooterRenderInfo,
+) => ReactNode | null | undefined;
+
 export type WebShellBuiltinComposerTagKind =
   | 'extension'
   | 'mcp'
@@ -295,6 +312,7 @@ export interface WebShellCustomization {
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   renderWelcomeFooter?: WelcomeFooterRenderer;
   renderUserMessageContent?: UserMessageContentRenderer;
+  renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;
