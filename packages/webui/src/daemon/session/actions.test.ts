@@ -154,6 +154,48 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection()).toMatchObject({ sessionId: 'session-b' });
   });
 
+  it('forwards options.workspaceCwd to the detached create branch', async () => {
+    const nextSession = createMockSession('session-b');
+    const createDetachedSession = vi.fn(async () => nextSession);
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected' },
+      createDetachedSession,
+    });
+
+    await actions.createSession({ workspaceCwd: '/ws/secondary' });
+
+    expect(createDetachedSession).toHaveBeenCalledWith('/ws/secondary');
+  });
+
+  it('omits the workspaceCwd override on the detached branch by default', async () => {
+    const nextSession = createMockSession('session-b');
+    const createDetachedSession = vi.fn(async () => nextSession);
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected' },
+      createDetachedSession,
+    });
+
+    await actions.createSession();
+
+    expect(createDetachedSession).toHaveBeenCalledWith(undefined);
+  });
+
+  it('merges options.workspaceCwd into the active session request', async () => {
+    const existingSession = createMockSession('session-a');
+    const nextSession = createMockSession('session-b');
+    existingSession.client.createOrAttachSession.mockResolvedValue(nextSession);
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session: existingSession,
+    });
+
+    await actions.createSession({ workspaceCwd: '/ws/secondary' });
+
+    expect(existingSession.client.createOrAttachSession).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceCwd: '/ws/secondary' }),
+    );
+  });
+
   it('does not restore a detached session after the session was cleared', async () => {
     const nextSession = createMockSession('session-b');
     const deferred = createDeferred<DaemonSessionClient>();
