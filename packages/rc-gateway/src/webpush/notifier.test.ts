@@ -1493,4 +1493,119 @@ describe('PushNotifier — APNs fan-out', () => {
       ),
     ).toBe(true);
   });
+
+  // ── routing_decision SSE + session.died snooze bypass ──────────────────────
+
+  it('routing_decision: emits "pass" event on the owner bus when routing matcher returns null', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/approver',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const { OwnerEventBus } = await import('../ownerEvents.js');
+    const bus = new OwnerEventBus();
+    const decisions: Array<{ decision: string; kind: string }> = [];
+    bus.subscribe((ev) => {
+      if (ev.type === 'routing_decision')
+        decisions.push({ decision: ev.decision, kind: ev.kind });
+    });
+    const routing = { firstDrop: () => null };
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      routing,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      bus,
+    );
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+      },
+      { sessionId: 's1' },
+    );
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({
+      decision: 'pass',
+      kind: 'permission.required',
+    });
+  });
+
+  it('routing_decision: emits "drop" event with ruleId when matcher drops', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/approver',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const { OwnerEventBus } = await import('../ownerEvents.js');
+    const bus = new OwnerEventBus();
+    const decisions: Array<{ decision: string; ruleId?: string }> = [];
+    bus.subscribe((ev) => {
+      if (ev.type === 'routing_decision')
+        decisions.push({ decision: ev.decision, ruleId: ev.ruleId });
+    });
+    const routing = { firstDrop: () => 'silence-all' };
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      routing,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      bus,
+    );
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+      },
+      { sessionId: 's1' },
+    );
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({
+      decision: 'drop',
+      ruleId: 'silence-all',
+    });
+  });
+
+  it('routing_decision: no event emitted when ownerBus is absent', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/approver',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const routing = { firstDrop: () => null };
+    // No bus → no crash
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      routing,
+    );
+    await expect(
+      notifier.notify(
+        {
+          type: 'permission_request',
+          data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+        },
+        { sessionId: 's1' },
+      ),
+    ).resolves.not.toThrow();
+    expect(sent).toHaveLength(1);
+  });
 });

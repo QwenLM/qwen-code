@@ -11,7 +11,7 @@ import type { PushStore } from '../pushStore.js';
 import type { AuditRecorder } from '../auditLog.js';
 import type { SnoozeStore } from '../routing/snooze.js';
 import type { WorkingDeviceTracker } from '../routing/workingDevice.js';
-import type { RoutingMatcher } from '../routing/rules.js';
+import type { RoutingMatcher, RoutingEvent } from '../routing/rules.js';
 import { parseTimeOfDay, isWithinTimeOfDay } from '../policy/conditions.js';
 import type { PushSender } from './sender.js';
 import {
@@ -27,6 +27,13 @@ import type {
   ApnsStore,
   ApnsSubscriptionRecord,
 } from '../nativePush/apnsStore.js';
+import type { OwnerEventBus } from '../ownerEvents.js';
+
+/**
+ * Event kinds that are considered "critical" and bypass the snooze floor.
+ * These events MUST always be deliverable regardless of snooze state.
+ */
+const SNOOZE_BYPASS_KINDS = new Set(['session.died', 'policy.deny']);
 
 /**
  * The APNs send seam the notifier drives (satisfied by `ApnsSender`). Kept
@@ -71,6 +78,13 @@ export class PushNotifier {
      * (no loadable P-8 key) → APNs is simply not delivered.
      */
     private readonly apns?: { store: ApnsStore; sender: ApnsNotifier },
+    /**
+     * Owner event bus for `routing_decision` SSE events. When present, the
+     * notifier emits one `routing_decision` frame per evaluated event — before
+     * any send — so an operator can observe routing behavior in real time.
+     * Absent → no SSE emission (no behavioral change).
+     */
+    private readonly ownerBus?: OwnerEventBus,
   ) {}
 
   /** Edge-detector for the end-of-quiet-window digest flush (D4, cycle 75). */
@@ -156,7 +170,11 @@ export class PushNotifier {
     // Routing gate: a snooze suppresses the WHOLE fan-out once, before any
     // send (snooze is event-global, not per-subscription). The /test path
     // (notifyToken) is deliberately NOT gated.
-    if (this.snooze?.isSnoozed(payload.kind)) {
+    // CRITICAL-KIND BYPASS: session.died and policy.deny bypass snooze so the
+    // operator is always alerted when a session ends unexpectedly or a policy
+    // denies a critical action, even during a snooze window.
+    const isCriticalKind = SNOOZE_BYPASS_KINDS.has(payload.kind);
+    if (!isCriticalKind && this.snooze?.isSnoozed(payload.kind)) {
       void this.audit?.record({
         action: 'push_suppressed',
         target: ctx.sessionId,
@@ -169,10 +187,22 @@ export class PushNotifier {
     // snooze — event-global, before any per-subscription work. Suppress-only:
     // a rule can never cause a push the gates below would have blocked. The
     // /test path (notifyToken) is NOT gated.
-    const dropRuleId = routing?.firstDrop({
+    const routingEv: RoutingEvent = {
       kind: payload.kind,
       sessionName: ctx.sessionName,
-    });
+    };
+    const dropRuleId = routing?.firstDrop(routingEv);
+    // Emit routing_decision SSE event (before any send or return)
+    if (this.ownerBus && routing !== undefined) {
+      this.ownerBus.publish({
+        type: 'routing_decision',
+        kind: payload.kind,
+        ...(ctx.sessionName ? { sessionName: ctx.sessionName } : {}),
+        decision: dropRuleId ? 'drop' : 'pass',
+        ...(dropRuleId ? { ruleId: dropRuleId } : {}),
+        evaluatedAt: now.toISOString(),
+      });
+    }
     if (dropRuleId) {
       void this.audit?.record({
         action: 'push_suppressed',

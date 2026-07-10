@@ -414,6 +414,166 @@ rules:
   });
 });
 
+describe('compileRouting / deferred operators (originatingClientScope, policy.*, subActor, suppressIfWorkingDevice)', () => {
+  const matcher = (yaml: string) => compileRouting(loadRoutingConfig(yaml));
+
+  it('originatingClientScope: drops when the originating scope matches', () => {
+    const m = matcher(`
+rules:
+  - id: drop-share
+    match: { originatingClientScope: share }
+    route: { drop: true }
+`);
+    expect(
+      m.firstDrop({
+        kind: 'permission.required',
+        originatingClientScope: 'share',
+      }),
+    ).toBe('drop-share');
+    expect(
+      m.firstDrop({
+        kind: 'permission.required',
+        originatingClientScope: 'owner',
+      }),
+    ).toBeNull();
+    expect(m.firstDrop({ kind: 'permission.required' })).toBeNull();
+  });
+
+  it('originatingClientScope: list membership', () => {
+    const m = matcher(`
+rules:
+  - id: r
+    match: { originatingClientScope: [share, approve] }
+    route: { drop: true }
+`);
+    expect(m.firstDrop({ kind: 'x', originatingClientScope: 'approve' })).toBe(
+      'r',
+    );
+    expect(
+      m.firstDrop({ kind: 'x', originatingClientScope: 'write' }),
+    ).toBeNull();
+  });
+
+  it('policy.decisionSource: drops when the policy source matches', () => {
+    const m = matcher(`
+rules:
+  - id: r
+    match: { policy.decisionSource: file }
+    route: { drop: true }
+`);
+    expect(m.firstDrop({ kind: 'x', policyDecisionSource: 'file' })).toBe('r');
+    expect(
+      m.firstDrop({ kind: 'x', policyDecisionSource: 'default' }),
+    ).toBeNull();
+  });
+
+  it('policy.action: drops when the policy action matches', () => {
+    const m = matcher(`
+rules:
+  - id: r
+    match: { policy.action: deny }
+    route: { drop: true }
+`);
+    expect(m.firstDrop({ kind: 'x', policyAction: 'deny' })).toBe('r');
+    expect(m.firstDrop({ kind: 'x', policyAction: 'allow' })).toBeNull();
+  });
+
+  it('subActor: drops when the sub-actor matches', () => {
+    const m = matcher(`
+rules:
+  - id: r
+    match: { subActor: telegram:42 }
+    route: { drop: true }
+`);
+    expect(m.firstDrop({ kind: 'x', subActor: 'telegram:42' })).toBe('r');
+    expect(m.firstDrop({ kind: 'x', subActor: 'telegram:99' })).toBeNull();
+    expect(m.firstDrop({ kind: 'x' })).toBeNull();
+  });
+
+  it('suppressIfWorkingDevice: true → per-sub drop when isWorkingDevice=true', () => {
+    const m = matcher(`
+rules:
+  - id: r
+    match: { kind: permission.required, suppressIfWorkingDevice: true }
+    route: { drop: true }
+`);
+    const sub = { tokenId: 't1', scopes: ['approve'] as const };
+    // working device → drop
+    expect(
+      m.firstDropForSubscription?.({ kind: 'permission.required' }, sub, true),
+    ).toBe('r');
+    // not working device → no drop
+    expect(
+      m.firstDropForSubscription?.({ kind: 'permission.required' }, sub, false),
+    ).toBeNull();
+    expect(
+      m.firstDropForSubscription?.({ kind: 'permission.required' }, sub),
+    ).toBeNull();
+  });
+
+  it('suppressIfWorkingDevice: false → matches only when isWorkingDevice=false', () => {
+    const m = matcher(`
+rules:
+  - id: r
+    match: { suppressIfWorkingDevice: false }
+    route: { drop: true }
+`);
+    const sub = { tokenId: 't1', scopes: ['approve'] as const };
+    expect(m.firstDropForSubscription?.({ kind: 'x' }, sub, false)).toBe('r');
+    expect(m.firstDropForSubscription?.({ kind: 'x' }, sub, true)).toBeNull();
+  });
+
+  it('suppressIfWorkingDevice: true is NOT in the global (event-wide) drop (per-sub only)', () => {
+    const m = matcher(`
+rules:
+  - id: r
+    match: { kind: permission.required, suppressIfWorkingDevice: true }
+    route: { drop: true }
+`);
+    // hasPerSubMatch → goes to perSubDropRules only; firstDrop should be null
+    expect(m.firstDrop({ kind: 'permission.required' })).toBeNull();
+  });
+
+  it('AND across deferred fields + kind', () => {
+    const m = matcher(`
+rules:
+  - id: r
+    match: { kind: x, originatingClientScope: share, subActor: bot:1 }
+    route: { drop: true }
+`);
+    expect(
+      m.firstDrop({
+        kind: 'x',
+        originatingClientScope: 'share',
+        subActor: 'bot:1',
+      }),
+    ).toBe('r');
+    expect(
+      m.firstDrop({ kind: 'x', originatingClientScope: 'share' }),
+    ).toBeNull(); // subActor absent
+    expect(m.firstDrop({ kind: 'x', subActor: 'bot:1' })).toBeNull(); // scope absent
+  });
+
+  it('deferred fields no longer trigger the "unhonored" console warning', async () => {
+    vi.resetModules();
+    const { loadRoutingConfig: fresh } = await import('./rules.js');
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    fresh(`
+rules:
+  - match:
+      kind: permission.required
+      originatingClientScope: share
+      policy.decisionSource: file
+      policy.action: deny
+      subActor: bot:1
+      suppressIfWorkingDevice: true
+    route: { drop: true }
+`);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+});
+
 describe('compileRouting / urgencyAtLeast (cycle 96)', () => {
   const matcher = (yaml: string) => compileRouting(loadRoutingConfig(yaml));
 
