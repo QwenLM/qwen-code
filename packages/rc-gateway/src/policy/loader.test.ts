@@ -8,7 +8,13 @@ import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadPolicy, loadPolicyFile, PolicyError } from './loader.js';
+import {
+  loadPolicy,
+  loadPolicyFile,
+  loadLayeredPolicy,
+  POLICY_PERMISSIONS_WARNING_KEYWORD,
+  PolicyError,
+} from './loader.js';
 
 describe('loadPolicy', () => {
   it('parses valid YAML and fills in defaults', () => {
@@ -175,5 +181,96 @@ describe('loadPolicyFile', () => {
     const policy = await loadPolicyFile(path);
     expect(policy).not.toBeNull();
     expect(policy!.rules[0].action).toBe('deny');
+  });
+});
+
+describe('loadLayeredPolicy — policy_permissions_warning', () => {
+  let dir: string | undefined;
+
+  afterEach(async () => {
+    if (dir) await rm(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  it('POLICY_PERMISSIONS_WARNING_KEYWORD is exactly "policy_permissions_warning"', () => {
+    expect(POLICY_PERMISSIONS_WARNING_KEYWORD).toBe(
+      'policy_permissions_warning',
+    );
+  });
+
+  it('emits a policy_permissions_warning when user-scope file is group-readable (0644)', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rc-policy-rdwarn-'));
+    const userPath = join(dir, 'policy.yaml');
+    await writeFile(userPath, 'rules: []\n', { mode: 0o644 });
+    const warnings: string[] = [];
+    await loadLayeredPolicy(userPath, undefined, (msg) => warnings.push(msg));
+    const w = warnings.find((m) =>
+      m.includes(POLICY_PERMISSIONS_WARNING_KEYWORD),
+    );
+    expect(w).toBeDefined();
+    expect(w).toContain(userPath);
+    expect(w).toContain('0644');
+    expect(w).toContain('chmod go-r');
+  });
+
+  it('emits a policy_permissions_warning when user-scope file is world-readable (0604)', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rc-policy-rdwarn-'));
+    const userPath = join(dir, 'policy.yaml');
+    await writeFile(userPath, 'rules: []\n', { mode: 0o604 });
+    const warnings: string[] = [];
+    await loadLayeredPolicy(userPath, undefined, (msg) => warnings.push(msg));
+    const w = warnings.find((m) =>
+      m.includes(POLICY_PERMISSIONS_WARNING_KEYWORD),
+    );
+    expect(w).toBeDefined();
+    expect(w).toContain('0604');
+  });
+
+  it('does NOT emit the warning when user-scope file has mode 0600', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rc-policy-rdwarn-'));
+    const userPath = join(dir, 'policy.yaml');
+    await writeFile(userPath, 'rules: []\n', { mode: 0o600 });
+    const warnings: string[] = [];
+    await loadLayeredPolicy(userPath, undefined, (msg) => warnings.push(msg));
+    expect(
+      warnings.some((m) => m.includes(POLICY_PERMISSIONS_WARNING_KEYWORD)),
+    ).toBe(false);
+  });
+
+  it('does NOT emit the warning when the user-scope file is absent (ENOENT)', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rc-policy-rdwarn-'));
+    const userPath = join(dir, 'absent.yaml');
+    const warnings: string[] = [];
+    await loadLayeredPolicy(userPath, undefined, (msg) => warnings.push(msg));
+    expect(
+      warnings.some((m) => m.includes(POLICY_PERMISSIONS_WARNING_KEYWORD)),
+    ).toBe(false);
+  });
+
+  it('does NOT emit the warning for a group-readable workspace policy file', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rc-policy-rdwarn-'));
+    const userPath = join(dir, 'absent-user.yaml'); // absent user file
+    const wsDir = join(dir, 'ws');
+    const wsPolicyDir = join(wsDir, '.qwen');
+    await writeFile(join(dir, 'policy.yaml'), 'rules: []\n', { mode: 0o644 }); // readable but this is the user path
+    // Create workspace policy dir + file
+    await writeFile(
+      userPath.replace('absent-user.yaml', 'user-ok.yaml'),
+      'rules: []\n',
+      { mode: 0o600 },
+    );
+    // Actually use a truly absent user path + a readable workspace file
+    const wsPolicy = join(wsPolicyDir, 'policy.yaml');
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(wsPolicyDir, { recursive: true });
+    await writeFile(wsPolicy, 'rules: []\n', { mode: 0o644 });
+    const warnings: string[] = [];
+    await loadLayeredPolicy(join(dir, 'absent-user.yaml'), wsDir, (msg) =>
+      warnings.push(msg),
+    );
+    // Only the user-scope file triggers the warning; workspace does not
+    expect(
+      warnings.some((m) => m.includes(POLICY_PERMISSIONS_WARNING_KEYWORD)),
+    ).toBe(false);
   });
 });
