@@ -131,6 +131,22 @@ describe('DingtalkConnectionManager', () => {
     manager.stop();
   });
 
+  it('reconnects instead of propagating a socket ping failure', async () => {
+    vi.useFakeTimers();
+    const initialClient = new FakeClient();
+    initialClient.socket.ping.mockImplementation(() => {
+      throw new Error('WebSocket is not open');
+    });
+    const createClient = vi.fn(() => new FakeClient());
+    const manager = createManager(initialClient, { createClient });
+    await manager.start();
+
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    expect(createClient).toHaveBeenCalledOnce();
+    manager.stop();
+  });
+
   it('retries a failed replacement after one second', async () => {
     vi.useFakeTimers();
     const initialClient = new FakeClient();
@@ -152,6 +168,28 @@ describe('DingtalkConnectionManager', () => {
     expect(createClient).toHaveBeenCalledTimes(2);
     expect(failedReplacement.disconnect).toHaveBeenCalledOnce();
     expect(initialClient.disconnect).toHaveBeenCalledOnce();
+    manager.stop();
+  });
+
+  it('retries when creating a replacement client throws', async () => {
+    vi.useFakeTimers();
+    const initialClient = new FakeClient();
+    const recoveredClient = new FakeClient();
+    const createClient = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw new Error('client construction failed');
+      })
+      .mockReturnValueOnce(recoveredClient);
+    const manager = createManager(initialClient, { createClient });
+    await manager.start();
+
+    initialClient.socket.emit('close');
+    await vi.advanceTimersByTimeAsync(999);
+    expect(createClient).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(createClient).toHaveBeenCalledTimes(2);
     manager.stop();
   });
 
@@ -227,6 +265,31 @@ describe('DingtalkConnectionManager', () => {
     manager.stop();
   });
 
+  it('keeps a healthy replacement when old-client cleanup fails', async () => {
+    vi.useFakeTimers();
+    const initialClient = new FakeClient();
+    initialClient.disconnect.mockImplementation(() => {
+      throw new Error('cleanup failed');
+    });
+    const replacement = new FakeClient();
+    const onClientChanged = vi.fn();
+    const log = vi.fn();
+    const manager = createManager(initialClient, {
+      createClient: () => replacement,
+      onClientChanged,
+      log,
+    });
+    await manager.start();
+
+    initialClient.socket.emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onClientChanged).toHaveBeenLastCalledWith(replacement);
+    expect(replacement.disconnect).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('cleanup failed'));
+    manager.stop();
+  });
+
   it('replaces a client after two unhealthy state checks', async () => {
     vi.useFakeTimers();
     const initialClient = new FakeClient();
@@ -235,7 +298,6 @@ describe('DingtalkConnectionManager', () => {
     await manager.start();
     initialClient.connected = false;
     initialClient.registered = false;
-    initialClient.socket.readyState = 3;
 
     for (let tick = 0; tick < 6; tick++) {
       manager.noteActivity(initialClient);

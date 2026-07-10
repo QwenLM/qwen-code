@@ -138,7 +138,16 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
         this.requestReconnect(client, 'heartbeat timeout');
         return;
       }
-      this.options.getSocket(client)?.ping();
+      const socket = this.options.getSocket(client);
+      if (!socket || socket.readyState !== SOCKET_OPEN) {
+        this.requestReconnect(client, 'socket is not open');
+        return;
+      }
+      try {
+        socket.ping();
+      } catch (error) {
+        this.requestReconnect(client, `socket ping failed: ${String(error)}`);
+      }
     }, HEARTBEAT_INTERVAL_MS);
 
     this.healthTimer = setInterval(() => {
@@ -178,8 +187,9 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
     const previousClient = this.activeClient;
     let retryDelay = INITIAL_RECONNECT_DELAY_MS;
     while (this.running && generation === this.generation) {
-      const replacement = this.options.createClient();
+      let replacement: T | undefined;
       try {
+        replacement = this.options.createClient();
         await replacement.connect();
         await this.waitUntilReady(replacement, generation);
         if (!this.running || generation !== this.generation) {
@@ -189,11 +199,17 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
         this.activeClient = replacement;
         this.stopMonitoring();
         this.options.onClientChanged(replacement);
-        previousClient.disconnect();
         this.startMonitoring(replacement);
+        try {
+          previousClient.disconnect();
+        } catch (error) {
+          this.options.log(
+            `failed to disconnect replaced client: ${String(error)}`,
+          );
+        }
         return;
       } catch (error) {
-        replacement.disconnect();
+        replacement?.disconnect();
         if (!this.running || generation !== this.generation) {
           return;
         }
