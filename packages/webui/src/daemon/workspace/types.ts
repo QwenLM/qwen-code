@@ -171,6 +171,11 @@ export interface DaemonScheduledTaskRun {
    * daemon's `CronTaskRun.sessionId` so run-attribution isn't silently dropped
    * on the client (not surfaced in the UI yet). */
   sessionId?: string;
+  /** READ-ONLY legacy compat: a pre-removal version stamped this on a fire whose
+   * precondition withheld the prompt. Never written now, but kept so the UI can
+   * still mark such stored entries "skipped" instead of showing them as ordinary
+   * successful runs. Absent = a real dispatched run. */
+  withheld?: boolean;
 }
 
 export interface DaemonScheduledTask {

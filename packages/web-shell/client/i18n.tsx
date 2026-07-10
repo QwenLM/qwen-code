@@ -724,6 +724,7 @@ const EN: Messages = {
   'scheduledTasks.viewHistoryHint': "Open the task's session to see its runs",
   'scheduledTasks.runKind.catchUp': 'late',
   'scheduledTasks.runKind.manual': 'manual',
+  'scheduledTasks.runKind.withheld': 'skipped',
   'scheduledTasks.error.runFailed': 'Failed to record the run',
   'scheduledTasks.error.oneShotConsumedButFailed':
     'The task was deleted but the prompt could not be delivered — it never ran. Recreate it to try again.',
@@ -2408,6 +2409,7 @@ const ZH: Messages = {
   'scheduledTasks.viewHistoryHint': '打开该任务的会话查看运行详情',
   'scheduledTasks.runKind.catchUp': '补跑',
   'scheduledTasks.runKind.manual': '手动',
+  'scheduledTasks.runKind.withheld': '已跳过',
   'scheduledTasks.error.runFailed': '记录运行失败',
   'scheduledTasks.error.oneShotConsumedButFailed':
     '任务已删除,但提示词未能送达——它没有运行。请重新创建后重试。',

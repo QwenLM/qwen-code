@@ -2116,7 +2116,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('sessionParent records the parent lineage and flushes', async () => {
+  it('sessionParent records the parent lineage via an awaited durable write', async () => {
     const sessionId = 'session-A';
     const recording = {
       flush: vi.fn().mockResolvedValue(undefined),
@@ -2138,8 +2138,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       persisted: true,
     });
 
+    // `recordParentSession` awaits the durable write internally, so the handler
+    // no longer issues a separate `flush()`.
     expect(recording.recordParentSession).toHaveBeenCalledWith('parent-A');
-    expect(recording.flush).toHaveBeenCalled();
+    expect(recording.flush).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

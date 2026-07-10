@@ -44,6 +44,16 @@ export interface CronTaskRun {
    * owner id was known.
    */
   sessionId?: string;
+  /**
+   * READ-ONLY backward-compatibility field. A pre-removal version stamped this
+   * on a fire whose precondition withheld the prompt (it was booked as a run
+   * but nothing executed). The isolated/precondition machinery is gone, so this
+   * is never written anymore — but stored history still carries it, and dropping
+   * it would misreport a deliberately-skipped fire as an ordinary successful
+   * run. Preserved through read/validation/passthrough so the UI keeps its
+   * "skipped" marker on legacy entries. Absent = a real dispatched run.
+   */
+  withheld?: boolean;
 }
 
 /** Cap on a task's on-disk run history. A ring, newest kept — this bounds the
@@ -398,7 +408,11 @@ function isValidRuns(value: unknown): value is CronTaskRun[] {
     return (
       isFiniteTimestamp(run['at']) &&
       (run['kind'] === undefined || typeof run['kind'] === 'string') &&
-      (run['sessionId'] === undefined || typeof run['sessionId'] === 'string')
+      (run['sessionId'] === undefined ||
+        typeof run['sessionId'] === 'string') &&
+      // Read-only legacy compat: validate so a stored `withheld` marker isn't
+      // rejected on read (it is never written anymore).
+      (run['withheld'] === undefined || typeof run['withheld'] === 'boolean')
     );
   });
 }

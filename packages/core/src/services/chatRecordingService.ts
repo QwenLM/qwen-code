@@ -1390,9 +1390,12 @@ export class ChatRecordingService {
    * once when the sub-session is created.
    *
    * @param parentSessionId Id of the spawning session.
-   * @returns true if the record was written successfully, false on I/O error.
+   * @returns true once the record is durably written, false on I/O error.
+   *   AWAITS the write (via the strict append path) rather than the
+   *   fire-and-forget `appendRecord`, whose swallowed rejection would let the
+   *   caller report `persisted: true` for a record that never reached disk.
    */
-  recordParentSession(parentSessionId: string): boolean {
+  async recordParentSession(parentSessionId: string): Promise<boolean> {
     // Idempotent: the lineage is immutable and written once. A bridge retry
     // (the write succeeded but its response was lost) must not append a second
     // record — the session would then carry two `parent_session` entries.
@@ -1404,7 +1407,7 @@ export class ChatRecordingService {
         subtype: 'parent_session',
         systemPayload: { parentSessionId },
       };
-      this.appendRecord(record);
+      await this.appendRecordStrict(record);
       this.currentParentSessionId = parentSessionId;
       return true;
     } catch (error) {

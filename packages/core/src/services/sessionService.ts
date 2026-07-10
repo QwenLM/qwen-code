@@ -400,6 +400,40 @@ export class SessionService {
     }
   }
 
+  /**
+   * Reads the persisted `parentSessionId` for a single session (active or
+   * archived), or undefined when it has no parent. Used to re-seed a live entry
+   * on restore/resume so a restored sub-session's status still reports its
+   * lineage after a daemon restart. Best-effort: a read failure returns
+   * undefined rather than throwing — a missing link must never fail a restore.
+   */
+  async readParentSessionId(sessionId: string): Promise<string | undefined> {
+    for (const state of ['active', 'archived'] as const) {
+      const filePath = this.getSessionFilePath(sessionId, state);
+      try {
+        const records = await jsonl.readLines<ChatRecord>(
+          filePath,
+          MAX_PROMPT_SCAN_LINES,
+        );
+        if (records.length === 0) continue;
+        if (
+          !(await this.sessionBelongsToCurrentProject(
+            records[0].sessionId,
+            records[0].cwd,
+          ))
+        ) {
+          continue;
+        }
+        const parent = this.extractParentSessionIdFromRecords(records);
+        if (parent) return parent;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        this.warn(`readParentSessionId: failed to read ${sessionId}: ${error}`);
+      }
+    }
+    return undefined;
+  }
+
   async getSessionLocation(sessionId: string): Promise<SessionLocation> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return undefined;
@@ -1506,6 +1540,13 @@ export class SessionService {
     const sourceRecords = includeActiveSideArtifactRecords(
       records,
       activeMessages,
+    ).filter(
+      // A fork is a fresh top-level session, NOT a `create_sub_session` child.
+      // Copying the source's `parent_session` record would make the fork report
+      // the original's parent as its own, so `?parentSessionId=` lists the fork
+      // as a direct child of a session that never spawned it. Drop the lineage.
+      (record) =>
+        !(record.type === 'system' && record.subtype === 'parent_session'),
     );
     if (sourceRecords.length === 0) {
       throw new Error(`Source session not found or empty: ${sourceSessionId}`);

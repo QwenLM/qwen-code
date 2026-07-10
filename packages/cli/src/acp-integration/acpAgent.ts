@@ -6642,8 +6642,10 @@ class QwenAgent implements Agent {
         const recording = session.getConfig().getChatRecordingService();
         let ok = false;
         if (recording) {
-          ok = recording.recordParentSession(parentSessionId);
-          await recording.flush();
+          // Awaited: `recordParentSession` resolves only once the record is
+          // durably written, so `persisted` never claims success for a write
+          // that silently failed.
+          ok = await recording.recordParentSession(parentSessionId);
         }
         return { sessionId, parentSessionId, persisted: ok };
       }

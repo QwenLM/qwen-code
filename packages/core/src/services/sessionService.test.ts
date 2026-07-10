@@ -3391,6 +3391,75 @@ describe('SessionService', () => {
         /Invalid new sessionId/,
       );
     });
+
+    it('drops the source parent_session record so the fork inherits no lineage', async () => {
+      // A fork is a fresh top-level session, not a sub-session. Copying the
+      // source's parent_session record would make the fork report the original's
+      // parent as its own. Seed the parent_session record on the active branch
+      // (u1 -> parent_session -> u2) so it would otherwise be copied.
+      const oldId = 'aaaaaaaa-1111-1111-1111-111111111111';
+      const newId = 'bbbbbbbb-2222-2222-2222-222222222222';
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      const srcFile = realPath.join(chatsDir, `${oldId}.jsonl`);
+      const lines = [
+        {
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId: oldId,
+          type: 'user',
+          timestamp: '2026-04-22T00:00:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+        },
+        {
+          uuid: 'up',
+          parentUuid: 'u1',
+          sessionId: oldId,
+          type: 'system',
+          subtype: 'parent_session',
+          timestamp: '2026-04-22T00:00:00.500Z',
+          cwd,
+          version: 'test',
+          systemPayload: { parentSessionId: 'P' },
+        },
+        {
+          uuid: 'u2',
+          parentUuid: 'up',
+          sessionId: oldId,
+          type: 'assistant',
+          timestamp: '2026-04-22T00:00:01.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'model', parts: [{ text: 'hi' }] },
+        },
+      ];
+      fs.writeFileSync(
+        srcFile,
+        lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      expect(
+        written.some(
+          (r) => r.type === 'system' && r.subtype === 'parent_session',
+        ),
+      ).toBe(false);
+
+      // The source keeps its lineage; the fork carries none of it.
+      expect(await service.readParentSessionId(oldId)).toBe('P');
+      expect(await service.readParentSessionId(newId)).toBeUndefined();
+    });
   });
 
   describe('findSessionTitlesByPrefix', () => {
@@ -3734,6 +3803,29 @@ describe('SessionService', () => {
       const item = findItem(result.items, sessionId);
       expect(item).toBeDefined();
       expect(item?.parentSessionId).toBe('parent-head');
+    });
+
+    it('readParentSessionId returns the parentSessionId for a session with a parent_session record', async () => {
+      const sessionId = '44444444-4444-4444-4444-444444444444';
+      writeSession(sessionId, [
+        userLine(sessionId, 'hello'),
+        parentSessionLine(sessionId, 'parent-xyz'),
+      ]);
+
+      expect(await service.readParentSessionId(sessionId)).toBe('parent-xyz');
+    });
+
+    it('readParentSessionId returns undefined for a session without a parent_session record', async () => {
+      const sessionId = '55555555-5555-5555-5555-555555555555';
+      writeSession(sessionId, [userLine(sessionId, 'hello')]);
+
+      expect(await service.readParentSessionId(sessionId)).toBeUndefined();
+    });
+
+    it('readParentSessionId returns undefined for a nonexistent session', async () => {
+      const sessionId = '66666666-6666-6666-6666-666666666666';
+
+      expect(await service.readParentSessionId(sessionId)).toBeUndefined();
     });
   });
 });

@@ -2122,13 +2122,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // from the persisted list on the next restart.
       //
       // So this is on the spawn critical path with the same discipline as the
-      // other init round-trips: each attempt is `withTimeout`-bounded (a child
-      // that never answers must not pin the spawn/admission/concurrency slot
-      // forever), and a transport/timeout failure is retried a bounded number
-      // of times. The definitive outcome is surfaced to the caller via
-      // `BridgeSession.parentSessionPersisted` (NOT just stderr, which is no
-      // API contract) so `create_sub_session` / the SDK can tell a durably
-      // linked child from a live-only one. Success REQUIRES `persisted === true`.
+      // other init round-trips: `withTimeout`-bounded and raced against
+      // transport close (a child that never answers, or whose channel died,
+      // must not pin the spawn/admission/concurrency slot). The definitive
+      // outcome is surfaced to the caller via `BridgeSession.parentSessionPersisted`
+      // (NOT just stderr, which is no API contract) so `create_sub_session` /
+      // the SDK can tell a durably linked child from a live-only one. Success
+      // REQUIRES `persisted === true`.
+      //
+      // A timeout or transport-close is TERMINAL, not retried: `withTimeout`
+      // does not cancel the underlying `extMethod`, so a retry would start an
+      // overlapping request whose late completion could contradict the reported
+      // result. Only an IMMEDIATE (synchronous) rejection — definitively failed,
+      // nothing left in flight — is retried, and the whole loop shares one
+      // deadline. `recordParentSession` is idempotent on the child, so even a
+      // late-completing timed-out write cannot double-append.
       //
       // The child is NOT rolled back when the write ultimately fails: it exists
       // and is linked in memory, and losing the whole sub-session over a
@@ -2136,23 +2144,34 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // instead. Only sub-sessions carry a parent.
       let parentSessionPersisted: boolean | undefined;
       if (entry.parentSessionId) {
+        const parentDeadline = Date.now() + initTimeoutMs;
+        let lastParentErr: string | undefined;
         for (
           let attempt = 1;
           attempt <= MAX_PARENT_PERSIST_ATTEMPTS;
           attempt++
         ) {
+          const remaining = parentDeadline - Date.now();
+          if (remaining <= 0) {
+            parentSessionPersisted = false;
+            lastParentErr = 'deadline exceeded';
+            break;
+          }
           try {
-            const parentResult = await withTimeout(
-              entry.connection.extMethod(
-                SERVE_CONTROL_EXT_METHODS.sessionParent,
-                {
-                  sessionId: entry.sessionId,
-                  parentSessionId: entry.parentSessionId,
-                },
+            const parentResult = await Promise.race([
+              withTimeout(
+                entry.connection.extMethod(
+                  SERVE_CONTROL_EXT_METHODS.sessionParent,
+                  {
+                    sessionId: entry.sessionId,
+                    parentSessionId: entry.parentSessionId,
+                  },
+                ),
+                remaining,
+                'sessionParent',
               ),
-              initTimeoutMs,
-              'sessionParent',
-            );
+              getTransportClosedReject(entry),
+            ]);
             // A reachable child gives a definitive answer — do not retry a
             // `persisted: false` (recording service off; a retry can't fix it).
             parentSessionPersisted =
@@ -2160,23 +2179,24 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 ?.persisted === true;
             break;
           } catch (err) {
-            // Transport error / timeout — retry, then give up.
-            if (attempt === MAX_PARENT_PERSIST_ATTEMPTS) {
+            lastParentErr = err instanceof Error ? err.message : String(err);
+            const terminal =
+              err instanceof BridgeTimeoutError ||
+              err instanceof BridgeChannelClosedError ||
+              attempt === MAX_PARENT_PERSIST_ATTEMPTS;
+            if (terminal) {
               parentSessionPersisted = false;
-              writeStderrLine(
-                `qwen serve: failed to persist parentSessionId for ${entry.sessionId} ` +
-                  `after ${attempt} attempt(s): ${
-                    err instanceof Error ? err.message : String(err)
-                  }`,
-              );
+              break;
             }
+            // else: immediate transient rejection — retry within the deadline.
           }
         }
         if (parentSessionPersisted === false) {
+          // One diagnostic covering both the cause and the API consequence.
           writeStderrLine(
-            `qwen serve: parentSessionId for ${entry.sessionId} was not persisted — ` +
-              `the parent link is live-only until restart (reported to the caller via ` +
-              `parentSessionPersisted=false)`,
+            `qwen serve: parentSessionId for ${entry.sessionId} was not persisted ` +
+              `(${lastParentErr ?? 'unknown'}) — the parent link is live-only ` +
+              `until restart (reported to the caller via parentSessionPersisted=false)`,
           );
         }
       }
@@ -3602,6 +3622,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         {
           drainEarlyEvents: replayUpdates.length === 0,
           lifecycleReason: action,
+          // Re-seed the persisted parent lineage the caller recovered from the
+          // transcript, so a restored sub-session's status reports its parent.
+          ...(req.parentSessionId
+            ? { parentSessionId: req.parentSessionId }
+            : {}),
         },
       );
       releaseAdmissionOnce();

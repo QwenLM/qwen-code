@@ -8056,6 +8056,51 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('treats a sessionParent withTimeout timeout as terminal — reports false without retrying', async () => {
+      const handles: ChannelHandle[] = [];
+      const bridge = makeBridge({
+        // Tight init deadline so the hanging sessionParent write trips
+        // `withTimeout` quickly rather than after the 10s default.
+        initializeTimeoutMs: 50,
+        channelFactory: async () => {
+          const h = makeChannel({
+            // sessionParent never answers: `withTimeout` rejects with a
+            // BridgeTimeoutError, which is terminal (a retry would overlap an
+            // uncancelled in-flight write), so the spawn must give up after ONE
+            // attempt and report the link as live-only.
+            extMethodImpl: (method) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionParent) {
+                return new Promise<Record<string, unknown>>(() => {
+                  /* never resolves */
+                });
+              }
+              return {};
+            },
+          });
+          handles.push(h);
+          return h.channel;
+        },
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        parentSessionId: 'parent-1',
+      });
+      expect(session.parentSessionPersisted).toBe(false);
+      // Exactly one attempt — a timeout is not retried.
+      expect(
+        handles[0]?.agent.extMethodCalls.filter(
+          (c) => c.method === SERVE_CONTROL_EXT_METHODS.sessionParent,
+        ),
+      ).toHaveLength(1);
+      // The child still spawned and keeps its in-memory parent lineage.
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        parentSessionId: 'parent-1',
+      });
+
+      await bridge.shutdown();
+    });
+
     it('omits parentSessionPersisted and never calls sessionParent for a parentless spawn', async () => {
       const handles: ChannelHandle[] = [];
       const bridge = makeBridge({

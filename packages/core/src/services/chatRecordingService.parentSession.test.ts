@@ -89,7 +89,7 @@ describe('ChatRecordingService - recordParentSession', () => {
   });
 
   it('records the parent session id as a parent_session system record', async () => {
-    const result = chatRecordingService.recordParentSession('parent-abc');
+    const result = await chatRecordingService.recordParentSession('parent-abc');
     await chatRecordingService.flush();
 
     expect(result).toBe(true);
@@ -106,7 +106,7 @@ describe('ChatRecordingService - recordParentSession', () => {
   });
 
   it('includes the standard record metadata', async () => {
-    chatRecordingService.recordParentSession('parent-abc');
+    await chatRecordingService.recordParentSession('parent-abc');
     await chatRecordingService.flush();
 
     const writtenRecord = vi.mocked(jsonl.writeLine).mock
@@ -123,8 +123,8 @@ describe('ChatRecordingService - recordParentSession', () => {
     // The lineage is immutable and written once. A bridge retry (the write
     // landed but its response was lost) calls this again with the SAME id — it
     // must report success without appending a duplicate parent_session record.
-    const first = chatRecordingService.recordParentSession('parent-abc');
-    const second = chatRecordingService.recordParentSession('parent-abc');
+    const first = await chatRecordingService.recordParentSession('parent-abc');
+    const second = await chatRecordingService.recordParentSession('parent-abc');
     await chatRecordingService.flush();
 
     expect(first).toBe(true);
@@ -141,7 +141,7 @@ describe('ChatRecordingService - recordParentSession', () => {
 
   it('maintains the parent chain when recorded after other records', async () => {
     chatRecordingService.recordUserMessage([{ text: 'hello' }]);
-    chatRecordingService.recordParentSession('parent-abc');
+    await chatRecordingService.recordParentSession('parent-abc');
     await chatRecordingService.flush();
 
     expect(jsonl.writeLine).toHaveBeenCalledTimes(2);

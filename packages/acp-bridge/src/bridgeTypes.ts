@@ -128,6 +128,14 @@ export interface BridgeRestoreSessionRequest {
   /** Internal replay transport for `session/load`; defaults to bulk response. */
   historyReplay?: 'stream' | 'response';
   approvalMode?: ApprovalMode;
+  /**
+   * Persisted parent lineage recovered from the transcript by the caller (the
+   * serve layer reads it before restore). Re-seeds the restored live entry so a
+   * restored sub-session's `getSessionSummary`/status still reports its parent
+   * after a daemon restart — the entry is otherwise created without it. Absent
+   * for a top-level session.
+   */
+  parentSessionId?: string;
 }
 
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';

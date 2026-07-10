@@ -3548,6 +3548,9 @@ export class WorkspaceDaemonClient {
     }
     if (options?.view !== undefined) query.set('view', options.view);
     if (options?.group !== undefined) query.set('group', options.group);
+    if (options?.parentSessionId !== undefined) {
+      query.set('parentSessionId', options.parentSessionId);
+    }
     return this.get(
       `/sessions?${query.toString()}`,
       'GET /workspaces/:workspace/sessions',

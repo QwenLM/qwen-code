@@ -794,6 +794,12 @@ export function registerSessionRoutes(
           [sessionId],
           async () => {
             await assertSessionLoadable(workspaceCwd, sessionId);
+            // Recover the persisted parent lineage so the restored live entry
+            // reports it (the bridge otherwise creates the entry without it, and
+            // status calls would show a restored sub-session as top-level).
+            const parentSessionId = await new SessionService(
+              workspaceCwd,
+            ).readParentSessionId(sessionId);
             return action === 'load'
               ? await runtime.bridge.loadSession({
                   sessionId,
@@ -801,12 +807,14 @@ export function registerSessionRoutes(
                   historyReplay: 'response',
                   ...(clientId !== undefined ? { clientId } : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
+                  ...(parentSessionId !== undefined ? { parentSessionId } : {}),
                 })
               : await runtime.bridge.resumeSession({
                   sessionId,
                   workspaceCwd,
                   ...(clientId !== undefined ? { clientId } : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
+                  ...(parentSessionId !== undefined ? { parentSessionId } : {}),
                 });
           },
         );
