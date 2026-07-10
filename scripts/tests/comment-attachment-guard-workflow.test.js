@@ -114,10 +114,9 @@ describe('comment attachment guard workflow', () => {
   });
 
   it('checks URL paths instead of country-code TLD hosts', () => {
-    expect(workflow).toContain(
-      'target = new URL(/^www\\./i.test(url) ? `https://${url}` : url)',
-    );
-    expect(workflow).toContain('.pathname;');
+    expect(workflow).toContain('const parsedUrl = new URL(');
+    expect(workflow).toContain('/^www\\./i.test(url)');
+    expect(workflow).toContain('...parsedUrl.pathname.split');
     expect(workflow).toContain(
       '.find((segment) => highRiskExtension.test(segment))',
     );
@@ -139,11 +138,12 @@ describe('comment attachment guard workflow', () => {
   });
 
   it('does not throw on malformed URL-like links', () => {
-    expect(workflow).toContain('} catch {\n                  target = url;');
+    expect(workflow).toContain('} catch {\n                  targets = [url];');
   });
 
   it('decodes escaped risky extensions in URL paths', () => {
-    expect(workflow).toContain('return decodeURIComponent(target);');
+    expect(workflow).toContain('const next = decodeURIComponent(decoded);');
+    expect(workflow).toContain('decoded.normalize');
     expect(workflow).toContain('Number.parseInt(match.slice(1), 16)');
   });
 
@@ -172,6 +172,13 @@ describe('comment attachment guard workflow', () => {
     ['path subsegment', 'https://evil.com/malware.exe/readme.txt'],
     ['trailing slash', 'https://evil.com/malware.exe/'],
     ['encoded extension', 'https://evil.com/file.e%78e'],
+    ['double encoded extension', 'https://evil.com/file%252ezip'],
+    ['query parameter filename', 'https://evil.com/download?file=malware.zip'],
+    ['fullwidth dot', 'https://evil.com/malware．exe'],
+    ['trailing punctuation', 'https://evil.com/malware.exe.'],
+    ['pipe delimiter', 'https://evil.com/malware.exe|note'],
+    ['equals delimiter', 'https://evil.com/malware.exe=1'],
+    ['plus delimiter', 'https://evil.com/malware.exe+1'],
     ['malformed percent fallback', 'https://evil.com/file.e%78e%ZZ'],
     ['markdown parentheses', '[patch](https://evil.com/file(1).exe)'],
     ['www autolink', 'www.evil.com/malware.exe'],

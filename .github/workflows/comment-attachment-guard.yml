@@ -43,31 +43,43 @@ jobs:
             const errorMessage = (error) =>
               `${error?.status ? `${error.status} ` : ''}${error?.message ?? error}`;
             const decodeTarget = (target) => {
-              try {
-                return decodeURIComponent(target);
-              } catch {
-                return target.replace(/%[0-9a-f]{2}/gi, (match) =>
-                  String.fromCharCode(Number.parseInt(match.slice(1), 16)),
-                );
+              let decoded = target;
+              for (let i = 0; i < 3; i += 1) {
+                try {
+                  const next = decodeURIComponent(decoded);
+                  if (next === decoded) {
+                    break;
+                  }
+                  decoded = next;
+                } catch {
+                  decoded = decoded.replace(/%[0-9a-f]{2}/gi, (match) =>
+                    String.fromCharCode(Number.parseInt(match.slice(1), 16)),
+                  );
+                  break;
+                }
               }
+              return decoded.normalize('NFKC');
             };
             const highRiskTarget = (url) => {
-              let target = url;
+              let targets = [url];
               if (/^(?:https?:\/\/|www\.)/i.test(url)) {
                 try {
-                  target = new URL(/^www\./i.test(url) ? `https://${url}` : url)
-                    .pathname;
+                  const parsedUrl = new URL(
+                    /^www\./i.test(url) ? `https://${url}` : url,
+                  );
+                  targets = [
+                    ...parsedUrl.pathname.split('/').filter(Boolean),
+                    ...parsedUrl.searchParams.values(),
+                  ];
                 } catch {
-                  target = url;
+                  targets = [url];
                 }
               }
               return (
-                target
-                  .split('/')
-                  .filter(Boolean)
+                targets
                   .map(decodeTarget)
                   .find((segment) => highRiskExtension.test(segment)) ||
-                decodeTarget(target.split('/').pop() || target)
+                decodeTarget(targets[targets.length - 1] || url)
               );
             };
 
