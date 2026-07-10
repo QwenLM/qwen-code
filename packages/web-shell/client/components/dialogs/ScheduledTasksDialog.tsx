@@ -26,10 +26,16 @@ import {
 import styles from './ScheduledTasksDialog.module.css';
 
 /** Wrap a prompt for "Run now" on an isolated task — instructs the model to
- * dispatch via `create_sub_session` rather than running inline. A guarded task
- * additionally has the model evaluate its precondition first and skip the
- * dispatch on a NO, so "Run now" reproduces a scheduled fire end to end (and
- * doubles as the way to test whether a condition is written correctly).
+ * dispatch via `create_sub_session` rather than running inline.
+ *
+ * A manual run does NOT evaluate the task's precondition, and deliberately so.
+ * The verdict is only observable inside the session that computes it: the client
+ * enqueues a prompt and `onRunPrompt` resolves at ADMISSION, long before the
+ * model decides anything. A client-side guard could therefore never learn its
+ * own outcome — it would record a `manual` run for work that was withheld, and
+ * for a one-shot it would consume (delete) the task before the verdict existed.
+ * So "Run now" means run now: the guard belongs to the scheduler, and a human
+ * clicking the button is overriding it on purpose.
  *
  * Only the MANUAL run relays through the model. A scheduled fire evaluates the
  * condition as its own cron turn and dispatches daemon-side
@@ -37,28 +43,14 @@ import styles from './ScheduledTasksDialog.module.css';
  * `create_sub_session` asks for permission, and nobody would be there to answer.
  * A manual run is attended by definition — the user is looking at this dialog —
  * so the tool's permission gate can do its job. */
-function wrapIsolatedRunPrompt(
-  prompt: string,
-  condition?: string | null,
-): string {
-  const dispatch =
+function wrapIsolatedRunPrompt(prompt: string): string {
+  return (
     'This scheduled task is configured to run in an ISOLATED session. Use the ' +
     '`create_sub_session` tool with completion "sent" to run the task below in ' +
     'a fresh sub-session — do NOT perform the task yourself in this session. ' +
     'After dispatching it, reply with a one-line confirmation.\n\n' +
     '--- Task ---\n' +
-    prompt;
-  if (!condition) return dispatch;
-  return (
-    'This scheduled task is guarded by a PRECONDITION. First check whether the ' +
-    'precondition below holds — investigate as needed, but do NOT perform the ' +
-    'task itself while checking.\n\n' +
-    '--- Precondition ---\n' +
-    condition +
-    '\n\nIf it does NOT hold, reply that the run was skipped because the ' +
-    'precondition was not met, and do nothing else.\n\n' +
-    'If it DOES hold, then: ' +
-    dispatch
+    prompt
   );
 }
 
@@ -389,11 +381,11 @@ export function ScheduledTasksDialog({
           // if the session can't be opened), record AFTER — so a failed enqueue
           // leaves no false "ran" entry. A record failure is surfaced but the
           // history still catches up on the next refresh. For isolated tasks,
-          // wrap the prompt so the model dispatches via create_sub_session,
-          // gated on the task's precondition when it has one.
+          // wrap the prompt so the model dispatches via create_sub_session.
+          // The precondition is NOT evaluated here — see wrapIsolatedRunPrompt.
           const runPrompt =
             fresh.runMode === 'isolated'
-              ? wrapIsolatedRunPrompt(fresh.prompt, fresh.condition)
+              ? wrapIsolatedRunPrompt(fresh.prompt)
               : fresh.prompt;
           await onRunPrompt(runPrompt, fresh.sessionId);
           try {
@@ -414,7 +406,7 @@ export function ScheduledTasksDialog({
           try {
             const runPrompt =
               fresh.runMode === 'isolated'
-                ? wrapIsolatedRunPrompt(fresh.prompt, fresh.condition)
+                ? wrapIsolatedRunPrompt(fresh.prompt)
                 : fresh.prompt;
             await onRunPrompt(runPrompt, fresh.sessionId);
           } catch (err) {
@@ -772,7 +764,11 @@ export function ScheduledTasksDialog({
                     className={styles.iconAction}
                     onClick={() => void handleRunNow(task)}
                     disabled={!task.enabled || runningTaskId !== null}
-                    title={t('scheduledTasks.runNow')}
+                    title={
+                      task.condition
+                        ? t('scheduledTasks.runNowIgnoresCondition')
+                        : t('scheduledTasks.runNow')
+                    }
                     aria-label={t('scheduledTasks.runNow')}
                   >
                     ▶

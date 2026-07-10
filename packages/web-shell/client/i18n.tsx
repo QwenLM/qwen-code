@@ -699,6 +699,8 @@ const EN: Messages = {
   'scheduledTasks.runsOnce': 'Runs once',
   'scheduledTasks.lastFired': (v) => `Last run: ${v?.when ?? ''}`,
   'scheduledTasks.runNow': 'Run now',
+  'scheduledTasks.runNowIgnoresCondition':
+    'Run now (runs immediately, ignoring the precondition)',
   'scheduledTasks.enable': 'Enable',
   'scheduledTasks.disable': 'Disable',
   'scheduledTasks.delete': 'Delete',
@@ -2395,6 +2397,7 @@ const ZH: Messages = {
   'scheduledTasks.runsOnce': '仅一次',
   'scheduledTasks.lastFired': (v) => `上次运行：${v?.when ?? ''}`,
   'scheduledTasks.runNow': '立即运行',
+  'scheduledTasks.runNowIgnoresCondition': '立即运行（忽略前置条件，直接执行）',
   'scheduledTasks.enable': '启用',
   'scheduledTasks.disable': '停用',
   'scheduledTasks.delete': '删除',

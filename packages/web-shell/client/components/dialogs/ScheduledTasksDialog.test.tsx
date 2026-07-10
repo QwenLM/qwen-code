@@ -338,7 +338,12 @@ describe('ScheduledTasksDialog precondition', () => {
     expect(card?.textContent).toContain('anything new on main?');
   });
 
-  it('gates a guarded task’s "Run now" on the precondition', async () => {
+  it('does NOT evaluate the precondition on a manual "Run now"', async () => {
+    // A client-side guard is unsound: `onRunPrompt` resolves at ADMISSION, so
+    // the dialog can never learn the verdict — it would record a `manual` run
+    // for withheld work, and for a one-shot it consumes (deletes) the task
+    // before the verdict exists. "Run now" therefore means run now; the guard
+    // belongs to the scheduler.
     const onRunPrompt = vi.fn();
     await mount(
       [
@@ -354,14 +359,32 @@ describe('ScheduledTasksDialog precondition', () => {
     await flush();
 
     const [sent] = onRunPrompt.mock.calls[0] as [string, string | null];
-    // A manual run relays through the model (it is attended, so it can answer
-    // create_sub_session's permission prompt) — and it must check the guard
-    // first, or "Run now" would not reproduce a scheduled fire.
-    expect(sent).toContain('anything new on main?');
     expect(sent).toContain('create_sub_session');
-    expect(sent).toContain('skipped because the precondition was not met');
-    // The command still rides along, so a YES verdict can dispatch it.
     expect(sent).toContain('summarize the day');
+    // No trace of the guard, in either direction.
+    expect(sent).not.toContain('anything new on main?');
+    expect(sent).not.toContain('PRECONDITION');
+    expect(sent).not.toContain('skipped');
+  });
+
+  it('tells the user that "Run now" ignores a task’s precondition', async () => {
+    await mount([
+      baseTask({
+        runMode: 'isolated',
+        sessionId: 'anchor-1',
+        condition: 'anything new on main?',
+      }),
+    ]);
+    const btn = document.querySelector('[aria-label="Run now"]')!;
+    expect(btn.getAttribute('title')).toBe(
+      'Run now (runs immediately, ignoring the precondition)',
+    );
+  });
+
+  it('keeps the plain tooltip for an unguarded task', async () => {
+    await mount([baseTask({ runMode: 'isolated', sessionId: 'anchor-1' })]);
+    const btn = document.querySelector('[aria-label="Run now"]')!;
+    expect(btn.getAttribute('title')).toBe('Run now');
   });
 
   it('does not mention a precondition for an unguarded isolated task', async () => {
