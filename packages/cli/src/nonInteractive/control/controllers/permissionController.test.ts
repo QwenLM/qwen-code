@@ -114,22 +114,21 @@ describe('PermissionController', () => {
       },
     });
     const onConfirm = vi.fn();
-
-    controller.getToolCallUpdateCallback()([
-      {
-        status: 'awaiting_approval',
-        request: {
-          callId: 'tool-call-answers',
-          name: 'ask_user_question',
-          args: { questions: [] },
-        },
-        confirmationDetails: {
-          type: 'ask_user_question',
-          title: 'Please answer',
-          onConfirm,
-        },
+    const toolCall = {
+      status: 'awaiting_approval',
+      request: {
+        callId: 'tool-call-answers',
+        name: 'ask_user_question',
+        args: { questions: [] } as Record<string, unknown>,
       },
-    ]);
+      confirmationDetails: {
+        type: 'ask_user_question',
+        title: 'Please answer',
+        onConfirm,
+      },
+    };
+
+    controller.getToolCallUpdateCallback()([toolCall]);
 
     await vi.waitFor(() => {
       expect(onConfirm).toHaveBeenCalledWith(
@@ -137,6 +136,10 @@ describe('PermissionController', () => {
         expect.objectContaining({ answers }),
       );
     });
+
+    // The leader path overrides the tool's in-process args with the
+    // host's sanitized updatedInput before confirming.
+    expect(toolCall.request.args).toEqual({ questions: [], answers });
   });
 
   it('omits answers from the payload when updatedInput has none', async () => {
@@ -229,6 +232,7 @@ describe('PermissionController', () => {
 
   it.each([
     ['updatedInput is an array', ['ls'], undefined],
+    ['updatedInput is a string', 'ls', undefined],
     ['answers is an array', { questions: [], answers: ['x'] }, undefined],
     ['answers is null', { questions: [], answers: null }, undefined],
     ['answers is an empty object', { questions: [], answers: {} }, {}],
@@ -270,8 +274,13 @@ describe('PermissionController', () => {
 
       const [outcome, payload] = onConfirm.mock.calls[0];
       expect(outcome).toBe(ToolConfirmationOutcome.ProceedOnce);
-      if (Array.isArray(updatedInput)) {
-        // An array updatedInput is rejected wholesale — plain confirm.
+      const isPlainObject =
+        updatedInput !== null &&
+        typeof updatedInput === 'object' &&
+        !Array.isArray(updatedInput);
+      if (!isPlainObject) {
+        // A non-object updatedInput (array or primitive) is rejected
+        // wholesale — plain confirm, no payload.
         expect(payload).toBeUndefined();
       } else if (expectedAnswers === undefined) {
         expect(payload).toEqual({ updatedInput });
@@ -432,6 +441,34 @@ describe('PermissionController', () => {
     expect(respond).not.toHaveBeenCalledWith(
       ToolConfirmationOutcome.ProceedOnce,
       expect.objectContaining({ answers: expect.anything() }),
+    );
+  });
+
+  it('confirms a teammate approval with no payload when updatedInput is absent', async () => {
+    const context = createContext(120_000);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    vi.spyOn(controller, 'sendControlRequest').mockResolvedValue({
+      subtype: 'success',
+      request_id: 'teammate-request-no-input',
+      response: { behavior: 'allow' },
+    });
+    const respond = vi.fn().mockResolvedValue(undefined);
+
+    await controller.handleTeammateApproval({
+      teammateName: 'worker',
+      toolName: 'run_shell_command',
+      toolInput: { command: 'ls' },
+      respond,
+      timestamp: 789,
+    });
+
+    expect(respond).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      undefined,
     );
   });
 

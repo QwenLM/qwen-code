@@ -25,6 +25,7 @@ import type {
 import {
   InputFormat,
   ToolConfirmationOutcome,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
 import type {
   CLIControlPermissionRequest,
@@ -415,7 +416,9 @@ export class PermissionController extends BaseController {
     }
     const updatedInputObj = updatedInput as Record<string, unknown>;
     const answers =
-      toolName === 'ask_user_question' ? updatedInputObj['answers'] : undefined;
+      toolName === ToolNames.ASK_USER_QUESTION
+        ? updatedInputObj['answers']
+        : undefined;
     return {
       updatedInput: updatedInputObj,
       ...(answers && typeof answers === 'object' && !Array.isArray(answers)
