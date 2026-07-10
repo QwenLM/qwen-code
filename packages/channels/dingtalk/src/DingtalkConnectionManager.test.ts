@@ -18,6 +18,14 @@ class FakeClient {
   disconnect = vi.fn();
 }
 
+function deferredPromise<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 function createManager(
   initialClient: FakeClient,
   overrides: Partial<DingtalkConnectionManagerOptions<FakeClient>> = {},
@@ -76,6 +84,22 @@ describe('DingtalkConnectionManager', () => {
     manager.stop();
   });
 
+  it('allows startup to be retried after the initial connect fails', async () => {
+    const initialClient = new FakeClient();
+    initialClient.connect = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('invalid endpoint'))
+      .mockResolvedValueOnce(undefined);
+    const manager = createManager(initialClient);
+
+    await expect(manager.start()).rejects.toThrow('invalid endpoint');
+    await manager.start();
+
+    expect(initialClient.connect).toHaveBeenCalledTimes(2);
+    expect(initialClient.disconnect).toHaveBeenCalledOnce();
+    manager.stop();
+  });
+
   it('replaces the client after two consecutive missed heartbeats', async () => {
     vi.useFakeTimers();
     const initialClient = new FakeClient();
@@ -104,6 +128,171 @@ describe('DingtalkConnectionManager', () => {
 
     expect(initialClient.socket.ping).toHaveBeenCalledTimes(3);
     expect(createClient).not.toHaveBeenCalled();
+    manager.stop();
+  });
+
+  it('retries a failed replacement after one second', async () => {
+    vi.useFakeTimers();
+    const initialClient = new FakeClient();
+    const failedReplacement = new FakeClient();
+    failedReplacement.connect = vi.fn().mockRejectedValue(new Error('offline'));
+    const recoveredClient = new FakeClient();
+    const createClient = vi
+      .fn()
+      .mockReturnValueOnce(failedReplacement)
+      .mockReturnValueOnce(recoveredClient);
+    const manager = createManager(initialClient, { createClient });
+    await manager.start();
+
+    initialClient.socket.emit('close');
+    await vi.advanceTimersByTimeAsync(999);
+    expect(createClient).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(createClient).toHaveBeenCalledTimes(2);
+    expect(failedReplacement.disconnect).toHaveBeenCalledOnce();
+    expect(initialClient.disconnect).toHaveBeenCalledOnce();
+    manager.stop();
+  });
+
+  it('caps reconnect backoff at thirty seconds', async () => {
+    vi.useFakeTimers();
+    const initialClient = new FakeClient();
+    const createClient = vi.fn(() => {
+      const client = new FakeClient();
+      client.connect = vi.fn().mockRejectedValue(new Error('offline'));
+      return client;
+    });
+    const manager = createManager(initialClient, { createClient });
+    await manager.start();
+
+    initialClient.socket.emit('close');
+    await vi.advanceTimersByTimeAsync(61_000);
+
+    expect(createClient).toHaveBeenCalledTimes(7);
+    manager.stop();
+  });
+
+  it('coalesces simultaneous reconnect signals', async () => {
+    vi.useFakeTimers();
+    const initialClient = new FakeClient();
+    const pendingConnect = deferredPromise<void>();
+    const createClient = vi.fn(() => {
+      const client = new FakeClient();
+      client.connect = vi.fn(() => pendingConnect.promise);
+      return client;
+    });
+    const manager = createManager(initialClient, { createClient });
+    await manager.start();
+
+    initialClient.socket.emit('close');
+    initialClient.socket.emit('error', new Error('closed'));
+    manager.requestReconnect(initialClient, 'SYSTEM disconnect');
+
+    expect(createClient).toHaveBeenCalledOnce();
+    manager.stop();
+    pendingConnect.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it('replaces the client immediately after a socket error', async () => {
+    vi.useFakeTimers();
+    const initialClient = new FakeClient();
+    const createClient = vi.fn(() => new FakeClient());
+    const manager = createManager(initialClient, { createClient });
+    await manager.start();
+
+    initialClient.socket.emit('error', new Error('network failure'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(createClient).toHaveBeenCalledOnce();
+    manager.stop();
+  });
+
+  it('ignores reconnect signals from a replaced client', async () => {
+    vi.useFakeTimers();
+    const initialClient = new FakeClient();
+    const replacement = new FakeClient();
+    const createClient = vi.fn(() => replacement);
+    const manager = createManager(initialClient, { createClient });
+    await manager.start();
+
+    initialClient.socket.emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(createClient).toHaveBeenCalledOnce();
+    expect(initialClient.disconnect).toHaveBeenCalledOnce();
+
+    manager.requestReconnect(initialClient, 'late close');
+    expect(createClient).toHaveBeenCalledOnce();
+    manager.stop();
+  });
+
+  it('replaces a client after two unhealthy state checks', async () => {
+    vi.useFakeTimers();
+    const initialClient = new FakeClient();
+    const createClient = vi.fn(() => new FakeClient());
+    const manager = createManager(initialClient, { createClient });
+    await manager.start();
+    initialClient.connected = false;
+    initialClient.registered = false;
+    initialClient.socket.readyState = 3;
+
+    for (let tick = 0; tick < 6; tick++) {
+      manager.noteActivity(initialClient);
+      await vi.advanceTimersByTimeAsync(20_000);
+    }
+
+    expect(createClient).toHaveBeenCalledOnce();
+    manager.stop();
+  });
+
+  it('cancels a pending retry when stopped', async () => {
+    vi.useFakeTimers();
+    const initialClient = new FakeClient();
+    const failedReplacement = new FakeClient();
+    failedReplacement.connect = vi.fn().mockRejectedValue(new Error('offline'));
+    const createClient = vi.fn(() => failedReplacement);
+    const manager = createManager(initialClient, { createClient });
+    await manager.start();
+
+    initialClient.socket.emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    manager.stop();
+
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(createClient).toHaveBeenCalledOnce();
+  });
+
+  it('resets reconnect backoff after a successful replacement', async () => {
+    vi.useFakeTimers();
+    const initialClient = new FakeClient();
+    const firstFailure = new FakeClient();
+    firstFailure.connect = vi.fn().mockRejectedValue(new Error('offline'));
+    const firstRecovery = new FakeClient();
+    const secondFailure = new FakeClient();
+    secondFailure.connect = vi.fn().mockRejectedValue(new Error('offline'));
+    const secondRecovery = new FakeClient();
+    const createClient = vi
+      .fn()
+      .mockReturnValueOnce(firstFailure)
+      .mockReturnValueOnce(firstRecovery)
+      .mockReturnValueOnce(secondFailure)
+      .mockReturnValueOnce(secondRecovery);
+    const manager = createManager(initialClient, { createClient });
+    await manager.start();
+
+    initialClient.socket.emit('close');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(createClient).toHaveBeenCalledTimes(2);
+
+    firstRecovery.socket.emit('close');
+    await vi.advanceTimersByTimeAsync(999);
+    expect(createClient).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(createClient).toHaveBeenCalledTimes(4);
     manager.stop();
   });
 });

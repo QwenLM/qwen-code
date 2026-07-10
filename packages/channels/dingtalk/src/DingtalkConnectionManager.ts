@@ -27,6 +27,10 @@ const CONNECT_TIMEOUT_MS = 10_000;
 const READY_POLL_MS = 100;
 const HEARTBEAT_INTERVAL_MS = 20_000;
 const MAX_HEARTBEAT_MISSES = 2;
+const HEALTH_INTERVAL_MS = 60_000;
+const MAX_HEALTH_FAILURES = 2;
+const INITIAL_RECONNECT_DELAY_MS = 1_000;
+const MAX_RECONNECT_DELAY_MS = 30_000;
 
 export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
   private running = false;
@@ -37,8 +41,12 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
   private heartbeatTimer?: ReturnType<typeof setInterval>;
   private heartbeatMisses = 0;
   private activitySinceHeartbeat = false;
+  private healthTimer?: ReturnType<typeof setInterval>;
+  private healthFailures = 0;
   private reconnectTask?: Promise<void>;
   private socketCleanup?: () => void;
+  private retryTimer?: ReturnType<typeof setTimeout>;
+  private resolveRetryDelay?: () => void;
 
   constructor(private readonly options: DingtalkConnectionManagerOptions<T>) {
     this.activeClient = options.initialClient;
@@ -50,10 +58,20 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
     }
     this.running = true;
     const generation = ++this.generation;
-    await this.activeClient.connect();
-    await this.waitUntilReady(this.activeClient, generation);
-    this.options.onClientChanged(this.activeClient);
-    this.startMonitoring(this.activeClient);
+    try {
+      await this.activeClient.connect();
+      await this.waitUntilReady(this.activeClient, generation);
+      this.options.onClientChanged(this.activeClient);
+      this.startMonitoring(this.activeClient);
+    } catch (error) {
+      if (this.running && generation === this.generation) {
+        this.running = false;
+        this.generation++;
+        this.cancelReadyDelay();
+        this.activeClient.disconnect();
+      }
+      throw error;
+    }
   }
 
   noteActivity(client: T): void {
@@ -81,6 +99,7 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
     this.generation++;
     this.stopMonitoring();
     this.cancelReadyDelay();
+    this.cancelRetryDelay();
     this.activeClient.disconnect();
   }
 
@@ -88,6 +107,7 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
     this.stopMonitoring();
     this.activitySinceHeartbeat = false;
     this.heartbeatMisses = 0;
+    this.healthFailures = 0;
 
     const socket = this.options.getSocket(client);
     if (socket) {
@@ -120,12 +140,34 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
       }
       this.options.getSocket(client)?.ping();
     }, HEARTBEAT_INTERVAL_MS);
+
+    this.healthTimer = setInterval(() => {
+      if (!this.running || client !== this.activeClient) {
+        return;
+      }
+      if (
+        client.connected &&
+        client.registered &&
+        this.options.getSocket(client)?.readyState === SOCKET_OPEN
+      ) {
+        this.healthFailures = 0;
+        return;
+      }
+      this.healthFailures++;
+      if (this.healthFailures >= MAX_HEALTH_FAILURES) {
+        this.requestReconnect(client, 'unhealthy connection state');
+      }
+    }, HEALTH_INTERVAL_MS);
   }
 
   private stopMonitoring(): void {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = undefined;
+    }
+    if (this.healthTimer) {
+      clearInterval(this.healthTimer);
+      this.healthTimer = undefined;
     }
     this.socketCleanup?.();
     this.socketCleanup = undefined;
@@ -134,23 +176,43 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
   private async reconnect(reason: string): Promise<void> {
     const generation = this.generation;
     const previousClient = this.activeClient;
-    const replacement = this.options.createClient();
-    try {
-      await replacement.connect();
-      await this.waitUntilReady(replacement, generation);
-      if (!this.running || generation !== this.generation) {
-        replacement.disconnect();
+    let retryDelay = INITIAL_RECONNECT_DELAY_MS;
+    while (this.running && generation === this.generation) {
+      const replacement = this.options.createClient();
+      try {
+        await replacement.connect();
+        await this.waitUntilReady(replacement, generation);
+        if (!this.running || generation !== this.generation) {
+          replacement.disconnect();
+          return;
+        }
+        this.activeClient = replacement;
+        this.stopMonitoring();
+        this.options.onClientChanged(replacement);
+        previousClient.disconnect();
+        this.startMonitoring(replacement);
         return;
+      } catch (error) {
+        replacement.disconnect();
+        if (!this.running || generation !== this.generation) {
+          return;
+        }
+        this.options.log(`${reason}: ${String(error)}`);
+        await this.waitForRetry(retryDelay);
+        retryDelay = Math.min(retryDelay * 2, MAX_RECONNECT_DELAY_MS);
       }
-      this.activeClient = replacement;
-      this.stopMonitoring();
-      this.options.onClientChanged(replacement);
-      previousClient.disconnect();
-      this.startMonitoring(replacement);
-    } catch (error) {
-      replacement.disconnect();
-      this.options.log(`${reason}: ${String(error)}`);
     }
+  }
+
+  private waitForRetry(delay: number): Promise<void> {
+    return new Promise((resolve) => {
+      this.resolveRetryDelay = resolve;
+      this.retryTimer = setTimeout(() => {
+        this.retryTimer = undefined;
+        this.resolveRetryDelay = undefined;
+        resolve();
+      }, delay);
+    });
   }
 
   private async waitUntilReady(client: T, generation: number): Promise<void> {
@@ -189,5 +251,14 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
     }
     this.resolveReadyDelay?.();
     this.resolveReadyDelay = undefined;
+  }
+
+  private cancelRetryDelay(): void {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = undefined;
+    }
+    this.resolveRetryDelay?.();
+    this.resolveRetryDelay = undefined;
   }
 }
