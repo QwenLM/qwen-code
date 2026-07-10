@@ -68,6 +68,15 @@ describe('protocol tag sanitizer', () => {
     expect(filter.flush()).toBe('visible');
   });
 
+  it('unwraps protocol summary tags after visible text has started', () => {
+    const filter = new TopLevelProtocolTagStreamFilter();
+
+    expect(filter.accept('Sure - ')).toBe('Sure - ');
+    expect(filter.accept('<summary>answer</summary>') + filter.flush()).toBe(
+      'answer',
+    );
+  });
+
   it('keeps a nested summary hidden when the analysis block later closes', () => {
     const filter = new TopLevelProtocolTagStreamFilter();
 
@@ -157,6 +166,24 @@ describe('protocol tag sanitizer', () => {
     expect(stripAnalysisSummaryProtocolTags(input)).toBe(
       '<details><summary>Title</summary><p>Body</p></details>',
     );
+  });
+
+  it('streams literal summary tags inside visible summary content', () => {
+    const filter = new TopLevelProtocolTagStreamFilter();
+    const input =
+      '<summary><details><summary>Title</summary><p>Body</p></details></summary>';
+
+    expect(filter.accept(input) + filter.flush()).toBe(
+      '<details><summary>Title</summary><p>Body</p></details>',
+    );
+  });
+
+  it('preserves literal unclosed analysis mentions in visible summary content', () => {
+    expect(
+      stripAnalysisSummaryProtocolTags(
+        '<summary>Fix: replace <analysis> tag in src/app.tsx line 42</summary>',
+      ),
+    ).toBe('Fix: replace <analysis> tag in src/app.tsx line 42');
   });
 
   it('keeps only the recovered summary from an unclosed analysis block', () => {

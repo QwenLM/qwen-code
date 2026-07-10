@@ -243,6 +243,9 @@ export class TopLevelProtocolTagStreamFilter {
     | undefined;
   private literalTag = false;
   private analysisDepth = 0;
+  private visibleSummaryOpen = false;
+  private literalSummaryDepth = 0;
+  private literalSummaryOpeningLastChar: string | undefined;
   private outputStarted = false;
   private recoveryBuffer: string | undefined;
   private recoveryAnalysisDepth = 0;
@@ -260,8 +263,8 @@ export class TopLevelProtocolTagStreamFilter {
     if (classification.type === 'possible') return '';
 
     if (classification.type === 'none') {
-      this.mode = 'passthrough';
-      const out = this.detectionBuffer;
+      this.mode = 'protocol';
+      const out = this.acceptProtocolText(this.detectionBuffer);
       this.detectionBuffer = '';
       return out;
     }
@@ -305,6 +308,9 @@ export class TopLevelProtocolTagStreamFilter {
     this.protocolTag = undefined;
     this.literalTag = false;
     this.analysisDepth = 0;
+    this.visibleSummaryOpen = false;
+    this.literalSummaryDepth = 0;
+    this.literalSummaryOpeningLastChar = undefined;
     this.outputStarted = false;
     this.recoveryBuffer = undefined;
     this.recoveryAnalysisDepth = 0;
@@ -333,7 +339,19 @@ export class TopLevelProtocolTagStreamFilter {
 
       if (this.literalTag) {
         if (this.analysisDepth === 0) out += char;
-        if (char === '>') this.literalTag = false;
+        if (this.literalSummaryOpeningLastChar && !/\s/.test(char)) {
+          this.literalSummaryOpeningLastChar = char;
+        }
+        if (char === '>') {
+          if (
+            this.literalSummaryOpeningLastChar &&
+            this.literalSummaryOpeningLastChar !== '/'
+          ) {
+            this.literalSummaryDepth += 1;
+          }
+          this.literalSummaryOpeningLastChar = undefined;
+          this.literalTag = false;
+        }
         continue;
       }
 
@@ -342,6 +360,21 @@ export class TopLevelProtocolTagStreamFilter {
         const classification = classifyTagStart(this.tagCandidate);
         if (classification.type === 'possible') continue;
         if (classification.type === 'protocol') {
+          if (this.isLiteralVisibleSummaryTag(classification)) {
+            out += this.tagCandidate;
+            if (classification.closing) {
+              this.literalSummaryDepth -= 1;
+            } else if (/\/\s*>$/.test(this.tagCandidate)) {
+              this.literalSummaryOpeningLastChar = undefined;
+            } else if (char === '>') {
+              this.literalSummaryDepth += 1;
+            } else {
+              this.literalSummaryOpeningLastChar = char;
+            }
+            this.literalTag = char !== '>';
+            this.tagCandidate = '';
+            continue;
+          }
           if (
             classification.name === 'summary' &&
             !classification.closing &&
@@ -401,6 +434,10 @@ export class TopLevelProtocolTagStreamFilter {
         this.analysisDepth += 1;
       }
     } else if (tag.closing) {
+      if (this.analysisDepth === 0 && this.visibleSummaryOpen) {
+        this.visibleSummaryOpen = false;
+        return;
+      }
       if (
         this.recoveryBuffer !== undefined &&
         !this.recoveryComplete &&
@@ -412,11 +449,23 @@ export class TopLevelProtocolTagStreamFilter {
     } else {
       if (this.analysisDepth === 0) {
         this.outputStarted = true;
+        this.visibleSummaryOpen = !selfClosing;
       } else if (this.recoveryBuffer !== undefined) {
         this.recoverySummaryOpened = true;
         this.recoverySummaryDepth += 1;
       }
     }
+  }
+
+  private isLiteralVisibleSummaryTag(
+    tag: Extract<TagStart, { type: 'protocol' }>,
+  ): boolean {
+    return (
+      tag.name === 'summary' &&
+      this.analysisDepth === 0 &&
+      this.visibleSummaryOpen &&
+      (!tag.closing || this.literalSummaryDepth > 0)
+    );
   }
 
   private resetToPassthrough(): void {
@@ -425,6 +474,9 @@ export class TopLevelProtocolTagStreamFilter {
     this.tagCandidate = '';
     this.protocolTag = undefined;
     this.literalTag = false;
+    this.visibleSummaryOpen = false;
+    this.literalSummaryDepth = 0;
+    this.literalSummaryOpeningLastChar = undefined;
     this.recoveryBuffer = undefined;
     this.recoveryAnalysisDepth = 0;
     this.recoverySummaryOpened = false;
