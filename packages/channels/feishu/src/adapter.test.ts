@@ -30,6 +30,7 @@ function createConfig(overrides?: Partial<ChannelConfig>): ChannelConfig {
     sessionScope: 'user',
     cwd: '/tmp',
     groupPolicy: 'open',
+    dmPolicy: 'open',
     groups: { '*': { requireMention: true } },
     ...overrides,
   };
@@ -80,6 +81,61 @@ describe('FeishuChannel', () => {
       const channel = createChannel();
 
       expect(channel.supportsProactiveSend()).toBe(true);
+    });
+
+    it('logs message debug payloads from the shared handler map', () => {
+      const channel = createChannel();
+      const logDebugPayload = vi.fn();
+      const onMessage = vi.fn();
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        logDebugPayload,
+        onMessage,
+      });
+      const buildHandlerMap = getPrivateMethod<
+        () => Record<string, (data: unknown) => unknown>
+      >(channel, 'buildHandlerMap').bind(channel);
+      const payload = {
+        message: {
+          message_id: 'debug-m1',
+          chat_id: 'chat-1',
+          chat_type: 'p2p',
+          message_type: 'text',
+          content: JSON.stringify({ text: 'hello' }),
+        },
+        sender: {
+          sender_type: 'app',
+          sender_id: { open_id: 'bot-open-id' },
+        },
+      };
+
+      const result = buildHandlerMap()['im.message.receive_v1']?.(payload);
+
+      expect(logDebugPayload).toHaveBeenCalledWith('Feishu', payload);
+      expect(onMessage).toHaveBeenCalledWith(payload);
+      expect(result).toEqual({});
+    });
+
+    it('logs card action debug payloads and preserves stop toast response', () => {
+      const channel = createChannel();
+      const logDebugPayload = vi.fn();
+      const onCardAction = vi.fn().mockReturnValue(true);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        logDebugPayload,
+        onCardAction,
+      });
+      const buildHandlerMap = getPrivateMethod<
+        () => Record<string, (data: unknown) => unknown>
+      >(channel, 'buildHandlerMap').bind(channel);
+      const payload = {
+        action: { value: { action: 'stop' } },
+        context: { open_message_id: 'card-1' },
+      };
+
+      const result = buildHandlerMap()['card.action.trigger']?.(payload);
+
+      expect(logDebugPayload).toHaveBeenCalledWith('Feishu', payload);
+      expect(onCardAction).toHaveBeenCalledWith(payload);
+      expect(result).toEqual({ toast: { type: 'info', content: '已停止' } });
     });
   });
 

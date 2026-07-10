@@ -63,7 +63,7 @@ export class McpPromptLoader implements ICommandLoader {
                   return {
                     type: 'message',
                     messageType: 'info',
-                    content: `Prompt "${prompt.name}" has no arguments.`,
+                    content: `Prompt "${prompt.name}" has no declared arguments. Any text you provide will be forwarded as-is (e.g., /${prompt.name} some text sends { input: "some text" }).`,
                   };
                 }
 
@@ -273,7 +273,16 @@ export class McpPromptLoader implements ICommandLoader {
       positionalArgs.push((match[1] ?? match[2]).replace(/\\(.)/g, '$1'));
     }
 
-    if (!promptArgs) {
+    if (!promptArgs || promptArgs.length === 0) {
+      Object.assign(promptInputs, argValues);
+      // Forward positional text as a default "input" argument when the prompt
+      // declares no arguments, matching Claude Code's behavior. This key is a
+      // client-side convention, not part of the MCP spec. A user-provided
+      // --input named arg takes precedence over positional text.
+      const positionalInput = positionalArgs.join(' ');
+      if (positionalInput && !Object.hasOwn(argValues, 'input')) {
+        promptInputs['input'] = positionalInput;
+      }
       return promptInputs;
     }
     for (const arg of promptArgs) {

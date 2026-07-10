@@ -1,5 +1,10 @@
 import type { CommandModule } from 'yargs';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import {
+  appendChannelMemory,
+  clearChannelMemory,
+  readChannelMemory,
+} from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import {
   DaemonChannelBridge,
@@ -31,11 +36,13 @@ import {
   loadChannelsConfig,
   loadChannelsFromExtensions,
   parseConfiguredChannels,
+  registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
   selectFirstModel,
   type ParsedChannel,
 } from './runtime.js';
+import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 
@@ -150,6 +157,10 @@ export function createDaemonChannelBridgeFacade(
     prompt: bridge.prompt.bind(bridge),
     cancelSession: bridge.cancelSession.bind(bridge),
   };
+
+  if (bridge.respondToPermission) {
+    facade.respondToPermission = bridge.respondToPermission.bind(bridge);
+  }
 
   if (bridge.getAvailableCommands) {
     facade.getAvailableCommands = bridge.getAvailableCommands.bind(bridge);
@@ -337,12 +348,22 @@ export async function runChannelDaemonWorker(
           createChannel(name, config, bridgeFacade, {
             ...(proxy ? { proxy } : {}),
             router: createdRouter,
+            channelMemory: {
+              readChannelMemory,
+              appendChannelMemory,
+              clearChannelMemory,
+            },
+            memoryIntentClassifier: new BridgeChannelMemoryIntentClassifier(
+              bridgeFacade,
+              config.cwd,
+            ),
           }),
           startupSignal,
         ),
       );
     }
     registerToolCallDispatch(bridgeFacade, createdRouter, channels);
+    registerPermissionRelay(bridgeFacade, createdRouter, channels);
     registerSessionCleanup(bridgeFacade, createdRouter, channels);
 
     for (const [name, channel] of channels) {

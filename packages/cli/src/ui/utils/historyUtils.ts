@@ -128,29 +128,27 @@ export function findLastUserItemIndex(history: readonly HistoryItem[]): number {
 }
 
 /**
- * For each `gemini_thought` item that is immediately followed by one or
- * more `gemini_thought_content` continuations, build the concatenated
- * full text (header + continuations joined by newlines).  Items with no
- * continuation are omitted from the result — callers fall back to
- * `item.text` in that case.
+ * Map every thought item to the id of its group's `gemini_thought` head.
+ *
+ * A "thought" is one `gemini_thought` head followed by zero or more
+ * `gemini_thought_content` continuations. Both the head and its continuations
+ * map to the head id, so a single click on the head can expand/collapse the
+ * whole group as a unit (see the per-thought inline expansion in
+ * HistoryItemDisplay).
  */
-export function buildThinkingFullTextMap(
+export function buildThoughtHeadIdMap(
   items: readonly HistoryItem[],
-): Map<HistoryItem, string> {
-  const map = new Map<HistoryItem, string>();
+): Map<HistoryItem, number> {
+  const map = new Map<HistoryItem, number>();
   for (let i = 0; i < items.length; i++) {
     const item = items[i]!;
     if (item.type !== 'gemini_thought') continue;
-    let fullText = item.text;
-    let hasContinuation = false;
+    const headId = item.id;
+    map.set(item, headId);
     for (let j = i + 1; j < items.length; j++) {
       const next = items[j]!;
       if (next.type !== 'gemini_thought_content') break;
-      fullText += '\n' + next.text;
-      hasContinuation = true;
-    }
-    if (hasContinuation) {
-      map.set(item, fullText);
+      map.set(next, headId);
     }
   }
   return map;

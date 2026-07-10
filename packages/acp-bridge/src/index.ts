@@ -15,6 +15,7 @@ export * from './bridgeErrors.js';
 export * from './sessionArtifacts.js';
 export * from './bridgeTypes.js';
 export * from './bridgeOptions.js';
+export * from './replayWindowLimits.js';
 export * from './spawnChannel.js';
 export * from './ndJsonStream.js';
 export * from './bridgeClient.js';

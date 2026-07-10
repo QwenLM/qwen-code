@@ -100,6 +100,8 @@ interface MockClient {
   workspaceMcpTools: () => Promise<unknown>;
   restartMcpServer: () => Promise<unknown>;
   workspaceSkills: () => Promise<unknown>;
+  workspaceAcpStatus: () => Promise<unknown>;
+  workspaceAcpPreheat: () => Promise<unknown>;
   workspaceTools: () => Promise<unknown>;
   setWorkspaceToolEnabled: () => Promise<unknown>;
   workspaceMemory: () => Promise<unknown>;
@@ -140,6 +142,8 @@ const sdkMocks = vi.hoisted(() => {
   const workspaceMcpTools = vi.fn();
   const restartMcpServer = vi.fn();
   const workspaceSkills = vi.fn();
+  const workspaceAcpStatus = vi.fn();
+  const workspaceAcpPreheat = vi.fn();
   const workspaceTools = vi.fn();
   const setWorkspaceToolEnabled = vi.fn();
   const workspaceMemory = vi.fn();
@@ -168,6 +172,8 @@ const sdkMocks = vi.hoisted(() => {
     workspaceMcpTools = workspaceMcpTools;
     restartMcpServer = restartMcpServer;
     workspaceSkills = workspaceSkills;
+    workspaceAcpStatus = workspaceAcpStatus;
+    workspaceAcpPreheat = workspaceAcpPreheat;
     workspaceTools = workspaceTools;
     setWorkspaceToolEnabled = setWorkspaceToolEnabled;
     workspaceMemory = workspaceMemory;
@@ -210,6 +216,8 @@ const sdkMocks = vi.hoisted(() => {
     capabilities,
     workspaceProviders,
     workspaceSkills,
+    workspaceAcpStatus,
+    workspaceAcpPreheat,
     MockDaemonClient,
     MockDaemonSessionClient,
     workspaceMcpTools,
@@ -257,6 +265,14 @@ const sdkMocks = vi.hoisted(() => {
         workspaceCwd: '/mock-workspace',
         initialized: true,
         skills: [],
+      });
+      workspaceAcpStatus.mockReset();
+      workspaceAcpStatus.mockResolvedValue({ channelLive: true });
+      workspaceAcpPreheat.mockReset();
+      workspaceAcpPreheat.mockResolvedValue({
+        ready: true,
+        channelLive: true,
+        durationMs: 1,
       });
       workspaceTools.mockReset();
       workspaceTools.mockResolvedValue({
@@ -472,6 +488,112 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('preheats ACP and refreshes deferred skills when ACP is not running', async () => {
+    sdkMocks.workspaceAcpStatus.mockResolvedValue({ channelLive: false });
+    sdkMocks.workspaceSkills
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'pdf',
+            description: 'Work with PDFs',
+            level: 'extension',
+            modelInvocable: true,
+          },
+        ],
+      });
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    await act(async () => {
+      await flushPromises();
+      await flushPromises();
+    });
+
+    expect(sdkMocks.workspaceAcpPreheat).toHaveBeenCalledWith(5000);
+    expect(sdkMocks.workspaceSkills).toHaveBeenCalledTimes(2);
+    expect(connection?.skills).toEqual(['review', 'pdf']);
+  });
+
+  it('clears deferred skills when ACP refresh returns an empty list', async () => {
+    sdkMocks.workspaceAcpStatus.mockResolvedValue({ channelLive: false });
+    sdkMocks.workspaceSkills
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        skills: [],
+      });
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    await act(async () => {
+      await flushPromises();
+      await flushPromises();
+    });
+
+    expect(connection?.skills).toEqual([]);
+    expect(connection?.commands).toEqual([]);
+  });
+
   it('warns when deferred workspace providers fail', async () => {
     const error = new Error('providers unavailable');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -516,12 +638,14 @@ describe('DaemonSessionProvider', () => {
     });
 
     // Skills failing must not block the deferred connect: providers still
-    // resolve and the connection reports connected, just without skill commands.
+    // resolve and the connection reports connected, without clearing any
+    // previous skill commands.
     expect(connection).toMatchObject({
       status: 'connected',
       workspaceCwd: '/mock-workspace',
     });
-    expect(connection).not.toHaveProperty('commands');
+    expect(connection?.commands).toBeUndefined();
+    expect(connection?.skills).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(
       '[DaemonSessionProvider] workspaceSkills failed in deferred connect:',
       error,
@@ -2065,7 +2189,9 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('logs settings reloads without inserting daemon debug blocks', async () => {
-    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+    const debug = vi
+      .spyOn(console, 'debug')
+      .mockImplementation(() => undefined);
     const session = createMockSession({
       events: async function* settingsReloadEvents() {
         yield {
@@ -2877,6 +3003,70 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toMatchObject([
       { kind: 'assistant', text: 'initial replay', streaming: false },
     ]);
+  });
+
+  it('renders bounded replay truncation from the loaded snapshot without resync', async () => {
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              truncatedEvents: 4,
+              retainedEvents: 2,
+              maxBytes: 512,
+              fullTranscriptAvailable: false,
+            },
+          },
+          {
+            id: 5,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'retained replay' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let awaitingResync = false;
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      awaitingResync = useDaemonTranscriptState().awaitingResync;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(awaitingResync).toBe(false);
+    expect(blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'status',
+          text: expect.stringContaining('History truncated'),
+        }),
+        expect.objectContaining({
+          kind: 'assistant',
+          text: 'retained replay',
+        }),
+      ]),
+    );
   });
 
   it('keeps replayed non-turn events from marking a prompt as waiting', async () => {

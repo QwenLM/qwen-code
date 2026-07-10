@@ -537,16 +537,62 @@ Done.`.replace(/\n/g, eol);
       expect((lastFrame() ?? '').includes('Alpha')).toBe(false);
     });
 
-    it('releases a complete separator whose column count differs from the header', () => {
-      // Header has 3 columns, the separator is complete (ends with `|`) but has
-      // only 2 — it can never become a matching separator, and the main parser
-      // treats it as plain text. So it must render, not be held for the stream.
+    it('releases a mismatched separator once a line follows it (no longer growing)', () => {
+      // Header has 3 columns, the separator has only 2 AND a further line follows
+      // it — so the separator is committed (it will not gain a third column) and
+      // can never become a matching separator. The main parser treats it as plain
+      // text, so it must render, not be held for the stream.
       const text = `| A | B | C |
-| --- | --- |`.replace(/\n/g, eol);
+| --- | --- |
+next paragraph`.replace(/\n/g, eol);
       const { lastFrame } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
       );
       expect(lastFrame() ?? '').toContain('A');
+    });
+
+    it('releases a separator with too many columns (overshot the header)', () => {
+      // Header has 2 columns, the trailing separator already has 3 — it overshot
+      // and can only gain more, so it can never match. Release it as plain text
+      // rather than holding the run for the rest of the stream.
+      const text = `| A | B |
+| --- | --- | --- |`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      expect(lastFrame() ?? '').toContain('A');
+    });
+
+    it('keeps holding while a short separator is still the trailing line (may gain columns)', () => {
+      // Regression: a 7-column header whose separator is mid-type momentarily ends
+      // with `|` at an intermediate count (`| --- | --- |` on the way to seven).
+      // That is NOT a final mismatch — the separator can still gain columns — so
+      // the header must stay held, not flash as raw `| … |` text on every
+      // closed-group frame while the separator streams in.
+      const text = `intro
+| C1 | C2 | C3 | C4 | C5 | C6 | C7 |
+| --- | --- |`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('intro');
+      expect(output).not.toContain('C1');
+    });
+
+    it('keeps holding the header while the separator is just a bare pipe', () => {
+      // The frame between the header's newline and the separator's first dash: the
+      // trailing line is a bare `|` (a valid separator prefix, no dash yet). The
+      // header must stay held rather than flashing raw for that one frame.
+      const text = `intro
+| C1 | C2 | C3 | C4 | C5 | C6 | C7 |
+|`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('intro');
+      expect(output).not.toContain('C1');
     });
 
     it('does not hold a pipe line inside a nested (longer) code fence', () => {

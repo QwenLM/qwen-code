@@ -219,6 +219,29 @@ describe('rateLimit', () => {
       expect(res.body).toMatchObject({ tier: 'read' });
     });
 
+    it('classifies plural workspace session listing as read tier', () => {
+      const next = vi.fn();
+      limiter.middleware(
+        mockReq({
+          method: 'GET',
+          path: '/workspaces/ws-secondary/sessions',
+        }),
+        mockRes(),
+        next,
+      );
+      expect(next).toHaveBeenCalled();
+      const res = mockRes();
+      limiter.middleware(
+        mockReq({
+          method: 'GET',
+          path: '/workspaces/ws-secondary/sessions',
+        }),
+        res,
+        vi.fn(),
+      );
+      expect(res.body).toMatchObject({ tier: 'read' });
+    });
+
     it('exempts GET /health', () => {
       const next = vi.fn();
       for (let i = 0; i < 5; i++) {

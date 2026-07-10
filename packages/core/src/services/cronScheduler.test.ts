@@ -1191,6 +1191,35 @@ describe('CronScheduler', () => {
       });
     });
 
+    it('delivers runMode on the job so the Session layer can route isolated fires', async () => {
+      // Isolated tasks fire through the same onFire channel as any other durable
+      // task; the runMode ride-along is what lets Session.onFire dispatch the
+      // prompt into a fresh sub-session instead of running it in the bound
+      // session. The scheduler itself persists a run normally — no special
+      // isolated persist path.
+      await writeCronTasks(tmpDir, [
+        { ...diskTask('iso1'), runMode: 'isolated' },
+      ]);
+      await scheduler.enableDurable('session-1');
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+      const firstMinute = new Date(2025, 0, 15, 10, 30, 0).getTime();
+
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.runMode).toBe('isolated');
+
+      await vi.waitFor(async () => {
+        const task = (await readCronTasks(tmpDir))[0]!;
+        expect(task.lastFiredAt).toBe(firstMinute);
+        // Records a run like any durable fire (attributed to this session).
+        expect(task.runs).toEqual([
+          { at: firstMinute, kind: 'scheduled', sessionId: 'session-1' },
+        ]);
+      });
+    });
+
     // Settle + tear down a second scheduler sharing this tmpDir, so its
     // fire-and-forget writes don't race the afterEach rm.
     async function settle(s: CronScheduler): Promise<void> {
@@ -1672,6 +1701,17 @@ describe('CronScheduler', () => {
       const tasks = await readCronTasks(tmpDir);
       expect(tasks).toHaveLength(1);
       expect(tasks[0]!.prompt).toBe('headless durable');
+    });
+
+    it('createDurable leaves tasks unbound even after enableDurable', async () => {
+      // Regression guard: durable tasks created via cron_create must stay
+      // unbound so non-daemon paths (TUI/ACP/headless) keep the shared-lock
+      // model. Binding is the daemon keepalive's job, not createDurable's.
+      await scheduler.enableDurable('session-1');
+      await scheduler.createDurable('* * * * *', 'unbound', true);
+      const tasks = await readCronTasks(tmpDir);
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!.sessionId).toBeUndefined();
     });
 
     it('non-owner loads durable tasks for listing but does not fire them', async () => {

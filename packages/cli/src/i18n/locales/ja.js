@@ -205,6 +205,43 @@ export default {
   'Delete {{name}}': '{{name}} を削除',
   'Unknown Step': '不明なステップ',
   'Esc to close': 'Esc で閉じる',
+  Transcript: 'トランスクリプト',
+  'to close': '閉じる',
+  'to scroll': 'スクロール',
+  'Failed to render transcript.': 'トランスクリプトの描画に失敗しました。',
+  'Read {{count}} file': '{{count}} 件のファイルを読み込みました',
+  'Read {{count}} files': '{{count}} 件のファイルを読み込みました',
+  'Reading {{count}} file': '{{count}} 件のファイルを読み込み中',
+  'Reading {{count}} files': '{{count}} 件のファイルを読み込み中',
+  'Edited {{count}} file': '{{count}} 件のファイルを編集しました',
+  'Edited {{count}} files': '{{count}} 件のファイルを編集しました',
+  'Editing {{count}} file': '{{count}} 件のファイルを編集中',
+  'Editing {{count}} files': '{{count}} 件のファイルを編集中',
+  'Wrote {{count}} file': '{{count}} 件のファイルを書き込みました',
+  'Wrote {{count}} files': '{{count}} 件のファイルを書き込みました',
+  'Writing {{count}} file': '{{count}} 件のファイルを書き込み中',
+  'Writing {{count}} files': '{{count}} 件のファイルを書き込み中',
+  'Searched {{count}} pattern': '{{count}} 件のパターンを検索しました',
+  'Searched {{count}} patterns': '{{count}} 件のパターンを検索しました',
+  'Searching {{count}} pattern': '{{count}} 件のパターンを検索中',
+  'Searching {{count}} patterns': '{{count}} 件のパターンを検索中',
+  'Listed {{count}} directory': '{{count}} 件のディレクトリを一覧表示しました',
+  'Listed {{count}} directories':
+    '{{count}} 件のディレクトリを一覧表示しました',
+  'Listing {{count}} directory': '{{count}} 件のディレクトリを一覧表示中',
+  'Listing {{count}} directories': '{{count}} 件のディレクトリを一覧表示中',
+  'Ran {{count}} command': '{{count}} 件のコマンドを実行しました',
+  'Ran {{count}} commands': '{{count}} 件のコマンドを実行しました',
+  'Running {{count}} command': '{{count}} 件のコマンドを実行中',
+  'Running {{count}} commands': '{{count}} 件のコマンドを実行中',
+  'Ran {{count}} agent': '{{count}} 件のエージェントを実行しました',
+  'Ran {{count}} agents': '{{count}} 件のエージェントを実行しました',
+  'Running {{count}} agent': '{{count}} 件のエージェントを実行中',
+  'Running {{count}} agents': '{{count}} 件のエージェントを実行中',
+  'Used {{count}} tool': '{{count}} 件のツールを使用しました',
+  'Used {{count}} tools': '{{count}} 件のツールを使用しました',
+  'Using {{count}} tool': '{{count}} 件のツールを使用中',
+  'Using {{count}} tools': '{{count}} 件のツールを使用中',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter で選択、↑↓ で移動、Esc で閉じる',
   'Esc to go back': 'Esc で戻る',
@@ -1139,8 +1176,6 @@ export default {
     'Tab または /approval-mode で権限モードをすばやく切り替えられます。',
   'Try /insight to generate personalized insights from your chat history.':
     '/insight でチャット履歴からパーソナライズされたインサイトを生成できます。',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Ctrl+O でコンパクトモードを切り替え — ツール出力と思考を非表示にしてすっきり表示。',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'QWEN.md ファイルを追加すると、Qwen Code に永続的なプロジェクトコンテキストを与えられます。',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1406,10 +1441,7 @@ export default {
     'Rawモードが利用できません。インタラクティブターミナルで実行してください。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
-  'to toggle compact mode': 'コンパクトモードの切り替え',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'コンパクトモードでツール出力と思考を非表示にします（Ctrl+O で切り替え）。',
-  'Press Ctrl+O to show full tool output': 'Ctrl+O で完全なツール出力を表示',
+  'to view transcript': 'トランスクリプトを表示',
   'Switch to plan mode or exit plan mode':
     'プランモードに切り替えるか、プランモードを終了する',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
@@ -1869,4 +1901,82 @@ export default {
   in: '入力',
   out: '出力',
   'In/Out': '入力/出力',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Qwen Codeのアップデートを確認し、利用可能な場合はインストールします',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Qwen Code のアップデートがあります！{{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Qwen Code の新しいバージョンがあります！{{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} は最新です！',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'アップデートの確認に失敗しました。ネットワークまたはレジストリ設定を確認してください。',
+  'Unable to check for updates: {{reason}}':
+    'アップデートを確認できません: {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    'アップデート成功！新バージョンは次回起動時に使用されます。',
+  'Update downloaded. It will be applied after you exit this session.':
+    'アップデートをダウンロードしました。現在のセッション終了後に適用されます。',
+  'Update failed: {{error}}': 'アップデート失敗：{{error}}',
+  'Downloading update...': 'アップデートをダウンロードしています...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'アップデートに成功しました！新しいバージョンを使用するには Qwen Code を再起動してください。再起動前にモデルプロバイダーを切り替えると正しく動作しない場合があります。',
+  'Automatic update failed. Please try updating manually.':
+    '自動アップデートに失敗しました。手動で更新してください。',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    '自動更新に失敗しました: {{error}}。手動で更新するにはインストーラーを再実行してください。',
+  'Running from a local git clone. Please update with "git pull".':
+    'ローカル Git クローンから実行中です。"git pull" で更新してください。',
+  'Running via npx, update not applicable.':
+    'npx 経由で実行中のため、更新は適用されません。',
+  'Running via pnpx, update not applicable.':
+    'pnpx 経由で実行中のため、更新は適用されません。',
+  'Running via bunx, update not applicable.':
+    'bunx 経由で実行中のため、更新は適用されません。',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Homebrew 経由でインストールされています。"brew upgrade" で更新してください。',
+  "Locally installed. Please update via your project's package.json.":
+    'ローカルにインストールされています。プロジェクトの package.json 経由で更新してください。',
+  'Update requires sudo. Please run:':
+    '更新には sudo が必要です。次を実行してください:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'スタンドアロンインストールを検出しました。自動更新を試行しています...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'スタンドアロンインストールを検出しました。更新するにはスタンドアロンインストーラーを再実行してください:',
+  'Run the following to update:':
+    '以下のコマンドを実行してアップデートしてください：',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'このスタンドアロンインストールを自動更新できません。以下から再インストールしてください：',
+  'Manual update required. Please reinstall Qwen Code.':
+    '手動更新が必要です。Qwen Codeを再インストールしてください。',
+
+  // ============================================================================
+  // reload-plugins command
+  // ============================================================================
+  '{{count}} extension': '{{count}} extension',
+  '{{count}} extensions': '{{count}} extensions',
+  '{{count}} command': '{{count}} command',
+  '{{count}} commands': '{{count}} commands',
+  '{{count}} skill': '{{count}} skill',
+  '{{count}} skills': '{{count}} skills',
+  '{{count}} agent': '{{count}} agent',
+  '{{count}} agents': '{{count}} agents',
+  '{{count}} hook': '{{count}} hook',
+  '{{count}} hooks': '{{count}} hooks',
+  '{{count}} extension MCP server': '{{count}} extension MCP server',
+  '{{count}} extension MCP servers': '{{count}} extension MCP servers',
+  '{{count}} extension LSP server': '{{count}} extension LSP server',
+  '{{count}} extension LSP servers': '{{count}} extension LSP servers',
+  'Reload extension changes from disk': 'Reload extension changes from disk',
+  'Reloaded extensions: {{summary}}': 'Reloaded extensions: {{summary}}',
+  'Reload failed: {{message}}': 'Reload failed: {{message}}',
+  'Reload failed.': 'Reload failed.',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    'Extensions changed on disk. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    'Extension reload did not complete. Run /reload-plugins to try again.',
 };

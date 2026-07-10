@@ -230,7 +230,9 @@ function MermaidBlock({ code }: { code: string }) {
     return (
       <div className={styles.codeBlock}>
         <div className={styles.codeBlockHeader}>
-          <span className={styles.codeBlockLang}>mermaid (error)</span>
+          <span className={styles.codeBlockLang}>
+            {t('mermaid.errorLabel')}
+          </span>
         </div>
         <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
           <code>{code}</code>
@@ -242,7 +244,7 @@ function MermaidBlock({ code }: { code: string }) {
   return (
     <div className={styles.codeBlock}>
       <div className={styles.codeBlockHeader}>
-        <span className={styles.codeBlockLang}>mermaid</span>
+        <span className={styles.codeBlockLang}>{t('mermaid.label')}</span>
         <span className={styles.mermaidActions}>
           <button
             className={styles.codeBlockCopy}
@@ -534,6 +536,11 @@ function MarkdownPre({ children }: { children?: ReactNode }) {
   return <>{children}</>;
 }
 
+/** `qwen-session://<id>` links are intercepted and dispatched as a DOM event
+ * (`qwen:open-session`) so the app shell can navigate to the session without
+ * the markdown renderer needing to know about session management. */
+const QWEN_SESSION_SCHEME = /^qwen-session:\/\//i;
+
 function MarkdownLink({
   href,
   children,
@@ -541,6 +548,25 @@ function MarkdownLink({
   href?: string;
   children?: ReactNode;
 }) {
+  if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
+    const sessionId = href.trim().replace(QWEN_SESSION_SCHEME, '');
+    return (
+      <a
+        href="#"
+        role="button"
+        className={styles.link}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          window.dispatchEvent(
+            new CustomEvent('qwen:open-session', { detail: sessionId }),
+          );
+        }}
+      >
+        {children}
+      </a>
+    );
+  }
   const safeHref = isSafeHref(href) ? href : undefined;
   return (
     <a

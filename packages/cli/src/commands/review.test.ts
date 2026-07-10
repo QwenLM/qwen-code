@@ -35,9 +35,12 @@ describe('reviewCommand', () => {
       'pr-context',
       'load-rules',
       'presubmit',
-      'post-suggestions',
       'cleanup',
     ]);
+  });
+
+  it('does not register the removed `post-suggestions` subcommand', () => {
+    expect(registeredSubcommands()).not.toContain('post-suggestions');
   });
 
   it('does not register the removed `deterministic` subcommand', () => {
