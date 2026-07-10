@@ -2323,6 +2323,46 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('should skip hook, skill, and file checkpointing side effects when requested', async () => {
+      const config = new Config({
+        ...baseParams,
+        fileCheckpointingEnabled: true,
+      });
+
+      await expect(
+        config.initialize({
+          skipMcpDiscovery: true,
+          skipHooks: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(HookSystem).not.toHaveBeenCalled();
+      expect(config.getHookSystem()).toBeUndefined();
+      expect(SkillManager).not.toHaveBeenCalled();
+      expect(config.getSkillManager()).toBeNull();
+      expect(config.getFileCheckpointingEnabled()).toBe(false);
+    });
+
+    it('warms tools strictly by default and leniently when lenientToolWarmup is set', async () => {
+      // Regression guard for the read-only transcript-replay path: a Config that
+      // skips the SkillManager must warm tools leniently, otherwise warmAll()
+      // aborts initialize() when SkillTool's constructor throws.
+      const warmAll = vi.mocked(ToolRegistry.prototype.warmAll);
+
+      warmAll.mockClear();
+      await new Config({ ...baseParams }).initialize();
+      expect(warmAll).toHaveBeenLastCalledWith({ strict: true });
+
+      warmAll.mockClear();
+      await new Config({ ...baseParams }).initialize({
+        skipSkillManager: true,
+        lenientToolWarmup: true,
+      });
+      expect(warmAll).toHaveBeenLastCalledWith({ strict: false });
+    });
+
     it('registers loop_wakeup when cron is enabled', async () => {
       const config = new Config({ ...baseParams, cronEnabled: true });
       await config.initialize();
@@ -6332,6 +6372,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 1_000_000,
       ['samplingParams']: { temperature: 0.7 },
       ['enableCacheControl']: true,
+      ['forceGlobalCacheScope']: true,
     };
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -6357,6 +6398,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 128_000,
       ['samplingParams']: { temperature: 0.8 },
       ['enableCacheControl']: false,
+      ['forceGlobalCacheScope']: false,
       ['toolResultContentFormat']: 'string',
       ['modalities']: { image: true },
     };
@@ -6368,6 +6410,7 @@ describe('Model Switching and Config Updates', () => {
         contextWindowSize: { kind: 'computed', detail: 'auto' },
         samplingParams: { kind: 'settings' },
         enableCacheControl: { kind: 'settings' },
+        forceGlobalCacheScope: { kind: 'settings' },
         toolResultContentFormat: { kind: 'settings' },
         modalities: { kind: 'computed', detail: 'auto' },
       },
@@ -6389,6 +6432,7 @@ describe('Model Switching and Config Updates', () => {
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
     expect(updatedConfig['samplingParams']?.temperature).toBe(0.8);
     expect(updatedConfig['enableCacheControl']).toBe(false);
+    expect(updatedConfig['forceGlobalCacheScope']).toBe(false);
     expect(updatedConfig['toolResultContentFormat']).toBe('string');
     // Modalities are model-derived; a hot switch must refresh them so the
     // vision-bridge gate reflects the new model (it reads getEffectiveInputModalities()).
@@ -6403,6 +6447,7 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['contextWindowSize']?.detail).toBe('auto');
     expect(sources['samplingParams']?.kind).toBe('settings');
     expect(sources['enableCacheControl']?.kind).toBe('settings');
+    expect(sources['forceGlobalCacheScope']?.kind).toBe('settings');
     expect(sources['toolResultContentFormat']?.kind).toBe('settings');
     expect(sources['modalities']?.kind).toBe('computed');
   });

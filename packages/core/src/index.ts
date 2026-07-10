@@ -216,7 +216,7 @@ export {
   getCronFilePath,
   generateCronTaskId,
   appendCronRun,
-  markCronRunWithheld,
+  taskHasLegacyCondition,
   MAX_TASK_RUNS,
 } from './services/cronTasksFile.js';
 export * from './services/fileDiscoveryService.js';
@@ -232,6 +232,23 @@ export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/sessionService.js';
+export {
+  decodeSessionTranscriptCursor,
+  encodeSessionTranscriptCursor,
+  InvalidSessionTranscriptCursorError,
+  SESSION_TRANSCRIPT_CURSOR_VERSION,
+  SESSION_TRANSCRIPT_DEFAULT_LIMIT,
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  SESSION_TRANSCRIPT_MAX_LIMIT,
+  SessionTranscriptReader,
+  SessionTranscriptSnapshotUnavailableError,
+  SessionTranscriptTooLargeError,
+} from './services/session-transcript-reader.js';
+export type {
+  SessionTranscriptCursorState,
+  SessionTranscriptReadPageOptions,
+  SessionTranscriptRecordPage,
+} from './services/session-transcript-reader.js';
 export * from './utils/conversation-chain.js';
 export * from './services/sessionTitle.js';
 export * from './services/sleepInhibitor.js';
