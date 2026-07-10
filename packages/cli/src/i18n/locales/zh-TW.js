@@ -2253,4 +2253,17 @@ export default {
     '擴充內容重新整理失敗。執行 /reload-plugins 來套用更新。',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     '擴充重新載入未完成。執行 /reload-plugins 重試。',
+  'Precondition check': '前置條件檢查',
+  'Precondition not met — this scheduled run was skipped.':
+    '前置條件不滿足 —— 已略過本次定時執行。',
+  'The precondition check was cancelled — this scheduled run was skipped.':
+    '前置條件檢查已取消 —— 已略過本次定時執行。',
+  'The precondition check was interrupted — this scheduled run was skipped.':
+    '前置條件檢查被中斷 —— 已略過本次定時執行。',
+  'The precondition check failed — this scheduled run was skipped.':
+    '前置條件檢查失敗 —— 已略過本次定時執行。',
+  'Running this scheduled task in a new session: {{link}}':
+    '正在新會話中執行該定時任務：{{link}}',
+  'This scheduled run could not be started: {{error}}':
+    '本次定時執行無法啟動：{{error}}',
 };

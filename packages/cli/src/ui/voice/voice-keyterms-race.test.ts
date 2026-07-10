@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from '../../config/settings.js';
+import { buildVoiceKeyterms } from './voice-keyterms.js';
 
 const raceState = vi.hoisted(() => ({
   target: '',
@@ -84,7 +85,7 @@ describe('buildVoiceKeyterms race checks', () => {
     workspaceDir = '';
   });
 
-  it('does not read a keyterms file swapped in before open', async () => {
+  it('does not read a keyterms file swapped in before open', () => {
     workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-keyterms-'));
     const qwenDir = path.join(workspaceDir, '.qwen');
     fs.mkdirSync(qwenDir, { recursive: true });
@@ -95,7 +96,6 @@ describe('buildVoiceKeyterms race checks', () => {
     raceState.replacementText = 'SwapSecret\n';
     raceState.enabled = true;
 
-    const { buildVoiceKeyterms } = await import('./voice-keyterms.js');
     const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
 
     expect(raceState.swapped).toBe(true);
@@ -103,7 +103,7 @@ describe('buildVoiceKeyterms race checks', () => {
     expect(terms).toContain('TypeScript'); // globals only
   });
 
-  it('does not read a keyterms file rewritten in place before open', async () => {
+  it('does not read a keyterms file rewritten in place before open', () => {
     workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-keyterms-'));
     const qwenDir = path.join(workspaceDir, '.qwen');
     fs.mkdirSync(qwenDir, { recursive: true });
@@ -116,7 +116,6 @@ describe('buildVoiceKeyterms race checks', () => {
     raceState.enabled = true;
     raceState.mode = 'overwrite';
 
-    const { buildVoiceKeyterms } = await import('./voice-keyterms.js');
     const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
 
     expect(raceState.swapped).toBe(true);
@@ -124,7 +123,7 @@ describe('buildVoiceKeyterms race checks', () => {
     expect(terms).toContain('TypeScript'); // globals only
   });
 
-  it('does not read content larger than the file size cap after open', async () => {
+  it('does not read content larger than the file size cap after open', () => {
     workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-keyterms-'));
     const qwenDir = path.join(workspaceDir, '.qwen');
     fs.mkdirSync(qwenDir, { recursive: true });
@@ -133,7 +132,6 @@ describe('buildVoiceKeyterms race checks', () => {
 
     raceState.oversizedReadText = `HugeTermMarker\n${'x'.repeat(64 * 1024)}`;
 
-    const { buildVoiceKeyterms } = await import('./voice-keyterms.js');
     const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
 
     expect(terms).not.toContain('HugeTermMarker');
