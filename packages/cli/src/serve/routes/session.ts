@@ -2024,6 +2024,18 @@ export function registerSessionRoutes(
           (cursor !== undefined && cursor !== ''
             ? isNumericSessionCursor(cursor)
             : await hasActivePersistedSessions(key));
+        // The live path only reads cursor/size; persisted-only options
+        // (organized view or archived state) would be silently dropped there.
+        // usePersisted already routes those to the persisted path — assert it so
+        // a future option added to validation but not to that gate fails loudly.
+        if (
+          !usePersisted &&
+          (view !== undefined || archiveState === 'archived')
+        ) {
+          throw new Error(
+            'session list live path received persisted-only options',
+          );
+        }
         const result = usePersisted
           ? await listWorkspaceSessionsForResponse(runtime.bridge, key, options)
           : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
@@ -2047,7 +2059,15 @@ export function registerSessionRoutes(
         writeStderrLine(
           `qwen serve: failed to list sessions for workspace ${safeLogValue(
             key,
-          )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
+          )} (options=${safeLogValue(
+            JSON.stringify({
+              view: req.query['view'],
+              archiveState: req.query['archiveState'],
+              group: req.query['group'],
+            }),
+          )}): ${safeLogValue(
+            err instanceof Error ? err.message : String(err),
+          )}`,
         );
         res.status(500).json({
           error: 'Failed to list sessions',

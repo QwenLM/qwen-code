@@ -966,6 +966,60 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
+  it('paginates organized non-primary sessions across an opaque cursor round-trip', async () => {
+    await withRuntimeDir(async () => {
+      const newestId = '550e8400-e29b-41d4-a716-446655440150';
+      const middleId = '550e8400-e29b-41d4-a716-446655440151';
+      const oldestId = '550e8400-e29b-41d4-a716-446655440152';
+      await writeStoredSession({
+        sessionId: newestId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T03:00:00.000Z',
+        prompt: 'secondary newest',
+        mtime: new Date('2026-07-08T03:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: middleId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T02:00:00.000Z',
+        prompt: 'secondary middle',
+        mtime: new Date('2026-07-08T02:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: oldestId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T01:00:00.000Z',
+        prompt: 'secondary oldest',
+        mtime: new Date('2026-07-08T01:00:00.000Z'),
+      });
+      const { app } = makeHarness({ secondarySummaries: [] });
+
+      const firstPage = await request(app)
+        .get(
+          '/workspaces/secondary-id/sessions?view=organized&group=all&size=2',
+        )
+        .set('Host', host())
+        .expect(200);
+      expect(
+        firstPage.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual([newestId, middleId]);
+      expect(firstPage.body.nextCursor).toEqual(expect.any(String));
+
+      const secondPage = await request(app)
+        .get(
+          `/workspaces/secondary-id/sessions?view=organized&group=all&size=2&cursor=${encodeURIComponent(
+            firstPage.body.nextCursor as string,
+          )}`,
+        )
+        .set('Host', host())
+        .expect(200);
+      expect(
+        secondPage.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual([oldestId]);
+      expect(secondPage.body.nextCursor).toBeUndefined();
+    });
+  });
+
   it('rejects archived and organized non-primary session lists for untrusted workspaces', async () => {
     const { app } = makeHarness({ secondaryTrusted: false });
 
