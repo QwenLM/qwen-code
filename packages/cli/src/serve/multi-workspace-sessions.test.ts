@@ -915,6 +915,57 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
+  it('lists organized archived non-primary sessions pinned first without merging live sessions', async () => {
+    await withRuntimeDir(async () => {
+      const pinnedArchivedId = '550e8400-e29b-41d4-a716-446655440140';
+      const plainArchivedId = '550e8400-e29b-41d4-a716-446655440141';
+      const liveOnlyId = '550e8400-e29b-41d4-a716-446655440142';
+      await writeStoredSession({
+        sessionId: pinnedArchivedId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'secondary pinned archived',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: plainArchivedId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T01:00:00.000Z',
+        prompt: 'secondary plain archived',
+        mtime: new Date('2026-07-08T01:00:00.000Z'),
+      });
+      const { app } = makeHarness({
+        secondarySummaries: [makeSummary(liveOnlyId, SECONDARY_CWD)],
+      });
+
+      await request(app)
+        .post('/workspaces/secondary-id/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [pinnedArchivedId, plainArchivedId] })
+        .expect(200);
+      await createSessionOrganizationService(
+        SECONDARY_CWD,
+      ).updateSessionOrganization(pinnedArchivedId, { isPinned: true });
+
+      const organized = await request(app)
+        .get(
+          '/workspaces/secondary-id/sessions?view=organized&archiveState=archived&group=all',
+        )
+        .set('Host', host())
+        .expect(200);
+      const ids = organized.body.sessions.map(
+        (s: { sessionId: string }) => s.sessionId,
+      );
+      expect(ids).toEqual([pinnedArchivedId, plainArchivedId]);
+      expect(ids).not.toContain(liveOnlyId);
+      expect(organized.body.sessions[0]).toMatchObject({
+        sessionId: pinnedArchivedId,
+        isPinned: true,
+        isArchived: true,
+      });
+    });
+  });
+
   it('rejects archived and organized non-primary session lists for untrusted workspaces', async () => {
     const { app } = makeHarness({ secondaryTrusted: false });
 
