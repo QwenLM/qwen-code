@@ -1504,7 +1504,9 @@ describe('GeminiChat', async () => {
               parts: [{ text: 'hello' }],
             },
           ],
-          config: {},
+          config: {
+            abortSignal: expect.any(AbortSignal),
+          },
         },
         'prompt-id-1',
       );
@@ -9374,7 +9376,182 @@ describe('GeminiChat', async () => {
     });
   });
 
-  describe('redactStructuredOutputArgsForRecording', () => {
+  describe('stream idle watchdog', () => {
+    function makeChunk(
+      parts: Array<{ text?: string; functionCall?: unknown }>,
+      finishReason?: string,
+    ): GenerateContentResponse {
+      return {
+        candidates: [
+          {
+            content: { role: 'model', parts },
+            ...(finishReason ? { finishReason } : {}),
+          },
+        ],
+      } as unknown as GenerateContentResponse;
+    }
+
+    function waitForDelayOrAbort(
+      ms: number,
+      signal?: AbortSignal,
+    ): Promise<void> {
+      return new Promise((resolve, reject) => {
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+        const cleanup = () => {
+          if (timeoutId !== undefined) {
+            clearTimeout(timeoutId);
+            timeoutId = undefined;
+          }
+          signal?.removeEventListener('abort', onAbort);
+        };
+
+        const onAbort = () => {
+          cleanup();
+          reject(new Error('aborted'));
+        };
+
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+
+        signal?.addEventListener('abort', onAbort, { once: true });
+        timeoutId = setTimeout(() => {
+          cleanup();
+          resolve();
+        }, ms);
+      });
+    }
+
+    async function* makeSilentStream(signal?: AbortSignal) {
+      await new Promise<never>((_, reject) => {
+        if (!signal) {
+          return;
+        }
+        if (signal.aborted) {
+          reject(new Error('aborted'));
+          return;
+        }
+        signal.addEventListener('abort', () => reject(new Error('aborted')), {
+          once: true,
+        });
+      });
+
+      yield {} as GenerateContentResponse;
+    }
+
+    it('should reject a silent stream after the configured idle timeout retries exhaust', async () => {
+      vi.useFakeTimers();
+      vi.stubEnv('QWEN_CODE_STREAM_IDLE_TIMEOUT_MS', '50');
+
+      const abortController = new AbortController();
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async (request) => makeSilentStream(request.config?.abortSignal),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        {
+          message: 'hangs forever',
+          config: { abortSignal: abortController.signal },
+        },
+        'prompt-stream-idle-timeout',
+      );
+
+      try {
+        await expectStreamExhaustion(stream);
+        expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(3);
+      } finally {
+        abortController.abort();
+        vi.unstubAllEnvs();
+        vi.useRealTimers();
+      }
+    });
+
+    it('should reset the idle timer whenever a new chunk arrives', async () => {
+      vi.useFakeTimers();
+      vi.stubEnv('QWEN_CODE_STREAM_IDLE_TIMEOUT_MS', '50');
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async (request) =>
+          (async function* () {
+            await waitForDelayOrAbort(30, request.config?.abortSignal);
+            yield makeChunk([{ text: 'Hel' }]);
+            await waitForDelayOrAbort(30, request.config?.abortSignal);
+            yield makeChunk([{ text: 'lo' }], 'STOP');
+          })(),
+      );
+
+      try {
+        const stream = await chat.sendMessageStream(
+          'gemini-3-pro',
+          { message: 'stream slowly but steadily' },
+          'prompt-stream-idle-progress',
+        );
+
+        const events = await collectStreamWithFakeTimers(stream, 100);
+        expect(events.map((event) => event.type)).toEqual([
+          StreamEventType.CHUNK,
+          StreamEventType.CHUNK,
+        ]);
+        expect(chat.getHistory().at(-1)?.parts?.map((part) => part.text ?? '').join('')).toBe(
+          'Hello',
+        );
+      } finally {
+        vi.unstubAllEnvs();
+        vi.useRealTimers();
+      }
+    });
+
+    it('should allow disabling the idle watchdog via environment variable', async () => {
+      vi.useFakeTimers();
+      vi.stubEnv('QWEN_CODE_STREAM_IDLE_TIMEOUT_MS', '50');
+      vi.stubEnv('QWEN_CODE_DISABLE_STREAM_WATCHDOG', 'true');
+
+      const abortController = new AbortController();
+      let internalSignal: AbortSignal | undefined;
+      let settled = false;
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async (request) => {
+          internalSignal = request.config?.abortSignal;
+          return makeSilentStream(internalSignal);
+        },
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        {
+          message: 'keep waiting',
+          config: { abortSignal: abortController.signal },
+        },
+        'prompt-stream-idle-disabled',
+      );
+
+      const consumePromise = (async () => {
+        for await (const _ of stream) {
+          /* consume */
+        }
+      })().finally(() => {
+        settled = true;
+      });
+
+      try {
+        await vi.advanceTimersByTimeAsync(60);
+        await Promise.resolve();
+        expect(settled).toBe(false);
+        expect(internalSignal?.aborted).toBe(false);
+        expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+      } finally {
+        abortController.abort();
+        await consumePromise.catch(() => undefined);
+        vi.unstubAllEnvs();
+        vi.useRealTimers();
+      }
+    });
+  });
+    describe('redactStructuredOutputArgsForRecording', () => {
     // The chat-recording JSONL persists assistant turns to disk and re-feeds
     // them on `--continue` / `--resume`. For `--json-schema` runs the
     // structured_output args ARE the user's structured payload, already
