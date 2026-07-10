@@ -16,16 +16,19 @@ function Harness({
   composerInput,
   onSubmit,
   renderComposerTag,
+  renderComposerTagTooltip,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
   renderComposerTag?: () => ReactNode;
+  renderComposerTagTooltip?: () => ReactNode;
 }) {
   const composer = useComposerCore({
     onSubmit,
     commands: [],
     editorTheme: {},
     renderComposerTag,
+    renderComposerTagTooltip,
     composerInput,
     composerInputVersion: composerInput ? 1 : undefined,
   });
@@ -38,10 +41,12 @@ async function mount({
   composerInput,
   onSubmit = vi.fn(),
   renderComposerTag,
+  renderComposerTagTooltip,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
   renderComposerTag?: () => ReactNode;
+  renderComposerTagTooltip?: () => ReactNode;
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -54,6 +59,7 @@ async function mount({
           composerInput={composerInput}
           onSubmit={onSubmit}
           renderComposerTag={renderComposerTag}
+          renderComposerTagTooltip={renderComposerTagTooltip}
         />
       </I18nProvider>,
     );
@@ -91,6 +97,50 @@ describe('useComposerCore inline tags', () => {
     expect(document.body.textContent).toContain('orders');
 
     warn.mockRestore();
+  });
+
+  it('falls back when inline custom tag tooltip rendering throws', async () => {
+    const error = new Error('bad tooltip');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await mount({
+      composerInput: {
+        tags: [{ id: 'orders', label: 'Table', value: 'orders' }],
+        tagPlacement: 'inline',
+      },
+      renderComposerTagTooltip: () => {
+        throw error;
+      },
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] inline tag tooltip render failed',
+      error,
+    );
+    expect(document.body.textContent).toContain('orders');
+
+    warn.mockRestore();
+  });
+
+  it('guards inline mask icon sources', async () => {
+    await mount({
+      composerInput: {
+        tags: [
+          {
+            id: 'orders',
+            label: 'Table',
+            value: 'orders',
+            icon: 'javascript:alert(1)',
+          },
+        ],
+        tagPlacement: 'inline',
+      },
+    });
+
+    expect(document.body.innerHTML).not.toContain('javascript:alert');
+    expect(
+      document.body.querySelector('[style*="--composer-tag-icon-url"]'),
+    ).toBeNull();
   });
 
   it('keeps inline tags after trimming leading whitespace on submit', async () => {

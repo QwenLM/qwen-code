@@ -92,6 +92,34 @@ describe('UserMessage', () => {
     expect(container.textContent).toContain('orders');
   });
 
+  it('guards parsed tag mask icon sources', () => {
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          parseUserMessageContent: () => [
+            {
+              type: 'tag',
+              tag: {
+                id: 'ctx-1',
+                label: 'Table',
+                value: 'orders',
+                icon: 'javascript:alert(1)',
+              },
+            },
+          ],
+        }}
+      >
+        <UserMessage content="<context />" />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(container.textContent).toContain('orders');
+    expect(container.innerHTML).not.toContain('javascript:alert');
+    expect(
+      container.querySelector('[style*="--user-message-tag-icon-url"]'),
+    ).toBeNull();
+  });
+
   it('renders kind-based tags like composer chips without the raw label', () => {
     const container = render(
       <WebShellCustomizationProvider

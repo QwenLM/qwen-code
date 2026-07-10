@@ -210,6 +210,7 @@ function UserMessageTag({
   const tagValue = getComposerTagValue(tag);
   const tagLabel = tag.kind ? '' : rawTagLabel;
   const iconUrl = tag.icon ?? getComposerTagIconUrl(tag.kind, composerTagIcons);
+  const safeIconUrl = iconUrl && isSafeImageSrc(iconUrl) ? iconUrl : undefined;
   return (
     <span
       className={`${styles.messageTag}${
@@ -238,10 +239,10 @@ function UserMessageTag({
     >
       {custom ?? (
         <>
-          {iconUrl && (
+          {safeIconUrl && (
             <span
               className={styles.messageTagIcon}
-              style={cssUrlVar('--user-message-tag-icon-url', iconUrl)}
+              style={cssUrlVar('--user-message-tag-icon-url', safeIconUrl)}
               aria-hidden="true"
             />
           )}

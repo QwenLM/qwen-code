@@ -61,6 +61,7 @@ import {
 import { isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
 import { getComposerTagIconUrl } from '../components/composerTagIcons';
+import { isSafeImageSrc } from '../components/messages/Markdown';
 import type {
   ComposerTagClickHandler,
   ComposerTagRenderer,
@@ -667,6 +668,8 @@ class ComposerTagWidget extends WidgetType {
     const tagValue = getComposerTagValue(this.tag);
     const tagLabel = this.tag.kind ? '' : rawTagLabel;
     const iconUrl = this.tag.iconUrl ?? getComposerTagIconUrl(this.tag.kind);
+    const safeIconUrl =
+      iconUrl && isSafeImageSrc(iconUrl) ? iconUrl : undefined;
     let customContent: ReactNode | null | undefined;
     try {
       customContent = this.tag.renderContent?.({
@@ -689,16 +692,20 @@ class ComposerTagWidget extends WidgetType {
         chip.appendChild(content);
         renderedCustomContent = true;
       } catch (error) {
+        this.contentRoot?.unmount();
         this.contentRoot = null;
         console.warn('[WebShell] inline tag renderContent failed', error);
       }
     }
 
-    if (!renderedCustomContent && iconUrl) {
+    if (!renderedCustomContent && safeIconUrl) {
       const icon = document.createElement('span');
       icon.style.cssText =
         'display:block;width:12px;height:12px;flex:0 0 auto;margin-left:7px;background:currentColor;mask:var(--composer-tag-icon-url) center / contain no-repeat;-webkit-mask:var(--composer-tag-icon-url) center / contain no-repeat;';
-      icon.style.setProperty('--composer-tag-icon-url', cssUrlValue(iconUrl));
+      icon.style.setProperty(
+        '--composer-tag-icon-url',
+        cssUrlValue(safeIconUrl),
+      );
       chip.appendChild(icon);
     }
 
@@ -760,9 +767,15 @@ class ComposerTagWidget extends WidgetType {
     chip.addEventListener('mouseleave', hide);
     chip.addEventListener('focusin', show);
     chip.addEventListener('focusout', hide);
-    this.tooltipRoot = createRoot(tooltipElement);
-    this.tooltipRoot.render(tooltip);
-    chip.appendChild(tooltipElement);
+    try {
+      this.tooltipRoot = createRoot(tooltipElement);
+      this.tooltipRoot.render(tooltip);
+      chip.appendChild(tooltipElement);
+    } catch (error) {
+      this.tooltipRoot?.unmount();
+      this.tooltipRoot = null;
+      console.warn('[WebShell] inline tag tooltip render failed', error);
+    }
   }
 
   private appendRemoveButton(chip: HTMLElement, view: EditorView) {
@@ -1233,7 +1246,12 @@ export function useComposerCore(
         placement: 'composer' as const,
         readonly: false,
       };
-      const tooltip = renderComposerTagTooltipRef.current?.(info);
+      let tooltip: ReactNode | null | undefined;
+      try {
+        tooltip = renderComposerTagTooltipRef.current?.(info);
+      } catch (error) {
+        console.warn('[WebShell] inline tag tooltip render failed', error);
+      }
       const tooltipText =
         typeof tooltip === 'string' || typeof tooltip === 'number'
           ? String(tooltip)

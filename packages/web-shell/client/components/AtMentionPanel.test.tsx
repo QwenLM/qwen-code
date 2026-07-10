@@ -262,6 +262,56 @@ describe('AtMentionPanel', () => {
     expect(images[0]?.getAttribute('src')).toBe('data:image/png;base64,iVBOR');
   });
 
+  it('guards mask icon sources', () => {
+    const menu = itemsMenu();
+    menu.items = [
+      {
+        id: 'safe',
+        label: 'Safe mask',
+        icon: 'data:image/png;base64,iVBOR',
+      },
+      {
+        id: 'unsafe',
+        label: 'Unsafe mask',
+        icon: 'javascript:alert(1)',
+      },
+    ];
+    mount(menu);
+
+    const icons = [
+      ...document.body.querySelectorAll('[style*="--at-item-icon-url"]'),
+    ];
+    expect(icons).toHaveLength(1);
+    expect(icons[0]?.getAttribute('style')).toContain(
+      'data:image/png;base64,iVBOR',
+    );
+    expect(document.body.innerHTML).not.toContain('javascript:alert');
+  });
+
+  it('falls back when a custom item renderer throws', () => {
+    const error = new Error('bad item');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const menu = itemsMenu();
+    const provider: WebShellAtProvider = {
+      id: 'files',
+      label: 'Files',
+      renderItem: () => {
+        throw error;
+      },
+      search: async () => [],
+    };
+    menu.providers = [providerView(provider)];
+
+    mount(menu);
+
+    expect(document.body.textContent).toContain('README.md');
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] at mention item render failed',
+      error,
+    );
+    warn.mockRestore();
+  });
+
   it('focuses search when explicitly requested', () => {
     vi.useFakeTimers();
     mount({ ...itemsMenu(), inputMode: 'search' });

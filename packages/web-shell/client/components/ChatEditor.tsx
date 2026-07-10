@@ -36,6 +36,7 @@ import {
 import { AtMentionPanel } from './AtMentionPanel';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import { getComposerTagIconUrl } from './composerTagIcons';
+import { isSafeImageSrc } from './messages/Markdown';
 import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
@@ -1298,15 +1299,17 @@ export const ChatEditor = memo(
       const tagLabel = tag.kind ? '' : rawTagLabel;
       const iconUrl =
         tag.icon ?? getComposerTagIconUrl(tag.kind, composerTagIcons);
+      const safeIconUrl =
+        iconUrl && isSafeImageSrc(iconUrl) ? iconUrl : undefined;
       if (!tagLabel && !tagValue) {
         return <span className={styles.tagLabel}>{tag.id}</span>;
       }
       return (
         <>
-          {iconUrl && (
+          {safeIconUrl && (
             <span
               className={styles.tagIcon}
-              style={cssUrlVar('--composer-tag-icon-url', iconUrl)}
+              style={cssUrlVar('--composer-tag-icon-url', safeIconUrl)}
               aria-hidden="true"
             />
           )}

@@ -386,13 +386,24 @@ export function AtMentionPanel({
                 'item' in row
                   ? selectedProvider?.provider
                   : row.provider.provider;
-              const customItem =
-                'item' in row && provider?.renderItem
-                  ? provider.renderItem({
-                      item: row.item,
-                      provider,
-                      selected,
-                    })
+              let customItem: ReactNode | undefined;
+              if ('item' in row && provider?.renderItem) {
+                try {
+                  customItem = provider.renderItem({
+                    item: row.item,
+                    provider,
+                    selected,
+                  });
+                } catch (error) {
+                  console.warn(
+                    '[WebShell] at mention item render failed',
+                    error,
+                  );
+                }
+              }
+              const safeIcon =
+                'icon' in row && row.icon && isSafeImageSrc(row.icon)
+                  ? row.icon
                   : undefined;
               return (
                 <button
@@ -431,24 +442,22 @@ export function AtMentionPanel({
                       <span className={styles.atItemMain}>
                         <span className={styles.atItemLeading}>
                           {'icon' in row &&
-                            row.icon &&
+                            safeIcon &&
                             (row.iconMode === 'image' ? (
-                              isSafeImageSrc(row.icon) && (
-                                <img
-                                  className={styles.atItemImageIcon}
-                                  src={row.icon}
-                                  title={row.iconTooltip}
-                                  alt=""
-                                  aria-hidden="true"
-                                />
-                              )
+                              <img
+                                className={styles.atItemImageIcon}
+                                src={safeIcon}
+                                title={row.iconTooltip}
+                                alt=""
+                                aria-hidden="true"
+                              />
                             ) : (
                               <span
                                 className={`${styles.atItemIcon} ${
                                   row.iconSpin ? styles.atItemIconSpin : ''
                                 }`}
                                 style={{
-                                  ...cssUrlVar('--at-item-icon-url', row.icon),
+                                  ...cssUrlVar('--at-item-icon-url', safeIcon),
                                   color: row.iconColor,
                                 }}
                                 title={row.iconTooltip}
