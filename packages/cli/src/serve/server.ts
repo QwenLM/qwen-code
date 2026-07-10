@@ -1188,6 +1188,9 @@ export function createServeApp(
     const reloadChannelWorker = deps.reloadChannelWorker;
     registerWorkspaceChannelControlRoutes(app, {
       getChannelWorkerSnapshot,
+      ...(deps.getChannelWorkerSnapshots
+        ? { getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots }
+        : {}),
       reloadChannelWorker,
       mutate,
       sendBridgeError,

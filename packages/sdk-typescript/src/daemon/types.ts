@@ -328,6 +328,8 @@ export interface DaemonStatusReport {
     // Mirrors the daemon's ChannelWorkerSnapshot. `state` and `signal` are
     // widened to string to avoid coupling the wire type to the daemon's unions.
     channelWorker: DaemonChannelWorkerSnapshot;
+    /** Present only when a multi-workspace daemon has channel workers. */
+    channelWorkers?: DaemonChannelWorkerGroupSnapshot[];
     transport: {
       restSseActive: number;
       acp: {
@@ -2216,10 +2218,19 @@ export interface DaemonChannelWorkerSnapshot {
   staleHeartbeatAt?: string;
 }
 
+/** A channel worker snapshot annotated with its owning workspace. */
+export interface DaemonChannelWorkerGroupSnapshot
+  extends DaemonChannelWorkerSnapshot {
+  workspaceId: string;
+  workspaceCwd: string;
+  primary: boolean;
+}
+
 /**
- * Result of `POST /workspace/channel/reload`: the daemon stopped and
- * relaunched its channel worker (which re-reads settings.json). `worker` is
- * the post-reload snapshot.
+ * Result of `POST /workspace/channel/reload`: the daemon restarted its channel
+ * worker group (which re-reads settings.json). `worker` is the compatible
+ * primary snapshot, or the first snapshot when only a non-primary workspace
+ * owns channels; inspect daemon status for the full multi-workspace list.
  */
 export interface DaemonChannelReloadResult {
   reloaded: boolean;

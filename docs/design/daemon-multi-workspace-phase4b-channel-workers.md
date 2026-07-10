@@ -84,10 +84,11 @@ Errors and aggregation:
 - single workspace (primary only): `resolvedCwd` can only be primary, producing
   exactly the same single group as today.
 
-A shared helper `resolveChannelOwnerCwd(rawCwd, workspaceCwd)` performs the
-`canonicalizeWorkspace(resolvePath(rawCwd ?? workspaceCwd))` computation so the
-grouping and a test asserting parity with `validateChannelWorkspaces` share one
-implementation.
+A shared cwd helper is used by config parsing and ownership grouping. Explicit
+absolute paths and `~/...` keep their existing meaning; ordinary relative paths
+resolve against the workspace whose settings are being loaded. The owner path
+is then canonicalized, so the serve layer and worker cannot disagree about
+ownership.
 
 ## Worker identity and env
 
@@ -119,7 +120,12 @@ A thin `ChannelWorkerGroup` owns `Map<workspaceId, ChannelWorkerSupervisor>`:
 - built from the resolved groups and the registry; each supervisor is bound to
   its runtime's `workspaceCwd`, selection, and `env.effectiveEnv`, and is
   created through the same injectable factory the single worker uses.
-- `start()` / `stop()` / `killAllSync()` fan out to all supervisors.
+- `start()` launches supervisors sequentially and rolls back those already
+  started if a later launch fails. `stop()` waits for any in-flight restart and
+  stops every supervisor. `killAllSync()` remains the signal-handler fallback.
+- `restart()` is the daemon-wide reload transaction. Concurrent requests
+  coalesce; supervisors restart sequentially, and any failure stops the entire
+  group to avoid a partially reloaded fleet.
 - `snapshots()` returns per-workspace snapshots (`ChannelWorkerSnapshot & {
 workspaceId; workspaceCwd; primary }`); `primarySnapshot()` backs the legacy
   single-worker fields.
@@ -159,16 +165,20 @@ Before the group is created (pre-startup) it reports the disabled snapshot.
 - The single `channelWorker` variable becomes a group manager reference in the
   outer scope so the pidfile writer and shutdown paths still see it.
 - Early fail-fast: at listen time (before `buildRuntime`), the pure grouping
-  function runs against `workspaceInputs` + `loadSettings` + boot-frozen trust
-  (`getWorkspaceTrustStatus`) to validate only (unknown / ambiguous / untrusted
-  / `--channel all` + multi). Errors reject the listen through the existing
-  channel-setup error path. No supervisor is created here.
+  function runs once against `workspaceInputs` + `loadSettings` + boot-frozen
+  trust (`getWorkspaceTrustStatus`). Unknown, ambiguous, untrusted, and invalid
+  cwd ownership reject startup before a usable handle is exposed. The resolved
+  group plan is frozen for the rest of startup; settings are not regrouped
+  later under a different filesystem snapshot.
 - Actual creation/start moves into `completeRuntimeStartup`: it reads the
   registry from `runtimeApp.locals.workspaceRegistry` (guaranteed present for
   multi-workspace, which always flows through `startRuntime` -> `buildRuntime`),
-  builds a supervisor per group, and starts them — replacing the single
-  `channelWorker.start()`. Both validation passes use the same pure function and
-  the same data, so they agree.
+  builds a supervisor per frozen group, and starts them — replacing the single
+  `channelWorker.start()`.
+- The newly built runtime app stays a candidate until every channel supervisor
+  reaches ready. Only then is it published as the active app and attached to
+  ACP transports. A worker startup failure therefore leaves `/health`
+  degraded and cannot expose a half-initialized runtime.
 - The pidfile reservation keeps the aggregate channel names; shutdown paths
   (`stopChannelWorkerAfterFailedStartup`, `killAllSync`, normal shutdown) fan
   out to the group.

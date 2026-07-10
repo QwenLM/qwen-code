@@ -71,6 +71,7 @@ interface RecordedSupervisor {
   supervisor: ChannelWorkerSupervisor & {
     start: ReturnType<typeof vi.fn>;
     stop: ReturnType<typeof vi.fn>;
+    restart: ReturnType<typeof vi.fn>;
     killAllSync: ReturnType<typeof vi.fn>;
   };
 }
@@ -83,8 +84,10 @@ function makeCreateSupervisor(
     const supervisor = {
       start: vi.fn(async () => {}),
       stop: vi.fn(async () => {}),
+      restart: vi.fn(async () => snapshotFor(opts.workspace)),
       killAllSync: vi.fn(),
       snapshot: () => snapshotFor(opts.workspace),
+      enqueueWebhookTask: vi.fn().mockRejectedValue(new Error('unused')),
     };
     recorded.push({ opts, supervisor });
     return supervisor;
@@ -160,6 +163,21 @@ describe('createChannelWorkerGroup', () => {
     ).toThrow(/unregistered workspace/);
   });
 
+  it('throws when a planned workspace is no longer trusted', () => {
+    const runtime = { ...fakeRuntime(PRIMARY, true), trusted: false };
+    const registry = fakeRegistry([runtime]);
+    const { createSupervisor } = makeCreateSupervisor(() => snapshot({}));
+
+    expect(() =>
+      createChannelWorkerGroup({
+        groups: [{ workspaceCwd: PRIMARY, selection: { mode: 'all' } }],
+        registry,
+        createSupervisor,
+        shared,
+      }),
+    ).toThrow(/not trusted/);
+  });
+
   it('fans out start / stop / killAllSync to every supervisor', async () => {
     const registry = fakeRegistry([
       fakeRuntime(PRIMARY, true),
@@ -188,6 +206,150 @@ describe('createChannelWorkerGroup', () => {
       expect(entry.supervisor.stop).toHaveBeenCalledTimes(1);
       expect(entry.supervisor.killAllSync).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it('does not start later supervisors when the first start fails', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    recorded[0]!.supervisor.start.mockRejectedValueOnce(
+      new Error('primary failed'),
+    );
+
+    await expect(group.start()).rejects.toThrow('primary failed');
+
+    expect(recorded[1]!.supervisor.start).not.toHaveBeenCalled();
+  });
+
+  it('rolls back already-started supervisors when a later start fails', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    recorded[1]!.supervisor.start.mockRejectedValueOnce(
+      new Error('secondary failed'),
+    );
+
+    await expect(group.start()).rejects.toThrow('secondary failed');
+
+    expect(recorded[0]!.supervisor.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('coalesces concurrent group restarts', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    let release!: () => void;
+    recorded[0]!.supervisor.restart.mockImplementationOnce(
+      () =>
+        new Promise<ChannelWorkerSnapshot>((resolve) => {
+          release = () => resolve(snapshot({ channels: ['a'] }));
+        }),
+    );
+
+    const first = group.restart();
+    const second = group.restart();
+    release();
+    await Promise.all([first, second]);
+
+    for (const entry of recorded) {
+      expect(entry.supervisor.restart).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('stops every supervisor when a group restart partially fails', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    recorded[1]!.supervisor.restart.mockRejectedValueOnce(
+      new Error('secondary reload failed'),
+    );
+
+    await expect(group.restart()).rejects.toThrow('secondary reload failed');
+
+    for (const entry of recorded) {
+      expect(entry.supervisor.stop).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('reports a non-primary-only group while keeping the legacy primary disabled', () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor } = makeCreateSupervisor(() => snapshot({}));
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+
+    expect(group.snapshots()).toEqual([
+      expect.objectContaining({
+        enabled: true,
+        workspaceCwd: SECONDARY,
+        primary: false,
+      }),
+    ]);
+    expect(group.primarySnapshot()).toEqual({
+      enabled: false,
+      state: 'disabled',
+      channels: [],
+    });
   });
 
   it('annotates snapshots with workspace metadata and exposes the primary', () => {
@@ -258,8 +420,10 @@ describe('createChannelWorkerGroup', () => {
       return {
         start: vi.fn(async () => {}),
         stop: vi.fn(async () => {}),
+        restart: vi.fn(async () => snapshot({})),
         killAllSync: vi.fn(),
         snapshot: () => snapshot({}),
+        enqueueWebhookTask: vi.fn().mockRejectedValue(new Error('unused')),
       };
     };
 

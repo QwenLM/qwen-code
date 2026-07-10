@@ -10,6 +10,7 @@ import type { SendBridgeError } from '../server/error-response.js';
 
 interface RegisterWorkspaceChannelControlRoutesDeps {
   getChannelWorkerSnapshot: () => ChannelWorkerSnapshot;
+  getChannelWorkerSnapshots?: () => ChannelWorkerSnapshot[];
   reloadChannelWorker: () => Promise<ChannelWorkerSnapshot>;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
@@ -25,6 +26,7 @@ export function registerWorkspaceChannelControlRoutes(
 ): void {
   const {
     getChannelWorkerSnapshot,
+    getChannelWorkerSnapshots,
     reloadChannelWorker,
     mutate,
     sendBridgeError,
@@ -37,7 +39,12 @@ export function registerWorkspaceChannelControlRoutes(
     async (req, res) => {
       const clientId = parseAndValidateClientId(req, res);
       if (clientId === null) return;
-      if (!getChannelWorkerSnapshot().enabled) {
+      const workers = getChannelWorkerSnapshots?.();
+      const hasEnabledWorker =
+        workers && workers.length > 0
+          ? workers.some((worker) => worker.enabled)
+          : getChannelWorkerSnapshot().enabled;
+      if (!hasEnabledWorker) {
         res.status(409).json({
           error:
             'This daemon has no channel worker to reload. Start it with `qwen serve --channel <name>`.',

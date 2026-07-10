@@ -5,7 +5,7 @@
  */
 
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
-import { resolvePath } from '@qwen-code/channel-base';
+import { resolveChannelCwd } from '../commands/channel/channel-cwd.js';
 import type { ServeChannelSelection } from './types.js';
 
 /**
@@ -62,7 +62,7 @@ export function resolveChannelOwnerCwd(
   rawCwd: string | undefined,
   workspaceCwd: string,
 ): string {
-  return canonicalizeWorkspace(resolvePath(rawCwd || workspaceCwd));
+  return canonicalizeWorkspace(resolveChannelCwd(rawCwd, workspaceCwd));
 }
 
 function rawChannelCwd(entry: unknown): string | undefined {

@@ -803,6 +803,76 @@ describe('runChannelDaemonWorker', () => {
     expect(mockLoadSettings).not.toHaveBeenCalled();
   });
 
+  it('accepts a trusted registered non-primary workspace', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/primary',
+      workspaces: [
+        { id: 'primary', cwd: '/primary', primary: true, trusted: true },
+        { id: 'worker', cwd: '/workspace', primary: false, trusted: true },
+      ],
+    });
+
+    await expect(
+      runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it('rejects a worker workspace missing from daemon capabilities', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/primary',
+      workspaces: [
+        { id: 'primary', cwd: '/primary', primary: true, trusted: true },
+      ],
+    });
+
+    await expect(
+      runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      }),
+    ).rejects.toThrow('not registered');
+  });
+
+  it('rejects an untrusted registered worker workspace', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/primary',
+      workspaces: [
+        { id: 'worker', cwd: '/workspace', primary: false, trusted: false },
+      ],
+    });
+
+    await expect(
+      runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      }),
+    ).rejects.toThrow('not trusted');
+  });
+
   it('stops the bridge when adapter creation fails before ready', async () => {
     const sdk = createSdk();
     mockCreateChannel.mockRejectedValueOnce(new Error('adapter boom'));

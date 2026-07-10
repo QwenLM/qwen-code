@@ -162,6 +162,8 @@ export {
   type DaemonPreflightCell,
   type DaemonPreflightKind,
   type DaemonStatus,
+  type DaemonChannelWorkerGroupSnapshot,
+  type DaemonChannelWorkerSnapshot,
   type DaemonStatusCell,
   type DaemonStatusReport,
   type DaemonStatusReportDetail,

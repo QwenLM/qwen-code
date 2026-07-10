@@ -45,9 +45,26 @@ describe('resolveChannelOwnerCwd', () => {
   it('canonicalizes an explicit cwd independently of the workspace', () => {
     expect(resolveChannelOwnerCwd(SECONDARY, PRIMARY)).toBe(SECONDARY);
   });
+
+  it('resolves a relative cwd against the loading workspace', () => {
+    expect(resolveChannelOwnerCwd('../secondary', PRIMARY)).toBe(SECONDARY);
+  });
 });
 
 describe('resolveChannelWorkspaceGroups', () => {
+  it('rejects a registry with no primary workspace', () => {
+    const result = resolveChannelWorkspaceGroups({
+      workspaces: [{ workspaceCwd: SECONDARY, primary: false, trusted: true }],
+      selection: { mode: 'all' },
+      loadChannelsConfig: loader({}),
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('no_primary_workspace');
+    }
+  });
+
   it('assigns an explicit-cwd channel to the workspace it targets', () => {
     // Same user-scope entry is visible in every workspace's merged config, but
     // its explicit cwd pins ownership to SECONDARY.
@@ -136,6 +153,24 @@ describe('resolveChannelWorkspaceGroups', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.code).toBe('channel_workspace_mismatch');
+    }
+  });
+
+  it('treats a cwd canonicalization failure as a workspace mismatch', () => {
+    const result = resolveChannelWorkspaceGroups({
+      workspaces: workspaces(),
+      selection: { mode: 'names', names: ['telegram'] },
+      loadChannelsConfig: loader({
+        [PRIMARY]: { telegram: { type: 'telegram', cwd: '\0' } },
+      }),
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatchObject({
+        code: 'channel_workspace_mismatch',
+        channel: 'telegram',
+      });
     }
   });
 

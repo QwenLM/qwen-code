@@ -9880,6 +9880,49 @@ describe('createServeApp', () => {
       expect(reloadChannelWorker).not.toHaveBeenCalled();
     });
 
+    it('reloads when only a non-primary workspace worker is enabled', async () => {
+      const secondarySnapshot = {
+        ...runningSnapshot,
+        workspaceId: 'secondary',
+        workspaceCwd: '/work/secondary',
+        primary: false,
+      };
+      const reloadChannelWorker = vi.fn(async () => secondarySnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => disabledSnapshot,
+        getChannelWorkerSnapshots: () => [secondarySnapshot],
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ reloaded: true, worker: secondarySnapshot });
+      expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back to the legacy snapshot when the worker list is empty', async () => {
+      const reloadChannelWorker = vi.fn(async () => runningSnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        getChannelWorkerSnapshots: () => [],
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(200);
+      expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
+    });
+
     it('maps relaunch failures through sendBridgeError', async () => {
       const reloadChannelWorker = vi.fn(async () => {
         throw new Error('relaunch failed');
