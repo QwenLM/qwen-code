@@ -8,6 +8,8 @@ import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import type { Application, Request, Response } from 'express';
 import { isWithinRoot } from '@qwen-code/qwen-code-core';
+import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -55,6 +57,16 @@ export function registerWorkspaceManagementRoutes(
       if (!isAbsolute(cwd)) {
         res.status(400).json({
           error: '`cwd` must be an absolute path',
+          code: 'invalid_path',
+        });
+        return;
+      }
+
+      // Bound the input before any filesystem work, matching the limit other
+      // workspace routes enforce (memory-amplification guard).
+      if (cwd.length > MAX_WORKSPACE_PATH_LENGTH) {
+        res.status(400).json({
+          error: `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
           code: 'invalid_path',
         });
         return;
@@ -130,8 +142,15 @@ export function registerWorkspaceManagementRoutes(
           trusted: runtime.trusted,
         });
       } catch (err) {
+        // Log the full error server-side but return a generic message so the
+        // response can't leak internal filesystem paths / implementation detail.
+        writeStderrLine(
+          `qwen serve: POST /workspaces failed for ${canonical}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
         res.status(500).json({
-          error: `Failed to create workspace runtime: ${err instanceof Error ? err.message : String(err)}`,
+          error: 'Failed to register workspace',
           code: 'runtime_creation_failed',
         });
       } finally {

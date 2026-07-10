@@ -3170,8 +3170,14 @@ export async function runQwenServe(
       let wsSettings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
       try {
         wsSettings = settingsRuntime.settings.loadSettings(cwd);
-      } catch {
-        // Fall back to defaults if settings can't be read.
+      } catch (err) {
+        // Match the startup secondary-workspace path: surface why full settings
+        // couldn't be read instead of silently falling back to defaults.
+        writeStderrLine(
+          `qwen serve: could not read full settings for dynamic workspace ` +
+            `${cwd} (${err instanceof Error ? err.message : String(err)}); ` +
+            `falling back to defaults.`,
+        );
       }
       const trusted = wsSettings
         ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
