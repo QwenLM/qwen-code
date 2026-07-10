@@ -2169,7 +2169,20 @@ describe('createServeApp', () => {
           continue;
         }
         if (feature === 'workspace_qualified_acp') {
-          expect(predicate({ multiWorkspaceSessionsEnabled: true })).toBe(true);
+          // Advertised only when BOTH multi-workspace sessions and the HTTP ACP
+          // surface are enabled.
+          expect(
+            predicate({
+              multiWorkspaceSessionsEnabled: true,
+              acpHttpEnabled: true,
+            }),
+          ).toBe(true);
+          expect(
+            predicate({
+              multiWorkspaceSessionsEnabled: true,
+              acpHttpEnabled: false,
+            }),
+          ).toBe(false);
           expect(predicate({ multiWorkspaceSessionsEnabled: false })).toBe(
             false,
           );
@@ -2177,6 +2190,7 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               multiWorkspaceSessionsEnabled: true,
+              acpHttpEnabled: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(

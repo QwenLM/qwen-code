@@ -359,6 +359,11 @@ export interface AdvertiseFeatureToggles {
   browserAutomationMcpAvailable?: boolean;
   voiceWsAvailable?: boolean;
   multiWorkspaceSessionsEnabled?: boolean;
+  /**
+   * Whether the HTTP ACP surface is enabled (default on; opts out via
+   * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
+   */
+  acpHttpEnabled?: boolean;
 }
 
 /**
@@ -436,7 +441,9 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'workspace_qualified_acp',
-    (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
+    (toggles) =>
+      toggles.acpHttpEnabled === true &&
+      toggles.multiWorkspaceSessionsEnabled === true,
   ],
   ['client_mcp_over_ws', (toggles) => toggles.clientMcpOverWsEnabled === true],
   ['cdp_tunnel_over_ws', (toggles) => toggles.cdpTunnelOverWsEnabled === true],

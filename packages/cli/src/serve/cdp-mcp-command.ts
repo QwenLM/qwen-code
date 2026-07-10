@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
+
 /** Stdio MCP adapter command used by the optional CDP browser automation bridge. */
 export const QWEN_CDP_MCP_COMMAND_ENV = 'QWEN_CDP_MCP_COMMAND';
 
@@ -24,7 +26,7 @@ export function isBrowserAutomationMcpAvailable(
   return (
     opts.cdpTunnelOverWs === true &&
     !opts.token &&
-    env['QWEN_SERVE_ACP_HTTP'] !== '0' &&
+    resolveAcpHttpEnabled(env) &&
     resolveCdpMcpCommand(env) !== undefined
   );
 }
