@@ -122,6 +122,7 @@ import {
 } from './routes/workspace-voice.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import { setRateLimiter } from './rate-limit.js';
+import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
 import {
   createTotalSessionAdmissionController,
   type TotalSessionAdmissionSnapshot,
@@ -778,6 +779,8 @@ export function createServeApp(
   const primaryBridge = primaryRuntime.bridge;
   const primaryWorkspace = primaryRuntime.workspaceService;
   const primaryRouteFileSystemFactory = primaryRuntime.routeFileSystemFactory;
+  const workspaceQualifiedAcpEnabled =
+    resolveAcpHttpEnabled() && workspaceRegistry.list().length > 1;
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -809,6 +812,7 @@ export function createServeApp(
   app.use(hostAllowlist(opts.hostname, getPort));
   const rateLimiter = installRateLimiter(app, opts, daemonLog, {
     mount: false,
+    workspaceQualifiedAcpEnabled,
   });
 
   const healthDemoRoutes = createHealthDemoRoutes({

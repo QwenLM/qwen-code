@@ -1173,22 +1173,26 @@ export function mountAcpHttp(
     return mount;
   };
 
+  const workspaceQualifiedAcpEnabled =
+    (opts.workspaceRegistry?.list().length ?? 0) > 1;
   const pluralAcpPath = '/workspaces/:workspace/acp';
-  app.post(pluralAcpPath, (req: Request, res: Response) => {
-    const mount = resolvePluralMount(req, res);
-    if (!mount) return;
-    return handleAcpPost(mount, req, res);
-  });
-  app.get(pluralAcpPath, (req: Request, res: Response) => {
-    const mount = resolvePluralMount(req, res);
-    if (!mount) return;
-    handleAcpGet(mount, req, res);
-  });
-  app.delete(pluralAcpPath, (req: Request, res: Response) => {
-    const mount = resolvePluralMount(req, res);
-    if (!mount) return;
-    handleAcpDelete(mount, req, res);
-  });
+  if (workspaceQualifiedAcpEnabled) {
+    app.post(pluralAcpPath, (req: Request, res: Response) => {
+      const mount = resolvePluralMount(req, res);
+      if (!mount) return;
+      return handleAcpPost(mount, req, res);
+    });
+    app.get(pluralAcpPath, (req: Request, res: Response) => {
+      const mount = resolvePluralMount(req, res);
+      if (!mount) return;
+      handleAcpGet(mount, req, res);
+    });
+    app.delete(pluralAcpPath, (req: Request, res: Response) => {
+      const mount = resolvePluralMount(req, res);
+      if (!mount) return;
+      handleAcpDelete(mount, req, res);
+    });
+  }
 
   // ── WebSocket upgrade (ACP RFD) ────────────────────────────────────
   let wss: WebSocketServer | undefined;
@@ -1250,10 +1254,9 @@ export function mountAcpHttp(
       const extraRoute = opts.extraWsRoutes?.find(
         (route) => route.path === rawPath,
       );
-      const pluralRawSelector =
-        opts.workspaceRegistry !== undefined
-          ? pluralAcpRawSelector(rawPath)
-          : null;
+      const pluralRawSelector = workspaceQualifiedAcpEnabled
+        ? pluralAcpRawSelector(rawPath)
+        : null;
       const isPluralAcpShape = pluralRawSelector !== null;
       if (rawPath !== path && !isCdpPath && !extraRoute && !isPluralAcpShape) {
         logReject(`unknown-path ${rawPath}`);

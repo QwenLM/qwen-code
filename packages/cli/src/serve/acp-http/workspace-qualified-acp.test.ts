@@ -190,6 +190,72 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(res.status).toBe(200);
   });
 
+  it('does not expose qualified HTTP or WS routes with one runtime', async () => {
+    const primaryBridge = makeBridge();
+    const registry = createWorkspaceRegistry([
+      makeRuntime({
+        id: 'primary-id',
+        cwd: '/ws',
+        primary: true,
+        trusted: true,
+        bridge: primaryBridge,
+      }),
+    ]);
+    const app = express();
+    app.use(express.json());
+    const singleHandle = mountAcpHttp(app, primaryBridge, {
+      boundWorkspace: '/ws',
+      workspace: {} as DaemonWorkspaceService,
+      enabled: true,
+      workspaceRegistry: registry,
+      workspaceRememberLane: new WorkspaceRememberTaskLane(primaryBridge),
+    })!;
+    const singleServer = await new Promise<Server>((resolve) => {
+      const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+    });
+    singleHandle.attachServer(singleServer);
+    const singlePort = (singleServer.address() as AddressInfo).port;
+
+    try {
+      const qualified = await fetch(
+        `http://127.0.0.1:${singlePort}/workspaces/primary-id/acp`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: INITIALIZE,
+        },
+      );
+      expect(qualified.status).toBe(404);
+
+      const upgradeStatus = await new Promise<number>((resolve) => {
+        const ws = new WebSocket(
+          `ws://127.0.0.1:${singlePort}/workspaces/primary-id/acp`,
+        );
+        ws.on('open', () => {
+          ws.close();
+          resolve(101);
+        });
+        ws.on('unexpected-response', (_req, res) => {
+          ws.terminate();
+          resolve(res.statusCode ?? 0);
+        });
+        ws.on('error', () => resolve(0));
+      });
+      expect(upgradeStatus).not.toBe(101);
+
+      const legacy = await fetch(`http://127.0.0.1:${singlePort}/acp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: INITIALIZE,
+      });
+      expect(legacy.status).toBe(200);
+    } finally {
+      singleHandle.dispose();
+      singleServer.closeAllConnections?.();
+      await new Promise<void>((resolve) => singleServer.close(() => resolve()));
+    }
+  });
+
   it('routes a WS upgrade + initialize to a trusted secondary workspace', async () => {
     const result = await new Promise<{ result?: { protocolVersion?: number } }>(
       (resolve, reject) => {
