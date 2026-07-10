@@ -180,6 +180,108 @@ describe('PermissionController', () => {
     });
   });
 
+  it('does not promote a same-named answers field for non-ask_user_question tools', async () => {
+    const context = createContext(120_000);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    vi.spyOn(controller, 'sendControlRequest').mockResolvedValue({
+      subtype: 'success',
+      request_id: 'request-foreign-answers',
+      response: {
+        behavior: 'allow',
+        // A non-ask_user_question tool happens to carry an `answers` field;
+        // it must not leak into the confirmation payload.
+        updatedInput: { command: 'ls', answers: { '0': 'leak' } },
+      },
+    });
+    const onConfirm = vi.fn();
+
+    controller.getToolCallUpdateCallback()([
+      {
+        status: 'awaiting_approval',
+        request: {
+          callId: 'tool-call-foreign-answers',
+          name: 'run_shell_command',
+          args: { command: 'ls' },
+        },
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Run command',
+          onConfirm,
+        },
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { updatedInput: { command: 'ls', answers: { '0': 'leak' } } },
+      );
+    });
+    expect(onConfirm).not.toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      expect.objectContaining({ answers: expect.anything() }),
+    );
+  });
+
+  it.each([
+    ['updatedInput is an array', ['ls'], undefined],
+    ['answers is an array', { questions: [], answers: ['x'] }, undefined],
+    ['answers is null', { questions: [], answers: null }, undefined],
+    ['answers is an empty object', { questions: [], answers: {} }, {}],
+  ])(
+    'omits answers from the payload when %s',
+    async (_desc, updatedInput, expectedAnswers) => {
+      const context = createContext(120_000);
+      const controller = new PermissionController(
+        context,
+        createRegistry(),
+        'PermissionController',
+      );
+      vi.spyOn(controller, 'sendControlRequest').mockResolvedValue({
+        subtype: 'success',
+        request_id: 'request-guard',
+        response: { behavior: 'allow', updatedInput },
+      });
+      const onConfirm = vi.fn();
+
+      controller.getToolCallUpdateCallback()([
+        {
+          status: 'awaiting_approval',
+          request: {
+            callId: 'tool-call-guard',
+            name: 'ask_user_question',
+            args: { questions: [] },
+          },
+          confirmationDetails: {
+            type: 'ask_user_question',
+            title: 'Please answer',
+            onConfirm,
+          },
+        },
+      ]);
+
+      await vi.waitFor(() => {
+        expect(onConfirm).toHaveBeenCalled();
+      });
+
+      const [outcome, payload] = onConfirm.mock.calls[0];
+      expect(outcome).toBe(ToolConfirmationOutcome.ProceedOnce);
+      if (Array.isArray(updatedInput)) {
+        // An array updatedInput is rejected wholesale — plain confirm.
+        expect(payload).toBeUndefined();
+      } else if (expectedAnswers === undefined) {
+        expect(payload).toEqual({ updatedInput });
+        expect(payload).not.toHaveProperty('answers');
+      } else {
+        expect(payload).toEqual({ updatedInput, answers: expectedAnswers });
+      }
+    },
+  );
+
   it('uses default timeout when SDK canUseTool timeout is undefined', async () => {
     const context = createContext(); // undefined timeout
     const controller = new PermissionController(
@@ -265,6 +367,72 @@ describe('PermissionController', () => {
         }),
       );
     });
+  });
+
+  it('forwards ask_user_question answers to a teammate approval', async () => {
+    const context = createContext(120_000);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    const answers = { '0': 'PostgreSQL', '1': 'REST' };
+    vi.spyOn(controller, 'sendControlRequest').mockResolvedValue({
+      subtype: 'success',
+      request_id: 'teammate-request',
+      response: {
+        behavior: 'allow',
+        updatedInput: { questions: [], answers },
+      },
+    });
+    const respond = vi.fn().mockResolvedValue(undefined);
+
+    await controller.handleTeammateApproval({
+      teammateName: 'worker',
+      toolName: 'ask_user_question',
+      toolInput: { questions: [] },
+      respond,
+      timestamp: 123,
+    });
+
+    expect(respond).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      expect.objectContaining({ answers }),
+    );
+  });
+
+  it('does not promote a same-named answers field for a non-ask_user_question teammate approval', async () => {
+    const context = createContext(120_000);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    vi.spyOn(controller, 'sendControlRequest').mockResolvedValue({
+      subtype: 'success',
+      request_id: 'teammate-request-foreign',
+      response: {
+        behavior: 'allow',
+        updatedInput: { command: 'ls', answers: { '0': 'leak' } },
+      },
+    });
+    const respond = vi.fn().mockResolvedValue(undefined);
+
+    await controller.handleTeammateApproval({
+      teammateName: 'worker',
+      toolName: 'run_shell_command',
+      toolInput: { command: 'ls' },
+      respond,
+      timestamp: 456,
+    });
+
+    expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.ProceedOnce, {
+      updatedInput: { command: 'ls', answers: { '0': 'leak' } },
+    });
+    expect(respond).not.toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      expect.objectContaining({ answers: expect.anything() }),
+    );
   });
 
   it('omits modify suggestions when edit confirmation hides modify actions', () => {
