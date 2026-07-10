@@ -48,22 +48,20 @@
 }
 
 .addButton {
-  padding: 5px 12px;
+  appearance: none;
+  padding: 4px 12px;
   border: 1px solid var(--primary);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--primary) 14%, transparent);
-  color: var(--primary);
-  font-size: 12px;
-  font-weight: 600;
+  border-radius: 8px;
+  background: var(--primary);
+  color: var(--background);
+  font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
 }
 
 .addButton:disabled {
-  opacity: 0.45;
+  opacity: 0.55;
   cursor: default;
-  border-color: var(--border);
-  background: transparent;
-  color: var(--muted-foreground);
 }
 
 .picker {
