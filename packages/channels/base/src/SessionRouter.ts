@@ -477,6 +477,10 @@ export class SessionRouter {
     let changed = persisted.dropped > 0;
     const reservations = new Map<string, SessionReservation>();
 
+    for (const key of persisted.droppedKeys) {
+      this.deleteByKey(key);
+    }
+
     // Reserve every persisted key up front so inbound messages during restart
     // wait for restore instead of returning stale IDs or creating duplicates.
     for (const key of Object.keys(entries)) {
@@ -562,7 +566,11 @@ export class SessionRouter {
   }
 
   private readPersistedEntries():
-    | { entries: Record<string, PersistedEntry>; dropped: number }
+    | {
+        entries: Record<string, PersistedEntry>;
+        dropped: number;
+        droppedKeys: string[];
+      }
     | undefined {
     const persistPath = this.persistPath;
     if (!persistPath || !existsSync(persistPath)) return undefined;
@@ -600,12 +608,12 @@ export class SessionRouter {
     }
 
     const entries: Record<string, PersistedEntry> = {};
-    let dropped = 0;
+    const droppedKeys: string[] = [];
     for (const [key, value] of Object.entries(parsed)) {
       if (this.isPersistedEntry(value)) entries[key] = value;
-      else dropped++;
+      else droppedKeys.push(key);
     }
-    return { entries, dropped };
+    return { entries, dropped: droppedKeys.length, droppedKeys };
   }
 
   private isPersistedEntry(value: unknown): value is PersistedEntry {

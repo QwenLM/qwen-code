@@ -767,6 +767,49 @@ describe('SessionRouter', () => {
       expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
     });
 
+    it('drops malformed persisted routes from existing eager state', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      const aliceSession = await router.resolve('ch', 'alice', 'chat1');
+      await router.resolve('ch', 'bob', 'chat2');
+      const persisted = JSON.parse(
+        readFileSync(persistPath, 'utf-8'),
+      ) as Record<string, unknown>;
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': persisted['ch:alice:chat1'],
+          'ch:bob:chat2': { sessionId: 42 },
+        }),
+      );
+      const restartedBridge = {
+        ...mockBridge(),
+        loadSession: vi
+          .fn()
+          .mockImplementation((sessionId: string) =>
+            Promise.resolve(sessionId),
+          ),
+      } as unknown as ChannelAgentBridge;
+
+      router.setBridge(restartedBridge);
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 1,
+        failed: 0,
+      });
+      expect(restartedBridge.loadSession).toHaveBeenCalledWith(
+        aliceSession,
+        '/tmp',
+      );
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe(aliceSession);
+      expect(router.getSession('ch', 'bob', 'chat2')).toBeUndefined();
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({
+        'ch:alice:chat1': expect.objectContaining({ sessionId: aliceSession }),
+      });
+    });
+
     it('persists replacement ids returned by loadSession', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
       tempDirs.push(dir);
