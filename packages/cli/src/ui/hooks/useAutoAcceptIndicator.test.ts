@@ -25,6 +25,7 @@ import type { Key } from './useKeypress.js';
 import { useKeypress } from './useKeypress.js';
 import { MessageType } from '../types.js';
 import { setLanguageAsync } from '../../i18n/index.js';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 
 vi.mock('./useKeypress.js');
 
@@ -58,6 +59,13 @@ interface MockConfigInstanceShape {
 }
 
 type UseKeypressHandler = (key: Key) => void;
+
+function createMockSettings(autoModeAcknowledged: boolean): LoadedSettings {
+  return {
+    merged: { ui: { autoModeAcknowledged } },
+    setValue: vi.fn(),
+  } as unknown as LoadedSettings;
+}
 
 describe('useAutoAcceptIndicator', () => {
   let mockConfigInstance: MockConfigInstanceShape;
@@ -517,6 +525,51 @@ describe('useAutoAcceptIndicator', () => {
       },
       expect.any(Number),
     );
+  });
+
+  it('should persist acknowledgement after emitting the AUTO mode entry notice', async () => {
+    await setLanguageAsync('en');
+    const mockAddItem = vi.fn();
+    const mockSettings = createMockSettings(false);
+
+    emitAutoModeEntryNotices({
+      config: mockConfigInstance as unknown as ActualConfigType,
+      settings: mockSettings,
+      addItem: mockAddItem,
+    });
+
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.INFO,
+        text: expect.stringContaining('Auto mode enabled.'),
+      }),
+      expect.any(Number),
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'ui.autoModeAcknowledged',
+      true,
+    );
+  });
+
+  it('should skip the AUTO mode entry notice after acknowledgement', async () => {
+    await setLanguageAsync('en');
+    const mockAddItem = vi.fn();
+    const mockSettings = createMockSettings(true);
+
+    emitAutoModeEntryNotices({
+      config: mockConfigInstance as unknown as ActualConfigType,
+      settings: mockSettings,
+      addItem: mockAddItem,
+    });
+
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Auto mode enabled.'),
+      }),
+      expect.any(Number),
+    );
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
   });
 
   it('should emit the AUTO mode entry notice with the active locale', async () => {

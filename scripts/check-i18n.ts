@@ -419,6 +419,15 @@ export async function checkI18n(
         .map((language) => language.code),
     );
 
+  const builtinMustTranslateKeySet = new Set(MUST_TRANSLATE_KEYS);
+  for (const key of EN_SEMANTIC_KEY_EXCEPTIONS) {
+    if (!builtinMustTranslateKeySet.has(key)) {
+      errors.push(
+        `English semantic key exception must be listed in MUST_TRANSLATE_KEYS: "${key}"`,
+      );
+    }
+  }
+
   const localeDefinitions = supportedLanguages.map((language) => ({
     code: language.code,
     id: language.id,
