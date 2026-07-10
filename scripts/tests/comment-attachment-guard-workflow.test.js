@@ -38,6 +38,20 @@ describe('comment attachment guard workflow', () => {
     );
   });
 
+  it('does not throw on malformed URL-like links', () => {
+    expect(workflow).toContain('} catch {\n                return target;');
+  });
+
+  it('decodes escaped risky extensions in URL paths', () => {
+    expect(workflow).toContain('return decodeURIComponent(target);');
+  });
+
+  it('keeps parenthesized URL segments in link matches', () => {
+    expect(workflow).toContain(
+      String.raw`/https?:\/\/[^\s"'<>\]]+|\[[^\]]+\]\((?:[^()\s]|\([^()\s]*\))+\)/gi;`,
+    );
+  });
+
   it('keeps diagnostics when deletion or summary writing fails', () => {
     expect(workflow).toContain(
       'Failed to delete suspicious comment ${comment.id}',

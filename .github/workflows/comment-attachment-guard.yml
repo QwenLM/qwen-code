@@ -35,13 +35,23 @@ jobs:
             const highRiskExtension =
               /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|sh|bat|ps1|node|dylib|so)(?:$|[\s)"'\]>?#/&;.,!:])/i;
             const linkPattern =
-              /https?:\/\/[^\s)"'<>\]]+|\[[^\]]+\]\([^)]+\)/gi;
+              /https?:\/\/[^\s"'<>\]]+|\[[^\]]+\]\((?:[^()\s]|\([^()\s]*\))+\)/gi;
             const highRiskTarget = (url) => {
+              let target = url;
               if (!/^https?:\/\//i.test(url)) {
-                return url;
+                return target;
               }
-              const parsedUrl = new URL(url);
-              return `${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`;
+              try {
+                const parsedUrl = new URL(url);
+                target = `${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`;
+              } catch {
+                return target;
+              }
+              try {
+                return decodeURIComponent(target);
+              } catch {
+                return target;
+              }
             };
 
             const { comment, sender } = context.payload;
