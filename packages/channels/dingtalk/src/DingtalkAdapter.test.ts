@@ -1599,7 +1599,7 @@ describe('DingtalkChannel mention target lifecycle', () => {
     expect(bridge.prompt).toHaveBeenCalledOnce();
   });
 
-  it('removes a bound session target when the session dies', async () => {
+  it('clears buffered mention targets for a dead session only', async () => {
     vi.doUnmock('@qwen-code/channel-base');
     vi.resetModules();
     const { DingtalkChannel: RealDingtalkChannel } = await import(
@@ -1631,14 +1631,44 @@ describe('DingtalkChannel mention target lifecycle', () => {
       bridge,
       { registerBridgeEvents: false },
     );
-    const sessionTargets = (
-      channel as unknown as { sessionMentionTargets: Map<string, string> }
-    ).sessionMentionTargets;
-    sessionTargets.set('session-1', 'staff-123');
+    const internals = channel as unknown as {
+      mentionTargets: Map<string, string>;
+      sessionMentionTargets: Map<string, string>;
+      bufferedMentionTargets: Set<string>;
+      bufferedMentionTargetsBySession: Map<string, Set<string>>;
+      onPromptBuffered(
+        chatId: string,
+        sessionId: string,
+        messageId?: string,
+      ): void;
+    };
+    internals.mentionTargets.set('buffered-1', 'staff-buffered');
+    internals.mentionTargets.set('queued-1', 'staff-queued');
+    internals.mentionTargets.set('other-1', 'staff-other');
+    internals.onPromptBuffered('cid-123', 'session-1', 'buffered-1');
+    internals.onPromptBuffered('cid-123', 'session-1', 'queued-1');
+    internals.onPromptBuffered('cid-123', 'session-2', 'other-1');
+    internals.sessionMentionTargets.set('session-1', 'staff-active');
+    internals.sessionMentionTargets.set('session-2', 'staff-other-active');
 
     channel.onSessionDied('session-1');
 
-    expect(sessionTargets.has('session-1')).toBe(false);
+    expect(internals.mentionTargets.has('buffered-1')).toBe(false);
+    expect(internals.mentionTargets.has('queued-1')).toBe(false);
+    expect(internals.bufferedMentionTargets.has('buffered-1')).toBe(false);
+    expect(internals.bufferedMentionTargets.has('queued-1')).toBe(false);
+    expect(internals.bufferedMentionTargetsBySession.has('session-1')).toBe(
+      false,
+    );
+    expect(internals.sessionMentionTargets.has('session-1')).toBe(false);
+    expect(internals.mentionTargets.get('other-1')).toBe('staff-other');
+    expect(internals.bufferedMentionTargets.has('other-1')).toBe(true);
+    expect(internals.bufferedMentionTargetsBySession.get('session-2')).toEqual(
+      new Set(['other-1']),
+    );
+    expect(internals.sessionMentionTargets.get('session-2')).toBe(
+      'staff-other-active',
+    );
   });
 });
 

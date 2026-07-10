@@ -115,6 +115,7 @@ export class DingtalkChannel extends ChannelBase {
   private mentionTargets = new Map<string, string>();
   private sessionMentionTargets = new Map<string, string>();
   private bufferedMentionTargets = new Set<string>();
+  private bufferedMentionTargetsBySession = new Map<string, Set<string>>();
   private dedupTimer?: ReturnType<typeof setInterval>;
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
@@ -646,6 +647,14 @@ export class DingtalkChannel extends ChannelBase {
 
   /** Recall reactions left behind when a session dies without terminal lifecycle events. */
   override onSessionDied(sessionId: string): void {
+    const bufferedTargets = this.bufferedMentionTargetsBySession.get(sessionId);
+    if (bufferedTargets) {
+      this.bufferedMentionTargetsBySession.delete(sessionId);
+      for (const messageId of bufferedTargets) {
+        this.bufferedMentionTargets.delete(messageId);
+        this.mentionTargets.delete(messageId);
+      }
+    }
     this.sessionMentionTargets.delete(sessionId);
     const keys = this.sessionReactionKeys.get(sessionId);
     if (keys) {
@@ -674,22 +683,24 @@ export class DingtalkChannel extends ChannelBase {
 
   protected override onPromptBufferDropped(
     _chatId: string,
-    _sessionId: string,
+    sessionId: string,
     messageIds: string[],
   ): void {
     for (const messageId of messageIds) {
       this.bufferedMentionTargets.delete(messageId);
       this.mentionTargets.delete(messageId);
+      this.untrackBufferedMentionTarget(sessionId, messageId);
     }
   }
 
   protected override onPromptBufferDrained(
     _chatId: string,
-    _sessionId: string,
+    sessionId: string,
     messageIds: string[],
   ): void {
     for (const messageId of messageIds) {
       this.bufferedMentionTargets.delete(messageId);
+      this.untrackBufferedMentionTarget(sessionId, messageId);
     }
     for (const messageId of messageIds.slice(0, -1)) {
       this.mentionTargets.delete(messageId);
@@ -698,11 +709,17 @@ export class DingtalkChannel extends ChannelBase {
 
   protected override onPromptBuffered(
     _chatId: string,
-    _sessionId: string,
+    sessionId: string,
     messageId?: string,
   ): void {
     if (messageId && this.mentionTargets.has(messageId)) {
       this.bufferedMentionTargets.add(messageId);
+      let targets = this.bufferedMentionTargetsBySession.get(sessionId);
+      if (!targets) {
+        targets = new Set();
+        this.bufferedMentionTargetsBySession.set(sessionId, targets);
+      }
+      targets.add(messageId);
     }
   }
 
@@ -713,6 +730,7 @@ export class DingtalkChannel extends ChannelBase {
   ): void {
     if (messageId) {
       this.bufferedMentionTargets.delete(messageId);
+      this.untrackBufferedMentionTarget(sessionId, messageId);
       const atUserId = this.mentionTargets.get(messageId);
       this.mentionTargets.delete(messageId);
       if (atUserId) this.sessionMentionTargets.set(sessionId, atUserId);
@@ -741,6 +759,17 @@ export class DingtalkChannel extends ChannelBase {
         this.mentionTargets.delete(messageId);
       }
     }
+  }
+
+  private untrackBufferedMentionTarget(
+    sessionId: string,
+    messageId: string,
+  ): void {
+    const targets = this.bufferedMentionTargetsBySession.get(sessionId);
+    if (!targets) return;
+    targets.delete(messageId);
+    if (targets.size === 0)
+      this.bufferedMentionTargetsBySession.delete(sessionId);
   }
 
   protected override onPromptEnd(
