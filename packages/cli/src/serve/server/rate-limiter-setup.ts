@@ -13,6 +13,7 @@ export function installRateLimiter(
   app: Application,
   opts: ServeOptions,
   daemonLog: DaemonLogger | undefined,
+  options: { mount?: boolean } = {},
 ): RateLimiterInstance | undefined {
   if (!opts.rateLimit) return undefined;
 
@@ -41,6 +42,8 @@ export function installRateLimiter(
         }
       : undefined,
   });
-  app.use(rateLimiter.middleware);
+  if (options.mount !== false) {
+    app.use(rateLimiter.middleware);
+  }
   return rateLimiter;
 }

@@ -35,7 +35,7 @@ let hasWriteFailure = false;
 let globalSession: DebugLogSession | null = null;
 const sessionContext = new AsyncLocalStorage<DebugLogSession>();
 
-function isDebugLogFileEnabled(): boolean {
+export function isDebugLogFileEnabled(): boolean {
   const value = process.env['QWEN_DEBUG_LOG_FILE'];
   if (!value) return false;
   const normalized = value.trim().toLowerCase();
