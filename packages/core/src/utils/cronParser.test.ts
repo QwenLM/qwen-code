@@ -40,6 +40,19 @@ describe('parseCron', () => {
     expect([...fields.minute].sort((a, b) => a - b)).toEqual([1, 4, 7, 10]);
   });
 
+  it('applies a step to a single starting value (N/step means N-max/step)', () => {
+    // Vixie-cron: `5/15` starts at 5 and steps to the field maximum,
+    // i.e. minutes 5, 20, 35, 50 — not just {5}.
+    const fields = parseCron('5/15 * * * *');
+    expect([...fields.minute].sort((a, b) => a - b)).toEqual([5, 20, 35, 50]);
+  });
+
+  it('applies a step to a single starting hour value', () => {
+    // `0/6` in the hour field → hours 0, 6, 12, 18.
+    const fields = parseCron('* 0/6 * * *');
+    expect([...fields.hour].sort((a, b) => a - b)).toEqual([0, 6, 12, 18]);
+  });
+
   it('throws on wrong number of fields', () => {
     expect(() => parseCron('* * *')).toThrow('must have exactly 5 fields');
     expect(() => parseCron('* * * * * *')).toThrow(
@@ -118,6 +131,14 @@ describe('matches', () => {
     expect(matches('0 10 1 * *', date)).toBe(false);
     // dom=*, dow=1 → AND, dow doesn't match
     expect(matches('0 10 * * 1', date)).toBe(false);
+  });
+
+  it('matches an N/step minute pattern at every stepped minute', () => {
+    // `5/15` fires at :05, :20, :35, :50 — not only :05.
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 5))).toBe(true);
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 20))).toBe(true);
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 50))).toBe(true);
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 10))).toBe(false);
   });
 
   it('matches every-N-minutes pattern', () => {
