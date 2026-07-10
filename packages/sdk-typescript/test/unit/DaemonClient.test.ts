@@ -3339,16 +3339,61 @@ describe('DaemonClient', () => {
     });
   });
 
-  describe('workspace-qualified extensions', () => {
-    it('routes extension methods to /workspaces/:workspace/extensions/*', async () => {
-      const status = {
-        v: 1,
-        workspaceCwd: '/work/a',
-        initialized: true,
-        extensions: [],
-      };
+  describe('extension management v2', () => {
+    it('waits for an operation without cancelling it when polling completes', async () => {
+      let polls = 0;
+      const { fetch } = recordingFetch(() => {
+        polls += 1;
+        return jsonResponse(200, {
+          v: 1,
+          operationId: 'op-1',
+          operation: 'install',
+          status: polls === 1 ? 'running' : 'succeeded',
+          createdAt: 1,
+          updatedAt: 2,
+        });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.waitForExtensionOperation(
+        { accepted: true, operationId: 'op-1' },
+        { pollIntervalMs: 0, timeoutMs: 100 },
+      );
+
+      expect(result.status).toBe('succeeded');
+      expect(polls).toBe(2);
+    });
+
+    it('times out polling without cancelling the accepted operation', async () => {
+      let polls = 0;
+      const { fetch } = recordingFetch(() => {
+        polls += 1;
+        return jsonResponse(200, {
+          v: 1,
+          operationId: 'op-1',
+          operation: 'install',
+          status: 'running',
+          createdAt: 1,
+          updatedAt: 2,
+        });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.waitForExtensionOperation(
+          { accepted: true, operationId: 'op-1' },
+          { timeoutMs: 0 },
+        ),
+      ).rejects.toThrow('server operation was not cancelled');
+      expect(polls).toBe(1);
+    });
+
+    it('routes global extension methods through /extensions/*', async () => {
       const { fetch, calls } = recordingFetch((req) => {
-        if (req.url.includes('/extensions/operations/')) {
+        if (req.url === 'http://daemon/extensions') {
+          return jsonResponse(200, { v: 1, generation: 1, extensions: [] });
+        }
+        if (req.url.includes('/operations/')) {
           return jsonResponse(200, {
             v: 1,
             operationId: 'op-1',
@@ -3358,6 +3403,61 @@ describe('DaemonClient', () => {
             updatedAt: 2,
           });
         }
+        return jsonResponse(202, { accepted: true, operationId: 'op-2' });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.extensionCatalog();
+      await client.installUserExtension(
+        {
+          source: 'owner/repo',
+          consent: true,
+          activation: { scope: 'user' },
+        },
+        'client-1',
+      );
+      await client.checkUserExtensionUpdates('client-1');
+      await client.updateUserExtension('a'.repeat(64), 'client-1');
+      await client.uninstallUserExtension('a'.repeat(64), 'client-1');
+      await client.setExtensionDefaultActivation(
+        'a'.repeat(64),
+        'disabled',
+        'client-1',
+      );
+      await client.extensionOperation('op-1');
+
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/extensions'],
+        ['POST', 'http://daemon/extensions/install'],
+        ['POST', 'http://daemon/extensions/check-updates'],
+        ['POST', `http://daemon/extensions/${'a'.repeat(64)}/update`],
+        ['DELETE', `http://daemon/extensions/${'a'.repeat(64)}`],
+        ['PUT', `http://daemon/extensions/${'a'.repeat(64)}/activation`],
+        ['GET', 'http://daemon/extensions/operations/op-1'],
+      ]);
+    });
+
+    it('treats a missing V2 extension uninstall as idempotent success', async () => {
+      const { fetch } = recordingFetch(
+        () => new Response(null, { status: 204 }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.uninstallUserExtension('a'.repeat(64)),
+      ).resolves.toBeUndefined();
+    });
+
+    it('routes only projection and activation methods through a workspace', async () => {
+      const status = {
+        v: 1,
+        workspaceId: 'ws-a',
+        workspaceCwd: '/work/a',
+        desiredGeneration: 1,
+        appliedGeneration: 1,
+        extensions: [],
+      };
+      const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/extensions')) return jsonResponse(200, status);
         return jsonResponse(202, { accepted: true, operationId: 'op-2' });
       });
@@ -3365,43 +3465,21 @@ describe('DaemonClient', () => {
       const ws = client.workspaceByCwd('/work/a');
 
       await expect(ws.workspaceExtensions()).resolves.toEqual(status);
-      await ws.extensionOperationStatus('op-1');
-      await ws.installExtension(
-        { source: 'owner/repo', consent: true },
-        'client-1',
-      );
-      await ws.checkExtensionUpdates('client-1');
-      await ws.refreshExtensions('client-1');
-      await ws.enableExtension('ext-a', { scope: 'workspace' }, 'client-1');
-      await ws.disableExtension('ext-a', { scope: 'workspace' }, 'client-1');
-      await ws.updateExtension('ext-a', 'client-1');
-      await ws.uninstallExtension('ext-a', 'client-1');
+      await ws.setExtensionActivation('a'.repeat(64), 'enabled', 'client-1');
+      await ws.clearExtensionActivation('a'.repeat(64), 'client-1');
+      await ws.refreshExtensionRuntime('client-1');
 
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/workspaces/%2Fwork%2Fa/extensions'],
         [
-          'GET',
-          'http://daemon/workspaces/%2Fwork%2Fa/extensions/operations/op-1',
+          'PUT',
+          `http://daemon/workspaces/%2Fwork%2Fa/extensions/${'a'.repeat(64)}/activation`,
         ],
-        ['POST', 'http://daemon/workspaces/%2Fwork%2Fa/extensions/install'],
         [
-          'POST',
-          'http://daemon/workspaces/%2Fwork%2Fa/extensions/check-updates',
+          'DELETE',
+          `http://daemon/workspaces/%2Fwork%2Fa/extensions/${'a'.repeat(64)}/activation`,
         ],
         ['POST', 'http://daemon/workspaces/%2Fwork%2Fa/extensions/refresh'],
-        [
-          'POST',
-          'http://daemon/workspaces/%2Fwork%2Fa/extensions/ext-a/enable',
-        ],
-        [
-          'POST',
-          'http://daemon/workspaces/%2Fwork%2Fa/extensions/ext-a/disable',
-        ],
-        [
-          'POST',
-          'http://daemon/workspaces/%2Fwork%2Fa/extensions/ext-a/update',
-        ],
-        ['DELETE', 'http://daemon/workspaces/%2Fwork%2Fa/extensions/ext-a'],
       ]);
     });
   });

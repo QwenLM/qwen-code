@@ -160,9 +160,13 @@ describe('git extension helpers', () => {
       mockGit.getRemotes.mockResolvedValue([
         { name: 'origin', refs: { fetch: 'http://my-repo.com' } },
       ]);
+      const controller = new AbortController();
 
-      await cloneFromGit(installMetadata, destination);
+      await cloneFromGit(installMetadata, destination, controller.signal);
 
+      expect(simpleGit).toHaveBeenCalledWith(destination, {
+        abort: controller.signal,
+      });
       expect(mockGit.clone).toHaveBeenCalledWith('http://my-repo.com', './', [
         '-c',
         'core.symlinks=true',

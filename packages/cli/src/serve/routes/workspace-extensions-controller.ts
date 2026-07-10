@@ -26,9 +26,15 @@ import {
   type ServeWorkspaceExtensionsStatus,
 } from '@qwen-code/acp-bridge/status';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
+import type { WorkspaceRuntime } from '../workspace-registry.js';
+import {
+  createFifoTaskQueue,
+  type FifoTaskQueue,
+} from '../extension-operation-scheduler.js';
 
-const MAX_EXTENSION_INSTALL_QUEUE_DEPTH = 10;
-const EXTENSION_MUTATION_TIMEOUT_MS = 10 * 60_000;
+const MAX_UNFINISHED_EXTENSION_OPERATIONS = 10;
+const EXTENSION_PREPARATION_CONCURRENCY = 2;
+const RECONCILE_SLOW_MS = 30_000;
 
 /**
  * Thrown by the per-workspace install queue when it is saturated, and matched
@@ -37,45 +43,21 @@ const EXTENSION_MUTATION_TIMEOUT_MS = 10 * 60_000;
  */
 export const EXTENSION_QUEUE_FULL_MESSAGE = 'Extension operation queue is full';
 
-/**
- * Wraps a promise with a timeout that rejects if the underlying work does not
- * settle in time. Shared by the controller (mutation queue) and the route
- * handlers (update-check / refresh).
- *
- * Non-cancellation semantics: on timeout the returned promise rejects, but the
- * underlying operation is NOT aborted and keeps running to completion in the
- * background. Inside `runQueuedExtensionMutation` a timed-out mutation is
- * recorded as `failed` even though the on-disk install/uninstall may still
- * settle, and the per-workspace queue stays occupied until the underlying work
- * finishes. Cancelling the underlying operation (e.g. via `AbortController`)
- * is tracked as a follow-up.
- */
-export const withExtensionTimeout = async <T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  operation: string,
-): Promise<T> =>
-  await new Promise<T>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      reject(new Error(`${operation} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    promise.then(
-      (value) => {
-        clearTimeout(timeout);
-        resolve(value);
-      },
-      (err: unknown) => {
-        clearTimeout(timeout);
-        reject(err);
-      },
-    );
-  });
-
 export type ExtensionMutationEvent = {
-  status: 'installed' | 'enabled' | 'disabled' | 'updated' | 'uninstalled';
+  status:
+    | 'installed'
+    | 'enabled'
+    | 'disabled'
+    | 'updated'
+    | 'uninstalled'
+    | 'checked'
+    | 'refreshed';
   source?: string;
   name?: string;
   version?: string;
+  updated?: boolean;
+  reason?: string;
+  states?: Record<string, string>;
 };
 
 export type ExtensionOperationStatus = {
@@ -86,8 +68,9 @@ export type ExtensionOperationStatus = {
     | 'queued'
     | 'running'
     | 'succeeded'
-    | 'succeeded_with_refresh_error'
+    | 'succeeded_with_warnings'
     | 'failed';
+  phase?: 'preparing' | 'committing' | 'reconciling';
   createdAt: number;
   updatedAt: number;
   source?: string;
@@ -98,7 +81,26 @@ export type ExtensionOperationStatus = {
     error?: string;
   };
   error?: string;
+  code?: string;
+  warnings?: Array<{
+    workspaceId?: string;
+    workspaceCwd: string;
+    code?: string;
+    error: string;
+  }>;
 };
+
+export interface ExtensionOperationContext {
+  prepare<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;
+  commit<
+    T extends {
+      generation: number;
+      warnings?: ReadonlyArray<{ code: string; error: string }>;
+    },
+  >(
+    task: () => Promise<T>,
+  ): Promise<T>;
+}
 
 export interface CreateExtensionsControllerDeps {
   boundWorkspace: string;
@@ -107,23 +109,19 @@ export interface CreateExtensionsControllerDeps {
   maxExtensionOperationHistory?: number;
 }
 
-/**
- * Per-workspace extension operation state and the mutation/refresh machinery
- * bound to a single workspace's `bridge` and `workspace` service. One
- * controller owns that workspace's install-serialization queue, async
- * operation history, and status cache, so both the legacy singular routes and
- * the workspace-qualified plural routes dispatch through the same instance for
- * a given workspace (never two competing install queues for one directory).
- */
+/** Shared coordinator for the legacy adapter and V2 global operations. */
 export interface ExtensionsController {
   readonly boundWorkspace: string;
   readonly workspace: DaemonWorkspaceService;
   buildWorkspaceCtx: ReturnType<typeof createBuildWorkspaceCtx>;
-  createExtensionManager(): ExtensionManager;
+  createExtensionManager(
+    workspaceDir?: string,
+    isWorkspaceTrusted?: boolean,
+  ): ExtensionManager;
   buildLocalExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
   invalidateStatusCache(): void;
   getOperation(operationId: string): ExtensionOperationStatus | undefined;
-  enqueueExtensionInstall<T>(run: () => Promise<T>): Promise<T>;
+  preparationQueue: FifoTaskQueue;
   validateExtensionMutationClient(
     req: Request,
     res: Response,
@@ -136,7 +134,20 @@ export interface ExtensionsController {
     res: Response,
     run: (
       extensionManager: ExtensionManager,
+      signal?: AbortSignal,
+      context?: ExtensionOperationContext,
     ) => Promise<ExtensionMutationEvent>,
+    options?: {
+      manager?: ExtensionManager;
+      refreshRuntimes?: readonly WorkspaceRuntime[];
+      operationBasePath?: string;
+      skipRefresh?: boolean;
+      deadlineMs?: number;
+      onRuntimeReconciled?: (
+        runtime: WorkspaceRuntime,
+        generation: number,
+      ) => void;
+    },
   ): void;
 }
 
@@ -147,28 +158,22 @@ export function createExtensionsController(
   const maxExtensionOperationHistory = deps.maxExtensionOperationHistory ?? 100;
   const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
 
-  let extensionInstallQueue: Promise<unknown> = Promise.resolve();
-  let extensionInstallQueueDepth = 0;
-  const enqueueExtensionInstall = async <T>(run: () => Promise<T>) => {
-    if (extensionInstallQueueDepth >= MAX_EXTENSION_INSTALL_QUEUE_DEPTH) {
-      throw new Error(EXTENSION_QUEUE_FULL_MESSAGE);
-    }
-    extensionInstallQueueDepth += 1;
-    const next = extensionInstallQueue.then(run, run).finally(() => {
-      extensionInstallQueueDepth -= 1;
-    });
-    extensionInstallQueue = next.catch(() => undefined);
-    return next;
-  };
+  const preparationQueue = createFifoTaskQueue(
+    EXTENSION_PREPARATION_CONCURRENCY,
+  );
+  const commitQueue = createFifoTaskQueue(1);
+  let unfinishedOperationCount = 0;
 
-  const createExtensionManager = () =>
+  const createExtensionManager = (
+    workspaceDir = boundWorkspace,
+    trustedOverride?: boolean,
+  ) =>
     new ExtensionManager({
-      workspaceDir: boundWorkspace,
+      workspaceDir,
       isWorkspaceTrusted:
-        getWorkspaceTrustStatus(
-          loadSettings(boundWorkspace).merged,
-          boundWorkspace,
-        ).effective.state === 'trusted',
+        trustedOverride ??
+        getWorkspaceTrustStatus(loadSettings(workspaceDir).merged, workspaceDir)
+          .effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
       requestSetting: async (setting: ExtensionSetting) => {
         throw new Error(
@@ -211,11 +216,19 @@ export function createExtensionsController(
     ...event,
     ...(event.source ? { source: redactUrlCredentials(event.source) } : {}),
   });
-  const rememberExtensionOperation = (
-    operation: ExtensionOperationStatus,
-  ): void => {
-    extensionOperations.set(operation.operationId, operation);
-    while (extensionOperations.size > maxExtensionOperationHistory) {
+  const bridgeMutationEvent = (event: ExtensionMutationEvent) => {
+    const redacted = redactExtensionOperationResult(event);
+    if (event.status === 'checked' || event.status === 'refreshed') {
+      const { status: _status, states: _states, ...bridgeEvent } = redacted;
+      return bridgeEvent;
+    }
+    return redacted;
+  };
+  const pruneExtensionOperations = (): void => {
+    const terminalCount = () =>
+      [...extensionOperations.values()].filter(isTerminalExtensionOperation)
+        .length;
+    while (terminalCount() > maxExtensionOperationHistory) {
       let evicted = false;
       for (const [id, storedOperation] of extensionOperations) {
         if (!isTerminalExtensionOperation(storedOperation)) continue;
@@ -225,6 +238,12 @@ export function createExtensionsController(
       }
       if (!evicted) break;
     }
+  };
+  const rememberExtensionOperation = (
+    operation: ExtensionOperationStatus,
+  ): void => {
+    extensionOperations.set(operation.operationId, operation);
+    pruneExtensionOperations();
   };
   const updateExtensionOperation = (
     operationId: string,
@@ -237,6 +256,7 @@ export function createExtensionsController(
       ...patch,
       updatedAt: Date.now(),
     });
+    pruneExtensionOperations();
   };
 
   let extensionsStatusCache:
@@ -249,9 +269,22 @@ export function createExtensionsController(
     res: Response,
     run: (
       extensionManager: ExtensionManager,
+      signal?: AbortSignal,
+      context?: ExtensionOperationContext,
     ) => Promise<ExtensionMutationEvent>,
+    options: {
+      manager?: ExtensionManager;
+      refreshRuntimes?: readonly WorkspaceRuntime[];
+      operationBasePath?: string;
+      skipRefresh?: boolean;
+      deadlineMs?: number;
+      onRuntimeReconciled?: (
+        runtime: WorkspaceRuntime,
+        generation: number,
+      ) => void;
+    } = {},
   ): void => {
-    if (extensionInstallQueueDepth >= MAX_EXTENSION_INSTALL_QUEUE_DEPTH) {
+    if (unfinishedOperationCount >= MAX_UNFINISHED_EXTENSION_OPERATIONS) {
       res.status(429).json({
         error: EXTENSION_QUEUE_FULL_MESSAGE,
         code: 'extension_queue_full',
@@ -272,76 +305,288 @@ export function createExtensionsController(
         : {}),
       ...(failureContext.name ? { name: failureContext.name } : {}),
     });
-    res.status(202).json({ accepted: true, operationId });
-    void enqueueExtensionInstall(async () => {
+    const operationBasePath =
+      options.operationBasePath ?? '/workspace/extensions/operations';
+    res
+      .status(202)
+      .location(`${operationBasePath}/${operationId}`)
+      .set('Retry-After', '1')
+      .json({ accepted: true, operationId });
+    unfinishedOperationCount += 1;
+    void (async () => {
+      let deadline: ReturnType<typeof setTimeout> | undefined;
       try {
-        updateExtensionOperation(operationId, { status: 'running' });
-        const extensionManager = createExtensionManager();
-        await extensionManager.refreshCache();
-        const event = await withExtensionTimeout(
-          run(extensionManager),
-          EXTENSION_MUTATION_TIMEOUT_MS,
-          `extension ${operation}`,
-        );
-        extensionsStatusCache = undefined;
-        workspace.invalidateWorkspaceSkillsStatus();
-        try {
-          const result = await bridge.refreshExtensionsForAllSessions(
-            redactExtensionOperationResult(event),
-          );
+        const extensionManager = options.manager ?? createExtensionManager();
+        const deadlineController = new AbortController();
+        let deadlineStarted = false;
+        let committedGeneration: number | undefined;
+        const commitWarnings: NonNullable<
+          ExtensionOperationStatus['warnings']
+        > = [];
+        const startDeadline = () => {
+          if (deadlineStarted) return;
+          deadlineStarted = true;
           updateExtensionOperation(operationId, {
-            status: 'succeeded',
-            result: {
-              ...redactExtensionOperationResult(event),
-              refreshed: result.refreshed,
-              failed: result.failed,
-            },
+            status: 'running',
+            phase: 'preparing',
           });
-          writeStderrLine(
-            `qwen serve: [${boundWorkspace}] extensions ${operation}: refreshed ${result.refreshed} session(s), ${result.failed} failed`,
-          );
-        } catch (refreshErr) {
-          const message = redactUrlCredentials(
-            refreshErr instanceof Error
-              ? refreshErr.message
-              : String(refreshErr),
-          );
-          updateExtensionOperation(operationId, {
-            status: 'succeeded_with_refresh_error',
-            result: {
-              ...redactExtensionOperationResult(event),
-              refreshed: 0,
-              failed: 1,
-              error: message.slice(0, 500),
+          if (options.deadlineMs) {
+            deadline = setTimeout(() => {
+              const error = new Error(
+                `Extension ${operation} exceeded its ${options.deadlineMs}ms preparation deadline.`,
+              ) as Error & { code: string };
+              error.code = 'extension_prepare_timeout';
+              deadlineController.abort(error);
+            }, options.deadlineMs);
+            deadline.unref();
+          }
+        };
+        const context: ExtensionOperationContext = {
+          prepare: async <T>(
+            task: (signal: AbortSignal) => Promise<T>,
+          ): Promise<T> => {
+            try {
+              return await preparationQueue.run(
+                async () => await task(deadlineController.signal),
+                {
+                  signal: deadlineController.signal,
+                  onStart: startDeadline,
+                },
+              );
+            } catch (error) {
+              if (deadlineController.signal.aborted) {
+                throw deadlineController.signal.reason;
+              }
+              throw error;
+            }
+          },
+          commit: async <
+            T extends {
+              generation: number;
+              warnings?: ReadonlyArray<{ code: string; error: string }>;
             },
-          });
-          try {
-            bridge.broadcastExtensionsChanged({
-              ...redactExtensionOperationResult(event),
-              refreshed: 0,
-              failed: 1,
-              error: message.slice(0, 500),
+          >(
+            task: () => Promise<T>,
+          ): Promise<T> => {
+            updateExtensionOperation(operationId, {
+              status: 'running',
+              phase: 'committing',
             });
-          } catch (broadcastErr) {
+            const result = await commitQueue.run(task);
+            committedGeneration = result.generation;
+            for (const warning of result.warnings ?? []) {
+              commitWarnings.push({
+                workspaceCwd: boundWorkspace,
+                code: warning.code,
+                error: redactUrlCredentials(warning.error).slice(0, 500),
+              });
+            }
+            return result;
+          },
+        };
+        await extensionManager.refreshCache();
+        const event = await run(
+          extensionManager,
+          deadlineController.signal,
+          context,
+        );
+        if (deadline) clearTimeout(deadline);
+        extensionsStatusCache = undefined;
+        if (options.skipRefresh || event.updated === false) {
+          updateExtensionOperation(operationId, {
+            status:
+              commitWarnings.length > 0
+                ? 'succeeded_with_warnings'
+                : 'succeeded',
+            result: redactExtensionOperationResult(event),
+            ...(commitWarnings.length > 0 ? { warnings: commitWarnings } : {}),
+          });
+          return;
+        }
+        workspace.invalidateWorkspaceSkillsStatus();
+        committedGeneration ??= (
+          await extensionManager.getExtensionStoreSnapshot()
+        ).generation;
+        updateExtensionOperation(operationId, {
+          status: 'running',
+          phase: 'reconciling',
+        });
+        const refreshTargets = options.refreshRuntimes;
+        if (refreshTargets && refreshTargets.length > 0) {
+          const results = await Promise.all(
+            refreshTargets.map(async (runtime) => {
+              const startedAt = Date.now();
+              try {
+                runtime.workspaceService.invalidateWorkspaceSkillsStatus();
+                return {
+                  status: 'fulfilled' as const,
+                  result: await runtime.bridge.refreshExtensionsForAllSessions(
+                    bridgeMutationEvent(event),
+                  ),
+                  elapsedMs: Date.now() - startedAt,
+                };
+              } catch (reason) {
+                return {
+                  status: 'rejected' as const,
+                  reason,
+                  elapsedMs: Date.now() - startedAt,
+                };
+              }
+            }),
+          );
+          let refreshed = 0;
+          let failed = 0;
+          const warnings: NonNullable<ExtensionOperationStatus['warnings']> = [
+            ...commitWarnings,
+          ];
+          for (let index = 0; index < results.length; index += 1) {
+            const settled = results[index]!;
+            const runtime = refreshTargets[index]!;
+            if (settled.status === 'fulfilled') {
+              refreshed += settled.result.refreshed;
+              failed += settled.result.failed;
+              if (settled.result.failed > 0) {
+                warnings.push({
+                  workspaceId: runtime.workspaceId,
+                  workspaceCwd: runtime.workspaceCwd,
+                  error: `${settled.result.failed} session refresh(es) failed`,
+                });
+              } else {
+                options.onRuntimeReconciled?.(runtime, committedGeneration);
+              }
+            } else {
+              failed += 1;
+              const message = redactUrlCredentials(
+                settled.reason instanceof Error
+                  ? settled.reason.message
+                  : String(settled.reason),
+              );
+              warnings.push({
+                workspaceId: runtime.workspaceId,
+                workspaceCwd: runtime.workspaceCwd,
+                error: message.slice(0, 500),
+              });
+              try {
+                runtime.bridge.broadcastExtensionsChanged({
+                  ...bridgeMutationEvent(event),
+                  refreshed: 0,
+                  failed: 1,
+                  error: message.slice(0, 500),
+                });
+              } catch {
+                // The warning already records the refresh failure; a failed
+                // notification must not turn a committed mutation into a
+                // failed operation.
+              }
+            }
+            if (settled.elapsedMs > RECONCILE_SLOW_MS) {
+              warnings.push({
+                workspaceId: runtime.workspaceId,
+                workspaceCwd: runtime.workspaceCwd,
+                code: 'reconcile_slow',
+                error: `Runtime reconciliation took ${settled.elapsedMs}ms.`,
+              });
+            }
+          }
+          updateExtensionOperation(operationId, {
+            status:
+              warnings.length > 0 ? 'succeeded_with_warnings' : 'succeeded',
+            result: {
+              ...redactExtensionOperationResult(event),
+              refreshed,
+              failed,
+            },
+            ...(warnings.length > 0 ? { warnings } : {}),
+          });
+        } else {
+          try {
+            const startedAt = Date.now();
+            const result = await bridge.refreshExtensionsForAllSessions(
+              bridgeMutationEvent(event),
+            );
+            const elapsedMs = Date.now() - startedAt;
+            const warnings: NonNullable<ExtensionOperationStatus['warnings']> =
+              [...commitWarnings];
+            if (result.failed > 0) {
+              warnings.push({
+                workspaceCwd: boundWorkspace,
+                error: `${result.failed} session refresh(es) failed`,
+              });
+            }
+            if (elapsedMs > RECONCILE_SLOW_MS) {
+              warnings.push({
+                workspaceCwd: boundWorkspace,
+                code: 'reconcile_slow',
+                error: `Runtime reconciliation took ${elapsedMs}ms.`,
+              });
+            }
+            updateExtensionOperation(operationId, {
+              status:
+                warnings.length > 0 ? 'succeeded_with_warnings' : 'succeeded',
+              result: {
+                ...redactExtensionOperationResult(event),
+                refreshed: result.refreshed,
+                failed: result.failed,
+              },
+              ...(warnings.length > 0 ? { warnings } : {}),
+            });
             writeStderrLine(
-              `qwen serve: [${boundWorkspace}] extensions ${operation}: failed to broadcast refresh failure: ${
-                broadcastErr instanceof Error
-                  ? redactUrlCredentials(broadcastErr.message)
-                  : String(broadcastErr)
-              }`,
+              `qwen serve: [${boundWorkspace}] extensions ${operation}: refreshed ${result.refreshed} session(s), ${result.failed} failed`,
+            );
+          } catch (refreshErr) {
+            const message = redactUrlCredentials(
+              refreshErr instanceof Error
+                ? refreshErr.message
+                : String(refreshErr),
+            );
+            updateExtensionOperation(operationId, {
+              status: 'succeeded_with_warnings',
+              result: {
+                ...redactExtensionOperationResult(event),
+                refreshed: 0,
+                failed: 1,
+                error: message.slice(0, 500),
+              },
+              warnings: [
+                ...commitWarnings,
+                { workspaceCwd: boundWorkspace, error: message },
+              ],
+            });
+            try {
+              bridge.broadcastExtensionsChanged({
+                ...bridgeMutationEvent(event),
+                refreshed: 0,
+                failed: 1,
+                error: message.slice(0, 500),
+              });
+            } catch (broadcastErr) {
+              writeStderrLine(
+                `qwen serve: [${boundWorkspace}] extensions ${operation}: failed to broadcast refresh failure: ${
+                  broadcastErr instanceof Error
+                    ? redactUrlCredentials(broadcastErr.message)
+                    : String(broadcastErr)
+                }`,
+              );
+            }
+            writeStderrLine(
+              `qwen serve: [${boundWorkspace}] extensions ${operation}: mutation succeeded but refresh failed: ${message}`,
             );
           }
-          writeStderrLine(
-            `qwen serve: [${boundWorkspace}] extensions ${operation}: mutation succeeded but refresh failed: ${message}`,
-          );
         }
       } catch (err) {
         const message = redactUrlCredentials(
           err instanceof Error ? err.message : String(err),
         );
+        const code =
+          err &&
+          typeof err === 'object' &&
+          typeof (err as { code?: unknown }).code === 'string'
+            ? (err as { code: string }).code
+            : undefined;
         updateExtensionOperation(operationId, {
           status: 'failed',
           error: message.slice(0, 500),
+          ...(code ? { code } : {}),
         });
         try {
           bridge.broadcastExtensionsChanged({
@@ -370,23 +615,11 @@ export function createExtensionsController(
         } catch {
           // Keep queued background work from surfacing as unhandledRejection.
         }
+      } finally {
+        if (deadline) clearTimeout(deadline);
+        unfinishedOperationCount -= 1;
       }
-    }).catch((err) => {
-      const message = redactUrlCredentials(
-        err instanceof Error ? err.message : String(err),
-      );
-      updateExtensionOperation(operationId, {
-        status: 'failed',
-        error: message.slice(0, 500),
-      });
-      try {
-        writeStderrLine(
-          `qwen serve: [${boundWorkspace}] extensions ${operation}: queued task failed: ${message}`,
-        );
-      } catch {
-        // Last-resort guard for detached async work.
-      }
-    });
+    })();
   };
 
   const buildLocalExtensionsStatus =
@@ -479,7 +712,7 @@ export function createExtensionsController(
       extensionsStatusCache = undefined;
     },
     getOperation: (operationId) => extensionOperations.get(operationId),
-    enqueueExtensionInstall,
+    preparationQueue,
     validateExtensionMutationClient,
     runQueuedExtensionMutation,
   };

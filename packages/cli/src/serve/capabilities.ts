@@ -275,17 +275,13 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Workspace-qualified settings also require the existing
   // `workspace_settings` tag because that surface depends on settings
   // persistence. ACP/WebSocket, auth, and voice stay on their existing
-  // primary-workspace routes in this phase; workspace-qualified extensions
-  // are advertised separately via `workspace_qualified_extensions`.
+  // primary-workspace routes in this phase; V2 extension management is
+  // advertised separately via `extension_management_v2`.
   workspace_qualified_rest_core: { since: 'v1' },
-  // Workspace-qualified extension management under
-  // `/workspaces/:workspace/extensions/*` (mirror of the primary-workspace
-  // `/workspace/extensions/*` surface). Reads resolve the target runtime;
-  // mutations additionally require the workspace to be trusted. Advertised
-  // UNCONDITIONALLY (like `workspace_qualified_rest_core`): presence means the
-  // plural routes exist on this build, independent of how many workspaces are
-  // currently hosted.
-  workspace_qualified_extensions: { since: 'v1' },
+  // Global extension catalog/mutations plus workspace-qualified activation
+  // projections. This is additive to the legacy primary-workspace
+  // `workspace_extensions` contract.
+  extension_management_v2: { since: 'v1' },
   // Phase 2 "reverse tool channel" (issue #5626). A connected WS client (e.g.
   // the Chrome extension) can host an MCP server that the daemon's agent
   // calls by carrying `mcp_message` JSON-RPC frames over the daemon WS,

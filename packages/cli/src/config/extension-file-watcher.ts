@@ -42,12 +42,24 @@ export class ExtensionFileWatcher {
   private staleFiles = new Set<string>();
   private watching = false;
   private watchGeneration = 0;
+  private readonly storeStatePath: string;
+  private generationPoller?: ReturnType<typeof setInterval>;
+  private observedStoreGeneration?: number;
 
   constructor(
     private readonly config: Config,
     private readonly extensionsDir = Storage.getUserExtensionsDir(),
     private readonly refreshState = new ExtensionRefreshState(),
-  ) {}
+    storeStatePath?: string,
+  ) {
+    this.storeStatePath =
+      storeStatePath ??
+      path.join(
+        path.dirname(this.extensionsDir),
+        'extension-store',
+        'state.json',
+      );
+  }
 
   startWatching(): void {
     this.stopWatching();
@@ -99,6 +111,7 @@ export class ExtensionFileWatcher {
     if (!fs.existsSync(this.extensionsDir)) {
       this.watchExtensionsParent();
     }
+    this.startGenerationPolling();
   }
 
   stopWatching(): void {
@@ -108,6 +121,9 @@ export class ExtensionFileWatcher {
     this.bootstrapWatcher = undefined;
     this.watching = false;
     this.watchGeneration++;
+    if (this.generationPoller) clearInterval(this.generationPoller);
+    this.generationPoller = undefined;
+    this.observedStoreGeneration = undefined;
     this.mutationListenerDisposer?.();
     this.mutationListenerDisposer = undefined;
     this.endPendingMutationSuppressions();
@@ -128,6 +144,7 @@ export class ExtensionFileWatcher {
     if (fs.existsSync(this.extensionsDir)) {
       roots.add(this.extensionsDir);
     }
+    roots.add(this.storeStatePath);
     for (const extension of this.config.getActiveExtensions()) {
       if (extension.installMetadata?.type === 'link') {
         const rawSource = extension.installMetadata.source;
@@ -215,6 +232,12 @@ export class ExtensionFileWatcher {
     event: WatchEvent,
     changedPath: string,
   ): RefreshAction | false {
+    if (changedPath === path.resolve(this.storeStatePath)) {
+      this.refreshState.markExtensionsChanged(
+        'extension store generation changed',
+      );
+      return false;
+    }
     if (this.staleFiles.has(changedPath)) {
       return 'stale';
     }
@@ -341,5 +364,35 @@ export class ExtensionFileWatcher {
     bootstrapWatcher?.close().catch((error: unknown) => {
       debugLogger.warn('Extension bootstrap watcher close error:', error);
     });
+  }
+
+  private startGenerationPolling(): void {
+    if (this.generationPoller) clearInterval(this.generationPoller);
+    this.pollStoreGeneration();
+    this.generationPoller = setInterval(
+      () => this.pollStoreGeneration(),
+      30_000,
+    );
+    this.generationPoller.unref?.();
+  }
+
+  private pollStoreGeneration(): void {
+    let generation: number;
+    try {
+      const parsed = JSON.parse(
+        fs.readFileSync(this.storeStatePath, 'utf8'),
+      ) as { generation?: unknown };
+      if (typeof parsed.generation !== 'number') return;
+      generation = parsed.generation;
+    } catch {
+      return;
+    }
+    const previous = this.observedStoreGeneration;
+    this.observedStoreGeneration = generation;
+    if (previous !== undefined && previous !== generation) {
+      this.refreshState.markExtensionsChanged(
+        'extension store generation changed',
+      );
+    }
   }
 }

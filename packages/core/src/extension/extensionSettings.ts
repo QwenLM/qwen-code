@@ -72,6 +72,7 @@ export async function maybePromptForSettings(
   requestSetting: (setting: ExtensionSetting) => Promise<string>,
   previousExtensionConfig?: ExtensionConfig,
   previousSettings?: Record<string, string>,
+  envFilePathOverride?: string,
 ): Promise<void> {
   const { name: extensionName, settings } = extensionConfig;
   if (
@@ -84,7 +85,8 @@ export async function maybePromptForSettings(
   // We assume user scope here because we don't have a way to ask the user for scope during the initial setup.
   // The user can change the scope later using the `settings set` command.
   const scope = ExtensionSettingScope.USER;
-  const envFilePath = getEnvFilePath(extensionName, scope);
+  const envFilePath =
+    envFilePathOverride ?? getEnvFilePath(extensionName, scope);
   const keychain = new HybridTokenStorage(
     getKeychainStorageName(extensionName, extensionId, scope),
   );

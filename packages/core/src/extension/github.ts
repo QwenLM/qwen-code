@@ -114,10 +114,12 @@ function getGitHubToken(): string | undefined {
 export async function cloneFromGit(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const redactedSource = redactUrlCredentials(installMetadata.source);
   try {
-    const git = simpleGit(destination);
+    const git = simpleGit(destination, signal ? { abort: signal } : undefined);
+    signal?.throwIfAborted();
     let sourceUrl = installMetadata.source;
     const token = getGitHubToken();
     if (token) {
@@ -146,6 +148,7 @@ export async function cloneFromGit(
       '--depth',
       '1',
     ]);
+    signal?.throwIfAborted();
 
     const remotes = await git.getRemotes(true);
     if (remotes.length === 0) {
@@ -155,9 +158,11 @@ export async function cloneFromGit(
     const refToFetch = installMetadata.ref || 'HEAD';
 
     await git.fetch(remotes[0].name, refToFetch);
+    signal?.throwIfAborted();
 
     // Detached HEAD is expected here — we only need the fetched content.
     await git.checkout('FETCH_HEAD');
+    signal?.throwIfAborted();
   } catch (error) {
     const redactedErrorMessage = redactUrlCredentials(getErrorMessage(error));
     throw new Error(
@@ -198,16 +203,19 @@ async function fetchReleaseFromGithub(
   owner: string,
   repo: string,
   ref?: string,
+  signal?: AbortSignal,
 ): Promise<GithubReleaseData> {
   const endpoint = ref ? `releases/tags/${ref}` : 'releases/latest';
   const url = `https://api.github.com/repos/${owner}/${repo}/${endpoint}`;
-  return await fetchJson(url);
+  return await fetchJson(url, signal);
 }
 
 export async function checkForExtensionUpdate(
   extension: Extension,
   extensionManager: ExtensionManager,
+  signal?: AbortSignal,
 ): Promise<ExtensionUpdateState> {
+  signal?.throwIfAborted();
   const installMetadata = extension.installMetadata;
   if (installMetadata?.type === 'local') {
     let latestConfig: ExtensionConfig | undefined;
@@ -258,7 +266,7 @@ export async function checkForExtensionUpdate(
     return ExtensionUpdateState.UP_TO_DATE;
   }
   if (installMetadata?.type === 'npm') {
-    return checkNpmUpdate(installMetadata);
+    return checkNpmUpdate(installMetadata, signal);
   }
   if (installMetadata?.type === 'archive-url') {
     let tempDir: string | undefined;
@@ -267,7 +275,7 @@ export async function checkForExtensionUpdate(
       tempDir = await fs.promises.mkdtemp(
         path.join(os.tmpdir(), 'extension-archive-update-'),
       );
-      await downloadFromArchiveUrl(installMetadata, tempDir);
+      await downloadFromArchiveUrl(installMetadata, tempDir, signal);
       const converted = await convertGeminiOrClaudeExtension(
         tempDir,
         installMetadata.pluginName,
@@ -290,6 +298,7 @@ export async function checkForExtensionUpdate(
       }
       return ExtensionUpdateState.UP_TO_DATE;
     } catch (error) {
+      signal?.throwIfAborted();
       debugLogger.error(
         `Failed to check for update for archive URL extension "${extension.name}" from ${redactUrlCredentials(installMetadata.source)}: ${redactUrlCredentials(getErrorMessage(error))}`,
       );
@@ -313,8 +322,12 @@ export async function checkForExtensionUpdate(
   }
   try {
     if (installMetadata.type === 'git') {
-      const git = simpleGit(extension.path);
+      const git = simpleGit(
+        extension.path,
+        signal ? { abort: signal } : undefined,
+      );
       const remotes = await git.getRemotes(true);
+      signal?.throwIfAborted();
       if (remotes.length === 0) {
         debugLogger.error('No git remotes found.');
         return ExtensionUpdateState.ERROR;
@@ -330,6 +343,7 @@ export async function checkForExtensionUpdate(
       const refToCheck = installMetadata.ref || 'HEAD';
 
       const lsRemoteOutput = await git.listRemote([remoteUrl, refToCheck]);
+      signal?.throwIfAborted();
 
       if (typeof lsRemoteOutput !== 'string' || lsRemoteOutput.trim() === '') {
         debugLogger.error(`Git ref ${refToCheck} not found.`);
@@ -338,6 +352,7 @@ export async function checkForExtensionUpdate(
 
       const remoteHash = lsRemoteOutput.split('\t')[0];
       const localHash = await git.revparse(['HEAD']);
+      signal?.throwIfAborted();
 
       if (!remoteHash) {
         debugLogger.error(
@@ -361,6 +376,7 @@ export async function checkForExtensionUpdate(
         owner,
         repo,
         installMetadata.ref,
+        signal,
       );
       if (releaseData.tag_name !== releaseTag) {
         return ExtensionUpdateState.UPDATE_AVAILABLE;
@@ -368,6 +384,7 @@ export async function checkForExtensionUpdate(
       return ExtensionUpdateState.UP_TO_DATE;
     }
   } catch (error) {
+    signal?.throwIfAborted();
     debugLogger.error(
       `Failed to check for updates for extension "${redactUrlCredentials(installMetadata.source)}": ${redactUrlCredentials(getErrorMessage(error))}`,
     );
@@ -378,11 +395,12 @@ export async function checkForExtensionUpdate(
 export async function downloadFromGitHubRelease(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
+  signal?: AbortSignal,
 ): Promise<GitHubDownloadResult> {
   const { source, ref } = installMetadata;
   const { owner, repo } = parseGitHubRepoForReleases(source);
 
-  const releaseData = await fetchReleaseFromGithub(owner, repo, ref);
+  const releaseData = await fetchReleaseFromGithub(owner, repo, ref, signal);
   if (!releaseData) {
     throw new Error(`No release data found for ${owner}/${repo} at tag ${ref}`);
   }
@@ -418,9 +436,15 @@ export async function downloadFromGitHubRelease(
   }
 
   try {
-    await downloadFile(archiveUrl, downloadedAssetPath, {
-      includeGitHubToken: true,
-    });
+    await downloadFile(
+      archiveUrl,
+      downloadedAssetPath,
+      {
+        includeGitHubToken: true,
+      },
+      0,
+      signal,
+    );
   } catch (error) {
     throw new Error(
       `Failed to download release from ${redactUrlCredentials(installMetadata.source)}: ${redactUrlCredentials(getErrorMessage(error))}`,
@@ -439,6 +463,7 @@ export async function downloadFromGitHubRelease(
 export async function downloadFromArchiveUrl(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const archiveExtension = getSupportedArchiveExtension(installMetadata.source);
   if (!archiveExtension) {
@@ -453,9 +478,15 @@ export async function downloadFromArchiveUrl(
   const downloadedAssetPath = path.join(destination, archiveName);
 
   try {
-    await downloadFile(installMetadata.source, downloadedAssetPath, {
-      includeGitHubToken: false,
-    });
+    await downloadFile(
+      installMetadata.source,
+      downloadedAssetPath,
+      {
+        includeGitHubToken: false,
+      },
+      0,
+      signal,
+    );
   } catch (error) {
     throw new Error(
       `Failed to download archive from ${redactUrlCredentials(installMetadata.source)}: ${redactUrlCredentials(getErrorMessage(error))}`,
@@ -524,7 +555,7 @@ export function findReleaseAsset(assets: Asset[]): Asset | undefined {
   return undefined;
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
+async function fetchJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   const headers: { 'User-Agent': string; Authorization?: string } = {
     'User-Agent': 'gemini-cli',
   };
@@ -534,7 +565,7 @@ async function fetchJson<T>(url: string): Promise<T> {
   }
   return new Promise((resolve, reject) => {
     https
-      .get(url, { headers }, (res) => {
+      .get(url, { headers, signal }, (res) => {
         if (res.statusCode !== 200) {
           return reject(
             new Error(`Request failed with status code ${res.statusCode}`),
@@ -556,6 +587,7 @@ async function downloadFile(
   dest: string,
   options: { includeGitHubToken?: boolean } = { includeGitHubToken: false },
   redirectCount = 0,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (redirectCount > 10) {
     throw new Error('Too many redirects while downloading extension archive');
@@ -597,7 +629,7 @@ async function downloadFile(
       reject(error);
     };
     const req = https
-      .get(parsedUrl, { headers }, (res) => {
+      .get(parsedUrl, { headers, signal }, (res) => {
         if (
           res.statusCode === 301 ||
           res.statusCode === 302 ||
@@ -628,6 +660,7 @@ async function downloadFile(
             dest,
             redirectOptions,
             redirectCount + 1,
+            signal,
           )
             .then(finish)
             .catch(fail);

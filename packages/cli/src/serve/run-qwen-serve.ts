@@ -3780,6 +3780,11 @@ export async function runQwenServe(
             (
               app.locals as { stopScheduledTaskKeepalive?: () => void }
             ).stopScheduledTaskKeepalive?.();
+            (
+              app.locals as {
+                stopExtensionGenerationReconciler?: () => void;
+              }
+            ).stopExtensionGenerationReconciler?.();
             // Same rationale for the create_sub_session launchers: stop accepting
             // new sub-session spawns before the bridges are torn down. Calls
             // every workspace's launcher stop (primary + secondaries).

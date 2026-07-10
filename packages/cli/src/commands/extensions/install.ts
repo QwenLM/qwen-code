@@ -14,7 +14,7 @@ import {
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
-import { loadSettings, SettingScope } from '../../config/settings.js';
+import { loadSettings } from '../../config/settings.js';
 import {
   requestConsentOrFail,
   requestConsentNonInteractive,
@@ -92,6 +92,7 @@ export async function handleInstall(args: InstallArgs) {
     });
     await extensionManager.refreshCache();
 
+    const scope = normalizeScope(args.scope);
     const extension = await extensionManager.installExtension(
       {
         ...installMetadata,
@@ -100,45 +101,14 @@ export async function handleInstall(args: InstallArgs) {
         allowPreRelease: args.allowPreRelease,
       },
       requestConsent,
+      undefined,
+      workspaceDir,
+      undefined,
+      scope === 'project'
+        ? { scope: 'workspace', workspacePath: workspaceDir }
+        : { scope: 'user' },
     );
-    const scope = normalizeScope(args.scope);
     if (args.scope) {
-      // installExtension auto-enables at the user (global) scope. For a
-      // project-scoped install, re-scope enablement to this workspace only —
-      // BEFORE recording the scope preference, so a failed Workspace enable
-      // (which rolls back to User) can't leave the prefs claiming "project".
-      if (scope === 'project') {
-        await extensionManager.disableExtension(
-          extension.name,
-          SettingScope.User,
-        );
-        try {
-          await extensionManager.enableExtension(
-            extension.name,
-            SettingScope.Workspace,
-          );
-        } catch (enableError) {
-          // The User-scope disable already landed. If the Workspace enable
-          // fails, the extension would be left disabled everywhere — roll the
-          // User enable back so it isn't silently dead, then surface the error.
-          try {
-            await extensionManager.enableExtension(
-              extension.name,
-              SettingScope.User,
-            );
-          } catch (rollbackError) {
-            // Rollback failed too: the extension is now disabled at every
-            // scope. Surface this so the user knows recovery also failed,
-            // before the original error is reported below.
-            writeStderrLine(
-              `Warning: failed to roll back the scope change for "${extension.name}"; it may be disabled at all scopes: ${getErrorMessage(rollbackError)}`,
-            );
-          }
-          throw enableError;
-        }
-      }
-      // Enablement succeeded (or scope is user/local with no enablement change):
-      // now it's safe to persist the scope preference.
       extensionManager.setExtensionScope(extension.name, scope);
     }
     writeStdoutLine(

@@ -2752,6 +2752,54 @@ export interface ExtensionInstallRequest {
   consent?: boolean;
 }
 
+export type ExtensionInitialActivation =
+  | { scope: 'user' }
+  | { scope: 'workspace'; workspaceId: string };
+
+export interface ExtensionManagementInstallRequest
+  extends ExtensionInstallRequest {
+  consent: true;
+  activation: ExtensionInitialActivation;
+}
+
+export type ExtensionActivationState = 'enabled' | 'disabled';
+export type ExtensionWorkspaceActivation = ExtensionActivationState | null;
+
+export interface ExtensionCatalogEntry {
+  id: string;
+  name: string;
+  version: string;
+  installType?: DaemonExtensionInstallType;
+  defaultActivation: ExtensionActivationState;
+  workspaceOverrideCount: number;
+}
+
+export interface ExtensionCatalog {
+  v: 1;
+  generation: number;
+  extensions: ExtensionCatalogEntry[];
+}
+
+export interface WorkspaceExtensionProjectionEntry {
+  extensionId: string;
+  name: string;
+  version: string;
+  defaultActivation: ExtensionActivationState;
+  workspaceActivation: ExtensionWorkspaceActivation;
+  effectiveActivation: ExtensionActivationState;
+  activationSource: 'workspace_override' | 'legacy_path_rule' | 'default';
+}
+
+export interface WorkspaceExtensionProjection {
+  v: 1;
+  workspaceId: string;
+  workspaceCwd: string;
+  trusted: boolean;
+  desiredGeneration: number;
+  appliedGeneration: number;
+  extensions: WorkspaceExtensionProjectionEntry[];
+}
+
 export interface ExtensionInstallResponse {
   accepted: true;
   operationId: string;
@@ -2764,16 +2812,27 @@ export type ExtensionOperationState =
   | 'running'
   | 'succeeded'
   | 'succeeded_with_refresh_error'
+  | 'succeeded_with_warnings'
   | 'failed';
 
 export interface ExtensionOperationResult {
-  status: 'installed' | 'enabled' | 'disabled' | 'updated' | 'uninstalled';
+  status:
+    | 'installed'
+    | 'enabled'
+    | 'disabled'
+    | 'updated'
+    | 'uninstalled'
+    | 'checked'
+    | 'refreshed';
   source?: string;
   name?: string;
   version?: string;
   refreshed?: number;
   failed?: number;
   error?: string;
+  updated?: boolean;
+  reason?: string;
+  states?: Record<string, string>;
 }
 
 export interface ExtensionOperationStatus {
@@ -2781,12 +2840,20 @@ export interface ExtensionOperationStatus {
   operationId: string;
   operation: string;
   status: ExtensionOperationState;
+  phase?: 'preparing' | 'committing' | 'reconciling';
   createdAt: number;
   updatedAt: number;
   source?: string;
   name?: string;
   result?: ExtensionOperationResult;
   error?: string;
+  code?: string;
+  warnings?: Array<{
+    workspaceId?: string;
+    workspaceCwd: string;
+    code?: 'reconcile_slow';
+    error: string;
+  }>;
 }
 
 export type ExtensionScope = 'user' | 'workspace';

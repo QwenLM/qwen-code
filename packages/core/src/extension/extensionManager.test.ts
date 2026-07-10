@@ -25,6 +25,7 @@ import {
   hashValue,
   type ExtensionConfig,
   type ExtensionMutationEvent,
+  type PreparedExtensionMutation,
 } from './extensionManager.js';
 import type { MCPServerConfig, ExtensionInstallMetadata } from '../index.js';
 
@@ -170,6 +171,131 @@ describe('extension tests', () => {
       );
     }
 
+    it('commits workspace initial activation with the installed artifact', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'workspace-ext.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'workspace-ext');
+        },
+      );
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        { type: 'local', source: archivePath },
+        () => Promise.resolve(),
+        undefined,
+        tempWorkspaceDir,
+        undefined,
+        { scope: 'workspace', workspacePath: tempWorkspaceDir },
+      );
+
+      const activation = await manager.getExtensionActivation(
+        extension.id,
+        tempWorkspaceDir,
+      );
+      expect(activation).toMatchObject({
+        default: 'disabled',
+        workspace: 'enabled',
+        effective: 'enabled',
+      });
+    });
+
+    it('prepares without mutating the store and commits exactly once', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'prepared-ext.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'prepared-ext');
+        },
+      );
+      const manager = createExtensionManager();
+      const events: ExtensionMutationEvent[] = [];
+      manager.addMutationListener((event) => events.push(event));
+      await manager.refreshCache();
+      const before = await manager.getExtensionStoreSnapshot();
+
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: { type: 'local', source: archivePath },
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
+      });
+
+      expect(fs.existsSync(path.join(userExtensionsDir, 'prepared-ext'))).toBe(
+        false,
+      );
+      expect((await manager.getExtensionStoreSnapshot()).generation).toBe(
+        before.generation,
+      );
+      expect(events).toEqual([]);
+
+      const committed = await manager.commitPreparedExtension(prepared);
+      expect(committed.extension?.name).toBe('prepared-ext');
+      expect(committed.generation).toBe(before.generation + 1);
+      await expect(
+        manager.commitPreparedExtension(prepared),
+      ).rejects.toMatchObject({ code: 'prepared_extension_consumed' });
+      await manager.disposePreparedExtension(prepared);
+      await manager.disposePreparedExtension(prepared);
+      expect(events).toEqual([
+        { id: 1, phase: 'start', operation: 'installExtension' },
+        { id: 1, phase: 'end', operation: 'installExtension' },
+      ]);
+    });
+
+    it('reports temp cleanup failure as a post-commit warning', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'cleanup-warning.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'cleanup-warning');
+        },
+      );
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: { type: 'local', source: archivePath },
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
+      });
+      const cleanupPath = prepared.cleanupPaths[0]!;
+      const rm = fs.promises.rm.bind(fs.promises);
+      vi.spyOn(fs.promises, 'rm').mockImplementation(
+        async (target, options) => {
+          if (target === cleanupPath) throw new Error('cleanup denied');
+          return await rm(target, options);
+        },
+      );
+
+      const committed = await manager.commitPreparedExtension(prepared);
+
+      expect(committed.generation).toBeGreaterThan(0);
+      expect(committed.warnings).toContainEqual({
+        code: 'extension_temp_cleanup_failed',
+        error: 'cleanup denied',
+      });
+      await expect(
+        manager.disposePreparedExtension(prepared),
+      ).resolves.toBeUndefined();
+    });
+
+    it('rejects forged prepared handles without deleting their paths', async () => {
+      const manager = createExtensionManager();
+      const protectedPath = path.join(tempWorkspaceDir, 'keep-me');
+      fs.mkdirSync(protectedPath);
+      const forged = {
+        stagingDirectory: protectedPath,
+        cleanupPaths: [],
+        disposed: false,
+      } as unknown as PreparedExtensionMutation;
+
+      await expect(
+        manager.disposePreparedExtension(forged),
+      ).rejects.toMatchObject({ code: 'invalid_prepared_extension' });
+      expect(fs.existsSync(protectedPath)).toBe(true);
+    });
+
     it('should install an extension from a local archive', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'local-extension.zip');
       fs.writeFileSync(archivePath, 'not used by mocked extractor');
@@ -225,8 +351,6 @@ describe('extension tests', () => {
 
       expect(events).toEqual([
         { id: 1, phase: 'start', operation: 'installExtension' },
-        { id: 2, phase: 'start', operation: 'enableExtension' },
-        { id: 2, phase: 'end', operation: 'enableExtension' },
         { id: 1, phase: 'end', operation: 'installExtension' },
       ]);
     });
@@ -274,6 +398,7 @@ describe('extension tests', () => {
 
       const manager = createExtensionManager();
       await manager.refreshCache();
+      const controller = new AbortController();
 
       const extension = await manager.installExtension(
         {
@@ -281,6 +406,11 @@ describe('extension tests', () => {
           type: 'git',
         },
         async () => {},
+        undefined,
+        undefined,
+        undefined,
+        { scope: 'user' },
+        controller.signal,
       );
 
       expect(downloadMock).toHaveBeenCalled();
@@ -352,6 +482,7 @@ describe('extension tests', () => {
 
       const manager = createExtensionManager();
       await manager.refreshCache();
+      const controller = new AbortController();
 
       const extension = await manager.installExtension(
         {
@@ -359,6 +490,11 @@ describe('extension tests', () => {
           type: 'archive-url',
         },
         async () => {},
+        undefined,
+        undefined,
+        undefined,
+        { scope: 'user' },
+        controller.signal,
       );
 
       expect(mockDownloadFromArchiveUrl).toHaveBeenCalledWith(
@@ -367,6 +503,7 @@ describe('extension tests', () => {
           type: 'archive-url',
         }),
         expect.any(String),
+        controller.signal,
       );
       expect(extension.name).toBe('archive-url-extension');
       expect(extension.installMetadata).toMatchObject({
@@ -836,6 +973,143 @@ describe('extension tests', () => {
   });
 
   describe('enableExtension / disableExtension', () => {
+    it('applies V2 default and workspace activation to loaded extensions', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+
+      await manager.setExtensionDefaultActivation(extension.id, 'disabled');
+      expect(manager.getLoadedExtensions()[0]?.isActive).toBe(false);
+
+      await manager.setExtensionWorkspaceActivation(
+        extension.id,
+        tempWorkspaceDir,
+        'enabled',
+      );
+      expect(manager.getLoadedExtensions()[0]?.isActive).toBe(true);
+
+      await manager.clearExtensionWorkspaceActivation(
+        extension.id,
+        tempWorkspaceDir,
+      );
+      expect(manager.getLoadedExtensions()[0]?.isActive).toBe(false);
+    });
+
+    it('changes activation scope in one policy mutation', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+      });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+
+      await manager.setExtensionActivationScope(extension.id, {
+        scope: 'workspace',
+        workspacePath: tempWorkspaceDir,
+      });
+      const snapshot = await manager.setExtensionActivationScope(extension.id, {
+        scope: 'user',
+      });
+
+      expect(snapshot.extensions[extension.id]).toMatchObject({
+        defaultActivation: 'enabled',
+        workspaceOverrides: {},
+      });
+    });
+
+    it('keeps the V2 state in sync after a legacy scope mutation', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+
+      await manager.disableExtension(
+        extension.name,
+        SettingScope.Workspace,
+        tempWorkspaceDir,
+      );
+
+      const activation = await manager.getExtensionActivation(
+        extension.id,
+        tempWorkspaceDir,
+      );
+      expect(activation).toMatchObject({
+        effective: 'disabled',
+        source: 'workspace_override',
+      });
+    });
+
+    it('keeps other workspace overrides during a legacy workspace mutation', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+      });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+      const otherWorkspace = path.join(os.tmpdir(), 'other-workspace');
+      await manager.setExtensionWorkspaceActivation(
+        extension.id,
+        otherWorkspace,
+        'enabled',
+      );
+
+      await manager.disableExtension(
+        extension.name,
+        SettingScope.Workspace,
+        tempWorkspaceDir,
+      );
+
+      const snapshot = await manager.getExtensionStoreSnapshot();
+      expect(snapshot.extensions[extension.id]?.workspaceOverrides).toEqual({
+        [otherWorkspace]: 'enabled',
+        [fs.realpathSync.native(tempWorkspaceDir)]: 'disabled',
+      });
+    });
+
+    it('clears only child workspace overrides during a legacy user mutation', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+      });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+      const outsideWorkspace = path.join(os.tmpdir(), 'outside-workspace');
+      await manager.setExtensionWorkspaceActivation(
+        extension.id,
+        tempWorkspaceDir,
+        'enabled',
+      );
+      await manager.setExtensionWorkspaceActivation(
+        extension.id,
+        outsideWorkspace,
+        'disabled',
+      );
+
+      await manager.disableExtension(extension.name, SettingScope.User);
+
+      const snapshot = await manager.getExtensionStoreSnapshot();
+      expect(snapshot.extensions[extension.id]?.workspaceOverrides).toEqual({
+        [outsideWorkspace]: 'disabled',
+      });
+    });
+
     it('should emit mutation lifecycle events around extension changes', async () => {
       createExtension({
         extensionsDir: userExtensionsDir,
@@ -1007,13 +1281,15 @@ describe('extension tests', () => {
 
   describe('updateExtension', () => {
     it('should end mutation lifecycle events when temp directory creation fails', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'update.zip');
+      fs.writeFileSync(archivePath, 'archive');
       const extensionPath = createExtension({
         extensionsDir: userExtensionsDir,
         name: 'my-extension',
         version: '1.0.0',
         installMetadata: {
           type: 'local',
-          source: tempWorkspaceDir,
+          source: archivePath,
           originSource: 'QwenCode',
         },
       });

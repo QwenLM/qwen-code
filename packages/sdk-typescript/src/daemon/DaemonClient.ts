@@ -119,11 +119,15 @@ import type {
   DaemonWorkspaceExtensionsStatus,
   ExtensionMutationResponse,
   ExtensionInstallRequest,
+  ExtensionManagementInstallRequest,
+  ExtensionActivationState,
+  ExtensionCatalog,
   ExtensionInstallResponse,
   ExtensionOperationStatus,
   ExtensionScopeRequest,
   ExtensionRefreshResponse,
   ExtensionUpdateCheckResponse,
+  WorkspaceExtensionProjection,
   DaemonWorkspaceHooksStatus,
   DaemonPermissionRuleType,
   DaemonPermissionScope,
@@ -1016,6 +1020,120 @@ export class DaemonClient {
       'DELETE /workspace/extensions/:name',
       { method: 'DELETE', clientId },
     );
+  }
+
+  async extensionCatalog(): Promise<ExtensionCatalog> {
+    return await this.jsonRequest<ExtensionCatalog>(
+      '/extensions',
+      'GET /extensions',
+    );
+  }
+
+  async installUserExtension(
+    params: ExtensionManagementInstallRequest,
+    clientId?: string,
+  ): Promise<ExtensionInstallResponse> {
+    return await this.jsonRequest<ExtensionInstallResponse>(
+      '/extensions/install',
+      'POST /extensions/install',
+      { method: 'POST', body: params, clientId },
+    );
+  }
+
+  async checkUserExtensionUpdates(
+    clientId?: string,
+  ): Promise<ExtensionInstallResponse> {
+    return await this.jsonRequest<ExtensionInstallResponse>(
+      '/extensions/check-updates',
+      'POST /extensions/check-updates',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async updateUserExtension(
+    extensionId: string,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/extensions/${urlEncode(extensionId)}/update`,
+      'POST /extensions/:extensionId/update',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async uninstallUserExtension(
+    extensionId: string,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse | undefined> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/extensions/${urlEncode(extensionId)}`,
+      {
+        method: 'DELETE',
+        headers: this.headers({}, clientId),
+      },
+      async (res) => {
+        if (res.status === 204) {
+          await res.body?.cancel().catch(() => undefined);
+          return undefined;
+        }
+        if (!res.ok) {
+          throw await this.failOnError(res, 'DELETE /extensions/:extensionId');
+        }
+        return (await res.json()) as ExtensionMutationResponse;
+      },
+    );
+  }
+
+  async setExtensionDefaultActivation(
+    extensionId: string,
+    state: ExtensionActivationState,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/extensions/${urlEncode(extensionId)}/activation`,
+      'PUT /extensions/:extensionId/activation',
+      { method: 'PUT', body: { state }, clientId },
+    );
+  }
+
+  async extensionOperation(
+    operationId: string,
+  ): Promise<ExtensionOperationStatus> {
+    return await this.jsonRequest<ExtensionOperationStatus>(
+      `/extensions/operations/${urlEncode(operationId)}`,
+      'GET /extensions/operations/:operationId',
+    );
+  }
+
+  async waitForExtensionOperation(
+    handle: ExtensionInstallResponse,
+    options: { pollIntervalMs?: number; timeoutMs?: number } = {},
+  ): Promise<ExtensionOperationStatus> {
+    const pollIntervalMs = options.pollIntervalMs ?? 1_000;
+    const timeoutMs = options.timeoutMs ?? 10 * 60_000;
+    const deadline = Date.now() + timeoutMs;
+    let firstPoll = true;
+    for (;;) {
+      if (!firstPoll && Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for extension operation ${handle.operationId}. The server operation was not cancelled.`,
+        );
+      }
+      firstPoll = false;
+      const operation = await this.extensionOperation(handle.operationId);
+      if (operation.status !== 'queued' && operation.status !== 'running') {
+        return operation;
+      }
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(
+          `Timed out waiting for extension operation ${handle.operationId}. The server operation was not cancelled.`,
+        );
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(pollIntervalMs, remainingMs)),
+      );
+    }
   }
 
   // -- Workspace files (workspace files) -------------------------------
@@ -3815,98 +3933,43 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceExtensions(): Promise<DaemonWorkspaceExtensionsStatus> {
+  workspaceExtensions(): Promise<WorkspaceExtensionProjection> {
     return this.get('/extensions', 'GET /workspaces/:workspace/extensions');
   }
 
-  extensionOperationStatus(
-    operationId: string,
-  ): Promise<ExtensionOperationStatus> {
-    return this.get(
-      `/extensions/operations/${urlEncode(operationId)}`,
-      'GET /workspaces/:workspace/extensions/operations/:operationId',
-    );
-  }
-
-  installExtension(
-    params: ExtensionInstallRequest,
+  setExtensionActivation(
+    extensionId: string,
+    state: ExtensionActivationState,
     clientId?: string,
-  ): Promise<ExtensionInstallResponse> {
-    return this.post(
-      '/extensions/install',
-      'POST /workspaces/:workspace/extensions/install',
-      params,
-      clientId,
+  ): Promise<ExtensionMutationResponse> {
+    return this.client.workspaceJsonRequest<ExtensionMutationResponse>(
+      this.workspaceSelector,
+      `/extensions/${urlEncode(extensionId)}/activation`,
+      'PUT /workspaces/:workspace/extensions/:extensionId/activation',
+      { method: 'PUT', body: { state }, clientId },
     );
   }
 
-  checkExtensionUpdates(
+  clearExtensionActivation(
+    extensionId: string,
     clientId?: string,
-  ): Promise<ExtensionUpdateCheckResponse> {
-    return this.post(
-      '/extensions/check-updates',
-      'POST /workspaces/:workspace/extensions/check-updates',
-      {},
-      clientId,
+  ): Promise<ExtensionMutationResponse> {
+    return this.client.workspaceJsonRequest<ExtensionMutationResponse>(
+      this.workspaceSelector,
+      `/extensions/${urlEncode(extensionId)}/activation`,
+      'DELETE /workspaces/:workspace/extensions/:extensionId/activation',
+      { method: 'DELETE', clientId },
     );
   }
 
-  refreshExtensions(clientId?: string): Promise<ExtensionRefreshResponse> {
+  refreshExtensionRuntime(
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
     return this.post(
       '/extensions/refresh',
       'POST /workspaces/:workspace/extensions/refresh',
       {},
       clientId,
-    );
-  }
-
-  enableExtension(
-    name: string,
-    params: ExtensionScopeRequest,
-    clientId?: string,
-  ): Promise<ExtensionMutationResponse> {
-    return this.post(
-      `/extensions/${urlEncode(name)}/enable`,
-      'POST /workspaces/:workspace/extensions/:name/enable',
-      params,
-      clientId,
-    );
-  }
-
-  disableExtension(
-    name: string,
-    params: ExtensionScopeRequest,
-    clientId?: string,
-  ): Promise<ExtensionMutationResponse> {
-    return this.post(
-      `/extensions/${urlEncode(name)}/disable`,
-      'POST /workspaces/:workspace/extensions/:name/disable',
-      params,
-      clientId,
-    );
-  }
-
-  updateExtension(
-    name: string,
-    clientId?: string,
-  ): Promise<ExtensionMutationResponse> {
-    return this.post(
-      `/extensions/${urlEncode(name)}/update`,
-      'POST /workspaces/:workspace/extensions/:name/update',
-      {},
-      clientId,
-    );
-  }
-
-  uninstallExtension(
-    name: string,
-    clientId?: string,
-  ): Promise<ExtensionMutationResponse> {
-    return this.client.workspaceJsonRequest<ExtensionMutationResponse>(
-      this.workspaceSelector,
-      `/extensions/${urlEncode(name)}`,
-      'DELETE /workspaces/:workspace/extensions/:name',
-      { method: 'DELETE', clientId },
     );
   }
 

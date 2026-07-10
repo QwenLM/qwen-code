@@ -188,7 +188,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_hooks', 'session_hooks', 'workspace_extensions',
  'session_branch', 'rate_limit', 'workspace_reload',
  'multi_workspace_sessions', 'workspace_qualified_rest_core',
- 'workspace_qualified_extensions',
+ 'extension_management_v2',
  'client_mcp_over_ws', 'cdp_tunnel_over_ws', 'browser_automation_mcp']
 ```
 
@@ -235,7 +235,7 @@ When `workspace_qualified_rest_core` is advertised, the same file surface is als
 
 The same tag also exposes workspace-qualified project-agent CRUD at `/workspaces/:workspace/agents` and `/workspaces/:workspace/agents/:agentType`. These plural routes only read or mutate project-level agents for the selected workspace; `global` and `user` scope requests return `400 { code: "global_scope_not_supported_for_workspace_route" }`. Workspace-less `/workspace/agents` routes retain their existing primary-workspace behavior and remain the only REST surface for user-level agent scope.
 
-`workspace_qualified_extensions` advertises the plural extension-management surface at `/workspaces/:workspace/extensions/*`, mirroring the primary-workspace `/workspace/extensions/*` routes: `GET /workspaces/:workspace/extensions` (status), `GET /workspaces/:workspace/extensions/operations/:operationId`, `POST /workspaces/:workspace/extensions/{install,check-updates,refresh}`, `POST /workspaces/:workspace/extensions/:name/{enable,disable,update}`, and `DELETE /workspaces/:workspace/extensions/:name`. Reads resolve the selected runtime only; mutations require a trusted workspace and otherwise return `403 { code: "untrusted_workspace" }`. Each workspace has its own asynchronous extension-operation queue and status cache; the primary workspace shares one queue across the singular and plural routes. Advertised unconditionally (like `workspace_qualified_rest_core`), independent of how many workspaces are hosted. The workspace-less `/workspace/extensions/*` routes retain their existing primary-workspace behavior.
+`extension_management_v2` advertises a user-level extension catalog and mutation surface at `/extensions/*`, plus workspace activation projections at `/workspaces/:workspace/extensions/*`. Artifacts are global; workspace routes expose only projection reads, exact activation overrides, and runtime refresh. Reads may target an untrusted registered workspace, while activation, refresh, and workspace-scoped install require a trusted target. Slow mutations use daemon-local operations at `/extensions/operations/:operationId`; store generation, not operation history, is authoritative across restart and across daemons. The published `workspace_extensions` capability and `/workspace/extensions/*` routes remain a primary-workspace compatibility adapter. Clients must preflight `extension_management_v2` and must not infer it from daemon mode or `workspace_qualified_rest_core`.
 
 `daemon_status` advertises `GET /daemon/status`, the consolidated read-only
 operator diagnostic snapshot documented below.

@@ -16,7 +16,6 @@ import {
   type Config,
   type DiscoveredPlugin,
   type ExtensionScope,
-  SettingScope,
   parseInstallSource,
   redactUrlCredentials,
   createDebugLogger,
@@ -219,7 +218,16 @@ export const DiscoverTab = ({
         let ext;
         try {
           const metadata = await parseInstallSource(plugin.installSource);
-          ext = await extensionManager.installExtension(metadata);
+          ext = await extensionManager.installExtension(
+            metadata,
+            undefined,
+            undefined,
+            process.cwd(),
+            undefined,
+            scope === 'user'
+              ? { scope: 'user' }
+              : { scope: 'workspace', workspacePath: process.cwd() },
+          );
         } catch (error) {
           errors.push(
             `${plugin.name}: ${redactUrlCredentials(getErrorMessage(error))}`,
@@ -231,51 +239,6 @@ export const DiscoverTab = ({
         // successful install to "failed" (which would prompt a confusing retry).
         installed++;
         try {
-          // installExtension auto-enables at User (global) scope. For a
-          // workspace-scoped choice, re-scope enablement to this workspace
-          // only: disable the global enable and enable for the workspace path.
-          if (scope !== 'user') {
-            await extensionManager.disableExtension(
-              ext.name,
-              SettingScope.User,
-            );
-            try {
-              await extensionManager.enableExtension(
-                ext.name,
-                SettingScope.Workspace,
-              );
-            } catch (enableError) {
-              // The User-scope disable already landed; roll it back so a failed
-              // Workspace enable doesn't leave the extension disabled at every
-              // scope (the outer catch only logs, so the install still reports
-              // success — without this the extension would be silently dead).
-              try {
-                await extensionManager.enableExtension(
-                  ext.name,
-                  SettingScope.User,
-                );
-              } catch (rollbackError) {
-                // Rollback failed: the extension is now disabled at every scope.
-                // The outer catch only debug-logs, so surface it through the
-                // batch error list — otherwise the user is told the install
-                // succeeded with no hint the extension is silently dead.
-                debugLogger.error(
-                  'Scope rollback failed after install:',
-                  rollbackError,
-                );
-                errors.push(
-                  t(
-                    '{{name}}: installed, but the scope rollback failed — it may be disabled at all scopes; re-enable it from the Installed tab.',
-                    { name: plugin.name },
-                  ),
-                );
-              }
-              throw enableError;
-            }
-          }
-          // Record the scope preference only after enablement succeeds, so the
-          // Installed tab can't show a "Project level" extension that is
-          // actually enabled at User scope after a rollback.
           extensionManager.setExtensionScope(ext.name, scope);
         } catch (scopeError) {
           debugLogger.error(

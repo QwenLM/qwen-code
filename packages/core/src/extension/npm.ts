@@ -178,7 +178,11 @@ function getNpmAuthToken(registryUrl: string): string | undefined {
   return undefined;
 }
 
-function fetchNpmJson<T>(url: string, authToken?: string): Promise<T> {
+function fetchNpmJson<T>(
+  url: string,
+  authToken?: string,
+  signal?: AbortSignal,
+): Promise<T> {
   const headers: Record<string, string> = {
     Accept: 'application/json',
   };
@@ -190,7 +194,7 @@ function fetchNpmJson<T>(url: string, authToken?: string): Promise<T> {
 
   return new Promise((resolve, reject) => {
     client
-      .get(url, { headers }, (res) => {
+      .get(url, { headers, signal }, (res) => {
         if (res.statusCode === 301 || res.statusCode === 302) {
           if (res.headers.location) {
             // Strip auth token when redirected to a different host
@@ -198,7 +202,7 @@ function fetchNpmJson<T>(url: string, authToken?: string): Promise<T> {
             const redirectHost = new URL(res.headers.location).host;
             const redirectToken =
               redirectHost === originalHost ? authToken : undefined;
-            fetchNpmJson<T>(res.headers.location, redirectToken)
+            fetchNpmJson<T>(res.headers.location, redirectToken, signal)
               .then(resolve)
               .catch(reject);
             return;
@@ -232,6 +236,7 @@ function downloadNpmFile(
   url: string,
   dest: string,
   authToken?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const headers: Record<string, string> = {};
   if (authToken) {
@@ -242,7 +247,7 @@ function downloadNpmFile(
 
   return new Promise((resolve, reject) => {
     client
-      .get(url, { headers }, (res) => {
+      .get(url, { headers, signal }, (res) => {
         if (res.statusCode === 301 || res.statusCode === 302) {
           if (res.headers.location) {
             // Strip auth token when redirected to a different host
@@ -250,7 +255,7 @@ function downloadNpmFile(
             const redirectHost = new URL(res.headers.location).host;
             const redirectToken =
               redirectHost === originalHost ? authToken : undefined;
-            downloadNpmFile(res.headers.location, dest, redirectToken)
+            downloadNpmFile(res.headers.location, dest, redirectToken, signal)
               .then(resolve)
               .catch(reject);
             return;
@@ -277,6 +282,7 @@ function downloadNpmFile(
 export async function downloadFromNpmRegistry(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
+  signal?: AbortSignal,
 ): Promise<NpmDownloadResult> {
   const { name, version: requestedVersion } = parseNpmPackageSource(
     installMetadata.source,
@@ -300,6 +306,7 @@ export async function downloadFromNpmRegistry(
   const metadata = await fetchNpmJson<NpmPackageMetadata>(
     metadataUrl,
     authToken,
+    signal,
   );
 
   // Resolve version
@@ -342,7 +349,7 @@ export async function downloadFromNpmRegistry(
 
   // Download tarball
   const tarballPath = path.join(destination, 'package.tgz');
-  await downloadNpmFile(tarballUrl, tarballPath, tarballAuthToken);
+  await downloadNpmFile(tarballUrl, tarballPath, tarballAuthToken, signal);
 
   // Extract tarball
   await tar.x({
@@ -381,6 +388,7 @@ export async function downloadFromNpmRegistry(
  */
 export async function checkNpmUpdate(
   installMetadata: ExtensionInstallMetadata,
+  signal?: AbortSignal,
 ): Promise<ExtensionUpdateState> {
   try {
     const { name } = parseNpmPackageSource(installMetadata.source);
@@ -394,6 +402,7 @@ export async function checkNpmUpdate(
     const metadata = await fetchNpmJson<NpmPackageMetadata>(
       metadataUrl,
       authToken,
+      signal,
     );
 
     const { version: requestedVersion } = parseNpmPackageSource(
@@ -425,6 +434,7 @@ export async function checkNpmUpdate(
     }
     return ExtensionUpdateState.UP_TO_DATE;
   } catch (error) {
+    signal?.throwIfAborted();
     debugLogger.error(
       `Failed to check npm update for "${redactUrlCredentials(installMetadata.source)}": ${redactUrlCredentials(String(error))}`,
     );
