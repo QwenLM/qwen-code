@@ -3054,6 +3054,44 @@ describe('ContentGenerationPipeline', () => {
       expect(call).not.toHaveProperty('max_tokens');
     });
 
+    it('should clamp a provider output-budget key even when max_tokens is also set', async () => {
+      // Arrange: config carries BOTH max_tokens and max_completion_tokens.
+      // max_tokens resolves via reconcile (min with the request), but the
+      // provider key must not escape unclamped through the spread — on
+      // backends honoring the larger key, prompt + output would exceed the
+      // window.
+      mockContentGeneratorConfig.samplingParams = {
+        max_tokens: 50000,
+        max_completion_tokens: 100000,
+      } as ContentGeneratorConfig['samplingParams'];
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { maxOutputTokens: 40000 },
+      };
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'r' } }],
+      });
+
+      // Act
+      await pipeline.execute(request, 'prompt-id');
+
+      // Assert: both output budgets clamped to the window.
+      const call = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(call).toMatchObject({
+        max_tokens: 40000,
+        max_completion_tokens: 40000,
+      });
+    });
+
     it('should inject the window-clamped max_tokens when samplingParams omits it and carries no provider output-budget key', async () => {
       // Arrange: samplingParams is set but specifies no output budget (no
       // max_tokens, no provider-specific key). The window clamp

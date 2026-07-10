@@ -856,14 +856,14 @@ export class ContentGenerationPipeline {
         (hasProviderOutputBudgetKey(configSamplingParams)
           ? undefined
           : requestMaxTokens);
-      if (maxTokens !== undefined) {
-        return { ...configSamplingParams, max_tokens: maxTokens };
-      }
-      // maxTokens is undefined only when a provider-specific output-budget key
-      // is in use (or there is nothing to clamp against). Clamp that key's
-      // value to the window rather than injecting a separate max_tokens.
+      // Single exit: whatever the branch decided about max_tokens, any
+      // provider-specific output-budget key in the result is clamped to the
+      // window too — a config carrying both max_tokens and e.g.
+      // max_completion_tokens must not leak the provider key unclamped.
       return clampProviderOutputBudgetKeys(
-        { ...configSamplingParams },
+        maxTokens !== undefined
+          ? { ...configSamplingParams, max_tokens: maxTokens }
+          : { ...configSamplingParams },
         requestMaxTokens,
       );
     }
