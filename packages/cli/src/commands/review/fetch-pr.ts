@@ -26,11 +26,11 @@
 
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh } from './lib/gh.js';
-import { git, gitOpt, gitRaw, refExists } from './lib/git.js';
+import { git, gitOpt, gitRaw, refExists, releaseWorktree } from './lib/git.js';
 import {
   REVIEW_TMP_DIR,
   reviewBranch,
@@ -120,14 +120,7 @@ function tryRemove(action: () => void): void {
 }
 
 function cleanStale(prNumber: string): void {
-  const wt = worktreePath(prNumber);
-  if (existsSync(wt)) {
-    tryRemove(() =>
-      execFileSync('git', ['worktree', 'remove', wt, '--force'], {
-        stdio: 'pipe',
-      }),
-    );
-  }
+  releaseWorktree(worktreePath(prNumber));
   const ref = reviewBranch(prNumber);
   if (refExists(ref)) {
     tryRemove(() =>

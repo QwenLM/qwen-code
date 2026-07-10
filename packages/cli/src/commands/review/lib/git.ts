@@ -9,6 +9,7 @@
 // across platforms.
 
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 
 /** Deadline for a single `git` invocation. Generous; a hang must still end. */
 const GIT_TIMEOUT_MS = 120_000;
@@ -58,6 +59,33 @@ export function gitOpt(...args: string[]): string | null {
 /** True iff a ref (branch / tag / commit) exists locally. */
 export function refExists(ref: string): boolean {
   return gitOpt('rev-parse', '--verify', '--quiet', ref) !== null;
+}
+
+/**
+ * Free a review worktree's path **and** its branch. Returns whether a live
+ * worktree was there to remove.
+ *
+ * `git worktree remove` needs the directory. A user reclaiming disk with
+ * `rm -rf .qwen/tmp` leaves the worktree *registered but missing*, and from then
+ * on git refuses both of the things the next review needs:
+ *
+ *     $ git worktree add .qwen/tmp/review-pr-6457 qwen-review/pr-6457
+ *     fatal: '...' is a missing but already registered worktree;
+ *     use 'add -f' to override, or 'prune' or 'remove' to clear
+ *
+ * and `git branch -D qwen-review/pr-6457`, because the branch is still checked
+ * out in that phantom. So `/review <same PR>` never runs again until someone
+ * prunes by hand. `git worktree prune` is the only thing that clears the
+ * registration and a no-op when nothing is stale — run it unconditionally, and
+ * **before** the branch delete that depends on it.
+ */
+export function releaseWorktree(worktreePath: string): boolean {
+  const existed = existsSync(worktreePath);
+  if (existed) {
+    gitOpt('worktree', 'remove', worktreePath, '--force');
+  }
+  gitOpt('worktree', 'prune');
+  return existed;
 }
 
 /**
