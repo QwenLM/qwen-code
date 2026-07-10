@@ -44,6 +44,7 @@ import type {
 } from './channel-worker-supervisor.js';
 import type { ServiceInfo } from '../commands/channel/pidfile.js';
 import { LARGE_PIPE_FRAME_THRESHOLD_BYTES } from './large-pipe-frame-observer.js';
+import type { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 
 const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   limits: {
@@ -4214,7 +4215,10 @@ describe('runQwenServe channel worker supervisor', () => {
         title: 'CI failed',
         payload: { runId: 123 },
       }),
-    ).rejects.toThrow('Channel worker is not running.');
+    ).rejects.toMatchObject({
+      code: 'channel_worker_unavailable',
+      message: 'Channel worker is not running.',
+    } satisfies Partial<ChannelWebhookEnqueueError>);
   });
 
   it('starts the channel worker after runtime mount and stops it before bridge shutdown', async () => {

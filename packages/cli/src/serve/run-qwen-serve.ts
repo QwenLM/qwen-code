@@ -103,6 +103,7 @@ import type {
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
 import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
+import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import { channelSelectionNames } from './channel-selection.js';
 import {
   finalizeStartupProfile,
@@ -583,7 +584,10 @@ export function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor
     killAllSync() {},
     snapshot: () => ({ ...snapshot, channels: [] }),
     async enqueueWebhookTask() {
-      throw new Error('Channel worker is not running.');
+      throw new ChannelWebhookEnqueueError(
+        'channel_worker_unavailable',
+        'Channel worker is not running.',
+      );
     },
   };
 }
