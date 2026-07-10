@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useTheme } from '../../themeContext';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -541,6 +541,22 @@ function MarkdownPre({ children }: { children?: ReactNode }) {
  * the markdown renderer needing to know about session management. */
 const QWEN_SESSION_SCHEME = /^qwen-session:\/\//i;
 
+/**
+ * react-markdown sanitizes every href through `defaultUrlTransform`, which
+ * allows only `http(s)`, `irc(s)`, `mailto` and `xmpp` and rewrites everything
+ * else to `''`. Without this, `qwen-session://<id>` never reaches
+ * {@link MarkdownLink} with its scheme intact, the interception below is dead
+ * code, and the link renders as an inert anchor.
+ *
+ * Letting the scheme through is safe: `MarkdownLink` never puts it in the DOM.
+ * It renders `href="#"` and dispatches the id as an event, so nothing navigates
+ * to a `qwen-session:` URL — and an unknown scheme is inert in a browser anyway.
+ * Every other href keeps the default sanitizer.
+ */
+export function markdownUrlTransform(url: string): string {
+  return QWEN_SESSION_SCHEME.test(url.trim()) ? url : defaultUrlTransform(url);
+}
+
 function MarkdownLink({
   href,
   children,
@@ -670,6 +686,7 @@ export const Markdown = memo(function Markdown({
             remarkPlugins={remarkPlugins}
             rehypePlugins={rehypePlugins}
             components={renderedComponents}
+            urlTransform={markdownUrlTransform}
           >
             {renderedContent}
           </ReactMarkdown>
