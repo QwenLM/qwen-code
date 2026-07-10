@@ -222,7 +222,11 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     const onChunk = (sid: string, chunk: string) => {
       if (sid === sessionId) chunks.push(chunk);
     };
+    const clearChunks = (sid: string) => {
+      if (sid === sessionId) chunks.length = 0;
+    };
     this.on('textChunk', onChunk);
+    this.on('responseBoundary', clearChunks);
 
     const prompt: Array<Record<string, unknown>> = [];
     if (options?.imageBase64 && options.imageMimeType) {
@@ -241,6 +245,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       });
     } finally {
       this.off('textChunk', onChunk);
+      this.off('responseBoundary', clearChunks);
     }
 
     return chunks.join('');
@@ -316,7 +321,14 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           status: (update['status'] as string) || 'pending',
           rawInput: update['rawInput'] as Record<string, unknown> | undefined,
         };
+        if (event.status === 'pending' || event.status === 'in_progress') {
+          this.emitResponseBoundary(sessionId);
+        }
         this.emit('toolCall', event);
+        break;
+      }
+      case 'plan': {
+        this.emitResponseBoundary(sessionId);
         break;
       }
       case 'available_commands_update': {
@@ -375,12 +387,17 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       }, ACP_PERMISSION_RESPONSE_TIMEOUT_MS);
       timeout.unref?.();
       this.pendingPermissions.set(requestId, { sessionId, resolve, timeout });
+      this.emitResponseBoundary(sessionId);
       this.emit('permissionRequest', {
         requestId,
         sessionId,
         request,
       });
     });
+  }
+
+  private emitResponseBoundary(sessionId: string): void {
+    this.emit('responseBoundary', sessionId);
   }
 
   private resolvePendingPermissions(sessionId?: string): void {

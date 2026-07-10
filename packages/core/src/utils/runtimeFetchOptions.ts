@@ -6,7 +6,7 @@
 
 import {
   Agent,
-  ProxyAgent,
+  EnvHttpProxyAgent,
   fetch as undiciFetch,
   type Dispatcher,
 } from 'undici';
@@ -73,8 +73,8 @@ export type OpenAIRuntimeFetchOptions =
       // Optional fetch override. When a custom dispatcher is being passed,
       // we pin this to the bundled undici's fetch so the dispatcher and
       // fetch share a single undici version — otherwise Node's built-in
-      // fetch (newer undici) rejects a ProxyAgent from the bundled undici
-      // (e.g. v6) with `invalid onError method`.
+      // fetch (newer undici) rejects a dispatcher from the bundled undici
+      // with errors such as `invalid onError method`.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       fetch?: any;
     }
@@ -203,8 +203,8 @@ const NO_DISPATCHER_FALLBACK = {
  * The dispatcher is cached so that preconnect and subsequent SDK requests
  * share the same connection pool, enabling TCP+TLS connection reuse.
  *
- * @param proxyUrl - Proxy URL used to create a cached ProxyAgent
- * @returns A cached undici ProxyAgent dispatcher
+ * @param proxyUrl - Proxy URL used to create a cached proxy dispatcher
+ * @returns A cached undici dispatcher that honors NO_PROXY
  */
 export function getOrCreateSharedDispatcher(
   proxyUrl: string,
@@ -219,16 +219,18 @@ export function getOrCreateSharedDispatcher(
     return cached;
   }
 
-  const dispatcher = new ProxyAgent({
-    uri: proxyUrl,
+  const dispatcher = new EnvHttpProxyAgent({
+    httpProxy: proxyUrl,
+    httpsProxy: proxyUrl,
     headersTimeout: 0,
     bodyTimeout: 0,
     keepAliveTimeout: 60_000,
-    // For a ProxyAgent the upstream (origin) TLS handshake is governed by
-    // `requestTls`, not `connect`; `proxyTls` covers an HTTPS proxy whose own
-    // certificate is self-signed. Disable verification on both when opted in.
+    // EnvHttpProxyAgent can dispatch either directly or through a proxy.
+    // `connect` covers a direct NO_PROXY connection, `requestTls` covers the
+    // origin through a proxy, and `proxyTls` covers an HTTPS proxy itself.
     ...(insecure
       ? {
+          connect: { rejectUnauthorized: false },
           requestTls: { rejectUnauthorized: false },
           proxyTls: { rejectUnauthorized: false },
         }
@@ -668,7 +670,7 @@ function buildFetchOptionsWithDispatcher(
     const dispatcher = getOrCreateSharedDispatcher(proxyUrl, insecure);
     // Pin fetch to undici's own implementation so the dispatcher and fetch
     // come from the same undici version. Node's bundled undici may differ in
-    // major version from the project's bundled one (e.g. v8 vs v6), which
+    // major version from the packaged one (e.g. v8 vs v7), which
     // breaks dispatcher handler-interface checks (`invalid onError method`).
     // The no-proxy branch above also pins undiciFetch for consistency.
     return { fetchOptions: { dispatcher }, fetch: undiciFetch };

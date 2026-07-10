@@ -47,6 +47,7 @@ interface CreateServeFeaturesDeps {
   channelReloadAvailable: boolean;
   sessionShellCommandEnabled: boolean;
   multiWorkspaceSessionsEnabled: boolean;
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 export interface ServeFeaturesRuntime {
@@ -68,6 +69,7 @@ export function createServeFeatures(
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
   } = deps;
+  const env = deps.env ?? process.env;
   let cachedVoiceTranscriptionAvailable: boolean | undefined;
   const invalidateServeFeaturesCache = () => {
     cachedVoiceTranscriptionAvailable = undefined;
@@ -105,14 +107,14 @@ export function createServeFeatures(
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
         browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
           opts,
-          process.env,
+          env,
         ),
         voiceTranscriptionAvailable: getCachedVoiceTranscriptionAvailable(),
         // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
         // on). A configured token no longer suppresses it — the browser carries
         // the bearer token via the WS subprotocol, which the upgrade listener
         // verifies (acp-http/index.ts).
-        voiceWsAvailable: resolveAcpHttpEnabled(),
+        voiceWsAvailable: resolveAcpHttpEnabled(env),
       }),
   };
 }
