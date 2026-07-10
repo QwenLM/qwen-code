@@ -496,6 +496,18 @@ describe('qwen serve — transcript paging route', () => {
       maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
     });
   });
+
+  afterAll(() => {
+    // The persisted transcript fixtures above live in the daemon's project
+    // `chats/` dir. Remove them so later suites (e.g. PATCH metadata's
+    // listWorkspaceSessions readback) start from a clean session list: extra
+    // persisted sessions widen a pre-existing listing race and flake them.
+    const qwenHome = path.join(homeDir, '.qwen');
+    const projectDir = Storage.runWithRuntimeBaseDir(qwenHome, REPO_ROOT, () =>
+      new Storage(REPO_ROOT).getProjectDir(),
+    );
+    rmSync(path.join(projectDir, 'chats'), { recursive: true, force: true });
+  });
 });
 
 describe('qwen serve — POST /session validation + concurrent coalescing', () => {
