@@ -1350,9 +1350,14 @@ describe('DingtalkChannel reply mentions', () => {
     getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
     await getResponseHook(channel)('cid123', 'hello', 'session-1');
 
-    expect(
-      JSON.parse(String((fetchSpy.mock.calls[0]![1] as RequestInit).body)),
-    ).not.toHaveProperty('at');
+    const body = JSON.parse(
+      String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
+    );
+    expect(body).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: 'hello' },
+    });
+    expect(body).not.toHaveProperty('at');
   });
 
   it('does not mention when the correlated prompt has no stored staff ID', async () => {
@@ -1365,12 +1370,17 @@ describe('DingtalkChannel reply mentions', () => {
     getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
     await getResponseHook(channel)('cid123', 'hello', 'session-1');
 
-    expect(
-      JSON.parse(String((fetchSpy.mock.calls[0]![1] as RequestInit).body)),
-    ).not.toHaveProperty('at');
+    const body = JSON.parse(
+      String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
+    );
+    expect(body).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: 'hello' },
+    });
+    expect(body).not.toHaveProperty('at');
   });
 
-  it('mentions only the first chunk of a long response', async () => {
+  it('reserves the mention prefix within the first text chunk limit', async () => {
     const channel = createChannel({ atSender: true });
     seedWebhook(channel, 'cid123');
     seedMentionTarget(channel, 'm1', 'staff-1');
@@ -1379,16 +1389,56 @@ describe('DingtalkChannel reply mentions', () => {
       .mockResolvedValue(new Response('{}', { status: 200 }));
 
     getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
-    await getResponseHook(channel)('cid123', 'a'.repeat(3801), 'session-1');
+    const text = 'a'.repeat(3800);
+    await getResponseHook(channel)('cid123', text, 'session-1');
 
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     const bodies = fetchSpy.mock.calls.map(([, init]) =>
       JSON.parse(String((init as RequestInit).body)),
     );
-    expect(bodies[0]).toMatchObject({ at: { atUserIds: ['staff-1'] } });
-    expect(bodies[0].msgtype).toBe('text');
+    expect(bodies[0]).toMatchObject({
+      msgtype: 'text',
+      at: { atUserIds: ['staff-1'] },
+    });
     expect(bodies[1]).toMatchObject({ msgtype: 'text' });
     expect(bodies[1]).not.toHaveProperty('at');
+    expect(bodies.map((body) => body.text.content.length)).toEqual([3800, 10]);
+    expect(
+      bodies
+        .map((body, index) =>
+          index === 0
+            ? body.text.content.slice('@staff-1\n\n'.length)
+            : body.text.content,
+        )
+        .join(''),
+    ).toBe(text);
+  });
+
+  it('preserves code fences across mentioned text chunks', async () => {
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const text = `\`\`\`\n${'a'.repeat(3800)}\n\`\`\``;
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    await getResponseHook(channel)('cid123', text, 'session-1');
+
+    const contents = fetchSpy.mock.calls.map(([, init], index) => {
+      const body = JSON.parse(String((init as RequestInit).body));
+      return index === 0
+        ? body.text.content.slice('@staff-1\n\n'.length)
+        : body.text.content;
+    });
+    expect(contents.join('')).toBe(text);
+    expect(
+      fetchSpy.mock.calls.every(([, init]) => {
+        const body = JSON.parse(String((init as RequestInit).body));
+        return body.text.content.length <= 3800;
+      }),
+    ).toBe(true);
   });
 
   it('mentions only the first block-streamed response', async () => {
@@ -1665,6 +1715,7 @@ describe('DingtalkChannel mention target lifecycle', () => {
     const internals = channel as unknown as {
       mentionTargets: Map<string, string>;
       sessionMentionTargets: Map<string, string>;
+      textReplySessions: Set<string>;
       bufferedMentionTargets: Set<string>;
       bufferedMentionTargetsBySession: Map<string, Set<string>>;
       onPromptBuffered(
@@ -1681,6 +1732,8 @@ describe('DingtalkChannel mention target lifecycle', () => {
     internals.onPromptBuffered('cid-123', 'session-2', 'other-1');
     internals.sessionMentionTargets.set('session-1', 'staff-active');
     internals.sessionMentionTargets.set('session-2', 'staff-other-active');
+    internals.textReplySessions.add('session-1');
+    internals.textReplySessions.add('session-2');
 
     channel.onSessionDied('session-1');
 
@@ -1692,6 +1745,7 @@ describe('DingtalkChannel mention target lifecycle', () => {
       false,
     );
     expect(internals.sessionMentionTargets.has('session-1')).toBe(false);
+    expect(internals.textReplySessions.has('session-1')).toBe(false);
     expect(internals.mentionTargets.get('other-1')).toBe('staff-other');
     expect(internals.bufferedMentionTargets.has('other-1')).toBe(true);
     expect(internals.bufferedMentionTargetsBySession.get('session-2')).toEqual(
@@ -1700,6 +1754,7 @@ describe('DingtalkChannel mention target lifecycle', () => {
     expect(internals.sessionMentionTargets.get('session-2')).toBe(
       'staff-other-active',
     );
+    expect(internals.textReplySessions.has('session-2')).toBe(true);
   });
 });
 

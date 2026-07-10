@@ -11,11 +11,7 @@ import {
   sanitizeLogText,
   sanitizeSenderName,
 } from '@qwen-code/channel-base';
-import {
-  normalizeDingTalkMarkdown,
-  extractTitle,
-  splitChunks,
-} from './markdown.js';
+import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
 import { downloadMedia } from './media.js';
 import type {
   ChannelConfig,
@@ -91,6 +87,7 @@ const GROUP_MSG_API = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
 const GROUP_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
+const TEXT_MESSAGE_LIMIT = 3800;
 const mentionTarget = Symbol('mentionTarget');
 
 type MentionTargetEnvelope = Envelope & {
@@ -102,6 +99,20 @@ interface DingTalkTokenResponse {
   errmsg?: string;
   access_token?: string;
   expires_in?: number;
+}
+
+function splitTextChunks(text: string, firstChunkLimit: number): string[] {
+  if (!text) return [text];
+
+  const chunks: string[] = [];
+  let offset = 0;
+  let chunkLimit = firstChunkLimit;
+  while (offset < text.length) {
+    chunks.push(text.slice(offset, offset + chunkLimit));
+    offset += chunkLimit;
+    chunkLimit = TEXT_MESSAGE_LIMIT;
+  }
+  return chunks;
 }
 
 type DingTalkClientInternals = DWClient & {
@@ -365,7 +376,11 @@ export class DingtalkChannel extends ChannelBase {
     const webhook = this.webhooks.get(chatId);
     if (!webhook) return;
 
-    const chunks = splitChunks(text);
+    const mentionPrefix = atUserId ? `@${atUserId}\n\n` : '';
+    const chunks = splitTextChunks(
+      text,
+      TEXT_MESSAGE_LIMIT - mentionPrefix.length,
+    );
     for (let i = 0; i < chunks.length; i++) {
       const isMention = i === 0 && atUserId !== undefined;
       const resp = await fetch(webhook, {
@@ -374,7 +389,7 @@ export class DingtalkChannel extends ChannelBase {
         body: JSON.stringify({
           msgtype: 'text',
           text: {
-            content: isMention ? `@${atUserId}\n\n${chunks[i]!}` : chunks[i]!,
+            content: isMention ? `${mentionPrefix}${chunks[i]!}` : chunks[i]!,
           },
           ...(isMention ? { at: { atUserIds: [atUserId] } } : {}),
         }),
@@ -786,7 +801,7 @@ export class DingtalkChannel extends ChannelBase {
       this.untrackBufferedMentionTarget(sessionId, messageId);
       const atUserId = this.mentionTargets.get(messageId);
       this.mentionTargets.delete(messageId);
-      if (atUserId) {
+      if (this.atSender && atUserId) {
         this.sessionMentionTargets.set(sessionId, atUserId);
         this.textReplySessions.add(sessionId);
       }
