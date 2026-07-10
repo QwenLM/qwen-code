@@ -1,4 +1,5 @@
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
 import { memo, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
@@ -63,6 +64,7 @@ export type TurnOutputOpenRequest =
       turnId: string;
       artifactId: string;
       artifact: DaemonSessionArtifact;
+      workspaceActions?: DaemonWorkspaceActions;
       previewContent?: string;
     }
   | {
@@ -71,6 +73,7 @@ export type TurnOutputOpenRequest =
       title: string;
       turnId: string;
       task: TurnOutputScheduledTask;
+      workspaceActions?: DaemonWorkspaceActions;
     };
 
 interface TurnOutputsProps {

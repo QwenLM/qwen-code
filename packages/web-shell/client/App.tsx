@@ -1297,12 +1297,18 @@ export function App({
     [getDefaultReviewPanelWidth, t],
   );
   const openScheduledTaskPanel = useCallback(
-    (task: TurnOutputScheduledTask) => {
+    (
+      task: TurnOutputScheduledTask,
+      tabWorkspaceActions?: ReturnType<typeof useWorkspaceActions>,
+    ) => {
       const tab: ArtifactPanelTab = {
         id: `scheduled-task:${task.toolCallId}`,
         kind: 'scheduled_task',
         title: t('scheduledTasks.title'),
         task,
+        ...(tabWorkspaceActions
+          ? { workspaceActions: tabWorkspaceActions }
+          : {}),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === tab.id)
@@ -1328,7 +1334,7 @@ export function App({
         return;
       }
       if (request.kind === 'scheduled_task') {
-        openScheduledTaskPanel(request.task);
+        openScheduledTaskPanel(request.task, request.workspaceActions);
         return;
       }
 
@@ -1346,6 +1352,9 @@ export function App({
         kind: 'artifact',
         title: request.title,
         artifactId: request.artifactId,
+        ...(request.workspaceActions
+          ? { workspaceActions: request.workspaceActions }
+          : {}),
         ...(request.previewContent !== undefined
           ? { previewContent: request.previewContent }
           : {}),

@@ -44,6 +44,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   usePromptStatus: () => 'idle',
   useStreamingState: () => streamingStateValue,
   useTranscriptBlocks: () => [],
+  useWorkspaceActions: () => ({}),
   useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
 }));
 

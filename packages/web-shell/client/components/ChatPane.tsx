@@ -10,6 +10,7 @@ import {
   useConnection,
   useStreamingState,
   useTranscriptBlocks,
+  useWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
 import { useMessages } from '../hooks/useMessages';
@@ -79,6 +80,7 @@ export function ChatPane({
   const { t } = useI18n();
   const connection = useConnection();
   const actions = useActions();
+  const workspaceActions = useWorkspaceActions();
   const messages = useMessages(t);
   const blocks = useTranscriptBlocks();
   const streamingState = useStreamingState();
@@ -189,6 +191,18 @@ export function ChatPane({
         reportError(error, 'Failed to cancel request'),
       );
   }, [actions, reportError]);
+
+  const handleRightPanelOpen = useCallback(
+    (request: TurnOutputOpenRequest) => {
+      if (!onRightPanelOpen) return;
+      if (request.kind === 'artifact' || request.kind === 'scheduled_task') {
+        onRightPanelOpen({ ...request, workspaceActions });
+        return;
+      }
+      onRightPanelOpen(request);
+    },
+    [onRightPanelOpen, workspaceActions],
+  );
 
   // Composer wiring, all scoped to THIS pane's own DaemonSession context. The
   // slash menu lists the session's daemon commands — they run server-side when
@@ -330,7 +344,7 @@ export function ChatPane({
               ? scheduledTasksByTurn
               : undefined
           }
-          onTurnOutputOpen={onRightPanelOpen}
+          onTurnOutputOpen={handleRightPanelOpen}
         />
       </div>
 

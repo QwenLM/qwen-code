@@ -1,6 +1,7 @@
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
   useWorkspaceActions,
+  type DaemonWorkspaceActions,
   type DaemonScheduledTask,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { EditorState } from '@codemirror/state';
@@ -64,6 +65,7 @@ export type ArtifactPanelTab =
       kind: 'artifact';
       title: string;
       artifactId: string;
+      workspaceActions?: DaemonWorkspaceActions;
       previewContent?: string;
     }
   | {
@@ -71,6 +73,7 @@ export type ArtifactPanelTab =
       kind: 'scheduled_task';
       title: string;
       task: TurnOutputScheduledTask;
+      workspaceActions?: DaemonWorkspaceActions;
     };
 
 interface ArtifactPanelProps {
@@ -103,6 +106,11 @@ export function ArtifactPanel({
   onClose,
 }: ArtifactPanelProps) {
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
+  const defaultWorkspaceActions = useWorkspaceActions();
+  const activeWorkspaceActions =
+    activeTab?.kind === 'artifact' || activeTab?.kind === 'scheduled_task'
+      ? (activeTab.workspaceActions ?? defaultWorkspaceActions)
+      : defaultWorkspaceActions;
 
   return (
     <aside
@@ -179,12 +187,17 @@ export function ArtifactPanel({
           <ArtifactDetailTab
             artifacts={artifacts}
             artifactId={activeTab.artifactId}
+            workspaceActions={activeWorkspaceActions}
             previewContent={activeTab.previewContent}
             loading={loading}
             error={error}
           />
         ) : (
-          <ScheduledTaskDetail key={activeTab.id} task={activeTab.task} />
+          <ScheduledTaskDetail
+            key={activeTab.id}
+            task={activeTab.task}
+            actions={activeWorkspaceActions}
+          />
         )}
       </div>
     </aside>
@@ -301,12 +314,14 @@ function TabScheduledTaskIcon() {
 function ArtifactDetailTab({
   artifacts,
   artifactId,
+  workspaceActions,
   previewContent,
   loading,
   error,
 }: {
   artifacts: readonly DaemonSessionArtifact[];
   artifactId: string;
+  workspaceActions: DaemonWorkspaceActions;
   previewContent?: string;
   loading?: boolean;
   error?: string | null;
@@ -314,7 +329,11 @@ function ArtifactDetailTab({
   const artifact = artifacts.find((item) => item.id === artifactId);
   if (artifact) {
     return (
-      <ArtifactDetail artifact={artifact} previewContent={previewContent} />
+      <ArtifactDetail
+        artifact={artifact}
+        workspaceActions={workspaceActions}
+        previewContent={previewContent}
+      />
     );
   }
   if (loading) {
@@ -326,9 +345,14 @@ function ArtifactDetailTab({
   return <div className={styles.empty}>Artifact not found.</div>;
 }
 
-function ScheduledTaskDetail({ task }: { task: TurnOutputScheduledTask }) {
+function ScheduledTaskDetail({
+  task,
+  actions,
+}: {
+  task: TurnOutputScheduledTask;
+  actions: DaemonWorkspaceActions;
+}) {
   const { t } = useI18n();
-  const actions = useWorkspaceActions();
   const [loadedTask, setLoadedTask] = useState<DaemonScheduledTask | null>(
     null,
   );
@@ -1520,9 +1544,11 @@ function fileExtensionLabel(value: string) {
 
 function ArtifactDetail({
   artifact,
+  workspaceActions,
   previewContent,
 }: {
   artifact: DaemonSessionArtifact;
+  workspaceActions: DaemonWorkspaceActions;
   previewContent?: string;
 }) {
   const location = getArtifactLocation(artifact);
@@ -1541,6 +1567,7 @@ function ArtifactDetail({
       <HtmlArtifactPreview
         workspacePath={artifact.workspacePath}
         artifactVersion={artifact.updatedAt}
+        workspaceActions={workspaceActions}
         previewContent={previewContent}
       />
     );
@@ -1551,6 +1578,7 @@ function ArtifactDetail({
       <FileArtifactPreview
         workspacePath={artifact.workspacePath}
         artifactVersion={artifact.updatedAt}
+        workspaceActions={workspaceActions}
       />
     );
   }
@@ -1630,13 +1658,14 @@ function isHtmlArtifact(artifact: DaemonSessionArtifact) {
 function HtmlArtifactPreview({
   workspacePath,
   artifactVersion,
+  workspaceActions,
   previewContent,
 }: {
   workspacePath: string;
   artifactVersion?: string;
+  workspaceActions: DaemonWorkspaceActions;
   previewContent?: string;
 }) {
-  const workspaceActions = useWorkspaceActions();
   const [html, setHtml] = useState<string | null>(previewContent ?? null);
   const [error, setError] = useState<string | null>(null);
 
@@ -1669,6 +1698,7 @@ function HtmlArtifactPreview({
       ) : (
         <iframe
           className={styles.htmlPreview}
+          referrerPolicy="no-referrer"
           sandbox=""
           srcDoc={withArtifactPreviewCsp(html)}
           title={`Preview ${workspacePath}`}
@@ -1683,9 +1713,12 @@ function withArtifactPreviewCsp(html: string) {
   const csp =
     "default-src 'none'; base-uri 'none'; style-src 'unsafe-inline'; img-src data: blob:;";
   if (typeof DOMParser === 'undefined') {
-    return `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${csp}"></head><body>${html}</body></html>`;
+    return `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${csp}"></head><body>${stripMetaRefreshFallback(html)}</body></html>`;
   }
   const doc = new DOMParser().parseFromString(html, 'text/html');
+  doc
+    .querySelectorAll('meta[http-equiv="refresh" i]')
+    .forEach((element) => element.remove());
   const meta = doc.createElement('meta');
   meta.httpEquiv = 'Content-Security-Policy';
   meta.content = csp;
@@ -1693,14 +1726,22 @@ function withArtifactPreviewCsp(html: string) {
   return `<!doctype html>${doc.documentElement.outerHTML}`;
 }
 
+function stripMetaRefreshFallback(html: string) {
+  return html.replace(
+    /<meta\b(?=[^>]*\bhttp-equiv\s*=\s*["']?refresh["']?)[^>]*>/gi,
+    '',
+  );
+}
+
 function FileArtifactPreview({
   workspacePath,
   artifactVersion,
+  workspaceActions,
 }: {
   workspacePath: string;
   artifactVersion?: string;
+  workspaceActions: DaemonWorkspaceActions;
 }) {
-  const workspaceActions = useWorkspaceActions();
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
