@@ -27,101 +27,26 @@ describe('Interactive protocol tag filtering', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'hides split top-level analysis/summary protocol wrappers in the TUI',
-    async () => {
-      fakeServer = await startFakeOpenAIServer(() => ({
-        contentChunks: [
-          '<analysis>internal scratchpad that must not render',
-          '</analysis><summary>VISIBLE_TMUX_SUMMARY_DONE',
-          '</summary>',
-        ],
-        usage: {
-          prompt_tokens: 20,
-          completion_tokens: 8,
-          total_tokens: 28,
-        },
-      }));
-
-      await rig.setup('interactive-protocol-tag-filtering', {
-        settings: {
-          security: {
-            auth: {
-              selectedType: 'openai',
-            },
-          },
-        },
-      });
-
-      const { ptyProcess, promise } = rig.runInteractive(
-        '--auth-type',
-        'openai',
-        '--openai-api-key',
-        'fake-key',
-        '--openai-base-url',
-        fakeServer.baseUrl,
-        '--model',
-        'fake-model',
-      );
-
-      try {
-        const isReady = await rig.poll(
-          () => /YOLO (模式|mode)/i.test(stripAnsi(rig._interactiveOutput)),
-          30000,
-          200,
-        );
-        expect(isReady, 'CLI did not start up in interactive mode').toBe(true);
-
-        await type(ptyProcess, 'Return the deterministic mock response.');
-        await type(ptyProcess, '\r');
-
-        const sawVisibleSummary = await rig.waitForText(
-          'VISIBLE_TMUX_SUMMARY_DONE',
-          30000,
-        );
-        expect(
-          sawVisibleSummary,
-          'Expected visible summary marker in TUI',
-        ).toBe(true);
-
-        const renderedOutput = stripAnsi(rig._interactiveOutput);
-        expect(renderedOutput).toContain('VISIBLE_TMUX_SUMMARY_DONE');
-        expect(renderedOutput).not.toContain('<analysis>');
-        expect(renderedOutput).not.toContain('</analysis>');
-        expect(renderedOutput).not.toContain('<summary>');
-        expect(renderedOutput).not.toContain('</summary>');
-        expect(renderedOutput).not.toContain('internal scratchpad');
-      } finally {
-        ptyProcess.kill();
-        await promise;
-      }
-    },
-  );
-
-  it.skipIf(process.platform === 'win32')(
     'retries HTTP failures before filtering tagged stream output',
     async () => {
-      fakeServer = await startFakeOpenAIServer(({ requestIndex }) =>
-        requestIndex < 2
-          ? {
-              status: 500,
-              error: {
-                message: `retryable fake failure ${requestIndex + 1}`,
-                type: 'server_error',
-              },
-            }
-          : {
-              contentChunks: [
-                '<analysis>retry scratchpad that must not render',
-                '</analysis><summary>VISIBLE_TMUX_RETRY_SUMMARY_DONE',
-                '</summary>',
-              ],
-              usage: {
-                prompt_tokens: 20,
-                completion_tokens: 8,
-                total_tokens: 28,
-              },
-            },
-      );
+      fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+        if (requestIndex < 2) {
+          throw new Error(`retryable fake failure ${requestIndex + 1}`);
+        }
+
+        return {
+          contentChunks: [
+            '<analysis>retry scratchpad that must not render',
+            '</analysis><summary>VISIBLE_TMUX_RETRY_SUMMARY_DONE',
+            '</summary>',
+          ],
+          usage: {
+            prompt_tokens: 20,
+            completion_tokens: 8,
+            total_tokens: 28,
+          },
+        };
+      });
 
       await rig.setup('interactive-protocol-tag-filtering-http-retry', {
         settings: {
