@@ -18,6 +18,7 @@ import {
   requireScope,
   enforceSessionLock,
   resolveSubActor,
+  enforceSubActorScope,
   enforceSubActorRateLimit,
   enforceSubActorBan,
 } from './auth.js';
@@ -471,6 +472,9 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   app.use('/ui', express.static(webRoot, { fallthrough: false }));
 
   app.use(bearerResolve(deps.store, audit));
+  // Reject a non-bridge authenticated token that sends X-RC-SubActor (would
+  // otherwise silently pollute attribution). Must follow bearerResolve.
+  app.use(enforceSubActorScope());
   // Resolve an asserted sub-actor (bridge "acting for @human") onto rcClient —
   // only honored for bridge-scope tokens. Must follow bearerResolve.
   app.use(resolveSubActor());

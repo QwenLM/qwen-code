@@ -27,6 +27,9 @@ export interface BridgeCapabilities {
   supportsEdits: boolean;
   /** Max message size the chat service accepts (0 = unknown/unbounded). */
   maxMessageBytes: number;
+  /** Max message size in characters (0 = unknown/unbounded). At least one of
+   * maxMessageBytes or maxMessageChars must be > 0 for a valid registration. */
+  maxMessageChars: number;
 }
 
 /** A registered bridge: its stable id + capabilities + the token that owns it. */

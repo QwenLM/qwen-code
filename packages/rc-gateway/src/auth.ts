@@ -58,6 +58,28 @@ export function resolveSubActor(): RequestHandler {
   };
 }
 
+/**
+ * Reject a non-bridge authenticated token that sends `X-RC-SubActor`. Bridges
+ * use this header to name the chat user acting through them; any other token
+ * sending it is either confused or attempting to spoof attribution. Unauthenticated
+ * requests (no `rcClient`) pass through — they'll fail auth downstream anyway.
+ * Mount BEFORE `resolveSubActor`.
+ */
+export function enforceSubActorScope(): RequestHandler {
+  return (req, res, next) => {
+    const headerVal = req.header('x-rc-subactor');
+    const hasHeader = headerVal !== undefined && headerVal !== '';
+    if (hasHeader && req.rcClient && !req.rcClient.scopes.includes(BRIDGE)) {
+      res.status(400).json({
+        error: 'X-RC-SubActor requires the bridge scope',
+        code: 'sub_actor_forbidden_scope',
+      });
+      return;
+    }
+    next();
+  };
+}
+
 /** Resolve the bearer token to `req.rcClient`, or 401 (+ audit auth_failed). */
 export function bearerResolve(
   store: TokenStore,
@@ -76,12 +98,10 @@ export function bearerResolve(
           action: 'token_expired_max_age',
           detail: { path: req.path },
         });
-        res
-          .status(401)
-          .json({
-            error: 'Token exceeded maximum age',
-            code: 'token_expired_max_age',
-          });
+        res.status(401).json({
+          error: 'Token exceeded maximum age',
+          code: 'token_expired_max_age',
+        });
       } else {
         void audit?.record({
           action: 'auth_failed',

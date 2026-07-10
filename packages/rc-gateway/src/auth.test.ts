@@ -15,6 +15,7 @@ import {
   requireScope,
   enforceSessionLock,
   resolveSubActor,
+  enforceSubActorScope,
   parseSubActor,
   enforceSubActorRateLimit,
   enforceSubActorBan,
@@ -358,6 +359,47 @@ describe('parseSubActor', () => {
     expect(parseSubActor('has space')).toBeNull();
     expect(parseSubActor(':leading')).toBeNull();
     expect(parseSubActor('<script>')).toBeNull();
+  });
+});
+
+describe('enforceSubActorScope middleware', () => {
+  it('400s sub_actor_forbidden_scope when a non-bridge token sends X-RC-SubActor', () => {
+    const req = subReq([APPROVE, WRITE, SESSION_READ], 'telegram:alice');
+    const res = fakeRes();
+    let called = false;
+    enforceSubActorScope()(req, res, () => {
+      called = true;
+    });
+    expect(called).toBe(false);
+    expect(res._status).toBe(400);
+    expect(res._json).toMatchObject({ code: 'sub_actor_forbidden_scope' });
+  });
+
+  it('passes through a non-bridge token with NO X-RC-SubActor header', () => {
+    const req = subReq([APPROVE, WRITE, SESSION_READ], undefined);
+    let called = false;
+    enforceSubActorScope()(req, fakeRes(), () => {
+      called = true;
+    });
+    expect(called).toBe(true);
+  });
+
+  it('passes through a bridge token with X-RC-SubActor (allowed to assert sub-actor)', () => {
+    const req = subReq([BRIDGE, SESSION_READ], 'telegram:alice');
+    let called = false;
+    enforceSubActorScope()(req, fakeRes(), () => {
+      called = true;
+    });
+    expect(called).toBe(true);
+  });
+
+  it('passes through an unauthenticated request (no rcClient)', () => {
+    const req = subReq(undefined, 'telegram:alice');
+    let called = false;
+    enforceSubActorScope()(req, fakeRes(), () => {
+      called = true;
+    });
+    expect(called).toBe(true);
   });
 });
 

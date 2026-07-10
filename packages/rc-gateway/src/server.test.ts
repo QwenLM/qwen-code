@@ -748,8 +748,8 @@ describe('gateway app', () => {
     expect(redeem.status).toBe(403);
   });
 
-  it('a NON-bridge write token cannot stamp subActor (header ignored)', async () => {
-    const { url, pairing, auditPath } = await boot();
+  it('a NON-bridge write token sending X-RC-SubActor gets 400 sub_actor_forbidden_scope', async () => {
+    const { url, pairing } = await boot();
     const { code } = pairing.mint([SESSION_READ, WRITE]); // no bridge
     const redeem = await fetch(`${url}/rc/pair/redeem`, {
       method: 'POST',
@@ -763,16 +763,13 @@ describe('gateway app', () => {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${writeToken}`,
-        'X-RC-SubActor': 'telegram:victim', // spoof attempt
+        'X-RC-SubActor': 'telegram:victim', // non-bridge scope → rejected
       },
       body: JSON.stringify({ prompt: 'hi' }),
     });
-    expect(res.status).toBe(200);
-    const rows = await pollAudit(auditPath, (r) =>
-      r.some((x) => x.action === 'prompt_sent'),
-    );
-    const sent = rows.find((x) => x.action === 'prompt_sent');
-    expect(sent?.subActor).toBeUndefined();
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { code: string };
+    expect(json.code).toBe('sub_actor_forbidden_scope');
   });
 
   it('403s the fork route for a token lacking write', async () => {

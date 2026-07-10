@@ -92,6 +92,7 @@ export type AuditAction =
   | 'idle_config_parse_failed'
   | 'idle_toggle_set'
   | 'bridge_registered'
+  | 'bridge_registration_rejected'
   | 'bridge_deregistered'
   | 'sub_actor_rate_limited'
   | 'sub_actor_banned'
@@ -151,6 +152,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'idle_config_parse_failed',
   'idle_toggle_set',
   'bridge_registered',
+  'bridge_registration_rejected',
   'bridge_deregistered',
   'sub_actor_rate_limited',
   'sub_actor_banned',
