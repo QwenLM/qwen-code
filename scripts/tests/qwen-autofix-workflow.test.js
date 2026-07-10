@@ -304,7 +304,12 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('trigger_label=${label_is_trigger}');
     expect(workflow).toContain('trigger_label=false label=');
     expect(workflow).toContain('sender_trusted=${sender_is_trusted}');
-    expect(workflow).toContain("group: 'qwen-autofix-issue'");
+    expect(workflow).toContain(
+      "group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'",
+    );
+    expect(workflow).toContain(
+      'issue #${ISSUE_NUMBER} assigned to ${AUTOFIX_BOT} → issue phase',
+    );
     expect(workflow).toContain(
       '(.labels // []) | map(.name) as $labels | ($labels | index($ready))',
     );
@@ -361,7 +366,6 @@ describe('qwen-autofix workflow', () => {
     expect(routeStep).not.toContain('comment command accepted');
     expect(routeStep).not.toContain('address-review command accepted');
     expect(routeStep).not.toContain('ROUTE_PR="${ISSUE_NUMBER}"');
-    expect(routeStep).not.toContain('ROUTE_ISSUE="${ISSUE_NUMBER}"');
   });
 
   it('gates real-time review triggers on bot author, trusted sender, and in-repo PR', () => {
