@@ -4224,7 +4224,7 @@ describe('runQwenServe channel worker supervisor', () => {
     } satisfies Partial<ChannelWebhookEnqueueError>);
   });
 
-  it('keeps bootstrap health degraded when worker startup fails', async () => {
+  it('closes the listener when worker startup fails after resolveOnListen', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-fail-')),
     );
@@ -4264,12 +4264,7 @@ describe('runQwenServe channel worker supervisor', () => {
 
     try {
       await expect(handle.runtimeReady).rejects.toThrow('worker boom');
-      const response = await fetch(`${handle.url}/health`);
-      expect(response.status).toBe(503);
-      expect(await response.json()).toMatchObject({
-        status: 'degraded',
-        error: 'worker boom',
-      });
+      expect(handle.server.listening).toBe(false);
       expect(attachServer).not.toHaveBeenCalled();
     } finally {
       await handle.close();

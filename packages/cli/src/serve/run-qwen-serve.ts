@@ -2255,6 +2255,8 @@ export async function runQwenServe(
   };
   let channelWorkerGroup: ChannelWorkerGroup | undefined;
   let channelWorkspaceGroups: readonly ChannelWorkspaceGroup[] | undefined;
+  let closeServerAfterChannelWorkerStartupFailure = false;
+  let runtimeFailureListenerClose: Promise<void> | undefined;
   const getChannelWorkerSnapshot = (): ChannelWorkerSnapshot =>
     channelWorkerGroup?.primarySnapshot() ?? {
       enabled: false,
@@ -3841,6 +3843,20 @@ export async function runQwenServe(
         for (const bridge of [...new Set(bridgesForCleanup)]) {
           await shutdownBridgeAfterFailedStartup(bridge);
         }
+        if (closeServerAfterChannelWorkerStartupFailure && server.listening) {
+          runtimeFailureListenerClose = new Promise((resolve) => {
+            server.close((closeErr) => {
+              if (closeErr) {
+                daemonLog.error(
+                  'server close after runtime startup error failed',
+                  closeErr,
+                );
+              }
+              resolve();
+            });
+          });
+          server.closeAllConnections();
+        }
         markRuntimeFailed(error);
       };
       const armRuntimeStartupTimer = (): void => {
@@ -3944,7 +3960,12 @@ export async function runQwenServe(
       ): Promise<void> => {
         if (runtimeStartupSettled) return;
         if (opts.channelSelection) {
-          await startChannelWorkerGroup(opts.channelSelection, candidateApp);
+          try {
+            await startChannelWorkerGroup(opts.channelSelection, candidateApp);
+          } catch (err) {
+            closeServerAfterChannelWorkerStartupFailure = true;
+            throw err;
+          }
           if (runtimeStartupSettled) return;
         }
         if (runtimeStartupSettled) return;
@@ -4278,6 +4299,12 @@ export async function runQwenServe(
                 }
               })
               .finally(() => {
+                if (!server.listening) {
+                  void (runtimeFailureListenerClose ?? Promise.resolve()).then(
+                    () => finish(),
+                  );
+                  return;
+                }
                 // Phase 2: arm the force timer NOW so it only races
                 // server.close, not the bridge tear-down above.
                 // `RunHandle.close()` contract says "fully
