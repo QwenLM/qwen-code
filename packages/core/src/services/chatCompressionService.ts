@@ -507,6 +507,12 @@ export class ChatCompressionService {
     const sideQueryHistory = pendingToolResult
       ? [...curatedHistory, opts.pendingUserMessage!]
       : curatedHistory;
+    const pendingToolResultTokenCount = pendingToolResult
+      ? estimateContentTokens(
+          [opts.pendingUserMessage!],
+          slimmingConfig.imageTokenEstimate,
+        )
+      : 0;
 
     // Slim the side-query input: replace inlineData with placeholders.
     // The original history (with images) is preserved separately for
@@ -751,10 +757,14 @@ export class ChatCompressionService {
         compressionOutputTokenCount > 0
       ) {
         canCalculateNewTokenCount = true;
+        const compressedHistoryTokenCount = Math.max(
+          0,
+          compressionInputTokenCount - 1000 - pendingToolResultTokenCount,
+        );
         newTokenCount = Math.max(
           0,
           originalTokenCount -
-            (compressionInputTokenCount - 1000) +
+            compressedHistoryTokenCount +
             compressionOutputTokenCount,
         );
         // The composer injects file-restoration blocks (up to

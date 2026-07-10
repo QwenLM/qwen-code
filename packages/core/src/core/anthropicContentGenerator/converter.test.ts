@@ -842,9 +842,7 @@ describe('AnthropicContentConverter', () => {
           { role: 'model', parts: [{ text: 'Hello!' }] },
           {
             role: 'model',
-            parts: [
-              { functionCall: { id: 't1', name: 'tool', args: {} } },
-            ],
+            parts: [{ functionCall: { id: 't1', name: 'tool', args: {} } }],
           },
           {
             role: 'user',
@@ -987,7 +985,141 @@ describe('AnthropicContentConverter', () => {
         {
           role: 'user',
           content: [
-            { type: 'text', text: 'extra', cache_control: { type: 'ephemeral' } },
+            {
+              type: 'text',
+              text: 'extra',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      ]);
+    });
+
+    it('keeps tool results split across consecutive user messages', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'x', name: 'tool', args: {} } },
+              { functionCall: { id: 'y', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'x',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'y',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(
+        (messages[1]?.content as Array<{ id?: string; type: string }>).filter(
+          (block) => block.type === 'tool_use',
+        ),
+      ).toHaveLength(2);
+      expect(messages[2]).toEqual({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'x',
+            content: 'first',
+          },
+          {
+            type: 'tool_result',
+            tool_use_id: 'y',
+            content: 'second',
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      });
+    });
+
+    it('merges users when dropping an orphan-only assistant turn', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'before' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'orphan', name: 'tool', args: {} } }],
+          },
+          { role: 'user', parts: [{ text: 'after' }] },
+        ],
+      });
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'before' },
+            {
+              type: 'text',
+              text: 'after',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      ]);
+    });
+
+    it('drops tool results that do not lead user content', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 't1', name: 'tool', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              { text: 'preface' },
+              {
+                functionResponse: {
+                  id: 't1',
+                  name: 'tool',
+                  response: { output: 'late' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Hi' },
+            {
+              type: 'text',
+              text: 'preface',
+              cache_control: { type: 'ephemeral' },
+            },
           ],
         },
       ]);
@@ -1000,15 +1132,11 @@ describe('AnthropicContentConverter', () => {
           { role: 'user', parts: [{ text: 'Hi' }] },
           {
             role: 'model',
-            parts: [
-              { functionCall: { id: 'dup', name: 'tool', args: {} } },
-            ],
+            parts: [{ functionCall: { id: 'dup', name: 'tool', args: {} } }],
           },
           {
             role: 'model',
-            parts: [
-              { functionCall: { id: 'dup', name: 'tool', args: {} } },
-            ],
+            parts: [{ functionCall: { id: 'dup', name: 'tool', args: {} } }],
           },
           {
             role: 'user',
@@ -1026,9 +1154,9 @@ describe('AnthropicContentConverter', () => {
       });
 
       const assistant = messages[1];
-      const toolUseBlocks = (assistant?.content as Array<{ type: string }>).filter(
-        (b) => b.type === 'tool_use',
-      );
+      const toolUseBlocks = (
+        assistant?.content as Array<{ type: string }>
+      ).filter((b) => b.type === 'tool_use');
       expect(toolUseBlocks).toHaveLength(1);
     });
   });
@@ -1319,6 +1447,49 @@ describe('AnthropicContentConverter', () => {
           { type: 'text', text: 'Hello!' },
           { type: 'tool_use', id: 't1', name: 'tool', input: {} },
         ],
+      });
+    });
+
+    it('strips thinking after consecutive assistant turns are merged', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'preserved before merge',
+                  thought: true,
+                  thoughtSignature: 'sig',
+                },
+              ],
+            },
+            {
+              role: 'model',
+              parts: [{ functionCall: { id: 't1', name: 'tool', args: {} } }],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { stripAssistantThinking: true },
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 't1', name: 'tool', input: {} }],
       });
     });
 

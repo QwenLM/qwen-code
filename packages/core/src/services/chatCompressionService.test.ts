@@ -2362,6 +2362,61 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
     ).toBe(true);
   });
 
+  it('does not subtract pending tool result tokens from original history', async () => {
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: 'TEST SUMMARY',
+      usage: {
+        promptTokenCount: 220_000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 220_500,
+      },
+    } as never);
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'inspect the repository' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'tool-call-1',
+              name: 'read_file',
+              args: { file_path: 'README.md' },
+            },
+          },
+        ],
+      },
+    ];
+
+    const result = await new ChatCompressionService().compress(
+      makeFakeChat(history),
+      {
+        promptId: 'p',
+        force: true,
+        model: 'qwen-vl',
+        config: makeFakeConfig(),
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+        trigger: 'auto',
+        pendingUserMessage: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool-call-1',
+                name: 'read_file',
+                response: { output: 'x'.repeat(160_000) },
+              },
+            },
+          ],
+        },
+      },
+    );
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.info.newTokenCount).toBeGreaterThan(0);
+  });
+
   it('produces newHistory composed via composePostCompactHistory', async () => {
     vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
       text: 'SUM_TXT',

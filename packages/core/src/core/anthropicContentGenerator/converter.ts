@@ -159,6 +159,10 @@ export class AnthropicContentConverter {
     messages = mergeConsecutiveAssistantMessages(messages);
     messages = cleanOrphanedToolCalls(messages);
     messages = mergeConsecutiveAssistantMessages(messages);
+    if (options.stripAssistantThinking) {
+      this.stripThinkingFromAssistantMessages(messages);
+    }
+    messages = mergeConsecutiveUserMessages(messages);
 
     // Add cache_control to enable prompt caching (if enabled). Prefer the
     // per-call override when the caller (typically the generator) passes
@@ -943,7 +947,8 @@ function mergeConsecutiveAssistantMessages(
 function cleanOrphanedToolCalls(
   messages: AnthropicMessageParam[],
 ): AnthropicMessageParam[] {
-  const survivingToolCallIds = new Set<string>();
+  const validToolUseBlocks = new WeakSet<object>();
+  const validToolResultBlocks = new WeakSet<object>();
 
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i]!;
@@ -952,33 +957,37 @@ function cleanOrphanedToolCalls(
     }
 
     const blocks = message.content as AnthropicContentBlockParam[];
-    const toolUseIds = new Set<string>();
+    const toolUseBlocks = new Map<string, AnthropicContentBlockParam>();
     for (const block of blocks) {
       if ((block as { type?: string }).type === 'tool_use') {
         const id = (block as { id?: string }).id;
-        if (id) toolUseIds.add(id);
+        if (id && !toolUseBlocks.has(id)) toolUseBlocks.set(id, block);
       }
     }
-    if (toolUseIds.size === 0) continue;
+    if (toolUseBlocks.size === 0) continue;
 
-    const nextMessage = messages[i + 1];
-    const toolResultIds = new Set<string>();
-    if (
-      nextMessage &&
-      nextMessage.role === 'user' &&
-      Array.isArray(nextMessage.content)
-    ) {
+    for (let j = i + 1; j < messages.length; j++) {
+      const nextMessage = messages[j];
+      if (
+        !nextMessage ||
+        nextMessage.role !== 'user' ||
+        !Array.isArray(nextMessage.content)
+      ) {
+        break;
+      }
+
+      let seenNonToolResult = false;
       for (const block of nextMessage.content as AnthropicContentBlockParam[]) {
         if ((block as { type?: string }).type === 'tool_result') {
           const id = (block as { tool_use_id?: string }).tool_use_id;
-          if (id) toolResultIds.add(id);
+          const toolUseBlock = id ? toolUseBlocks.get(id) : undefined;
+          if (!seenNonToolResult && toolUseBlock) {
+            validToolUseBlocks.add(toolUseBlock as object);
+            validToolResultBlocks.add(block as object);
+          }
+        } else {
+          seenNonToolResult = true;
         }
-      }
-    }
-
-    for (const id of toolUseIds) {
-      if (toolResultIds.has(id)) {
-        survivingToolCallIds.add(id);
       }
     }
   }
@@ -1007,11 +1016,11 @@ function cleanOrphanedToolCalls(
       const t = (b as { type?: string }).type;
       if (t === 'tool_use') {
         const id = (b as { id?: string }).id;
-        return !id || survivingToolCallIds.has(id);
+        return !id || validToolUseBlocks.has(b as object);
       }
       if (t === 'tool_result') {
         const id = (b as { tool_use_id?: string }).tool_use_id;
-        return !id || survivingToolCallIds.has(id);
+        return !id || validToolResultBlocks.has(b as object);
       }
       return true;
     });
@@ -1026,4 +1035,29 @@ function cleanOrphanedToolCalls(
   }
 
   return cleaned;
+}
+
+function mergeConsecutiveUserMessages(
+  messages: AnthropicMessageParam[],
+): AnthropicMessageParam[] {
+  const merged: AnthropicMessageParam[] = [];
+
+  for (const message of messages) {
+    const lastMessage = merged[merged.length - 1];
+    if (
+      message.role === 'user' &&
+      lastMessage?.role === 'user' &&
+      Array.isArray(message.content) &&
+      Array.isArray(lastMessage.content)
+    ) {
+      lastMessage.content = [
+        ...(lastMessage.content as AnthropicContentBlockParam[]),
+        ...(message.content as AnthropicContentBlockParam[]),
+      ];
+      continue;
+    }
+    merged.push(message);
+  }
+
+  return merged;
 }
