@@ -183,6 +183,37 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('passes approval mode to the session factory', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const factory = vi.fn().mockResolvedValue(session);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: factory,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo', { approvalMode: 'yolo' });
+    await bridge.loadSession('session-1', '/repo', { approvalMode: 'yolo' });
+
+    expect(factory).toHaveBeenNthCalledWith(1, {
+      workspaceCwd: '/repo',
+      modelServiceId: undefined,
+      sessionScope: 'thread',
+      approvalMode: 'yolo',
+    });
+    expect(factory).toHaveBeenNthCalledWith(2, {
+      workspaceCwd: '/repo',
+      modelServiceId: undefined,
+      sessionId: 'session-1',
+      sessionScope: 'thread',
+      approvalMode: 'yolo',
+    });
+
+    events.close();
+    bridge.stop();
+  });
+
   it('drains daemon chunks queued with prompt completion', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
