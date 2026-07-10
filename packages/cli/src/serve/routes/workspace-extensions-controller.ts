@@ -31,6 +31,13 @@ const MAX_EXTENSION_INSTALL_QUEUE_DEPTH = 10;
 const EXTENSION_MUTATION_TIMEOUT_MS = 10 * 60_000;
 
 /**
+ * Thrown by the per-workspace install queue when it is saturated, and matched
+ * by the route layer to emit a 429. Shared so the throw site and the match
+ * site (a separate module) can never silently drift apart.
+ */
+export const EXTENSION_QUEUE_FULL_MESSAGE = 'Extension operation queue is full';
+
+/**
  * Wraps a promise with a timeout that rejects if the underlying work does not
  * settle in time. Shared by the controller (mutation queue) and the route
  * handlers (update-check / refresh).
@@ -144,7 +151,7 @@ export function createExtensionsController(
   let extensionInstallQueueDepth = 0;
   const enqueueExtensionInstall = async <T>(run: () => Promise<T>) => {
     if (extensionInstallQueueDepth >= MAX_EXTENSION_INSTALL_QUEUE_DEPTH) {
-      throw new Error('Extension operation queue is full');
+      throw new Error(EXTENSION_QUEUE_FULL_MESSAGE);
     }
     extensionInstallQueueDepth += 1;
     const next = extensionInstallQueue.then(run, run).finally(() => {
@@ -246,7 +253,7 @@ export function createExtensionsController(
   ): void => {
     if (extensionInstallQueueDepth >= MAX_EXTENSION_INSTALL_QUEUE_DEPTH) {
       res.status(429).json({
-        error: 'Extension operation queue is full',
+        error: EXTENSION_QUEUE_FULL_MESSAGE,
         code: 'extension_queue_full',
       });
       return;
@@ -291,7 +298,7 @@ export function createExtensionsController(
             },
           });
           writeStderrLine(
-            `qwen serve: extensions ${operation}: refreshed ${result.refreshed} session(s), ${result.failed} failed`,
+            `qwen serve: [${boundWorkspace}] extensions ${operation}: refreshed ${result.refreshed} session(s), ${result.failed} failed`,
           );
         } catch (refreshErr) {
           const message = redactUrlCredentials(
@@ -317,7 +324,7 @@ export function createExtensionsController(
             });
           } catch (broadcastErr) {
             writeStderrLine(
-              `qwen serve: extensions ${operation}: failed to broadcast refresh failure: ${
+              `qwen serve: [${boundWorkspace}] extensions ${operation}: failed to broadcast refresh failure: ${
                 broadcastErr instanceof Error
                   ? redactUrlCredentials(broadcastErr.message)
                   : String(broadcastErr)
@@ -325,7 +332,7 @@ export function createExtensionsController(
             );
           }
           writeStderrLine(
-            `qwen serve: extensions ${operation}: mutation succeeded but refresh failed: ${message}`,
+            `qwen serve: [${boundWorkspace}] extensions ${operation}: mutation succeeded but refresh failed: ${message}`,
           );
         }
       } catch (err) {
@@ -349,7 +356,7 @@ export function createExtensionsController(
           });
         } catch (broadcastErr) {
           writeStderrLine(
-            `qwen serve: extensions ${operation}: failed to broadcast failure: ${
+            `qwen serve: [${boundWorkspace}] extensions ${operation}: failed to broadcast failure: ${
               broadcastErr instanceof Error
                 ? redactUrlCredentials(broadcastErr.message)
                 : String(broadcastErr)
@@ -358,7 +365,7 @@ export function createExtensionsController(
         }
         try {
           writeStderrLine(
-            `qwen serve: extensions ${operation}: background task failed: ${message}`,
+            `qwen serve: [${boundWorkspace}] extensions ${operation}: background task failed: ${message}`,
           );
         } catch {
           // Keep queued background work from surfacing as unhandledRejection.
@@ -374,7 +381,7 @@ export function createExtensionsController(
       });
       try {
         writeStderrLine(
-          `qwen serve: extensions ${operation}: queued task failed: ${message}`,
+          `qwen serve: [${boundWorkspace}] extensions ${operation}: queued task failed: ${message}`,
         );
       } catch {
         // Last-resort guard for detached async work.

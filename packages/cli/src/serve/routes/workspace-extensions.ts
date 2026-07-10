@@ -30,6 +30,7 @@ import type {
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import {
   createExtensionsController,
+  EXTENSION_QUEUE_FULL_MESSAGE,
   withExtensionTimeout,
   type ExtensionsController,
 } from './workspace-extensions-controller.js';
@@ -39,11 +40,11 @@ type SafeBody = typeof safeBodyType;
 const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
 
 const isExtensionQueueFullError = (err: unknown): boolean =>
-  err instanceof Error && err.message === 'Extension operation queue is full';
+  err instanceof Error && err.message === EXTENSION_QUEUE_FULL_MESSAGE;
 
 const sendExtensionQueueFull = (res: Response): void => {
   res.status(429).json({
-    error: 'Extension operation queue is full',
+    error: EXTENSION_QUEUE_FULL_MESSAGE,
     code: 'extension_queue_full',
   });
 };
