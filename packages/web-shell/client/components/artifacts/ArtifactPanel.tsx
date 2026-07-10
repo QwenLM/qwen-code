@@ -32,6 +32,7 @@ import {
   formatArtifactSize,
   getArtifactLocation,
   normalizePath,
+  withArtifactPreviewCsp,
 } from './artifactUtils';
 import {
   displayPath,
@@ -1711,30 +1712,6 @@ function HtmlArtifactPreview({
       )}
       {error && <div className={styles.previewError}>{error}</div>}
     </div>
-  );
-}
-
-function withArtifactPreviewCsp(html: string) {
-  const csp =
-    "default-src 'none'; base-uri 'none'; style-src 'unsafe-inline'; img-src data: blob:;";
-  if (typeof DOMParser === 'undefined') {
-    return `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${csp}"></head><body>${stripMetaRefreshFallback(html)}</body></html>`;
-  }
-  const doc = new DOMParser().parseFromString(html, 'text/html');
-  doc
-    .querySelectorAll('meta[http-equiv="refresh" i]')
-    .forEach((element) => element.remove());
-  const meta = doc.createElement('meta');
-  meta.httpEquiv = 'Content-Security-Policy';
-  meta.content = csp;
-  doc.head.prepend(meta);
-  return `<!doctype html>${doc.documentElement.outerHTML}`;
-}
-
-function stripMetaRefreshFallback(html: string) {
-  return html.replace(
-    /<meta\b(?=[^>]*\bhttp-equiv\s*=\s*["']?refresh["']?)[^>]*>/gi,
-    '',
   );
 }
 
