@@ -86,6 +86,8 @@ export function useSessionArtifacts(): SessionArtifactsState {
       }
     }
   }, [actions, isConnected, sessionId, supportsArtifacts]);
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
 
   useEffect(() => {
     void refresh();
@@ -95,9 +97,9 @@ export function useSessionArtifacts(): SessionArtifactsState {
     const previous = previousPromptStatusRef.current;
     previousPromptStatusRef.current = promptStatus;
     if (previous !== 'idle' && promptStatus === 'idle') {
-      void refresh();
+      void refreshRef.current();
     }
-  }, [promptStatus, refresh]);
+  }, [promptStatus]);
 
   useEffect(() => {
     const previous = previousArtifactsVersionRef.current;
@@ -107,9 +109,9 @@ export function useSessionArtifacts(): SessionArtifactsState {
       artifactsVersion !== undefined &&
       artifactsVersion !== previous
     ) {
-      void refresh();
+      void refreshRef.current();
     }
-  }, [artifactsVersion, refresh]);
+  }, [artifactsVersion]);
 
   const artifactById = useMemo(
     () => new Map(artifacts.map((artifact) => [artifact.id, artifact])),
@@ -121,5 +123,5 @@ export function useSessionArtifacts(): SessionArtifactsState {
 
 function isSessionDisconnectedError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
-  return message === 'Daemon session is not connected';
+  return message.includes('session is not connected');
 }

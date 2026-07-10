@@ -843,6 +843,7 @@ function ReviewChanges({
   const [isFileListOpen, setIsFileListOpen] = useState(true);
   const [isReviewStacked, setIsReviewStacked] = useState(false);
   const [reviewListWidth, setReviewListWidth] = useState(520);
+  const reviewListWidthRef = useRef(reviewListWidth);
   const reviewContentRef = useRef<HTMLDivElement | null>(null);
   const reviewResizeCleanupRef = useRef<(() => void) | null>(null);
   const [expandedPath, setExpandedPath] = useState<string | null>(null);
@@ -855,6 +856,10 @@ function ReviewChanges({
   useEffect(() => {
     setExpandedPath(selectedPath);
   }, [selectedPath]);
+
+  useEffect(() => {
+    reviewListWidthRef.current = reviewListWidth;
+  }, [reviewListWidth]);
 
   useEffect(() => {
     const container = reviewContentRef.current;
@@ -878,7 +883,7 @@ function ReviewChanges({
       const resizeHandle = event.currentTarget;
       resizeHandle.setPointerCapture(event.pointerId);
       const startX = event.clientX;
-      const startWidth = reviewListWidth;
+      const startWidth = reviewListWidthRef.current;
       const containerWidth = container.getBoundingClientRect().width;
       const maxWidth = Math.max(180, containerWidth - 180);
       const previousCursor = document.body.style.cursor;
@@ -926,7 +931,7 @@ function ReviewChanges({
       window.addEventListener('pointerup', handlePointerUp);
       window.addEventListener('pointercancel', handlePointerUp);
     },
-    [reviewListWidth],
+    [],
   );
   if (changes.length === 0) {
     return <div className={styles.empty}>No file changes to review.</div>;

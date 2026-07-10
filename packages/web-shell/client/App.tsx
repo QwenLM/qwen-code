@@ -1430,6 +1430,9 @@ export function App({
       if (nextTabs.length === 0) {
         setArtifactPanelOpen(false);
         setActiveArtifactPanelTabId(null);
+        setReviewChanges([]);
+        setSelectedReviewPath(null);
+        setArtifactPanelExtraArtifacts([]);
         return nextTabs;
       }
       if (activeArtifactPanelTabIdRef.current === tabId) {

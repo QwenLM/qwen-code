@@ -263,8 +263,13 @@ function getFileChange(
 }
 
 function getToolFilePath(tool: ACPToolCall): string | undefined {
-  const fromArgs = getStringField(tool.args, 'file_path', 'filePath', 'path');
-  if (fromArgs) return fromArgs;
+  const fromArgs = getStringContentField(
+    tool.args,
+    'file_path',
+    'filePath',
+    'path',
+  );
+  if (fromArgs !== undefined && fromArgs.length > 0) return fromArgs;
   for (const content of tool.content ?? []) {
     if (content.path) return content.path;
   }
