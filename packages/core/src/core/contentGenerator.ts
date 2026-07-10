@@ -90,6 +90,11 @@ export type ContentGeneratorConfig = {
   maxRetries?: number; // Maximum retries for rate-limit errors
   retryErrorCodes?: number[]; // Additional error codes that trigger rate-limit retry
   enableCacheControl?: boolean; // Enable cache control for DashScope providers
+  // Force `scope: 'global'` on Anthropic cache_control entries even when the
+  // base URL is not an Anthropic-native origin (e.g. proxy providers like
+  // Routify, OpenRouter). Requires the proxy to forward `cache_control` fields
+  // and the `prompt-caching-scope-2026-01-05` beta. See issue #6642.
+  forceGlobalCacheScope?: boolean;
   samplingParams?: {
     top_p?: number;
     top_k?: number;
