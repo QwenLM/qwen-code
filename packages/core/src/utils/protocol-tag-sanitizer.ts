@@ -65,6 +65,9 @@ function stripClosedAnalysisBlocks(text: string): string {
 
     const closeEnd = findAnalysisCloseEnd(text, end);
     if (closeEnd === -1) {
+      if (/<\/summary(?=[\s/>])[^>]*>/i.test(text.slice(end))) {
+        return result + text.slice(index);
+      }
       return result + text.slice(index, start);
     }
 
@@ -93,18 +96,32 @@ function stripVisibleTags(text: string): string {
 
     result += stripped.slice(index, start);
     if (tag.startsWith('<summary')) {
-      if (summaryDepth > 0) result += match[0];
+      if (summaryDepth > 0) {
+        result += match[0];
+      } else if (needsBoundarySpace(stripped, start, end)) {
+        result += ' ';
+      }
       summaryDepth += 1;
     } else if (summaryDepth > 1) {
       result += match[0];
       summaryDepth -= 1;
     } else if (summaryDepth === 1) {
+      if (needsBoundarySpace(stripped, start, end)) result += ' ';
       summaryDepth = 0;
     } else {
       result += match[0];
     }
     index = end;
   }
+}
+
+function needsBoundarySpace(text: string, start: number, end: number): boolean {
+  return (
+    start > 0 &&
+    end < text.length &&
+    !/\s/.test(text[start - 1]!) &&
+    !/\s/.test(text[end]!)
+  );
 }
 
 function stripAnalysisOutsideSummary(text: string): string {
