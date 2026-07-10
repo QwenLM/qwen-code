@@ -762,7 +762,7 @@ const EN: Messages = {
   'scheduledTasks.conditionPlaceholder':
     'e.g. Check whether anything landed on main since yesterday. If nothing did, the task should not run.',
   'scheduledTasks.condition.hint':
-    'Checked in this task’s own session before each run. The prompt only runs in a fresh session when the check says yes — otherwise the run is skipped.',
+    'Checked in this task's own session before each run. The prompt only runs in a fresh session when the check says yes — otherwise the run is skipped.',
   'scheduledTasks.condition.cardPrefix': 'If:',
   'turnOutputs.filesEdited': (v) => `Edited ${v?.count ?? 0} files`,
   'turnOutputs.viewChanges': 'View changes',
@@ -2495,7 +2495,7 @@ const ZH: Messages = {
   'scheduledTasks.conditionPlaceholder':
     '例如：检查昨天以来 main 分支有没有新提交。如果没有，则本次不应执行。',
   'scheduledTasks.condition.hint':
-    '每次触发前，先在本任务自己的会话中检查该条件。只有判定为“是”，才会新建会话执行命令；否则跳过本次运行。',
+    '每次触发前，先在本任务自己的会话中检查该条件。只有判定为"是"，才会新建会话执行命令；否则跳过本次运行。',
   'scheduledTasks.condition.cardPrefix': '若：',
   'turnOutputs.filesEdited': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
   'turnOutputs.viewChanges': '查看更改',
