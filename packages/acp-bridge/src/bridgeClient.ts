@@ -1148,6 +1148,9 @@ export class BridgeClient implements Client {
       ...(result.stopReason !== undefined
         ? { stopReason: result.stopReason }
         : {}),
+      ...(result.parentSessionPersisted !== undefined
+        ? { parentSessionPersisted: result.parentSessionPersisted }
+        : {}),
     };
   }
 

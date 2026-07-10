@@ -2988,8 +2988,8 @@ export async function runQwenServe(
       });
       const secondaryClientMcpSenderRegistry = new ClientMcpSenderRegistry();
       // Wire sub-session support for the secondary workspace too — without
-      // this, isolated scheduled tasks and create_sub_session calls from
-      // sessions bound to a secondary workspace hit methodNotFound.
+      // this, create_sub_session calls from sessions bound to a secondary
+      // workspace hit methodNotFound.
       // eslint-disable-next-line prefer-const -- assigned once after bridge creation; `let` required because the launcher closure captures it before the assignment.
       let secondaryBridgeRef:
         | ReturnType<typeof runtime.createAcpSessionBridge>
@@ -3296,8 +3296,211 @@ export async function runQwenServe(
       },
     };
 
+    // Factory for dynamically creating workspace runtimes (POST /workspaces).
+    const createDynamicWorkspaceRuntime = async (
+      cwd: string,
+    ): Promise<import('./workspace-registry.js').WorkspaceRuntime> => {
+      let wsSettings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
+      try {
+        wsSettings = settingsRuntime.settings.loadSettings(cwd);
+      } catch (err) {
+        // Match the startup secondary-workspace path: surface why full settings
+        // couldn't be read instead of silently falling back to defaults.
+        writeStderrLine(
+          `qwen serve: could not read full settings for dynamic workspace ` +
+            `${cwd} (${err instanceof Error ? err.message : String(err)}); ` +
+            `falling back to defaults.`,
+        );
+      }
+      const trusted = wsSettings
+        ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
+            wsSettings.merged,
+            cwd,
+          ).effective.state === 'trusted'
+        : false;
+      const wsEnv = createRuntimeEnvMetadata(cwd, wsSettings);
+      const wsHash = core.hashDaemonWorkspace(cwd);
+      const wsFsFactory = runtime.resolveBridgeFsFactory({
+        boundWorkspaces: [cwd],
+        trusted,
+        emit: deps.fsAuditEmit,
+        pathLocks: sharedPathLocks,
+        ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
+      });
+      const wsChannelFactory = runtime.createSpawnChannelFactory({
+        sourceEnv: wsEnv.effectiveEnv,
+        onDiagnosticLine: diagnosticSink,
+        pipeHooks: {
+          onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
+          onMessageReceived: (bytes) => recordPipeMessage('inbound', bytes),
+          onMessageObserved: ({ direction, bytes, message }) =>
+            observeLargePipeFrame({
+              direction: daemonPipeDirection(direction),
+              bytes,
+              message,
+            }),
+        },
+        ...(opts.experimentalLsp === true
+          ? { extraArgs: ['--experimental-lsp'] }
+          : {}),
+      });
+      const wsClientMcpRegistry = new ClientMcpSenderRegistry();
+      // eslint-disable-next-line prefer-const
+      let wsBridgeRef:
+        | ReturnType<typeof runtime.createAcpSessionBridge>
+        | undefined;
+      const wsSubSessionLauncher = createSubSessionLauncher({
+        getBridge: () => wsBridgeRef,
+        boundWorkspace: cwd,
+      });
+      const wsBridge = runtime.createAcpSessionBridge({
+        clientMcpSender: wsClientMcpRegistry.lookup,
+        onCreateSubSession: wsSubSessionLauncher.launch,
+        maxSessions: opts.maxSessions,
+        freshSessionAdmission: totalSessionAdmission.admit,
+        sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
+        ...(opts.maxPendingPromptsPerSession !== undefined
+          ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
+          : {}),
+        ...(opts.eventRingSize !== undefined
+          ? { eventRingSize: opts.eventRingSize }
+          : {}),
+        ...(opts.compactedReplayMaxBytes !== undefined
+          ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
+          : {}),
+        ...(opts.channelIdleTimeoutMs !== undefined
+          ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
+          : {}),
+        ...(opts.sessionReapIntervalMs !== undefined
+          ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
+          : {}),
+        ...(opts.sessionIdleTimeoutMs !== undefined
+          ? { sessionIdleTimeoutMs: opts.sessionIdleTimeoutMs }
+          : {}),
+        ...(opts.permissionResponseTimeoutMs !== undefined
+          ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
+          : {}),
+        boundWorkspace: cwd,
+        sessionShellCommandEnabled,
+        childEnvOverrides,
+        channelFactory: wsChannelFactory,
+        onDiagnosticLine: diagnosticSink,
+        telemetry: createRuntimeBridgeTelemetry(wsHash),
+        ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+        ...(permissionConsensusQuorum !== undefined
+          ? { permissionConsensusQuorum }
+          : {}),
+        permissionAudit: permissionAuditPublisher,
+        statusProvider: runtime.createDaemonStatusProvider({
+          env: wsEnv.effectiveEnv,
+        }),
+        fileSystem: createBridgeFileSystemAdapter(wsFsFactory),
+        persistApprovalMode: (workspace, mode) =>
+          withSettingsLock(workspace, async () => {
+            const fresh = settingsRuntime.settings.loadSettings(workspace);
+            fresh.setValue(WORKSPACE_SETTING_SCOPE, 'tools.approvalMode', mode);
+          }),
+      });
+      wsBridgeRef = wsBridge;
+      const wsService = runtime.createDaemonWorkspaceService({
+        boundWorkspace: cwd,
+        contextFilename: contextFilenameForInit ?? 'QWEN.md',
+        statusProvider: runtime.createDaemonStatusProvider({
+          env: wsEnv.effectiveEnv,
+        }),
+        workspaceProvidersStatusProvider:
+          runtime.createWorkspaceProvidersStatusProvider({
+            env: wsEnv.effectiveEnv,
+          }),
+        workspaceSkillsStatusProvider:
+          runtime.createWorkspaceSkillsStatusProvider(),
+        isChannelLive: () => wsBridge.isChannelLive(),
+        preheatAcpChild: () => wsBridge.preheat(),
+        persistDisabledTools: persistDisabledToolsFn,
+        persistSetting: persistSettingFn,
+        persistSettings: persistSettingsFn,
+        reloadDaemonEnv: (workspace) =>
+          withSettingsLock(workspace, async () => {
+            const fresh = settingsRuntime.settings.loadSettings(workspace, {
+              skipLoadEnvironment: true,
+            });
+            const result = settingsRuntime.settings.reloadEnvironment(
+              fresh.merged,
+              workspace,
+            );
+            // Mirror the startup secondary-workspace path: rebuild the runtime
+            // env snapshot and update the metadata so `.env` changes actually
+            // propagate to child processes spawned by this workspace's bridge.
+            try {
+              const refreshedRuntimeEnv =
+                settingsRuntime.environment.buildRuntimeEnvironment(
+                  fresh.merged,
+                  workspace,
+                  daemonRuntimeBaseEnv,
+                );
+              logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
+              wsEnv.replace(refreshedRuntimeEnv.effectiveEnv);
+              wsEnv.metadata.envFileReadFailed =
+                refreshedRuntimeEnv.envFileReadFailed;
+              wsEnv.metadata.envFileReadFailures.splice(
+                0,
+                wsEnv.metadata.envFileReadFailures.length,
+                ...refreshedRuntimeEnv.envFileReadFailures,
+              );
+              wsEnv.metadata.overlayKeys.splice(
+                0,
+                wsEnv.metadata.overlayKeys.length,
+                ...refreshedRuntimeEnv.overlayKeys,
+              );
+              wsEnv.metadata.envFilePaths.splice(
+                0,
+                wsEnv.metadata.envFilePaths.length,
+                ...refreshedRuntimeEnv.envFilePaths,
+              );
+              delete wsEnv.metadata.fallbackReason;
+            } catch (err) {
+              wsEnv.metadata.fallbackReason =
+                err instanceof Error ? err.message : String(err);
+              daemonLog.warn(
+                'failed to rebuild dynamic runtime env snapshot after daemon env reload; preserving previous runtime env',
+                {
+                  workspace,
+                  error: wsEnv.metadata.fallbackReason,
+                },
+              );
+            }
+            return result;
+          }),
+        queryWorkspaceStatus: (method, idle) =>
+          wsBridge.queryWorkspaceStatus(method, idle),
+        invokeWorkspaceCommand: (method, params, invokeOpts) =>
+          wsBridge.invokeWorkspaceCommand(method, params, invokeOpts),
+        refreshExtensionsForAllSessions: () =>
+          wsBridge.refreshExtensionsForAllSessions(),
+        publishWorkspaceEvent: (event) => wsBridge.publishWorkspaceEvent(event),
+      });
+      // Register shared-array cleanup only after the runtime is fully built, so
+      // a throw during createDaemonWorkspaceService (or any later step) can't
+      // leave an orphaned bridge/channel in the shutdown arrays.
+      runtimeBridges.push(wsBridge);
+      internalRuntimeBridgesForCleanup.push(wsBridge);
+      subSessionStoppers.push(wsSubSessionLauncher.stop);
+      return {
+        workspaceId: wsHash,
+        workspaceCwd: cwd,
+        primary: false,
+        trusted,
+        env: wsEnv.metadata,
+        bridge: wsBridge,
+        workspaceService: wsService,
+        routeFileSystemFactory: wsFsFactory,
+        clientMcpSenderRegistry: wsClientMcpRegistry,
+      };
+    };
+
     const app = runtime.createServeApp(opts, () => actualPort, {
       workspaceRegistry,
+      createWorkspaceRuntime: createDynamicWorkspaceRuntime,
       bridge,
       webShellDir,
       boundWorkspace,

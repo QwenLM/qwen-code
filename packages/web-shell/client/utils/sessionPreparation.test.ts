@@ -172,6 +172,17 @@ describe('createAndAttachSessionForPrompt', () => {
       closeError,
     );
   });
+
+  it('forwards workspaceCwd to createSession', async () => {
+    const actions = createActions();
+    await createAndAttachSessionForPrompt({
+      sessionActions: actions,
+      workspaceCwd: '/ws/secondary',
+    });
+    expect(actions.createSession).toHaveBeenCalledWith({
+      workspaceCwd: '/ws/secondary',
+    });
+  });
 });
 
 function createDeferred<T>(): {

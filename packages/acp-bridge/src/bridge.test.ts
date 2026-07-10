@@ -46,7 +46,12 @@ import {
   extractErrorMessage,
   extractErrorCode,
 } from './bridge.js';
-import { SERVE_STATUS_EXT_METHODS } from './status.js';
+import {
+  BridgeChannelClosedError,
+  BridgeTimeoutError,
+  SERVE_CONTROL_EXT_METHODS,
+  SERVE_STATUS_EXT_METHODS,
+} from './status.js';
 import type { ChannelFactory } from './channel.js';
 import type { BridgeTelemetry } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
@@ -908,6 +913,141 @@ describe('createAcpSessionBridge', () => {
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
     expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
+
+    await bridge.shutdown();
+  });
+
+  it('gets transcript pages through workspace status without creating a session', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method, params) => {
+            if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                events: [],
+                hasMore: false,
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    const result = await bridge.getSessionTranscriptPage({
+      sessionId: 'session-1',
+      cursor: 'opaque',
+      limit: 2,
+    });
+
+    expect(result).toEqual({
+      v: 1,
+      sessionId: 'session-1',
+      events: [],
+      hasMore: false,
+    });
+    expect(handles[0]?.agent.extMethodCalls).toEqual([
+      {
+        method: SERVE_STATUS_EXT_METHODS.sessionTranscript,
+        params: {
+          cwd: WS_A,
+          sessionId: 'session-1',
+          cursor: 'opaque',
+          limit: 2,
+        },
+      },
+    ]);
+    expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.promptCalls).toHaveLength(0);
+    expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
+
+    await bridge.shutdown();
+  });
+
+  it('times out transcript page status requests', async () => {
+    vi.useFakeTimers();
+    try {
+      const callSeen = deferred<void>();
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+            callSeen.resolve();
+            return new Promise<never>(() => {});
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      const request = bridge.getSessionTranscriptPage({
+        sessionId: 'session-1',
+      });
+      const rejection =
+        // eslint-disable-next-line vitest/valid-expect -- awaited via `rejection` below, after the fake timers advance (handler attached early so the timeout rejection is not unhandled)
+        expect(request).rejects.toBeInstanceOf(BridgeTimeoutError);
+      await callSeen.promise;
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      await rejection;
+      expect(handle.agent.extMethodCalls).toHaveLength(1);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects transcript page status requests when the channel closes', async () => {
+    const callSeen = deferred<void>();
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          callSeen.resolve();
+          return new Promise<never>(() => {});
+        }
+        throw new Error(`unexpected extMethod ${method}`);
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+
+    const request = bridge.getSessionTranscriptPage({
+      sessionId: 'session-1',
+    });
+    await callSeen.promise;
+    handle.crash({ exitCode: 1, signalCode: null });
+
+    await expect(request).rejects.toBeInstanceOf(BridgeChannelClosedError);
+    await bridge.shutdown();
+  });
+
+  it('maps a missing transcript session (resourceNotFound) to SessionNotFoundError', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw RequestError.resourceNotFound('session:missing-transcript');
+        }
+        throw new Error(`unexpected extMethod ${method}`);
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    await expect(
+      bridge.getSessionTranscriptPage({ sessionId: 'missing-transcript' }),
+    ).rejects.toMatchObject({
+      name: 'SessionNotFoundError',
+      sessionId: 'missing-transcript',
+    });
 
     await bridge.shutdown();
   });
@@ -2114,7 +2254,7 @@ describe('createAcpSessionBridge', () => {
       truncatedEvents: 1,
       retainedEvents: 1,
       maxBytes: 512,
-      fullTranscriptAvailable: false,
+      fullTranscriptAvailable: true,
     });
     const retained = loaded.compactedReplay?.[1]?.data as {
       update?: { content?: { text?: string } };
@@ -7741,6 +7881,386 @@ describe('createAcpSessionBridge', () => {
       expect(() => bridge.getSessionSummary('missing')).toThrow(
         SessionNotFoundError,
       );
+      await bridge.shutdown();
+    });
+  });
+
+  describe('parentSessionId', () => {
+    it('carries parentSessionId from a spawn into the session summary', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        parentSessionId: 'parent-1',
+      });
+
+      // Both summary readers surface the same parent lineage.
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        sessionId: session.sessionId,
+        parentSessionId: 'parent-1',
+      });
+      const fromList = bridge
+        .listWorkspaceSessions(WS_A)
+        .find((s) => s.sessionId === session.sessionId);
+      expect(fromList?.parentSessionId).toBe('parent-1');
+
+      await bridge.shutdown();
+    });
+
+    it('leaves parentSessionId undefined when the spawn omits it', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      expect(
+        bridge.getSessionSummary(session.sessionId).parentSessionId,
+      ).toBeUndefined();
+      const fromList = bridge
+        .listWorkspaceSessions(WS_A)
+        .find((s) => s.sessionId === session.sessionId);
+      expect(fromList?.parentSessionId).toBeUndefined();
+
+      await bridge.shutdown();
+    });
+
+    it('sends the sessionParent ext-method to the child when spawned with a parent', async () => {
+      const handles: ChannelHandle[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          const h = makeChannel();
+          handles.push(h);
+          return h.channel;
+        },
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        parentSessionId: 'parent-1',
+      });
+
+      // The parent link is persisted fire-and-forget over the child's own
+      // connection, so wait for it to land on the agent side.
+      await vi.waitFor(() => {
+        expect(
+          handles[0]?.agent.extMethodCalls.find(
+            (c) => c.method === SERVE_CONTROL_EXT_METHODS.sessionParent,
+          ),
+        ).toEqual({
+          method: SERVE_CONTROL_EXT_METHODS.sessionParent,
+          params: {
+            sessionId: session.sessionId,
+            parentSessionId: 'parent-1',
+          },
+        });
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('does not send the sessionParent ext-method when spawned without a parent', async () => {
+      const handles: ChannelHandle[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          const h = makeChannel();
+          handles.push(h);
+          return h.channel;
+        },
+      });
+      await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      expect(
+        handles[0]?.agent.extMethodCalls.some(
+          (c) => c.method === SERVE_CONTROL_EXT_METHODS.sessionParent,
+        ),
+      ).toBe(false);
+
+      await bridge.shutdown();
+    });
+
+    it('still succeeds when the child reports the parent link was not persisted', async () => {
+      const handles: ChannelHandle[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          const h = makeChannel({
+            // The child answers sessionParent with persisted:false (recording
+            // service unavailable). The spawn awaits + checks this, but must not
+            // fail over it — the parent link is live-only until restart.
+            extMethodImpl: (method) =>
+              method === SERVE_CONTROL_EXT_METHODS.sessionParent
+                ? { persisted: false }
+                : {},
+          });
+          handles.push(h);
+          return h.channel;
+        },
+      });
+
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        parentSessionId: 'parent-1',
+      });
+
+      // Spawn still resolves, and the session keeps its parent lineage.
+      expect(session.sessionId).toBeTruthy();
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        parentSessionId: 'parent-1',
+      });
+      // The child WAS asked to persist (result awaited before the spawn returned).
+      expect(
+        handles[0]?.agent.extMethodCalls.some(
+          (c) => c.method === SERVE_CONTROL_EXT_METHODS.sessionParent,
+        ),
+      ).toBe(true);
+
+      await bridge.shutdown();
+    });
+
+    it('still succeeds when the sessionParent ext-method throws', async () => {
+      const handles: ChannelHandle[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          const h = makeChannel({
+            extMethodImpl: (method) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionParent) {
+                throw new Error('recording service unavailable');
+              }
+              return {};
+            },
+          });
+          handles.push(h);
+          return h.channel;
+        },
+      });
+
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        parentSessionId: 'parent-1',
+      });
+
+      // A throw from the persist ext-method is caught and logged, not fatal.
+      expect(session.sessionId).toBeTruthy();
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        parentSessionId: 'parent-1',
+      });
+      expect(
+        handles[0]?.agent.extMethodCalls.some(
+          (c) => c.method === SERVE_CONTROL_EXT_METHODS.sessionParent,
+        ),
+      ).toBe(true);
+
+      await bridge.shutdown();
+    });
+
+    it('reports parentSessionPersisted:true when the child confirms the write', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method) =>
+              method === SERVE_CONTROL_EXT_METHODS.sessionParent
+                ? { persisted: true }
+                : {},
+          }).channel,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        parentSessionId: 'parent-1',
+      });
+      // The child durably recorded the parent link → the caller is told so.
+      expect(session.parentSessionPersisted).toBe(true);
+
+      await bridge.shutdown();
+    });
+
+    it('reports parentSessionPersisted:false and does NOT retry a definitive persisted:false', async () => {
+      const handles: ChannelHandle[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          const h = makeChannel({
+            // A reachable child that answers `persisted:false` (recording
+            // service off) — a definitive answer a retry can't improve.
+            extMethodImpl: (method) =>
+              method === SERVE_CONTROL_EXT_METHODS.sessionParent
+                ? { persisted: false }
+                : {},
+          });
+          handles.push(h);
+          return h.channel;
+        },
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        parentSessionId: 'parent-1',
+      });
+      expect(session.parentSessionPersisted).toBe(false);
+      // Exactly one call — a definitive `persisted:false` is not retried.
+      expect(
+        handles[0]?.agent.extMethodCalls.filter(
+          (c) => c.method === SERVE_CONTROL_EXT_METHODS.sessionParent,
+        ),
+      ).toHaveLength(1);
+      // The child still exists and keeps its parent lineage.
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        parentSessionId: 'parent-1',
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('retries a throwing sessionParent (MAX_PARENT_PERSIST_ATTEMPTS) then reports false', async () => {
+      const handles: ChannelHandle[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          const h = makeChannel({
+            // Every attempt throws (transport error) — the spawn retries the
+            // bounded number of times, then gives up and reports live-only.
+            extMethodImpl: (method) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionParent) {
+                throw new Error('recording service unavailable');
+              }
+              return {};
+            },
+          });
+          handles.push(h);
+          return h.channel;
+        },
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        parentSessionId: 'parent-1',
+      });
+      expect(session.parentSessionPersisted).toBe(false);
+      // Bounded retry: MAX_PARENT_PERSIST_ATTEMPTS (3) attempts before giving up.
+      expect(
+        handles[0]?.agent.extMethodCalls.filter(
+          (c) => c.method === SERVE_CONTROL_EXT_METHODS.sessionParent,
+        ),
+      ).toHaveLength(3);
+      // The child spawned regardless and keeps its parent lineage.
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        parentSessionId: 'parent-1',
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('reports parentSessionPersisted:true when a retry finally succeeds', async () => {
+      const handles: ChannelHandle[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          const h = makeChannel({
+            // Fail the first two attempts, succeed on the third — the call is
+            // already recorded before the impl runs, so on the 3rd it's the
+            // 3rd recorded sessionParent call.
+            extMethodImpl: (method, _params, self) => {
+              if (method !== SERVE_CONTROL_EXT_METHODS.sessionParent) return {};
+              const calls = self.extMethodCalls.filter(
+                (c) => c.method === SERVE_CONTROL_EXT_METHODS.sessionParent,
+              ).length;
+              if (calls < 3) throw new Error('transient transport error');
+              return { persisted: true };
+            },
+          });
+          handles.push(h);
+          return h.channel;
+        },
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        parentSessionId: 'parent-1',
+      });
+      expect(session.parentSessionPersisted).toBe(true);
+      expect(
+        handles[0]?.agent.extMethodCalls.filter(
+          (c) => c.method === SERVE_CONTROL_EXT_METHODS.sessionParent,
+        ),
+      ).toHaveLength(3);
+
+      await bridge.shutdown();
+    });
+
+    it('treats a sessionParent withTimeout timeout as terminal — reports false without retrying', async () => {
+      const handles: ChannelHandle[] = [];
+      const bridge = makeBridge({
+        // Tight init deadline so the hanging sessionParent write trips
+        // `withTimeout` quickly rather than after the 10s default.
+        initializeTimeoutMs: 50,
+        channelFactory: async () => {
+          const h = makeChannel({
+            // sessionParent never answers: `withTimeout` rejects with a
+            // BridgeTimeoutError, which is terminal (a retry would overlap an
+            // uncancelled in-flight write), so the spawn must give up after ONE
+            // attempt and report the link as live-only.
+            extMethodImpl: (method) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionParent) {
+                return new Promise<Record<string, unknown>>(() => {
+                  /* never resolves */
+                });
+              }
+              return {};
+            },
+          });
+          handles.push(h);
+          return h.channel;
+        },
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        parentSessionId: 'parent-1',
+      });
+      expect(session.parentSessionPersisted).toBe(false);
+      // Exactly one attempt — a timeout is not retried.
+      expect(
+        handles[0]?.agent.extMethodCalls.filter(
+          (c) => c.method === SERVE_CONTROL_EXT_METHODS.sessionParent,
+        ),
+      ).toHaveLength(1);
+      // The child still spawned and keeps its in-memory parent lineage.
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        parentSessionId: 'parent-1',
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('omits parentSessionPersisted and never calls sessionParent for a parentless spawn', async () => {
+      const handles: ChannelHandle[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          const h = makeChannel();
+          handles.push(h);
+          return h.channel;
+        },
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      // No parent → the field is entirely absent (not `false`), and the child
+      // was never asked to persist a parent link.
+      expect(session.parentSessionPersisted).toBeUndefined();
+      expect('parentSessionPersisted' in session).toBe(false);
+      expect(
+        handles[0]?.agent.extMethodCalls.some(
+          (c) => c.method === SERVE_CONTROL_EXT_METHODS.sessionParent,
+        ),
+      ).toBe(false);
+
       await bridge.shutdown();
     });
   });
