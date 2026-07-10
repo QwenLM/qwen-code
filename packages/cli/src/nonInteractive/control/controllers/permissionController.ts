@@ -25,6 +25,7 @@ import type {
 import {
   InputFormat,
   ToolConfirmationOutcome,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
 import type {
   CLIControlPermissionRequest,
@@ -389,6 +390,44 @@ export class PermissionController extends BaseController {
   }
 
   /**
+   * Build the confirmation payload for an approved (`allow`) tool call.
+   *
+   * `updatedInput` carries the (possibly sanitised) tool args the host
+   * wants executed. For `ask_user_question` the host also delivers the
+   * user's answers on this channel as `updatedInput.answers`; those
+   * answers must reach the tool via `payload.answers` (the tool reads
+   * them from there, not from its args). Answers are promoted only for
+   * `ask_user_question`, so a same-named `answers` field on any other
+   * tool's input can never leak into the confirmation payload.
+   *
+   * Returns `undefined` when the host sent no usable `updatedInput`, so
+   * callers fall back to a plain single-argument confirmation.
+   */
+  private buildAllowConfirmationPayload(
+    toolName: string,
+    updatedInput: unknown,
+  ): ToolConfirmationPayload | undefined {
+    if (
+      !updatedInput ||
+      typeof updatedInput !== 'object' ||
+      Array.isArray(updatedInput)
+    ) {
+      return undefined;
+    }
+    const updatedInputObj = updatedInput as Record<string, unknown>;
+    const answers =
+      toolName === ToolNames.ASK_USER_QUESTION
+        ? updatedInputObj['answers']
+        : undefined;
+    return {
+      updatedInput: updatedInputObj,
+      ...(answers && typeof answers === 'object' && !Array.isArray(answers)
+        ? { answers: answers as Record<string, string> }
+        : {}),
+    };
+  }
+
+  /**
    * Handle a teammate tool approval request routed via the
    * TEAMMATE_APPROVAL_REQUEST team event. Stream-json only —
    * non-stream-json sessions handle teammate approvals directly
@@ -447,14 +486,13 @@ export class PermissionController extends BaseController {
         // args and the host's policy is silently bypassed. The
         // leader's same-process path mutates `request.args`
         // directly; teammates can't reach across process so the
-        // payload carries the override instead.
-        const updatedInput = payload['updatedInput'];
-        const respondPayload: ToolConfirmationPayload | undefined =
-          updatedInput &&
-          typeof updatedInput === 'object' &&
-          !Array.isArray(updatedInput)
-            ? { updatedInput: updatedInput as Record<string, unknown> }
-            : undefined;
+        // payload carries the override instead. For
+        // `ask_user_question` this same payload also carries the
+        // user's answers, mirroring the leader path.
+        const respondPayload = this.buildAllowConfirmationPayload(
+          event.toolName,
+          payload['updatedInput'],
+        );
         await event.respond(
           ToolConfirmationOutcome.ProceedOnce,
           respondPayload,
@@ -555,14 +593,32 @@ export class PermissionController extends BaseController {
       const behavior = String(payload['behavior'] || '').toLowerCase();
 
       if (behavior === 'allow') {
-        // Handle updated input if provided
-        const updatedInput = payload['updatedInput'];
-        if (updatedInput && typeof updatedInput === 'object') {
-          toolCall.request.args = updatedInput as Record<string, unknown>;
-        }
-        await toolCall.confirmationDetails.onConfirm(
-          ToolConfirmationOutcome.ProceedOnce,
+        // Handle updated input if provided. The SDK's `can_use_tool`
+        // callback returns `updatedInput` — the (possibly sanitised)
+        // tool args the host wants executed. For most tools this simply
+        // overrides `request.args`. For `ask_user_question` the host also
+        // uses this channel to deliver the user's answers: it returns
+        // `{ ...originalInput, answers }`, and those answers must reach the
+        // tool via the confirmation payload (`payload.answers`) — the tool
+        // reads answers from there, not from `request.args`.
+        const confirmationPayload = this.buildAllowConfirmationPayload(
+          toolCall.request.name,
+          payload['updatedInput'],
         );
+
+        if (confirmationPayload) {
+          // Override the tool's args in-process with the host's
+          // sanitised input before confirming.
+          toolCall.request.args = confirmationPayload.updatedInput ?? {};
+          await toolCall.confirmationDetails.onConfirm(
+            ToolConfirmationOutcome.ProceedOnce,
+            confirmationPayload,
+          );
+        } else {
+          await toolCall.confirmationDetails.onConfirm(
+            ToolConfirmationOutcome.ProceedOnce,
+          );
+        }
       } else {
         // Extract cancel message from response if available
         const cancelMessage =
