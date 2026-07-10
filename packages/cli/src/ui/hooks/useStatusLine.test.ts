@@ -9,6 +9,7 @@ import { renderHook, act } from '@testing-library/react';
 import * as child_process from 'child_process';
 import { StreamingState } from '../types.js';
 import type { StatusLinePresetReasoning } from '../statusLinePresets.js';
+import { useStatusLine } from './useStatusLine.js';
 
 const debugLogMock = vi.hoisted(() => ({
   log: vi.fn(),
@@ -145,10 +146,7 @@ function setStatusLineConfig(
 }
 
 describe('useStatusLine', () => {
-  // Must import dynamically after mocks are set up
-  let useStatusLine: typeof import('./useStatusLine.js').useStatusLine;
-
-  beforeEach(async () => {
+  beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     lastExecCommand = undefined;
@@ -199,10 +197,6 @@ describe('useStatusLine', () => {
     mockConfig.getContentGeneratorConfig.mockReturnValue({
       contextWindowSize: 131072,
     });
-
-    // Dynamic import to get fresh module after mocks
-    const mod = await import('./useStatusLine.js');
-    useStatusLine = mod.useStatusLine;
   });
 
   afterEach(() => {

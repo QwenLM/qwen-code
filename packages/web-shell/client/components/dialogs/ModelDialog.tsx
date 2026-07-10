@@ -176,6 +176,7 @@ export function ModelDialog({
                 ? t('model.setVision')
                 : t('model.select')
         }
+        data-web-shell-model-dialog
       >
         {availableModels.length === 0 ? (
           <div className={styles.empty}>{t('model.none')}</div>
@@ -200,6 +201,8 @@ export function ModelDialog({
               className={`${styles.row} ${selected ? styles.selected : ''} ${
                 isCurrent ? dp('dialog-current') : ''
               }`}
+              data-web-shell-model-option
+              data-model-id={model.id}
               onClick={() => confirm(index)}
               onMouseMove={() => moveHighlight(index)}
             >

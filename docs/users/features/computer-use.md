@@ -18,9 +18,9 @@ To disable it entirely — which also prevents the native driver from being down
 {
   "tools": {
     "computerUse": {
-      "enabled": false
-    }
-  }
+      "enabled": false,
+    },
+  },
 }
 ```
 
@@ -37,22 +37,22 @@ On macOS, desktop automation requires two system permissions:
 - **Accessibility** — to read window/UI state and synthesize input
 - **Screen Recording** — to capture screenshots
 
-On first use the driver walks you through granting these via the standard macOS system dialogs. The agent can also check permission status on demand (the `check_permissions` tool). Because macOS attributes permission grants to the *responsible* process, grants may need to be given to the terminal or IDE that launched Qwen Code.
+On first use the driver walks you through granting these via the standard macOS system dialogs. The agent can also check permission status on demand (the `check_permissions` tool). Because macOS attributes permission grants to the _responsible_ process, grants may need to be given to the terminal or IDE that launched Qwen Code.
 
 ## What the agent can do
 
 The full `cua-driver` tool surface is exposed. Highlights:
 
-| Category      | Tools (a selection)                                                                 |
-| ------------- | ----------------------------------------------------------------------------------- |
-| Mouse         | `click`, `double_click`, `right_click`, `drag`, `move_cursor`, `scroll`             |
-| Keyboard      | `type_text`, `press_key`, `hotkey`                                                  |
-| Windows / UI  | `list_windows`, `get_window_state`, `get_accessibility_tree`, `set_value`, `zoom`   |
-| Apps          | `launch_app`, `list_apps`, `bring_to_front`, `kill_app`                             |
-| Browser pages | `page` (execute JavaScript, read text, query the DOM, click elements)               |
-| Screenshots   | `get_window_state` (captures a PNG), `page`                                         |
-| Recording     | `start_recording`, `stop_recording`, `replay_trajectory` (record/replay a session)  |
-| Sessions      | `start_session`, `end_session`, agent-cursor overlay controls                       |
+| Category      | Tools (a selection)                                                                |
+| ------------- | ---------------------------------------------------------------------------------- |
+| Mouse         | `click`, `double_click`, `right_click`, `drag`, `move_cursor`, `scroll`            |
+| Keyboard      | `type_text`, `press_key`, `hotkey`                                                 |
+| Windows / UI  | `list_windows`, `get_window_state`, `get_accessibility_tree`, `set_value`, `zoom`  |
+| Apps          | `launch_app`, `list_apps`, `bring_to_front`, `kill_app`                            |
+| Browser pages | `page` (execute JavaScript, read text, query the DOM, click elements)              |
+| Screenshots   | `get_window_state` (captures a PNG), `page`                                        |
+| Recording     | `start_recording`, `stop_recording`, `replay_trajectory` (record/replay a session) |
+| Sessions      | `start_session`, `end_session`, agent-cursor overlay controls                      |
 
 Element-addressed actions are preferred over raw pixel coordinates: `get_window_state` returns a Markdown rendering of a window's accessibility tree with a stable `element_index` for each actionable element, which the input tools can target directly.
 
@@ -62,11 +62,11 @@ Support is most complete on macOS; some tools are platform-specific (for example
 
 All Computer Use settings live under `tools.computerUse` in `settings.json`. See the [Settings reference](../configuration/settings.md) for the authoritative list.
 
-| Setting                            | Type    | Default  | Description                                                                                                                                                                              |
-| ---------------------------------- | ------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tools.computerUse.enabled`        | boolean | `true`   | Register the `computer_use__*` tools. When `false`, the driver is never downloaded or spawned.                                                                                          |
+| Setting                               | Type    | Default  | Description                                                                                                                                                                                                                                               |
+| ------------------------------------- | ------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tools.computerUse.enabled`           | boolean | `true`   | Register the `computer_use__*` tools. When `false`, the driver is never downloaded or spawned.                                                                                                                                                            |
 | `tools.computerUse.maxImageDimension` | number  | `-1`     | Longest-edge pixel cap for screenshots. `-1` keeps the driver's default (1568); `0` disables resizing (full resolution); a positive value caps the longest edge. Lower caps cut vision-token cost. Env override: `QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION`. |
-| `tools.computerUse.idleTimeoutMs`  | number  | `300000` | Milliseconds to keep the driver process alive after the last `computer_use__*` call (default 5 minutes). `0` keeps it running until Qwen Code exits.                                    |
+| `tools.computerUse.idleTimeoutMs`     | number  | `300000` | Milliseconds to keep the driver process alive after the last `computer_use__*` call (default 5 minutes). `0` keeps it running until Qwen Code exits.                                                                                                      |
 
 All three settings require a restart to take effect.
 

@@ -98,6 +98,32 @@
   margin-left: 2px;
 }
 
+.fieldHint {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted-foreground);
+}
+
+.radioGroup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 2px 0;
+}
+
+.radioOption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.radioOption input {
+  cursor: pointer;
+  margin: 0;
+}
+
 .input,
 .textarea,
 .select {
@@ -309,6 +335,27 @@
   overflow: hidden;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* The precondition of a guarded isolated task. Indented behind a rule so it
+   reads as a guard on the prompt above it, not a second prompt. */
+.cardCondition {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+  border-inline-start: 2px solid var(--border);
+  padding-inline-start: 8px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.cardConditionLabel {
+  font-weight: 600;
+  margin-inline-end: 4px;
 }
 
 .cardFooter {
