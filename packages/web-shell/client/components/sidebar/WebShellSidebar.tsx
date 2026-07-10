@@ -869,8 +869,16 @@ export function WebShellSidebar({
   const handleAddWorkspace = useCallback(
     async (cwd: string) => {
       await workspaceActions.addWorkspace(cwd);
-      // Refresh capabilities so the new workspace appears immediately.
-      workspace.getCapabilities?.();
+      // Force a fresh capabilities fetch so the new workspace appears
+      // immediately. Best-effort: registration already succeeded, so a
+      // refresh failure must not surface as an add-workspace error — the
+      // next reload reconciles. (The former `getCapabilities?.()` was a
+      // no-op: it returns a cached promise and never updates state.)
+      try {
+        await workspace.refreshCapabilities?.();
+      } catch {
+        // ignore — the workspace is registered; the list reconciles on reload
+      }
     },
     [workspaceActions, workspace],
   );

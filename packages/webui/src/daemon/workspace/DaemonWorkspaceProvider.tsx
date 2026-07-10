@@ -85,6 +85,39 @@ export function DaemonWorkspaceProvider({
     return capabilitiesPromiseRef.current;
   }, [client]);
 
+  // Force a fresh capabilities fetch and update state. `getCapabilities`
+  // memoizes its first in-flight promise and only feeds `setCapabilities`
+  // from the mount effect, so callers that mutate capabilities at runtime
+  // (e.g. registering a workspace) would otherwise see no change until a
+  // full reload. This bypasses the cache, replaces the cached promise so
+  // later `getCapabilities` callers see the new value too, and pushes the
+  // result into state.
+  const refreshCapabilities = useCallback(() => {
+    if (!client) {
+      return Promise.reject(new Error('Daemon workspace client unavailable'));
+    }
+    capabilitiesClientRef.current = client;
+    const promise = client.capabilities().catch((error: unknown) => {
+      if (capabilitiesPromiseRef.current === promise) {
+        capabilitiesPromiseRef.current = undefined;
+      }
+      throw error;
+    });
+    capabilitiesPromiseRef.current = promise;
+    return promise.then((caps) => {
+      // Ignore a stale resolve if the client was swapped or a newer refresh
+      // superseded this one.
+      if (
+        capabilitiesClientRef.current === client &&
+        capabilitiesPromiseRef.current === promise
+      ) {
+        setCapabilities(caps);
+        setStatus('connected');
+      }
+      return caps;
+    });
+  }, [client]);
+
   useEffect(() => {
     if (!client) return undefined;
     setStatus('connecting');
@@ -153,6 +186,7 @@ export function DaemonWorkspaceProvider({
       error,
       capabilities,
       getCapabilities,
+      refreshCapabilities,
       actions: workspaceActions,
     };
   }, [
@@ -164,6 +198,7 @@ export function DaemonWorkspaceProvider({
     error,
     capabilities,
     getCapabilities,
+    refreshCapabilities,
     workspaceActions,
   ]);
 

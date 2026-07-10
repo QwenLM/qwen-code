@@ -116,6 +116,16 @@ export interface DaemonWorkspaceContextValue {
   error?: Error;
   capabilities?: DaemonCapabilities;
   getCapabilities?: () => Promise<DaemonCapabilities>;
+  /**
+   * Force a fresh `/capabilities` fetch and push the result into the
+   * provider's `capabilities` state so consumers re-render. Unlike
+   * `getCapabilities` — which memoizes its first in-flight promise for the
+   * lifetime of the connection and never calls `setCapabilities` outside the
+   * initial mount — this bypasses that cache. Use it after a mutation that
+   * changes capabilities (e.g. registering a workspace) so the new state
+   * shows without a full page reload.
+   */
+  refreshCapabilities?: () => Promise<DaemonCapabilities>;
   actions: DaemonWorkspaceActions;
 }
 
