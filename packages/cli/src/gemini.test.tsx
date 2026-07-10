@@ -1989,35 +1989,7 @@ describe('startInteractiveUI', () => {
     );
   });
 
-  it('can skip post-render IDE connection after prompt-interactive awaited it', async () => {
-    const promptInteractiveConfig = {
-      ...mockConfig,
-      isTelemetryInitializationDeferred: () => false,
-    } as unknown as Config;
-    const mockInitializationResult = {
-      authError: null,
-      themeError: null,
-      shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
-    };
-
-    await startInteractiveUI(
-      promptInteractiveConfig,
-      mockSettings,
-      mockStartupWarnings,
-      mockWorkspaceRoot,
-      mockInitializationResult,
-      { postRenderConnectIde: false },
-    );
-
-    expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
-      promptInteractiveConfig,
-      mockSettings,
-      { connectIde: false, initializeTelemetry: false },
-    );
-  });
-
-  it('delegates auto-update gating to post-render prefetch', async () => {
+  it('delegates disabled auto-update settings to post-render prefetch', async () => {
     const settingsWithAutoUpdateDisabled = {
       merged: {
         general: {
@@ -2048,6 +2020,34 @@ describe('startInteractiveUI', () => {
       mockConfig,
       settingsWithAutoUpdateDisabled,
       { connectIde: false, initializeTelemetry: true },
+    );
+  });
+
+  it('can skip post-render IDE connection after prompt-interactive awaited it', async () => {
+    const promptInteractiveConfig = {
+      ...mockConfig,
+      isTelemetryInitializationDeferred: () => false,
+    } as unknown as Config;
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      promptInteractiveConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+      { postRenderConnectIde: false },
+    );
+
+    expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
+      promptInteractiveConfig,
+      mockSettings,
+      { connectIde: false, initializeTelemetry: false },
     );
   });
 });

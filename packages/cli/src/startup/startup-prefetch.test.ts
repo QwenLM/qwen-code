@@ -21,8 +21,9 @@ const mockDebug = vi.hoisted(() => vi.fn());
 const mockWarn = vi.hoisted(() => vi.fn());
 const mockPreconnectApi = vi.hoisted(() => vi.fn());
 const mockRecordStartupEvent = vi.hoisted(() => vi.fn());
-const mockCheckForUpdates = vi.hoisted(() => vi.fn());
+const mockCheckForUpdatesDetailed = vi.hoisted(() => vi.fn());
 const mockHandleAutoUpdate = vi.hoisted(() => vi.fn());
+const mockUpdateEventEmit = vi.hoisted(() => vi.fn());
 const mockConnectIdeForStartup = vi.hoisted(() => vi.fn());
 const mockDisconnectIde = vi.hoisted(() => vi.fn());
 const mockGetIdeClientInstance = vi.hoisted(() =>
@@ -49,11 +50,22 @@ vi.mock('../utils/startupProfiler.js', () => ({
 }));
 
 vi.mock('../ui/utils/updateCheck.js', () => ({
-  checkForUpdates: (...args: unknown[]) => mockCheckForUpdates(...args),
+  checkForUpdatesDetailed: (...args: unknown[]) =>
+    mockCheckForUpdatesDetailed(...args),
 }));
 
 vi.mock('../utils/handleAutoUpdate.js', () => ({
   handleAutoUpdate: (...args: unknown[]) => mockHandleAutoUpdate(...args),
+}));
+
+vi.mock('../utils/updateEventEmitter.js', () => ({
+  updateEventEmitter: {
+    emit: (...args: unknown[]) => mockUpdateEventEmit(...args),
+  },
+}));
+
+vi.mock('../i18n/index.js', () => ({
+  t: (key: string) => key,
 }));
 
 vi.mock('../core/initializer.js', () => ({
@@ -94,7 +106,10 @@ describe('startupPrefetch', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useRealTimers();
-    mockCheckForUpdates.mockResolvedValue(null);
+    mockCheckForUpdatesDetailed.mockResolvedValue({
+      status: 'up-to-date',
+      currentVersion: '1.0.0',
+    });
     mockConnectIdeForStartup.mockResolvedValue(undefined);
     mockDisconnectIde.mockResolvedValue(undefined);
     mockGetIdeClientInstance.mockResolvedValue({
@@ -172,12 +187,8 @@ describe('startupPrefetch', () => {
 
     await vi.dynamicImportSettled();
 
-    expect(mockCheckForUpdates).toHaveBeenCalledTimes(1);
-    expect(mockHandleAutoUpdate).toHaveBeenCalledWith(
-      null,
-      expect.any(Object),
-      '/repo',
-    );
+    expect(mockCheckForUpdatesDetailed).toHaveBeenCalledTimes(1);
+    expect(mockHandleAutoUpdate).not.toHaveBeenCalled();
     expect(mockRecordStartupEvent).toHaveBeenCalledWith(
       'startup_prefetch_started',
       { name: 'update_check' },
@@ -191,13 +202,13 @@ describe('startupPrefetch', () => {
   it('starts post-render tasks without awaiting completion', async () => {
     const config = makeConfig();
     const updatePromise = new Promise<null>(() => {});
-    mockCheckForUpdates.mockReturnValue(updatePromise);
+    mockCheckForUpdatesDetailed.mockReturnValue(updatePromise);
 
     startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
 
     await vi.dynamicImportSettled();
 
-    expect(mockCheckForUpdates).toHaveBeenCalledTimes(1);
+    expect(mockCheckForUpdatesDetailed).toHaveBeenCalledTimes(1);
     expect(mockConnectIdeForStartup).toHaveBeenCalledWith(config);
     expect(mockStartBackgroundHousekeeping).toHaveBeenCalledWith(
       config,
@@ -214,8 +225,26 @@ describe('startupPrefetch', () => {
 
     await vi.dynamicImportSettled();
 
-    expect(mockCheckForUpdates).not.toHaveBeenCalled();
+    expect(mockCheckForUpdatesDetailed).not.toHaveBeenCalled();
     expect(mockConnectIdeForStartup).toHaveBeenCalledWith(config);
+  });
+
+  it('surfaces update check errors through the update event emitter', async () => {
+    const config = makeConfig();
+    mockCheckForUpdatesDetailed.mockResolvedValue({
+      status: 'error',
+      error: new Error('registry unavailable'),
+    });
+
+    startPostRenderPrefetches(config, makeSettings());
+
+    await vi.dynamicImportSettled();
+
+    expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-failed', {
+      message:
+        'Failed to check for updates. Please check your network or registry configuration.',
+    });
+    expect(mockHandleAutoUpdate).not.toHaveBeenCalled();
   });
 
   it('requires connectIde option before connecting IDE', async () => {
@@ -432,7 +461,7 @@ describe('startupPrefetch', () => {
   it('swallows deferred task failures', async () => {
     const config = makeConfig();
     const error = new Error('network down');
-    mockCheckForUpdates.mockRejectedValue(error);
+    mockCheckForUpdatesDetailed.mockRejectedValue(error);
 
     expect(() =>
       startPostRenderPrefetches(config, makeSettings()),
@@ -441,6 +470,10 @@ describe('startupPrefetch', () => {
     await vi.dynamicImportSettled();
 
     expect(mockWarn).toHaveBeenCalledWith('update_check failed:', error);
+    expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-failed', {
+      message:
+        'Failed to check for updates. Please check your network or registry configuration.',
+    });
   });
 
   it('does not start housekeeping for non-interactive configs', async () => {
@@ -463,6 +496,6 @@ describe('startupPrefetch', () => {
 
     await vi.dynamicImportSettled();
 
-    expect(mockCheckForUpdates).toHaveBeenCalledTimes(1);
+    expect(mockCheckForUpdatesDetailed).toHaveBeenCalledTimes(1);
   });
 });
