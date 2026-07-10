@@ -100,10 +100,7 @@ import {
   collectToolCallIdsFromHistory,
   normalizeModelToolCallIds,
 } from './toolCallIdUtils.js';
-import {
-  startsWithAnalysisSummaryProtocolTag,
-  stripAnalysisSummaryProtocolTags,
-} from '../utils/protocol-tag-sanitizer.js';
+import { TopLevelProtocolTagStreamFilter } from '../utils/protocol-tag-sanitizer.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
@@ -2118,6 +2115,7 @@ export class GeminiChat {
         let reactiveCompressionAttempted = false;
         let suppressNextRetryEvent = false;
         let streamYieldedAnyChunk = false;
+        const protocolTagFilter = new TopLevelProtocolTagStreamFilter();
 
         // Read per-config overrides; fall back to built-in defaults.
         const cgConfig = self.config.getContentGeneratorConfig();
@@ -2161,6 +2159,7 @@ export class GeminiChat {
               requestContents,
               params,
               prompt_id,
+              protocolTagFilter,
             );
 
             lastFinishReason = undefined;
@@ -2427,6 +2426,7 @@ export class GeminiChat {
                 ),
               );
               yield { type: StreamEventType.RETRY };
+              suppressNextRetryEvent = true;
               // Don't count transient retries against content retry limit.
               attempt--;
               await delay(delayMs, params.config?.abortSignal).promise;
@@ -2539,6 +2539,7 @@ export class GeminiChat {
               requestContents,
               escalatedParams,
               prompt_id,
+              protocolTagFilter,
             );
             for await (const chunk of escalatedStream) {
               const fr = chunk.candidates?.[0]?.finishReason;
@@ -2606,6 +2607,8 @@ export class GeminiChat {
                 recoveryContents,
                 recoveryParams,
                 prompt_id,
+                protocolTagFilter,
+                true,
               );
               for await (const chunk of recoveryStream) {
                 const fr = chunk.candidates?.[0]?.finishReason;
@@ -2809,6 +2812,7 @@ export class GeminiChat {
                     requestContents,
                     params,
                     prompt_id,
+                    protocolTagFilter,
                     fallbackGenerator,
                     fallbackRetryAuthType,
                     fallbackRetryErrorCodes,
@@ -2955,6 +2959,8 @@ export class GeminiChat {
     requestContents: Content[],
     params: SendMessageParameters,
     prompt_id: string,
+    protocolTagFilter: TopLevelProtocolTagStreamFilter,
+    continueProtocolStream = false,
     overrides?: {
       contentGenerator: ContentGenerator;
       retryAuthType?: string;
@@ -3027,7 +3033,8 @@ export class GeminiChat {
       },
     });
 
-    return this.processStreamResponse(model, streamResponse);
+    if (!continueProtocolStream) protocolTagFilter.reset();
+    return this.processStreamResponse(model, streamResponse, protocolTagFilter);
   }
 
   private async *makeFallbackStream(
@@ -3035,6 +3042,7 @@ export class GeminiChat {
     requestContents: Content[],
     params: SendMessageParameters,
     prompt_id: string,
+    protocolTagFilter: TopLevelProtocolTagStreamFilter,
     contentGenerator: ContentGenerator,
     retryAuthType?: string,
     retryErrorCodes?: readonly number[],
@@ -3044,6 +3052,8 @@ export class GeminiChat {
       requestContents,
       params,
       prompt_id,
+      protocolTagFilter,
+      false,
       { contentGenerator, retryAuthType, retryErrorCodes },
     );
 
@@ -3366,6 +3376,7 @@ export class GeminiChat {
   private async *processStreamResponse(
     model: string,
     streamResponse: AsyncGenerator<GenerateContentResponse>,
+    protocolTagFilter: TopLevelProtocolTagStreamFilter,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -3403,6 +3414,29 @@ export class GeminiChat {
         if (isValidResponse(chunk)) {
           const content = chunk.candidates?.[0]?.content;
           if (content?.parts) {
+            const finishReason = chunk.candidates?.[0]?.finishReason;
+            const sanitizedParts: Part[] = [];
+            for (const part of content.parts) {
+              if (typeof part.text === 'string' && !part.thought) {
+                const text = protocolTagFilter.accept(part.text);
+                if (text) {
+                  sanitizedParts.push({ ...part, text });
+                } else {
+                  const { text: _text, ...rest } = part;
+                  const hasNonTextData = Object.entries(rest).some(
+                    ([key, value]) => key !== 'thought' && value !== undefined,
+                  );
+                  if (hasNonTextData) sanitizedParts.push(rest);
+                }
+              } else {
+                sanitizedParts.push(part);
+              }
+            }
+            if (finishReason && finishReason !== FinishReason.MAX_TOKENS) {
+              const text = protocolTagFilter.flush();
+              if (text) sanitizedParts.push({ text });
+            }
+            content.parts = sanitizedParts;
             content.parts = normalizeModelToolCallIds(
               content.parts,
               usedToolCallIds,
@@ -3492,7 +3526,13 @@ export class GeminiChat {
           }
         }
 
-        yield chunk; // Yield every chunk to the UI immediately.
+        const suppressEmptyTerminalChunk =
+          Boolean(chunk.candidates?.[0]?.finishReason) &&
+          !hasToolCall &&
+          !allModelParts.some((part) => part.text?.trim());
+        if (!suppressEmptyTerminalChunk) {
+          yield chunk;
+        }
       }
     } catch (e) {
       streamError = e;
@@ -3535,24 +3575,11 @@ export class GeminiChat {
       }
     }
 
-    const rawContentText = consolidatedHistoryParts
+    const contentText = consolidatedHistoryParts
       .filter((part) => part.text)
       .map((part) => part.text)
       .join('')
       .trim();
-    const shouldSanitizeProtocolText =
-      !hasToolCall &&
-      consolidatedHistoryParts.length > 0 &&
-      consolidatedHistoryParts.every(isValidNonThoughtTextPart) &&
-      startsWithAnalysisSummaryProtocolTag(rawContentText);
-    const contentText = shouldSanitizeProtocolText
-      ? stripAnalysisSummaryProtocolTags(rawContentText)
-      : rawContentText;
-    const persistentHistoryParts: Part[] = shouldSanitizeProtocolText
-      ? contentText
-        ? [{ text: contentText }]
-        : []
-      : consolidatedHistoryParts;
 
     // Record assistant turn with raw Content and metadata. Gate matches
     // the in-memory `this.history.push` decision below so chat-recording
@@ -3637,7 +3664,7 @@ export class GeminiChat {
           role: 'model',
           parts: [
             ...(thoughtContentPart ? [thoughtContentPart] : []),
-            ...persistentHistoryParts,
+            ...consolidatedHistoryParts,
           ],
         });
         // Track the pushed turn so the outer sendMessageStream retry loop
@@ -3701,7 +3728,7 @@ export class GeminiChat {
       role: 'model',
       parts: [
         ...(thoughtContentPart ? [thoughtContentPart] : []),
-        ...persistentHistoryParts,
+        ...consolidatedHistoryParts,
       ],
     });
   }

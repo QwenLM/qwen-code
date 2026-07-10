@@ -13,7 +13,7 @@ function isSelfClosingTag(tag: string): boolean {
 }
 
 function findAnalysisCloseEnd(text: string, from: number): number {
-  const tagPattern = /<\/?analysis\b[^>]*>/gi;
+  const tagPattern = /<\/?analysis(?=[\s/>])[^>]*>/gi;
   let depth = 1;
   tagPattern.lastIndex = from;
 
@@ -36,7 +36,7 @@ function findAnalysisCloseEnd(text: string, from: number): number {
 }
 
 function stripClosedAnalysisBlocks(text: string): string {
-  const tagPattern = /<\/?analysis\b[^>]*>/gi;
+  const tagPattern = /<\/?analysis(?=[\s/>])[^>]*>/gi;
   let result = '';
   let index = 0;
 
@@ -76,13 +76,20 @@ function stripClosedAnalysisBlocks(text: string): string {
 }
 
 function stripVisibleTags(text: string): string {
-  return stripClosedAnalysisBlocks(text)
-    .replace(/<\/?summary\b[^>]*>/gi, ' ')
-    .replace(/ {2,}/g, ' ');
+  return stripClosedAnalysisBlocks(text).replace(
+    /<\/?summary(?=[\s/>])[^>]*>/gi,
+    (tag, offset: number, source: string) => {
+      const before = source[offset - 1];
+      const after = source[offset + tag.length];
+      return before && after && !/\s/.test(before) && !/\s/.test(after)
+        ? ' '
+        : '';
+    },
+  );
 }
 
 function stripAnalysisOutsideSummary(text: string): string {
-  const tagPattern = /<\/?(?:analysis|summary)\b[^>]*>/gi;
+  const tagPattern = /<\/?(?:analysis|summary)(?=[\s/>])[^>]*>/gi;
   let result = '';
   let index = 0;
   let summaryDepth = 0;
@@ -133,7 +140,7 @@ function stripAnalysisOutsideSummary(text: string): string {
       index = closeEnd;
     } else {
       const rest = text.slice(end);
-      const summaryIndex = rest.search(/<summary\b[^>]*>/i);
+      const summaryIndex = rest.search(/<summary(?=[\s/>])[^>]*>/i);
       index = summaryIndex === -1 ? text.length : end + summaryIndex;
     }
   }
@@ -143,56 +150,179 @@ export function stripAnalysisSummaryProtocolTags(text: string): string {
   return stripVisibleTags(stripAnalysisOutsideSummary(text).trim()).trim();
 }
 
-export function startsWithAnalysisSummaryProtocolTag(text: string): boolean {
-  return /^<(?:analysis|summary)\b/i.test(text.trimStart());
-}
+const PROTOCOL_TAG_PREFIXES = [
+  '<analysis',
+  '</analysis',
+  '<summary',
+  '</summary',
+] as const;
 
-function couldBecomeProtocolStart(text: string): boolean {
-  const lower = text.trimStart().toLowerCase();
-  return (
-    lower.length === 0 ||
-    '<analysis'.startsWith(lower) ||
-    '<summary'.startsWith(lower) ||
-    lower.startsWith('<analysis') ||
-    lower.startsWith('<summary')
-  );
+type TagStart =
+  | { type: 'possible' }
+  | { type: 'none' }
+  | { type: 'protocol'; name: 'analysis' | 'summary'; closing: boolean };
+
+function classifyTagStart(text: string): TagStart {
+  const lower = text.toLowerCase();
+  if (PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(lower))) {
+    return { type: 'possible' };
+  }
+
+  for (const prefix of PROTOCOL_TAG_PREFIXES) {
+    if (!lower.startsWith(prefix)) continue;
+    const delimiter = lower[prefix.length];
+    if (delimiter === undefined) return { type: 'possible' };
+    if (/[\s/>]/.test(delimiter)) {
+      return {
+        type: 'protocol',
+        name: prefix.endsWith('analysis') ? 'analysis' : 'summary',
+        closing: prefix.startsWith('</'),
+      };
+    }
+  }
+
+  return { type: 'none' };
 }
 
 export class TopLevelProtocolTagStreamFilter {
-  private buffer = '';
-  private passthrough = false;
+  private mode: 'detect' | 'passthrough' | 'protocol' = 'detect';
+  private detectionBuffer = '';
+  private tagCandidate = '';
+  private protocolTag:
+    | { name: 'analysis' | 'summary'; closing: boolean; lastChar: string }
+    | undefined;
+  private literalTag = false;
+  private analysisDepth = 0;
+  private outputStarted = false;
 
   accept(text: string): string {
-    if (this.passthrough) {
-      return text;
+    if (this.mode === 'passthrough') return text;
+    if (this.mode === 'protocol') return this.acceptProtocolText(text);
+
+    this.detectionBuffer += text;
+    const candidate = this.detectionBuffer.replace(/^[\s\u200b]+/, '');
+    const classification = classifyTagStart(candidate);
+    if (classification.type === 'possible') return '';
+
+    if (classification.type === 'none') {
+      this.mode = 'passthrough';
+      const out = this.detectionBuffer;
+      this.detectionBuffer = '';
+      return out;
     }
 
-    this.buffer += text;
-    if (couldBecomeProtocolStart(this.buffer)) {
-      return '';
-    }
-
-    this.passthrough = true;
-    const out = this.buffer;
-    this.buffer = '';
-    return out;
+    this.mode = 'protocol';
+    this.detectionBuffer = '';
+    return this.acceptProtocolText(candidate);
   }
 
   flush(): string {
-    if (this.passthrough || this.buffer.length === 0) {
-      return '';
+    if (this.mode === 'passthrough') return '';
+    if (this.mode === 'detect') {
+      const candidate = this.detectionBuffer.replace(/^[\s\u200b]+/, '');
+      const classification = classifyTagStart(candidate);
+      const out =
+        candidate.length > 0 && classification.type === 'possible'
+          ? ''
+          : this.detectionBuffer;
+      this.resetToPassthrough();
+      return out;
     }
 
-    const out = startsWithAnalysisSummaryProtocolTag(this.buffer)
-      ? stripAnalysisSummaryProtocolTags(this.buffer)
-      : this.buffer;
-    this.buffer = '';
-    this.passthrough = true;
+    const out =
+      this.tagCandidate &&
+      classifyTagStart(this.tagCandidate).type === 'none' &&
+      this.analysisDepth === 0
+        ? this.tagCandidate
+        : '';
+    this.resetToPassthrough();
     return out;
   }
 
   reset(): void {
-    this.buffer = '';
-    this.passthrough = false;
+    this.mode = 'detect';
+    this.detectionBuffer = '';
+    this.tagCandidate = '';
+    this.protocolTag = undefined;
+    this.literalTag = false;
+    this.analysisDepth = 0;
+    this.outputStarted = false;
+  }
+
+  private acceptProtocolText(text: string): string {
+    let out = '';
+
+    for (const char of text) {
+      if (this.protocolTag) {
+        if (char === '>') {
+          this.finishProtocolTag(this.protocolTag);
+          this.protocolTag = undefined;
+        } else if (!/\s/.test(char)) {
+          this.protocolTag.lastChar = char;
+        }
+        continue;
+      }
+
+      if (this.literalTag) {
+        if (this.analysisDepth === 0) out += char;
+        if (char === '>') this.literalTag = false;
+        continue;
+      }
+
+      if (this.tagCandidate) {
+        this.tagCandidate += char;
+        const classification = classifyTagStart(this.tagCandidate);
+        if (classification.type === 'possible') continue;
+        if (classification.type === 'protocol') {
+          this.protocolTag = {
+            ...classification,
+            lastChar: char === '>' ? '' : char,
+          };
+          this.tagCandidate = '';
+          if (char === '>') {
+            this.finishProtocolTag(this.protocolTag);
+            this.protocolTag = undefined;
+          }
+          continue;
+        }
+
+        if (this.analysisDepth === 0) out += this.tagCandidate;
+        this.literalTag = char !== '>';
+        this.tagCandidate = '';
+        continue;
+      }
+
+      if (char === '<') {
+        this.tagCandidate = char;
+      } else if (this.analysisDepth === 0) {
+        if (this.outputStarted || !/\s/.test(char)) {
+          out += char;
+          this.outputStarted = true;
+        }
+      }
+    }
+
+    return out;
+  }
+
+  private finishProtocolTag(tag: NonNullable<typeof this.protocolTag>): void {
+    const selfClosing = tag.lastChar === '/';
+    if (tag.name === 'analysis') {
+      if (tag.closing) {
+        this.analysisDepth = Math.max(0, this.analysisDepth - 1);
+      } else if (!selfClosing) {
+        this.analysisDepth += 1;
+      }
+    } else if (!tag.closing && this.analysisDepth === 0) {
+      this.outputStarted = true;
+    }
+  }
+
+  private resetToPassthrough(): void {
+    this.mode = 'passthrough';
+    this.detectionBuffer = '';
+    this.tagCandidate = '';
+    this.protocolTag = undefined;
+    this.literalTag = false;
   }
 }
