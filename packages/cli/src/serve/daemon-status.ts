@@ -5,7 +5,7 @@
  */
 
 import type { ServeProtocolVersions } from './capabilities.js';
-import type { AcpHttpHandle } from './acp-http/index.js';
+import type { AcpHttpHandle, AcpHttpSnapshot } from './acp-http/index.js';
 import type { DeviceFlowRegistry } from './auth/device-flow.js';
 import type { DaemonLogger } from './daemon-logger.js';
 import type {
@@ -369,6 +369,7 @@ export async function buildDaemonStatusResponse(
   pushRuntimeIssues(
     issues,
     acpSnapshot,
+    acpAggregate,
     rateLimitHits,
     input,
     channelWorker,
@@ -631,6 +632,7 @@ async function withTimeout<T>(
 function pushRuntimeIssues(
   issues: DaemonStatusIssue[],
   acpSnapshot: ReturnType<AcpHttpHandle['registry']['getSnapshot']> | undefined,
+  acpAggregate: AcpHttpSnapshot | undefined,
   rateLimitHits: Record<RateLimitTier, number>,
   input: BuildDaemonStatusOptions,
   channelWorker: ChannelWorkerSnapshot,
@@ -676,15 +678,22 @@ function pushRuntimeIssues(
   if (
     acpSnapshot !== undefined &&
     acpSnapshot.connectionCap !== null &&
-    acpSnapshot.connectionCap > 0 &&
-    acpSnapshot.connectionCount / acpSnapshot.connectionCap >=
-      CAPACITY_WARNING_RATIO
+    acpSnapshot.connectionCap > 0
   ) {
-    issues.push({
-      code: 'connection_capacity_high',
-      severity: 'warning',
-      message: `ACP connections are at ${acpSnapshot.connectionCount}/${acpSnapshot.connectionCap}.`,
-    });
+    // Per-mount cap is uniform (opts.maxConnections); warn on the busiest mount
+    // so a saturated secondary workspace is visible, not just the primary's.
+    const cap = acpSnapshot.connectionCap;
+    const busiest = (acpAggregate?.mounts ?? []).reduce(
+      (max, m) => Math.max(max, m.connectionCount),
+      acpSnapshot.connectionCount,
+    );
+    if (busiest / cap >= CAPACITY_WARNING_RATIO) {
+      issues.push({
+        code: 'connection_capacity_high',
+        severity: 'warning',
+        message: `ACP connections are at ${busiest}/${cap} on the busiest workspace mount.`,
+      });
+    }
   }
 
   const pendingPermissionCount = workspaceSnapshots.reduce(
