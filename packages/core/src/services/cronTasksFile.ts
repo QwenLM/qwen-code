@@ -114,6 +114,23 @@ export function appendCronRun(
 }
 
 /**
+ * True for a task written by a pre-removal version as an `isolated` task with a
+ * `condition` precondition. The field is no longer part of {@link
+ * DurableCronTask} (validation accepts it as an unknown key), so it is read off
+ * the raw object. A blank/absent condition is not a gate.
+ *
+ * The isolated run mode and its preconditions were removed; such a task can no
+ * longer be evaluated. Every consumer — the scheduler, the REST list view, and
+ * the manual `/run` endpoint — uses this to FAIL CLOSED (skip / block / reject)
+ * so a removed safety gate ("only run when X") can never silently degrade into
+ * "always run" on any path. The user re-creates the task if they still want it.
+ */
+export function taskHasLegacyCondition(task: DurableCronTask): boolean {
+  const condition = (task as unknown as Record<string, unknown>)['condition'];
+  return typeof condition === 'string' && condition.length > 0;
+}
+
+/**
  * Generates an 8-character base36 id for a durable task. Shared by the
  * scheduler (`CronScheduler`) and the daemon's scheduled-tasks route so
  * route-created and tool-created tasks use one id scheme — changing it here

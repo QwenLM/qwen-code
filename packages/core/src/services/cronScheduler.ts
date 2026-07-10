@@ -21,6 +21,7 @@ import {
   getCronFilePath,
   readCronTasks,
   removeCronTasks,
+  taskHasLegacyCondition,
   updateCronTasks,
 } from './cronTasksFile.js';
 import { tryAcquireLock, releaseLock } from './cronTasksLock.js';
@@ -724,7 +725,7 @@ export class CronScheduler {
     // into a runaway one; the user re-creates it if they still want it.
     const tasks = read.filter((t) => {
       if (!hasParseableCron(t) || t.enabled === false) return false;
-      if (hasLegacyCondition(t)) {
+      if (taskHasLegacyCondition(t)) {
         if (!this.warnedLegacyConditionIds.has(t.id)) {
           this.warnedLegacyConditionIds.add(t.id);
           // eslint-disable-next-line no-console -- operator-facing remediation breadcrumb for a silently-disabled task
@@ -1509,18 +1510,6 @@ function hasParseableCron(task: DurableCronTask): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * True for a task written by a pre-removal version as an `isolated` task with a
- * `condition` precondition. The field is no longer part of {@link
- * DurableCronTask}, so it is read off the raw object — `isValidTask` accepts the
- * unknown key, and the loader uses this to fail such a task closed rather than
- * firing it unconditionally. A blank/absent condition is not a gate.
- */
-function hasLegacyCondition(task: DurableCronTask): boolean {
-  const condition = (task as unknown as Record<string, unknown>)['condition'];
-  return typeof condition === 'string' && condition.length > 0;
 }
 
 function durableTaskToJob(

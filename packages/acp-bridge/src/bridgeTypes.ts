@@ -107,6 +107,15 @@ export interface BridgeSession {
   createdAt?: string;
   /** True while the live session has an in-flight prompt. */
   hasActivePrompt?: boolean;
+  /**
+   * Only present when this spawn carried a `parentSessionId`. `true` iff the
+   * parent lineage was durably written to the child's transcript (survives a
+   * daemon restart); `false` means the link is live-only and will disappear
+   * from the persisted session list on restart. Lets `create_sub_session` / the
+   * SDK distinguish a durably linked child from a degraded one instead of
+   * treating every spawn as an equally successful link.
+   */
+  parentSessionPersisted?: boolean;
 }
 
 export interface BridgeRestoreSessionRequest {

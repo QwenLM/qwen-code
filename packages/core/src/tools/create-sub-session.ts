@@ -168,13 +168,24 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
       // intercepted by the markdown renderer and dispatched as a DOM event.
       const sessionLink = `[🧵 ${res.sessionId.slice(0, 8)}](qwen-session://${res.sessionId})`;
 
+      // The sub-session exists and is linked in memory, but the daemon reported
+      // that the parent lineage was NOT durably written to its transcript — so
+      // the parent→child relationship will disappear from the persisted session
+      // list after a daemon restart. Surface it (rather than reporting an
+      // indistinguishable success) so the caller knows the link is degraded.
+      const parentWarning =
+        res.parentSessionPersisted === false
+          ? ' Note: the parent-session link could not be persisted and is ' +
+            'live-only — it will not survive a daemon restart.'
+          : '';
+
       if (completion === 'sent') {
         // Fire-and-forget: report the id; the caller did not wait for a result.
         return {
           llmContent:
             `Sub-session ${sessionLink} created and the prompt was ` +
             'dispatched. It runs independently — this call did not wait for a ' +
-            'result.',
+            `result.${parentWarning}`,
           returnDisplay: `${sessionLink} started`,
         };
       }
@@ -187,7 +198,7 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
           : `Sub-session ${sessionLink} completed its first turn but ` +
             'produced no text output.';
       return {
-        llmContent: `Sub-session ${sessionLink} first-turn result${stop}:\n\n${body}`,
+        llmContent: `Sub-session ${sessionLink} first-turn result${stop}:\n\n${body}${parentWarning}`,
         returnDisplay: `${sessionLink} completed${stop}`,
       };
     } catch (error) {

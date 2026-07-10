@@ -215,6 +215,7 @@ export {
   getCronFilePath,
   generateCronTaskId,
   appendCronRun,
+  taskHasLegacyCondition,
   MAX_TASK_RUNS,
 } from './services/cronTasksFile.js';
 export * from './services/fileDiscoveryService.js';

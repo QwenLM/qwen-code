@@ -1052,6 +1052,10 @@ function extractPromptText(
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const PERSIST_TIMEOUT_MS = 5_000;
+// Bounded retries for the sub-session `parentSessionId` transcript write on the
+// spawn critical path — a transport/timeout hiccup gets a couple more tries
+// before the child is reported as live-only (`parentSessionPersisted:false`).
+const MAX_PARENT_PERSIST_ATTEMPTS = 3;
 const MCP_RESTART_TIMEOUT_MS = 300_000;
 const WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS = 300_000;
 const MCP_OAUTH_TIMEOUT_MS = 600_000;
@@ -2113,38 +2117,66 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const clientId = registerClient(entry, requestedClientId);
       // Persist the parent lineage into the child's transcript so it survives a
       // daemon restart (rehydrated by `listSessions`). The live `SessionEntry`
-      // already exposes `parentSessionId`, so the session filter works this run
-      // either way — but WITHOUT the transcript record the link vanishes from
-      // the persisted list on the next restart. So this is awaited and its
-      // `persisted` result checked, not fire-and-forget: a dropped write must be
-      // surfaced loudly rather than silently degrading to live-only. The child
-      // is not rolled back on failure (it exists and is linked in memory, and
-      // losing the whole sub-session over a transcript hiccup is worse) — the
-      // failure is written to stderr so it is diagnosable. Only sub-sessions
-      // carry a parent.
+      // already exposes `parentSessionId`, so the in-memory filter works this
+      // run regardless — but WITHOUT the transcript record the link vanishes
+      // from the persisted list on the next restart.
+      //
+      // So this is on the spawn critical path with the same discipline as the
+      // other init round-trips: each attempt is `withTimeout`-bounded (a child
+      // that never answers must not pin the spawn/admission/concurrency slot
+      // forever), and a transport/timeout failure is retried a bounded number
+      // of times. The definitive outcome is surfaced to the caller via
+      // `BridgeSession.parentSessionPersisted` (NOT just stderr, which is no
+      // API contract) so `create_sub_session` / the SDK can tell a durably
+      // linked child from a live-only one. Success REQUIRES `persisted === true`.
+      //
+      // The child is NOT rolled back when the write ultimately fails: it exists
+      // and is linked in memory, and losing the whole sub-session over a
+      // transcript hiccup is the worse failure — the caller is told via the flag
+      // instead. Only sub-sessions carry a parent.
+      let parentSessionPersisted: boolean | undefined;
       if (entry.parentSessionId) {
-        try {
-          const parentResult = await entry.connection.extMethod(
-            SERVE_CONTROL_EXT_METHODS.sessionParent,
-            {
-              sessionId: entry.sessionId,
-              parentSessionId: entry.parentSessionId,
-            },
-          );
-          const persisted = (
-            parentResult as { persisted?: boolean } | undefined
-          )?.persisted;
-          if (persisted === false) {
-            writeStderrLine(
-              `qwen serve: parentSessionId for ${entry.sessionId} was not persisted ` +
-                `(recording service unavailable) — the parent link is live-only until restart`,
+        for (
+          let attempt = 1;
+          attempt <= MAX_PARENT_PERSIST_ATTEMPTS;
+          attempt++
+        ) {
+          try {
+            const parentResult = await withTimeout(
+              entry.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.sessionParent,
+                {
+                  sessionId: entry.sessionId,
+                  parentSessionId: entry.parentSessionId,
+                },
+              ),
+              initTimeoutMs,
+              'sessionParent',
             );
+            // A reachable child gives a definitive answer — do not retry a
+            // `persisted: false` (recording service off; a retry can't fix it).
+            parentSessionPersisted =
+              (parentResult as { persisted?: boolean } | undefined)
+                ?.persisted === true;
+            break;
+          } catch (err) {
+            // Transport error / timeout — retry, then give up.
+            if (attempt === MAX_PARENT_PERSIST_ATTEMPTS) {
+              parentSessionPersisted = false;
+              writeStderrLine(
+                `qwen serve: failed to persist parentSessionId for ${entry.sessionId} ` +
+                  `after ${attempt} attempt(s): ${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+              );
+            }
           }
-        } catch (err) {
+        }
+        if (parentSessionPersisted === false) {
           writeStderrLine(
-            `qwen serve: failed to persist parentSessionId for ${entry.sessionId}: ${
-              err instanceof Error ? err.message : String(err)
-            } — the parent link is live-only until restart`,
+            `qwen serve: parentSessionId for ${entry.sessionId} was not persisted — ` +
+              `the parent link is live-only until restart (reported to the caller via ` +
+              `parentSessionPersisted=false)`,
           );
         }
       }
@@ -2206,6 +2238,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         attached: false,
         clientId,
         createdAt: entry.createdAt,
+        ...(entry.parentSessionId
+          ? { parentSessionPersisted: parentSessionPersisted === true }
+          : {}),
       };
     } finally {
       ci.sessionSpawnsInFlight = Math.max(0, ci.sessionSpawnsInFlight - 1);

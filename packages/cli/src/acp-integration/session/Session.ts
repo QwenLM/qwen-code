@@ -1071,6 +1071,9 @@ export class Session implements SessionContext {
         ...(typeof resp['stopReason'] === 'string'
           ? { stopReason: resp['stopReason'] }
           : {}),
+        ...(typeof resp['parentSessionPersisted'] === 'boolean'
+          ? { parentSessionPersisted: resp['parentSessionPersisted'] }
+          : {}),
       };
     });
   }

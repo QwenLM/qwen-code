@@ -464,7 +464,12 @@ export function createSubSessionLauncher(
             releaseOnce();
           }
         })();
-        return { sessionId };
+        return {
+          sessionId,
+          ...(sub.parentSessionPersisted !== undefined
+            ? { parentSessionPersisted: sub.parentSessionPersisted }
+            : {}),
+        };
       }
 
       // first-turn: hold the slot synchronously until the turn completes.
@@ -495,7 +500,14 @@ export function createSubSessionLauncher(
           firstTurn,
           turnError,
         ]);
-        return { sessionId, result, stopReason };
+        return {
+          sessionId,
+          result,
+          stopReason,
+          ...(sub.parentSessionPersisted !== undefined
+            ? { parentSessionPersisted: sub.parentSessionPersisted }
+            : {}),
+        };
       } finally {
         releaseOnce();
       }

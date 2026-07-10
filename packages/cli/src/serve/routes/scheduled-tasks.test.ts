@@ -388,6 +388,72 @@ describe('scheduled-tasks routes', () => {
     expect(res.body.code).toBe('task_disabled');
   });
 
+  it('reports a legacy guarded task (still-on-disk `condition`) as disabled on GET, fail-closed', async () => {
+    // A task written by a pre-removal version as an isolated run with a
+    // `condition` precondition — the field is no longer part of DurableCronTask,
+    // so it lives on disk as an unknown key (isValidTask ignores it). Even
+    // though its on-disk `enabled` is true, the REST list must fail it CLOSED:
+    // reported disabled with no next-run, so the management UI never shows it
+    // active or offers a Run affordance for a task the scheduler refuses to fire.
+    await seedTask({
+      id: 'legacy-guard',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: true,
+      sessionId: 'sess-legacy-guard',
+      condition: 'only when files changed',
+    });
+    // A normal enabled task, appended alongside, for contrast.
+    const normal = await create({ cron: '0 9 * * *', prompt: 'ok' });
+    expect(normal.status).toBe(201);
+
+    const res = await request(h.app).get('/scheduled-tasks');
+    expect(res.status).toBe(200);
+    const legacy = res.body.tasks.find(
+      (t: { id: string }) => t.id === 'legacy-guard',
+    );
+    expect(legacy.enabled).toBe(false); // fail-closed despite on-disk enabled:true
+    expect(legacy.nextRunAt).toBeNull(); // no next-run advertised
+    // The ordinary task is unaffected — enabled with a real next-run.
+    const ok = res.body.tasks.find(
+      (t: { id: string }) => t.id === normal.body.id,
+    );
+    expect(ok.enabled).toBe(true);
+    expect(typeof ok.nextRunAt).toBe('number');
+  });
+
+  it('refuses a manual run for a legacy guarded task (409 task_legacy_unsupported, no record)', async () => {
+    // The direct `/run` path is a second fail-closed guard: the task's on-disk
+    // `enabled` may still be true, so the disabled check is not enough. Running
+    // it here would execute the prompt with its removed safety gate ignored.
+    await seedTask({
+      id: 'legacy-run',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: true,
+      sessionId: 'sess-legacy-run',
+      condition: 'only when files changed',
+    });
+    const res = await request(h.app).post('/scheduled-tasks/legacy-run/run');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('task_legacy_unsupported');
+    // The message points at re-creating the task / the create_sub_session path.
+    expect(res.body.error).toContain('create_sub_session');
+    // No phantom run recorded and lastFiredAt untouched.
+    const list = await request(h.app).get('/scheduled-tasks');
+    const t = list.body.tasks.find(
+      (x: { id: string }) => x.id === 'legacy-run',
+    );
+    expect(t.runs).toEqual([]);
+    expect(t.lastFiredAt).toBe(1_700_000_000_000);
+  });
+
   it('removes a ONE-SHOT task on manual run (so the scheduler cannot fire it again)', async () => {
     await seedTask({
       id: 'os-run',

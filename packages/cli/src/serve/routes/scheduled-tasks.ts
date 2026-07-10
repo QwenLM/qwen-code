@@ -28,6 +28,7 @@ import {
   updateCronTasks,
   generateCronTaskId,
   appendCronRun,
+  taskHasLegacyCondition,
   parseCron,
   nextFireTime,
   nextDurableFireMs,
@@ -150,10 +151,15 @@ function toView(task: DurableCronTask): ScheduledTaskView {
     prompt: task.prompt,
     recurring: task.recurring,
     // Absent enabled defaults to enabled — tool-created tasks never write it.
-    enabled: task.enabled !== false,
+    // A legacy guarded task (isolated run mode + precondition, both removed) is
+    // reported as NOT runnable — `enabled: false` with no `nextRunAt` — so the
+    // management UI never shows it as active or offers a Run affordance for a
+    // task the scheduler refuses to fire. Fail closed on the read path too, not
+    // just the tick. `POST /:id/run` rejects it as a second guard.
+    enabled: task.enabled !== false && !taskHasLegacyCondition(task),
     createdAt: task.createdAt,
     lastFiredAt: task.lastFiredAt,
-    nextRunAt: computeNextRunAt(task),
+    nextRunAt: taskHasLegacyCondition(task) ? null : computeNextRunAt(task),
     // The task's bound session (its run-history transcript), or null for an
     // unbound tool-created/legacy task.
     sessionId:
@@ -704,6 +710,7 @@ export function registerScheduledTasksRoutes(
     const now = Date.now();
     let found = false;
     let blockedDisabled = false;
+    let blockedLegacy = false;
     let updated: DurableCronTask | undefined;
     try {
       await updateCronTasks(boundWorkspace, (tasks) => {
@@ -711,6 +718,16 @@ export function registerScheduledTasksRoutes(
         if (idx === -1) return tasks; // not found → no write
         found = true;
         const current = tasks[idx]!;
+        // A legacy guarded task (isolated + precondition, both removed) must not
+        // run from ANY path. The scheduler already skips it and the list view
+        // reports it disabled; reject a direct `/run` too — its on-disk
+        // `enabled` may still be true, so the disabled check below is not enough.
+        // Executing it here would run the prompt with its safety gate ignored,
+        // which is exactly what the removal must never allow.
+        if (taskHasLegacyCondition(current)) {
+          blockedLegacy = true;
+          return tasks; // no write
+        }
         // A disabled task must not record a manual run: it's paused (and if it
         // was disabled by archiving its session, that session can't even fire),
         // so stamping lastFiredAt + a 'manual' entry would write a phantom "ran"
@@ -746,6 +763,14 @@ export function registerScheduledTasksRoutes(
       res.status(500).json({
         error: 'Failed to record scheduled task run',
         code: 'scheduled_tasks_write_failed',
+      });
+      return;
+    }
+    if (blockedLegacy) {
+      res.status(409).json({
+        error:
+          'This task uses the removed isolated run mode with a precondition and can no longer run. Recreate it (and call the `create_sub_session` tool from the prompt if you need per-run isolation).',
+        code: 'task_legacy_unsupported',
       });
       return;
     }
