@@ -216,7 +216,14 @@ needs explicit path handling.
   explicitly here (the same reason `checkRate` is threaded through `opts`); the
   Phase 1 request-time workspace hashing only covers Express routes.
 
-## Per-runtime device-flow registry
+## Per-runtime device-flow registry (superseded — see "Systematic rework" axis 4)
+
+> **Superseded.** This section is the pre-rework design (a per-runtime
+> device-flow registry). Review found it left secondary mounts unauthenticated,
+> so the shipped implementation instead keeps a single daemon-global registry
+> shared by every mount with best-effort event-sink fan-out — see "Systematic
+> rework" axis 4 above. The subsections below are retained only as
+> design-history context and do not describe the shipped behavior.
 
 Device-flow is the one mirrored surface that is still app-global and must change.
 
