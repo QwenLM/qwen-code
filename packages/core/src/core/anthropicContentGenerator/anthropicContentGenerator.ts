@@ -538,8 +538,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
   /**
    * Whether to ATTACH the body-side `scope: 'global'` field on
-   * `cache_control` entries this request. Requires both
-   * `enableCacheControl !== false` AND an Anthropic-native baseURL.
+   * `cache_control` entries this request. Requires
+   * `enableCacheControl !== false` AND either an Anthropic-native baseURL
+   * OR `forceGlobalCacheScope` (opt-in for proxy providers that forward
+   * the `prompt-caching-scope-2026-01-05` beta; see issue #6642).
    * Computed per request: `Config.handleModelChange()` hot-updates
    * `enableCacheControl` in-place on the qwen-oauth path (without
    * recreating the ContentGenerator); non-qwen-oauth providers refresh
@@ -556,9 +558,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
    * to attach scope to, beta correctly suppressed).
    */
   private useGlobalCacheScope(): boolean {
+    if (this.contentGeneratorConfig.enableCacheControl === false) {
+      return false;
+    }
     return (
-      this.contentGeneratorConfig.enableCacheControl !== false &&
-      isAnthropicNativeBaseUrl(this.contentGeneratorConfig)
+      isAnthropicNativeBaseUrl(this.contentGeneratorConfig) ||
+      this.contentGeneratorConfig.forceGlobalCacheScope === true
     );
   }
 
