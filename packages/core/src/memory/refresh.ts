@@ -23,7 +23,6 @@ export interface MemoryWriteCandidate {
 }
 
 export interface RefreshMemoryAfterWriteOptions {
-  rebuildIndexes?: boolean;
   logContext?: string;
 }
 
@@ -163,9 +162,7 @@ export async function refreshMemoryAfterManagedWrite(
       return false;
     }
 
-    if (options.rebuildIndexes ?? true) {
-      await rebuildWrittenMemoryIndexes(candidates, projectRoot, options);
-    }
+    await rebuildWrittenMemoryIndexes(candidates, projectRoot, options);
 
     await refreshMemoryInstruction(config, options);
     return true;

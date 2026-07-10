@@ -21,6 +21,7 @@ import {
 import {
   didWriteManagedMemory,
   refreshMemoryAfterManagedWrite,
+  refreshMemoryInstruction,
 } from './refresh.js';
 
 vi.mock('./indexer.js', () => ({
@@ -189,6 +190,20 @@ describe('managed memory refresh helper', () => {
         },
       ]),
     ).resolves.toBe(true);
+
+    expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
+    expect(
+      config.getGeminiClient().refreshSystemInstruction,
+    ).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps refreshing the system instruction when hierarchical refresh fails', async () => {
+    const config = createConfig(projectRoot);
+    vi.mocked(config.refreshHierarchicalMemory).mockRejectedValueOnce(
+      new Error('hierarchical refresh failed'),
+    );
+
+    await expect(refreshMemoryInstruction(config)).resolves.toBeUndefined();
 
     expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
     expect(
