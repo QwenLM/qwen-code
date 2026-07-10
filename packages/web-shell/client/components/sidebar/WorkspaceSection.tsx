@@ -84,7 +84,10 @@ export function WorkspaceSection({
         archiveState: 'active',
       });
       setSessions(result);
-    } catch {
+    } catch (err) {
+      // Surface connectivity failures so users can distinguish a broken
+      // daemon from genuinely zero sessions.
+      console.warn('[WorkspaceSection] session poll failed:', err);
       setSessions([]);
     }
   }, [client, workspace.cwd, workspace.trusted]);
@@ -105,6 +108,7 @@ export function WorkspaceSection({
           !workspace.trusted && styles.headerDisabled,
         )}
         disabled={!workspace.trusted}
+        aria-expanded={expanded}
         onClick={() => {
           onSelectWorkspace(workspace.primary ? undefined : workspace.cwd);
           setExpanded((v) => !v);

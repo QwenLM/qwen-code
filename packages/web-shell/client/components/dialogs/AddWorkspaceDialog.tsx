@@ -28,8 +28,8 @@ export function AddWorkspaceDialog({
       e.preventDefault();
       const trimmed = path.trim();
       if (!trimmed) return;
-      if (!trimmed.startsWith('/')) {
-        setError('Path must be absolute (start with /)');
+      if (!trimmed.startsWith('/') && !/^[A-Za-z]:[\\//]/.test(trimmed)) {
+        setError(t('sidebar.addWorkspaceAbsError'));
         return;
       }
       setError(null);
@@ -56,11 +56,12 @@ export function AddWorkspaceDialog({
     >
       <form className={dp('dialog-form')} onSubmit={handleSubmit}>
         <div className={dp('dialog-form-row')}>
-          <label className={styles.label}>
+          <label className={styles.label} htmlFor="add-workspace-path">
             {t('sidebar.addWorkspacePath')}
           </label>
           <input
             ref={inputRef}
+            id="add-workspace-path"
             type="text"
             className={styles.input}
             placeholder="/absolute/path/to/project"
