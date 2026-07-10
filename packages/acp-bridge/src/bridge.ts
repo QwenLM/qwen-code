@@ -109,6 +109,7 @@ import type {
   BridgeWorkspaceMemoryForgetMatch,
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
+  BridgeSessionTranscriptPage,
 } from './bridgeTypes.js';
 import type {
   BridgeFreshSessionAdmissionContext,
@@ -390,6 +391,10 @@ interface SessionEntry {
   workspaceCwd: string;
   createdAt: string;
   displayName?: string;
+  /** Id of the session that spawned this one (via `create_sub_session`).
+   * Immutable — written once at creation, never on attach. Absent for a
+   * top-level session. */
+  parentSessionId?: string;
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Per-session event bus drives `GET /session/:id/events`. */
@@ -1049,6 +1054,10 @@ function extractPromptText(
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const PERSIST_TIMEOUT_MS = 5_000;
+// Bounded retries for the sub-session `parentSessionId` transcript write on the
+// spawn critical path — a transport/timeout hiccup gets a couple more tries
+// before the child is reported as live-only (`parentSessionPersisted:false`).
+const MAX_PARENT_PERSIST_ATTEMPTS = 3;
 const MCP_RESTART_TIMEOUT_MS = 300_000;
 const WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS = 300_000;
 const MCP_OAUTH_TIMEOUT_MS = 600_000;
@@ -1070,6 +1079,7 @@ const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
  */
 const SESSION_RECAP_TIMEOUT_MS = 60_000;
 const SESSION_BTW_TIMEOUT_MS = 60_000;
+const SESSION_TRANSCRIPT_TIMEOUT_MS = 60_000;
 const SHELL_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
 // Per-session cap on undrained mid-turn messages: a busy turn with no drain
@@ -1511,6 +1521,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       workspaceCwd: entry.workspaceCwd,
       createdAt: entry.createdAt,
       displayName: entry.displayName,
+      ...(entry.parentSessionId
+        ? { parentSessionId: entry.parentSessionId }
+        : {}),
       clientCount: entry.clientIds.size,
       hasActivePrompt: entry.promptActive,
       isWaitingForPermission,
@@ -2018,6 +2031,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     approvalMode: ApprovalMode | undefined,
     requestedClientId?: string,
     onSessionRegistered?: () => void,
+    parentSessionId?: string,
   ): Promise<BridgeSession> {
     // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -2096,12 +2110,99 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ci,
         newSessionResp.sessionId,
         boundWorkspace,
+        undefined,
+        { parentSessionId },
       );
       initializedSessionId = entry.sessionId;
       sessionRegistered = true;
       onSessionRegistered?.();
       seedSnapshotCaches(entry, newSessionResp);
       const clientId = registerClient(entry, requestedClientId);
+      // Persist the parent lineage into the child's transcript so it survives a
+      // daemon restart (rehydrated by `listSessions`). The live `SessionEntry`
+      // already exposes `parentSessionId`, so the in-memory filter works this
+      // run regardless — but WITHOUT the transcript record the link vanishes
+      // from the persisted list on the next restart.
+      //
+      // So this is on the spawn critical path with the same discipline as the
+      // other init round-trips: `withTimeout`-bounded and raced against
+      // transport close (a child that never answers, or whose channel died,
+      // must not pin the spawn/admission/concurrency slot). The definitive
+      // outcome is surfaced to the caller via `BridgeSession.parentSessionPersisted`
+      // (NOT just stderr, which is no API contract) so `create_sub_session` /
+      // the SDK can tell a durably linked child from a live-only one. Success
+      // REQUIRES `persisted === true`.
+      //
+      // A timeout or transport-close is TERMINAL, not retried: `withTimeout`
+      // does not cancel the underlying `extMethod`, so a retry would start an
+      // overlapping request whose late completion could contradict the reported
+      // result. Only an IMMEDIATE (synchronous) rejection — definitively failed,
+      // nothing left in flight — is retried, and the whole loop shares one
+      // deadline. `recordParentSession` is idempotent on the child, so even a
+      // late-completing timed-out write cannot double-append.
+      //
+      // The child is NOT rolled back when the write ultimately fails: it exists
+      // and is linked in memory, and losing the whole sub-session over a
+      // transcript hiccup is the worse failure — the caller is told via the flag
+      // instead. Only sub-sessions carry a parent.
+      let parentSessionPersisted: boolean | undefined;
+      if (entry.parentSessionId) {
+        const parentDeadline = Date.now() + initTimeoutMs;
+        let lastParentErr: string | undefined;
+        for (
+          let attempt = 1;
+          attempt <= MAX_PARENT_PERSIST_ATTEMPTS;
+          attempt++
+        ) {
+          const remaining = parentDeadline - Date.now();
+          if (remaining <= 0) {
+            parentSessionPersisted = false;
+            lastParentErr = 'deadline exceeded';
+            break;
+          }
+          try {
+            const parentResult = await Promise.race([
+              withTimeout(
+                entry.connection.extMethod(
+                  SERVE_CONTROL_EXT_METHODS.sessionParent,
+                  {
+                    sessionId: entry.sessionId,
+                    parentSessionId: entry.parentSessionId,
+                  },
+                ),
+                remaining,
+                'sessionParent',
+              ),
+              getTransportClosedReject(entry),
+            ]);
+            // A reachable child gives a definitive answer — do not retry a
+            // `persisted: false` (recording service off; a retry can't fix it).
+            parentSessionPersisted =
+              (parentResult as { persisted?: boolean } | undefined)
+                ?.persisted === true;
+            break;
+          } catch (err) {
+            lastParentErr = err instanceof Error ? err.message : String(err);
+            const terminal =
+              err instanceof BridgeTimeoutError ||
+              err instanceof BridgeChannelClosedError ||
+              attempt === MAX_PARENT_PERSIST_ATTEMPTS;
+            if (terminal) {
+              parentSessionPersisted = false;
+              break;
+            }
+            // else: immediate transient rejection — retry within the deadline.
+          }
+        }
+        if (parentSessionPersisted === false) {
+          // One diagnostic covering both the cause and the API consequence.
+          writeStderrLine(
+            `qwen serve: parentSessionId for ${entry.sessionId} was not persisted ` +
+              `(${lastParentErr ?? 'unknown'}) — the parent link is live-only ` +
+              `until restart (reported to the caller via parentSessionPersisted=false)`,
+          );
+        }
+      }
 
       // ACP `newSession` doesn't take a model id; honor the caller's
       // `modelServiceId` via `unstable_setSessionModel`. See
@@ -2160,6 +2261,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         attached: false,
         clientId,
         createdAt: entry.createdAt,
+        ...(entry.parentSessionId
+          ? { parentSessionPersisted: parentSessionPersisted === true }
+          : {}),
       };
     } finally {
       ci.sessionSpawnsInFlight = Math.max(0, ci.sessionSpawnsInFlight - 1);
@@ -2922,12 +3026,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     sessionId: string,
     workspaceCwd: string,
     events = createSessionEventBus(),
-    options: { drainEarlyEvents?: boolean; lifecycleReason?: string } = {},
+    options: {
+      drainEarlyEvents?: boolean;
+      lifecycleReason?: string;
+      parentSessionId?: string;
+    } = {},
   ): SessionEntry => {
     const entry: SessionEntry = {
       sessionId,
       workspaceCwd,
       createdAt: new Date().toISOString(),
+      ...(options.parentSessionId
+        ? { parentSessionId: options.parentSessionId }
+        : {}),
       channel: ci.channel,
       connection: ci.connection,
       events,
@@ -3514,6 +3625,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         {
           drainEarlyEvents: replayUpdates.length === 0,
           lifecycleReason: action,
+          // Re-seed the persisted parent lineage the caller recovered from the
+          // transcript, so a restored sub-session's status reports its parent.
+          ...(req.parentSessionId
+            ? { parentSessionId: req.parentSessionId }
+            : {}),
         },
       );
       releaseAdmissionOnce();
@@ -4049,6 +4165,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         req.approvalMode,
         req.clientId,
         releaseAdmissionOnce,
+        req.parentSessionId,
       );
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
@@ -5457,6 +5574,39 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionLspStatus,
       );
+    },
+
+    async getSessionTranscriptPage(req) {
+      const info = await ensureChannel();
+      try {
+        const response = await withWorkspaceControl(info, () =>
+          withTimeout(
+            Promise.race([
+              info.connection.extMethod(
+                SERVE_STATUS_EXT_METHODS.sessionTranscript,
+                { ...req, cwd: boundWorkspace },
+              ),
+              getChannelClosedReject(info),
+            ]),
+            Math.max(initTimeoutMs, SESSION_TRANSCRIPT_TIMEOUT_MS),
+            SERVE_STATUS_EXT_METHODS.sessionTranscript,
+          ),
+        );
+        return response as unknown as BridgeSessionTranscriptPage;
+      } catch (err) {
+        // A missing transcript file (ENOENT without a cursor) surfaces from the
+        // child as a raw resourceNotFound JSON-RPC error. Translate it to
+        // SessionNotFoundError so the route maps it to HTTP 404 — mirroring the
+        // load/resume path above — instead of falling through to a 500.
+        if (isAcpSessionResourceNotFound(err, req.sessionId)) {
+          throw new SessionNotFoundError(req.sessionId);
+        }
+        throw err;
+      } finally {
+        if (hasNoChannelWork(info)) {
+          await startIdleTimer(info, 'session transcript');
+        }
+      }
     },
 
     async cancelSessionTask(sessionId, taskId, taskKind) {

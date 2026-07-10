@@ -17,7 +17,14 @@
  * `qwen-serve-streaming.test.ts`, backed by the local fake OpenAI server.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  truncateSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +34,11 @@ import {
   DaemonHttpError,
   type DaemonSessionSummary,
 } from '@qwen-code/sdk';
+import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  Storage,
+  type ChatRecord,
+} from '@qwen-code/qwen-code-core';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Match the rest of the integration suite: prefer the bundled CLI
@@ -47,6 +59,54 @@ let homeDir = '';
 let port = 0;
 let base = '';
 let client: DaemonClient;
+
+function writePersistedTranscript(
+  sessionId: string,
+  records: ChatRecord[],
+  state: 'active' | 'archived' = 'active',
+): string {
+  const qwenHome = path.join(homeDir, '.qwen');
+  const projectDir = Storage.runWithRuntimeBaseDir(qwenHome, REPO_ROOT, () =>
+    new Storage(REPO_ROOT).getProjectDir(),
+  );
+  const chatsDir = path.join(
+    projectDir,
+    'chats',
+    ...(state === 'archived' ? ['archive'] : []),
+  );
+  mkdirSync(chatsDir, { recursive: true });
+  const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+  writeFileSync(
+    filePath,
+    records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+    'utf8',
+  );
+  return filePath;
+}
+
+function chatRecord(
+  sessionId: string,
+  uuid: string,
+  parentUuid: string | null,
+  text: string,
+): ChatRecord {
+  const assistant = uuid.startsWith('a');
+  return {
+    uuid,
+    parentUuid,
+    sessionId,
+    timestamp: assistant
+      ? '2026-07-08T00:00:01.000Z'
+      : '2026-07-08T00:00:00.000Z',
+    type: assistant ? 'assistant' : 'user',
+    cwd: REPO_ROOT,
+    version: '1.0.0',
+    message: {
+      role: assistant ? 'model' : 'user',
+      parts: [{ text }],
+    },
+  };
+}
 
 beforeAll(async () => {
   homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-routes-home-'));
@@ -281,6 +341,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_metadata',
       'session_organization',
       'session_export',
+      'session_transcript',
       'mcp_guardrails',
       'workspace_mcp_manage',
       'mcp_guardrail_events',
@@ -314,6 +375,138 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_qualified_rest_core',
       'voice_transcribe',
     ]);
+  });
+});
+
+describe('qwen serve — transcript paging route', () => {
+  const getTranscript = (sessionId: string, query = '') =>
+    fetch(`${base}/session/${sessionId}/transcript${query}`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+
+  it('serves persisted transcript pages through the SDK helper', async () => {
+    const sessionId = '99999999-aaaa-bbbb-cccc-111111111111';
+    writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u1', null, 'hello persisted transcript'),
+      chatRecord(sessionId, 'a1', 'u1', 'hello from replay'),
+    ]);
+
+    const first = await client.getSessionTranscriptPage(sessionId, {
+      limit: 1,
+    });
+    expect(first.sessionId).toBe(sessionId);
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursor).toBeDefined();
+    expect(first.events.length).toBeGreaterThan(0);
+    expect(first.events.every((event) => event.type === 'session_update')).toBe(
+      true,
+    );
+    expect(first.events.some((event) => 'id' in event)).toBe(false);
+
+    const second = await client.getSessionTranscriptPage(sessionId, {
+      cursor: first.nextCursor!,
+      limit: 1,
+    });
+    expect(second.sessionId).toBe(sessionId);
+    expect(second.hasMore).toBe(false);
+    expect(second.nextCursor).toBeUndefined();
+    expect(second.events.length).toBeGreaterThan(0);
+    expect(
+      second.events.every((event) => event.type === 'session_update'),
+    ).toBe(true);
+    expect(second.events.some((event) => 'id' in event)).toBe(false);
+  });
+
+  it('maps transcript request validation errors through the real daemon', async () => {
+    const sessionId = '99999999-aaaa-bbbb-cccc-222222222222';
+    writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u1', null, 'validation transcript'),
+    ]);
+
+    const invalidLimit = await getTranscript(sessionId, '?limit=0');
+    expect(invalidLimit.status).toBe(400);
+    await expect(invalidLimit.json()).resolves.toMatchObject({
+      code: 'invalid_transcript_limit',
+    });
+
+    const invalidCursor = await getTranscript(
+      sessionId,
+      '?cursor=not-a-cursor',
+    );
+    expect(invalidCursor.status).toBe(400);
+    await expect(invalidCursor.json()).resolves.toMatchObject({
+      code: 'invalid_transcript_cursor',
+    });
+
+    const missing = await getTranscript('99999999-aaaa-bbbb-cccc-333333333333');
+    expect(missing.status).toBe(404);
+  });
+
+  it('maps archived, conflicting, and unavailable transcript snapshots to 409', async () => {
+    const archivedId = '99999999-aaaa-bbbb-cccc-444444444444';
+    const archivedRecord = chatRecord(
+      archivedId,
+      'u1',
+      null,
+      'archived transcript',
+    );
+    writePersistedTranscript(archivedId, [archivedRecord], 'archived');
+    const archived = await getTranscript(archivedId);
+    expect(archived.status).toBe(409);
+    await expect(archived.json()).resolves.toMatchObject({
+      code: 'session_archived',
+    });
+
+    const conflictId = '99999999-aaaa-bbbb-cccc-555555555555';
+    const conflictRecord = chatRecord(
+      conflictId,
+      'u1',
+      null,
+      'conflicting transcript',
+    );
+    writePersistedTranscript(conflictId, [conflictRecord]);
+    writePersistedTranscript(conflictId, [conflictRecord], 'archived');
+    const conflict = await getTranscript(conflictId);
+    expect(conflict.status).toBe(409);
+    await expect(conflict.json()).resolves.toMatchObject({
+      code: 'session_conflict',
+    });
+
+    const unavailable = await getTranscript(
+      '99999999-aaaa-bbbb-cccc-666666666666',
+      '?cursor=stale',
+    );
+    expect(unavailable.status).toBe(409);
+    await expect(unavailable.json()).resolves.toMatchObject({
+      code: 'transcript_snapshot_unavailable',
+    });
+  });
+
+  it('rejects oversized transcript snapshots with 413', async () => {
+    const sessionId = '99999999-aaaa-bbbb-cccc-777777777777';
+    const filePath = writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u1', null, 'oversized transcript'),
+    ]);
+    truncateSync(filePath, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
+
+    const response = await getTranscript(sessionId);
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'transcript_too_large',
+      maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+    });
+  });
+
+  afterAll(() => {
+    // The persisted transcript fixtures above live in the daemon's project
+    // `chats/` dir. Remove them so later suites (e.g. PATCH metadata's
+    // listWorkspaceSessions readback) start from a clean session list: extra
+    // persisted sessions widen a pre-existing listing race and flake them.
+    const qwenHome = path.join(homeDir, '.qwen');
+    const projectDir = Storage.runWithRuntimeBaseDir(qwenHome, REPO_ROOT, () =>
+      new Storage(REPO_ROOT).getProjectDir(),
+    );
+    rmSync(path.join(projectDir, 'chats'), { recursive: true, force: true });
   });
 });
 

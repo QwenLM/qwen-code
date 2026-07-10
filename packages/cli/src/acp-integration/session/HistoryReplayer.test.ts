@@ -379,6 +379,152 @@ describe('HistoryReplayer', () => {
       });
     });
 
+    it('should carry dangling function calls across replay pages', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-missing',
+                name: 'run_shell_command',
+                args: { command: 'sleep 10' },
+              },
+            },
+          ],
+        },
+      };
+
+      const firstPage = await replayer.replayPage([record], {
+        finalizeDangling: false,
+      });
+      expect(firstPage.pendingToolCalls).toEqual([
+        {
+          callId: 'call-missing',
+          toolName: 'run_shell_command',
+          recordId: record.uuid,
+          timestamp: record.timestamp,
+        },
+      ]);
+      expect(sentUpdates().map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+      ]);
+
+      sendUpdateSpy.mockClear();
+      sentUpdateContexts = [];
+      const lastPage = await replayer.replayPage([], {
+        pendingToolCalls: firstPage.pendingToolCalls,
+        finalizeDangling: true,
+      });
+
+      expect(lastPage.pendingToolCalls).toEqual([]);
+      expect(sentUpdates().map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call_update',
+      ]);
+      expect(sentUpdates()[0]).toMatchObject({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-missing',
+        status: 'failed',
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: MISSING_TOOL_RESULT_MESSAGE,
+            },
+          },
+        ],
+        _meta: {
+          toolName: 'run_shell_command',
+          provenance: 'builtin',
+          timestamp: toEpochMs(record.timestamp),
+        },
+      });
+      expect(sentUpdateContexts[0]).toEqual({
+        activeRecordId: record.uuid,
+        activeRecordTimestamp: record.timestamp,
+      });
+    });
+
+    it('should match a pending function call with its result on the next page', async () => {
+      const callRecord: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-123',
+                name: 'read_file',
+                args: { path: '/test.ts' },
+              },
+            },
+          ],
+        },
+      };
+      const firstPage = await replayer.replayPage([callRecord], {
+        finalizeDangling: false,
+      });
+
+      sendUpdateSpy.mockClear();
+      const resultRecord = createToolResultRecord(
+        'read_file',
+        'File contents here',
+      );
+      const secondPage = await replayer.replayPage([resultRecord], {
+        pendingToolCalls: firstPage.pendingToolCalls,
+        finalizeDangling: true,
+      });
+
+      expect(secondPage.pendingToolCalls).toEqual([]);
+      expect(sentUpdates()).toHaveLength(1);
+      expect(sentUpdates()[0]).toMatchObject({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-123',
+        status: 'completed',
+      });
+    });
+
+    it('should expose pending function calls when replayPage throws mid-page', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-started-before-error',
+                name: 'run_shell_command',
+                args: { command: 'sleep 10' },
+              },
+            },
+            { text: 'this send fails' },
+          ],
+        },
+      };
+      sendUpdateSpy.mockImplementation(
+        async (update: Record<string, unknown>) => {
+          if (update['sessionUpdate'] === 'agent_message_chunk') {
+            throw new Error('replay failed');
+          }
+        },
+      );
+
+      await expect(
+        replayer.replayPage([record], { finalizeDangling: false }),
+      ).rejects.toThrow('replay failed');
+
+      expect(replayer.getPendingToolCalls()).toEqual([
+        {
+          callId: 'call-started-before-error',
+          toolName: 'run_shell_command',
+          recordId: record.uuid,
+          timestamp: record.timestamp,
+        },
+      ]);
+    });
+
     it('should not synthesize missing-result failures for calls without source ids', async () => {
       const records: ChatRecord[] = [
         {

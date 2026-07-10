@@ -758,6 +758,14 @@ export function createDaemonWorkspaceActions({
         'Install auth provider timed out',
       );
     },
+
+    async addWorkspace(cwd) {
+      const client = requireClient(getClient, 'Add workspace failed');
+      return withActionTimeout(
+        client.addWorkspace(cwd),
+        'Add workspace timed out',
+      );
+    },
   };
 }
 
