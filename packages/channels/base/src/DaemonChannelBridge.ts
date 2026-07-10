@@ -37,6 +37,7 @@ export interface DaemonChannelSessionClient {
     lastEventId?: number;
     resume?: boolean;
   }): AsyncGenerator<DaemonChannelEvent>;
+  detach?(): Promise<void>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<Record<string, unknown>>;
   respondToPermission(
@@ -393,6 +394,20 @@ export class DaemonChannelBridge
     this.resolveTurnBarrier(sessionId);
     this.abortActivePrompts(sessionId);
     this.activePrompts.delete(sessionId);
+    await session.cancel();
+  }
+
+  async discardSession(sessionId: string): Promise<void> {
+    const session = this.removeSessionBinding(sessionId);
+    if (!session) return;
+    if (session.detach) {
+      try {
+        await session.detach();
+        return;
+      } catch {
+        // Fall back to cancellation for clients that cannot detach cleanly.
+      }
+    }
     await session.cancel();
   }
 
@@ -760,9 +775,15 @@ export class DaemonChannelBridge
   }
 
   private dropSession(sessionId: string, reason: string): void {
-    if (!this.sessions.has(sessionId)) {
-      return;
-    }
+    if (!this.removeSessionBinding(sessionId)) return;
+    this.emit('sessionDied', { sessionId, reason });
+  }
+
+  private removeSessionBinding(
+    sessionId: string,
+  ): DaemonChannelSessionClient | undefined {
+    const session = this.sessions.get(sessionId);
+    if (!session) return undefined;
     this.resolveTurnBarrier(sessionId);
     this.eventControllers.get(sessionId)?.abort();
     this.eventControllers.delete(sessionId);
@@ -785,7 +806,7 @@ export class DaemonChannelBridge
         this.respondedRequestToSession.delete(requestId);
       }
     }
-    this.emit('sessionDied', { sessionId, reason });
+    return session;
   }
 
   private getStringField(

@@ -11,6 +11,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SessionRouter } from './SessionRouter.js';
+import {
+  DaemonChannelBridge,
+  type DaemonChannelSessionClient,
+} from './DaemonChannelBridge.js';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 
 const mockRenameSync = vi.hoisted(() => vi.fn());
@@ -63,6 +67,33 @@ function invalidationMetadataSize(router: SessionRouter): number {
     routeTokens?: Map<string, unknown>;
   };
   return (state.routeTokens ?? state.routeGenerations)?.size ?? 0;
+}
+
+function daemonSession(
+  sessionId: string,
+  detach?: () => Promise<void>,
+): DaemonChannelSessionClient & { detach?: () => Promise<void> } {
+  return {
+    sessionId,
+    workspaceCwd: '/tmp',
+    prompt: vi.fn().mockResolvedValue({}),
+    events: vi.fn(async function* (options?: { signal?: AbortSignal }) {
+      await new Promise<void>((resolve) => {
+        if (options?.signal?.aborted) {
+          resolve();
+        } else {
+          options?.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        }
+      });
+      yield* [];
+    }),
+    cancel: vi.fn().mockResolvedValue(undefined),
+    setModel: vi.fn().mockResolvedValue({}),
+    respondToPermission: vi.fn().mockResolvedValue(true),
+    ...(detach ? { detach } : {}),
+  };
 }
 
 describe('SessionRouter', () => {
@@ -1271,6 +1302,107 @@ describe('SessionRouter', () => {
         'old-session',
       ]);
       expect(lazyBridge.loadSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('discards a daemon client created after an absent route is cleared', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      const detach = vi.fn().mockResolvedValue(undefined);
+      const session = daemonSession('late-session', detach);
+      let finishFactory!: (session: DaemonChannelSessionClient) => void;
+      const daemonBridge = new DaemonChannelBridge({
+        cwd: '/tmp',
+        sessionFactory: vi.fn(
+          () =>
+            new Promise<DaemonChannelSessionClient>((resolve) => {
+              finishFactory = resolve;
+            }),
+        ),
+      });
+      const sessionDied = vi.fn();
+      daemonBridge.on('sessionDied', sessionDied);
+      await daemonBridge.start();
+      const router = createLazyRouter(persistPath, daemonBridge);
+
+      const resolving = router.resolve('ch', 'alice', 'chat1');
+      await Promise.resolve();
+      router.removeSession('ch', 'alice', 'chat1');
+      finishFactory(session);
+
+      await expect(resolving).rejects.toThrow('invalidated');
+      expect(daemonBridge.listSessions()).toEqual([]);
+      expect(detach).toHaveBeenCalledOnce();
+      expect(session.cancel).not.toHaveBeenCalled();
+      expect(sessionDied).not.toHaveBeenCalled();
+      await daemonBridge.discardSession('late-session');
+      expect(detach).toHaveBeenCalledOnce();
+    });
+
+    it('discards a loaded daemon client after its dormant route is cleared', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      const session = daemonSession('old-session');
+      let finishFactory!: (session: DaemonChannelSessionClient) => void;
+      const daemonBridge = new DaemonChannelBridge({
+        cwd: '/tmp',
+        sessionFactory: vi.fn(
+          () =>
+            new Promise<DaemonChannelSessionClient>((resolve) => {
+              finishFactory = resolve;
+            }),
+        ),
+      });
+      await daemonBridge.start();
+      const router = createLazyRouter(persistPath, daemonBridge);
+      router.restoreRoutes();
+
+      const resolving = router.resolve('ch', 'alice', 'chat1');
+      await Promise.resolve();
+      router.removeSession('ch', 'alice', 'chat1');
+      finishFactory(session);
+
+      await expect(resolving).rejects.toThrow('invalidated');
+      expect(daemonBridge.listSessions()).toEqual([]);
+      expect(session.cancel).toHaveBeenCalledOnce();
+    });
+
+    it('falls back to cancel when detach fails for an invalidated replacement', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      const detach = vi.fn().mockRejectedValue(new Error('detach failed'));
+      const session = daemonSession('replacement-session', detach);
+      let finishFactory!: (session: DaemonChannelSessionClient) => void;
+      const factory = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('gone'))
+        .mockImplementationOnce(
+          () =>
+            new Promise<DaemonChannelSessionClient>((resolve) => {
+              finishFactory = resolve;
+            }),
+        );
+      const daemonBridge = new DaemonChannelBridge({
+        cwd: '/tmp',
+        sessionFactory: factory,
+      });
+      await daemonBridge.start();
+      const router = createLazyRouter(persistPath, daemonBridge);
+      router.restoreRoutes();
+
+      const resolving = router.resolve('ch', 'alice', 'chat1');
+      await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(2));
+      router.removeSession('ch', 'alice', 'chat1');
+      finishFactory(session);
+
+      await expect(resolving).rejects.toThrow('invalidated');
+      expect(daemonBridge.listSessions()).toEqual([]);
+      expect(detach).toHaveBeenCalledOnce();
+      expect(session.cancel).toHaveBeenCalledOnce();
     });
 
     it.each(['removeSession', 'removeSessionId'] as const)(

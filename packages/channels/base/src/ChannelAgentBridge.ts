@@ -108,6 +108,8 @@ export interface ChannelAgentBridge {
     options?: { imageBase64?: string; imageMimeType?: string },
   ): Promise<string>;
   cancelSession(sessionId: string): Promise<void>;
+  /** Release a bridge-owned session that will not be routed to a caller. */
+  discardSession?(sessionId: string): Promise<void>;
   respondToPermission?(
     requestId: string,
     response: RequestPermissionResponse,
