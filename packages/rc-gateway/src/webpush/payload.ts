@@ -24,6 +24,12 @@ export interface PushPayload {
 }
 
 const MAX_SUMMARY = 140;
+/**
+ * Pre-encryption budget (bytes). Push services cap the encrypted POST at
+ * ~4096 bytes; encryption adds framing overhead, so we budget 3800 bytes for
+ * the pre-encryption JSON body.
+ */
+export const MAX_PAYLOAD_BYTES = 3800;
 
 /** Truncate to <=140 chars, ending with a single-char ellipsis if cut. */
 function truncate(s: string): string {
@@ -97,4 +103,40 @@ export function buildDigestPayload(summary: DigestSummary): PushPayload {
     ),
     url: '/ui/',
   };
+}
+
+/**
+ * Enforce the pre-encryption byte budget (≤3800 bytes). If the serialized
+ * payload exceeds the budget, `summary` is shortened with a trailing `…` until
+ * it fits. Returns `{ payload, truncated }` where `truncated` is true when the
+ * summary was shortened beyond its original value (callers SHOULD emit a
+ * `push_payload_truncated` audit entry). Pure: the input payload is never
+ * mutated.
+ *
+ * Invariant: the returned payload always satisfies
+ * `Buffer.byteLength(JSON.stringify(payload), 'utf8') <= MAX_PAYLOAD_BYTES`
+ * unless the payload is pathologically large with an empty summary (which is
+ * impossible in practice — non-summary fields are short constants).
+ */
+export function enforcePayloadBudget(payload: PushPayload): {
+  payload: PushPayload;
+  truncated: boolean;
+} {
+  const json = JSON.stringify(payload);
+  if (Buffer.byteLength(json, 'utf8') <= MAX_PAYLOAD_BYTES) {
+    return { payload, truncated: false };
+  }
+  // Make a mutable copy; shorten summary one char at a time until it fits.
+  const copy: PushPayload = { ...payload };
+  let chars = Array.from(copy.summary); // handle multi-byte / surrogate pairs
+  while (chars.length > 0) {
+    // Drop the last character and append ellipsis
+    chars = chars.slice(0, chars.length - 1);
+    copy.summary = chars.join('') + '…';
+    if (Buffer.byteLength(JSON.stringify(copy), 'utf8') <= MAX_PAYLOAD_BYTES) {
+      return { payload: copy, truncated: true };
+    }
+  }
+  // Degenerate: summary is empty+ellipsis; just return as-is.
+  return { payload: copy, truncated: true };
 }

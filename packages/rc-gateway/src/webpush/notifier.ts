@@ -280,7 +280,10 @@ export class PushNotifier {
         // occur post-validation) is treated as "no quiet hours" → send.
         // parseTimeOfDay / isWithinTimeOfDay are internally try/caught and
         // never throw into the fan-out.
-        if (r.quietHours) {
+        // CRITICAL-KIND BYPASS: policy.deny and session.died bypass quiet hours
+        // so the operator is always alerted for these critical events even when
+        // a device is in a quiet window (spec: add-webpush-notifications §3).
+        if (!isCriticalKind && r.quietHours) {
           const window = parseTimeOfDay(r.quietHours);
           if (window && isWithinTimeOfDay(window, now)) {
             void this.audit?.record({

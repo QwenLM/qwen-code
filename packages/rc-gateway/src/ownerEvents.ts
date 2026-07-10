@@ -5,6 +5,7 @@
  */
 
 import type { AuditRecord } from './auditLog.js';
+import type { WalFrame } from './wal.js';
 
 /**
  * A `routing_decision` event emitted for every routing-rule evaluation so
@@ -61,6 +62,9 @@ export interface IdleRateLimitState {
  *    `rateLimitState` carries the per-session rolling-hour budget so the UI can
  *    show an accurate "N remaining" indicator without a round-trip.
  *  - `routing_decision`: emitted for every routing evaluation before fan-out.
+ *  - `session_event`: a WAL frame (session lifecycle event such as
+ *    `session_forked` or `child_forked`) emitted by the fork route so
+ *    subscribers can observe fork lifecycle in real time.
  */
 export type OwnerEvent =
   | { type: 'audit'; record: AuditRecord }
@@ -73,7 +77,13 @@ export type OwnerEvent =
       /** Rolling-hour budget snapshot taken immediately after consuming a slot. */
       rateLimitState: IdleRateLimitState;
     }
-  | RoutingDecisionEvent;
+  | RoutingDecisionEvent
+  | {
+      /** A WAL frame for a specific session (e.g. session_forked, child_forked). */
+      type: 'session_event';
+      sessionId: string;
+      event: WalFrame;
+    };
 
 export type OwnerEventHandler = (event: OwnerEvent) => void;
 

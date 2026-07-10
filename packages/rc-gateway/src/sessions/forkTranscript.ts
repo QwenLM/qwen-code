@@ -97,3 +97,38 @@ export function buildForkTitleRecord(
 export function serializeForked(records: readonly ForkRecord[]): string {
   return records.map((r) => JSON.stringify(r)).join('\n') + '\n';
 }
+
+/**
+ * Builds the JSONL fork header record that is prepended as the very first line
+ * of a forked transcript. This gives every fork a machine-readable lineage
+ * breadcrumb that does not interfere with core's `reconstructHistory` (it only
+ * reads records with known `type` values; an unknown `type: 'fork'` is skipped
+ * by the history builder).
+ *
+ * Fields:
+ *  - `type`: always `'fork'` (distinguishable from user/assistant/system).
+ *  - `parentSessionId`: the source session's id.
+ *  - `parentEventId`: the WAL event id at which the fork was taken, if known.
+ *    Absent (omitted, not null) when the fork is a full-copy with no event
+ *    anchor.
+ *  - `transcriptMode`: which records were copied (`'include'` = all, `'empty'`
+ *    = none, `'summary'` = future).
+ *  - `forkedAt`: ISO-8601 timestamp of fork creation.
+ */
+export function buildForkHeader(opts: {
+  parentSessionId: string;
+  parentEventId?: number;
+  transcriptMode: 'include' | 'summary' | 'empty';
+  forkedAt: string;
+}): ForkRecord {
+  const header: ForkRecord = {
+    type: 'fork',
+    parentSessionId: opts.parentSessionId,
+    transcriptMode: opts.transcriptMode,
+    forkedAt: opts.forkedAt,
+  };
+  if (opts.parentEventId !== undefined) {
+    header['parentEventId'] = opts.parentEventId;
+  }
+  return header;
+}

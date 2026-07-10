@@ -21,6 +21,8 @@ import { join } from 'node:path';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import { resolveChatsDir } from '../sessions/chatsPath.js';
 import { createForkRoute } from './fork.js';
+import { OwnerEventBus, type OwnerEvent } from '../ownerEvents.js';
+import { decodeSegment } from '../wal.js';
 
 // A cwd whose sanitizeCwd is stable and lands under our tmp runtime base.
 const CWD = '/fork-test/ws';
@@ -75,6 +77,9 @@ interface MountOpts {
   audit: AuditRecorder;
   cwd?: string | undefined;
   randomId?: () => string;
+  bus?: OwnerEventBus;
+  walDir?: string;
+  now?: () => Date;
 }
 
 async function mount(opts: MountOpts): Promise<string> {
@@ -89,7 +94,13 @@ async function mount(opts: MountOpts): Promise<string> {
     createForkRoute(
       opts.daemon as never,
       async () => ('cwd' in opts ? opts.cwd : CWD),
-      { audit: opts.audit, randomId: opts.randomId },
+      {
+        audit: opts.audit,
+        randomId: opts.randomId,
+        bus: opts.bus,
+        walDir: opts.walDir,
+        now: opts.now,
+      },
     ),
   );
   const s: Server = await new Promise((resolve) => {
@@ -128,20 +139,20 @@ afterEach(async () => {
 });
 
 describe('fork route', () => {
-  it('400s an unsupported transcript mode', async () => {
+  it('400s an unsupported transcript mode (unknown value)', async () => {
     const { daemon } = fakeDaemon(async () => ({}));
     const audit = fakeAudit();
     const url = await mount({ daemon, audit });
-    const res = await postFork(url, { transcript: 'empty' });
+    const res = await postFork(url, { transcript: 'unknown-mode' });
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe('unsupported_fork_mode');
   });
 
-  it('400s when fromEventId is present', async () => {
+  it('400s transcript=summary (not yet implemented)', async () => {
     const { daemon } = fakeDaemon(async () => ({}));
     const audit = fakeAudit();
     const url = await mount({ daemon, audit });
-    const res = await postFork(url, { fromEventId: 5 });
+    const res = await postFork(url, { transcript: 'summary' });
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe('unsupported_fork_mode');
   });
@@ -186,11 +197,15 @@ describe('fork route', () => {
     expect(body.parentSessionId).toBe(PARENT_ID);
     expect(typeof body.forkedAt).toBe('string');
 
-    // The fork file exists with the rewritten sessionId.
+    // The fork file exists. The first line is the fork header; the second is the copied record.
     const forkPath = join(chatsDir, `${NEW_ID}.jsonl`);
     await stat(forkPath); // throws if missing
     const written = await readFile(forkPath, 'utf8');
-    const first = JSON.parse(written.split('\n')[0]);
+    const lines = written.split('\n').filter((l) => l.length > 0);
+    const header = JSON.parse(lines[0]);
+    expect(header.type).toBe('fork');
+    expect(header.parentSessionId).toBe(PARENT_ID);
+    const first = JSON.parse(lines[1]);
     expect(first.sessionId).toBe(NEW_ID);
     expect(first.cwd).toBe(CWD); // cwd untouched
 
@@ -222,8 +237,9 @@ describe('fork route', () => {
       .split('\n')
       .filter((l) => l.length > 0)
       .map((l) => JSON.parse(l));
-    // The parent's single record plus the appended title record.
-    expect(recs).toHaveLength(2);
+    // fork header + the parent's single record + the appended title record.
+    expect(recs).toHaveLength(3);
+    expect(recs[0].type).toBe('fork'); // fork header
     const titleRec = recs[recs.length - 1];
     expect(titleRec.type).toBe('system');
     expect(titleRec.subtype).toBe('custom_title');
@@ -250,8 +266,8 @@ describe('fork route', () => {
     const res = await postFork(url, {});
     expect(res.status).toBe(200);
     const written = await readFile(join(chatsDir, `${NEW_ID}.jsonl`), 'utf8');
-    // Only the single copied record — no title record appended.
-    expect(written.split('\n').filter((l) => l.length > 0)).toHaveLength(1);
+    // Fork header + the single copied record — no title record appended.
+    expect(written.split('\n').filter((l) => l.length > 0)).toHaveLength(2);
     expect(written).not.toContain('custom_title');
     const entry = audit.calls.find((c) => c.action === 'session_forked');
     expect(entry!.detail).toMatchObject({ named: false });
@@ -298,5 +314,198 @@ describe('fork route', () => {
     const res = await postFork(url, {});
     expect(res.status).toBe(500);
     expect((await res.json()).code).toBe('fork_failed');
+  });
+
+  it('fork header: first JSONL line is {type:"fork", parentSessionId, transcriptMode, forkedAt}', async () => {
+    await writeParent();
+    const { daemon } = fakeDaemon(async () => ({}));
+    const audit = fakeAudit();
+    const now = new Date('2026-07-10T00:00:00.000Z');
+    const url = await mount({
+      daemon,
+      audit,
+      randomId: () => NEW_ID,
+      now: () => now,
+    });
+    const res = await postFork(url, {});
+    expect(res.status).toBe(200);
+
+    const written = await readFile(join(chatsDir, `${NEW_ID}.jsonl`), 'utf8');
+    const lines = written.split('\n').filter((l) => l.length > 0);
+    const header = JSON.parse(lines[0]);
+    expect(header.type).toBe('fork');
+    expect(header.parentSessionId).toBe(PARENT_ID);
+    expect(header.transcriptMode).toBe('include');
+    expect(header.forkedAt).toBe('2026-07-10T00:00:00.000Z');
+    expect('parentEventId' in header).toBe(false);
+    // The copied records come AFTER the header.
+    expect(lines.length).toBe(2); // 1 header + 1 copied record
+    expect(JSON.parse(lines[1]).sessionId).toBe(NEW_ID);
+  });
+
+  it('fork header includes parentEventId when fromEventId is supplied', async () => {
+    await writeParent();
+    const { daemon } = fakeDaemon(async () => ({}));
+    const audit = fakeAudit();
+    const url = await mount({ daemon, audit, randomId: () => NEW_ID });
+    const res = await postFork(url, { fromEventId: 7 });
+    expect(res.status).toBe(200);
+
+    const written = await readFile(join(chatsDir, `${NEW_ID}.jsonl`), 'utf8');
+    const header = JSON.parse(
+      written.split('\n').filter((l) => l.length > 0)[0],
+    );
+    expect(header.type).toBe('fork');
+    expect(header.parentEventId).toBe(7);
+  });
+
+  it('fromEventId=0 forks with empty transcript body (include mode up to record 0)', async () => {
+    // Write a parent with two records
+    await mkdir(chatsDir, { recursive: true });
+    const rec0 = {
+      uuid: 'r0',
+      parentUuid: null,
+      sessionId: PARENT_ID,
+      cwd: CWD,
+      type: 'user',
+    };
+    const rec1 = {
+      uuid: 'r1',
+      parentUuid: 'r0',
+      sessionId: PARENT_ID,
+      cwd: CWD,
+      type: 'assistant',
+    };
+    await writeFile(
+      join(chatsDir, `${PARENT_ID}.jsonl`),
+      [JSON.stringify(rec0), JSON.stringify(rec1)].join('\n') + '\n',
+      'utf8',
+    );
+    const { daemon } = fakeDaemon(async () => ({}));
+    const audit = fakeAudit();
+    const url = await mount({ daemon, audit, randomId: () => NEW_ID });
+    // fromEventId=0 means include records up to (but not beyond) event 0 — empty slice
+    const res = await postFork(url, { fromEventId: 0 });
+    expect(res.status).toBe(200);
+    const written = await readFile(join(chatsDir, `${NEW_ID}.jsonl`), 'utf8');
+    // Only the fork header, no copied records (slice is empty)
+    const lines = written.split('\n').filter((l) => l.length > 0);
+    expect(lines.length).toBe(1);
+    const header = JSON.parse(lines[0]);
+    expect(header.type).toBe('fork');
+    expect(header.parentEventId).toBe(0);
+  });
+
+  describe('SSE session_forked / child_forked events', () => {
+    it('emits session_forked on parent session and child_forked on child session when bus + walDir provided', async () => {
+      await writeParent();
+      const { daemon } = fakeDaemon(async () => ({}));
+      const audit = fakeAudit();
+      const bus = new OwnerEventBus();
+      const received: OwnerEvent[] = [];
+      bus.subscribe((e) => received.push(e));
+      const walDir = join(runtimeBase, 'wal-test');
+      const url = await mount({
+        daemon,
+        audit,
+        randomId: () => NEW_ID,
+        bus,
+        walDir,
+      });
+      const res = await postFork(url, {});
+      expect(res.status).toBe(200);
+
+      // session_forked should be published on the bus for the parent session.
+      const parentEvent = received.find(
+        (e) => e.type === 'session_event' && e.sessionId === PARENT_ID,
+      );
+      expect(parentEvent).toBeDefined();
+      if (parentEvent?.type === 'session_event') {
+        expect(parentEvent.event.type).toBe('session_forked');
+        expect(
+          (parentEvent.event.data as Record<string, unknown>).childSessionId,
+        ).toBe(NEW_ID);
+      }
+
+      // child_forked should be published for the new session.
+      const childEvent = received.find(
+        (e) => e.type === 'session_event' && e.sessionId === NEW_ID,
+      );
+      expect(childEvent).toBeDefined();
+      if (childEvent?.type === 'session_event') {
+        expect(childEvent.event.type).toBe('child_forked');
+        expect(
+          (childEvent.event.data as Record<string, unknown>).parentSessionId,
+        ).toBe(PARENT_ID);
+      }
+    });
+
+    it('WAL seeded: session_forked id = fromEventId + 1, child_forked id = 1 when no fromEventId', async () => {
+      await writeParent();
+      const { daemon } = fakeDaemon(async () => ({}));
+      const audit = fakeAudit();
+      const walDir = join(runtimeBase, 'wal-seed');
+      const url = await mount({
+        daemon,
+        audit,
+        randomId: () => NEW_ID,
+        walDir,
+      });
+      const res = await postFork(url, {});
+      expect(res.status).toBe(200);
+
+      // Parent WAL: session_forked should have id=1 (fromEventId defaults to 0, so +1=1)
+      const parentWalFrames = [
+        ...decodeSegment(join(walDir, 'wal', `${PARENT_ID}.log`)),
+      ];
+      expect(parentWalFrames.length).toBeGreaterThanOrEqual(1);
+      const forkedFrame = parentWalFrames.find(
+        (f) => f.type === 'session_forked',
+      );
+      expect(forkedFrame).toBeDefined();
+      expect(forkedFrame?.id).toBe(1);
+
+      // Child WAL: child_forked should have id=1
+      const childWalFrames = [
+        ...decodeSegment(join(walDir, 'wal', `${NEW_ID}.log`)),
+      ];
+      expect(childWalFrames.length).toBeGreaterThanOrEqual(1);
+      const childFrame = childWalFrames.find((f) => f.type === 'child_forked');
+      expect(childFrame).toBeDefined();
+      expect(childFrame?.id).toBe(1);
+    });
+
+    it('WAL seeded: session_forked id = fromEventId + 1 when fromEventId is provided', async () => {
+      await writeParent();
+      const { daemon } = fakeDaemon(async () => ({}));
+      const audit = fakeAudit();
+      const walDir = join(runtimeBase, 'wal-seed-feid');
+      const url = await mount({
+        daemon,
+        audit,
+        randomId: () => NEW_ID,
+        walDir,
+      });
+      const res = await postFork(url, { fromEventId: 10 });
+      expect(res.status).toBe(200);
+
+      const parentWalFrames = [
+        ...decodeSegment(join(walDir, 'wal', `${PARENT_ID}.log`)),
+      ];
+      const forkedFrame = parentWalFrames.find(
+        (f) => f.type === 'session_forked',
+      );
+      expect(forkedFrame?.id).toBe(11); // fromEventId(10) + 1
+    });
+
+    it('no SSE/WAL side effects when bus and walDir are absent', async () => {
+      await writeParent();
+      const { daemon } = fakeDaemon(async () => ({}));
+      const audit = fakeAudit();
+      // No bus, no walDir — should still fork successfully with no side effects.
+      const url = await mount({ daemon, audit, randomId: () => NEW_ID });
+      const res = await postFork(url, {});
+      expect(res.status).toBe(200);
+    });
   });
 });

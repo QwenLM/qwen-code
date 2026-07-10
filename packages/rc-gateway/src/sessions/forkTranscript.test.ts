@@ -9,6 +9,7 @@ import {
   forkRecords,
   serializeForked,
   buildForkTitleRecord,
+  buildForkHeader,
 } from './forkTranscript.js';
 
 function sample(): Array<Record<string, unknown>> {
@@ -39,6 +40,51 @@ function sample(): Array<Record<string, unknown>> {
     },
   ];
 }
+
+describe('buildForkHeader', () => {
+  it('returns a record with type="fork", parentSessionId, transcriptMode, forkedAt', () => {
+    const header = buildForkHeader({
+      parentSessionId: 'parent-abc',
+      transcriptMode: 'include',
+      forkedAt: '2026-07-10T00:00:00.000Z',
+    });
+    expect(header.type).toBe('fork');
+    expect(header.parentSessionId).toBe('parent-abc');
+    expect(header.transcriptMode).toBe('include');
+    expect(header.forkedAt).toBe('2026-07-10T00:00:00.000Z');
+    expect('parentEventId' in header).toBe(false);
+  });
+
+  it('includes parentEventId when provided', () => {
+    const header = buildForkHeader({
+      parentSessionId: 'parent-abc',
+      parentEventId: 42,
+      transcriptMode: 'summary',
+      forkedAt: '2026-07-10T00:00:00.000Z',
+    });
+    expect(header.parentEventId).toBe(42);
+  });
+
+  it('omits parentEventId when undefined', () => {
+    const header = buildForkHeader({
+      parentSessionId: 'parent-abc',
+      transcriptMode: 'empty',
+      forkedAt: '2026-07-10T00:00:00.000Z',
+    });
+    expect('parentEventId' in header).toBe(false);
+  });
+
+  it('supports all three transcriptMode values', () => {
+    for (const mode of ['include', 'summary', 'empty'] as const) {
+      const header = buildForkHeader({
+        parentSessionId: 'p',
+        transcriptMode: mode,
+        forkedAt: '2026-07-10T00:00:00.000Z',
+      });
+      expect(header.transcriptMode).toBe(mode);
+    }
+  });
+});
 
 describe('forkRecords', () => {
   it('rewrites every record sessionId to the new id', () => {

@@ -70,7 +70,11 @@ describe('loadLayeredPolicy', () => {
   });
 
   it('no workspace file → just the user policy', async () => {
-    await writeFile(userPath, `rules:\n${rule('u', 'deny', '{ tool: bash }')}`);
+    await writeFile(
+      userPath,
+      `rules:\n${rule('u', 'deny', '{ tool: bash }')}`,
+      { mode: 0o600 },
+    );
     const p = await loadLayeredPolicy(userPath, workspaceCwd, warn);
     expect(p.rules.map((r) => r.id)).toEqual(['u']);
     expect(warnings).toHaveLength(0);
