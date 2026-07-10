@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import express from 'express';
+import express, { type Request, type Response } from 'express';
 import request from 'supertest';
 import {
   registerWorkspaceManagementRoutes,
@@ -32,7 +32,7 @@ function createMockRegistry(
   return {
     primary: runtimes[0]!,
     list: () => Object.freeze([...runtimes]) as readonly WorkspaceRuntime[],
-    getByWorkspaceCwd: (cwd) => byCwd.get(cwd),
+    getByWorkspaceCwd: (cwd: string) => byCwd.get(cwd),
     getByWorkspaceId: () => undefined,
     resolveWorkspaceCwd: () => undefined,
     resolveLiveSessionOwner: () => ({ kind: 'not_found' }),
@@ -54,8 +54,8 @@ function createApp(overrides?: Partial<WorkspaceManagementRouteDeps>) {
   app.use(express.json());
   const deps: WorkspaceManagementRouteDeps = {
     workspaceRegistry: createMockRegistry([makeRuntime(REAL_DIR)]),
-    mutate: () => (_req, _res, next) => next(),
-    safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
+    mutate: () => (_req: Request, _res: Response, next: () => void) => next(),
+    safeBody: (req: Request) => (req.body ?? {}) as Record<string, unknown>,
     createWorkspaceRuntime: vi
       .fn()
       .mockImplementation((cwd: string) => Promise.resolve(makeRuntime(cwd))),
