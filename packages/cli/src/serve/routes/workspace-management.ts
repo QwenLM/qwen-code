@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { realpath, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import type { Application, Request, Response } from 'express';
 import { isWithinRoot } from '@qwen-code/qwen-code-core';
@@ -72,16 +73,17 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
 
-      // Canonicalize like startup registration does (run-qwen-serve uses
-      // realpathSync.native): resolve symlinks so an alias such as
-      // `/tmp/link -> /real/project` cannot slip past the string-based
-      // duplicate / nesting checks and register one physical directory twice.
+      // Canonicalize with the OS-native syscall, the same call startup
+      // registration uses (canonicalizeWorkspace -> realpathSync.native). The
+      // POSIX JS realpath() can differ on case-insensitive filesystems
+      // (APFS/NTFS), which would let the same physical directory register under
+      // two distinct canonical strings and defeat the duplicate check.
       let canonical: string;
       try {
-        canonical = await realpath(resolve(cwd));
+        canonical = realpathSync.native(resolve(cwd));
       } catch {
         res.status(400).json({
-          error: `Path does not exist: ${cwd}`,
+          error: 'Path does not exist or is not accessible',
           code: 'invalid_path',
         });
         return;
@@ -91,14 +93,14 @@ export function registerWorkspaceManagementRoutes(
         const s = await stat(canonical);
         if (!s.isDirectory()) {
           res.status(400).json({
-            error: `Path is not a directory: ${canonical}`,
+            error: 'Path is not a directory',
             code: 'invalid_path',
           });
           return;
         }
       } catch {
         res.status(400).json({
-          error: `Path does not exist: ${canonical}`,
+          error: 'Path does not exist or is not accessible',
           code: 'invalid_path',
         });
         return;
@@ -106,25 +108,35 @@ export function registerWorkspaceManagementRoutes(
 
       // The duplicate / in-flight / nesting checks and `inFlight.add` below run
       // synchronously (no `await` between them), so concurrent POSTs for the
-      // same canonical cwd can't race past registration.
+      // same canonical cwd can't race past registration. Error messages stay
+      // generic and never echo a resolved path (which could reveal symlink
+      // targets or another workspace's location).
       if (
         workspaceRegistry.getByWorkspaceCwd(canonical) ||
         inFlight.has(canonical)
       ) {
         res.status(409).json({
-          error: `Workspace already registered: ${canonical}`,
+          error: 'Workspace already registered',
           code: 'workspace_exists',
         });
         return;
       }
 
-      for (const existing of workspaceRegistry.list()) {
+      // Nesting guard checks registered workspaces AND in-flight registrations,
+      // so two concurrent POSTs for parent/child paths (e.g. /project and
+      // /project/sub) can't both pass while neither is in the registry yet.
+      const boundCwds = [
+        ...workspaceRegistry.list().map((r) => r.workspaceCwd),
+        ...inFlight,
+      ];
+      for (const existing of boundCwds) {
         if (
-          isWithinRoot(canonical, existing.workspaceCwd) ||
-          isWithinRoot(existing.workspaceCwd, canonical)
+          existing !== canonical &&
+          (isWithinRoot(canonical, existing) ||
+            isWithinRoot(existing, canonical))
         ) {
           res.status(409).json({
-            error: `Workspace path is nested with existing workspace: ${existing.workspaceCwd}`,
+            error: 'Workspace path nests with an existing workspace',
             code: 'workspace_nested',
           });
           return;

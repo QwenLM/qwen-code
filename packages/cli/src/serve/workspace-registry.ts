@@ -11,6 +11,7 @@ import {
 import type { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 export interface WorkspaceRuntimeEnvMetadata {
   readonly mode: 'parent-process' | 'runtime-overlay';
@@ -215,8 +216,19 @@ export function createWorkspaceRegistry(
       byId.set(runtime.workspaceId, runtime);
       runtimes.push(runtime);
       const event: WorkspaceRegistryEvent = { type: 'added', runtime };
+      // A misbehaving listener must not abort the caller after the runtime is
+      // already committed to the maps/array: that would leave the workspace
+      // registered while the caller (e.g. POST /workspaces) reports failure.
       for (const listener of listeners) {
-        listener(event);
+        try {
+          listener(event);
+        } catch (err) {
+          writeStderrLine(
+            `WorkspaceRegistry onChange listener threw: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
       }
     },
     onChange: (listener) => {
