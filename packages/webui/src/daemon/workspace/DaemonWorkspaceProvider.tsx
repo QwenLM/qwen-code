@@ -100,6 +100,8 @@ export function DaemonWorkspaceProvider({
     const promise = client.capabilities().catch((error: unknown) => {
       if (capabilitiesPromiseRef.current === promise) {
         capabilitiesPromiseRef.current = undefined;
+        setError(error instanceof Error ? error : new Error(String(error)));
+        setStatus('error');
       }
       throw error;
     });
@@ -113,6 +115,7 @@ export function DaemonWorkspaceProvider({
       ) {
         setCapabilities(caps);
         setStatus('connected');
+        setError(undefined);
       }
       return caps;
     });

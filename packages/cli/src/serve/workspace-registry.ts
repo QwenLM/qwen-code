@@ -11,7 +11,6 @@ import {
 import type { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 export interface WorkspaceRuntimeEnvMetadata {
   readonly mode: 'parent-process' | 'runtime-overlay';
@@ -65,11 +64,6 @@ export interface WorkspaceSessionOwnerIndex {
   handleBridgeSessionLifecycle(event: WorkspaceSessionLifecycleEvent): void;
 }
 
-export type WorkspaceRegistryEvent = {
-  readonly type: 'added';
-  readonly runtime: WorkspaceRuntime;
-};
-
 export interface WorkspaceRegistry {
   readonly primary: WorkspaceRuntime;
   list(): readonly WorkspaceRuntime[];
@@ -80,7 +74,6 @@ export interface WorkspaceRegistry {
   ): WorkspaceRuntime | undefined;
   resolveLiveSessionOwner(sessionId: string): WorkspaceSessionOwnerResolution;
   add(runtime: WorkspaceRuntime): void;
-  onChange(listener: (event: WorkspaceRegistryEvent) => void): () => void;
 }
 
 export interface WorkspaceRegistryOptions {
@@ -168,7 +161,6 @@ export function createWorkspaceRegistry(
   const runtimes: WorkspaceRuntime[] = [...inputRuntimes];
   const primary = primaryRuntimes[0]!;
   const sessionOwnerIndex = options.sessionOwnerIndex;
-  const listeners = new Set<(event: WorkspaceRegistryEvent) => void>();
   const scanLiveOwners = (
     sessionId: string,
   ): WorkspaceSessionOwnerResolution => {
@@ -215,27 +207,6 @@ export function createWorkspaceRegistry(
       byCwd.set(runtime.workspaceCwd, runtime);
       byId.set(runtime.workspaceId, runtime);
       runtimes.push(runtime);
-      const event: WorkspaceRegistryEvent = { type: 'added', runtime };
-      // A misbehaving listener must not abort the caller after the runtime is
-      // already committed to the maps/array: that would leave the workspace
-      // registered while the caller (e.g. POST /workspaces) reports failure.
-      for (const listener of listeners) {
-        try {
-          listener(event);
-        } catch (err) {
-          writeStderrLine(
-            `WorkspaceRegistry onChange listener threw: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
-      }
-    },
-    onChange: (listener) => {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
     },
     resolveLiveSessionOwner: (sessionId) => {
       const indexedCwds = sessionOwnerIndex?.getWorkspaceCwds(sessionId) ?? [];
