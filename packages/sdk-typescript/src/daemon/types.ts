@@ -477,7 +477,55 @@ export interface DaemonForkSessionResult {
   launched: boolean;
 }
 
-/** Sparse session record returned by `GET /workspace/:id/sessions`. */
+/**
+ * Wire-format mirror of `BridgePendingInteraction*` in
+ * `packages/acp-bridge/src/bridgeTypes.ts`; keep fields synchronized.
+ * Session runtime interaction details returned by live session endpoints.
+ */
+export interface DaemonPendingInteractionOption {
+  optionId: string;
+  label?: string;
+  kind?: string;
+}
+
+export interface DaemonPendingPermissionInteraction {
+  requestId: string;
+  kind: 'permission';
+  createdAt: string;
+  action: {
+    type?: string;
+    title?: string;
+    content?: unknown;
+    locations?: unknown;
+    input?: unknown;
+  };
+  options: DaemonPendingInteractionOption[];
+}
+
+export interface DaemonPendingUserQuestion {
+  /** Key to use in `PermissionResponse.answers` when voting. */
+  answerKey: string;
+  header?: string;
+  question?: string;
+  options?: Array<{ label?: string; description?: string }>;
+  multiSelect?: boolean;
+  [key: string]: unknown;
+}
+
+export interface DaemonPendingUserQuestionInteraction {
+  requestId: string;
+  kind: 'user_question';
+  createdAt: string;
+  title?: string;
+  questions: DaemonPendingUserQuestion[];
+  options: DaemonPendingInteractionOption[];
+}
+
+export type DaemonPendingInteraction =
+  | DaemonPendingPermissionInteraction
+  | DaemonPendingUserQuestionInteraction;
+
+/** Wire-format mirror of the bridge's `BridgeSessionSummary`; keep fields synchronized. */
 export interface DaemonSessionSummary {
   sessionId: string;
   workspaceCwd: string;
@@ -486,6 +534,18 @@ export interface DaemonSessionSummary {
   displayName?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
+  isWaitingForPermission?: boolean;
+  isWaitingForUserQuestion?: boolean;
+  pendingInteractionCount?: number;
+  hasTurnError?: boolean;
+  /** Present for live sessions in status and workspace-list responses. */
+  turnError?: {
+    message: string;
+    code?: string;
+    errorKind?: string;
+  };
+  /** Present for live sessions in status and workspace-list responses. */
+  pendingInteractions?: DaemonPendingInteraction[];
   isArchived?: boolean;
   isPinned?: boolean;
   pinnedAt?: string;
@@ -2510,6 +2570,8 @@ export type PermissionOutcome =
 
 export interface PermissionResponse {
   outcome: PermissionOutcome;
+  /** Answers to ask_user_question, keyed by its `answerKey`. */
+  answers?: Record<string, string>;
   [key: string]: unknown;
 }
 

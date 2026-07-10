@@ -14,7 +14,10 @@ import type {
   DaemonPerfSnapshot,
   DaemonStartupSnapshot,
 } from './daemon-status.js';
-import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type {
+  ChannelWorkerSnapshot,
+  ChannelWorkerSupervisor,
+} from './channel-worker-supervisor.js';
 import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import {
   allowOriginCors,
@@ -170,6 +173,13 @@ import {
   registerWorkspaceQualifiedToolsRoutes,
   registerWorkspaceToolsRoutes,
 } from './routes/workspace-tools.js';
+import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
+import {
+  parseChannelWebhookConfigLenient,
+  type parseChannelWebhookConfig,
+} from '../commands/channel/config-utils.js';
+import { loadChannelsConfig } from '../commands/channel/runtime.js';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 export {
   createDefaultFsAuditEmit,
@@ -197,6 +207,49 @@ export { getActiveSseCount } from './routes/sse-events.js';
  * `createServeApp` repeatedly would flood stderr with identical lines.
  */
 let warnedDefaultTrust = false;
+
+function loadServeChannelWebhookConfigs(
+  workspace: string,
+): Record<string, { webhooks?: ReturnType<typeof parseChannelWebhookConfig> }> {
+  const channelsConfig = loadChannelsConfig(workspace);
+  const parsed: Record<
+    string,
+    { webhooks?: ReturnType<typeof parseChannelWebhookConfig> }
+  > = {};
+
+  for (const [channelName, rawConfig] of Object.entries(channelsConfig)) {
+    if (typeof rawConfig !== 'object' || rawConfig === null) {
+      continue;
+    }
+    let webhooks: ReturnType<typeof parseChannelWebhookConfig>;
+    try {
+      webhooks = parseChannelWebhookConfigLenient(
+        channelName,
+        rawConfig as Record<string, unknown>,
+        (source, sourceError) => {
+          const sourceMessage =
+            sourceError instanceof Error
+              ? sourceError.message
+              : String(sourceError);
+          writeStderrLine(
+            `[daemon] Skipping malformed webhook source "${source}" for channel "${channelName}": ${sourceMessage}`,
+          );
+        },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      writeStderrLine(
+        `[daemon] Skipping malformed webhook config for channel "${channelName}": ${message}`,
+      );
+      continue;
+    }
+    if (webhooks) {
+      parsed[channelName] = { webhooks };
+    }
+  }
+
+  return parsed;
+}
 
 function describeRegistryPrimaryForConflict(
   registry: WorkspaceRegistry,
@@ -295,6 +348,7 @@ export interface ServeAppDeps {
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  enqueueChannelWebhookTask?: ChannelWorkerSupervisor['enqueueWebhookTask'];
   /**
    * Stop and relaunch the daemon-managed channel worker so it re-reads
    * settings.json. Wired only when the daemon owns a channel worker; its
@@ -561,6 +615,7 @@ export function createServeApp(
       sessionShellCommandEnabled,
       multiWorkspaceSessionsEnabled:
         (injectedWorkspaceRegistry?.list().length ?? 1) > 1,
+      ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
     });
   const statusProvider =
     deps.statusProvider ??
@@ -740,6 +795,9 @@ export function createServeApp(
     app.use(denyBrowserOriginCors);
   }
   app.use(hostAllowlist(opts.hostname, getPort));
+  const rateLimiter = installRateLimiter(app, opts, daemonLog, {
+    mount: false,
+  });
 
   const healthDemoRoutes = createHealthDemoRoutes({
     opts,
@@ -782,12 +840,23 @@ export function createServeApp(
     mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
   }
 
+  if (deps.enqueueChannelWebhookTask) {
+    registerChannelWebhookRoutes(app, {
+      channelsConfig: loadServeChannelWebhookConfigs(primaryBoundWorkspace),
+      safeBody,
+      enqueueWebhookTask: deps.enqueueChannelWebhookTask,
+      rateLimiter,
+      daemonLog,
+    });
+  }
+
   app.use(bearerAuth(opts.token));
 
-  // Rate limiter: after auth (only count authenticated requests),
-  // before body parser (reject early without burning JSON.parse CPU).
-  const rateLimiter = installRateLimiter(app, opts, daemonLog);
-  installJsonBodyParser(app);
+  // Rate limiter: after auth (only count authenticated requests), except
+  // webhook routes which use their own shared-secret auth before bearerAuth.
+  if (rateLimiter) {
+    app.use(rateLimiter.middleware);
+  }
 
   if (!healthDemoRoutes.exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
@@ -797,6 +866,8 @@ export function createServeApp(
     // leaks the full API surface).
     healthDemoRoutes.register(app);
   }
+
+  installJsonBodyParser(app);
 
   // Mutation-route gate factory. Non-strict mode is passthrough;
   // `{ strict: true }` requires a token even on loopback defaults.

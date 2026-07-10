@@ -30,6 +30,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   buildPermissionRequestContent,
+  interactionMetaFields,
   toPermissionOptions,
 } from './permissionUtils.js';
 
@@ -214,7 +215,10 @@ export class SubAgentTracker {
           // `kind` ACP can't carry. This is the second producer path (nested
           // sub-agent tool calls); Session.ts adds the same _meta on the primary
           // path.
-          _meta: { toolName: event.name },
+          _meta: {
+            toolName: event.name,
+            ...interactionMetaFields(fullConfirmationDetails),
+          },
         },
       };
 
