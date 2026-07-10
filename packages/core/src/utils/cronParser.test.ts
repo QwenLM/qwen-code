@@ -40,6 +40,20 @@ describe('parseCron', () => {
     expect([...fields.minute].sort((a, b) => a - b)).toEqual([1, 4, 7, 10]);
   });
 
+  it('parses single value with step as N-max/step', () => {
+    // 5/15 means start at 5, step by 15 up to field max (59) → {5, 20, 35, 50}
+    const fields5 = parseCron('5/15 * * * *');
+    expect([...fields5.minute].sort((a, b) => a - b)).toEqual([5, 20, 35, 50]);
+
+    // 0/15 means start at 0, step by 15 up to 59 → {0, 15, 30, 45}
+    const fields0 = parseCron('0/15 * * * *');
+    expect([...fields0.minute].sort((a, b) => a - b)).toEqual([0, 15, 30, 45]);
+
+    // 0/6 in hour field → {0, 6, 12, 18}
+    const fieldsH = parseCron('* 0/6 * * *');
+    expect([...fieldsH.hour].sort((a, b) => a - b)).toEqual([0, 6, 12, 18]);
+  });
+
   it('throws on wrong number of fields', () => {
     expect(() => parseCron('* * *')).toThrow('must have exactly 5 fields');
     expect(() => parseCron('* * * * * *')).toThrow(
@@ -128,6 +142,23 @@ describe('matches', () => {
     expect(matches('*/5 * * * *', date5)).toBe(true);
     expect(matches('*/5 * * * *', date3)).toBe(false);
   });
+
+  it('matches single-value step expressions (N/step)', () => {
+    // 5/15 → {5, 20, 35, 50}
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 5))).toBe(true);
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 20))).toBe(true);
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 35))).toBe(true);
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 50))).toBe(true);
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 0))).toBe(false);
+    expect(matches('5/15 * * * *', new Date(2025, 0, 15, 10, 15))).toBe(false);
+
+    // 0/15 → {0, 15, 30, 45} — the common "every 15 minutes" idiom
+    expect(matches('0/15 * * * *', new Date(2025, 0, 15, 10, 0))).toBe(true);
+    expect(matches('0/15 * * * *', new Date(2025, 0, 15, 10, 15))).toBe(true);
+    expect(matches('0/15 * * * *', new Date(2025, 0, 15, 10, 30))).toBe(true);
+    expect(matches('0/15 * * * *', new Date(2025, 0, 15, 10, 45))).toBe(true);
+    expect(matches('0/15 * * * *', new Date(2025, 0, 15, 10, 10))).toBe(false);
+  });
 });
 
 describe('nextFireTime', () => {
@@ -179,5 +210,13 @@ describe('nextFireTime', () => {
     const now = new Date(2025, 0, 15, 10, 0, 0); // exactly 10:00:00
     const next = nextFireTime('*/5 * * * *', now);
     expect(next.getTime()).toBeGreaterThan(now.getTime());
+  });
+
+  it('finds next fire time for single-value step (0/15)', () => {
+    // 0/15 → {0, 15, 30, 45}; after 10:16, next is 10:30
+    const now = new Date(2025, 0, 15, 10, 16, 0);
+    const next = nextFireTime('0/15 * * * *', now);
+    expect(next.getHours()).toBe(10);
+    expect(next.getMinutes()).toBe(30);
   });
 });

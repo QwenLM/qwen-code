@@ -78,7 +78,7 @@ function parseField(field: string, min: number, max: number): Set<number> {
         throw new Error(`Value "${base}" out of bounds [${min}-${max}]`);
       }
       rangeStart = val;
-      rangeEnd = val;
+      rangeEnd = stepParts.length === 2 ? max : val;
     }
 
     if (stepParts.length === 2 && !INTEGER_TOKEN_RE.test(stepParts[1]!)) {
