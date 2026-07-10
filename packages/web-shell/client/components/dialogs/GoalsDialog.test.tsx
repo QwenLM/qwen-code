@@ -77,7 +77,9 @@ function setTextarea(value: string) {
 async function mount(
   goals: MockGoal[],
   opts: {
-    onCreateGoal?: (condition: string) => void | Promise<void>;
+    onCreateGoal?: (
+      condition: string,
+    ) => boolean | void | Promise<boolean | void>;
     onOpenSession?: (sessionId: string) => void;
     onError?: (error: unknown, message: string) => void;
     droppedCount?: number;
@@ -413,5 +415,75 @@ describe('GoalsDialog', () => {
     await flush();
 
     expect(document.body.textContent).toContain('daemon unreachable');
+  });
+
+  it('drops a stale dropped-session count when the next load fails outright', async () => {
+    // The banner describes a partial probe. A hard `GET /goals` failure is a
+    // different state, and pinning the old count reports a partial probe that
+    // did not happen on this load.
+    vi.useFakeTimers();
+    actions.listGoals.mockResolvedValue({ goals: [], droppedCount: 2 });
+    actions.clearGoal.mockResolvedValue({ cleared: true });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <GoalsDialog
+            onCreateGoal={vi.fn()}
+            onOpenSession={vi.fn()}
+            onError={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(
+      document.querySelector('[data-testid="goals-dropped"]'),
+    ).not.toBeNull();
+
+    // The next poll reaches nothing at all.
+    actions.listGoals.mockRejectedValue(new Error('daemon unreachable'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    expect(document.querySelector('[data-testid="goals-dropped"]')).toBeNull();
+    expect(document.body.textContent).toContain('daemon unreachable');
+    vi.useRealTimers();
+  });
+
+  it('keeps the form open with the condition when creation reports failure', async () => {
+    // `onCreateGoal` returning false means no goal was started and the caller
+    // already surfaced why. Resetting would close the form and silently throw
+    // away what the user typed.
+    const onCreateGoal = vi.fn().mockResolvedValue(false);
+    await mount([], { onCreateGoal });
+
+    click(findButton('New goal'));
+    setTextarea('ship it');
+    click(findButton('Set goal'));
+    await flush();
+
+    expect(onCreateGoal).toHaveBeenCalledWith('ship it');
+    const textarea = document.querySelector('textarea');
+    expect(textarea).not.toBeNull();
+    expect(textarea!.value).toBe('ship it');
+  });
+
+  it('closes the form when creation resolves with no explicit result', async () => {
+    // The common case: a void-returning callback still means success.
+    const onCreateGoal = vi.fn().mockResolvedValue(undefined);
+    await mount([], { onCreateGoal });
+
+    click(findButton('New goal'));
+    setTextarea('ship it');
+    click(findButton('Set goal'));
+    await flush();
+
+    expect(document.querySelector('textarea')).toBeNull();
   });
 });

@@ -4880,7 +4880,10 @@ export function App({
                         const created = await createNewSession();
                         // createNewSession already surfaced the failure; don't
                         // drop the goal into the wrong (still-current) session.
-                        if (!created) return;
+                        // `false` keeps the form open with the typed condition
+                        // still in it — returning normally would read as
+                        // "created" and reset it.
+                        if (!created) return false;
                         onSessionIdChange?.(undefined);
                         // Switch to the chat only once the prompt is admitted.
                         // Switching first unmounts the Goals page, and a later

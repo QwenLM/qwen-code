@@ -17,8 +17,9 @@
  *
  * A session whose child is wedged or dying rejects; those are dropped (and
  * logged) rather than failing the whole list, so one bad session can't hide the
- * others. The per-call timeout is the bridge's, and the calls run concurrently,
- * so a wedged child costs one timeout rather than one per session.
+ * others. The per-call timeout is the bridge's, and the calls run concurrently
+ * (up to `PROBE_CONCURRENCY`), so a wedged child costs one timeout rather than
+ * one per session.
  *
  * Read-only: clearing a goal stays on `POST /session/:id/goal/clear`, and
  * setting one stays a prompt (`/goal <condition>` registers the hook and kicks
@@ -44,6 +45,42 @@ export interface GoalsSessionBridge {
 export interface RegisterGoalsRoutesDeps {
   boundWorkspace: string;
   bridge: GoalsSessionBridge;
+}
+
+/**
+ * Ceiling on in-flight `sessionGoalGet` probes. Each is an IPC round-trip to a
+ * separate child process, so a workspace with dozens of live sessions would
+ * otherwise open dozens at once every poll.
+ */
+const PROBE_CONCURRENCY = 10;
+
+/**
+ * `Promise.allSettled` over `items`, but with at most `limit` calls in flight.
+ * Results stay index-aligned with `items` so the caller can still name the
+ * session behind a rejection.
+ */
+async function allSettledWithLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<Array<PromiseSettledResult<R>>> {
+  const results = new Array<PromiseSettledResult<R>>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next++;
+      try {
+        results[index] = { status: 'fulfilled', value: await fn(items[index]) };
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason };
+      }
+    }
+  };
+  // `Math.max(1, …)` so a zero limit can never leave the array sparse: the
+  // caller reads `outcome.status` off every index.
+  const workers = Math.min(Math.max(1, limit), items.length);
+  await Promise.all(Array.from({ length: workers }, worker));
+  return results;
 }
 
 /** One row of the Goals page. */
@@ -73,11 +110,13 @@ export function registerGoalsRoutes(
   app.get('/goals', async (_req, res) => {
     try {
       const sessions = bridge.listWorkspaceSessions(boundWorkspace);
-      const settled = await Promise.allSettled(
-        sessions.map(async (session) => ({
+      const settled = await allSettledWithLimit(
+        sessions,
+        PROBE_CONCURRENCY,
+        async (session) => ({
           session,
           goal: await bridge.getSessionGoal(session.sessionId),
-        })),
+        }),
       );
 
       const goals: GoalView[] = [];

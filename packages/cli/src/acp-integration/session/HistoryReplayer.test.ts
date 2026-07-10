@@ -939,6 +939,189 @@ describe('HistoryReplayer', () => {
       expect(texts).toEqual(['hello']);
       expect(goalStatuses()).toHaveLength(1);
     });
+
+    it('survives a slash_command record whose outputHistoryItems is not an array', async () => {
+      const record = goalRecord();
+      (
+        record as unknown as { systemPayload: Record<string, unknown> }
+      ).systemPayload['outputHistoryItems'] = {
+        type: 'goal_status',
+        kind: 'set',
+        condition: 'ship it',
+      };
+
+      await expect(replayer.replay([record])).resolves.toBeUndefined();
+      expect(goalStatuses()).toEqual([]);
+    });
+
+    it('survives null entries and still replays the valid cards after them', async () => {
+      const record = goalRecord();
+      (
+        record as unknown as { systemPayload: Record<string, unknown> }
+      ).systemPayload['outputHistoryItems'] = [
+        null,
+        'not an object',
+        { type: 'goal_status', kind: 'set', condition: 'ship it' },
+      ];
+
+      await expect(replayer.replay([record])).resolves.toBeUndefined();
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
+    });
+  });
+
+  describe('an active goal that cannot be restored is superseded', () => {
+    // The client reads "a goal is running" off the newest goal card it saw. If
+    // restore is going to refuse the goal, replaying the `set` card alone
+    // leaves the UI claiming a live loop that nothing drives.
+    const goalRecord = (
+      ...outputHistoryItems: Array<Record<string, unknown>>
+    ): ChatRecord =>
+      ({
+        uuid: 'goal-uuid',
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'slash_command',
+        cwd: '/test',
+        version: '1.0.0',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/goal',
+          outputHistoryItems,
+        },
+      }) as unknown as ChatRecord;
+
+    const goalStatuses = () =>
+      sentUpdates()
+        .map((u) => u['_meta'] as Record<string, unknown> | undefined)
+        .map((meta) => meta?.['goalStatus'] as Record<string, unknown>)
+        .filter(Boolean);
+
+    const replayWithConfig = async (
+      config: Partial<Record<string, unknown>>,
+      records: ChatRecord[],
+    ) => {
+      const ctx = {
+        ...mockContext,
+        config: {
+          getToolRegistry: () => ({ getTool: () => null }),
+          isTrustedFolder: () => true,
+          getDisableAllHooks: () => false,
+          getHookSystem: () => ({}),
+          ...config,
+        } as unknown as Config,
+      } as unknown as SessionContext;
+      await new HistoryReplayer(ctx, {
+        supersedeUnrestorableGoal: true,
+      }).replay(records);
+    };
+
+    it.each([
+      [
+        'the folder is no longer trusted',
+        { isTrustedFolder: () => false },
+        'not trusted',
+      ],
+      [
+        'hooks are disabled by policy',
+        { getDisableAllHooks: () => true },
+        'hooks are disabled',
+      ],
+      [
+        'the hook system is unavailable',
+        { getHookSystem: () => undefined },
+        'hook system is unavailable',
+      ],
+    ])('emits a trailing cleared card when %s', async (_l, cfg, reason) => {
+      await replayWithConfig(cfg, [
+        goalRecord({
+          type: 'goal_status',
+          kind: 'set',
+          condition: 'ship it',
+          setAt: 1234,
+        }),
+      ]);
+
+      const statuses = goalStatuses();
+      expect(statuses).toHaveLength(2);
+      expect(statuses[0]).toMatchObject({ kind: 'set' });
+      // Ordering is the whole point: `loadSession` batches replay updates into
+      // its response, so a card emitted after replay would reach the client
+      // first and lose to the `set` card.
+      expect(statuses[1]).toMatchObject({
+        kind: 'cleared',
+        condition: 'ship it',
+        setAt: 1234,
+      });
+      expect(statuses[1]['lastReason']).toContain(reason);
+    });
+
+    it('leaves a restorable goal alone', async () => {
+      await replayWithConfig({}, [
+        goalRecord({ type: 'goal_status', kind: 'set', condition: 'ship it' }),
+      ]);
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
+    });
+
+    it('says nothing when the transcript has no active goal', async () => {
+      await replayWithConfig({ isTrustedFolder: () => false }, [
+        goalRecord({
+          type: 'goal_status',
+          kind: 'achieved',
+          condition: 'ship it',
+          iterations: 1,
+          durationMs: 5,
+        }),
+      ]);
+      expect(goalStatuses()).toHaveLength(1);
+      expect(goalStatuses()[0]).toMatchObject({ kind: 'achieved' });
+    });
+
+    it('says nothing when the active card was already dropped as invalid', async () => {
+      // The oversized card never reached the client, so there is no phantom
+      // "running" state to correct — a `cleared` card would name a goal the
+      // user never saw.
+      await replayWithConfig({ isTrustedFolder: () => false }, [
+        goalRecord({
+          type: 'goal_status',
+          kind: 'set',
+          condition: 'x'.repeat(4001),
+        }),
+      ]);
+      expect(goalStatuses()).toEqual([]);
+    });
+
+    it('stays off by default, and never touches config when it is off', async () => {
+      // Export replays a transcript through this class with a config stub that
+      // throws on any method it does not implement. A replay that only renders
+      // history must not ask about trust or hook policy — or editorialize.
+      const ctx = {
+        ...mockContext,
+        config: new Proxy(
+          { getToolRegistry: () => ({ getTool: () => null }) },
+          {
+            get(target: Record<string, unknown>, prop: string | symbol) {
+              if (prop in target) return target[prop as string];
+              if (typeof prop === 'symbol') return undefined;
+              throw new Error(`config does not implement ${String(prop)}`);
+            },
+          },
+        ) as unknown as Config,
+      } as unknown as SessionContext;
+
+      await expect(
+        new HistoryReplayer(ctx).replay([
+          goalRecord({
+            type: 'goal_status',
+            kind: 'set',
+            condition: 'ship it',
+          }),
+        ]),
+      ).resolves.toBeUndefined();
+
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
+    });
   });
 
   describe('mixed record types', () => {

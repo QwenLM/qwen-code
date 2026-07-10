@@ -59,7 +59,6 @@ import {
   redactUrlCredentials,
   computeUniqueBranchTitle,
   getActiveGoal,
-  getLastGoalTerminal,
   unregisterGoalHook,
   ToolNames,
   FORK_SUBAGENT_TYPE,
@@ -367,12 +366,18 @@ async function collectHistoryReplayUpdates({
   records,
   gaps,
   cumulativeUsage,
+  supersedeUnrestorableGoal,
 }: {
   sessionId: string;
   config: Config;
   records: ChatRecord[];
   gaps?: HistoryGap[];
   cumulativeUsage: CumulativeUsage;
+  /**
+   * Only the resume path, where `#restoreGoalOnResume` follows. Reading another
+   * session's history must render it as it was.
+   */
+  supersedeUnrestorableGoal?: boolean;
 }): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
   const updates: SessionUpdate[] = [];
   const replayContext: SessionContext = {
@@ -385,7 +390,9 @@ async function collectHistoryReplayUpdates({
   };
 
   try {
-    await new HistoryReplayer(replayContext).replay(records, gaps);
+    await new HistoryReplayer(replayContext, {
+      supersedeUnrestorableGoal,
+    }).replay(records, gaps);
   } catch (error) {
     const replayError = error instanceof Error ? error.message : String(error);
     debugLogger.warn(
@@ -3175,6 +3182,8 @@ class QwenAgent implements Agent {
             records,
             gaps: sessionData?.historyGaps,
             cumulativeUsage: replayUsage,
+            // A resume: the goal restore runs right after this.
+            supersedeUnrestorableGoal: true,
           });
           replayUpdates = liftSessionUpdateTimestamps(replay.updates);
           copyCumulativeUsage(session.cumulativeUsage, replayUsage);
@@ -3200,7 +3209,7 @@ class QwenAgent implements Agent {
     }
 
     await this.#restoreWorktreeOnResume(config, session);
-    this.#restoreGoalOnResume(config);
+    this.#restoreGoalOnResume(config, session);
 
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
@@ -3258,7 +3267,7 @@ class QwenAgent implements Agent {
     );
 
     await this.#restoreWorktreeOnResume(config, session);
-    this.#restoreGoalOnResume(config);
+    this.#restoreGoalOnResume(config, session);
 
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
@@ -3300,11 +3309,18 @@ class QwenAgent implements Agent {
    * Without this the goal loop silently dies whenever a session is reloaded or
    * `qwen serve` restarts, even though the transcript still shows it as active.
    *
-   * The terminal observer is installed by the `Session` constructor, so the
-   * `addItem` bridge that `restoreGoalFromHistory` takes in the TUI is not
-   * needed here. Best-effort: a failed restore must not block session load.
+   * The `addItem` bridge that `restoreGoalFromHistory` takes in the TUI is not
+   * used here — the daemon's terminal card goes out over the wire, not into an
+   * Ink history. But restore reaches `unregisterGoalHook` on every path,
+   * including the one where there was nothing to restore, and that clears the
+   * observer the `Session` constructor installed. So it is put back afterwards,
+   * unconditionally: without it a restored goal that later achieves or fails
+   * emits no terminal update and persists no terminal card, and the next reload
+   * revives a goal that already finished.
+   *
+   * Best-effort: a failed restore must not block session load.
    */
-  #restoreGoalOnResume(config: Config): void {
+  #restoreGoalOnResume(config: Config, session: Session): void {
     try {
       const records = config.getResumedSessionData()?.conversation.messages;
       if (!records?.length) return;
@@ -3316,6 +3332,13 @@ class QwenAgent implements Agent {
         debugLogger.info(
           `ACP goal restored sessionId=${config.getSessionId()} condition=${restored.condition}`,
         );
+      } else if (restored.blockedBy) {
+        // The transcript still holds an active goal card. `HistoryReplayer`
+        // supersedes it with a `cleared` card so the client does not show a
+        // goal that nothing is driving; say why on stderr.
+        writeStderrLine(
+          `qwen: not restoring the active goal for session ${config.getSessionId()} (${restored.blockedBy}).`,
+        );
       }
     } catch (error) {
       // Not debugLogger: it no-ops unless a debug session is active, and a
@@ -3324,6 +3347,8 @@ class QwenAgent implements Agent {
       writeStderrLine(
         `qwen: goal restore failed for session ${config.getSessionId()}: ${error}`,
       );
+    } finally {
+      session.installGoalTerminalObserver();
     }
   }
 
@@ -7148,8 +7173,9 @@ class QwenAgent implements Agent {
         // while its session is resident.
         this.sessionOrThrow(sessionId);
         const active = getActiveGoal(sessionId);
-        const lastTerminal = getLastGoalTerminal(sessionId);
         return {
+          // Projected field by field: `ActiveGoal` also carries `hookId` and
+          // `tokensAtStart`, which are this process's business.
           active: active
             ? {
                 condition: active.condition,
@@ -7160,7 +7186,6 @@ class QwenAgent implements Agent {
                   : {}),
               }
             : null,
-          lastTerminal: lastTerminal ?? null,
         };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionContinue: {

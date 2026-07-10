@@ -224,7 +224,13 @@ export interface BridgeSessionSummary {
   color?: SessionGroupColor | null;
 }
 
-/** A session's live `/goal` state, as reported by the `qwen --acp` child. */
+/**
+ * A session's live `/goal` state, as reported by the `qwen --acp` child.
+ *
+ * Only the active goal crosses the bridge. The child also caches the most
+ * recent goal that ended on its own, but nothing on this side reads it, so it
+ * is not part of the wire shape — add it back alongside the first consumer.
+ */
 export interface BridgeSessionGoal {
   active: {
     condition: string;
@@ -233,18 +239,6 @@ export interface BridgeSessionGoal {
     setAt: number;
     /** The judge's verdict on the most recent turn, when it has run. */
     lastReason?: string;
-  } | null;
-  /**
-   * The most recent goal that ended on its own (`achieved` / `failed` /
-   * `aborted`). A user-driven `/goal clear` does not populate this.
-   */
-  lastTerminal: {
-    kind: 'achieved' | 'aborted' | 'failed';
-    condition: string;
-    iterations: number;
-    durationMs: number;
-    lastReason?: string;
-    systemMessage?: string;
   } | null;
 }
 

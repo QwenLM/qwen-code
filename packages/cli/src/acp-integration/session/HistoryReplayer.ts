@@ -24,10 +24,31 @@ import {
   indexGapsByChild,
 } from '../../ui/utils/history-gap-notice.js';
 import {
+  collectGoalStatusItemsFromRecords,
+  findGoalToRestore,
+  goalConditionBlockedBy,
+  goalRestoreBlockedBy,
+  isTranscriptItemRecord,
   MAX_GOAL_LENGTH,
   parseGoalStatusItem,
+  type GoalRestoreBlockedReason,
 } from '../../ui/utils/restoreGoal.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+
+/**
+ * Shown on the `cleared` card that supersedes an active goal the resumed
+ * session refuses to restore. `condition-invalid` never reaches here: such a
+ * card is dropped from the replay outright.
+ */
+const GOAL_NOT_RESTORED_REASON: Record<
+  Exclude<GoalRestoreBlockedReason, 'condition-invalid'>,
+  string
+> = {
+  'untrusted-folder':
+    'Goal not restored: this folder is not trusted, so its Stop hook cannot run.',
+  'hooks-disabled': 'Goal not restored: hooks are disabled for this session.',
+  'no-hook-system': 'Goal not restored: the hook system is unavailable.',
+};
 
 export const MISSING_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
@@ -47,17 +68,34 @@ interface PendingReplayToolCall {
  * This ensures that replayed history looks identical to how it would
  * have appeared during the original session.
  */
+export interface HistoryReplayerOptions {
+  /**
+   * Emit a trailing `cleared` card when the transcript ends on an active goal
+   * this session will refuse to restore. Only meaningful where goal restore
+   * actually follows the replay — i.e. resuming a session into a live agent.
+   *
+   * Off by default. A replay that merely renders a transcript (export, or
+   * reading another session's history) must reproduce what happened, not
+   * editorialize about a Stop hook it was never going to register. It also has
+   * no business asking `config` for trust and hook policy: the export path
+   * supplies a config stub that throws on any method it does not implement.
+   */
+  supersedeUnrestorableGoal?: boolean;
+}
+
 export class HistoryReplayer {
   private readonly ctx: SessionContext;
   private readonly messageEmitter: MessageEmitter;
   private readonly toolCallEmitter: ToolCallEmitter;
+  private readonly options: HistoryReplayerOptions;
   private readonly pendingReplayToolCalls = new Map<
     string,
     PendingReplayToolCall
   >();
 
-  constructor(ctx: SessionContext) {
+  constructor(ctx: SessionContext, options: HistoryReplayerOptions = {}) {
     this.ctx = ctx;
+    this.options = options;
     this.messageEmitter = new MessageEmitter(ctx);
     this.toolCallEmitter = new ToolCallEmitter(ctx);
   }
@@ -83,6 +121,7 @@ export class HistoryReplayer {
           }
           await this.replayRecord(record);
         }
+        await this.supersedeUnrestorableGoal(records);
       } catch (error) {
         replayError = error;
       }
@@ -395,19 +434,21 @@ export class HistoryReplayer {
     const payload = record.systemPayload as
       | SlashCommandRecordPayload
       | undefined;
-    if (payload?.phase !== 'result' || !payload.outputHistoryItems?.length) {
-      return;
-    }
-    for (const item of payload.outputHistoryItems) {
+    if (payload?.phase !== 'result') return;
+    // Typed as an array, but it came off disk: a hand-edited record could make
+    // it any JSON value, and iterating a plain object throws.
+    const items: unknown = payload.outputHistoryItems;
+    if (!Array.isArray(items) || items.length === 0) return;
+    for (const item of items) {
       const goalStatus = parseGoalStatusItem(item);
       if (goalStatus) {
-        if (goalStatus.condition.length > MAX_GOAL_LENGTH) {
+        if (goalConditionBlockedBy(goalStatus.condition)) {
           // A transcript is a file: a corrupted or hand-edited condition would
           // otherwise ride out to every client inside `_meta.goalStatus`.
           // `restoreGoalFromHistory` refuses the same card, so skipping it here
           // keeps the card and the hook consistent — neither survives.
           writeStderrLine(
-            `qwen: skipping replay of a goal card whose condition exceeds ${MAX_GOAL_LENGTH} characters (got ${goalStatus.condition.length}).`,
+            `qwen: skipping replay of a goal card whose condition is empty or exceeds ${MAX_GOAL_LENGTH} characters (got ${goalStatus.condition.length}).`,
           );
         } else if (goalStatus.kind !== 'checking') {
           const { type: _type, ...status } = goalStatus;
@@ -415,7 +456,11 @@ export class HistoryReplayer {
         }
         continue;
       }
-      const text = typeof item['text'] === 'string' ? item['text'] : '';
+      // Not a goal card, and not necessarily an object either.
+      const text =
+        isTranscriptItemRecord(item) && typeof item['text'] === 'string'
+          ? item['text']
+          : '';
       if (text) {
         await this.messageEmitter.emitAgentMessage(
           text.replace(/\n/g, '  \n'),
@@ -423,6 +468,45 @@ export class HistoryReplayer {
         );
       }
     }
+  }
+
+  /**
+   * Emits a trailing `cleared` card when the transcript ends on an active goal
+   * that `restoreGoalFromHistory` is about to refuse.
+   *
+   * A client reads "there is an active goal" off the newest goal card it has
+   * seen, so replaying a `set` card that no Stop hook will drive leaves the UI
+   * claiming a goal is running when the loop is dead. The gates are pure
+   * functions of `config`, so the answer is known here, before restore runs.
+   *
+   * This card is emitted, not recorded: the transcript keeps its `set` card, so
+   * a later resume in a trusted folder (or with hooks re-enabled) restores the
+   * goal instead of finding it destroyed. Emitting from inside replay is also
+   * what puts the card *after* the `set` card — `loadSession` batches replay
+   * updates into its response, and a notification sent afterwards would reach
+   * the client first.
+   *
+   * Gated on `supersedeUnrestorableGoal`: only a resume registers a hook, and
+   * only a resume has a `config` that answers trust and hook-policy questions.
+   */
+  private async supersedeUnrestorableGoal(
+    records: ChatRecord[],
+  ): Promise<void> {
+    if (!this.options.supersedeUnrestorableGoal) return;
+    const active = findGoalToRestore(
+      collectGoalStatusItemsFromRecords(records),
+    );
+    // An invalid condition was never replayed, so no active card is on screen.
+    if (!active || goalConditionBlockedBy(active.condition)) return;
+    const blockedBy = goalRestoreBlockedBy(this.ctx.config);
+    if (!blockedBy) return;
+    await this.messageEmitter.emitGoalStatus({
+      kind: 'cleared',
+      condition: active.condition,
+      iterations: active.iterations,
+      ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
+      lastReason: GOAL_NOT_RESTORED_REASON[blockedBy],
+    });
   }
 
   /**

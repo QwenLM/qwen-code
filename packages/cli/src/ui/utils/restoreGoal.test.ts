@@ -5,12 +5,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { MockInstance } from 'vitest';
 import {
   __resetActiveGoalStoreForTests,
   getActiveGoal,
   getLastGoalTerminal,
   notifyGoalTerminal,
   setActiveGoal,
+  setGoalTerminalObserver,
   type ChatRecord,
   type Config,
 } from '@qwen-code/qwen-code-core';
@@ -22,7 +24,9 @@ import {
   MAX_GOAL_LENGTH,
   goalTerminalEventToHistoryItem,
   parseGoalStatusItem,
+  recordGoalStatusItem,
   restoreGoalFromHistory,
+  type GoalStatusItem,
 } from './restoreGoal.js';
 
 const goalItem = (
@@ -177,7 +181,10 @@ describe('restoreGoalFromHistory', () => {
       [goalItem({ kind: 'set', condition: 'do x' })],
       cfg,
     );
-    expect(result).toEqual({ restored: false });
+    expect(result).toEqual({
+      restored: false,
+      blockedBy: 'untrusted-folder',
+    });
     expect(getActiveGoal('sess-1')).toBeUndefined();
   });
 
@@ -189,7 +196,7 @@ describe('restoreGoalFromHistory', () => {
       [goalItem({ kind: 'set', condition: 'do x' })],
       cfg,
     );
-    expect(result).toEqual({ restored: false });
+    expect(result).toEqual({ restored: false, blockedBy: 'hooks-disabled' });
   });
 
   it('skips restore when hook system is unavailable', () => {
@@ -200,7 +207,7 @@ describe('restoreGoalFromHistory', () => {
       [goalItem({ kind: 'set', condition: 'do x' })],
       cfg,
     );
-    expect(result).toEqual({ restored: false });
+    expect(result).toEqual({ restored: false, blockedBy: 'no-hook-system' });
   });
 
   it('rehydrates the last completed goal cache from history on resume', () => {
@@ -276,6 +283,35 @@ describe('restoreGoalFromHistory', () => {
       ],
     });
   });
+
+  it.each([
+    ['an active goal is restored', 'checking' as const],
+    ['there is no goal to restore', 'achieved' as const],
+  ])(
+    'tears down an existing terminal observer when %s and no addItem is given',
+    (_label, kind) => {
+      // The ACP path calls restore without `addItem` and relies on this: every
+      // exit re-enters `unregisterGoalHook`, which clears the observer table.
+      // `acpAgent.#restoreGoalOnResume` reinstalls the Session's observer
+      // afterwards. If that ever stops being true, a restored goal reaches its
+      // terminal state with nobody listening — this pins the reason why.
+      const observer = vi.fn();
+      setGoalTerminalObserver('sess-1', observer);
+
+      restoreGoalFromHistory(
+        [goalItem({ kind, condition: 'do x' })],
+        makeConfig(),
+      );
+
+      notifyGoalTerminal('sess-1', {
+        kind: 'achieved',
+        condition: 'do x',
+        iterations: 1,
+        durationMs: 10,
+      });
+      expect(observer).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('findLastTerminalGoal', () => {
@@ -523,6 +559,7 @@ describe('restoreGoalFromHistory condition cap', () => {
     const condition = 'x'.repeat(MAX_GOAL_LENGTH + 1);
     expect(restoreGoalFromHistory([goalItem({ condition })], cfg)).toEqual({
       restored: false,
+      blockedBy: 'condition-invalid',
     });
     expect(getActiveGoal('sess-1')).toBeUndefined();
   });
@@ -642,7 +679,176 @@ describe('parseGoalStatusItem keeps oversized cards so ordering survives', () =>
     expect(findGoalToRestore(items)?.condition).toBe(oversized);
     expect(restoreGoalFromHistory(items, makeConfig())).toEqual({
       restored: false,
+      blockedBy: 'condition-invalid',
     });
     expect(getActiveGoal('sess-1')).toBeUndefined();
+  });
+});
+
+describe('transcript payloads are untrusted', () => {
+  // A transcript is a file on disk. Anything in it may have been hand-edited,
+  // truncated, or written by an older version. A throw here is not contained:
+  // `#restoreGoalOnResume` catches it and skips the hook, leaving a replayed
+  // `set` card on screen with nothing driving it.
+
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['an array', []],
+    ['a string', 'goal_status'],
+    ['a number', 7],
+  ])('parseGoalStatusItem returns null for %s', (_label, value) => {
+    expect(parseGoalStatusItem(value)).toBeNull();
+  });
+
+  it('collectGoalStatusItemsFromRecords skips a non-array outputHistoryItems', () => {
+    const record = {
+      type: 'system',
+      subtype: 'slash_command',
+      systemPayload: {
+        phase: 'result',
+        // A plain object, not an array: `for..of` would throw.
+        outputHistoryItems: { type: 'goal_status', kind: 'set' },
+      },
+    } as unknown as ChatRecord;
+    expect(collectGoalStatusItemsFromRecords([record])).toEqual([]);
+  });
+
+  it('collectGoalStatusItemsFromRecords skips null entries and keeps later valid cards', () => {
+    const record = {
+      type: 'system',
+      subtype: 'slash_command',
+      systemPayload: {
+        phase: 'result',
+        outputHistoryItems: [
+          null,
+          'not an object',
+          { type: 'goal_status', kind: 'set', condition: 'survives' },
+        ],
+      },
+    } as unknown as ChatRecord;
+    expect(collectGoalStatusItemsFromRecords([record])).toEqual([
+      { type: 'goal_status', kind: 'set', condition: 'survives' },
+    ]);
+  });
+});
+
+describe('restoreGoalFromHistory carries the original start time', () => {
+  beforeEach(() => __resetActiveGoalStoreForTests());
+  afterEach(() => __resetActiveGoalStoreForTests());
+
+  it('restores setAt from the set card rather than restarting the clock', () => {
+    const cfg = makeConfig();
+    restoreGoalFromHistory(
+      [goalItem({ kind: 'set', condition: 'do x', setAt: 1000 })],
+      cfg,
+    );
+    expect(getActiveGoal('sess-1')).toMatchObject({ setAt: 1000 });
+  });
+
+  it('finds setAt on the set card when the newest card is a checking card', () => {
+    // `checking` cards written before this change carry no setAt at all, so the
+    // scan has to walk back to the `set` card that opened the run.
+    const cfg = makeConfig();
+    restoreGoalFromHistory(
+      [
+        goalItem({ kind: 'set', condition: 'do x', setAt: 1000 }),
+        userItem(),
+        goalItem({ kind: 'checking', condition: 'do x', iterations: 3 }),
+      ],
+      cfg,
+    );
+    expect(getActiveGoal('sess-1')).toMatchObject({
+      setAt: 1000,
+      iterations: 3,
+    });
+  });
+
+  it('does not borrow setAt from a previous, already-finished goal', () => {
+    const cfg = makeConfig();
+    const now = Date.now();
+    restoreGoalFromHistory(
+      [
+        goalItem({ kind: 'set', condition: 'goal A', setAt: 1000 }),
+        goalItem({ kind: 'achieved', condition: 'goal A', durationMs: 5 }),
+        // Goal B's own `set` card is gone (truncated transcript).
+        goalItem({ kind: 'checking', condition: 'goal B', iterations: 1 }),
+      ],
+      cfg,
+    );
+    const goal = getActiveGoal('sess-1');
+    expect(goal).toMatchObject({ condition: 'goal B' });
+    expect(goal!.setAt).not.toBe(1000);
+    expect(goal!.setAt).toBeGreaterThanOrEqual(now);
+  });
+
+  it('ignores a non-positive setAt from a corrupted transcript', () => {
+    const cfg = makeConfig();
+    const now = Date.now();
+    restoreGoalFromHistory(
+      [goalItem({ kind: 'set', condition: 'do x', setAt: 0 })],
+      cfg,
+    );
+    expect(getActiveGoal('sess-1')!.setAt).toBeGreaterThanOrEqual(now);
+  });
+});
+
+describe('restoreGoalFromHistory refuses an empty condition', () => {
+  beforeEach(() => __resetActiveGoalStoreForTests());
+  afterEach(() => __resetActiveGoalStoreForTests());
+
+  it('does not register a hook for a blank condition', () => {
+    // `/goal` never sets one — a bare `/goal` reports status. Only a corrupted
+    // transcript gets here, and a blank condition makes every judge call ask
+    // the model to check nothing.
+    const cfg = makeConfig();
+    expect(
+      restoreGoalFromHistory([goalItem({ kind: 'set', condition: '' })], cfg),
+    ).toEqual({ restored: false, blockedBy: 'condition-invalid' });
+    expect(getActiveGoal('sess-1')).toBeUndefined();
+  });
+});
+
+describe('recordGoalStatusItem', () => {
+  let stderr: MockInstance<typeof process.stderr.write>;
+  beforeEach(() => {
+    stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true) as MockInstance<typeof process.stderr.write>;
+  });
+  afterEach(() => stderr.mockRestore());
+
+  const item = {
+    type: 'goal_status',
+    kind: 'set',
+    condition: 'do x',
+  } as GoalStatusItem;
+
+  it('warns when there is no chat recording service to persist the card', () => {
+    // Optional chaining used to swallow this: the goal then works for the rest
+    // of the session and silently fails to come back on resume.
+    recordGoalStatusItem(
+      makeConfig({
+        getChatRecordingService: vi.fn().mockReturnValue(undefined),
+      } as unknown as Partial<Config>),
+      item,
+    );
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('no chat recording service'),
+    );
+  });
+
+  it('warns but does not throw when the recording write fails', () => {
+    const cfg = makeConfig({
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordSlashCommand: vi.fn().mockImplementation(() => {
+          throw new Error('disk full');
+        }),
+      }),
+    } as unknown as Partial<Config>);
+    expect(() => recordGoalStatusItem(cfg, item)).not.toThrow();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('failed to record goal_status'),
+    );
   });
 });

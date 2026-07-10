@@ -6,7 +6,10 @@
 
 /**
  * Words the daemon reads as "drop the goal" rather than as a condition.
- * Keep in sync with CLEAR_KEYWORDS in packages/cli/src/ui/commands/goalCommand.ts
+ *
+ * Mirrors CLEAR_KEYWORDS in packages/cli/src/ui/commands/goalCommand.ts, which
+ * is the authority. The test beside this file reads that source and fails on
+ * drift — this client bundles for the browser and cannot import from core.
  */
 export const GOAL_CLEAR_KEYWORDS: ReadonlySet<string> = new Set([
   'clear',

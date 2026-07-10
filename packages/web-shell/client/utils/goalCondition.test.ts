@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   GOAL_CLEAR_KEYWORDS,
@@ -67,5 +70,54 @@ describe('isGoalClearCommand', () => {
 
   it('does not match /goal <condition>', () => {
     expect(isGoalClearCommand('/goal clear the build cache')).toBe(false);
+  });
+});
+
+describe('the CLI is the authority on both of these constants', () => {
+  // The Web Shell client bundles for the browser and does not depend on
+  // `@qwen-code/qwen-code-core`, so these constants cannot simply be imported
+  // from the package that enforces them. They are duplicated, and a comment
+  // asking the next person to "keep in sync" is not a mechanism. Read the CLI
+  // source and compare. Drift here is silent and user-visible: the form accepts
+  // a condition the daemon then reads as a command, or rejects one it accepts.
+  const repoRoot = fileURLToPath(new URL('../../../..', import.meta.url));
+  const read = (relative: string) =>
+    readFileSync(join(repoRoot, relative), 'utf8');
+
+  it('agrees with goalCommand.ts on the clear keywords', () => {
+    const source = read('packages/cli/src/ui/commands/goalCommand.ts');
+    const literal = /const CLEAR_KEYWORDS = new Set\(\[([^\]]*)\]\)/.exec(
+      source,
+    );
+    expect(
+      literal,
+      'CLEAR_KEYWORDS literal not found in goalCommand.ts',
+    ).not.toBeNull();
+    const cliKeywords = [...literal![1].matchAll(/'([^']+)'/g)].map(
+      (m) => m[1],
+    );
+
+    expect(cliKeywords.length).toBeGreaterThan(0);
+    expect([...cliKeywords].sort()).toEqual([...GOAL_CLEAR_KEYWORDS].sort());
+  });
+
+  it('agrees with restoreGoal.ts on MAX_GOAL_LENGTH', () => {
+    const source = read('packages/cli/src/ui/utils/restoreGoal.ts');
+    const cliMax = /export const MAX_GOAL_LENGTH = (\d+);/.exec(source);
+    expect(
+      cliMax,
+      'MAX_GOAL_LENGTH not found in restoreGoal.ts',
+    ).not.toBeNull();
+
+    const dialog = read(
+      'packages/web-shell/client/components/dialogs/GoalsDialog.tsx',
+    );
+    const dialogMax = /const MAX_GOAL_LENGTH = (\d+);/.exec(dialog);
+    expect(
+      dialogMax,
+      'MAX_GOAL_LENGTH not found in GoalsDialog.tsx',
+    ).not.toBeNull();
+
+    expect(Number(dialogMax![1])).toBe(Number(cliMax![1]));
   });
 });

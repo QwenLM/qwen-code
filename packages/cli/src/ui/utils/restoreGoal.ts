@@ -31,6 +31,13 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
  */
 export const MAX_GOAL_LENGTH = 4000;
 
+export interface RestorableGoal {
+  condition: string;
+  iterations: number;
+  /** Absent when no card of this goal's run carried one. */
+  setAt?: number;
+}
+
 /**
  * Finds the most recent `goal_status` history item. Returns the active
  * condition plus the iteration count to resume from when the latest goal event
@@ -41,20 +48,47 @@ export const MAX_GOAL_LENGTH = 4000;
  * resume instead of resetting to zero. `checking` items persist the running
  * count (see useGeminiStream's continuation handler); `set` items predate any
  * iteration, so they restore at 0.
+ *
+ * `setAt` is carried so elapsed time keeps measuring from the original `/goal`.
+ * The newest card is not necessarily the one that has it — only `set` cards are
+ * written with a `setAt` — so we keep scanning back through this same run's
+ * cards for it, stopping at the terminal card that ends the previous run.
  */
 export function findGoalToRestore(
   history: readonly HistoryItemWithoutId[],
-): { condition: string; iterations: number } | null {
+): RestorableGoal | null {
   for (let i = history.length - 1; i >= 0; i--) {
     const item = history[i];
     if (item?.type !== MessageType.GOAL_STATUS) continue;
     const goal = item as HistoryItemGoalStatus;
-    if (goal.kind === 'set' || goal.kind === 'checking') {
-      return { condition: goal.condition, iterations: goal.iterations ?? 0 };
-    }
-    return null;
+    if (goal.kind !== 'set' && goal.kind !== 'checking') return null;
+    const setAt = goal.setAt ?? findSetAtOfRun(history, i);
+    return {
+      condition: goal.condition,
+      iterations: goal.iterations ?? 0,
+      ...(setAt !== undefined ? { setAt } : {}),
+    };
   }
   return null;
+}
+
+/**
+ * Walks back from the active goal card at `startIndex` for the `setAt` stamped
+ * on the `set` card that opened this run. Any other kind ends the run, so the
+ * scan stops there rather than picking up a previous goal's start time.
+ */
+function findSetAtOfRun(
+  history: readonly HistoryItemWithoutId[],
+  startIndex: number,
+): number | undefined {
+  for (let i = startIndex - 1; i >= 0; i--) {
+    const item = history[i];
+    if (item?.type !== MessageType.GOAL_STATUS) continue;
+    const goal = item as HistoryItemGoalStatus;
+    if (goal.kind !== 'set' && goal.kind !== 'checking') return undefined;
+    if (goal.setAt !== undefined) return goal.setAt;
+  }
+  return undefined;
 }
 
 /**
@@ -94,14 +128,25 @@ function finiteNumber(value: unknown): number | undefined {
 }
 
 /**
- * Rebuilds a goal card from one persisted `outputHistoryItems` entry, or
- * returns null when the entry is not a well-formed goal card. Transcripts store
- * these as loose `Record<string, unknown>`, so every field is re-validated
- * rather than cast.
+ * Narrows one untrusted `outputHistoryItems` entry before any field is read.
+ * A transcript is a file: an entry may be any JSON value, and only a plain
+ * object is safely indexable.
  */
-export function parseGoalStatusItem(
-  item: Record<string, unknown>,
-): GoalStatusItem | null {
+export function isTranscriptItemRecord(
+  item: unknown,
+): item is Record<string, unknown> {
+  return typeof item === 'object' && item !== null && !Array.isArray(item);
+}
+
+/**
+ * Rebuilds a goal card from one persisted `outputHistoryItems` entry, or
+ * returns null when the entry is not a well-formed goal card. Transcripts are
+ * files on disk: an entry may be any JSON value at all — including `null` or an
+ * array — so the shape is checked before any field is read, and then every
+ * field is re-validated rather than cast.
+ */
+export function parseGoalStatusItem(item: unknown): GoalStatusItem | null {
+  if (!isTranscriptItemRecord(item)) return null;
   if (item['type'] !== MessageType.GOAL_STATUS) return null;
   const kind = item['kind'];
   const condition = item['condition'];
@@ -142,7 +187,13 @@ export function collectGoalStatusItemsFromRecords(
       | SlashCommandRecordPayload
       | undefined;
     if (payload?.phase !== 'result') continue;
-    for (const raw of payload.outputHistoryItems ?? []) {
+    // The type says `outputHistoryItems?: Record<string, unknown>[]`, but the
+    // value came off disk. A hand-edited record that made it a plain object
+    // would throw here and take the whole restore down with it — including the
+    // valid goal cards further along.
+    const raws: unknown = payload.outputHistoryItems;
+    if (!Array.isArray(raws)) continue;
+    for (const raw of raws) {
       const item = parseGoalStatusItem(raw);
       if (item) items.push(item);
     }
@@ -169,7 +220,17 @@ export function recordGoalStatusItem(
   rawCommand = '/goal',
 ): void {
   try {
-    config.getChatRecordingService?.()?.recordSlashCommand({
+    const recording = config.getChatRecordingService?.();
+    if (!recording) {
+      // Optional chaining used to swallow this. A goal set without a recording
+      // service works for the rest of the session and then vanishes on resume,
+      // which is indistinguishable from the restore bug this module fixes.
+      writeStderrLine(
+        `qwen: no chat recording service; goal_status (kind=${item.kind}) will not survive a resume.`,
+      );
+      return;
+    }
+    recording.recordSlashCommand({
       phase: 'result',
       rawCommand,
       outputHistoryItems: [{ ...item } as Record<string, unknown>],
@@ -201,18 +262,63 @@ export function installGoalTerminalObserver(args: {
 }
 
 /**
+ * Why a transcript's active goal could not be put back under a live Stop hook.
+ * `condition-invalid` covers a transcript that no longer describes a goal
+ * `/goal` itself would accept.
+ */
+export type GoalRestoreBlockedReason =
+  | 'untrusted-folder'
+  | 'hooks-disabled'
+  | 'no-hook-system'
+  | 'condition-invalid';
+
+/**
+ * The environment half of `/goal`'s gates, as a pure function of `config`.
+ *
+ * Split out so the history replay can ask the question *before* restore runs:
+ * a client derives "there is an active goal" from the newest replayed goal
+ * card, so a card that is about to be refused must not be replayed as active.
+ */
+export function goalRestoreBlockedBy(
+  config: Config,
+): Exclude<GoalRestoreBlockedReason, 'condition-invalid'> | null {
+  if (!config.isTrustedFolder()) return 'untrusted-folder';
+  if (config.getDisableAllHooks()) return 'hooks-disabled';
+  if (!config.getHookSystem()) return 'no-hook-system';
+  return null;
+}
+
+/** Mirrors the gates `/goal` applies to a condition at set time. */
+export function goalConditionBlockedBy(
+  condition: string,
+): 'condition-invalid' | null {
+  if (condition.length === 0) return 'condition-invalid';
+  if (condition.length > MAX_GOAL_LENGTH) return 'condition-invalid';
+  return null;
+}
+
+export type RestoreGoalResult =
+  | { restored: true; condition: string }
+  | { restored: false; blockedBy?: GoalRestoreBlockedReason };
+
+/**
  * On session resume, restores the active /goal hook if the transcript ended
  * with an unsatisfied goal. Idempotent — safe to call on a fresh session.
  *
  * Re-runs the same trust/policy/length gates as `/goal`; if a gate now fails,
  * we skip restoration rather than re-register a goal the user can no longer
- * cancel.
+ * cancel. That case reports `blockedBy`, which callers must not confuse with
+ * "the transcript had no goal": the transcript still shows one as active, so
+ * something has to say otherwise.
+ *
+ * Note that every `{ restored: false }` path unregisters, which clears the
+ * session's goal-terminal observer as a side effect. ACP callers reinstall it.
  */
 export function restoreGoalFromHistory(
   history: readonly HistoryItemWithoutId[],
   config: Config,
   addItem?: AddGoalStatusItem,
-): { restored: true; condition: string } | { restored: false } {
+): RestoreGoalResult {
   const sessionId = config.getSessionId();
   // Always rehydrate the "last completed goal" cache from transcript so empty
   // `/goal` after resume can render the most recent achievement summary.
@@ -229,24 +335,21 @@ export function restoreGoalFromHistory(
     return { restored: false };
   }
 
-  if (!config.isTrustedFolder() || config.getDisableAllHooks()) {
+  const blockedBy = goalRestoreBlockedBy(config);
+  if (blockedBy) {
     unregisterGoalHook(config, sessionId);
-    return { restored: false };
+    return { restored: false, blockedBy };
   }
-  if (!config.getHookSystem()) {
-    unregisterGoalHook(config, sessionId);
-    return { restored: false };
-  }
-  // `/goal` caps the condition at set time, but a transcript is a file: a
-  // corrupted or hand-edited `condition` would otherwise be re-registered
-  // unbounded and then embedded verbatim in every judge call and continuation
-  // prompt for the rest of the session.
-  if (restorable.condition.length > MAX_GOAL_LENGTH) {
+  // `/goal` gates the condition at set time, but a transcript is a file: a
+  // corrupted or hand-edited `condition` would otherwise be re-registered —
+  // unbounded, or empty and meaningless — and then embedded verbatim in every
+  // judge call and continuation prompt for the rest of the session.
+  if (goalConditionBlockedBy(restorable.condition)) {
     writeStderrLine(
-      `qwen: refusing to restore a goal whose condition exceeds ${MAX_GOAL_LENGTH} characters (got ${restorable.condition.length}).`,
+      `qwen: refusing to restore a goal whose condition is empty or exceeds ${MAX_GOAL_LENGTH} characters (got ${restorable.condition.length}).`,
     );
     unregisterGoalHook(config, sessionId);
-    return { restored: false };
+    return { restored: false, blockedBy: 'condition-invalid' };
   }
 
   registerGoalHook({
@@ -257,6 +360,11 @@ export function restoreGoalFromHistory(
     // Resume the iteration count so MAX_GOAL_ITERATIONS is a cross-resume cap,
     // not a per-resume one.
     initialIterations: restorable.iterations,
+    // Likewise the start time: without it every reload restarts the clock, and
+    // `GET /goals` reports a long-running goal as freshly started.
+    ...(restorable.setAt !== undefined
+      ? { initialSetAt: restorable.setAt }
+      : {}),
   });
   if (addItem) {
     installGoalTerminalObserver({ sessionId, config, addItem });

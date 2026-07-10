@@ -15,7 +15,10 @@ import { formatRuntime } from '../../utils/formatRuntime';
 import { isGoalClearKeyword } from '../../utils/goalCondition';
 import styles from './GoalsDialog.module.css';
 
-/** Keep in sync with MAX_GOAL_LENGTH in packages/cli/src/ui/utils/restoreGoal.ts */
+/**
+ * Mirrors MAX_GOAL_LENGTH in packages/cli/src/ui/utils/restoreGoal.ts, which is
+ * the authority. `goalCondition.test.ts` reads that source and fails on drift.
+ */
 const MAX_GOAL_LENGTH = 4000;
 
 /**
@@ -31,8 +34,12 @@ const TICK_INTERVAL_MS = 1000;
 interface GoalsDialogProps {
   /** Send `/goal <condition>` into a brand-new session and switch to it. Setting
    * a goal is not a pure write — the daemon registers the Stop hook AND kicks
-   * off the first turn — so it has to travel the prompt path, not a REST POST. */
-  onCreateGoal: (condition: string) => void | Promise<void>;
+   * off the first turn — so it has to travel the prompt path, not a REST POST.
+   *
+   * Return `false` to report a failure this form must not treat as a creation —
+   * the condition stays in the box. Reserved for failures already surfaced
+   * elsewhere; throw to have the message rendered inline instead. */
+  onCreateGoal: (condition: string) => boolean | void | Promise<boolean | void>;
   /** Open the session driving a goal — its transcript IS the goal's history. */
   onOpenSession: (sessionId: string) => void;
   onError: (error: unknown, fallback: string) => void;
@@ -82,6 +89,10 @@ export function GoalsDialog({
       if (!mountedRef.current || seq !== reloadSeqRef.current) return;
       setLoadError(err instanceof Error ? err.message : String(err));
       setGoals((prev) => prev ?? []);
+      // The count described the previous, partially-probed list. This load
+      // reached nothing at all, so keeping it would pin a degraded banner
+      // reporting a partial probe that no longer happened.
+      setDroppedCount(0);
     }
   }, [actions]);
 
@@ -140,8 +151,11 @@ export function GoalsDialog({
     setSubmitting(true);
     setFormError(null);
     try {
-      await onCreateGoal(trimmed);
+      const created = await onCreateGoal(trimmed);
       if (!mountedRef.current) return;
+      // No goal was started, and the caller already said why. Resetting here
+      // would close the form and drop the condition the user typed.
+      if (created === false) return;
       resetForm();
     } catch (err) {
       if (!mountedRef.current) {

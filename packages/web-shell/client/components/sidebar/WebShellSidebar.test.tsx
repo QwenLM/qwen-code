@@ -121,6 +121,7 @@ function renderSidebar(
     onOpenSettings: () => void;
     onOpenDaemonStatus: () => void;
     onOpenScheduledTasks: () => void;
+    onOpenGoals: () => void;
     onOpenSessions: () => void;
     canOpenSessionsOverview: boolean;
     onOpenSplitView: () => void;
@@ -328,6 +329,22 @@ describe('WebShellSidebar — daemon status entry', () => {
       button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(onOpenDaemonStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['expanded', false],
+    ['collapsed', true],
+  ])('invokes onOpenGoals from the %s sidebar', (_label, collapsed) => {
+    const onOpenGoals = vi.fn();
+    const { container } = renderSidebar(collapsed, { onOpenGoals });
+    const button = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Goals"]',
+    );
+    expect(button).not.toBeNull();
+    act(() => {
+      button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onOpenGoals).toHaveBeenCalledTimes(1);
   });
 });
 

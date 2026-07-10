@@ -153,8 +153,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * Read a live session's `/goal` state. The active goal lives only in the
    * child's in-memory store, so this is the sole authoritative source for the
    * condition, its running turn count and the judge's last verdict. Params:
-   * `{ sessionId }`; result: `{ active: ActiveGoalView | null, lastTerminal:
-   * GoalTerminalView | null }`.
+   * `{ sessionId }`; result: `{ active: ActiveGoalView | null }`.
    */
   sessionGoalGet: 'qwen/control/session/goal/get',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',

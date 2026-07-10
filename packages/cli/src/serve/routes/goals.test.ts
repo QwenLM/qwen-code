@@ -38,10 +38,9 @@ const activeGoal = (
   overrides: Partial<NonNullable<BridgeSessionGoal['active']>> = {},
 ): BridgeSessionGoal => ({
   active: { condition, iterations: 0, setAt: 1000, ...overrides },
-  lastTerminal: null,
 });
 
-const noGoal: BridgeSessionGoal = { active: null, lastTerminal: null };
+const noGoal: BridgeSessionGoal = { active: null };
 
 function makeApp(bridge: GoalsSessionBridge) {
   const app = express();
@@ -208,5 +207,56 @@ describe('GET /goals', () => {
 
     expect(res.status).toBe(500);
     expect(res.body.code).toBe('goals_read_failed');
+  });
+
+  it('caps how many sessions it probes at once', async () => {
+    // Every probe is an IPC round-trip to a separate child process. A
+    // workspace with many live sessions would otherwise open one per session
+    // on every 10s poll from the Goals page.
+    const sessions = Array.from({ length: 25 }, (_, i) => summary(`s${i}`));
+    let inFlight = 0;
+    let peak = 0;
+
+    const app = makeApp({
+      listWorkspaceSessions: () => sessions,
+      getSessionGoal: async (id) => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        // Yield so every probe the pool started is counted as concurrent.
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        inFlight--;
+        return activeGoal(`goal ${id}`);
+      },
+    });
+
+    const res = await request(app).get('/goals');
+
+    expect(res.status).toBe(200);
+    // All 25 are still probed — the cap bounds the burst, not the coverage.
+    expect(res.body.goals).toHaveLength(25);
+    expect(peak).toBe(10);
+  });
+
+  it('keeps a rejection attributed to the session that caused it', async () => {
+    // Index alignment is what lets the drop log name the bad session. A
+    // concurrency-limited fan-out that collects results out of order would
+    // silently misattribute them.
+    const sessions = [summary('good-1'), summary('bad'), summary('good-2')];
+    const app = makeApp({
+      listWorkspaceSessions: () => sessions,
+      getSessionGoal: async (id) => {
+        if (id === 'bad') throw new Error('child is wedged');
+        return activeGoal(`goal ${id}`);
+      },
+    });
+
+    const res = await request(app).get('/goals');
+
+    expect(res.status).toBe(200);
+    expect(res.body.droppedCount).toBe(1);
+    expect(
+      res.body.goals.map((g: { sessionId: string }) => g.sessionId),
+    ).toEqual(expect.arrayContaining(['good-1', 'good-2']));
+    expect(res.body.goals).toHaveLength(2);
   });
 });

@@ -978,10 +978,14 @@ export class Session implements SessionContext {
     // Initialize modular components with this session as context
     this.toolCallEmitter = new ToolCallEmitter(this);
     this.planEmitter = new PlanEmitter(this);
-    this.historyReplayer = new HistoryReplayer(this);
+    // This replayer only ever runs on resume, so it may correct an active goal
+    // card that `#restoreGoalOnResume` is about to refuse.
+    this.historyReplayer = new HistoryReplayer(this, {
+      supersedeUnrestorableGoal: true,
+    });
     this.messageEmitter = new MessageEmitter(this);
 
-    this.#installGoalTerminalObserver();
+    this.installGoalTerminalObserver();
     this.#registerBackgroundNotificationCallbacks();
   }
 
@@ -1076,7 +1080,15 @@ export class Session implements SessionContext {
     }
   }
 
-  #installGoalTerminalObserver(): void {
+  /**
+   * Installs (or replaces) this session's goal-terminal observer.
+   *
+   * Public because it does not stay installed: `registerGoalHook` and
+   * `unregisterGoalHook` both clear the observer table for the session, so any
+   * caller that (re-)registers a goal outside `#processSlashCommandResult` —
+   * notably goal restore on resume — has to put it back. Idempotent.
+   */
+  installGoalTerminalObserver(): void {
     setGoalTerminalObserver(this.sessionId, (event: GoalTerminalEvent) => {
       void this.messageEmitter.emitGoalTerminal(event).catch((error) => {
         debugLogger.warn(
@@ -5372,7 +5384,7 @@ export class Session implements SessionContext {
       }
     }
     if (hasActiveGoalStatus) {
-      this.#installGoalTerminalObserver();
+      this.installGoalTerminalObserver();
     }
   }
 
