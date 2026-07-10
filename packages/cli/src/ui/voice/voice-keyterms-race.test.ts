@@ -9,7 +9,6 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from '../../config/settings.js';
-import { buildVoiceKeyterms } from './voice-keyterms.js';
 
 const raceState = vi.hoisted(() => ({
   target: '',
