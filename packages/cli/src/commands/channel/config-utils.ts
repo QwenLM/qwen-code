@@ -208,6 +208,7 @@ export async function parseChannelConfig(
     model: rawConfig['model'] as string | undefined,
     groupPolicy:
       (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) || 'disabled',
+    dmPolicy: (rawConfig['dmPolicy'] as ChannelConfig['dmPolicy']) || 'open',
     groups: (rawConfig['groups'] as ChannelConfig['groups']) || {},
   };
 }

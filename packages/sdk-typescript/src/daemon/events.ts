@@ -60,6 +60,11 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // reseeds state. Synthetic (no `id`) so it doesn't burn a slot
   // in the per-session monotonic sequence.
   'state_resync_required',
+  // Synthetic marker prepended to a bounded `/session/:id/load` replay
+  // snapshot when older replay history was dropped from the daemon's
+  // in-memory window. This is NOT a resync request: consumers should render
+  // it as transcript status and continue applying the retained snapshot.
+  'history_truncated',
   // MCP guardrail push events. See `mcp_guardrail_events` capability
   // tag. Both fire on the per-session SSE bus; consumers should
   // pre-flight `caps.features.includes('mcp_guardrail_events')`
@@ -395,6 +400,16 @@ export interface DaemonStateResyncRequiredData {
    * earliestAvailableId - 1]` inclusive.
    */
   earliestAvailableId: number;
+  [key: string]: unknown;
+}
+
+export interface DaemonHistoryTruncatedData {
+  reason: 'replay_window_exceeded';
+  truncatedEvents: number;
+  retainedEvents: number;
+  maxBytes: number;
+  truncatedTurns?: number;
+  fullTranscriptAvailable: false;
   [key: string]: unknown;
 }
 
@@ -952,6 +967,10 @@ export type DaemonStateResyncRequiredEvent = DaemonEventEnvelope<
   'state_resync_required',
   DaemonStateResyncRequiredData
 >;
+export type DaemonHistoryTruncatedEvent = DaemonEventEnvelope<
+  'history_truncated',
+  DaemonHistoryTruncatedData
+>;
 export type DaemonMcpBudgetWarningEvent = DaemonEventEnvelope<
   'mcp_budget_warning',
   DaemonMcpBudgetWarningData
@@ -1103,7 +1122,8 @@ export type DaemonStreamLifecycleEvent =
   | DaemonClientEvictedEvent
   | DaemonSlowClientWarningEvent
   | DaemonStreamErrorEvent
-  | DaemonStateResyncRequiredEvent;
+  | DaemonStateResyncRequiredEvent
+  | DaemonHistoryTruncatedEvent;
 
 /**
  * MCP guardrail push events. Grouped as their own union member (rather
@@ -1321,6 +1341,14 @@ export interface DaemonSessionViewState {
   /** Most recent resync payload (reason + gap range). */
   lastResyncRequired?: DaemonStateResyncRequiredData;
   /**
+   * Count of `history_truncated` markers observed from bounded replay
+   * snapshots. This is informational only and does not imply stale local state
+   * or trigger resync recovery.
+   */
+  historyTruncatedCount: number;
+  /** Most recent bounded replay-window marker. */
+  lastHistoryTruncated?: DaemonHistoryTruncatedData;
+  /**
    * Daemon assist push: most recent `followup_suggestion` observed on
    * this session. Adapters render it as ghost-text in the input
    * placeholder; clients self-invalidate on next sendPrompt (no
@@ -1370,6 +1398,7 @@ const MAX_FORBIDDEN_VOTES_PER_SESSION = 32;
  */
 const RESYNC_PASSTHROUGH_TYPES = new Set<KnownDaemonEvent['type']>([
   'state_resync_required',
+  'history_truncated',
   'session_died',
   'session_closed',
   'client_evicted',
@@ -1432,6 +1461,8 @@ export function createDaemonSessionViewState(
     awaitingResync: seed.awaitingResync ?? false,
     resyncRequiredCount: seed.resyncRequiredCount ?? 0,
     lastResyncRequired: seed.lastResyncRequired,
+    historyTruncatedCount: seed.historyTruncatedCount ?? 0,
+    lastHistoryTruncated: seed.lastHistoryTruncated,
     lastFollowupSuggestion: seed.lastFollowupSuggestion,
     rewindCount: seed.rewindCount ?? 0,
     lastRewind: seed.lastRewind,
@@ -1562,6 +1593,10 @@ export function asKnownDaemonEvent(
     case 'state_resync_required':
       return isStateResyncRequiredData(event.data)
         ? (event as DaemonStateResyncRequiredEvent)
+        : undefined;
+    case 'history_truncated':
+      return isHistoryTruncatedData(event.data)
+        ? (event as DaemonHistoryTruncatedEvent)
         : undefined;
     case 'mcp_budget_warning':
       return isMcpBudgetWarningData(event.data)
@@ -1927,6 +1962,12 @@ export function reduceDaemonSessionEvent(
         awaitingResync: true,
         resyncRequiredCount: base.resyncRequiredCount + 1,
         lastResyncRequired: event.data,
+      };
+    case 'history_truncated':
+      return {
+        ...base,
+        historyTruncatedCount: base.historyTruncatedCount + 1,
+        lastHistoryTruncated: event.data,
       };
     case 'mcp_budget_warning':
       // Non-terminal: budget pressure is a status signal, not a stream
@@ -2571,6 +2612,28 @@ function isStateResyncRequiredData(
   );
 }
 
+function isHistoryTruncatedData(
+  value: unknown,
+): value is DaemonHistoryTruncatedData {
+  if (
+    !isRecord(value) ||
+    value['reason'] !== 'replay_window_exceeded' ||
+    !isFiniteNumber(value['truncatedEvents']) ||
+    !isFiniteNumber(value['retainedEvents']) ||
+    !isFiniteNumber(value['maxBytes']) ||
+    value['fullTranscriptAvailable'] !== false
+  ) {
+    return false;
+  }
+  const truncatedTurns = value['truncatedTurns'];
+  return (
+    isNonNegativeInteger(value['truncatedEvents']) &&
+    isNonNegativeInteger(value['retainedEvents']) &&
+    isNonNegativeInteger(value['maxBytes']) &&
+    (truncatedTurns === undefined || isNonNegativeInteger(truncatedTurns))
+  );
+}
+
 function isSlowClientWarningData(
   value: unknown,
 ): value is DaemonSlowClientWarningData {
@@ -3036,6 +3099,10 @@ function isOptionalNumber(value: unknown): boolean {
 
 function isOptionalNumberOrNull(value: unknown): boolean {
   return value === undefined || value === null || isFiniteNumber(value);
+}
+
+function isNonNegativeInteger(value: unknown): boolean {
+  return isFiniteNumber(value) && Number.isInteger(value) && value >= 0;
 }
 
 function isOptionalStringOrNull(value: unknown): boolean {

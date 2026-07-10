@@ -88,6 +88,17 @@ export interface DurableCronTask {
    */
   sessionId?: string;
   /**
+   * How each scheduled fire runs. Absent or `'shared'` = the #6389 model: the
+   * task fires inside its single bound {@link sessionId} session and every run
+   * accumulates in that one transcript. `'isolated'` = the owning session
+   * dispatches each fire straight into a FRESH sub-session (its own clean
+   * context and transcript) and never runs the prompt inline. Absent defaults to
+   * `'shared'` so tool-created and legacy tasks are unchanged. The scheduler
+   * treats both modes identically — it only carries the field to `onFire`, which
+   * is where the routing happens.
+   */
+  runMode?: 'shared' | 'isolated';
+  /**
    * Bounded, newest-last history of recent fires (capped at MAX_TASK_RUNS).
    * Absent on tool-created tasks and on any task that has not fired yet.
    * Appended at the scheduler's persist sites via {@link appendCronRun}.
@@ -394,6 +405,12 @@ function isValidTask(value: unknown): value is DurableCronTask {
     // would treat it as unbound, so a "bound" task would silently run unbound.
     (obj['sessionId'] === undefined ||
       (typeof obj['sessionId'] === 'string' && obj['sessionId'].length > 0)) &&
+    // Absent = 'shared'. Any string other than the two known modes routes
+    // through fix-or-delete rather than being silently treated as 'shared',
+    // so a typo can't quietly disable per-run isolation.
+    (obj['runMode'] === undefined ||
+      obj['runMode'] === 'shared' ||
+      obj['runMode'] === 'isolated') &&
     (obj['runs'] === undefined || isValidRuns(obj['runs']))
   );
 }

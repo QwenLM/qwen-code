@@ -873,6 +873,44 @@ describe('BackgroundTaskRegistry', () => {
     expect(registry.hasUnfinalizedTasks()).toBe(false);
   });
 
+  it('hasRunningTasks ignores cancelled-but-not-notified entries (#5949)', () => {
+    // Session-switch gates (/clear, /resume) key off hasRunningTasks so a
+    // task the user just cancelled — aborted, only its terminal
+    // notification outstanding — cannot make the switch silently no-op.
+    // hasUnfinalizedTasks must still report it for the headless holdback.
+    registry.register({
+      agentId: 'test-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+    });
+    expect(registry.hasRunningTasks()).toBe(true);
+
+    registry.cancel('test-1');
+    expect(registry.get('test-1')!.status).toBe('cancelled');
+    expect(registry.hasRunningTasks()).toBe(false);
+    expect(registry.hasUnfinalizedTasks()).toBe(true);
+
+    registry.finalizeCancelled('test-1', '');
+    expect(registry.hasRunningTasks()).toBe(false);
+  });
+
+  it('hasRunningTasks ignores foreground entries', () => {
+    registry.register({
+      agentId: 'fg-1',
+      description: 'foreground agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: false,
+      outputFile: '/tmp/test.jsonl',
+    });
+    expect(registry.hasRunningTasks()).toBe(false);
+  });
+
   it('hasUnfinalizedTasks clears once every entry has been notified', () => {
     registry.register({
       agentId: 'a',

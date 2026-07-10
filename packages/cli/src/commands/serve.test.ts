@@ -57,6 +57,18 @@ describe('serve command args', () => {
     expect(parsed['permission-response-timeout-ms']).toBe(60000);
   });
 
+  it('parses --compacted-replay-max-bytes as a number', () => {
+    const parsed = buildParser().parseSync(
+      '--compacted-replay-max-bytes 4194304',
+    );
+    expect(parsed['compacted-replay-max-bytes']).toBe(4 * 1024 * 1024);
+  });
+
+  it('parses --max-total-sessions as a number', () => {
+    const parsed = buildParser().parseSync('--max-total-sessions 42');
+    expect(parsed['max-total-sessions']).toBe(42);
+  });
+
   it('leaves --permission-response-timeout-ms unset by default', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['permission-response-timeout-ms']).toBeUndefined();
@@ -232,6 +244,36 @@ describe('serve rate limit env parsing', () => {
       expect.objectContaining({
         channelSelection: { mode: 'names', names: ['telegram', 'feishu'] },
       }),
+    );
+  });
+
+  it('passes compacted replay byte cap to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --compacted-replay-max-bytes 1048576',
+    );
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        compactedReplayMaxBytes: 1024 * 1024,
+      }),
+    );
+  });
+
+  it('passes --max-total-sessions to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --max-total-sessions 42');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTotalSessions: 42 }),
     );
   });
 

@@ -56,6 +56,8 @@ function makeStopInput(lastAssistantText: string): StopInput {
     timestamp: new Date().toISOString(),
     stop_hook_active: true,
     last_assistant_message: lastAssistantText,
+    background_tasks: [],
+    crons: [],
   };
 }
 

@@ -73,7 +73,6 @@ import {
   buildReattachParts,
   countAllInlineImages,
   replaceImagePayloadsInPlace,
-
 } from '../services/image-payload-references.js';
 import {
   estimateContentTokens,
@@ -1576,7 +1575,6 @@ export class GeminiChat {
       return requestHistory;
     }
     return curatedHistory.map(copyContentContainer);
-
   }
 
   /**

@@ -36,6 +36,25 @@ describe('<ThinkMessage />', () => {
     expect(output).not.toContain('Analyzing the code structure');
   });
 
+  it('advertises click in the collapsed hint only when clickable (VP mode)', () => {
+    const withoutClick = render(
+      <ThinkMessage {...defaultProps} isPending={false} expanded={false} />,
+    ).lastFrame();
+    expect(withoutClick).not.toContain('click');
+    expect(withoutClick).toContain(`${toggleKeyHint} to expand`);
+
+    const withClick = render(
+      <ThinkMessage
+        {...defaultProps}
+        isPending={false}
+        expanded={false}
+        clickable={true}
+      />,
+    ).lastFrame();
+    expect(withClick).toContain('click');
+    expect(withClick).toContain(`${toggleKeyHint} to expand`);
+  });
+
   it('should render full text when committed and expanded', () => {
     const { lastFrame } = render(
       <ThinkMessage {...defaultProps} isPending={false} expanded={true} />,

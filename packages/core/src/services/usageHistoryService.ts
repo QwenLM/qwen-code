@@ -16,6 +16,24 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('USAGE_HISTORY');
 
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+/**
+ * Trailing window used by {@link loadUsageHistoryWithLive} when merging
+ * non-persisted (daemon / Web Shell / in-progress) sessions into the history.
+ *
+ * Sized to cover the largest summary/daily range the usage-dashboard exposes
+ * (month = 30 days) plus margin, so the hero totals, breakdown tiles, and the
+ * per-day line/bar charts are exact. Crucially it is NOT sized for the full
+ * heatmap span (~12 months): persisted `usage_record.jsonl` records of any age
+ * are always unioned in, so the heatmap keeps its full history, but a *never-
+ * persisted* daemon session older than this window is not replayed — that cell
+ * undercounts slightly. That cosmetic gap is a deliberate trade for load
+ * latency: replaying a full year of transcripts costs ~13s here vs. ~1.7s for
+ * this window (heavy Web Shell users accumulate thousands of unpersisted
+ * transcripts). Widen only alongside a cheaper scan.
+ */
+const LIVE_REBUILD_WINDOW_DAYS = 35;
+
 export interface UsageSummaryRecord {
   version: 1;
   sessionId: string;
@@ -204,10 +222,38 @@ export function metricsToUsageRecord(
   };
 }
 
+interface RebuildFromSessionJsonlOptions {
+  /**
+   * Session to exclude from the one-time persistence migration (the caller's
+   * in-progress session — {@link persistSessionUsage} writes its authoritative
+   * record on `/clear` or exit). It is still returned in the rebuilt records.
+   */
+  skipSessionInRebuild?: string;
+  /** Persist rebuilt records as a migration. Read-only callers pass `false`. */
+  persist?: boolean;
+  /**
+   * Only replay transcripts whose file mtime is at/after this epoch-ms. Bounds
+   * the scan when merging recent live sessions into an already-persisted
+   * history (see {@link loadUsageHistoryWithLive}); undefined replays all.
+   */
+  sinceMs?: number;
+  /**
+   * Session ids already covered by the persisted history. Their transcripts are
+   * skipped by filename (`{sessionId}.jsonl`) with no file read, avoiding a full
+   * replay of sessions the persisted file already records authoritatively.
+   */
+  skipSessionIds?: ReadonlySet<string>;
+}
+
 async function rebuildFromSessionJsonl(
-  skipSessionInRebuild?: string,
-  persist = true,
+  options: RebuildFromSessionJsonlOptions = {},
 ): Promise<UsageSummaryRecord[]> {
+  const {
+    skipSessionInRebuild,
+    persist = true,
+    sinceMs,
+    skipSessionIds,
+  } = options;
   const projectsDir = path.join(Storage.getGlobalQwenDir(), 'projects');
   try {
     if (!fs.existsSync(projectsDir)) return [];
@@ -243,6 +289,31 @@ async function rebuildFromSessionJsonl(
     for (const file of files) {
       try {
         const filePath = path.join(chatsDir, file);
+
+        // Bound the scan when merging live sessions into a persisted history:
+        // skip transcripts untouched before `sinceMs`.
+        if (sinceMs !== undefined) {
+          let mtimeMs: number;
+          try {
+            mtimeMs = fs.statSync(filePath).mtimeMs;
+          } catch (e) {
+            debugLogger.debug(
+              `rebuildFromSessionJsonl: cannot stat ${filePath}: ${e}`,
+            );
+            continue;
+          }
+          if (mtimeMs < sinceMs) continue;
+        }
+
+        // Skip sessions the persisted history already records, before any file
+        // read: the transcript filename is `{sessionId}.jsonl`
+        // (chatRecordingService.ts), so the sessionId — the same value the
+        // full-read path below derives from the first record — needs no I/O.
+        if (skipSessionIds && skipSessionIds.size > 0) {
+          const fileSessionId = path.basename(file, '.jsonl');
+          if (skipSessionIds.has(fileSessionId)) continue;
+        }
+
         const records = await jsonl.read<ChatRecord>(filePath);
         if (records.length === 0) continue;
 
@@ -337,11 +408,71 @@ export async function loadUsageHistory(
   }
 
   return dedupBySessionId(
-    await rebuildFromSessionJsonl(
+    await rebuildFromSessionJsonl({
       skipSessionInRebuild,
-      options?.persistRebuild ?? true,
-    ),
+      persist: options?.persistRebuild ?? true,
+    }),
   );
+}
+
+/**
+ * Load the durable usage history **and** merge in sessions that were never
+ * written to `usage_record.jsonl` — notably daemon / Web Shell sessions (only
+ * the TUI `/clear` path persists usage) and any still-in-progress session.
+ *
+ * Unlike {@link loadUsageHistory}, which returns the persisted file verbatim
+ * whenever it is non-empty (and so silently omits everything not yet
+ * persisted), this replays recent transcripts for sessions the persisted file
+ * does not already cover and unions the two. Persisted records win on any
+ * sessionId conflict — they are the authoritative final snapshot. This is what
+ * the daemon usage-dashboard reads so its totals reflect live Web Shell
+ * activity. Read-only: never writes `usage_record.jsonl`.
+ *
+ * The transcript scan is bounded to a trailing window (mtime-based) so an
+ * established history does not pay a full cross-project replay on every load.
+ */
+export async function loadUsageHistoryWithLive(options?: {
+  /**
+   * Only replay transcripts touched at/after this epoch-ms. Defaults to a
+   * {@link LIVE_REBUILD_WINDOW_DAYS}-day trailing window (covers the dashboard's
+   * summary + daily charts; see the constant for the heatmap trade-off).
+   */
+  sinceMs?: number;
+}): Promise<UsageSummaryRecord[]> {
+  let persisted: UsageSummaryRecord[] = [];
+  try {
+    const records = await jsonl.read<UsageSummaryRecord>(getUsageHistoryPath());
+    persisted = records.filter((r) => r.version === 1);
+  } catch (e) {
+    debugLogger.debug(
+      `loadUsageHistoryWithLive: failed to read usage file: ${e}`,
+    );
+  }
+
+  const persistedIds = new Set(persisted.map((r) => r.sessionId));
+
+  // The trailing window bounds an *incremental* live merge on top of persisted
+  // history: old days come from the persisted file, so only recent transcripts
+  // need replaying. When there is no persisted base (fresh machine, or a user
+  // who only ever ran Web Shell so `/clear` never persisted), nothing else
+  // covers older history — replay it all (unbounded) rather than silently
+  // truncating the dashboard, matching the pre-existing empty-file behavior.
+  const sinceMs =
+    options?.sinceMs ??
+    (persistedIds.size > 0
+      ? Date.now() - LIVE_REBUILD_WINDOW_DAYS * MS_PER_DAY
+      : undefined);
+
+  const rebuilt = await rebuildFromSessionJsonl({
+    persist: false,
+    sinceMs,
+    skipSessionIds: persistedIds,
+  });
+
+  // Persisted records are the authoritative final snapshot, so they win on any
+  // sessionId conflict — place them last (dedupBySessionId is last-wins). The
+  // rebuilt set only adds sessions the persisted file never captured.
+  return dedupBySessionId([...rebuilt, ...persisted]);
 }
 
 export function getTimeRangeBounds(range: TimeRange): {
