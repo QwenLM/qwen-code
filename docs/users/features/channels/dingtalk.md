@@ -35,6 +35,7 @@ Add the channel to `~/.qwen/settings.json`:
       "cwd": "/path/to/your/project",
       "instructions": "You are a concise coding assistant responding via DingTalk.",
       "groupPolicy": "open",
+      "atSender": true,
       "groups": {
         "*": { "requireMention": true }
       }
@@ -82,6 +83,8 @@ DingTalk bots work in both DM and group conversations. To enable group support:
 3. @mention the bot in the group to trigger a response
 
 By default, the bot requires an @mention in group chats (`requireMention: true`). Set `"requireMention": false` for a specific group to make it respond to all messages. See [Group Chats](./overview#group-chats) for full details.
+
+Set `"atSender": true` to have the bot @mention the member whose group message triggered its response. It is off by default; it only applies to agent replies with a DingTalk staff ID, and only the first message of a long reply contains the mention.
 
 ### Finding a Group's Conversation ID
 
