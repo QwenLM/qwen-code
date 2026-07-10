@@ -1316,6 +1316,7 @@ export function App({
       setReviewChanges([]);
       setSelectedReviewPath(null);
       setArtifactPanelExtraArtifacts([]);
+      setPaneArtifactSnapshots(new Map());
       setArtifactPanelWidth(DEFAULT_REVIEW_PANEL_WIDTH);
       return;
     }
@@ -1326,6 +1327,7 @@ export function App({
     setReviewChanges(savedState.reviewChanges);
     setSelectedReviewPath(savedState.selectedReviewPath);
     setArtifactPanelExtraArtifacts(savedState.extraArtifacts);
+    setPaneArtifactSnapshots(new Map());
     setArtifactPanelWidth(savedState.width);
   }, [connection.sessionId]);
   const getMaxArtifactPanelWidth = useCallback(() => {

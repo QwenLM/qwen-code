@@ -1590,6 +1590,42 @@ describe('App session callbacks', () => {
     expect(container.textContent).toContain('Artifact not found.');
   });
 
+  it('clears split pane artifact snapshots when switching sessions', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-report-artifact"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-open-artifact"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Pane artifact');
+
+    await act(async () => {
+      mockConnection.sessionId = 'session-2';
+      rerender();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toContain('Pane artifact');
+  });
+
   it('enters the split view from a ?split= URL and consumes the param', async () => {
     window.history.pushState({}, '', '/?split=s1,s2');
     try {
