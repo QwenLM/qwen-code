@@ -18,6 +18,12 @@ import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { WorkspacePermissionRulesSessionRequiredError } from '../workspace-service/types.js';
+import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
+import {
+  requireTrustedWorkspaceRuntime,
+  resolveWorkspaceRuntimeFromParam,
+} from '../workspace-route-runtime.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 export interface WorkspacePermissionsRouteDeps {
   boundWorkspace: string;
@@ -142,6 +148,127 @@ export function registerWorkspacePermissionsRoutes(
       }
 
       res.status(200).json(liveResponse);
+    },
+  );
+}
+
+export function registerWorkspaceQualifiedPermissionsRoutes(
+  app: Application,
+  deps: Pick<WorkspacePermissionsRouteDeps, 'mutate' | 'safeBody'> & {
+    workspaceRegistry: WorkspaceRegistry;
+  },
+): void {
+  app.get('/workspaces/:workspace/permissions', (req, res) => {
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
+    if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+    try {
+      res
+        .status(200)
+        .json(buildPermissionSettings(loadSettings(runtime.workspaceCwd)));
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: GET /workspaces/:workspace/permissions error: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      res.status(500).json({
+        error: 'Failed to load permission rules',
+        code: 'internal_error',
+      });
+    }
+  });
+
+  app.post(
+    '/workspaces/:workspace/permissions',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const body = deps.safeBody(req);
+      const scope = body['scope'];
+      const ruleType = body['ruleType'];
+
+      if (scope !== 'workspace') {
+        res.status(400).json({
+          error:
+            'workspace-qualified permissions routes only support "workspace" scope',
+          code: 'global_scope_not_supported_for_workspace_route',
+        });
+        return;
+      }
+      const permissionScope: PermissionSettingsScope = 'workspace';
+
+      if (!isPermissionRuleType(ruleType)) {
+        res.status(400).json({
+          error: 'ruleType must be "allow", "ask", or "deny"',
+          code: 'invalid_rule_type',
+        });
+        return;
+      }
+
+      let rules: string[];
+      try {
+        const settings = loadSettings(runtime.workspaceCwd);
+        const existingRules = readPermissionRuleSet(
+          settings.workspace.settings,
+        )[ruleType];
+        rules = normalizePermissionRules(body['rules'], { existingRules });
+      } catch (err) {
+        if (err instanceof PermissionRulesValidationError) {
+          res.status(400).json({
+            error: err.message,
+            code: err.code,
+          });
+          return;
+        }
+        throw err;
+      }
+
+      const clientId = parseAndValidateWorkspaceClientId(
+        req,
+        res,
+        runtime.bridge,
+      );
+      if (clientId === null) return;
+
+      try {
+        const liveResponse =
+          await runtime.workspaceService.setWorkspacePermissionRules(
+            {
+              route: 'POST /workspaces/:workspace/permissions',
+              workspaceCwd: runtime.workspaceCwd,
+              ...(clientId ? { originatorClientId: clientId } : {}),
+            },
+            { scope: permissionScope, ruleType, rules },
+          );
+        res.status(200).json(liveResponse);
+      } catch (err) {
+        if (err instanceof WorkspacePermissionRulesSessionRequiredError) {
+          res.status(409).json({
+            error:
+              'A live ACP session is required to update active permission rules.',
+            code: 'permission_session_required',
+          });
+          return;
+        }
+        writeStderrLine(
+          `qwen serve: POST /workspaces/:workspace/permissions ACP error (ruleType=${ruleType}, workspace=${runtime.workspaceCwd}): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to update permission rules',
+          code: 'permission_update_failed',
+        });
+      }
     },
   );
 }
