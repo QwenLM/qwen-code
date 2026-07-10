@@ -201,15 +201,9 @@ jobs:
               fi
               if [[ "${EVENT_NAME}" == 'issues' ]]; then
                 DO_REVIEW=false
-                # Assigned to the autofix bot → issue phase directly (bypasses
-                # label gates; the assignee itself is the trust signal).
-                if [[ "${ASSIGNEE_LOGIN}" == "${AUTOFIX_BOT}" && "${ISSUE_STATE}" == 'open' ]]; then
-                  DO_ISSUE=true
-                  ROUTE_ISSUE="${ISSUE_NUMBER}"
-                  echo "🧭 issue #${ISSUE_NUMBER} assigned to ${AUTOFIX_BOT} → issue phase"
-                else
-                  label_is_trigger=false
-                  [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true
+                label_is_trigger=false
+                [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true
+                [[ "${ASSIGNEE_LOGIN}" == "${AUTOFIX_BOT}" ]] && label_is_trigger=true
                 if [[ "${label_is_trigger}" != 'true' ]]; then
                   echo "🧭 issue event ignored: trigger_label=false label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
                 else
@@ -237,7 +231,6 @@ jobs:
                     echo "🧭 issue event ignored: state_open=$([[ "${ISSUE_STATE}" == 'open' ]] && echo true || echo false) bug=${issue_is_bug} ready=${issue_is_ready} approved=${issue_is_approved} trigger_label=${label_is_trigger} sender_permission='${sender_permission:-none}' sender_trusted=${sender_is_trusted} label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
                   fi
                 fi
-              fi
               fi
               ;;
           esac
