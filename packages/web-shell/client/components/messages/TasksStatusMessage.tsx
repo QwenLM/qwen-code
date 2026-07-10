@@ -15,7 +15,10 @@ import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
-import { localizeToolDisplayName } from './toolFormatting';
+import {
+  localizeToolDisplayName,
+  sanitizeControlChars,
+} from './toolFormatting';
 import styles from './TasksStatusMessage.module.css';
 
 const ACTIVE_EVENT = 'web-shell:tasks-panel-active';
@@ -223,9 +226,12 @@ function formatActivityLabel(
   const singleLineDescription = description
     ? description.replace(/\s*\n\s*/g, ' ').trim()
     : '';
-  return singleLineDescription
+  const label = singleLineDescription
     ? `${display}(${singleLineDescription})`
     : display;
+  // The description is LLM-generated; strip bare control bytes so a stray
+  // \r/BEL/ESC can't garble the panel (matches the CLI surfaces).
+  return sanitizeControlChars(label);
 }
 
 export function TasksStatusMessage({
