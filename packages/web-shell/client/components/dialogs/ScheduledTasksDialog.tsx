@@ -117,9 +117,9 @@ const MAX_SET_TIMEOUT_MS = 2_147_483_647;
 const PAST_DUE_FAST_RELOADS = 3;
 const OVERDUE_RELOAD_INTERVAL_MS = 30_000;
 const MAX_PROMPT_LENGTH = 100_000;
-const AT_REFERENCE_UNSAFE_CHARS = /[^\p{L}\p{N}_./-]/gu;
+const AT_REFERENCE_UNSAFE_CHARS = /[^\p{L}\p{N}_.-]/gu;
 const PROMPT_REFERENCE_TOKEN =
-  /(^|[\s])(@(?:ext|mcp):(?:\\.|[^\s])+|\/(?:\\.|[^\s/])+)(?=$|\s)/gu;
+  /(^|[\s])(@(?:ext|mcp):(?:\\.[^\s\\]*|[^\s\\])+|\/(?:\\.[^\s\\/]*|[^\s\\/])+)(?=$|\s)/gu;
 const REFERENCE_PICKER_THEME_VARS = [
   '--background',
   '--foreground',
@@ -221,12 +221,24 @@ function textFromPromptNode(node: ChildNode): string {
   return node.tagName === 'DIV' || node.tagName === 'P' ? `${text}\n` : text;
 }
 
-function textFromPromptEditor(root: HTMLElement): string {
+function textFromPromptChildren(root: ParentNode): string {
   let text = '';
   root.childNodes.forEach((node) => {
     text += textFromPromptNode(node);
   });
+  return text;
+}
+
+function normalizePromptText(text: string): string {
   return text.replace(/\u00a0/g, ' ').replace(/\n$/, '');
+}
+
+function textFromPromptEditor(root: HTMLElement): string {
+  return normalizePromptText(textFromPromptChildren(root));
+}
+
+function textFromPromptFragment(fragment: DocumentFragment): string {
+  return normalizePromptText(textFromPromptChildren(fragment));
 }
 
 function clearPromptEditor(root: HTMLElement) {
@@ -263,6 +275,20 @@ function insertPlainPromptText(root: HTMLElement, text: string) {
   const remaining = MAX_PROMPT_LENGTH - textFromPromptEditor(root).length;
   if (remaining <= 0) return;
   document.execCommand('insertText', false, text.slice(0, remaining));
+}
+
+function selectedPromptText(root: HTMLElement): {
+  selection: Selection;
+  text: string;
+} | null {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return null;
+  const range = selection.getRangeAt(0);
+  if (!root.contains(range.commonAncestorContainer)) return null;
+  return {
+    selection,
+    text: textFromPromptFragment(range.cloneContents()),
+  };
 }
 
 function makePromptTagElement(item: PromptReferenceItem): HTMLElement {
@@ -391,6 +417,22 @@ function PromptReferenceEditor({
             event.currentTarget,
             event.dataTransfer.getData('text/plain'),
           );
+        }}
+        onCopy={(event) => {
+          const selected = selectedPromptText(event.currentTarget);
+          if (!selected) return;
+          event.preventDefault();
+          event.clipboardData.setData('text/plain', selected.text);
+        }}
+        onCut={(event) => {
+          const selected = selectedPromptText(event.currentTarget);
+          if (!selected) return;
+          event.preventDefault();
+          event.clipboardData.setData('text/plain', selected.text);
+          selected.selection.deleteFromDocument();
+          const next = normalizePromptEditor(event.currentTarget);
+          lastAppliedValueRef.current = next;
+          onChange(next);
         }}
       />
       {value.trim().length === 0 && (

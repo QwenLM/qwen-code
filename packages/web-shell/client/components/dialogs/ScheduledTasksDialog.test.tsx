@@ -156,6 +156,18 @@ function deferred<T = unknown>() {
   return { promise, resolve };
 }
 
+function dispatchClipboardEvent(
+  target: Element,
+  type: 'copy' | 'cut',
+  clipboardData: { setData: ReturnType<typeof vi.fn> },
+) {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'clipboardData', { value: clipboardData });
+  act(() => {
+    target.dispatchEvent(event);
+  });
+}
+
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
@@ -256,6 +268,33 @@ describe('ScheduledTasksDialog editing', () => {
     );
   });
 
+  it('copies and cuts prompt references as serialized tokens', async () => {
+    const promptText = '@ext:clickhouse /review @mcp:repo-tools';
+    await mount([baseTask({ prompt: promptText })]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    if (!prompt) throw new Error('prompt editor not found');
+    const range = document.createRange();
+    range.selectNodeContents(prompt);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    const copyClipboard = { setData: vi.fn() };
+    dispatchClipboardEvent(prompt, 'copy', copyClipboard);
+    expect(copyClipboard.setData).toHaveBeenCalledWith(
+      'text/plain',
+      promptText,
+    );
+
+    const cutClipboard = { setData: vi.fn() };
+    dispatchClipboardEvent(prompt, 'cut', cutClipboard);
+    await flush();
+    expect(cutClipboard.setData).toHaveBeenCalledWith('text/plain', promptText);
+    expect(prompt.textContent).toBe('');
+  });
+
   it('does not render filesystem paths as skill tags', async () => {
     await mount([
       baseTask({ prompt: 'check /var/log and then /agent-reproduce-align' }),
@@ -271,6 +310,17 @@ describe('ScheduledTasksDialog editing', () => {
     ]);
     expect(document.querySelector('[role="textbox"]')?.textContent).toContain(
       '/var/log',
+    );
+  });
+
+  it('does not hang on escaped slash-reference near-misses', async () => {
+    const promptText = `check /${'\\a'.repeat(30)}/ after`;
+    await mount([baseTask({ prompt: promptText })]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+
+    expect(document.querySelector('[role="textbox"]')?.textContent).toContain(
+      promptText,
     );
   });
 
