@@ -729,8 +729,13 @@ export class DingtalkChannel extends ChannelBase {
       this.mentionTargets.set(messageId, atUserId);
     }
 
+    await this.processInbound(envelope);
+  }
+
+  protected override async processInbound(envelope: Envelope): Promise<void> {
+    const messageId = envelope.messageId;
     try {
-      await this.processInbound(envelope);
+      await super.processInbound(envelope);
     } finally {
       if (messageId && !this.bufferedMentionTargets.has(messageId)) {
         this.mentionTargets.delete(messageId);

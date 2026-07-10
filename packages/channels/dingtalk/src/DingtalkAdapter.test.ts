@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import type {
   ChannelTaskLifecycleEvent,
+  Envelope,
   SessionTarget,
 } from '@qwen-code/channel-base';
 
@@ -1522,6 +1523,80 @@ describe('DingtalkChannel mention target lifecycle', () => {
     });
     expect(bridge.prompt).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
+  });
+
+  it('clears the final buffered command target after synthetic collect re-entry', async () => {
+    vi.doUnmock('@qwen-code/channel-base');
+    vi.resetModules();
+    const { DingtalkChannel: RealDingtalkChannel } = await import(
+      './DingtalkAdapter.js'
+    );
+    const firstPrompt = deferredPromise<string>();
+    const bridge = Object.assign(new EventEmitter(), {
+      availableCommands: [],
+      newSession: vi.fn().mockResolvedValue('session-1'),
+      loadSession: vi.fn(),
+      prompt: vi.fn().mockReturnValueOnce(firstPrompt.promise),
+      cancelSession: vi.fn().mockResolvedValue(undefined),
+    }) as never;
+    const channel = new RealDingtalkChannel(
+      'real-dingtalk',
+      {
+        type: 'dingtalk',
+        token: '',
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        senderPolicy: 'open',
+        allowedUsers: [],
+        sessionScope: 'user',
+        cwd: '/tmp',
+        groupPolicy: 'open',
+        dmPolicy: 'open',
+        dispatchMode: 'collect',
+        atSender: true,
+        groups: { '*': { requireMention: false } },
+      },
+      bridge,
+      { registerBridgeEvents: false },
+    );
+    const finalCommand: Envelope = {
+      chatId: 'cid-123',
+      senderId: 'sender-123',
+      senderName: 'Alice',
+      messageId: 'command-1',
+      text: '/help',
+      isGroup: true,
+      isMentioned: true,
+    };
+    const initial = channel.handleInbound({
+      ...finalCommand,
+      messageId: 'active-1',
+      text: 'first request',
+    });
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+    const internals = channel as unknown as {
+      collectBuffers: Map<string, Array<{ text: string; envelope: Envelope }>>;
+      mentionTargets: Map<string, string>;
+      onPromptBuffered(
+        chatId: string,
+        sessionId: string,
+        messageId?: string,
+      ): void;
+    };
+    internals.mentionTargets.set('command-1', 'staff-123');
+    internals.collectBuffers.set('session-1', [
+      { text: '/help', envelope: finalCommand },
+    ]);
+    internals.onPromptBuffered('cid-123', 'session-1', 'command-1');
+
+    firstPrompt.resolve('first response');
+    await initial;
+
+    await vi.waitFor(() => {
+      expect(internals.mentionTargets.has('command-1')).toBe(false);
+    });
+    expect(bridge.prompt).toHaveBeenCalledOnce();
   });
 
   it('removes a bound session target when the session dies', async () => {
