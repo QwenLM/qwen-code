@@ -9,6 +9,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { argon2id } from '@noble/hashes/argon2';
 import type { RcScope } from './scopes.js';
+import type { CorsOriginRecord } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Argon2id parameters (RFC 9106 "second recommended" interactive-ish profile,
@@ -172,8 +173,21 @@ export interface ShareInfo {
   usesRemaining: number | null;
 }
 
+/** Outcome of `removeOrigin`. */
+export type RemoveOriginResult =
+  | { removed: true }
+  | { notFound: true }
+  | { conflict: 'config' };
+
+interface CorsOriginRow {
+  origin: string;
+  admittedByTokenId: string | null;
+  admittedAt: string | null;
+}
+
 interface PersistShape {
   tokens: TokenRecord[];
+  corsOrigins?: CorsOriginRow[];
 }
 
 /** Parse `Authorization: Bearer <token>` → credential, or null. */
@@ -219,6 +233,7 @@ export class TokenStore {
   private constructor(
     private readonly filePath: string,
     private records: TokenRecord[],
+    private corsRows: CorsOriginRow[],
     private nowFn: () => number,
   ) {}
 
@@ -227,14 +242,16 @@ export class TokenStore {
     nowFn: () => number = Date.now,
   ): Promise<TokenStore> {
     let records: TokenRecord[] = [];
+    let corsRows: CorsOriginRow[] = [];
     try {
       const raw = await readFile(filePath, 'utf8');
       const parsed = JSON.parse(raw) as PersistShape;
       if (Array.isArray(parsed.tokens)) records = parsed.tokens;
+      if (Array.isArray(parsed.corsOrigins)) corsRows = parsed.corsOrigins;
     } catch {
       // Missing/corrupt file → start empty. First issue() persists it.
     }
-    return new TokenStore(filePath, records, nowFn);
+    return new TokenStore(filePath, records, corsRows, nowFn);
   }
 
   async issue(
@@ -517,9 +534,88 @@ export class TokenStore {
     return { revokedIds };
   }
 
+  // ---------------------------------------------------------------------------
+  // CORS origin persistence (wire-protocol: "Browser CORS allowlist derived
+  // from pairing").  Origins are stored independently of tokens — revoking the
+  // admitting token does NOT remove the origin.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Record (or re-record) an admitted browser origin.  Upserts on the origin
+   * key so re-admission refreshes the admitting token id and timestamp.
+   * Callers are responsible for gating admission via `evaluateAdmission`
+   * (cors.ts) and for writing the `cors_origin_admitted` audit event.
+   */
+  async admitOrigin(
+    origin: string,
+    byTokenId: string,
+    admittedAt: string = new Date().toISOString(),
+  ): Promise<CorsOriginRecord> {
+    const existing = this.corsRows.findIndex((r) => r.origin === origin);
+    const row: CorsOriginRow = {
+      origin,
+      admittedByTokenId: byTokenId,
+      admittedAt,
+    };
+    if (existing >= 0) {
+      this.corsRows[existing] = row;
+    } else {
+      this.corsRows.push(row);
+    }
+    await this.persist();
+    return { origin, admittedByTokenId: byTokenId, admittedAt, source: 'db' };
+  }
+
+  /**
+   * List admitted origins: persisted rows (`source: 'db'`) merged with the
+   * caller-supplied config origins (`source: 'config'`, never stored,
+   * `admittedByTokenId`/`admittedAt` null).  An origin present in BOTH is
+   * listed once as the read-only `config` entry (config origins are read-only).
+   */
+  listOrigins(configOrigins: readonly string[] = []): CorsOriginRecord[] {
+    const config = new Set(configOrigins);
+    const fromDb: CorsOriginRecord[] = this.corsRows
+      .filter((r) => !config.has(r.origin))
+      .map((r) => ({
+        origin: r.origin,
+        admittedByTokenId: r.admittedByTokenId,
+        admittedAt: r.admittedAt,
+        source: 'db' as const,
+      }));
+    const fromConfig: CorsOriginRecord[] = [...config].map((origin) => ({
+      origin,
+      admittedByTokenId: null,
+      admittedAt: null,
+      source: 'config' as const,
+    }));
+    return [...fromDb, ...fromConfig];
+  }
+
+  /**
+   * Remove an admitted origin.  Config-sourced origins are read-only:
+   * targeting one returns `{ conflict: 'config' }` (HTTP 409 directing the
+   * operator to edit config instead).  Removal works regardless of surviving
+   * tokens paired from that origin; the caller writes the `cors_origin_removed`
+   * audit event on `{ removed: true }`.
+   */
+  async removeOrigin(
+    origin: string,
+    configOrigins: readonly string[] = [],
+  ): Promise<RemoveOriginResult> {
+    if (configOrigins.includes(origin)) return { conflict: 'config' };
+    const idx = this.corsRows.findIndex((r) => r.origin === origin);
+    if (idx < 0) return { notFound: true };
+    this.corsRows.splice(idx, 1);
+    await this.persist();
+    return { removed: true };
+  }
+
   private async persist(): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
-    const body: PersistShape = { tokens: this.records };
+    const body: PersistShape = {
+      tokens: this.records,
+      corsOrigins: this.corsRows,
+    };
     await writeFile(this.filePath, JSON.stringify(body, null, 2), {
       mode: 0o600,
     });

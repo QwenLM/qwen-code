@@ -517,3 +517,103 @@ describe('TokenStore', () => {
     expect(result).toMatchObject({ id, scopes: [SESSION_READ] });
   });
 });
+
+// ---------------------------------------------------------------------------
+// TokenStore cors_origins operations
+// ---------------------------------------------------------------------------
+
+describe('TokenStore cors_origins operations', () => {
+  let path: string;
+  beforeEach(() => {
+    path = join(mkdtempSync(join(tmpdir(), 'rc-cors-store-')), 'tokens.json');
+  });
+
+  it('fresh store has empty listOrigins', async () => {
+    const store = await TokenStore.open(path);
+    expect(store.listOrigins()).toEqual([]);
+  });
+
+  it('admitOrigin persists and listOrigins returns it with source db', async () => {
+    const store = await TokenStore.open(path);
+    const rec = await store.admitOrigin('https://app.example.com', 'tok_1');
+    expect(rec.origin).toBe('https://app.example.com');
+    expect(rec.source).toBe('db');
+    expect(rec.admittedByTokenId).toBe('tok_1');
+    const listed = store.listOrigins();
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.origin).toBe('https://app.example.com');
+    expect(listed[0]?.source).toBe('db');
+  });
+
+  it('admitOrigin upserts (re-admitting same origin refreshes token id)', async () => {
+    const store = await TokenStore.open(path);
+    await store.admitOrigin('https://app.example.com', 'tok_1');
+    await store.admitOrigin('https://app.example.com', 'tok_2');
+    const listed = store.listOrigins();
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.admittedByTokenId).toBe('tok_2');
+  });
+
+  it('listOrigins merges config entries with source config and null token/timestamp', async () => {
+    const store = await TokenStore.open(path);
+    await store.admitOrigin('https://db.example.com', 'tok_1');
+    const listed = store.listOrigins(['https://config.example.com']);
+    expect(listed).toHaveLength(2);
+    const cfg = listed.find((r) => r.origin === 'https://config.example.com');
+    expect(cfg?.source).toBe('config');
+    expect(cfg?.admittedByTokenId).toBeNull();
+    expect(cfg?.admittedAt).toBeNull();
+  });
+
+  it('when an origin is in both db and config, it appears once as config', async () => {
+    const store = await TokenStore.open(path);
+    await store.admitOrigin('https://both.example.com', 'tok_1');
+    const listed = store.listOrigins(['https://both.example.com']);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.source).toBe('config');
+  });
+
+  it('removeOrigin on a db-admitted origin removes it', async () => {
+    const store = await TokenStore.open(path);
+    await store.admitOrigin('https://app.example.com', 'tok_1');
+    const result = await store.removeOrigin('https://app.example.com');
+    expect(result).toEqual({ removed: true });
+    expect(store.listOrigins()).toHaveLength(0);
+    // idempotent: second remove returns notFound
+    const result2 = await store.removeOrigin('https://app.example.com');
+    expect(result2).toEqual({ notFound: true });
+  });
+
+  it('removeOrigin on a config-sourced origin returns conflict:config', async () => {
+    const store = await TokenStore.open(path);
+    const cfg = ['https://config.example.com'];
+    const result = await store.removeOrigin('https://config.example.com', cfg);
+    expect(result).toEqual({ conflict: 'config' });
+    // still listed
+    expect(store.listOrigins(cfg)).toHaveLength(1);
+  });
+
+  it('removeOrigin on an unknown origin returns notFound', async () => {
+    const store = await TokenStore.open(path);
+    const result = await store.removeOrigin('https://never.example.com');
+    expect(result).toEqual({ notFound: true });
+  });
+
+  it('cors_origins persist across reopen', async () => {
+    const store = await TokenStore.open(path);
+    await store.admitOrigin('https://app.example.com', 'tok_1');
+    const reopened = await TokenStore.open(path);
+    const listed = reopened.listOrigins();
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.origin).toBe('https://app.example.com');
+    expect(listed[0]?.source).toBe('db');
+  });
+
+  it('removing an origin persists across reopen', async () => {
+    const store = await TokenStore.open(path);
+    await store.admitOrigin('https://app.example.com', 'tok_1');
+    await store.removeOrigin('https://app.example.com');
+    const reopened = await TokenStore.open(path);
+    expect(reopened.listOrigins()).toHaveLength(0);
+  });
+});

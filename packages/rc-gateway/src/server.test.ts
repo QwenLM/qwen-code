@@ -1541,3 +1541,92 @@ describe('APNs token-revoke cascade (native-mobile-shells)', () => {
     rmSync(apnsDir, { recursive: true, force: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// CORS preflight + actual-request middleware (Task 1.4)
+// ---------------------------------------------------------------------------
+
+describe('CORS preflight and actual-request middleware', () => {
+  it('OPTIONS from an unlisted origin returns 403 with no ACAO header', async () => {
+    const { url } = await boot();
+    const res = await fetch(`${url}/rc/health`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://unlisted.evil.com',
+        'Access-Control-Request-Method': 'GET',
+      },
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  it('OPTIONS from an allowlisted origin returns 204 with ACAO + credentials + Vary', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-cors-srv-'));
+    const s = await TokenStore.open(join(dir, 'tokens.json'));
+    await s.admitOrigin('https://app.example.com', 'tok1');
+    const { url: url2 } = await boot(undefined, {
+      store: s,
+    });
+    const res = await fetch(`${url2}/rc/health`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://app.example.com',
+        'Access-Control-Request-Method': 'GET',
+      },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get('access-control-allow-origin')).toBe(
+      'https://app.example.com',
+    );
+    expect(res.headers.get('access-control-allow-credentials')).toBe('true');
+    expect(res.headers.get('vary')).toBe('Origin');
+  });
+
+  it('actual GET from an unlisted origin has no ACAO header (still 200 for public routes)', async () => {
+    const { url } = await boot();
+    const res = await fetch(`${url}/rc/health`, {
+      headers: { Origin: 'https://unlisted.evil.com' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  it('actual GET from an allowlisted origin gets ACAO + credentials + Vary', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-cors-srv2-'));
+    const s = await TokenStore.open(join(dir, 'tokens.json'));
+    await s.admitOrigin('https://app.example.com', 'tok1');
+    const { url: url2 } = await boot(undefined, { store: s });
+    const res = await fetch(`${url2}/rc/health`, {
+      headers: { Origin: 'https://app.example.com' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBe(
+      'https://app.example.com',
+    );
+    expect(res.headers.get('access-control-allow-credentials')).toBe('true');
+    expect(res.headers.get('vary')).toBe('Origin');
+  });
+
+  it('GET /rc/cors returns 200 with origins array for owner token', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-cors-srv3-'));
+    const s = await TokenStore.open(join(dir, 'tokens.json'));
+    const p = new PairingService();
+    const { url } = await boot(undefined, { store: s, pairing: p });
+    const { code } = p.mint(['owner']);
+    const redeemRes = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner' }),
+    });
+    const { token: ownerToken } = (await redeemRes.json()) as { token: string };
+    await s.admitOrigin('https://app.example.com', 'tok1');
+    const res = await fetch(`${url}/rc/cors`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { origins: Array<{ origin: string }> };
+    expect(
+      body.origins.some((o) => o.origin === 'https://app.example.com'),
+    ).toBe(true);
+  });
+});

@@ -37,6 +37,18 @@ import {
 import { ConnectionRegistry } from './connectionRegistry.js';
 import { AuditLog, type AuditRecorder } from './auditLog.js';
 import { createPairRedeemRoute } from './routes/pair.js';
+import {
+  createListCorsOriginsRoute,
+  createAddCorsOriginRoute,
+  createRemoveCorsOriginRoute,
+} from './routes/cors.js';
+import type {
+  CorsAllowlist} from './cors.js';
+import {
+  allowlistFromRecords,
+  evaluatePreflight,
+  corsHeadersForActualRequest,
+} from './cors.js';
 import { createPermissionVoteRoute } from './routes/permission.js';
 import { createPromptRoute, type PromptAcceptedHook } from './routes/prompt.js';
 import { createUsageRoute, type UsageReader } from './routes/usage.js';
@@ -211,6 +223,19 @@ export interface GatewayDeps {
    * `null` → 404 (the shell falls back to a Custom Tab).
    */
   assetLinks?: () => Array<Record<string, unknown>> | null;
+  /**
+   * Owner-configured CORS origins (read-only; sourced from config file, not
+   * the store).  These are merged at load into the allowlist as `source:
+   * 'config'` entries and cannot be deleted via the API (409).
+   */
+  corsConfigOrigins?: readonly string[];
+  /**
+   * The gateway's own UI origin, used as the unconditional CORS admission
+   * bypass at redemption.  Format: `scheme://host[:port]` (RFC 6454 serialized
+   * origin).  When omitted, the admisssion gate still runs but the
+   * "own-UI-origin bypass" never fires.
+   */
+  ownUiOrigin?: string;
 }
 
 export interface GatewayApp {
@@ -256,6 +281,64 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     undefined,
     { onRecord: (record) => ownerEvents.publish({ type: 'audit', record }) },
   );
+
+  // ---------------------------------------------------------------------------
+  // CORS allowlist — built from persisted db origins + config overrides.
+  // The `corsAllowlist` instance is mutated live as origins are admitted/removed.
+  // ---------------------------------------------------------------------------
+  const corsInitialRecords = deps.store.listOrigins(
+    deps.corsConfigOrigins ?? [],
+  );
+  const corsAllowlist: CorsAllowlist = allowlistFromRecords(corsInitialRecords);
+
+  // Owner-configured origins are in-memory overrides (config-sourced).
+  for (const o of deps.corsConfigOrigins ?? []) corsAllowlist.add(o);
+
+  // CORS preflight handler — runs BEFORE auth middleware so browsers can
+  // complete the preflight without sending credentials.
+  app.options('*', (req, res) => {
+    const decision = evaluatePreflight(
+      {
+        method: req.method,
+        origin: req.headers['origin'] as string | undefined,
+        requestMethod: req.headers['access-control-request-method'] as
+          | string
+          | undefined,
+        requestHeaders: req.headers['access-control-request-headers'] as
+          | string
+          | undefined,
+      },
+      corsAllowlist,
+    );
+    for (const [k, v] of Object.entries(decision.headers)) res.setHeader(k, v);
+    if (decision.allowed) {
+      res.status(204).end();
+    } else {
+      void audit.record({
+        action: 'cors_denied',
+        detail: {
+          origin: decision.origin,
+          phase: 'preflight',
+        },
+      });
+      res.status(403).end();
+    }
+  });
+
+  // Actual-request CORS header middleware — runs before auth so browsers
+  // receive the CORS headers even on 401/403 responses.
+  app.use((req, res, next) => {
+    if (req.method === 'OPTIONS') {
+      next();
+      return;
+    }
+    const cors = corsHeadersForActualRequest(
+      req.headers['origin'] as string | undefined,
+      corsAllowlist,
+    );
+    for (const [k, v] of Object.entries(cors.headers)) res.setHeader(k, v);
+    next();
+  });
   // Process-local activity tracker: feeds the notifier's working-device
   // suppression and is touched by recordActivity on the human-action POSTs.
   const workingDevice = new WorkingDeviceTracker();
@@ -320,7 +403,14 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
 
   app.post(
     '/rc/pair/redeem',
-    createPairRedeemRoute(deps.pairing, deps.store, audit),
+    createPairRedeemRoute(
+      deps.pairing,
+      deps.store,
+      audit,
+      deps.ownUiOrigin
+        ? { ownUiOrigin: deps.ownUiOrigin, allowlist: corsAllowlist }
+        : undefined,
+    ),
   );
 
   const webRoot =
@@ -562,6 +652,39 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/rc/commands',
     requireScope(SESSION_READ, audit),
     createListCommandsRoute(commandLoader),
+  );
+  // CORS allowlist CRUD (owner-only; wire-protocol: "Browser CORS allowlist
+  // derived from pairing"). GET lists db+config origins; POST manually admits;
+  // DELETE removes db-admitted origins (409 for config-sourced).
+  app.get(
+    '/rc/cors',
+    requireScope(OWNER, audit),
+    createListCorsOriginsRoute({
+      store: deps.store,
+      allowlist: corsAllowlist,
+      audit,
+      configOrigins: deps.corsConfigOrigins,
+    }),
+  );
+  app.post(
+    '/rc/cors',
+    requireScope(OWNER, audit),
+    createAddCorsOriginRoute({
+      store: deps.store,
+      allowlist: corsAllowlist,
+      audit,
+      configOrigins: deps.corsConfigOrigins,
+    }),
+  );
+  app.delete(
+    '/rc/cors/:origin',
+    requireScope(OWNER, audit),
+    createRemoveCorsOriginRoute({
+      store: deps.store,
+      allowlist: corsAllowlist,
+      audit,
+      configOrigins: deps.corsConfigOrigins,
+    }),
   );
   app.get(
     '/rc/tokens',
