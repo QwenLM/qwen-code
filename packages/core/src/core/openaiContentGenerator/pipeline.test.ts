@@ -12,6 +12,7 @@ import { GenerateContentResponse, Type, FinishReason } from '@google/genai';
 import type { ErrorHandler, PipelineConfig } from './types.js';
 import {
   ContentGenerationPipeline,
+  NonSSEResponseError,
   StreamContentError,
   StreamInactivityTimeoutError,
 } from './pipeline.js';
@@ -1108,6 +1109,141 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.enable_thinking).toBeUndefined();
     });
 
+    it('disables qwen thinking via chat_template_kwargs on a non-DashScope endpoint (vLLM/SGLang)', async () => {
+      // Self-hosted OpenAI-compatible servers render the chat template
+      // server-side and read the thinking switch from `chat_template_kwargs`,
+      // silently ignoring a top-level `enable_thinking`. A qwen model on such
+      // an endpoint must therefore get the switch nested, not top-level — and
+      // any top-level `enable_thinking: true` a provider preset injected via
+      // extra_body must be stripped so it can't contradict the opt-out.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://llm.example.com/v1',
+        model: 'Qwen3.6-27B',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        enable_thinking: true, // Simulates extra_body injection
+      }));
+
+      const request: GenerateContentParameters = {
+        model: 'Qwen3.6-27B',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.chat_template_kwargs).toEqual({ enable_thinking: false });
+      expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('disables coder-model thinking via chat_template_kwargs on a non-DashScope endpoint', async () => {
+      // `coder-model` is the QWEN_OAUTH default, but a user can point it at a
+      // self-hosted endpoint. The `model === 'coder-model'` arm must reach the
+      // non-DashScope chat_template_kwargs path just like a `qwen*` model.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://llm.example.com/v1',
+        model: 'coder-model',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'coder-model',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.chat_template_kwargs).toEqual({ enable_thinking: false });
+      expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('merges enable_thinking into pre-existing chat_template_kwargs on a non-DashScope endpoint', async () => {
+      // The non-DashScope path spreads any existing `chat_template_kwargs`
+      // before appending `enable_thinking: false`. Guard the merge so a future
+      // refactor can't silently drop user-configured kwargs.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://llm.example.com/v1',
+        model: 'Qwen3.6-27B',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        chat_template_kwargs: { apply_chat_template: true },
+      }));
+
+      const request: GenerateContentParameters = {
+        model: 'Qwen3.6-27B',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.chat_template_kwargs).toEqual({
+        apply_chat_template: true,
+        enable_thinking: false,
+      });
+    });
+
     it('does NOT emit enable_thinking on a non-qwen model routed through DashScope', async () => {
       // DashScope's compatible-mode endpoint routes multiple model families
       // (qwen3, GLM, DeepSeek). Hostname alone is not enough — GLM uses
@@ -1714,6 +1850,321 @@ describe('ContentGenerationPipeline', () => {
       }).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
 
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('should throw NonSSEResponseError when response has non-SSE content-type', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          // Intentionally yields nothing — simulates an HTML body parsed as SSE
+        },
+      };
+
+      const mockHttpResponse = {
+        headers: new Headers({
+          'content-type': 'text/html;charset=UTF-8',
+          'x-request-id': 'req-123',
+        }),
+        status: 200,
+        body: null,
+      } as unknown as Response;
+
+      // Create a mock API promise that has withResponse()
+      const mockApiPromise = Object.assign(Promise.resolve(mockStream), {
+        withResponse: () =>
+          Promise.resolve({
+            data: mockStream,
+            response: mockHttpResponse,
+            request_id: 'req-123',
+          }),
+      });
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockReturnValue(
+        mockApiPromise,
+      );
+
+      let thrownError: NonSSEResponseError | undefined;
+      try {
+        await pipeline.executeStream(request, userPromptId);
+      } catch (e) {
+        thrownError = e as NonSSEResponseError;
+      }
+
+      expect(thrownError).toBeInstanceOf(NonSSEResponseError);
+      expect(thrownError!.httpStatus).toBe(200);
+      expect(thrownError!.status).toBe(200);
+      expect(thrownError!.requestId).toBe('req-123');
+      expect(thrownError!.request_id).toBe('req-123');
+    });
+
+    it('should throw NonSSEResponseError for application/json streaming responses', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const jsonBody = '{"error":"gateway blocked streaming request"}';
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {},
+      };
+
+      const bodyStream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(jsonBody));
+          controller.close();
+        },
+      });
+
+      const mockHttpResponse = {
+        headers: new Headers({
+          'content-type': 'application/json',
+        }),
+        status: 200,
+        body: bodyStream,
+      } as unknown as Response;
+
+      const mockApiPromise = Object.assign(Promise.resolve(mockStream), {
+        withResponse: () =>
+          Promise.resolve({
+            data: mockStream,
+            response: mockHttpResponse,
+            request_id: 'req-json',
+          }),
+      });
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockReturnValue(
+        mockApiPromise,
+      );
+
+      let thrownError: NonSSEResponseError | undefined;
+      try {
+        await pipeline.executeStream(request, 'test-id');
+      } catch (e) {
+        thrownError = e as NonSSEResponseError;
+      }
+
+      expect(thrownError).toBeInstanceOf(NonSSEResponseError);
+      expect(thrownError!.contentType).toBe('application/json');
+      expect(thrownError!.bodyPrefix).toContain('gateway blocked');
+      expect(thrownError!.requestId).toBe('req-json');
+    });
+
+    it('should include body prefix in NonSSEResponseError when body is readable', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const htmlBody = '<html>' + 'x'.repeat(700) + '</html>';
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {},
+      };
+
+      // Create a ReadableStream with the HTML content
+      const bodyStream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(htmlBody));
+          controller.close();
+        },
+      });
+
+      const mockHttpResponse = {
+        headers: new Headers({
+          'content-type': 'text/html',
+        }),
+        status: 200,
+        body: bodyStream,
+      } as unknown as Response;
+
+      const mockApiPromise = Object.assign(Promise.resolve(mockStream), {
+        withResponse: () =>
+          Promise.resolve({
+            data: mockStream,
+            response: mockHttpResponse,
+            request_id: null,
+          }),
+      });
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockReturnValue(
+        mockApiPromise,
+      );
+
+      let thrownError: NonSSEResponseError | undefined;
+      try {
+        await pipeline.executeStream(request, 'test-id');
+      } catch (e) {
+        thrownError = e as NonSSEResponseError;
+      }
+
+      expect(thrownError).toBeInstanceOf(NonSSEResponseError);
+      expect(thrownError!.contentType).toBe('text/html');
+      expect(thrownError!.httpStatus).toBe(200);
+      expect(thrownError!.bodyPrefix).toBe(htmlBody.slice(0, 512));
+      expect(thrownError!.bodyPrefix).toHaveLength(512);
+      expect(thrownError!.requestId).toBeNull();
+    });
+
+    it('should still throw NonSSEResponseError when body prefix read fails', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {},
+      };
+
+      const bodyStream = new ReadableStream({
+        start(controller) {
+          controller.error(new Error('body already consumed'));
+        },
+      });
+
+      const mockHttpResponse = {
+        headers: new Headers({
+          'content-type': 'text/html',
+        }),
+        status: 200,
+        body: bodyStream,
+      } as unknown as Response;
+
+      const mockApiPromise = Object.assign(Promise.resolve(mockStream), {
+        withResponse: () =>
+          Promise.resolve({
+            data: mockStream,
+            response: mockHttpResponse,
+            request_id: null,
+          }),
+      });
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockReturnValue(
+        mockApiPromise,
+      );
+
+      let thrownError: NonSSEResponseError | undefined;
+      try {
+        await pipeline.executeStream(request, 'test-id');
+      } catch (e) {
+        thrownError = e as NonSSEResponseError;
+      }
+
+      expect(thrownError).toBeInstanceOf(NonSSEResponseError);
+      expect(thrownError!.bodyPrefix).toBe('');
+    });
+
+    it('should not throw NonSSEResponseError for text/event-stream content-type', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const mockGeminiResponse = new GenerateContentResponse();
+      mockGeminiResponse.candidates = [
+        {
+          content: { parts: [{ text: 'Hello' }], role: 'model' },
+          finishReason: FinishReason.STOP,
+        },
+      ];
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            object: 'chat.completion.chunk',
+            created: Date.now(),
+            model: 'test-model',
+            choices: [
+              { index: 0, delta: { content: 'Hello' }, finish_reason: 'stop' },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+
+      const mockHttpResponse = {
+        headers: new Headers({
+          'content-type': 'text/event-stream',
+        }),
+        status: 200,
+        body: null,
+      } as unknown as Response;
+
+      const mockApiPromise = Object.assign(Promise.resolve(mockStream), {
+        withResponse: () =>
+          Promise.resolve({
+            data: mockStream,
+            response: mockHttpResponse,
+            request_id: null,
+          }),
+      });
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockReturnValue(
+        mockApiPromise,
+      );
+
+      const resultGenerator = await pipeline.executeStream(request, 'test-id');
+      const results = [];
+      for await (const result of resultGenerator) {
+        results.push(result);
+      }
+      expect(results.length).toBeGreaterThan(0);
+    });
+
+    it('should fall back to regular await when withResponse is not available', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const mockGeminiResponse = new GenerateContentResponse();
+      mockGeminiResponse.candidates = [
+        {
+          content: { parts: [{ text: 'Hello' }], role: 'model' },
+          finishReason: FinishReason.STOP,
+        },
+      ];
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            object: 'chat.completion.chunk',
+            created: Date.now(),
+            model: 'test-model',
+            choices: [
+              { index: 0, delta: { content: 'Hello' }, finish_reason: 'stop' },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      // Regular mockResolvedValue — no withResponse method
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(request, 'test-id');
+      const results = [];
+      for await (const result of resultGenerator) {
+        results.push(result);
+      }
+      expect(results.length).toBeGreaterThan(0);
     });
 
     it('should pass abort signal to OpenAI client for streaming requests', async () => {
@@ -3110,13 +3561,38 @@ describe('ContentGenerationPipeline', () => {
       const err = await captured;
       expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
       expect((err as Error).message).toBe(
-        'No stream activity for 1000ms after 0 chunks (stream lifetime: 1000ms)',
+        'No stream activity for 1000ms after 0 chunks ' +
+          '(stream lifetime: 1000ms). Set QWEN_STREAM_IDLE_TIMEOUT_MS ' +
+          'to increase this window (or 0 to disable it).',
       );
       expect(err).toMatchObject({ code: 'ETIMEDOUT' });
       expect((err as StreamInactivityTimeoutError).chunksReceived).toBe(0);
       expect((err as StreamInactivityTimeoutError).streamLifetimeMs).toBe(1000);
       expect(gated.wasReturned()).toBe(true);
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('includes the idle detail and env override hint in timeout errors', async () => {
+      const gated = gatedStream(); // never push/end → silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const captured = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1000);
+      const err = await captured;
+      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
+      const message = (err as Error).message;
+      expect(message).toContain('No stream activity for 1000ms after 0 chunks');
+      expect(message).toContain('QWEN_STREAM_IDLE_TIMEOUT_MS');
     });
 
     it('uses the default stream idle timeout when no override is configured', async () => {
@@ -3486,7 +3962,7 @@ describe('ContentGenerationPipeline', () => {
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
       );
-      const p = buildPipeline(); // no config; invalid env → default (120000ms)
+      const p = buildPipeline(); // no config; invalid env → default
       const gen = await p.executeStream(
         streamingRequest(new AbortController().signal),
         'id',
@@ -3519,7 +3995,7 @@ describe('ContentGenerationPipeline', () => {
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
       );
-      const p = buildPipeline(); // no config; oversized env → default (120000ms)
+      const p = buildPipeline(); // no config; oversized env → default
       const gen = await p.executeStream(
         streamingRequest(new AbortController().signal),
         'id',
@@ -3619,7 +4095,7 @@ describe('ContentGenerationPipeline', () => {
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
       );
-      // Config is oversized → rejected; env = 4000 → used (not default 120000).
+      // Config is oversized → rejected; env = 4000 → used (not default).
       const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS + 1);
       const gen = await p.executeStream(
         streamingRequest(new AbortController().signal),
@@ -3635,7 +4111,7 @@ describe('ContentGenerationPipeline', () => {
       expect(settled).toBe(false); // not yet at the env value
       await vi.advanceTimersByTimeAsync(1);
       await consume;
-      expect(settled).toBe(true); // trips at 4000ms from the env (not 120000 default)
+      expect(settled).toBe(true); // trips at 4000ms from the env (not default)
     });
 
     it('disables the watchdog when QWEN_STREAM_IDLE_TIMEOUT_MS=0', async () => {

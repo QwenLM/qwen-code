@@ -55,7 +55,10 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
         // Fallback for other unions: take the first non-null type
         // OpenAPI 3.0 doesn't support type arrays.
         // Ideal fix would be anyOf, but simple fallback is safer for now.
-        target['type'] = types[0];
+        target['type'] = types.find((t) => t !== 'null') ?? types[0];
+        if (types.includes('null')) {
+          target['nullable'] = true;
+        }
       }
     } else if (source['type'] !== undefined) {
       target['type'] = source['type'];

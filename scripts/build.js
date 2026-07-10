@@ -34,7 +34,7 @@ if (!existsSync(join(root, 'node_modules'))) {
 execSync('npm run generate', { stdio: 'inherit', cwd: root });
 
 // --cli-only: skip packages not needed by the CLI bundle
-// (webui, sdk, web-shell, vscode-ide-companion are for IDE/web use only)
+// (webui, web-shell, vscode-ide-companion are for IDE/web use only)
 const cliOnly = process.argv.includes('--cli-only');
 
 // Build in dependency order:
@@ -44,9 +44,9 @@ const cliOnly = process.argv.includes('--cli-only');
 // 4. channel adapters (depend on channel-base)
 // 5. audio-capture (native microphone backend used by cli)
 // 6. acp-bridge (depends on core - used by cli)
-// 7. cli (depends on core, acp-bridge, web-templates, channel packages)
-// 8. webui (shared UI components - used by vscode companion)
-// 9. sdk (build-time devDep on acp-bridge for shared constants)
+// 7. sdk (build-time devDep on acp-bridge for shared constants, used by cli channel worker)
+// 8. cli (depends on core, acp-bridge, web-templates, channel packages, sdk)
+// 9. webui (shared UI components - used by vscode companion)
 // 10. web-shell (depends on webui and sdk)
 // 11. vscode-ide-companion (depends on webui)
 const buildOrder = [
@@ -56,17 +56,18 @@ const buildOrder = [
   'packages/channels/telegram',
   'packages/channels/weixin',
   'packages/channels/dingtalk',
+  'packages/channels/wecom',
   'packages/channels/feishu',
   'packages/channels/qqbot',
   'packages/channels/plugin-example',
   'packages/audio-capture',
   'packages/acp-bridge',
+  'packages/sdk-typescript',
   'packages/cli',
   ...(cliOnly
     ? []
     : [
         'packages/webui',
-        'packages/sdk-typescript',
         'packages/web-shell',
         'packages/vscode-ide-companion',
         'packages/chrome-extension',

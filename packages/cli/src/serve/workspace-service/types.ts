@@ -38,6 +38,7 @@ import type {
 import type { WorkspaceVoiceStatus } from '../../services/voice-service.js';
 import type { VoiceMode } from '../../services/voice-settings.js';
 import type { WorkspaceProvidersStatusProvider } from '../workspace-providers-status.js';
+import type { WorkspaceSkillsStatusProvider } from '../workspace-skills-status.js';
 
 // ---------------------------------------------------------------------------
 // WorkspaceRequestContext
@@ -148,6 +149,17 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
   ): Promise<QwenPermissionSettings>;
 
+  /** Start the ACP child/channel without creating a user-visible session. */
+  preheatAcpChild(
+    ctx: WorkspaceRequestContext,
+    opts?: { timeoutMs?: number },
+  ): Promise<WorkspaceAcpPreheatResult>;
+
+  /** Current ACP child/channel liveness for the bound workspace. */
+  getWorkspaceAcpStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<WorkspaceAcpStatusResult>;
+
   /** Voice settings and selectable transcription models for the workspace. */
   getWorkspaceVoiceStatus(
     ctx: WorkspaceRequestContext,
@@ -196,6 +208,9 @@ export interface DaemonWorkspaceService {
   /** Reload all settings (env + model + permissions + tools + memory). */
   reload(ctx: WorkspaceRequestContext): Promise<ReloadResponse>;
 
+  /** Drop cached skill status so extension skill changes are re-enumerated. */
+  invalidateWorkspaceSkillsStatus(): void;
+
   /** Broadcast extension refresh to all active sessions (fire-and-forget). */
   refreshExtensionsForAllSessions(): Promise<{
     refreshed: number;
@@ -214,6 +229,18 @@ export interface ReloadResponse {
   sessionsSkipped?: string[];
   childReloaded: boolean;
   childError?: string;
+}
+
+export interface WorkspaceAcpPreheatResult {
+  ready: boolean;
+  channelLive: boolean;
+  durationMs: number;
+  reason?: 'timeout' | 'error';
+  error?: string;
+}
+
+export interface WorkspaceAcpStatusResult {
+  channelLive: boolean;
 }
 
 export type WorkspaceTrustDesiredState = 'trusted' | 'untrusted';
@@ -325,6 +352,15 @@ export interface DaemonWorkspaceServiceDeps {
   workspaceProvidersStatusProvider?: WorkspaceProvidersStatusProvider;
 
   /**
+   * Daemon-local skill enumeration. Used as a fallback for
+   * `/workspace/skills` when the ACP child cannot answer (e.g. before the
+   * first prompt on a cold daemon whose preheat has not yet — or cannot —
+   * bring the child up), so skill-backed slash commands autocomplete without
+   * waiting on the child. The live child stays authoritative when present.
+   */
+  workspaceSkillsStatusProvider?: WorkspaceSkillsStatusProvider;
+
+  /**
    * Returns whether the ACP channel is currently live. Used by
    * `getWorkspaceEnvStatus` to populate the `acpChannelLive` field
    * without requiring an ACP round-trip.
@@ -352,6 +388,9 @@ export interface DaemonWorkspaceServiceDeps {
 
   /** Reload daemon-side process.env from .env / settings.env. */
   reloadDaemonEnv?: (workspace: string) => Promise<EnvReloadResult>;
+
+  /** Eagerly start the ACP child/channel without creating a session. */
+  preheatAcpChild?: () => Promise<void>;
 
   /**
    * Query workspace status from the ACP child. The bridge owns the

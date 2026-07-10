@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.19.3",
+  "version": "0.19.8",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -13,13 +13,23 @@
   },
   "files": [
     "dist/index.js",
-    "dist/types"
+    "dist/types",
+    "docs/examples/qwencode-viz/SKILL.md"
   ],
   "scripts": {
     "dev": "vite",
     "build": "vite build && vite build --config vite.lib.config.ts && tsc -p tsconfig.lib.json",
-    "test": "vitest run",
-    "test:ci": "vitest run"
+    "lint": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx",
+    "lint:fix": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx --fix",
+    "format:check": "cd ../.. && prettier --experimental-cli --check packages/web-shell",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --config vitest.config.ts",
+    "test:ci": "vitest run --config vitest.config.ts --coverage",
+    "test:coverage": "vitest run --config vitest.config.ts --coverage",
+    "test:e2e:smoke": "playwright test --config playwright.config.ts --grep @smoke",
+    "test:e2e": "playwright test --config playwright.config.ts",
+    "test:e2e:report": "playwright show-report client/e2e/playwright-report",
+    "verify": "npm run lint && npm run format:check && npm run typecheck && npm run test:ci"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.18.0",
@@ -29,6 +39,7 @@
     "@codemirror/view": "^6.35.0",
     "@tanstack/react-virtual": "^3.13.26",
     "codemirror": "^6.0.0",
+    "fzf": "^0.5.2",
     "katex": "^0.16.47",
     "mermaid": "^11.15.0",
     "react-markdown": "^9.0.0",
@@ -44,6 +55,7 @@
     "react-dom": "^18.0.0 || ^19.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.57.0",
     "@qwen-code/sdk": "file:../sdk-typescript",
     "@qwen-code/webui": "file:../webui",
     "@types/node": "^22.0.0",

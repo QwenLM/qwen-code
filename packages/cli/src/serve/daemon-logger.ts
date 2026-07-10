@@ -150,13 +150,20 @@ function isOptedOut(): boolean {
   return ['0', 'false', 'off', 'no'].includes(raw.trim().toLowerCase());
 }
 
-function computeDaemonId(pid: number, boundWorkspace: string): string {
-  const hash = crypto
+function computeWorkspaceHash(boundWorkspace: string): string {
+  return crypto
     .createHash('sha256')
     .update(boundWorkspace)
     .digest('hex')
     .slice(0, 8);
-  return `serve-${pid}-${hash}`;
+}
+
+function computeDaemonId(pid: number): string {
+  return `daemon:${pid}`;
+}
+
+function computeDaemonLogFileName(pid: number): string {
+  return `serve-${pid}.log`;
 }
 
 export function initDaemonLogger(opts: InitDaemonLoggerOptions): DaemonLogger {
@@ -167,16 +174,18 @@ export function initDaemonLogger(opts: InitDaemonLoggerOptions): DaemonLogger {
   const stderr = opts.stderr ?? writeStderrLine;
   const baseDir = opts.baseDir ?? resolveDaemonLogBaseDir();
 
-  const daemonId = computeDaemonId(pid, opts.boundWorkspace);
+  const daemonId = computeDaemonId(pid);
+  const workspaceHash = computeWorkspaceHash(opts.boundWorkspace);
   const daemonDir = nodePath.join(baseDir, 'daemon');
-  const logPath = nodePath.join(daemonDir, `${daemonId}.log`);
+  const logPath = nodePath.join(daemonDir, computeDaemonLogFileName(pid));
 
   try {
     nodeFs.mkdirSync(daemonDir, { recursive: true });
     const firstLine = buildDaemonLogLine({
       level: 'INFO',
-      message: `daemon started pid=${pid} workspace=${opts.boundWorkspace}`,
+      message: `daemon started pid=${pid}`,
       now: now(),
+      ctx: { workspace: opts.boundWorkspace, workspaceHash },
     });
     nodeFs.appendFileSync(logPath, firstLine);
   } catch (err) {

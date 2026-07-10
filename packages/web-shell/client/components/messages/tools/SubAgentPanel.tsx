@@ -104,14 +104,13 @@ const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
     tool.subTools || tool.subContent ? (
       <SubAgentPanel tool={tool} />
     ) : (
-      <ToolLine tool={tool} />
+      <ToolLine tool={tool} forceExpandable hideCollapsedOutput />
     );
   return <SubToolTime timestamp={tool.startTime}>{body}</SubToolTime>;
 });
 
 function TaskToolCallLine({ tc }: { tc: TaskToolCall }) {
   const { t } = useI18n();
-  const desc = tc.description || '';
   return (
     <div className={chromeStyles.line}>
       <div className={chromeStyles.lineMain}>
@@ -119,9 +118,6 @@ function TaskToolCallLine({ tc }: { tc: TaskToolCall }) {
         <span className={chromeStyles.lineName}>
           {localizeToolDisplayName(tc.name, t)}
         </span>
-        {desc && (
-          <span className={chromeStyles.lineArg}>{truncateText(desc, 70)}</span>
-        )}
       </div>
     </div>
   );
@@ -274,6 +270,7 @@ export function SubAgentPanel({
   hideHeader,
   inline,
 }: SubAgentPanelProps) {
+  const { t } = useI18n();
   const isComplete = tool.status === 'completed' || tool.status === 'failed';
   const displayStatus = getAgentDisplayStatus(tool);
   const [expanded, setExpanded] = useState(defaultExpanded ?? false);
@@ -291,7 +288,7 @@ export function SubAgentPanel({
   const tokenCount =
     taskExec?.tokenCount && taskExec.tokenCount > 0
       ? taskExec.tokenCount
-      : taskExec?.executionSummary?.totalTokens;
+      : taskExec?.executionSummary?.outputTokens;
   const tokens = tokenCount ? formatTokenCount(tokenCount) : '';
   const resultText = isComplete ? getAgentResultText(tool) : '';
 
@@ -317,7 +314,9 @@ export function SubAgentPanel({
             <span className={styles.desc}>{truncateText(description, 50)}</span>
           )}
           {isComplete && subToolCount > 0 && (
-            <span className={styles.meta}>· {subToolCount} tools</span>
+            <span className={styles.meta}>
+              · {t('subagent.toolsCount', { count: subToolCount })}
+            </span>
           )}
           {elapsed && <span className={styles.meta}>· {elapsed}</span>}
           {tokens && <span className={styles.meta}>· {tokens}</span>}
@@ -335,13 +334,13 @@ export function SubAgentPanel({
                 className={`${styles.tab} ${activeTab === 'result' ? styles.tabActive : ''}`}
                 onClick={() => setActiveTab('result')}
               >
-                Result
+                {t('subagent.result')}
               </button>
               <button
                 className={`${styles.tab} ${activeTab === 'tools' ? styles.tabActive : ''}`}
                 onClick={() => setActiveTab('tools')}
               >
-                Tools ({subToolCount})
+                {t('subagent.tools', { count: subToolCount })}
               </button>
             </div>
           )}

@@ -9,7 +9,6 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import * as childProcess from 'node:child_process';
-import * as Diff from 'diff';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
@@ -79,7 +78,7 @@ import {
   detectLineEnding,
   type ReadTextFileResponse,
 } from '../services/fileSystemService.js';
-import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+import { createPatchSmart, getDiffStat } from './diffOptions.js';
 
 const debugLogger = createDebugLogger('SHELL');
 
@@ -1614,13 +1613,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
       edit.newContent,
     );
     return {
-      fileDiff: Diff.createPatch(
+      fileDiff: createPatchSmart(
         edit.fileName,
         edit.originalContent,
         edit.newContent,
         'Current',
         'Proposed',
-        DEFAULT_DIFF_OPTIONS,
       ),
       fileName: edit.fileName,
       originalContent: edit.originalContent,
@@ -2513,10 +2511,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // `promoteAbortController.signal.aborted` exclusion, the
       // foreground path would falsely report "Command timed out" for
       // a process that finished naturally.
+      // When the scheduler's execution timeout fires, execSignal is aborted
+      // with a TimeoutError — distinguish this from a user cancellation.
+      const schedulerTimedOut =
+        signal.aborted && getAbortReasonName(signal) === 'TimeoutError';
       const wasTimeout =
         effectiveTimeout &&
         combinedSignal.aborted &&
-        !signal.aborted &&
+        (!signal.aborted || schedulerTimedOut) &&
         !promoteAbortController.signal.aborted;
       const wasPromoteRefused =
         promoteAbortController.signal.aborted && !signal.aborted;
@@ -2670,10 +2672,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
           // cancellation. See the matching block above for why we also
           // exclude `promoteAbortController.signal.aborted` from the
           // timeout discriminator.
+          const schedulerTimedOut =
+            signal.aborted && getAbortReasonName(signal) === 'TimeoutError';
           const wasTimeout =
             effectiveTimeout &&
             combinedSignal.aborted &&
-            !signal.aborted &&
+            (!signal.aborted || schedulerTimedOut) &&
             !promoteAbortController.signal.aborted;
           const wasPromoteRefused =
             promoteAbortController.signal.aborted && !signal.aborted;
@@ -4471,9 +4475,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   /**
    * Detect `gh pr create` commands and append AI attribution text to the
-   * PR body. Format: "🤖 Generated with Qwen Code (N-shotted by Qwen-Coder)"
+   * PR body. Format: "Generated with Qwen Code (N-shotted by Qwen-Coder)"
    * when at least one user prompt has been recorded since the last commit;
-   * otherwise just "🤖 Generated with Qwen Code".
+   * otherwise just "Generated with Qwen Code".
    *
    * Skipped on Windows: the appended text relies on bash quote-escape
    * conventions (`\$`, `'\''`) that cmd.exe and PowerShell don't honor,
@@ -4508,8 +4512,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     const attribution =
       shots > 0
-        ? `\n\n🤖 Generated with Qwen Code (${shots}-shotted by ${generator})`
-        : `\n\n🤖 Generated with Qwen Code`;
+        ? `\n\nGenerated with Qwen Code (${shots}-shotted by ${generator})`
+        : `\n\nGenerated with Qwen Code`;
 
     // Match both the long form `--body` and the short alias `-b`
     // (documented in `gh pr create --help`), with either space or
@@ -4736,6 +4740,8 @@ function getShellToolDescription(): string {
   const processGroupNote = isWindows
     ? ''
     : '\n  - Command is executed as a subprocess that leads its own process group. Command process group can be terminated as `kill -- -PGID` or signaled as `kill -s SIGNAL -- -PGID`.';
+  const processStopNote =
+    '\n  - To stop a background command started by this tool, use `task_stop` when a task id is available. Do not use broad process-name kills such as `kill $(pgrep node)`, `pkill node`, or `killall node`; use a specific PID or process group id where supported.';
 
   return `Executes a given shell command (as \`${executionWrapper}\`) in a subprocess with optional timeout, ensuring proper handling and security measures.
 
@@ -4771,7 +4777,7 @@ ${getShellCommandSequencingGuidance(shellConfiguration)}
   - Database servers: \`mongod\`, \`mysql\`, \`redis-server\`
   - Web servers: \`python -m http.server\`, \`php -S localhost:8000\`
   - Any command expected to run indefinitely until manually stopped
-${processGroupNote}
+${processGroupNote}${processStopNote}
 - Use foreground execution (is_background: false) for:
   - One-time commands: \`ls\`, \`cat\`, \`grep\`
   - Build commands: \`npm run build\`, \`make\`

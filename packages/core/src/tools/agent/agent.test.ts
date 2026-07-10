@@ -18,7 +18,11 @@ import { type Config, ApprovalMode } from '../../config/config.js';
 import { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
-import { FORK_AGENT, FORK_DEFAULT_MAX_TURNS } from './fork-subagent.js';
+import {
+  FORK_AGENT,
+  FORK_DEFAULT_MAX_TURNS,
+  runInForkContext,
+} from './fork-subagent.js';
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import {
   AgentHeadless,
@@ -35,6 +39,7 @@ import { partToString } from '../../utils/partUtils.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
 import { PermissionMode } from '../../hooks/types.js';
 import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../../agents/team/identity.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -127,6 +132,14 @@ describe('AgentTool', () => {
     // enough for these tests — they don't assert on registry behavior.
     const stubRegistry = {
       assertCanStartBackgroundAgent: vi.fn(),
+      canStartBackgroundAgent: vi.fn().mockReturnValue(true),
+      tryReserveBackgroundSlot: vi
+        .fn()
+        .mockReturnValue({ id: Symbol('background-slot') }),
+      waitForBackgroundSlot: vi
+        .fn()
+        .mockResolvedValue({ id: Symbol('background-slot') }),
+      releaseBackgroundSlot: vi.fn(),
       register: vi.fn(),
       unregisterForeground: vi.fn(),
       complete: vi.fn(),
@@ -177,9 +190,11 @@ describe('AgentTool', () => {
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getModel: vi.fn().mockReturnValue('parent-model'),
       getBareMode: vi.fn().mockReturnValue(false),
+      isSafeMode: vi.fn().mockReturnValue(false),
       getSandbox: vi.fn().mockReturnValue(undefined),
       getScreenReader: vi.fn().mockReturnValue(false),
       getMaxSessionTurns: vi.fn().mockReturnValue(-1),
+      getMaxSubagentDepth: vi.fn().mockReturnValue(5),
       getMaxToolCalls: vi.fn().mockReturnValue(-1),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       isInteractive: vi.fn().mockReturnValue(false),
@@ -404,6 +419,37 @@ describe('AgentTool', () => {
       expect(parameters.properties.name?.description).toContain('active team');
     });
 
+    it('exposes plan_mode_required only when teams are enabled', async () => {
+      vi.mocked(config.isAgentTeamEnabled).mockReturnValue(true);
+
+      const teamAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const schema = teamAgentTool.schema;
+      const parameters = schema.parametersJsonSchema as {
+        properties: {
+          plan_mode_required?: {
+            description?: string;
+          };
+        };
+      };
+      expect(parameters.properties.plan_mode_required?.description).toContain(
+        'named teammate',
+      );
+
+      vi.mocked(config.isAgentTeamEnabled).mockReturnValue(false);
+      const ordinaryAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const ordinarySchema = ordinaryAgentTool.schema;
+      const ordinaryParameters = ordinarySchema.parametersJsonSchema as {
+        properties: {
+          plan_mode_required?: unknown;
+        };
+      };
+      expect(ordinaryParameters.properties.plan_mode_required).toBeUndefined();
+    });
+
     it('should generate schema without enum when no subagents available', async () => {
       vi.mocked(mockSubagentManager.listSubagents).mockResolvedValue([]);
 
@@ -520,6 +566,109 @@ describe('AgentTool', () => {
         }),
       ).toMatch(/fork/i);
     });
+
+    it('accepts working_dir when subagent_type is set', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          working_dir: '.qwen/tmp/review-pr-1',
+        }),
+      ).toBeNull();
+    });
+
+    it('rejects an empty working_dir', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          working_dir: '',
+        }),
+      ).toMatch(/working_dir/i);
+    });
+
+    it('rejects a whitespace-only working_dir', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          working_dir: '   ',
+        }),
+      ).toMatch(/working_dir/i);
+    });
+
+    it('rejects working_dir combined with isolation', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          working_dir: '.qwen/tmp/review-pr-1',
+          isolation: 'worktree',
+        }),
+      ).toMatch(/mutually exclusive/i);
+    });
+
+    it('rejects working_dir without an explicit subagent_type', () => {
+      const { subagent_type: _ignored, ...noTypeParams } = validParams;
+      void _ignored;
+      expect(
+        agentTool.validateToolParams({
+          ...noTypeParams,
+          working_dir: '.qwen/tmp/review-pr-1',
+        }),
+      ).toMatch(/subagent_type/i);
+    });
+
+    it('rejects working_dir combined with subagent_type "fork"', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          working_dir: '.qwen/tmp/review-pr-1',
+        }),
+      ).toMatch(/fork/i);
+    });
+
+    it('rejects working_dir combined with run_in_background', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          working_dir: '.qwen/tmp/review-pr-1',
+          run_in_background: true,
+        }),
+      ).toMatch(/run_in_background|incompatible/i);
+    });
+
+    it('rejects plan_mode_required without a named teammate', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          plan_mode_required: true,
+        }),
+      ).toMatch(/named teammate/i);
+    });
+
+    it('rejects plan_mode_required when no team is active', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue(null);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'planner',
+          plan_mode_required: true,
+        }),
+      ).toMatch(/active team/i);
+    });
+
+    it('accepts plan_mode_required for a named teammate in an active team', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'planner',
+          plan_mode_required: true,
+        }),
+      ).toBeNull();
+    });
   });
 
   // Round-7 regression guard: agent isolation must refuse when the
@@ -619,6 +768,271 @@ describe('AgentTool', () => {
       expect(result.llmContent).not.toContain('no active team');
       expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
         'file-search',
+      );
+    });
+
+    it('passes plan_mode_required through to TeamManager for named teammates', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = agentTool.build({
+        description: 'Plan implementation',
+        prompt: 'Investigate and propose a plan',
+        subagent_type: 'file-search',
+        name: 'planner',
+        plan_mode_required: true,
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      expect(spawnTeammate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'planner',
+          planModeRequired: true,
+        }),
+      );
+    });
+
+    it('rejects plan_mode_required direct execution from a subagent context', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = agentTool.build({
+        description: 'Plan implementation',
+        prompt: 'Investigate and propose a plan',
+        name: 'planner',
+        plan_mode_required: true,
+      });
+
+      const result = await runWithAgentContext('child-agent', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('from the team leader');
+      expect(spawnTeammate).not.toHaveBeenCalled();
+    });
+
+    it('rejects working_dir when a named teammate would spawn (worktree pin would be silently ignored)', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = agentTool.build({
+        description: 'Review',
+        prompt: 'Review the diff',
+        subagent_type: 'file-search',
+        name: 'reviewer',
+        working_dir: '.qwen/tmp/review-pr-1',
+      });
+
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(partToString(result.llmContent)).toMatch(
+        /not supported for a named teammate/i,
+      );
+      expect(spawnTeammate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('nesting depth guard', () => {
+    it('rejects a spawn that would exceed maxSubagentDepth', async () => {
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(1);
+      const invocation = agentTool.build({
+        description: 'Spawn deeper',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+      });
+      // One agent frame → invoker is a level-1 sub-agent; its child would be
+      // level 2, which exceeds max=1 → rejected before any subagent load.
+      const result = await runWithAgentContext('sub-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('nesting depth limit reached');
+      // The user-facing display mirrors a failed task execution, not a bare
+      // string, so the UI renders it like any other failed sub-agent run.
+      expect(result.returnDisplay).toMatchObject({
+        type: 'task_execution',
+        status: 'failed',
+        subagentName: 'file-search',
+        terminateReason: 'Nesting depth limit reached (max 1)',
+      });
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      // A blocked spawn must take the scheduler's failure path: `error` keeps
+      // tool-usage stats from counting it as a spawned sub-agent (and fires
+      // failure-path hooks), and the display row reports it as failed. The
+      // scheduler sends only `error.message` to the model (llmContent is
+      // discarded on the failure path), so the message must carry the full
+      // actionable guidance, not just the terse reason label.
+      expect(result.error?.message).toContain('nesting depth limit reached');
+      expect(result.error?.message).toContain('Complete this task directly');
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('failed');
+    });
+
+    it('allows a spawn from the top-level session at maxSubagentDepth=1', async () => {
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(1);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+      const invocation = agentTool.build({
+        description: 'Spawn helper',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+      });
+      // No agent frame → invoker level 0 → child level 1 ≤ 1 → allowed; the
+      // guard lets execution proceed to subagent resolution.
+      await invocation.execute(new AbortController().signal);
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'file-search',
+      );
+    });
+
+    it('does not route a nested sub-agent to a teammate even with a name + active team', async () => {
+      // Regression: nested sub-agents now carry the AgentTool. A sub-agent
+      // passing `name` must NOT reach executeTeammate (which would bypass the
+      // depth guard and the v1 "teammates do not nest" rule). With max depth 1
+      // and one agent frame, the spawn falls through team routing to the depth
+      // guard and is rejected — proving executeTeammate was not taken.
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(1);
+      vi.mocked(config.getTeamManager).mockReturnValue({} as never);
+      const invocation = agentTool.build({
+        description: 'Spawn teammate from within a sub-agent',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+        name: 'helper',
+      });
+      const result = await runWithAgentContext('sub-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('nesting depth limit reached');
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+    });
+
+    it('blocks a teammate from spawning any sub-agent', async () => {
+      // Teammates do not nest in v1. The schema layer strips `agent` from
+      // teammate tool lists; this pins the symmetric runtime backstop for a
+      // hallucinated call that slips past schema-hiding. Depth would permit
+      // the spawn here (max 5), so a pass proves the teammate guard fired.
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      const invocation = agentTool.build({
+        description: 'Spawn from a teammate',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+      });
+      const result = await runWithTeammateIdentity(
+        {
+          agentId: 'scribe@demo',
+          agentName: 'scribe',
+          teamName: 'demo',
+          isTeamLead: false,
+        },
+        () =>
+          runWithAgentContext('teammate-1', () =>
+            invocation.execute(new AbortController().signal),
+          ),
+      );
+
+      expect(result.llmContent).toContain('Teammates cannot spawn sub-agents');
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+    });
+
+    it('blocks a fork child from spawning any sub-agent', async () => {
+      // Forks must never spawn sub-agents. The runtime guard blocks ALL agent
+      // calls from within a fork (not just fork-in-fork), catching the
+      // wildcard/fallback tool path that could otherwise re-add `agent`.
+      const invocation = agentTool.build({
+        description: 'Spawn from within a fork',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+      });
+      const result = await runInForkContext(() =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain(
+        'Cannot spawn sub-agents from within a fork',
+      );
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      // Same failure-path contract as the depth guard above: the model-facing
+      // message keeps the actionable instruction.
+      expect(result.error?.message).toContain(
+        'Cannot spawn sub-agents from within a fork',
+      );
+      expect(result.error?.message).toContain('execute tasks directly');
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('failed');
+    });
+
+    it('allows nesting while depth remains under the cap', async () => {
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+      const invocation = agentTool.build({
+        description: 'Spawn deeper',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+      });
+      // Two frames → invoker is level 2; child would be level 3 ≤ 5 → allowed.
+      await runWithAgentContext('sub-1', () =>
+        runWithAgentContext('sub-2', () =>
+          invocation.execute(new AbortController().signal),
+        ),
+      );
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'file-search',
+      );
+    });
+
+    it('ignores a teammate name from a nested sub-agent and spawns a regular sub-agent', async () => {
+      // With a team active and depth permitting the spawn, a nested
+      // sub-agent's `name` must not reach executeTeammate (teammates do not
+      // nest in v1) — the spawn proceeds as a regular one-shot agent of the
+      // requested type. Pins the silent-success path at the default cap.
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+      const invocation = agentTool.build({
+        description: 'Spawn with a name from a nested sub-agent',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+        name: 'helper',
+      });
+      await runWithAgentContext('sub-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(spawnTeammate).not.toHaveBeenCalled();
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'file-search',
+      );
+    });
+
+    it('falls back to a regular general-purpose sub-agent when a nested sub-agent requests a fork', async () => {
+      // Fork is a top-level-only capability in v1. A nested sub-agent
+      // requesting `subagent_type: "fork"` must get the awaitable
+      // general-purpose sub-agent, not an error and not a nested fork.
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+      const invocation = agentTool.build({
+        description: 'Fork from a nested sub-agent',
+        prompt: 'Do work',
+        subagent_type: 'fork',
+      });
+      await runWithAgentContext('sub-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'general-purpose',
       );
     });
   });
@@ -777,6 +1191,152 @@ describe('AgentTool', () => {
       expect(display.subagentName).toBe('file-search');
     });
 
+    it('rejects working_dir when the resolved subagent config runs in the background', async () => {
+      // The explicit run_in_background param is caught in validateToolParams;
+      // this covers the other route into the background — a subagent config
+      // with background: true — which is only known after loadSubagent.
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...mockSubagents[0],
+        background: true,
+      });
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Review',
+        prompt: 'Review the diff',
+        subagent_type: 'file-search',
+        working_dir: '.qwen/tmp/review-pr-1',
+      });
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toMatch(/background agent/i);
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+    });
+
+    it('allows working_dir for a background:true subagent that downgrades to foreground when nested', async () => {
+      // Nested → isTopLevelSession() is false → the config's background: true
+      // is downgraded to an awaited foreground run, so shouldRunInBackground
+      // is false and the background guard must NOT fire. Execution proceeds to
+      // worktree validation (which rejects this non-worktree path), proving
+      // the guard keys off the effective decision and does not over-reject the
+      // foreground path. A regression back to `backgroundRequested` would flip
+      // this to the background-agent error.
+      vi.useRealTimers();
+      // A real, existing directory that is not a git repo — so the
+      // GitWorktreeService probe constructs cleanly and isGitRepository()
+      // returns false (the default '/test/project' mock does not exist on CI,
+      // where simple-git throws at construction).
+      const nonRepo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-nested-')),
+      );
+      try {
+        vi.mocked(config.getProjectRoot).mockReturnValue(nonRepo);
+        vi.mocked(config.getTargetDir).mockReturnValue(nonRepo);
+        vi.mocked(config.getCwd).mockReturnValue(nonRepo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(nonRepo);
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+          ...mockSubagents[0],
+          background: true,
+        });
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: 'some-worktree',
+        });
+        const result = await runWithAgentContext('sub-1', () =>
+          invocation.execute(new AbortController().signal),
+        );
+
+        const text = partToString(result.llmContent);
+        expect(text).not.toMatch(/background agent/i);
+        expect(text).toMatch(/not a git repository|not a registered/i);
+      } finally {
+        fs.rmSync(nonRepo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    });
+
+    it('strips internal analysis and summary tags from subagent result', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        [
+          '<analysis>',
+          'Scratchpad details should stay out of the parent context.',
+          '</analysis>',
+          '',
+          '<summary>',
+          'Task completed successfully',
+          '',
+          '- Found the target file',
+          '</summary>',
+        ].join('\n'),
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toBe(
+        'Task completed successfully\n\n- Found the target file',
+      );
+      expect(llmText).not.toContain('<analysis>');
+      expect(llmText).not.toContain('<summary>');
+    });
+
+    it('preserves diagnostic tags from failed subagent result', async () => {
+      const raw = '<analysis>debug</analysis><summary>partial</summary>';
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(raw);
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.ERROR,
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(raw);
+    });
+
+    it('explains successful subagents with no model-visible output', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        '<analysis>scratch only</analysis>',
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(
+        '(subagent produced no model-visible output)',
+      );
+    });
+
     it('passes custom ignore files into worktree isolation file service', async () => {
       vi.useRealTimers();
       const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wt-'));
@@ -831,6 +1391,496 @@ describe('AgentTool', () => {
             .getFileService()
             .getQwenIgnoreFileDisplayForPath('secret.txt'),
         ).toBe('.cursorignore');
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('pins the sub-agent to a caller-owned worktree via working_dir and leaves it in place', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+
+        // A real, registered worktree the caller owns — mirrors the PR
+        // worktree `/review`'s fetch-pr provisions at `.qwen/tmp/review-pr-<n>`.
+        const wt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+        fs.mkdirSync(path.dirname(wt), { recursive: true });
+        execFileSync(
+          'git',
+          ['worktree', 'add', '-b', 'review-pr-1', wt, 'HEAD'],
+          {
+            cwd: repo,
+          },
+        );
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: wt,
+        });
+        const result = await invocation.execute();
+
+        const createCall = vi.mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0];
+        const agentConfig = createCall[1] as Config;
+        // Every cwd surface is rebound to the caller's worktree...
+        expect(agentConfig.getProjectRoot()).toBe(wt);
+        expect(agentConfig.getTargetDir()).toBe(wt);
+        expect(agentConfig.getCwd()).toBe(wt);
+        expect(agentConfig.getWorkingDir()).toBe(wt);
+        expect(agentConfig.getProjectRoot()).not.toBe(repo);
+        // ...and the caller-owned worktree is NOT torn down by cleanup, nor
+        // reported as preserved (the externallyManaged guard skips teardown).
+        expect(fs.existsSync(wt)).toBe(true);
+        expect(partToString(result.llmContent)).not.toContain(
+          '[worktree preserved',
+        );
+        // A pinned worktree gets the narrow notice, not the isolation notice
+        // (which tells the agent to translate the parent's paths).
+        expect(mockContextState.set).toHaveBeenCalledWith(
+          'task_prompt',
+          expect.stringContaining('Your working directory is'),
+        );
+        expect(mockContextState.set).not.toHaveBeenCalledWith(
+          'task_prompt',
+          expect.stringContaining('translate it to the corresponding path'),
+        );
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('rejects working_dir that is not a registered worktree of this repo', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-bad-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+
+        // A plain sub-directory that was never `git worktree add`-ed.
+        const plain = path.join(repo, 'not-a-worktree');
+        fs.mkdirSync(plain);
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: plain,
+        });
+        const result = await invocation.execute();
+
+        expect(partToString(result.llmContent)).toMatch(
+          /not a registered linked worktree/i,
+        );
+        expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('resolves a repo-relative working_dir against the parent cwd (the /review production form)', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-rel-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+
+        // fetch-pr creates the worktree at <cwd>/.qwen/tmp/review-pr-<n> and
+        // the /review skill passes that repo-relative path verbatim.
+        const wt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+        fs.mkdirSync(path.dirname(wt), { recursive: true });
+        execFileSync(
+          'git',
+          ['worktree', 'add', '-b', 'review-pr-1', wt, 'HEAD'],
+          { cwd: repo },
+        );
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          // Relative form, exactly as the skill passes it.
+          working_dir: path.join('.qwen', 'tmp', 'review-pr-1'),
+        });
+        await invocation.execute();
+
+        const createCall = vi.mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0];
+        const agentConfig = createCall[1] as Config;
+        // The relative path resolves to the correct absolute worktree.
+        expect(agentConfig.getProjectRoot()).toBe(wt);
+        expect(agentConfig.getTargetDir()).toBe(wt);
+        expect(agentConfig.getCwd()).toBe(wt);
+        expect(agentConfig.getWorkingDir()).toBe(wt);
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('rejects working_dir pointing at the repository main working tree', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-main-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          // The main checkout is a registered worktree of itself, but pinning
+          // here would defeat the isolation — must be rejected.
+          working_dir: repo,
+        });
+        const result = await invocation.execute();
+
+        expect(partToString(result.llmContent)).toMatch(/main working tree/i);
+        expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('rejects working_dir when the parent directory is not a git repository', async () => {
+      vi.useRealTimers();
+      const nonRepo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-nogit-')),
+      );
+      try {
+        vi.mocked(config.getProjectRoot).mockReturnValue(nonRepo);
+        vi.mocked(config.getTargetDir).mockReturnValue(nonRepo);
+        vi.mocked(config.getCwd).mockReturnValue(nonRepo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(nonRepo);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: 'some-worktree',
+        });
+        const result = await invocation.execute();
+
+        // The isGitRepository() preflight names the real cause instead of
+        // the confusing "not a registered git worktree" fallback.
+        expect(partToString(result.llmContent)).toMatch(
+          /not a git repository/i,
+        );
+        expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      } finally {
+        fs.rmSync(nonRepo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('accepts a registered worktree in detached HEAD state (no branch)', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-detached-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+        // A detached worktree is registered but has no branch, so
+        // getRegisteredWorktreeBranch returns null for it. That must not gate
+        // the pin — `git worktree add --detach` is a legitimate setup.
+        const wt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+        fs.mkdirSync(path.dirname(wt), { recursive: true });
+        execFileSync('git', ['worktree', 'add', '--detach', wt, 'HEAD'], {
+          cwd: repo,
+        });
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: wt,
+        });
+        await invocation.execute();
+
+        const createCall = vi.mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0];
+        const agentConfig = createCall[1] as Config;
+        expect(agentConfig.getProjectRoot()).toBe(wt);
+        expect(agentConfig.getTargetDir()).toBe(wt);
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('leaves the caller-owned worktree in place when the sub-agent fails', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-failpath-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+        const wt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+        fs.mkdirSync(path.dirname(wt), { recursive: true });
+        execFileSync(
+          'git',
+          ['worktree', 'add', '-b', 'review-pr-1', wt, 'HEAD'],
+          { cwd: repo },
+        );
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+        // The sub-agent throws mid-execution, so the finally / outer-catch
+        // path runs cleanupWorktreeIsolation(). The externallyManaged guard
+        // must still stop it from removing the caller's worktree — this is the
+        // error-recovery path where teardown bugs hide.
+        vi.mocked(mockAgent.execute).mockRejectedValue(
+          new Error('subagent boom'),
+        );
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: wt,
+        });
+        const result = await invocation.execute();
+
+        expect(fs.existsSync(wt)).toBe(true);
+        expect(partToString(result.llmContent)).not.toContain(
+          '[worktree preserved',
+        );
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('re-anchors validation at the repo root when launched from a monorepo subdirectory', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-mono-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        // A nested package directory the CLI could be launched from.
+        const subdir = path.join(repo, 'packages', 'core');
+        fs.mkdirSync(subdir, { recursive: true });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+        const wt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+        fs.mkdirSync(path.dirname(wt), { recursive: true });
+        execFileSync(
+          'git',
+          ['worktree', 'add', '-b', 'review-pr-1', wt, 'HEAD'],
+          { cwd: repo },
+        );
+
+        // getTargetDir() is the subdirectory, not the repo root, so the
+        // helper's `repoRoot !== parentCwd` re-anchoring branch executes.
+        vi.mocked(config.getProjectRoot).mockReturnValue(subdir);
+        vi.mocked(config.getTargetDir).mockReturnValue(subdir);
+        vi.mocked(config.getCwd).mockReturnValue(subdir);
+        vi.mocked(config.getWorkingDir).mockReturnValue(subdir);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          // Absolute worktree path registered at the repo root.
+          working_dir: wt,
+        });
+        await invocation.execute();
+
+        const createCall = vi.mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0];
+        const agentConfig = createCall[1] as Config;
+        expect(agentConfig.getProjectRoot()).toBe(wt);
+        expect(agentConfig.getTargetDir()).toBe(wt);
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('resolves a repo-relative working_dir against the subdirectory cwd, not the repo root (monorepo)', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-monorel-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+
+        // fetch-pr creates the worktree cwd-relative (git resolves a relative
+        // worktree path against the process cwd), so when the CLI runs from a
+        // package subdirectory the worktree lands under the SUBDIR's .qwen,
+        // NOT the repo root's. Mimic that exactly.
+        const subdir = path.join(repo, 'packages', 'core');
+        fs.mkdirSync(subdir, { recursive: true });
+        const wt = path.join(subdir, '.qwen', 'tmp', 'review-pr-1');
+        fs.mkdirSync(path.dirname(wt), { recursive: true });
+        execFileSync(
+          'git',
+          [
+            'worktree',
+            'add',
+            '-b',
+            'review-pr-1',
+            path.join('.qwen', 'tmp', 'review-pr-1'),
+            'HEAD',
+          ],
+          { cwd: subdir },
+        );
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(subdir);
+        vi.mocked(config.getTargetDir).mockReturnValue(subdir);
+        vi.mocked(config.getCwd).mockReturnValue(subdir);
+        vi.mocked(config.getWorkingDir).mockReturnValue(subdir);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          // Relative form, resolved against the subdir cwd — must land on the
+          // subdir worktree, not <repo>/.qwen/tmp/review-pr-1.
+          working_dir: path.join('.qwen', 'tmp', 'review-pr-1'),
+        });
+        await invocation.execute();
+
+        const createCall = vi.mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0];
+        const agentConfig = createCall[1] as Config;
+        expect(agentConfig.getProjectRoot()).toBe(wt);
+        expect(agentConfig.getTargetDir()).toBe(wt);
       } finally {
         fs.rmSync(repo, { recursive: true, force: true });
         vi.useFakeTimers();
@@ -1411,6 +2461,39 @@ describe('AgentTool', () => {
       expect(AgentHeadless.create).not.toHaveBeenCalled();
     });
 
+    it('falls back to general-purpose when a nested sub-agent requests a fork', async () => {
+      // v1: fork is a top-level-only capability. A sub-agent — which may
+      // carry the AgentTool via nesting — that requests a fork downgrades to
+      // the awaitable general-purpose subagent instead of opening a nested
+      // fork, even in interactive mode where fork is otherwise enabled.
+      const mockLoadedSubagent: SubagentConfig = {
+        name: 'general-purpose',
+        description: 'General-purpose agent',
+        systemPrompt: 'You are a general-purpose agent.',
+        level: 'builtin',
+        filePath: '<builtin:general-purpose>',
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockLoadedSubagent,
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'fork task',
+        prompt: 'do the thing',
+        subagent_type: 'fork',
+      });
+      // One agent frame → the invoker is a level-1 sub-agent, not the
+      // top-level session, so the fork request must take the fallback path.
+      await runWithAgentContext('parent-sub', () => invocation.execute());
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'general-purpose',
+      );
+      expect(AgentHeadless.create).not.toHaveBeenCalled();
+    });
+
     it('should call AgentHeadless.create directly and execute without options', async () => {
       const params: AgentParams = {
         description: 'fork task',
@@ -1711,7 +2794,7 @@ describe('AgentTool', () => {
       );
     });
 
-    it('should not inject hook_context when additionalContext is undefined', async () => {
+    it('should inject hook_context as empty string when additionalContext is undefined', async () => {
       const mockStartOutput = {
         getAdditionalContext: vi.fn().mockReturnValue(undefined),
       };
@@ -1730,9 +2813,12 @@ describe('AgentTool', () => {
       ).createInvocation(params);
       await invocation.execute();
 
+      // hook_context is always set (to empty string) so ${hook_context} in
+      // systemPrompt does not throw even when hook returns no additional context.
+      expect(mockContextState.set).toHaveBeenCalledWith('hook_context', '');
       expect(mockContextState.set).not.toHaveBeenCalledWith(
         'hook_context',
-        expect.anything(),
+        expect.stringMatching(/.+/),
       );
     });
 
@@ -1759,7 +2845,7 @@ describe('AgentTool', () => {
       expect(display.status).toBe('completed');
     });
 
-    it('should skip hooks when hookSystem is not available', async () => {
+    it('should set hook_context to empty string even when hookSystem is not available', async () => {
       (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
         .fn()
         .mockReturnValue(undefined);
@@ -1776,6 +2862,8 @@ describe('AgentTool', () => {
       const result = await invocation.execute();
 
       expect(mockHookSystem.fireSubagentStartEvent).not.toHaveBeenCalled();
+      // hook_context is always set so ${hook_context} in systemPrompt does not throw.
+      expect(mockContextState.set).toHaveBeenCalledWith('hook_context', '');
       const llmText = partToString(result.llmContent);
       expect(llmText).toBe('Task completed successfully');
     });
@@ -2490,6 +3578,11 @@ describe('AgentTool', () => {
     let mockContextState: ContextState;
     let mockRegistry: {
       assertCanStartBackgroundAgent: ReturnType<typeof vi.fn>;
+      canStartBackgroundAgent: ReturnType<typeof vi.fn>;
+      tryReserveBackgroundSlot: ReturnType<typeof vi.fn>;
+      waitForBackgroundSlot: ReturnType<typeof vi.fn>;
+      releaseBackgroundSlot: ReturnType<typeof vi.fn>;
+      getQueuedCount: ReturnType<typeof vi.fn>;
       register: ReturnType<typeof vi.fn>;
       unregisterForeground: ReturnType<typeof vi.fn>;
       complete: ReturnType<typeof vi.fn>;
@@ -2531,6 +3624,15 @@ describe('AgentTool', () => {
 
       mockRegistry = {
         assertCanStartBackgroundAgent: vi.fn(),
+        canStartBackgroundAgent: vi.fn().mockReturnValue(true),
+        tryReserveBackgroundSlot: vi
+          .fn()
+          .mockReturnValue({ id: Symbol('background-slot') }),
+        waitForBackgroundSlot: vi
+          .fn()
+          .mockResolvedValue({ id: Symbol('background-slot') }),
+        releaseBackgroundSlot: vi.fn(),
+        getQueuedCount: vi.fn().mockReturnValue(0),
         register: vi.fn(),
         unregisterForeground: vi.fn(),
         complete: vi.fn(),
@@ -2596,6 +3698,11 @@ describe('AgentTool', () => {
           subagentType: 'monitor',
           status: 'running',
         }),
+        expect.objectContaining({
+          slotReservation: expect.objectContaining({
+            id: expect.any(Symbol),
+          }),
+        }),
       );
       expect(
         (
@@ -2613,6 +3720,52 @@ describe('AgentTool', () => {
       ).toHaveBeenCalled();
       const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('background');
+    });
+
+    it('stores sanitized background results in the registry', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        '<analysis>scratch</analysis><summary>visible</summary>',
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.runAllTimersAsync();
+
+      expect(mockRegistry.complete).toHaveBeenCalledWith(
+        expect.any(String),
+        'visible',
+        expect.any(Object),
+      );
+    });
+
+    it('stores a fallback for background results with no model-visible text', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        '<analysis>scratch only</analysis>',
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.runAllTimersAsync();
+
+      expect(mockRegistry.complete).toHaveBeenCalledWith(
+        expect.any(String),
+        '(subagent produced no model-visible output)',
+        expect.any(Object),
+      );
     });
 
     it('routes owned monitor notifications into a background agent external input queue', async () => {
@@ -2719,6 +3872,35 @@ describe('AgentTool', () => {
       expect(mockRegistry.register).toHaveBeenCalled();
     });
 
+    it('downgrades a background request from a nested sub-agent to an awaited foreground run', async () => {
+      // Background delegation is top-level-only in v1: a nested launcher
+      // cannot honor the background completion contract (send_message /
+      // task_stop are excluded from its toolset, and completion
+      // notifications go to the top-level session). The run must complete
+      // inline instead of orphaning the child's results.
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      const params: AgentParams = {
+        description: 'Start monitor from a nested sub-agent',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+        run_in_background: true,
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await runWithAgentContext('sub-1', () =>
+        invocation.execute(),
+      );
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).not.toContain('Background agent launched');
+      expect(llmText).toContain('Monitor done');
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ isBackgrounded: false }),
+      );
+    });
+
     it('returns registry registration errors to the model without launching the background body', async () => {
       const errorMessage =
         'Cannot start background agent: maximum concurrent background agents ' +
@@ -2795,13 +3977,19 @@ describe('AgentTool', () => {
       expect(mockAgent.execute).not.toHaveBeenCalled();
     });
 
-    it('preflights the background cap before hooks and subagent setup', async () => {
-      const errorMessage =
-        'Cannot start background agent: maximum concurrent background agents ' +
-        '(1) reached. Stop an existing agent first.';
-      mockRegistry.assertCanStartBackgroundAgent.mockImplementation(() => {
-        throw new Error(errorMessage);
-      });
+    it('waits for a background slot before hooks and subagent setup', async () => {
+      let releaseSlot:
+        | ((reservation: { readonly id: symbol }) => void)
+        | undefined;
+      const slotReservation = { id: Symbol('background-slot') };
+      mockRegistry.canStartBackgroundAgent.mockReturnValue(false);
+      mockRegistry.tryReserveBackgroundSlot.mockReturnValue(undefined);
+      mockRegistry.getQueuedCount.mockReturnValue(1);
+      mockRegistry.waitForBackgroundSlot.mockReturnValue(
+        new Promise((resolve) => {
+          releaseSlot = resolve;
+        }),
+      );
       const mockHookSystem = {
         fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
         fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
@@ -2819,12 +4007,34 @@ describe('AgentTool', () => {
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
-      const result = await invocation.execute();
+      const updates: ToolResultDisplay[] = [];
+      const executePromise = invocation.execute(undefined, (output) => {
+        updates.push(output);
+      });
+      await Promise.resolve();
 
-      expect(partToString(result.llmContent)).toBe(errorMessage);
+      expect(mockRegistry.waitForBackgroundSlot).toHaveBeenCalled();
       expect(mockHookSystem.fireSubagentStartEvent).not.toHaveBeenCalled();
       expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
       expect(mockRegistry.register).not.toHaveBeenCalled();
+      expect(
+        updates.some(
+          (update) =>
+            (update as AgentResultDisplay).terminateReason ===
+            'Waiting for a sub-agent slot (1 already queued).',
+        ),
+      ).toBe(true);
+
+      releaseSlot?.(slotReservation);
+      const result = await executePromise;
+
+      expect(partToString(result.llmContent)).toContain(
+        'Background agent launched',
+      );
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'running' }),
+        expect.objectContaining({ slotReservation }),
+      );
     });
 
     it('passes the sidechain transcript path to SubagentStop hooks for fresh background agents', async () => {
@@ -2904,6 +4114,9 @@ describe('AgentTool', () => {
       expect(mockRegistry.unregisterForeground).toHaveBeenCalledWith(
         expect.stringContaining('file-search-'),
       );
+      expect(mockRegistry.tryReserveBackgroundSlot).not.toHaveBeenCalled();
+      expect(mockRegistry.waitForBackgroundSlot).not.toHaveBeenCalled();
+      expect(mockRegistry.releaseBackgroundSlot).not.toHaveBeenCalled();
       expect(
         (
           mockAgent as unknown as {
@@ -2925,6 +4138,31 @@ describe('AgentTool', () => {
           }
         ).setExternalMessageWaitPredicate,
       ).toHaveBeenCalled();
+    });
+
+    it('does not wait for a background slot before foreground subagent setup', async () => {
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+      mockRegistry.tryReserveBackgroundSlot.mockReturnValue(undefined);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      });
+      await invocation.execute();
+
+      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalled();
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ isBackgrounded: false }),
+      );
+      expect(mockRegistry.waitForBackgroundSlot).not.toHaveBeenCalled();
     });
 
     it('routes owned monitor notifications and cleanup for foreground agents', async () => {
@@ -3061,6 +4299,7 @@ describe('AgentTool', () => {
             model: 'parent-model',
             maxSessionTurns: -1,
             maxToolCalls: -1,
+            maxSubagentDepth: 5,
           }),
         }),
       );
@@ -3222,6 +4461,9 @@ describe('AgentTool', () => {
 
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({ toolUseId: 'call-xyz-789' }),
+        expect.objectContaining({
+          slotReservation: expect.anything(),
+        }),
       );
     });
 

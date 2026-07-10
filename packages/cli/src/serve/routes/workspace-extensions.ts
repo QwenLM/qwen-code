@@ -45,6 +45,7 @@ interface RegisterWorkspaceExtensionRoutesDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: SafeBody;
   sendBridgeError: SendBridgeError;
+  maxExtensionOperationHistory?: number;
 }
 
 export function registerWorkspaceExtensionRoutes(
@@ -59,6 +60,7 @@ export function registerWorkspaceExtensionRoutes(
     safeBody,
     sendBridgeError,
   } = deps;
+  const maxExtensionOperationHistory = deps.maxExtensionOperationHistory ?? 100;
   const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
 
   let extensionInstallQueue: Promise<unknown> = Promise.resolve();
@@ -129,10 +131,11 @@ export function registerWorkspaceExtensionRoutes(
     req: Request,
     res: Response,
     route: string,
+    opts: { requireClientId?: boolean } = {},
   ): boolean => {
     const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
     if (clientId === null) return false;
-    if (clientId === undefined) {
+    if (clientId === undefined && opts.requireClientId !== false) {
       res.status(400).json({
         error: 'Missing X-Qwen-Client-Id header',
         code: 'missing_client_id',
@@ -273,7 +276,6 @@ export function registerWorkspaceExtensionRoutes(
     error?: string;
   };
   const extensionOperations = new Map<string, ExtensionOperationStatus>();
-  const MAX_EXTENSION_OPERATION_HISTORY = 100;
   const isTerminalExtensionOperation = (
     operation: ExtensionOperationStatus,
   ): boolean => operation.status !== 'queued' && operation.status !== 'running';
@@ -287,7 +289,7 @@ export function registerWorkspaceExtensionRoutes(
     operation: ExtensionOperationStatus,
   ): void => {
     extensionOperations.set(operation.operationId, operation);
-    while (extensionOperations.size > MAX_EXTENSION_OPERATION_HISTORY) {
+    while (extensionOperations.size > maxExtensionOperationHistory) {
       let evicted = false;
       for (const [id, storedOperation] of extensionOperations) {
         if (!isTerminalExtensionOperation(storedOperation)) continue;
@@ -348,6 +350,7 @@ export function registerWorkspaceExtensionRoutes(
           `extension ${operation}`,
         );
         extensionsStatusCache = undefined;
+        workspace.invalidateWorkspaceSkillsStatus();
         try {
           const result = await bridge.refreshExtensionsForAllSessions(event);
           updateExtensionOperation(operationId, {
@@ -485,6 +488,9 @@ export function registerWorkspaceExtensionRoutes(
             id: ext.id,
             name: ext.name,
             ...(ext.displayName ? { displayName: ext.displayName } : {}),
+            ...(ext.config.description
+              ? { description: ext.config.description }
+              : {}),
             version: ext.version,
             isActive: ext.isActive,
             path: ext.path,
@@ -758,6 +764,7 @@ export function registerWorkspaceExtensionRoutes(
             'extension refresh',
           ),
         );
+        extensionsStatusCache = undefined;
         res.status(200).json(result);
       } catch (err) {
         if (isExtensionQueueFullError(err)) {
@@ -781,6 +788,7 @@ export function registerWorkspaceExtensionRoutes(
             req,
             res,
             'POST /workspace/extensions/:name/enable',
+            { requireClientId: false },
           )
         ) {
           return;
@@ -827,6 +835,7 @@ export function registerWorkspaceExtensionRoutes(
             req,
             res,
             'POST /workspace/extensions/:name/disable',
+            { requireClientId: false },
           )
         ) {
           return;

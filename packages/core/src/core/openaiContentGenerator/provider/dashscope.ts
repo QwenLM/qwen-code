@@ -4,10 +4,10 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
 import {
-  DEFAULT_TIMEOUT,
   DEFAULT_MAX_RETRIES,
   DEFAULT_DASHSCOPE_BASE_URL,
   DASHSCOPE_PROXY_BASE_URL,
+  resolveRequestTimeout,
 } from '../constants.js';
 import type {
   DashScopeRequestMetadata,
@@ -136,9 +136,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const {
       apiKey,
       baseUrl = DEFAULT_DASHSCOPE_BASE_URL,
-      timeout = DEFAULT_TIMEOUT,
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
+    const timeout = resolveRequestTimeout(this.contentGeneratorConfig.timeout);
     const defaultHeaders = this.buildHeaders();
     // Configure fetch options for proxy support and timeout handling.
     // With proxy, dispatcher timeouts are disabled so SDK timeout controls the
@@ -210,34 +210,91 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
     const extraBody = this.contentGeneratorConfig.extra_body;
 
+    // When the user picks a reasoning effort (/effort), turn thinking on for
+    // qwen hybrid models. qwen has no per-tier `reasoning_effort` field yet, so
+    // the unified effort maps onto the on/off `enable_thinking` switch — extend
+    // this to a real tier mapping when qwen ships one. User extra_body wins
+    // (merged last); the disable path (reasoning: false) is handled upstream in
+    // the pipeline.
+    const enableThinkingFromEffort = this.shouldEnableThinkingFromEffort(
+      request.model,
+    );
+
     if (this.isVisionModel(request.model)) {
-      return {
+      // DashScope-exclusive fields not present in the OpenAI SDK types; spread
+      // through a loose record so they don't trip excess-property checks.
+      // Several vision models (e.g. qwen3.6-plus, qwen3.7-plus) are reasoning
+      // models that need `preserve_thinking` for multi-turn reasoning continuity.
+      const dashscopeExtras: Record<string, unknown> = {
+        vl_high_resolution_images: true,
+        preserve_thinking: true,
+        ...(enableThinkingFromEffort ? { enable_thinking: true } : {}),
+      };
+      const visionResult: Record<string, unknown> = {
         ...requestWithTokenLimits,
         messages,
         ...(tools ? { tools } : {}),
         ...(this.buildMetadata(userPromptId) || {}),
-        /* @ts-expect-error dashscope exclusive */
-        vl_high_resolution_images: true,
-        // Default-on for supported reasoning models; user extra_body wins.
-        // Several vision models (e.g. qwen3.6-plus, qwen3.7-plus) are reasoning
-        // models that need this flag for multi-turn reasoning continuity.
-        // (No @ts-expect-error needed: TS flags only the first excess property
-        // in this cast, already suppressed on vl_high_resolution_images above.)
-        preserve_thinking: true,
+        ...dashscopeExtras,
+      };
+      // qwen drives thinking via `enable_thinking`, not the OpenAI-style nested
+      // `reasoning` object the pipeline injects from /effort. Drop it so we
+      // don't ship two competing knobs (mirrors deepseek.ts / zai.ts). User
+      // extra_body still wins (merged last).
+      if (enableThinkingFromEffort && 'reasoning' in visionResult) {
+        delete visionResult['reasoning'];
+      }
+      return {
+        ...visionResult,
         ...(extraBody ? extraBody : {}),
-      } as OpenAI.Chat.ChatCompletionCreateParams;
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
     }
 
-    return {
+    // DashScope-exclusive fields not present in the OpenAI SDK types; user
+    // extra_body wins (merged last).
+    const dashscopeExtras: Record<string, unknown> = {
+      preserve_thinking: true,
+      ...(enableThinkingFromEffort ? { enable_thinking: true } : {}),
+    };
+    const result: Record<string, unknown> = {
       ...requestWithTokenLimits, // Preserve all original parameters including sampling params and adjusted max_tokens
       messages,
       ...(tools ? { tools } : {}),
       ...(this.buildMetadata(userPromptId) || {}),
-      // Default-on for supported reasoning models; user extra_body wins.
-      /* @ts-expect-error dashscope exclusive */
-      preserve_thinking: true,
+      ...dashscopeExtras,
+    };
+    // qwen drives thinking via `enable_thinking`, not the OpenAI-style nested
+    // `reasoning` object the pipeline injects from /effort. Drop it so we don't
+    // ship two competing knobs (mirrors deepseek.ts / zai.ts). User extra_body
+    // still wins (merged last).
+    if (enableThinkingFromEffort && 'reasoning' in result) {
+      delete result['reasoning'];
+    }
+    return {
+      ...result,
       ...(extraBody ? extraBody : {}),
-    } as OpenAI.Chat.ChatCompletionCreateParams;
+    } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+  }
+
+  /**
+   * Whether to send `enable_thinking: true` because the user selected a
+   * reasoning effort. qwen's hybrid-thinking models expose thinking as the
+   * boolean `enable_thinking` rather than a tiered `reasoning_effort`, so the
+   * unified effort ladder collapses to on/off here. Gated to qwen-family wire
+   * models (mirroring the pipeline's disable gate) so the qwen-specific field
+   * never leaks to a non-qwen model sharing the DashScope endpoint.
+   */
+  private shouldEnableThinkingFromEffort(model: string | undefined): boolean {
+    const reasoning = this.contentGeneratorConfig.reasoning;
+    if (!reasoning || reasoning.effort === undefined) {
+      return false;
+    }
+    const wireModel = (
+      model ??
+      this.contentGeneratorConfig.model ??
+      ''
+    ).toLowerCase();
+    return wireModel.startsWith('qwen') || wireModel === 'coder-model';
   }
 
   buildMetadata(userPromptId: string): DashScopeRequestMetadata {

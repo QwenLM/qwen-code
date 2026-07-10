@@ -621,6 +621,38 @@ describe('subagent.ts', () => {
         expect(history).toEqual(initialMessages);
       });
 
+      it('should skip env history when initialMessages is an empty array', async () => {
+        const { config } = await createMockConfig();
+        vi.mocked(GeminiChat).mockClear();
+        vi.mocked(getInitialChatHistory).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'System ${name}.',
+          initialMessages: [],
+        };
+        const context = new ContextState();
+        context.set('name', 'Agent');
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(context);
+
+        const callArgs = vi.mocked(GeminiChat).mock.calls[0];
+        const generationConfig = getGenerationConfigFromMock();
+
+        expect(generationConfig.systemInstruction).toContain('System Agent.');
+        expect(callArgs[2]).toEqual([]);
+        expect(getInitialChatHistory).not.toHaveBeenCalled();
+      });
+
       it('should use renderedSystemPrompt verbatim and bypass templating', async () => {
         const { config } = await createMockConfig();
         vi.mocked(GeminiChat).mockClear();
@@ -1253,6 +1285,79 @@ describe('subagent.ts', () => {
         expect(parts[0].functionResponse?.response?.['error']).toContain(
           'Duplicate provider tool call id "call_1"',
         );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+      });
+
+      it('should stop consecutive identical tool calls with fresh ids', async () => {
+        const listDirectoryToolDef: FunctionDeclaration = {
+          name: 'list_directory',
+          description: 'Lists a directory',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listDirectoryToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_directory'] };
+        const missingPath = '/workspace/project/missing-directory';
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            ...Array.from({ length: 5 }, (_, index) => [
+              {
+                id: `call_${index + 1}`,
+                name: 'list_directory',
+                args: { path: missingPath },
+              },
+            ]),
+            'stop',
+          ]),
+        );
+
+        const listDirectoryInvocation = {
+          params: { path: missingPath },
+          getDescription: vi.fn().mockReturnValue('List directory'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent:
+              'Error: ENOENT: no such file or directory, scandir ' +
+              missingPath,
+            returnDisplay: 'Directory not found',
+          }),
+        };
+        const listDirectoryTool = {
+          name: 'list_directory',
+          displayName: 'List Directory',
+          description: 'List directory contents',
+          kind: 'READ' as const,
+          schema: listDirectoryToolDef,
+          build: vi.fn().mockImplementation(() => listDirectoryInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_directory' ? listDirectoryTool : undefined,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
+        expect(listDirectoryInvocation.execute).toHaveBeenCalledTimes(4);
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
       });
 

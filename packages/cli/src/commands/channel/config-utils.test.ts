@@ -8,18 +8,43 @@ vi.mock('./channel-registry.js', () => ({
   getPlugin: async (type: string) => {
     const plugins: Record<
       string,
-      { channelType: string; requiredConfigFields?: string[] }
+      {
+        channelType: string;
+        requiredConfigFields?: string[];
+        envResolvableConfigFields?: string[];
+      }
     > = {
       telegram: { channelType: 'telegram', requiredConfigFields: ['token'] },
       dingtalk: {
         channelType: 'dingtalk',
         requiredConfigFields: ['clientId', 'clientSecret'],
       },
+      wecom: {
+        channelType: 'wecom',
+        requiredConfigFields: ['botId', 'secret'],
+        envResolvableConfigFields: ['wsUrl'],
+      },
+      numeric: {
+        channelType: 'numeric',
+        requiredConfigFields: ['port'],
+      },
+      overlap: {
+        channelType: 'overlap',
+        requiredConfigFields: ['endpoint'],
+        envResolvableConfigFields: ['endpoint'],
+      },
       bare: { channelType: 'bare' }, // no requiredConfigFields
     };
     return plugins[type];
   },
-  supportedTypes: async () => ['telegram', 'dingtalk', 'bare'],
+  supportedTypes: async () => [
+    'telegram',
+    'dingtalk',
+    'wecom',
+    'numeric',
+    'overlap',
+    'bare',
+  ],
 }));
 
 describe('resolveEnvVars', () => {
@@ -36,6 +61,10 @@ describe('resolveEnvVars', () => {
   it('resolves $ENV_VAR to its value', () => {
     process.env[ENV_KEY] = 'secret';
     expect(resolveEnvVars(`$${ENV_KEY}`)).toBe('secret');
+  });
+
+  it('supports $$ escapes for literal dollar-prefixed values', () => {
+    expect(resolveEnvVars('$$literal-token')).toBe('$literal-token');
   });
 
   it('throws when referenced env var is not set', () => {
@@ -67,6 +96,43 @@ describe('parseChannelConfig', () => {
     await expect(
       parseChannelConfig('bot', { type: 'telegram' }),
     ).rejects.toThrow('requires "token"');
+  });
+
+  it('resolves env vars in plugin-required bot credentials', async () => {
+    process.env['TEST_WECOM_BOT_ID'] = 'bot-from-env';
+    process.env['TEST_WECOM_SECRET'] = 'secret-from-env';
+
+    const result = await parseChannelConfig('bot', {
+      type: 'wecom',
+      botId: '$TEST_WECOM_BOT_ID',
+      secret: '$TEST_WECOM_SECRET',
+    });
+
+    expect(result['botId']).toBe('bot-from-env');
+    expect(result['secret']).toBe('secret-from-env');
+
+    delete process.env['TEST_WECOM_BOT_ID'];
+    delete process.env['TEST_WECOM_SECRET'];
+  });
+
+  it('supports $$ escapes in plugin-required bot credentials', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'wecom',
+      botId: '$$literal-bot-id',
+      secret: '$$literal-secret',
+    });
+
+    expect(result['botId']).toBe('$literal-bot-id');
+    expect(result['secret']).toBe('$literal-secret');
+  });
+
+  it('allows non-string plugin-required fields', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'numeric',
+      port: 443,
+    });
+
+    expect(result['port']).toBe(443);
   });
 
   it('throws a clear error when token is not a string', async () => {
@@ -104,7 +170,10 @@ describe('parseChannelConfig', () => {
     expect(result.sessionScope).toBe('user');
     expect(result.cwd).toBe(process.cwd());
     expect(result.groupPolicy).toBe('disabled');
+    expect(result.dmPolicy).toBe('open');
     expect(result.groups).toEqual({});
+    expect(result.identity).toBeUndefined();
+    expect(result.memoryScope).toBeUndefined();
   });
 
   it('resolves env vars in token, clientId, clientSecret', async () => {
@@ -128,6 +197,121 @@ describe('parseChannelConfig', () => {
     delete process.env['TEST_SEC'];
   });
 
+  it('resolves env vars in plugin-declared optional config fields', async () => {
+    process.env['TEST_WECOM_WS_URL'] = 'wss://example.invalid/ws';
+
+    const result = await parseChannelConfig('bot', {
+      type: 'wecom',
+      botId: 'bot-id',
+      secret: 'bot-secret',
+      wsUrl: '$TEST_WECOM_WS_URL',
+    });
+
+    expect(result['wsUrl']).toBe('wss://example.invalid/ws');
+
+    delete process.env['TEST_WECOM_WS_URL'];
+  });
+
+  it('supports $$ escapes in plugin-declared optional config fields', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'wecom',
+      botId: 'bot-id',
+      secret: 'bot-secret',
+      wsUrl: '$$literal-ws-url',
+    });
+
+    expect(result['wsUrl']).toBe('$literal-ws-url');
+  });
+
+  it('does not resolve plugin fields twice when declarations overlap', async () => {
+    process.env['TEST_OVERLAP_ENDPOINT'] = '$ENDPOINT_LITERAL';
+
+    const result = await parseChannelConfig(
+      'bot',
+      {
+        type: 'overlap',
+        endpoint: '$TEST_OVERLAP_ENDPOINT',
+      },
+      process.cwd(),
+      { resolveEnvVars: 'available' },
+    );
+
+    expect(result['endpoint']).toBe('$ENDPOINT_LITERAL');
+
+    delete process.env['TEST_OVERLAP_ENDPOINT'];
+  });
+
+  it('does not resolve known credential fields twice', async () => {
+    process.env['TEST_TOKEN'] = '$TOKEN_LITERAL_VALUE';
+
+    const result = await parseChannelConfig('bot', {
+      type: 'telegram',
+      token: '$TEST_TOKEN',
+    });
+
+    expect(result.token).toBe('$TOKEN_LITERAL_VALUE');
+
+    delete process.env['TEST_TOKEN'];
+  });
+
+  it('rejects available env vars when explicitly empty', async () => {
+    process.env['TEST_EMPTY_SECRET'] = '';
+
+    await expect(
+      parseChannelConfig(
+        'bot',
+        {
+          type: 'wecom',
+          botId: 'bot-id',
+          secret: '$TEST_EMPTY_SECRET',
+        },
+        process.cwd(),
+        { resolveEnvVars: 'available' },
+      ),
+    ).rejects.toThrow(
+      'Environment variable TEST_EMPTY_SECRET is empty (referenced as $TEST_EMPTY_SECRET)',
+    );
+
+    delete process.env['TEST_EMPTY_SECRET'];
+  });
+
+  it('rejects available env vars when unset', async () => {
+    delete process.env['TEST_MISSING_SECRET'];
+
+    await expect(
+      parseChannelConfig(
+        'bot',
+        {
+          type: 'wecom',
+          botId: 'bot-id',
+          secret: '$TEST_MISSING_SECRET',
+        },
+        process.cwd(),
+        { resolveEnvVars: 'available' },
+      ),
+    ).rejects.toThrow(
+      'Environment variable TEST_MISSING_SECRET is not set (referenced as $TEST_MISSING_SECRET). Set the variable or remove the $ prefix to use a literal value.',
+    );
+  });
+
+  it('rejects unavailable required credential env vars', async () => {
+    delete process.env['TEST_MISSING_TOKEN'];
+
+    await expect(
+      parseChannelConfig(
+        'bot',
+        {
+          type: 'telegram',
+          token: '$TEST_MISSING_TOKEN',
+        },
+        process.cwd(),
+        { resolveEnvVars: 'available' },
+      ),
+    ).rejects.toThrow(
+      'Environment variable TEST_MISSING_TOKEN is not set (referenced as $TEST_MISSING_TOKEN). Set the variable or remove the $ prefix to use a literal value.',
+    );
+  });
+
   it('preserves explicit config values over defaults', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',
@@ -138,8 +322,11 @@ describe('parseChannelConfig', () => {
       cwd: '/custom',
       approvalMode: 'auto',
       instructions: 'Be helpful',
+      identity: { id: 'ops-agent', displayName: 'Ops Agent' },
+      memoryScope: { namespace: 'qwen-tag:ops', mode: 'metadata-only' },
       model: 'qwen-coder',
       groupPolicy: 'open',
+      dmPolicy: 'disabled',
       groups: { g1: { mentionKeywords: ['@bot'] } },
     });
 
@@ -150,9 +337,66 @@ describe('parseChannelConfig', () => {
     expect(result.cwd).toBe('/custom');
     expect(result.approvalMode).toBe('auto');
     expect(result.instructions).toBe('Be helpful');
+    expect(result.identity).toEqual({
+      id: 'ops-agent',
+      displayName: 'Ops Agent',
+    });
+    expect(result.memoryScope).toEqual({
+      namespace: 'qwen-tag:ops',
+      mode: 'metadata-only',
+    });
     expect(result.model).toBe('qwen-coder');
     expect(result.groupPolicy).toBe('open');
+    expect(result.dmPolicy).toBe('disabled');
     expect(result.groups).toEqual({ g1: { mentionKeywords: ['@bot'] } });
+  });
+
+  it('drops empty identity and memory scope objects', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      identity: { id: '', displayName: null, description: undefined },
+      memoryScope: { namespace: '', mode: undefined },
+    });
+
+    expect(result.identity).toBeUndefined();
+    expect(result.memoryScope).toBeUndefined();
+  });
+
+  it('rejects a non-object identity', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', identity: 'ops' }),
+    ).rejects.toThrow('Channel "bot" field "identity" must be an object.');
+  });
+
+  it('rejects a non-string identity field', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', identity: { id: 123 } }),
+    ).rejects.toThrow('Channel "bot" field "identity.id" must be a string.');
+  });
+
+  it('rejects a non-object memoryScope', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', memoryScope: ['ops'] }),
+    ).rejects.toThrow('Channel "bot" field "memoryScope" must be an object.');
+  });
+
+  it('rejects an unknown memoryScope.mode', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        memoryScope: { mode: 'full' },
+      }),
+    ).rejects.toThrow(
+      'Channel "bot" field "memoryScope.mode" must be "metadata-only".',
+    );
+  });
+
+  it('drops empty identity fields instead of failing', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      identity: { id: 'ops-agent', displayName: '', description: null },
+    });
+    expect(result.identity).toEqual({ id: 'ops-agent' });
   });
 
   it('spreads extra fields from raw config', async () => {
@@ -176,7 +420,7 @@ describe('parseChannelConfig', () => {
       type: 'bare',
       cwd: '~',
     });
-    expect(result.cwd).toBe(os.homedir());
+    expect(result.cwd).toBe(path.normalize(os.homedir()));
   });
 
   it('resolves relative cwd against process.cwd', async () => {

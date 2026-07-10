@@ -252,6 +252,42 @@ export default {
   'Delete {{name}}': 'Supprimer {{name}}',
   'Unknown Step': 'Étape inconnue',
   'Esc to close': 'Esc pour fermer',
+  Transcript: 'Transcription',
+  'to close': 'pour fermer',
+  'to scroll': 'pour défiler',
+  'Failed to render transcript.': 'Échec du rendu de la transcription.',
+  'Read {{count}} file': 'Lu {{count}} fichier',
+  'Read {{count}} files': 'Lu {{count}} fichiers',
+  'Reading {{count}} file': 'Lecture de {{count}} fichier',
+  'Reading {{count}} files': 'Lecture de {{count}} fichiers',
+  'Edited {{count}} file': 'Modifié {{count}} fichier',
+  'Edited {{count}} files': 'Modifié {{count}} fichiers',
+  'Editing {{count}} file': 'Modification de {{count}} fichier',
+  'Editing {{count}} files': 'Modification de {{count}} fichiers',
+  'Wrote {{count}} file': 'Écrit {{count}} fichier',
+  'Wrote {{count}} files': 'Écrit {{count}} fichiers',
+  'Writing {{count}} file': 'Écriture de {{count}} fichier',
+  'Writing {{count}} files': 'Écriture de {{count}} fichiers',
+  'Searched {{count}} pattern': 'Recherché {{count}} motif',
+  'Searched {{count}} patterns': 'Recherché {{count}} motifs',
+  'Searching {{count}} pattern': 'Recherche de {{count}} motif',
+  'Searching {{count}} patterns': 'Recherche de {{count}} motifs',
+  'Listed {{count}} directory': 'Listé {{count}} répertoire',
+  'Listed {{count}} directories': 'Listé {{count}} répertoires',
+  'Listing {{count}} directory': 'Liste de {{count}} répertoire',
+  'Listing {{count}} directories': 'Liste de {{count}} répertoires',
+  'Ran {{count}} command': 'Exécuté {{count}} commande',
+  'Ran {{count}} commands': 'Exécuté {{count}} commandes',
+  'Running {{count}} command': 'Exécution de {{count}} commande',
+  'Running {{count}} commands': 'Exécution de {{count}} commandes',
+  'Ran {{count}} agent': 'Exécuté {{count}} agent',
+  'Ran {{count}} agents': 'Exécuté {{count}} agents',
+  'Running {{count}} agent': 'Exécution de {{count}} agent',
+  'Running {{count}} agents': 'Exécution de {{count}} agents',
+  'Used {{count}} tool': 'Utilisé {{count}} outil',
+  'Used {{count}} tools': 'Utilisé {{count}} outils',
+  'Using {{count}} tool': 'Utilisation de {{count}} outil',
+  'Using {{count}} tools': 'Utilisation de {{count}} outils',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter pour sélectionner, ↑↓ pour naviguer, Esc pour fermer',
   'Esc to go back': 'Esc pour revenir',
@@ -284,7 +320,7 @@ export default {
   'Open in editor': "Ouvrir dans l'éditeur",
   'Edit tools': 'Modifier les outils',
   'Edit color': 'Modifier la couleur',
-  '❌ Error:': '❌ Erreur :',
+  '✗ Error:': '✗ Erreur :',
   'Are you sure you want to delete agent "{{name}}"?':
     'Êtes-vous sûr de vouloir supprimer l\'agent "{{name}}" ?',
 
@@ -293,13 +329,12 @@ export default {
   // ============================================================================
   'Project Level (.qwen/agents/)': 'Niveau projet (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': 'Niveau utilisateur (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!': '✅ Sous-agent créé avec succès !',
+  '✓ Subagent Created Successfully!': '✓ Sous-agent créé avec succès !',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     'Le sous-agent "{{name}}" a été enregistré au niveau {{level}}.',
   'Name: ': 'Nom : ',
   'Location: ': 'Emplacement : ',
-  '❌ Error saving subagent:':
-    '❌ Erreur lors de la sauvegarde du sous-agent :',
+  '✗ Error saving subagent:': '✗ Erreur lors de la sauvegarde du sous-agent :',
   'Warnings:': 'Avertissements :',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
     'Le nom "{{name}}" existe déjà au niveau {{level}} - le sous-agent existant sera écrasé',
@@ -1224,9 +1259,9 @@ export default {
     'Choisissez comment poursuivre votre session :',
   'Start new chat session': 'Démarrer une nouvelle session de chat',
   'Continue previous conversation': 'Continuer la conversation précédente',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 Bon retour ! (Dernière mise à jour : {{timeAgo}})',
-  '🎯 Overall Goal:': '🎯 Objectif global :',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    'Bon retour ! (Dernière mise à jour : {{timeAgo}})',
+  'Overall Goal:': 'Objectif global :',
   'Connect a Provider': 'Connecter un fournisseur',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     'Vous devez connecter un fournisseur pour continuer. Appuyez à nouveau sur Ctrl+C pour quitter.',
@@ -1289,6 +1324,12 @@ export default {
   // Boîtes de dialogue - Modèle
   // ============================================================================
   'Select Model': 'Sélectionner un modèle',
+  ' (this project)': ' (ce projet)',
+  ' (global)': ' (global)',
+  'Persist the model selection to the project settings (workspace scope)':
+    'Persister la sélection du modèle dans les paramètres du projet (étendue workspace)',
+  'Persist the model selection to the user settings (global scope)':
+    'Persister la sélection du modèle dans les paramètres utilisateur (étendue globale)',
   'API Key': 'API Key',
   '(default)': '(par défaut)',
   '(not set)': '(non défini)',
@@ -1394,8 +1435,8 @@ export default {
   // Statut MCP
   // ============================================================================
   'No MCP servers configured.': 'Aucun MCP servers configuré.',
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ Les MCP servers démarrent ({{count}} en initialisation)...',
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    '◌ Les MCP servers démarrent ({{count}} en initialisation)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     'Remarque : Le premier démarrage peut prendre plus de temps. La disponibilité des outils se mettra à jour automatiquement.',
   'Configured MCP servers:': 'MCP servers configurés :',
@@ -1419,7 +1460,7 @@ export default {
   'Prompts:': 'Invites :',
   'Resources:': 'Ressources :',
   Blocked: 'Bloqué',
-  '💡 Tips:': '💡 Conseils :',
+  '★ Tips:': '★ Conseils :',
   Use: 'Utilisez',
   'to show server and tool descriptions':
     'pour afficher les descriptions des serveurs et des outils',
@@ -1868,8 +1909,8 @@ export default {
   'Select authentication method:':
     "Sélectionner la méthode d'authentification :",
   '\n=== Authentication Status ===\n': "\n=== Statut d'authentification ===\n",
-  '⚠️  No authentication method configured.\n':
-    "⚠️  Aucune méthode d'authentification configurée.\n",
+  '⚠  No authentication method configured.\n':
+    "⚠  Aucune méthode d'authentification configurée.\n",
   'Run one of the following commands to get started:\n':
     "Exécutez l'une des commandes suivantes pour commencer :\n",
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -1892,8 +1933,8 @@ export default {
   '  Current Model: {{model}}': '  Modèle actuel : {{model}}',
   '  Config Version: {{version}}': '  Version de config : {{version}}',
   '  Status: API key configured\n': '  Statut : API Key configurée\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    "⚠️  Méthode d'authentification : Alibaba Cloud Coding Plan (Incomplète)",
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    "⚠  Méthode d'authentification : Alibaba Cloud Coding Plan (Incomplète)",
   '  Issue: API key not found in environment or settings\n':
     "  Problème : API Key introuvable dans l'environnement ou les paramètres\n",
   '  Run `qwen auth coding-plan` to re-configure.\n':
@@ -1908,12 +1949,10 @@ export default {
     'Mode brut non disponible. Veuillez exécuter dans un terminal interactif.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Utilisez les flèches ↑ ↓ pour naviguer, Enter pour sélectionner, Ctrl+C pour quitter)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Masquer la sortie des outils et la réflexion pour une vue plus nette (basculer avec Ctrl+O).',
-  'Press Ctrl+O to show full tool output':
-    'Appuyez sur Ctrl+O pour afficher la sortie complète des outils',
   'Switch to plan mode or exit plan mode':
     'Passer en mode plan ou quitter le mode plan',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    "Définit l'intensité de réflexion des modèles compatibles avec le raisonnement ({{tiers}}) ; mappée et limitée selon le fournisseur.",
   'Exited plan mode. Previous approval mode restored.':
     "Mode plan quitté. Mode d'approbation précédent restauré.",
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -1997,7 +2036,7 @@ export default {
     'Afficher le détail de l’utilisation du contexte par élément.',
 
   // === Missing key backfill ===
-  'to toggle compact mode': 'basculer le mode compact',
+  'to view transcript': 'pour voir la transcription',
   'The name of the extension to update.':
     "Le nom de l'extension à mettre à jour.",
   'Session (temporary)': 'Session (temporaire)',
@@ -2023,8 +2062,6 @@ export default {
     "Demande de copie envoyée au terminal. Si le collage est vide, copiez manuellement l'URL ci-dessus.",
   'Cannot write to terminal — copy the URL above manually.':
     "Impossible d'écrire dans le terminal — copiez manuellement l'URL ci-dessus.",
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Appuyez sur Ctrl+O pour basculer le mode compact — masquer la sortie des outils et la réflexion pour une vue plus nette.',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'API Key invalide. Les Coding Plan API Keys commencent par "sk-sp-". Veuillez vérifier.',
   'Lock release warning': 'Avertissement de libération du verrou',
@@ -2100,4 +2137,82 @@ export default {
   in: 'ent.',
   out: 'sort.',
   'In/Out': 'Ent/Sort',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Vérifier les mises à jour de Qwen Code et installer si disponible',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Mise à jour de Qwen Code disponible ! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Une nouvelle version de Qwen Code est disponible ! {{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} est à jour !',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'Échec de la vérification des mises à jour. Vérifiez votre réseau ou la configuration du registre.',
+  'Unable to check for updates: {{reason}}':
+    'Impossible de vérifier les mises à jour : {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    'Mise à jour réussie ! La nouvelle version sera utilisée lors de la prochaine exécution.',
+  'Update downloaded. It will be applied after you exit this session.':
+    'Mise à jour téléchargée. Elle sera appliquée après avoir quitté cette session.',
+  'Update failed: {{error}}': 'Échec de la mise à jour : {{error}}',
+  'Downloading update...': 'Téléchargement de la mise à jour...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Mise à jour réussie ! Redémarrez Qwen Code pour utiliser la nouvelle version. Changer de fournisseur de modèle avant le redémarrage peut ne pas fonctionner correctement.',
+  'Automatic update failed. Please try updating manually.':
+    'La mise à jour automatique a échoué. Essayez de mettre à jour manuellement.',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Échec de la mise à jour automatique : {{error}}. Relancez le programme d’installation pour mettre à jour manuellement.',
+  'Running from a local git clone. Please update with "git pull".':
+    'Exécution depuis un clone Git local. Veuillez mettre à jour avec "git pull".',
+  'Running via npx, update not applicable.':
+    'Exécution via npx, mise à jour non applicable.',
+  'Running via pnpx, update not applicable.':
+    'Exécution via pnpx, mise à jour non applicable.',
+  'Running via bunx, update not applicable.':
+    'Exécution via bunx, mise à jour non applicable.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Installé via Homebrew. Veuillez mettre à jour avec "brew upgrade".',
+  "Locally installed. Please update via your project's package.json.":
+    'Installé localement. Veuillez mettre à jour via le package.json de votre projet.',
+  'Update requires sudo. Please run:':
+    'La mise à jour nécessite sudo. Veuillez exécuter :',
+  'Standalone install detected. Attempting to automatically update now...':
+    'Installation autonome détectée. Tentative de mise à jour automatique...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'Installation autonome détectée. Veuillez relancer l’installateur autonome pour mettre à jour :',
+  'Run the following to update:':
+    'Exécutez la commande suivante pour mettre à jour :',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'Impossible de mettre à jour automatiquement cette installation autonome. Veuillez réinstaller depuis :',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Mise à jour manuelle requise. Veuillez réinstaller Qwen Code.',
+
+  // ============================================================================
+  // reload-plugins command
+  // ============================================================================
+  '{{count}} extension': '{{count}} extension',
+  '{{count}} extensions': '{{count}} extensions',
+  '{{count}} command': '{{count}} command',
+  '{{count}} commands': '{{count}} commands',
+  '{{count}} skill': '{{count}} skill',
+  '{{count}} skills': '{{count}} skills',
+  '{{count}} agent': '{{count}} agent',
+  '{{count}} agents': '{{count}} agents',
+  '{{count}} hook': '{{count}} hook',
+  '{{count}} hooks': '{{count}} hooks',
+  '{{count}} extension MCP server': '{{count}} extension MCP server',
+  '{{count}} extension MCP servers': '{{count}} extension MCP servers',
+  '{{count}} extension LSP server': '{{count}} extension LSP server',
+  '{{count}} extension LSP servers': '{{count}} extension LSP servers',
+  'Reload extension changes from disk': 'Reload extension changes from disk',
+  'Reloaded extensions: {{summary}}': 'Reloaded extensions: {{summary}}',
+  'Reload failed: {{message}}': 'Reload failed: {{message}}',
+  'Reload failed.': 'Reload failed.',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    'Extensions changed on disk. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    'Extension reload did not complete. Run /reload-plugins to try again.',
 };

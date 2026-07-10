@@ -12,6 +12,7 @@ import type {
 import {
   escapeAnsiCtrlCodes,
   sanitizeFilenameForDisplay,
+  sanitizeMultilineForDisplay,
   sanitizeSensitiveText,
   sliceTextByVisualHeight,
 } from './textUtils.js';
@@ -274,6 +275,23 @@ describe('textUtils', () => {
       expect(out).toContain('evil');
       expect(out).toContain('path');
       expect(out).toContain('.txt');
+    });
+  });
+
+  describe('sanitizeMultilineForDisplay', () => {
+    it('preserves line structure while escaping other control bytes', () => {
+      expect(sanitizeMultilineForDisplay('line one\n\tline two')).toBe(
+        'line one\n\tline two',
+      );
+      expect(sanitizeMultilineForDisplay('a\rb\x07c\x9bd')).toBe(
+        'a\\rb\\u0007c\\u009bd',
+      );
+    });
+
+    it('neutralizes ANSI sequences like the filename variant', () => {
+      const out = sanitizeMultilineForDisplay('x\x1b[2Jy\nz');
+      expect(out.includes('\x1b')).toBe(false);
+      expect(out).toContain('\n');
     });
   });
 

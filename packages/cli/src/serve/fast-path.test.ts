@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import yargs, { type Argv } from 'yargs';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -16,7 +17,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import * as os from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
+import * as ts from 'typescript';
 import { QWEN_DIR, Storage } from '@qwen-code/qwen-code-core';
 
 import {
@@ -35,10 +37,12 @@ import {
   getGlobalQwenDirLite,
   SETTINGS_DIRECTORY_NAME,
 } from '../config/storage-paths-lite.js';
+import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import {
   resetTrustedFoldersForTesting,
   TrustLevel,
 } from '../config/trustedFolders.js';
+import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
 import * as runQwenServeModule from './run-qwen-serve.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
 import type { Settings } from '../config/settingsSchema.js';
@@ -66,6 +70,119 @@ const originalRateLimitPrompt = process.env['QWEN_SERVE_RATE_LIMIT_PROMPT'];
 const originalCloudShell = process.env['CLOUD_SHELL'];
 const originalGoogleCloudProject = process.env['GOOGLE_CLOUD_PROJECT'];
 const originalCwd = process.cwd();
+const cliPackageRoot = process.cwd();
+
+interface StaticSourceGraph {
+  localFiles: Set<string>;
+  externalValueImports: Set<string>;
+  unresolvedLocalImports: string[];
+}
+
+function normalizePathForTest(filePath: string): string {
+  return filePath.replace(/\\/g, '/');
+}
+
+function moduleSpecifierText(
+  specifier: ts.Expression | undefined,
+): string | undefined {
+  if (!specifier || !ts.isStringLiteral(specifier)) return undefined;
+  return specifier.text;
+}
+
+function importDeclarationHasRuntimeValue(node: ts.ImportDeclaration): boolean {
+  const clause = node.importClause;
+  if (!clause) return true;
+  if (clause.isTypeOnly) return false;
+  if (clause.name) return true;
+  const bindings = clause.namedBindings;
+  if (!bindings) return false;
+  if (ts.isNamespaceImport(bindings)) return true;
+  if (bindings.elements.length === 0) return true;
+  return bindings.elements.some((element) => !element.isTypeOnly);
+}
+
+function exportDeclarationHasRuntimeValue(node: ts.ExportDeclaration): boolean {
+  if (node.isTypeOnly) return false;
+  const clause = node.exportClause;
+  if (!clause) return true;
+  if (ts.isNamespaceExport(clause)) return true;
+  if (clause.elements.length === 0) return true;
+  return clause.elements.some((element) => !element.isTypeOnly);
+}
+
+function resolveLocalSourceImport(
+  importer: string,
+  specifier: string,
+): string | undefined {
+  const basePath = resolve(dirname(importer), specifier);
+  const candidates = specifier.endsWith('.js')
+    ? [`${basePath.slice(0, -3)}.ts`, `${basePath.slice(0, -3)}.tsx`]
+    : [
+        `${basePath}.ts`,
+        `${basePath}.tsx`,
+        join(basePath, 'index.ts'),
+        join(basePath, 'index.tsx'),
+      ];
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
+function collectStaticSourceGraph(entryFile: string): StaticSourceGraph {
+  const visited = new Set<string>();
+  const localFiles = new Set<string>();
+  const externalValueImports = new Set<string>();
+  const unresolvedLocalImports: string[] = [];
+
+  function visit(filePath: string): void {
+    const normalizedFilePath = resolve(filePath);
+    if (visited.has(normalizedFilePath)) return;
+    visited.add(normalizedFilePath);
+    localFiles.add(
+      normalizePathForTest(relative(cliPackageRoot, normalizedFilePath)),
+    );
+
+    const sourceText = readFileSync(normalizedFilePath, 'utf8');
+    const sourceFile = ts.createSourceFile(
+      normalizedFilePath,
+      sourceText,
+      ts.ScriptTarget.Latest,
+      true,
+      normalizedFilePath.endsWith('.tsx')
+        ? ts.ScriptKind.TSX
+        : ts.ScriptKind.TS,
+    );
+
+    for (const statement of sourceFile.statements) {
+      let specifier: string | undefined;
+      let hasRuntimeValue = false;
+      if (ts.isImportDeclaration(statement)) {
+        specifier = moduleSpecifierText(statement.moduleSpecifier);
+        hasRuntimeValue = importDeclarationHasRuntimeValue(statement);
+      } else if (ts.isExportDeclaration(statement)) {
+        specifier = moduleSpecifierText(statement.moduleSpecifier);
+        hasRuntimeValue = exportDeclarationHasRuntimeValue(statement);
+      }
+      if (!specifier || !hasRuntimeValue) continue;
+      if (!specifier.startsWith('.')) {
+        externalValueImports.add(specifier);
+        continue;
+      }
+      const resolvedImport = resolveLocalSourceImport(
+        normalizedFilePath,
+        specifier,
+      );
+      if (!resolvedImport) {
+        unresolvedLocalImports.push(
+          `${normalizePathForTest(relative(cliPackageRoot, normalizedFilePath))} -> ${specifier}`,
+        );
+        continue;
+      }
+      visit(resolvedImport);
+    }
+  }
+
+  visit(entryFile);
+  return { localFiles, externalValueImports, unresolvedLocalImports };
+}
 
 function useTempQwenHome(): string {
   tempQwenHome = realpathSync(
@@ -95,6 +212,9 @@ function pickServeFastPathComparable(
   const out: ServeFastPathSettings = {};
   if (settings.env) {
     out.env = settings.env;
+  }
+  if (settings.general?.chatRecording !== undefined) {
+    out.general = { chatRecording: settings.general.chatRecording };
   }
   if (settings.advanced?.excludedEnvVars !== undefined) {
     out.advanced = {
@@ -246,13 +366,12 @@ afterEach(() => {
 
 describe('CLI entry import boundary', () => {
   it('does not statically import the full gemini entry before the serve fast path can run', () => {
-    const indexSource = readFileSync('index.ts', 'utf8');
+    const cliSource = readFileSync('src/cli.ts', 'utf8');
 
-    expect(indexSource).not.toContain("import './src/gemini.js'");
-    expect(indexSource).not.toContain("import { main } from './src/gemini.js'");
-    expect(indexSource).not.toContain("process.argv[2] === 'serve'");
-    expect(indexSource).toContain('import { isServeFastPathArgv }');
-    expect(indexSource).toContain("await import('./src/serve/fast-path.js')");
+    expect(cliSource).not.toContain("import './gemini.js'");
+    expect(cliSource).not.toContain("import { main } from './gemini.js'");
+    expect(cliSource).not.toContain("process.argv[2] === 'serve'");
+    expect(cliSource).toContain("await import('./serve/fast-path.js')");
   });
 
   it('does not import the full settings loader on the serve fast path', () => {
@@ -263,6 +382,29 @@ describe('CLI entry import boundary', () => {
     expect(fastPathSource).not.toContain('@qwen-code/qwen-code-core');
     expect(fastPathSource).toContain('bootSettings: settings');
     expect(fastPathSource).toContain('resolveOnListen: true');
+    expect(fastPathSource).toContain(
+      'deferRuntimeUntilFirstHealth: !parsed.open',
+    );
+  });
+
+  it('uses the shared headless yolo warning helper on the serve fast path', () => {
+    const fastPathSource = readFileSync('src/serve/fast-path.ts', 'utf8');
+
+    expect(fastPathSource).toContain('getHeadlessYoloSafetyWarning');
+    expect(fastPathSource).not.toContain(
+      "settings.tools?.approvalMode === 'yolo'",
+    );
+  });
+
+  it('keeps headless yolo warning helper free of runtime core imports', () => {
+    const helperSource = readFileSync(
+      'src/utils/headlessSafetyWarnings.ts',
+      'utf8',
+    );
+
+    expect(helperSource).not.toMatch(
+      /import\s+(?!type\b)[^;]*from ['"]@qwen-code\/qwen-code-core['"]/,
+    );
   });
 
   it('keeps settings free of UI imports used before serve can listen', () => {
@@ -297,6 +439,53 @@ describe('CLI entry import boundary', () => {
     expect(runServeSource).toContain("import('./server.js')");
     expect(runServeSource).toContain("import('@qwen-code/acp-bridge/bridge')");
   });
+
+  it('keeps request helpers from value-importing the ACP compatibility shim', () => {
+    const requestHelpersSource = readFileSync(
+      'src/serve/server/request-helpers.ts',
+      'utf8',
+    );
+
+    expect(requestHelpersSource).not.toMatch(
+      /from ['"]\.\.\/acp-session-bridge\.js['"]/,
+    );
+    expect(requestHelpersSource).toContain(
+      "import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';",
+    );
+    expect(requestHelpersSource).toContain(
+      "import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';",
+    );
+  });
+
+  it('keeps the runQwenServe static source graph free of ACP runtime modules', () => {
+    const graph = collectStaticSourceGraph(
+      resolve(cliPackageRoot, 'src/serve/run-qwen-serve.ts'),
+    );
+
+    expect(graph.unresolvedLocalImports).toEqual([]);
+    const forbiddenLocalFiles = [...graph.localFiles].filter(
+      (filePath) => filePath === 'src/serve/acp-session-bridge.ts',
+    );
+    expect(
+      forbiddenLocalFiles,
+      `Unexpected static source graph files:\n${forbiddenLocalFiles.join('\n')}`,
+    ).toEqual([]);
+
+    const forbiddenExternalImports = [
+      '@qwen-code/acp-bridge',
+      '@qwen-code/acp-bridge/bridge',
+      '@qwen-code/acp-bridge/spawnChannel',
+      '@qwen-code/acp-bridge/bridgeClient',
+      '@qwen-code/acp-bridge/bridgeErrors',
+    ];
+    const forbiddenImports = [...graph.externalValueImports].filter(
+      (specifier) => forbiddenExternalImports.includes(specifier),
+    );
+    expect(
+      forbiddenImports,
+      `Unexpected ACP runtime imports:\n${forbiddenImports.join('\n')}`,
+    ).toEqual([]);
+  });
 });
 
 describe('serve fast path argument parsing', () => {
@@ -328,6 +517,24 @@ describe('serve fast path argument parsing', () => {
     });
   });
 
+  it('parses --tls-cert and --tls-key on the fast path', () => {
+    const parsed = parseServeFastPathArgs([
+      'serve',
+      '--tls-cert',
+      '/tmp/cert.pem',
+      '--tls-key',
+      '/tmp/key.pem',
+    ]);
+
+    expect(parsed).toMatchObject({
+      kind: 'serve',
+      options: {
+        tlsCert: '/tmp/cert.pem',
+        tlsKey: '/tmp/key.pem',
+      },
+    });
+  });
+
   it('parses bundled entrypoint argv before serve', () => {
     const parsed = parseServeFastPathArgs([
       '/repo/dist/cli.js',
@@ -339,6 +546,27 @@ describe('serve fast path argument parsing', () => {
     expect(parsed).toMatchObject({
       kind: 'serve',
       options: { port: 0 },
+    });
+  });
+
+  it('falls back to the full parser for repeatable --workspace values', () => {
+    expect(
+      parseServeFastPathArgs([
+        'serve',
+        '--workspace',
+        '/tmp/primary',
+        '--workspace',
+        '/tmp/secondary',
+      ]),
+    ).toEqual({ kind: 'fallback' });
+  });
+
+  it('falls back to the full parser for empty --workspace values', () => {
+    expect(parseServeFastPathArgs(['serve', '--workspace='])).toEqual({
+      kind: 'fallback',
+    });
+    expect(parseServeFastPathArgs(['serve', '--workspace', ''])).toEqual({
+      kind: 'fallback',
     });
   });
 
@@ -365,6 +593,12 @@ describe('serve fast path argument parsing', () => {
     });
   });
 
+  it('falls back to the full parser for daemon-managed channels', () => {
+    expect(parseServeFastPathArgs(['serve', '--channel', 'telegram'])).toEqual({
+      kind: 'fallback',
+    });
+  });
+
   it('handles every yargs serve long option or explicitly falls back', () => {
     const options = (
       buildServeCommandParser() as unknown as {
@@ -382,15 +616,22 @@ describe('serve fast path argument parsing', () => {
       ['hostname', ['--hostname', '127.0.0.1']],
       ['token', ['--token', 'token']],
       ['max-sessions', ['--max-sessions', '10']],
+      ['max-total-sessions', ['--max-total-sessions', '20']],
       [
         'max-pending-prompts-per-session',
         ['--max-pending-prompts-per-session', '5'],
       ],
       ['max-connections', ['--max-connections', '256']],
       ['event-ring-size', ['--event-ring-size', '8000']],
+      [
+        'compacted-replay-max-bytes',
+        ['--compacted-replay-max-bytes', '4194304'],
+      ],
       ['workspace', ['--workspace', process.cwd()]],
       ['require-auth', ['--require-auth']],
       ['enable-session-shell', ['--enable-session-shell']],
+      ['tls-cert', ['--tls-cert', '/tmp/cert.pem']],
+      ['tls-key', ['--tls-key', '/tmp/key.pem']],
       ['web', ['--no-web']],
       ['open', ['--open']],
       ['http-bridge', ['--no-http-bridge']],
@@ -413,10 +654,11 @@ describe('serve fast path argument parsing', () => {
       ['rate-limit-read', ['--rate-limit-read', '120']],
       ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
       ['experimental-lsp', ['--experimental-lsp']],
+      ['channel', ['--channel', 'telegram']],
       ['help', ['--help']],
       ['version', ['--version']],
     ]);
-    const expectedFallbackOptions = new Set(['help', 'version']);
+    const expectedFallbackOptions = new Set(['channel', 'help', 'version']);
 
     expect(longOptionNames.sort()).toEqual(
       [...sampleArgvByOption.keys()].sort(),
@@ -444,11 +686,28 @@ describe('serve fast path argument parsing', () => {
       },
     });
     expect(fastPathParsed).not.toHaveProperty('options.maxSessions');
+    expect(fastPathParsed).not.toHaveProperty('options.maxTotalSessions');
     expect(fastPathParsed).not.toHaveProperty('options.maxConnections');
     expect(fastPathParsed).not.toHaveProperty('options.eventRingSize');
     expect(fastPathParsed).not.toHaveProperty(
+      'options.compactedReplayMaxBytes',
+    );
+    expect(fastPathParsed).not.toHaveProperty(
       'options.maxPendingPromptsPerSession',
     );
+  });
+
+  it('parses --compacted-replay-max-bytes on the fast path', () => {
+    const parsed = parseServeFastPathArgs([
+      'serve',
+      '--compacted-replay-max-bytes',
+      '1048576',
+    ]);
+
+    expect(parsed).toMatchObject({
+      kind: 'serve',
+      options: { compactedReplayMaxBytes: 1024 * 1024 },
+    });
   });
 
   it('keeps --experimental-lsp on the fast path', () => {
@@ -497,6 +756,10 @@ describe('serve fast path argument parsing', () => {
     [
       ['serve', '--max-pending-prompts-per-session=-1'],
       'qwen serve: --max-pending-prompts-per-session must be a non-negative integer (0 / Infinity = unlimited).',
+    ],
+    [
+      ['serve', '--compacted-replay-max-bytes=0'],
+      'qwen serve: --compacted-replay-max-bytes must be a positive safe integer in [1, 268435456].',
     ],
     [
       ['serve', '--rate-limit', '--rate-limit-prompt=0'],
@@ -634,6 +897,35 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.exit).toHaveBeenCalledWith(1);
   });
 
+  it('does not report startup failure when runtime startup is cancelled by close', async () => {
+    const stderrWrites: string[] = [];
+    const close = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((
+      code?: string | number | null,
+    ) => {
+      throw new Error(`process.exit(${code})`);
+    }) as typeof process.exit);
+
+    await expect(
+      waitForServeRuntimeOrExit({
+        runtimeReady: Promise.reject(
+          new Error(RUNTIME_STARTUP_CANCELLED_MESSAGE),
+        ),
+        close,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(close).not.toHaveBeenCalled();
+    expect(stderrWrites.join('')).not.toContain(
+      'runtime startup failed after listener was ready',
+    );
+    expect(exit).not.toHaveBeenCalled();
+  });
+
   it('validates rate limit env after settings bootstrap enables rate limiting', async () => {
     useTempQwenHome();
     tempWorkspace = realpathSync(
@@ -710,6 +1002,66 @@ describe('serve fast path environment bootstrap', () => {
 
     expect(stderrWrites.join('')).toContain('qwen serve: listen boom');
     expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it('keeps headless yolo warning best-effort after listening', async () => {
+    const originalSandbox = process.env['SANDBOX'];
+    const originalSuppress = process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'];
+    delete process.env['SANDBOX'];
+    delete process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'];
+    const qwenHome = useTempQwenHome();
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ tools: { approvalMode: 'yolo', sandbox: false } }),
+    );
+    const runtimeReady = Promise.reject(new Error('runtime boom'));
+    void runtimeReady.catch(() => undefined);
+    const close = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(runQwenServeModule, 'runQwenServe').mockResolvedValue({
+      runtimeReady,
+      close,
+    } as unknown as Awaited<
+      ReturnType<typeof runQwenServeModule.runQwenServe>
+    >);
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      const text = String(chunk);
+      stderrWrites.push(text);
+      if (text.includes(HEADLESS_YOLO_NO_SANDBOX_WARNING)) {
+        throw new Error('stderr closed');
+      }
+      return true;
+    });
+    vi.spyOn(process, 'exit').mockImplementation(((
+      code?: string | number | null,
+    ) => {
+      throw new Error(`process.exit(${code})`);
+    }) as typeof process.exit);
+
+    try {
+      await expect(
+        tryRunServeFastPath(['serve', '--port', '0', '--no-open', '--no-web']),
+      ).rejects.toThrow('process.exit(1)');
+
+      expect(stderrWrites.join('')).toContain(HEADLESS_YOLO_NO_SANDBOX_WARNING);
+      expect(stderrWrites.join('')).toContain(
+        'qwen serve: runtime startup failed after listener was ready: runtime boom',
+      );
+      expect(stderrWrites.join('')).not.toContain('qwen serve: stderr closed');
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(process.exit).toHaveBeenCalledWith(1);
+    } finally {
+      if (originalSandbox === undefined) {
+        delete process.env['SANDBOX'];
+      } else {
+        process.env['SANDBOX'] = originalSandbox;
+      }
+      if (originalSuppress === undefined) {
+        delete process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'];
+      } else {
+        process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'] = originalSuppress;
+      }
+    }
   });
 
   it('rejects malformed user settings so the full settings loader can handle it', async () => {
@@ -1013,6 +1365,7 @@ describe('serve fast path environment bootstrap', () => {
             FAST_PATH_OVERLAP: 'workspace',
           },
           advanced: { runtimeOutputDir: '.workspace-runtime' },
+          general: { chatRecording: false },
           context: {
             fileName: 'WORKSPACE.md',
             fileFiltering: { customIgnoreFiles: ['.workspace-ignore'] },

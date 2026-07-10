@@ -24,6 +24,11 @@ import {
   type ServeWorkspaceMemoryFile,
   type ServeWorkspaceMemoryStatus,
 } from '@qwen-code/acp-bridge/status';
+import {
+  requireTrustedWorkspaceRuntime,
+  resolveWorkspaceRuntimeFromParam,
+} from './workspace-route-runtime.js';
+import type { WorkspaceRegistry } from './workspace-registry.js';
 
 /**
  * Issue #4175 PR 16: workspace memory CRUD routes.
@@ -59,6 +64,7 @@ import {
 export interface WorkspaceMemoryRouteDeps {
   bridge: AcpSessionBridge;
   boundWorkspace: string;
+  collectStatus?: typeof collectWorkspaceMemoryStatus;
   /**
    * `mutate({ strict: true })`-style middleware factory from PR 15.
    * Passed in so `server.ts` stays the single composition root for
@@ -78,6 +84,78 @@ export interface WorkspaceMemoryRouteDeps {
 
 const MAX_MEMORY_CONTENT_BYTES = 1024 * 1024;
 
+function sendWorkspaceMemoryWriteError(
+  res: Response,
+  err: unknown,
+  options: {
+    route: string;
+    scope: ServeContextFileScope;
+    mode: 'append' | 'replace';
+  },
+): void {
+  const { route, scope, mode } = options;
+  if (err instanceof WorkspaceMemoryWriteTimeoutError) {
+    writeStderrLine(
+      `qwen serve: ${route} timeout — file lock at ` +
+        `${err.filePath} did not acquire within ${err.timeoutMs}ms ` +
+        `(stalled FS / OneDrive / NFS)`,
+    );
+    const debug = isServeDebugMode();
+    res.status(500).json({
+      error: debug
+        ? err.message
+        : 'Workspace memory write timed out waiting for the per-file lock. Retry or restart the daemon.',
+      code: 'memory_write_timeout',
+      scope,
+      mode,
+      timeoutMs: err.timeoutMs,
+      ...(debug ? { filePath: err.filePath } : {}),
+    });
+    return;
+  }
+  if (err instanceof WorkspaceMemoryFileTooLargeError) {
+    writeStderrLine(
+      `qwen serve: ${route} refused — existing file ` +
+        `${err.filePath} is ${err.bytes} bytes (cap ${err.limit})`,
+    );
+    const debug = isServeDebugMode();
+    res.status(413).json({
+      error: debug
+        ? err.message
+        : 'Existing memory file exceeds the safe-append cap. Trim the file or POST with mode=replace.',
+      code: 'memory_file_too_large',
+      scope,
+      mode,
+      ...(debug ? { filePath: err.filePath } : {}),
+      bytes: err.bytes,
+      limit: err.limit,
+    });
+    return;
+  }
+  writeStderrLine(
+    `qwen serve: ${route} failed (scope=${scope} mode=${mode}): ${
+      err instanceof Error ? (err.stack ?? err.message) : String(err)
+    }`,
+  );
+  const osCode =
+    err && typeof err === 'object' && 'code' in err
+      ? (err as { code?: unknown }).code
+      : undefined;
+  const debug = isServeDebugMode();
+  res.status(500).json({
+    error: 'Failed to write workspace memory',
+    code: 'file_error',
+    scope,
+    mode,
+    ...(typeof osCode === 'string' ? { osCode } : {}),
+    ...(debug
+      ? {
+          errorMessage: err instanceof Error ? err.message : String(err),
+        }
+      : {}),
+  });
+}
+
 /** Mount the two memory routes on the supplied Express app. */
 export function mountWorkspaceMemoryRoutes(
   app: Application,
@@ -85,7 +163,8 @@ export function mountWorkspaceMemoryRoutes(
 ): void {
   app.get('/workspace/memory', async (_req, res) => {
     try {
-      const status = await collectWorkspaceMemoryStatus(deps.boundWorkspace);
+      const collectStatus = deps.collectStatus ?? collectWorkspaceMemoryStatus;
+      const status = await collectStatus(deps.boundWorkspace);
       res.status(200).json(status);
     } catch (err) {
       // Per-file stat failures are caught inside
@@ -214,89 +293,138 @@ export function mountWorkspaceMemoryRoutes(
         }
         res.status(200).json(responseBody);
       } catch (err) {
-        // 413 + structured fields for the "memory file is past the
-        // safe-append cap" case so callers can tell pathological
-        // file size apart from generic file errors. The helper
-        // refuses to pull >16 MB into memory on append; clients
-        // either trim the file or switch to mode=replace.
-        if (err instanceof WorkspaceMemoryWriteTimeoutError) {
-          writeStderrLine(
-            `qwen serve: POST /workspace/memory timeout — file lock at ` +
-              `${err.filePath} did not acquire within ${err.timeoutMs}ms ` +
-              `(stalled FS / OneDrive / NFS)`,
-          );
-          const debug = isServeDebugMode();
-          res.status(500).json({
-            error: debug
-              ? err.message
-              : 'Workspace memory write timed out waiting for the per-file lock. Retry or restart the daemon.',
-            code: 'memory_write_timeout',
-            scope,
-            mode,
-            timeoutMs: err.timeoutMs,
-            ...(debug ? { filePath: err.filePath } : {}),
-          });
-          return;
-        }
-        if (err instanceof WorkspaceMemoryFileTooLargeError) {
-          writeStderrLine(
-            `qwen serve: POST /workspace/memory refused — existing file ` +
-              `${err.filePath} is ${err.bytes} bytes (cap ${err.limit})`,
-          );
-          // Path disclosure: both `error` (which embeds the absolute
-          // file path in the constructor message — see
-          // `WorkspaceMemoryFileTooLargeError`) and `filePath` are
-          // gated behind QWEN_SERVE_DEBUG so production responses
-          // don't include `/Users/<x>/.qwen/...` in the body.
-          // Operators triaging an issue locally enable the debug
-          // toggle to get the full text; in default mode SDK
-          // callers branch on `code` + `bytes` / `limit` instead
-          // (the structured discriminator survives without the
-          // disclosure).
-          const debug = isServeDebugMode();
-          res.status(413).json({
-            error: debug
-              ? err.message
-              : 'Existing memory file exceeds the safe-append cap. Trim the file or POST with mode=replace.',
-            code: 'memory_file_too_large',
-            scope,
-            mode,
-            ...(debug ? { filePath: err.filePath } : {}),
-            bytes: err.bytes,
-            limit: err.limit,
-          });
-          return;
-        }
-        writeStderrLine(
-          `qwen serve: POST /workspace/memory failed (scope=${scope} mode=${mode}): ${
-            err instanceof Error ? (err.stack ?? err.message) : String(err)
-          }`,
-        );
-        // Surface enough context for callers to debug without leaking
-        // absolute paths in the response body. `osCode` (`EACCES` /
-        // `EROFS` / `EDQUOT` / `ENOSPC` / ...) stays unconditional so
-        // SDK clients can branch on the failure class. The full
-        // `errorMessage` (which often embeds the file path on Node's
-        // ENOENT/EACCES messages) is gated behind `QWEN_SERVE_DEBUG`.
-        // Without the debug toggle, callers see only the generic
-        // `error` + `code` + `osCode` envelope; the daemon's stderr
-        // log has the full message for the operator.
-        const osCode =
-          err && typeof err === 'object' && 'code' in err
-            ? (err as { code?: unknown }).code
-            : undefined;
-        const debug = isServeDebugMode();
-        res.status(500).json({
-          error: 'Failed to write workspace memory',
-          code: 'file_error',
+        sendWorkspaceMemoryWriteError(res, err, {
+          route: 'POST /workspace/memory',
           scope,
           mode,
-          ...(typeof osCode === 'string' ? { osCode } : {}),
-          ...(debug
-            ? {
-                errorMessage: err instanceof Error ? err.message : String(err),
-              }
-            : {}),
+        });
+      }
+    },
+  );
+}
+
+export function mountWorkspaceQualifiedMemoryRoutes(
+  app: Application,
+  deps: Omit<WorkspaceMemoryRouteDeps, 'bridge' | 'boundWorkspace'> & {
+    workspaceRegistry: WorkspaceRegistry;
+  },
+): void {
+  app.get('/workspaces/:workspace/memory', async (req, res) => {
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
+    if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+    try {
+      const collectStatus = deps.collectStatus ?? collectWorkspaceMemoryStatus;
+      res.status(200).json(await collectStatus(runtime.workspaceCwd));
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: GET /workspaces/:workspace/memory failed: ${
+          err instanceof Error ? (err.stack ?? err.message) : String(err)
+        }`,
+      );
+      res.status(500).json({
+        error: 'Failed to discover workspace memory',
+        code: 'memory_discovery_failed',
+      });
+    }
+  });
+
+  app.post(
+    '/workspaces/:workspace/memory',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const body = deps.safeBody(req);
+      if (body['scope'] !== 'workspace') {
+        res.status(400).json({
+          error:
+            'workspace-qualified memory routes only support "workspace" scope',
+          code: 'global_scope_not_supported_for_workspace_route',
+        });
+        return;
+      }
+      const modeRaw = body['mode'];
+      if (
+        modeRaw !== undefined &&
+        modeRaw !== 'append' &&
+        modeRaw !== 'replace'
+      ) {
+        res.status(400).json({
+          error: '`mode` must be "append", "replace", or omitted',
+          code: 'invalid_mode',
+        });
+        return;
+      }
+      const mode: 'append' | 'replace' =
+        modeRaw === 'replace' ? 'replace' : 'append';
+      const content = body['content'];
+      if (typeof content !== 'string') {
+        res.status(400).json({
+          error: '`content` must be a string',
+          code: 'invalid_content',
+        });
+        return;
+      }
+      if (Buffer.byteLength(content, 'utf8') > MAX_MEMORY_CONTENT_BYTES) {
+        res.status(400).json({
+          error: `\`content\` exceeds the ${MAX_MEMORY_CONTENT_BYTES}-byte limit`,
+          code: 'content_too_large',
+        });
+        return;
+      }
+      const clientId = deps.parseClientId(req, res);
+      if (clientId === null) return;
+      let originatorClientId: string | undefined;
+      if (clientId !== undefined) {
+        if (!runtime.bridge.knownClientIds().has(clientId)) {
+          res.status(400).json({
+            error: `Client id "${clientId}" is not registered for this workspace`,
+            code: 'invalid_client_id',
+            clientId,
+          });
+          return;
+        }
+        originatorClientId = clientId;
+      }
+      try {
+        const result = await writeWorkspaceContextFile({
+          scope: 'workspace',
+          mode,
+          content,
+          projectRoot: runtime.workspaceCwd,
+        });
+        if (result.changed) {
+          runtime.bridge.publishWorkspaceEvent({
+            type: 'memory_changed',
+            data: {
+              scope: 'workspace',
+              filePath: result.filePath,
+              mode,
+              bytesWritten: result.bytesWritten,
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        }
+        res.status(200).json({
+          ok: true,
+          filePath: result.filePath,
+          bytesWritten: result.bytesWritten,
+          mode,
+          changed: result.changed,
+        });
+      } catch (err) {
+        sendWorkspaceMemoryWriteError(res, err, {
+          route: 'POST /workspaces/:workspace/memory',
+          scope: 'workspace',
+          mode,
         });
       }
     },

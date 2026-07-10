@@ -27,7 +27,11 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   RestoreInProgressError,
+  SessionArtifactAuthorizationError,
+  SessionArchivedError,
+  SessionArchivingError,
   SessionBusyError,
+  SessionConflictError,
   SessionLimitExceededError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
@@ -37,6 +41,7 @@ import {
   WorkspaceInitRaceError,
   WorkspaceInitSymlinkError,
   WorkspaceMismatchError,
+  TotalSessionLimitExceededError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 
@@ -241,12 +246,46 @@ export function sendBridgeError(
     res.status(404).json({ error: err.message, sessionId: err.sessionId });
     return;
   }
+  if (err instanceof SessionArchivedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'session_archived',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionConflictError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'session_conflict',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionArchivingError) {
+    res.set('Retry-After', '5');
+    res.status(409).json({
+      error: err.message,
+      code: 'session_archiving',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
   if (err instanceof InvalidClientIdError) {
     res.status(400).json({
       error: err.message,
       code: 'invalid_client_id',
       sessionId: err.sessionId,
       clientId: err.clientId,
+    });
+    return;
+  }
+  if (err instanceof SessionArtifactAuthorizationError) {
+    res.status(403).json({
+      error: err.message,
+      code: 'session_artifact_forbidden',
+      sessionId: err.sessionId,
+      artifactId: err.artifactId,
     });
     return;
   }
@@ -340,6 +379,37 @@ export function sendBridgeError(
       error: err.message,
       code: 'session_limit_exceeded',
       limit: err.limit,
+      scope: 'workspace',
+    });
+    return;
+  }
+  if (err instanceof TotalSessionLimitExceededError) {
+    const totalSessionError = err as TotalSessionLimitExceededError & {
+      operation?: string;
+      workspaceCwd?: string;
+      sourceSessionId?: string;
+    };
+    daemonLog?.warn('total session admission rejected', {
+      ...(ctx?.route ? { route: ctx.route } : {}),
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+      limit: totalSessionError.limit,
+      scope: totalSessionError.scope,
+      ...(totalSessionError.operation
+        ? { operation: totalSessionError.operation }
+        : {}),
+      ...(totalSessionError.workspaceCwd
+        ? { workspaceCwd: totalSessionError.workspaceCwd }
+        : {}),
+      ...(totalSessionError.sourceSessionId
+        ? { sourceSessionId: totalSessionError.sourceSessionId }
+        : {}),
+    });
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'session_limit_exceeded',
+      limit: err.limit,
+      scope: err.scope,
     });
     return;
   }

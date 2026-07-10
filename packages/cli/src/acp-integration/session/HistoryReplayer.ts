@@ -9,6 +9,7 @@ import type {
   AgentResultDisplay,
   SlashCommandRecordPayload,
   NotificationRecordPayload,
+  HistoryGap,
 } from '@qwen-code/qwen-code-core';
 import type {
   Content,
@@ -17,6 +18,11 @@ import type {
 import type { SessionContext } from './types.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
+import { getToolResultCallId } from '../../utils/chat-record-tool-call-id.js';
+import {
+  formatHistoryGapNotice,
+  indexGapsByChild,
+} from '../../ui/utils/history-gap-notice.js';
 
 export const MISSING_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
@@ -55,13 +61,21 @@ export class HistoryReplayer {
    * Replays all chat records from a loaded session.
    *
    * @param records - Array of chat records to replay
+   * @param gaps - Optional detected history gaps; a visible notice is emitted
+   *   immediately before each gap's child record so the user sees that an
+   *   earlier segment was lost rather than assuming the halves are contiguous.
    */
-  async replay(records: ChatRecord[]): Promise<void> {
+  async replay(records: ChatRecord[], gaps?: HistoryGap[]): Promise<void> {
     this.pendingReplayToolCalls.clear();
+    const gapByChildUuid = indexGapsByChild(gaps);
     try {
       let replayError: unknown;
       try {
         for (const record of records) {
+          const gap = gapByChildUuid.get(record.uuid);
+          if (gap) {
+            await this.emitHistoryGapNotice(gap, record.timestamp);
+          }
           await this.replayRecord(record);
         }
       } catch (error) {
@@ -112,6 +126,7 @@ export class HistoryReplayer {
               await this.messageEmitter.emitUserMessage(
                 displayText,
                 record.timestamp,
+                record.subtype === 'cron' ? { source: 'cron' } : undefined,
               );
             }
             break;
@@ -176,6 +191,24 @@ export class HistoryReplayer {
     } finally {
       this.setActiveRecordId(null);
     }
+  }
+
+  /**
+   * Emits a visible notice marking a break in the persisted history chain: an
+   * earlier segment was physically lost (storage interruption) and could not be
+   * recovered, so the surviving turns below must not be read as contiguous with
+   * whatever came before the gap. Uses the agent message channel — the same one
+   * used for other system notices (see MessageEmitter.emitStopHookLoop) — so no
+   * new session-update kind is needed.
+   */
+  private async emitHistoryGapNotice(
+    gap: HistoryGap,
+    timestamp?: string,
+  ): Promise<void> {
+    await this.messageEmitter.emitAgentMessage(
+      formatHistoryGapNotice(gap),
+      timestamp,
+    );
   }
 
   /**
@@ -250,7 +283,7 @@ export class HistoryReplayer {
     }
 
     const result = record.toolCallResult;
-    const callId = this.getToolResultCallId(record);
+    const callId = getToolResultCallId(record);
     this.pendingReplayToolCalls.delete(callId);
 
     // Extract tool name from the function response in message if available
@@ -262,6 +295,7 @@ export class HistoryReplayer {
       success: !result?.error,
       message: record.message.parts,
       resultDisplay: result?.resultDisplay,
+      artifacts: result?.artifacts,
       // For TodoWriteTool fallback, try to extract args from the record
       // Note: args aren't stored in tool_result records by default
       args: undefined,
@@ -377,29 +411,6 @@ export class HistoryReplayer {
       }
     }
     return '';
-  }
-
-  private getToolResultCallId(record: ChatRecord): string {
-    const resultCallId = record.toolCallResult?.callId;
-    if (typeof resultCallId === 'string' && resultCallId.length > 0) {
-      return resultCallId;
-    }
-    return this.extractFunctionResponseIdFromRecord(record) ?? record.uuid;
-  }
-
-  private extractFunctionResponseIdFromRecord(
-    record: ChatRecord,
-  ): string | undefined {
-    if (record.message?.parts) {
-      for (const part of record.message.parts) {
-        const id =
-          'functionResponse' in part ? part.functionResponse?.id : undefined;
-        if (typeof id === 'string' && id.length > 0) {
-          return id;
-        }
-      }
-    }
-    return undefined;
   }
 
   private setActiveRecordId(recordId: string | null, timestamp?: string): void {

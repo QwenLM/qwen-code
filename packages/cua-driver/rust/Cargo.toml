@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/cua-driver",
+    "crates/cua-driver-testkit",
     "crates/cua-driver-uia",
     "crates/cua-driver-core",
     "crates/platform-macos",
@@ -13,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.8"
+version = "0.7.1"
 edition = "2021"
 authors = ["trycua"]
 license = "MIT"

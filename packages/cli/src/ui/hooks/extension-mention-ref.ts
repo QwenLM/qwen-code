@@ -4,77 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  type Config,
-  type Extension,
-  stripTerminalControlSequences,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
 import { t } from '../../i18n/index.js';
-
-/**
- * Prefix used for extension mention references. When the user selects an
- * extension from the `@` autocomplete, the inserted value is `ext:<name>`.
- * This prefix disambiguates extension mentions from file paths and MCP
- * resource references at parse time.
- */
-export const EXTENSION_REF_PREFIX = 'ext:';
-
-/**
- * Parses an `ext:<name>` reference string. Returns the extension name
- * portion if the input starts with the extension prefix, or `null` otherwise.
- */
-export function parseExtensionRef(pathName: string): { name: string } | null {
-  if (!pathName.startsWith(EXTENSION_REF_PREFIX)) return null;
-  const name = pathName.slice(EXTENSION_REF_PREFIX.length);
-  if (!name) return null;
-  return { name };
-}
-
-/**
- * Builds the canonical `ext:<name>` reference string for an extension.
- */
-export function buildExtensionRef(extensionName: string): string {
-  return `${EXTENSION_REF_PREFIX}${extensionName}`;
-}
-
-/**
- * Case-insensitive match of an extension name against a list of extensions.
- * Matches against `extension.name` and `extension.config.name` (the canonical
- * slugs). `displayName` is intentionally excluded: it often contains spaces
- * which the `@`-path parser truncates at, so matching would be unreliable.
- */
-export function matchExtensionByRef(
-  name: string,
-  extensions: Extension[],
-): Extension | undefined {
-  const lower = name.toLowerCase();
-  return extensions.find(
-    (ext) =>
-      ext.name.toLowerCase() === lower ||
-      ext.config.name.toLowerCase() === lower,
-  );
-}
-
-/**
- * Regex matching Unicode bidi override/isolate/mark characters that
- * `stripTerminalControlSequences` leaves intact.
- */
-const BIDI_CONTROL_RE = /[‎‏؜⁦⁧⁨⁩‪‫‬‭‮]/g;
-
-/**
- * Normalizes an untrusted display string for safe UI rendering. Strips
- * terminal control sequences and bidi overrides, collapses/trims whitespace,
- * and returns `null` when no safe text remains.
- */
-export function sanitizeDisplayText(raw: string): string | null {
-  const stripped = stripTerminalControlSequences(raw)
-    .replace(BIDI_CONTROL_RE, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return stripped.length > 0 ? stripped : null;
-}
+export {
+  EXTENSION_REF_PREFIX,
+  parseExtensionRef,
+  buildExtensionRef,
+  matchExtensionByRef,
+  sanitizeDisplayText,
+  buildExtensionContextText,
+} from '../../utils/extension-mention.js';
+import {
+  buildExtensionRef,
+  sanitizeDisplayText,
+} from '../../utils/extension-mention.js';
 
 /**
  * Returns autocomplete suggestions for extensions matching the given pattern.
@@ -119,60 +64,4 @@ export function getExtensionSuggestions(
       sourceBadge: t('Extension'),
       isDirectory: false,
     }));
-}
-
-/**
- * Builds a structured context text block for an extension that has been
- * @-mentioned. This text is injected into the user message so the model
- * knows about the extension's capabilities.
- */
-export function buildExtensionContextText(extension: Extension): string {
-  const displayName =
-    sanitizeDisplayText(extension.displayName || extension.name) ||
-    extension.name;
-  const lines: string[] = [];
-
-  lines.push(
-    `--- Extension: ${displayName} (untrusted third-party content) ---`,
-  );
-  if (extension.config.description) {
-    const desc = sanitizeDisplayText(extension.config.description);
-    if (desc) {
-      lines.push(desc);
-      lines.push('');
-    }
-  }
-
-  const capabilities: string[] = [];
-
-  if (extension.skills && extension.skills.length > 0) {
-    const skillNames = extension.skills
-      .map((s) => sanitizeDisplayText(s.name) || s.name)
-      .join(', ');
-    capabilities.push(`- Skills: ${skillNames} (invoke via /<skill-name>)`);
-  }
-
-  if (extension.mcpServers && Object.keys(extension.mcpServers).length > 0) {
-    const serverNames = Object.keys(extension.mcpServers)
-      .map((n) => sanitizeDisplayText(n) || n)
-      .join(', ');
-    capabilities.push(`- MCP Servers: ${serverNames}`);
-  }
-
-  if (extension.agents && extension.agents.length > 0) {
-    const agentNames = extension.agents
-      .map((a) => sanitizeDisplayText(a.name) || a.name)
-      .join(', ');
-    capabilities.push(`- Agents: ${agentNames}`);
-  }
-
-  if (capabilities.length > 0) {
-    lines.push('Available capabilities from this extension:');
-    lines.push(...capabilities);
-    lines.push('');
-  }
-
-  lines.push(`--- End Extension: ${displayName} ---`);
-
-  return lines.join('\n');
 }

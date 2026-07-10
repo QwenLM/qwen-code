@@ -23,11 +23,16 @@ import type {
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
   DaemonMidTurnMessageResult,
+  DaemonPendingPromptsResult,
+  DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionLspStatus,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
+  DaemonSessionArtifactInput,
+  DaemonSessionArtifactMutationResult,
+  DaemonSessionArtifactsEnvelope,
   DaemonSessionState,
   DaemonSession,
   DaemonSessionStatsStatus,
@@ -405,6 +410,33 @@ export class DaemonSessionClient {
     return await this.client.heartbeat(this.sessionId, this.clientId);
   }
 
+  async artifacts(): Promise<DaemonSessionArtifactsEnvelope> {
+    return await this.client.listSessionArtifacts(
+      this.sessionId,
+      this.clientId,
+    );
+  }
+
+  async addArtifact(
+    artifact: DaemonSessionArtifactInput,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.client.addSessionArtifact(
+      this.sessionId,
+      artifact,
+      this.clientId,
+    );
+  }
+
+  async removeArtifact(
+    artifactId: string,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.client.removeSessionArtifact(
+      this.sessionId,
+      artifactId,
+      this.clientId,
+    );
+  }
+
   async setModel(modelId: string): Promise<SetModelResult> {
     return await this.client.setSessionModel(
       this.sessionId,
@@ -478,6 +510,20 @@ export class DaemonSessionClient {
   ): Promise<DaemonMidTurnMessageResult> {
     return await this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  async getPendingPrompts(): Promise<DaemonPendingPromptsResult> {
+    return await this.client.getPendingPrompts(this.sessionId, {
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  async removePendingPrompt(
+    promptId: string,
+  ): Promise<DaemonRemovePendingPromptResult> {
+    return await this.client.removePendingPrompt(this.sessionId, promptId, {
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
@@ -572,6 +618,10 @@ export class DaemonSessionClient {
 
   async close(): Promise<void> {
     return await this.client.closeSession(this.sessionId, this.clientId);
+  }
+
+  async detach(): Promise<void> {
+    return await this.client.detachSession(this.sessionId, this.clientId);
   }
 
   async updateMetadata(metadata: {

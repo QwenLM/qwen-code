@@ -37,8 +37,11 @@ import {
   AppContainer,
   dedupeNewestFirst,
   getNextRenderMode,
+  isInputActiveForState,
   isRenderModeToggleKey,
   mergeStartupWarnings,
+  shouldAutoOpenSkillReview,
+  shouldDrainMessageQueue,
 } from './AppContainer.js';
 import {
   formatSessionWindowTitle,
@@ -65,6 +68,7 @@ import {
 import {
   type HistoryItem,
   type HistoryItemWithoutId,
+  StreamingState,
   ToolCallStatus,
 } from './types.js';
 import type { RestoreOption } from './components/RewindSelector.js';
@@ -821,6 +825,48 @@ describe('AppContainer State Management', () => {
           />,
         );
       }).not.toThrow();
+    });
+
+    it('keeps input active while compression is processing', () => {
+      expect(
+        isInputActiveForState({
+          initError: null,
+          isProcessing: true,
+          hasPendingCompression: true,
+          streamingState: StreamingState.Idle,
+        }),
+      ).toBe(true);
+
+      expect(
+        isInputActiveForState({
+          initError: null,
+          isProcessing: true,
+          hasPendingCompression: false,
+          streamingState: StreamingState.Idle,
+        }),
+      ).toBe(false);
+    });
+
+    it('does not drain queued messages while compression is processing', () => {
+      expect(
+        shouldDrainMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: true,
+          dialogsVisible: false,
+          messageQueueLength: 1,
+        }),
+      ).toBe(false);
+
+      expect(
+        shouldDrainMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          messageQueueLength: 1,
+        }),
+      ).toBe(true);
     });
 
     it('submits /btw immediately instead of queueing while responding', () => {
@@ -3448,106 +3494,123 @@ describe('AppContainer State Management', () => {
       // structurally present.
       expect(abortSpy).not.toHaveBeenCalled();
     });
-    describe('Ctrl+O compact mode toggle (issue #3899)', () => {
-      const ctrlOKey: Key = {
-        name: 'o',
-        ctrl: true,
+  });
+
+  describe('Transcript (Ctrl+O) integration', () => {
+    // The frozen transcript (TranscriptView) renders its title row as the
+    // literal "Transcript"; the main view never does, so its presence in the
+    // rendered frame is a reliable open/closed signal.
+    const TRANSCRIPT_MARKER = 'Transcript';
+
+    const makeKey = (overrides: Partial<Key>): Key =>
+      ({
+        name: '',
+        ctrl: false,
         meta: false,
         shift: false,
         paste: false,
-        sequence: '',
-      };
+        sequence: '',
+        ...overrides,
+      }) as Key;
 
-      // The global handler is the one that calls compactToggleHasVisualEffect.
-      // Mirrors the discriminator pattern used by the renderMode test above.
-      const findGlobalKeypressHandler = () =>
-        mockedUseKeypress.mock.calls
-          .map((call) => call[0])
-          .reverse()
-          .find(
-            (handler): handler is (key: Key) => void =>
-              typeof handler === 'function' &&
-              handler.toString().includes('compactToggleHasVisualEffect'),
-          );
+    // The global keypress handler owns Ctrl+O / the transcript close keys; it is
+    // the registered useKeypress handler whose body references TOGGLE_TRANSCRIPT.
+    const getGlobalKeypress = () =>
+      mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('TOGGLE_TRANSCRIPT'),
+        ) as ((key: Key) => void) | undefined;
 
-      it('skips refreshStatic on Ctrl+O when history has no tool_group/thought items', () => {
-        mockedUseHistory.mockReturnValue({
-          history: [
-            { type: 'user', id: 1, text: 'hi' },
-            { type: 'gemini', id: 2, text: 'hello' },
-          ],
-          addItem: vi.fn(),
-          updateItem: vi.fn(),
-          clearItems: vi.fn(),
-          loadHistory: vi.fn(),
-          truncateToItem: vi.fn(),
-        });
+    const ctrlO = makeKey({ name: 'o', ctrl: true, sequence: '\x0f' });
 
-        render(
-          <AppContainer
-            config={mockConfig}
-            settings={mockSettings}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
-        mockStdout.write.mockClear();
+    const renderApp = () =>
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
 
-        const handler = findGlobalKeypressHandler();
-        expect(handler).toBeDefined();
-        handler!(ctrlOKey);
+    it('Ctrl+O installs the TranscriptView in the rendered tree', () => {
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress();
+      expect(handleKeypress).toBeDefined();
+      // Baseline: the marker also confirms the main view doesn't render it.
+      expect(lastFrame()).not.toContain(TRANSCRIPT_MARKER);
+      act(() => handleKeypress!(ctrlO));
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+    });
 
-        // refreshStatic writes ansiEscapes.clearTerminal — its absence
-        // proves we took the no-op short-circuit.
-        expect(mockStdout.write).not.toHaveBeenCalledWith(
-          ansiEscapes.clearTerminal,
-        );
+    it.each([
+      ['Esc', makeKey({ name: 'escape', sequence: '\x1b' })],
+      ['q', makeKey({ name: 'q', sequence: 'q' })],
+      ['Ctrl+C', makeKey({ name: 'c', ctrl: true, sequence: '\x03' })],
+      ['Ctrl+D', makeKey({ name: 'd', ctrl: true, sequence: '\x04' })],
+      // Ctrl+O is the toggle: pressing it again while open also closes.
+      ['Ctrl+O', ctrlO],
+    ])('%s while open removes the TranscriptView', (_label, closeKey) => {
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress()!;
+      act(() => handleKeypress(ctrlO));
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+      act(() => handleKeypress(closeKey));
+      expect(lastFrame()).not.toContain(TRANSCRIPT_MARKER);
+    });
+
+    it.each([
+      ['Ctrl+Q', makeKey({ name: 'q', ctrl: true, sequence: '\x11' })],
+      ['Alt+Q', makeKey({ name: 'q', meta: true, sequence: '\x1bq' })],
+      ['Shift+Q', makeKey({ name: 'q', shift: true, sequence: 'Q' })],
+    ])(
+      '%s does NOT close the transcript (bare-q modifier guard)',
+      (_l, modQ) => {
+        const { lastFrame } = renderApp();
+        const handleKeypress = getGlobalKeypress()!;
+        act(() => handleKeypress(ctrlO));
+        expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+        act(() => handleKeypress(modQ));
+        // Only a bare `q` closes; modified variants stay swallowed but open.
+        expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+      },
+    );
+
+    it('swallows arbitrary keys while open and keeps the transcript open', () => {
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress()!;
+      act(() => handleKeypress(ctrlO));
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+      expect(() =>
+        act(() => handleKeypress(makeKey({ name: 'x', sequence: 'x' }))),
+      ).not.toThrow();
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+    });
+
+    it('auto-closes when a blocking confirmation appears (anti-deadlock)', () => {
+      // A blocking prompt would be invisible behind the alt-screen transcript;
+      // the needsBlockingInput effect must close it on the same commit.
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'waiting_for_confirmation',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
-
-      it('skips refreshStatic on Ctrl+O when history contains only tool_group (no visual effect)', () => {
-        mockedUseHistory.mockReturnValue({
-          history: [
-            { type: 'user', id: 1, text: 'run ls' },
-            {
-              type: 'tool_group',
-              id: 2,
-              tools: [
-                {
-                  callId: 'c1',
-                  name: 'shell',
-                  description: 'shell description',
-                  status: ToolCallStatus.Success,
-                  resultDisplay: undefined,
-                  confirmationDetails: undefined,
-                },
-              ],
-            },
-          ],
-          addItem: vi.fn(),
-          updateItem: vi.fn(),
-          clearItems: vi.fn(),
-          loadHistory: vi.fn(),
-          truncateToItem: vi.fn(),
-        });
-
-        render(
-          <AppContainer
-            config={mockConfig}
-            settings={mockSettings}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
-        mockStdout.write.mockClear();
-
-        const handler = findGlobalKeypressHandler();
-        expect(handler).toBeDefined();
-        handler!(ctrlOKey);
-
-        expect(mockStdout.write).not.toHaveBeenCalledWith(
-          ansiEscapes.clearTerminal,
-        );
-      });
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress()!;
+      act(() => handleKeypress(ctrlO));
+      // openTranscript sets the freeze, but the anti-deadlock effect tears it
+      // back down on the same commit, so it never stays visible.
+      expect(lastFrame()).not.toContain(TRANSCRIPT_MARKER);
     });
   });
 
@@ -4066,6 +4129,83 @@ describe('AppContainer State Management', () => {
       capturedUIActions.openRewindSelector();
 
       expect(mockAddItemDisabled).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Skill review auto-open gating (shouldAutoOpenSkillReview)', () => {
+    const pending = {
+      taskId: 'skill-task-1',
+      skills: [
+        {
+          name: 'auto-skill-alpha',
+          description: 'does alpha',
+          stagedManifestPath: '/tmp/staged/auto-skill-alpha/SKILL.md',
+        },
+      ],
+    };
+
+    /** The baseline where every gate is satisfied and the dialog opens. */
+    const openable = {
+      pending,
+      streamingState: StreamingState.Idle,
+      isMemoryDialogOpen: false,
+      autoSkillEnabled: true,
+      dismissedTaskIds: new Set<string>(),
+    };
+
+    it('opens when idle with an undismissed pending batch and auto-skill on', () => {
+      expect(shouldAutoOpenSkillReview(openable)).toBe(true);
+    });
+
+    it('does NOT open while auto-skill is disabled (the turn-off flow)', () => {
+      // The state right after "Turn off auto-generated skills": the batch
+      // stays pending (turn-off closes without dismissing), so only the live
+      // flag keeps it from re-popping.
+      expect(
+        shouldAutoOpenSkillReview({ ...openable, autoSkillEnabled: false }),
+      ).toBe(false);
+    });
+
+    it('does NOT open over an open /memory dialog', () => {
+      expect(
+        shouldAutoOpenSkillReview({ ...openable, isMemoryDialogOpen: true }),
+      ).toBe(false);
+    });
+
+    it('opens again once /memory closes with auto-skill re-enabled', () => {
+      // The re-enable flow: same inputs as the case above except /memory has
+      // been closed (the effect re-runs on isMemoryDialogOpen for exactly
+      // this transition), so the pending batch resurfaces.
+      expect(
+        shouldAutoOpenSkillReview({ ...openable, isMemoryDialogOpen: false }),
+      ).toBe(true);
+    });
+
+    it('does NOT reopen a batch the user dismissed with Esc', () => {
+      expect(
+        shouldAutoOpenSkillReview({
+          ...openable,
+          dismissedTaskIds: new Set([pending.taskId]),
+        }),
+      ).toBe(false);
+    });
+
+    it('does NOT open while streaming or with no pending skills', () => {
+      expect(
+        shouldAutoOpenSkillReview({
+          ...openable,
+          streamingState: StreamingState.Responding,
+        }),
+      ).toBe(false);
+      expect(shouldAutoOpenSkillReview({ ...openable, pending: null })).toBe(
+        false,
+      );
+      expect(
+        shouldAutoOpenSkillReview({
+          ...openable,
+          pending: { taskId: 'skill-task-1', skills: [] },
+        }),
+      ).toBe(false);
     });
   });
 });

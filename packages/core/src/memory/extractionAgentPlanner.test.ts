@@ -10,6 +10,7 @@ import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { getAutoMemoryRoot, getUserAutoMemoryRoot } from './paths.js';
 import { runForkedAgent, getCacheSafeParams } from '../utils/forkedAgent.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 vi.mock('./scan.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./scan.js')>();
@@ -43,6 +44,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
     getSessionId: vi.fn().mockReturnValue('session-1'),
     getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
     getApprovalMode: vi.fn(),
+    getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
   } as unknown as Config;
 
   beforeEach(() => {
@@ -75,6 +77,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
       status: 'completed',
       finalText: '',
       filesTouched: ['/tmp/auto-memory/user/prefs.md'],
+      filesWritten: ['/tmp/auto-memory/user/prefs.md'],
     });
 
     const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
@@ -83,6 +86,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
       touchedTopics: ['user'],
       touchedProjectScope: true,
       touchedUserScope: false,
+      hasToolActivity: true,
       systemMessage: 'Managed auto-memory updated: user.md',
     });
     expect(runForkedAgent).toHaveBeenCalledWith(
@@ -102,11 +106,44 @@ describe('runAutoMemoryExtractionByAgent', () => {
     );
   });
 
+  it('threads the configured memory agent timeout into the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+    vi.mocked(mockConfig.getMemoryAgentTimeoutMinutes).mockReturnValueOnce(30);
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTimeMinutes: 30 }),
+    );
+  });
+
+  it('passes 0 through to disable the time limit', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+    vi.mocked(mockConfig.getMemoryAgentTimeoutMinutes).mockReturnValueOnce(0);
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTimeMinutes: 0 }),
+    );
+  });
+
   it('returns empty touchedTopics when agent touches no files', async () => {
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       finalText: '',
       filesTouched: [],
+      filesWritten: [],
     });
 
     const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
@@ -114,8 +151,38 @@ describe('runAutoMemoryExtractionByAgent', () => {
       touchedTopics: [],
       touchedProjectScope: false,
       touchedUserScope: false,
+      hasToolActivity: false,
       systemMessage: undefined,
     });
+  });
+
+  it('uses a scoped config that allows shell and denies outside writes', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
+    const permissionManager = call?.config.getPermissionManager?.();
+    expect(permissionManager).toBeDefined();
+    expect(await permissionManager!.isToolEnabled(ToolNames.SHELL)).toBe(true);
+    expect(
+      permissionManager!.findMatchingDenyRule({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: '/tmp/outside.md',
+      }),
+    ).toBe(
+      'ManagedAutoMemory(write_file: only within /tmp/user-memory or /tmp/auto-memory)',
+    );
+    expect(
+      await permissionManager!.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: '/tmp/outside.md',
+      }),
+    ).toBe('deny');
   });
 
   it('throws when getCacheSafeParams returns null', async () => {
@@ -146,6 +213,11 @@ describe('runAutoMemoryExtractionByAgent', () => {
         '/tmp/auto-memory/reference/api.md',
         '/tmp/some/other/file.ts',
       ],
+      filesWritten: [
+        '/tmp/auto-memory/project/arch.md',
+        '/tmp/auto-memory/reference/api.md',
+        '/tmp/some/other/file.ts',
+      ],
     });
 
     const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
@@ -162,6 +234,10 @@ describe('runAutoMemoryExtractionByAgent', () => {
       status: 'completed',
       finalText: '',
       filesTouched: [
+        '/tmp/user-memory/user/role.md',
+        '/tmp/user-memory/feedback/terse.md',
+      ],
+      filesWritten: [
         '/tmp/user-memory/user/role.md',
         '/tmp/user-memory/feedback/terse.md',
       ],
@@ -200,6 +276,10 @@ describe('runAutoMemoryExtractionByAgent', () => {
         'C:/Users/foo/.qwen/projects/proj/memory/project/release.md',
         'C:/Users/foo/.qwen/memories/user/role.md',
       ],
+      filesWritten: [
+        'C:/Users/foo/.qwen/projects/proj/memory/project/release.md',
+        'C:/Users/foo/.qwen/memories/user/role.md',
+      ],
     });
 
     try {
@@ -223,6 +303,10 @@ describe('runAutoMemoryExtractionByAgent', () => {
       status: 'completed',
       finalText: '',
       filesTouched: [
+        '/tmp/auto-memory\\project\\arch.md',
+        '/tmp/user-memory\\user\\role.md',
+      ],
+      filesWritten: [
         '/tmp/auto-memory\\project\\arch.md',
         '/tmp/user-memory\\user\\role.md',
       ],
@@ -261,6 +345,10 @@ describe('runAutoMemoryExtractionByAgent', () => {
       status: 'completed',
       finalText: '',
       filesTouched: [
+        '/tmp/user-memory/user/role.md',
+        '/tmp/auto-memory/project/release.md',
+      ],
+      filesWritten: [
         '/tmp/user-memory/user/role.md',
         '/tmp/auto-memory/project/release.md',
       ],

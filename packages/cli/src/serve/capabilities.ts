@@ -44,6 +44,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_prompt: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
+  session_artifacts: { since: 'v1' },
+  session_artifacts_persistence: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
   // `GET /session/:id/events`. Old daemons silently lack both — SDK
@@ -67,6 +69,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // hierarchical QWEN.md state and accepts append/replace writes scoped
   // to either the bound workspace or the global ~/.qwen directory.
   workspace_memory: { since: 'v1' },
+  workspace_memory_remember: {
+    since: 'v1',
+    modes: ['workspace', 'clean'],
+  },
+  workspace_memory_forget: { since: 'v1' },
+  workspace_memory_dream: { since: 'v1' },
   // Workspace agents CRUD (`GET/POST /workspace/agents` +
   // `GET/POST/DELETE /workspace/agents/:agentType`). Wraps
   // `SubagentManager` over HTTP so remote clients can list / read /
@@ -84,7 +92,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_lsp: { since: 'v1' },
   session_status: { since: 'v1' },
   session_close: { since: 'v1' },
+  session_archive: { since: 'v1' },
   session_metadata: { since: 'v1' },
+  session_organization: { since: 'v1' },
+  session_export: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
   // counter exposed on `GET /workspace/mcp`, a `--mcp-client-budget=N`
   // flag with `--mcp-budget-mode={enforce, warn, off}`, and a
@@ -248,21 +259,46 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_branch: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
+  // Daemon supports reloading its daemon-managed channel worker via
+  // `POST /workspace/channel/reload`. The worker is stopped and relaunched;
+  // on relaunch it re-reads settings.json (channels / proxy / per-channel
+  // model), so channel settings changes apply without a full daemon restart.
+  // Advertised CONDITIONALLY — only when the daemon was started with
+  // `--channel` (i.e. a channel worker exists to reload).
+  channel_reload: { since: 'v1' },
+  // Multi-workspace sessions closed loop (issue #6378 Phase 2a). Advertised
+  // only when one daemon hosts more than one registered workspace runtime.
+  multi_workspace_sessions: { since: 'v1' },
+  // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
+  // Covers core file/status/permissions/trust/lifecycle/MCP/tool, memory,
+  // workspace agent CRUD, and persisted session organization surfaces.
+  // Workspace-qualified settings also require the existing
+  // `workspace_settings` tag because that surface depends on settings
+  // persistence. ACP/WebSocket, auth, voice, and extensions stay on their
+  // existing primary-workspace routes in this phase.
+  workspace_qualified_rest_core: { since: 'v1' },
   // Phase 2 "reverse tool channel" (issue #5626). A connected WS client (e.g.
   // the Chrome extension) can host an MCP server that the daemon's agent
   // calls by carrying `mcp_message` JSON-RPC frames over the daemon WS,
   // reusing the SDK-MCP-server control-plane pattern. Inbound WS frame types:
   // `mcp_register` { server }, `mcp_message` { id, server, payload }
   // (bidirectional, request/response correlated by `id`), `mcp_unregister`
-  // { server }. Advertised CONDITIONALLY — only when the operator opts in
-  // (the public contract is still settling per #5626), so clients pre-flight
-  // this tag before attempting to register a client-hosted server.
+  // { server }. Advertised CONDITIONALLY so clients pre-flight this tag before
+  // attempting to register a client-hosted server. `runQwenServe` enables it
+  // only when explicitly requested by option or env.
   client_mcp_over_ws: { since: 'v1' },
   // Plan C "CDP tunnel" (issue #5626): the daemon exposes a `/cdp` WebSocket
-  // where a loopback puppeteer client (chrome-devtools-mcp) drives ONE real tab
+  // where a loopback CDP client drives ONE real tab
   // via the extension's `chrome.debugger`, tunneled over `/acp` as `cdp_*`
-  // frames. Advertised only when the operator opts in (contract still settling).
+  // frames. Advertised when explicitly enabled or when the daemon is serving a
+  // Chrome extension origin.
   cdp_tunnel_over_ws: { since: 'v1' },
+  // Browser automation MCP tools are available only when the CDP tunnel is on
+  // and the operator has configured an external stdio adapter via
+  // QWEN_CDP_MCP_COMMAND. This is separate from `cdp_tunnel_over_ws`: a daemon
+  // may expose the tunnel while intentionally not bundling/registering a
+  // chrome-devtools MCP adapter.
+  browser_automation_mcp: { since: 'v1' },
   // Daemon hosts the `/voice/stream` WebSocket: the browser captures audio and
   // streams raw PCM, the daemon transcribes server-side via the configured
   // `voiceModel` (credentials never reach the client). Advertised
@@ -291,21 +327,32 @@ export interface AdvertiseFeatureToggles {
   persistSettingAvailable?: boolean;
   voiceTranscriptionAvailable?: boolean;
   sessionShellCommandEnabled?: boolean;
+  sessionArtifactsPersistenceAvailable?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
   /**
+   * Whether the daemon exposes the channel worker reload route
+   * (`channel_reload`). Set only when the daemon was started with
+   * `--channel`, so a channel worker exists to reload.
+   */
+  channelReloadAvailable?: boolean;
+  /**
    * Whether the daemon will accept client-hosted MCP servers over the WS
-   * (`client_mcp_over_ws`, issue #5626). Opt-in: the contract is still
-   * settling, so the tag is advertised only when explicitly enabled.
+   * (`client_mcp_over_ws`, issue #5626).
    */
   clientMcpOverWsEnabled?: boolean;
   /**
    * Whether the daemon exposes the Plan C `/cdp` tunnel endpoint
-   * (`cdp_tunnel_over_ws`, issue #5626). Opt-in: the contract is still
-   * settling, so the tag is advertised only when explicitly enabled.
+   * (`cdp_tunnel_over_ws`, issue #5626).
    */
   cdpTunnelOverWsEnabled?: boolean;
+  /**
+   * Whether the daemon can register browser automation MCP tools for the CDP
+   * tunnel (`browser_automation_mcp`, issue #5626).
+   */
+  browserAutomationMcpAvailable?: boolean;
   voiceWsAvailable?: boolean;
+  multiWorkspaceSessionsEnabled?: boolean;
 }
 
 /**
@@ -370,10 +417,23 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'session_shell_command',
     (toggles) => toggles.sessionShellCommandEnabled === true,
   ],
+  [
+    'session_artifacts_persistence',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
+  ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
+  ['channel_reload', (toggles) => toggles.channelReloadAvailable === true],
+  [
+    'multi_workspace_sessions',
+    (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
+  ],
   ['client_mcp_over_ws', (toggles) => toggles.clientMcpOverWsEnabled === true],
   ['cdp_tunnel_over_ws', (toggles) => toggles.cdpTunnelOverWsEnabled === true],
+  [
+    'browser_automation_mcp',
+    (toggles) => toggles.browserAutomationMcpAvailable === true,
+  ],
   [
     // Advertised whenever the `/voice/stream` WS endpoint exists. A configured
     // token (or `--require-auth`) no longer suppresses it: browsers can't set

@@ -147,6 +147,14 @@ interface ToolGroupMessageProps {
   /** Pre-computed count of read ops from managed-auto-memory files. */
   memoryReadCount?: number;
   isUserInitiated?: boolean;
+  /**
+   * Transcript full-detail mode (Ctrl+O). When true, force `forceExpandAll`
+   * (skip the type-based partition so every tool renders individually), pass
+   * `forceShowResult=true` to each `ToolMessage`, and lift the per-tool
+   * terminal-height truncation. Default false (main view keeps the #5661
+   * type-based partition baseline).
+   */
+  fullDetail?: boolean;
 }
 
 // Main component maps the tools using ToolMessage
@@ -161,6 +169,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   memoryWriteCount,
   memoryReadCount,
   isUserInitiated,
+  fullDetail = false,
 }) => {
   const config = useConfig();
 
@@ -258,14 +267,47 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   const hasSubagentPendingConfirmation = subagentsAwaitingApproval.length > 0;
 
   // Pure parallel agent group (≥2 agents, nothing else).
-  // Dense panel in both phases with all agents. During live phase
-  // LiveAgentPanel below also shows running agents (brief overlap
-  // that resolves as agents complete and expire from the panel).
-  if (isPureParallelAgentGroup(toolCalls) && !hasSubagentPendingConfirmation) {
+  //
+  // Render through the SAME `inlineToolCalls` hand-off as every other group:
+  // during the live phase, running / background subagents are owned by
+  // LiveAgentPanel below the composer, so rendering them here too duplicated a
+  // full agent roster inside the non-`<Static>` live frame. Once that frame
+  // exceeds the terminal height, ink clears the whole screen (incl. scrollback)
+  // on every repaint — the per-second elapsed/token ticks then make it fire
+  // continuously, so scroll-up snaps straight back to the bottom (#5798, the
+  // `shouldClearTerminalForFrame` path in ink). Showing only the agents the
+  // panel is NOT displaying (terminal rows en route to `<Static>`) halves the
+  // live frame and keeps it under the viewport. `totalAgentCount` keeps the
+  // header's "N · done/N" honest, and `availableTerminalHeight` is a hard cap
+  // backstop for degenerate cases (many agents finishing at once).
+  //
+  // Skipped in transcript full-detail mode (fullDetail) so every agent
+  // falls through to its own full ToolMessage instead of the dense panel.
+  if (
+    !fullDetail &&
+    isPureParallelAgentGroup(toolCalls) &&
+    !hasSubagentPendingConfirmation
+  ) {
+    // `isPureParallelAgentGroup` already guarantees every entry is a subagent,
+    // so `inlineToolCalls` (a subset) and `toolCalls.length` need no further
+    // `isSubagentToolEntry` filtering here.
+    if (inlineToolCalls.length === 0) {
+      return null;
+    }
     return (
       <InlineParallelAgentsDisplay
-        toolCalls={toolCalls}
+        toolCalls={inlineToolCalls}
         contentWidth={contentWidth}
+        totalAgentCount={toolCalls.length}
+        // The height backstop guards only the live, non-`<Static>` frame. Once
+        // committed (`isPending=false`) the rows live in `<Static>` with no
+        // snap-back risk, and MainContent passes `staticAreaMaxItemHeight`
+        // (>=100) here — forwarding that would let the cap fire on scrollback
+        // and permanently hide completed agents behind "+N more". Pass
+        // undefined (no cap) when committed, per the component's contract.
+        availableTerminalHeight={
+          isPending ? availableTerminalHeight : undefined
+        }
       />
     );
   }
@@ -288,8 +330,11 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   // Memory-only groups get their own compact rendering with read/write
   // counts. Check BEFORE the partition logic so they aren't routed through
-  // the collapsible/non-collapsible split.
+  // the collapsible/non-collapsible split. Skipped in transcript full-detail
+  // mode (fullDetail) so each memory op renders as its own full ToolMessage
+  // rather than collapsing to the "Recalled/Wrote N memories" badge.
   const allMemOpsComplete =
+    !fullDetail &&
     isMemoryOnlyGroup &&
     !hasErrorTool &&
     toolCalls.every((t) => t.status === ToolCallStatus.Success);
@@ -320,9 +365,12 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   // Force-expand ALL tools individually when the user must interact or
   // must see full details: confirmation prompts, errors, user-initiated
-  // batches, focused shells, terminal subagents.
+  // batches, focused shells, terminal subagents. Transcript full-detail
+  // mode (fullDetail) also forces it so every tool renders individually
+  // instead of collapsing read/search into a partition summary.
   const hasTerminalSubagent = inlineToolCalls.some(isTerminalSubagentTool);
   const forceExpandAll =
+    fullDetail ||
     hasConfirmingTool ||
     hasSubagentPendingConfirmation ||
     hasErrorTool ||
@@ -398,15 +446,19 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   }
   const countOneLineToolCalls =
     nonCollapsibleTools.length - countToolCallsWithResults;
-  const availableTerminalHeightPerToolMessage = availableTerminalHeight
-    ? Math.max(
-        Math.floor(
-          (availableTerminalHeight - staticHeight - countOneLineToolCalls) /
-            Math.max(1, countToolCallsWithResults),
-        ),
-        1,
-      )
-    : undefined;
+  // In transcript full-detail mode, lift the per-tool height truncation so
+  // each tool's output renders in full (combined with forceShowResult below).
+  const availableTerminalHeightPerToolMessage = fullDetail
+    ? undefined
+    : availableTerminalHeight
+      ? Math.max(
+          Math.floor(
+            (availableTerminalHeight - staticHeight - countOneLineToolCalls) /
+              Math.max(1, countToolCallsWithResults),
+          ),
+          1,
+        )
+      : undefined;
 
   return (
     <Box flexDirection="column" width={contentWidth} gap={0}>
@@ -441,7 +493,9 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                 activeShellPtyId={activeShellPtyId}
                 embeddedShellFocused={embeddedShellFocused}
                 config={config}
+                fullDetail={fullDetail}
                 forceShowResult={
+                  fullDetail ||
                   isUserInitiated ||
                   tool.status === ToolCallStatus.Confirming ||
                   tool.status === ToolCallStatus.Error ||

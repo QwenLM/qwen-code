@@ -67,6 +67,9 @@ describe('handleAtCommand', () => {
       getPromptRegistry: () => ({
         getPromptsByServer: () => [],
       }),
+      getResourceRegistry: () => ({
+        getResourcesByServer: () => [],
+      }),
       getDebugMode: () => false,
       getFileExclusions: () => ({
         getCoreIgnorePatterns: () => COMMON_IGNORE_PATTERNS,
@@ -150,6 +153,40 @@ describe('handleAtCommand', () => {
     // toolDisplays should be returned for caller to add to UI history
     expect(result.toolDisplays).toBeDefined();
     expect(result.toolDisplays).toHaveLength(1);
+    expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+  });
+
+  it('should attach a truncated text file larger than 10MB', async () => {
+    const filePath = await createTestFile(
+      path.join(testRootDir, 'large.log'),
+      'x'.repeat(11 * 1024 * 1024),
+    );
+
+    const result = await handleAtCommand({
+      query: `@${filePath}`,
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 626,
+      signal: abortController.signal,
+    });
+
+    const processedText = Array.isArray(result.processedQuery)
+      ? result.processedQuery
+          .map((part) =>
+            typeof part === 'string'
+              ? part
+              : 'text' in part
+                ? part.text
+                : JSON.stringify(part),
+          )
+          .join('')
+      : '';
+
+    expect(processedText).toContain(
+      'Showing lines 1-1 of at least 1 total lines',
+    );
+    expect(processedText).toContain('... [truncated]');
+    expect(result.shouldProceed).toBe(true);
     expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
   });
 
@@ -262,6 +299,36 @@ describe('handleAtCommand', () => {
     expect(mockOnDebugMessage).toHaveBeenCalledWith(
       `Path ${dirPath} resolved to directory.`,
     );
+  });
+
+  it('should inject MCP server context for @mcp mentions', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getMcpServers: () => ({ demo: {} }),
+      getPromptRegistry: () => ({
+        getPromptsByServer: (name: string) => (name === 'demo' ? ['p'] : []),
+      }),
+      getResourceRegistry: () => ({
+        getResourcesByServer: (name: string) =>
+          name === 'demo' ? [{ uri: 'res://1' }] : [],
+      }),
+    } as unknown as Config;
+
+    const result = await handleAtCommand({
+      query: 'Use @mcp:demo now',
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 128,
+      signal: abortController.signal,
+    });
+
+    expect(result.shouldProceed).toBe(true);
+    expect(result.processedQuery).toEqual([
+      { text: 'Use @mcp:demo now' },
+      {
+        text: expect.stringContaining('--- MCP Server: demo ---'),
+      },
+    ]);
   });
 
   it('should handle query with text before and after @command', async () => {
@@ -1313,6 +1380,34 @@ describe('handleAtCommand', () => {
       // The success card reflects what was injected ('RESOURCE BODY' = 13).
       expect(result.toolDisplays![0].resultDisplay).toBe('Injected 13 chars');
       expect(result.filesRead).toContain('myserver:res://doc');
+    });
+
+    it('preserves @mcp:<uri> as a resource ref when a server is named mcp', async () => {
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://doc', text: 'RESOURCE BODY' }],
+      });
+      const config = {
+        ...mockConfig,
+        getMcpServers: () => ({ mcp: {}, demo: {} }),
+        getToolRegistry: () => ({ readMcpResource }),
+      } as unknown as Config;
+
+      const result = await handleAtCommand({
+        query: 'Use @mcp:res://doc now',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 606,
+        signal: abortController.signal,
+      });
+
+      expect(readMcpResource).toHaveBeenCalledWith('mcp', 'res://doc', {
+        signal: abortController.signal,
+      });
+      const parts = result.processedQuery as Array<{ text?: string }>;
+      const text = parts.map((part) => part.text ?? '').join('\n');
+      expect(text).toContain('Use @mcp:res://doc now');
+      expect(text).toContain('RESOURCE BODY');
+      expect(text).not.toContain('--- MCP Server: demo ---');
     });
 
     it('injects both a @file and a @server:uri resource, surfacing both tool cards', async () => {

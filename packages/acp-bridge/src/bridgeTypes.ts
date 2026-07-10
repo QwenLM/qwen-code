@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ApprovalMode } from '@qwen-code/qwen-code-core';
+import type {
+  ApprovalMode,
+  SessionGroupColor,
+} from '@qwen-code/qwen-code-core';
 import type {
   CancelNotification,
   LoadSessionResponse,
@@ -14,9 +17,19 @@ import type {
   ResumeSessionResponse,
   SetSessionModelRequest,
   SetSessionModelResponse,
+  SessionUpdate,
 } from '@agentclientprotocol/sdk';
-import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
+import type {
+  BridgeEvent,
+  SessionReplaySnapshot,
+  SubscribeOptions,
+} from './eventBus.js';
 import type { PermissionPolicy } from './permission.js';
+import type {
+  SessionArtifactInput,
+  SessionArtifactMutationResult,
+  SessionArtifactsEnvelope,
+} from './sessionArtifacts.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
@@ -49,6 +62,7 @@ export interface RewindResponse {
   targetTurnIndex: number;
   filesChanged: string[];
   filesFailed: string[];
+  warnings?: string[];
 }
 
 export interface BridgeSpawnRequest {
@@ -94,13 +108,39 @@ export interface BridgeRestoreSessionRequest {
   workspaceCwd: string;
   /** Optional echo of a daemon-issued client id for this session. */
   clientId?: string;
+  /** Internal replay transport for `session/load`; defaults to bulk response. */
+  historyReplay?: 'stream' | 'response';
 }
 
-export type BridgeSessionState = LoadSessionResponse | ResumeSessionResponse;
+export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
+export const LOAD_REPLAY_META_KEY = 'qwen.session.loadReplay';
+export const LOAD_REPLAY_BULK_MODE = 'bulk';
+export const LOAD_REPLAY_VERSION = 1 as const;
+
+export interface BridgeLoadReplayEnvelope {
+  v: typeof LOAD_REPLAY_VERSION;
+  updates: SessionUpdate[];
+  partial?: true;
+  replayError?: string;
+}
+
+export type BridgeSessionState = (
+  | LoadSessionResponse
+  | ResumeSessionResponse
+) & {
+  artifactSnapshot?: unknown;
+  artifactSnapshotUnavailable?: unknown;
+};
 
 export interface BridgeRestoredSession extends BridgeSession {
   /** ACP state returned by `session/load` / `session/resume`. */
   state: BridgeSessionState;
+  /** Artifact restore warnings surfaced during session load/resume. */
+  artifactWarnings?: string[];
+  /** True when response-mode history replay aborted after emitting a prefix. */
+  partial?: true;
+  /** Agent-provided replay failure detail when `partial` is true. */
+  replayError?: string;
   /** Compacted events for all completed turns (O(turns) size). */
   compactedReplay?: BridgeEvent[];
   /** Raw events since last turn boundary (current incomplete turn). */
@@ -135,6 +175,47 @@ export interface ChangeSessionCwdResult {
   warnings: string[];
 }
 
+export type BridgeWorkspaceMemoryRememberContextMode = 'workspace' | 'clean';
+export type BridgeAutoMemoryTopic =
+  | 'user'
+  | 'feedback'
+  | 'project'
+  | 'reference';
+
+export interface BridgeWorkspaceMemoryRememberRequest {
+  content: string;
+  contextMode: BridgeWorkspaceMemoryRememberContextMode;
+}
+
+export interface BridgeWorkspaceMemoryRememberResult {
+  summary?: string;
+  filesTouched: string[];
+  touchedScopes: Array<'user' | 'project'>;
+}
+
+export interface BridgeWorkspaceMemoryForgetRequest {
+  query: string;
+}
+
+export interface BridgeWorkspaceMemoryForgetMatch {
+  topic: BridgeAutoMemoryTopic;
+  summary: string;
+  filePath: string;
+}
+
+export interface BridgeWorkspaceMemoryForgetResult {
+  summary?: string;
+  removedEntries: BridgeWorkspaceMemoryForgetMatch[];
+  touchedTopics: BridgeAutoMemoryTopic[];
+  touchedScopes: Array<'user' | 'project'>;
+}
+
+export interface BridgeWorkspaceMemoryDreamResult {
+  summary?: string;
+  touchedTopics: BridgeAutoMemoryTopic[];
+  dedupedEntries: number;
+}
+
 /** Sparse summary used by `GET /workspace/:id/sessions`. */
 export interface BridgeSessionSummary {
   sessionId: string;
@@ -144,6 +225,12 @@ export interface BridgeSessionSummary {
   displayName?: string;
   clientCount: number;
   hasActivePrompt: boolean;
+  isArchived?: boolean;
+  isPinned?: boolean;
+  pinnedAt?: string;
+  groupId?: string | null;
+  /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
+  color?: SessionGroupColor | null;
 }
 
 export interface SessionMetadataUpdate {
@@ -153,6 +240,8 @@ export interface SessionMetadataUpdate {
 export interface CloseSessionOpts {
   /** Override the default `'client_close'` reason in the `session_closed` event. */
   reason?: string;
+  /** Require the ACP child to acknowledge session close before resolving. */
+  requireAgentClose?: boolean;
 }
 
 export interface BridgeClientRequestContext {
@@ -259,10 +348,40 @@ export interface MidTurnQueueEntry {
   originatorClientId?: string;
 }
 
+/**
+ * Internal record for a prompt accepted into the per-session FIFO queue.
+ * Lives on `SessionEntry.pendingPromptList` so the daemon can report
+ * pending prompts and let callers remove specific items. The
+ * `abortController` is wired to the caller's signal (if any) so
+ * `removePendingPrompt` can cancel a queued-but-not-yet-started prompt.
+ */
+export interface PendingPromptEntry {
+  promptId: string;
+  queuedAt: number;
+  originatorClientId?: string;
+  text: string;
+  abortController: AbortController;
+  state: 'queued' | 'running';
+}
+
+/**
+ * Public projection of `PendingPromptEntry` returned by
+ * `getPendingPrompts` and the HTTP API. Omits the internal
+ * `abortController` and raw prompt content blocks.
+ */
+export interface PendingPromptSummary {
+  promptId: string;
+  text: string;
+  queuedAt: number;
+  state: 'queued' | 'running';
+  originatorClientId?: string;
+}
+
 export interface BridgeDaemonStatusLimits {
   maxSessions: number | null;
   maxPendingPromptsPerSession: number | null;
   eventRingSize: number;
+  compactedReplayMaxBytes: number;
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
 }
@@ -378,6 +497,29 @@ export interface AcpSessionBridge {
   ): Promise<PromptResponse>;
 
   /**
+   * Return the pending prompt queue for a session. Includes the currently
+   * running prompt (state `'running'`) and any prompts waiting in the FIFO
+   * (state `'queued'`). Throws `SessionNotFoundError` for unknown ids.
+   */
+  getPendingPrompts(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): readonly PendingPromptSummary[];
+
+  /**
+   * Remove a specific prompt from the pending queue. For `queued` prompts,
+   * aborts them so the FIFO skips dispatch. For `running` prompts, aborts
+   * the in-flight turn (equivalent to cancel). Returns `{ removed: false }`
+   * when the promptId is not found. Throws `SessionNotFoundError` for
+   * unknown session ids.
+   */
+  removePendingPrompt(
+    sessionId: string,
+    promptId: string,
+    context?: BridgeClientRequestContext,
+  ): { removed: boolean };
+
+  /**
    * Cancel the in-flight prompt on the session. Throws
    * `SessionNotFoundError` when the id is unknown.
    */
@@ -407,6 +549,14 @@ export interface AcpSessionBridge {
   getSessionLastEventId(sessionId: string): number;
 
   /**
+   * Return the current compacted replay snapshot for a loaded session, when
+   * the bridge has a compaction engine configured.
+   */
+  getSessionReplaySnapshot(
+    sessionId: string,
+  ): SessionReplaySnapshot | undefined;
+
+  /**
    * Explicitly close a live session. Force-closes even when other clients
    * are attached. Throws `SessionNotFoundError` for unknown ids.
    */
@@ -425,6 +575,36 @@ export interface AcpSessionBridge {
     metadata: SessionMetadataUpdate,
     context?: BridgeClientRequestContext,
   ): SessionMetadataUpdate;
+
+  /**
+   * List the structured artifacts registered for a live session. Throws
+   * `SessionNotFoundError` when the id is unknown.
+   */
+  getSessionArtifacts(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionArtifactsEnvelope>;
+
+  /**
+   * Register a client-supplied artifact for the session. Client artifacts use
+   * the daemon-issued client id from the request context for retention/audit;
+   * request bodies cannot self-assign client ids.
+   */
+  addSessionArtifact(
+    sessionId: string,
+    artifact: SessionArtifactInput,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionArtifactMutationResult>;
+
+  /**
+   * Remove an artifact from the session. Missing artifact ids are idempotent
+   * no-ops; unknown session ids still throw `SessionNotFoundError`.
+   */
+  removeSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionArtifactMutationResult>;
 
   /**
    * Cast a vote on a pending `permission_request` (first-responder wins).
@@ -507,6 +687,38 @@ export interface AcpSessionBridge {
     params?: Record<string, unknown>,
     opts?: { timeoutMs?: number },
   ): Promise<T>;
+
+  /**
+   * Run a hidden workspace-level managed-memory remember task. This
+   * ensures the ACP child exists but must not create/load/resume an ACP
+   * session or touch the per-session prompt queue.
+   */
+  runWorkspaceMemoryRemember(
+    request: BridgeWorkspaceMemoryRememberRequest,
+  ): Promise<BridgeWorkspaceMemoryRememberResult>;
+
+  /**
+   * Run a hidden workspace-level managed-memory forget task. This
+   * ensures the ACP child exists but must not create/load/resume an ACP
+   * session or touch the per-session prompt queue.
+   */
+  runWorkspaceMemoryForget(
+    request: BridgeWorkspaceMemoryForgetRequest,
+  ): Promise<BridgeWorkspaceMemoryForgetResult>;
+
+  /**
+   * Run a hidden workspace-level managed-memory dream task. This
+   * ensures the ACP child exists but must not create/load/resume an ACP
+   * session or touch the per-session prompt queue.
+   */
+  runWorkspaceMemoryDream(): Promise<BridgeWorkspaceMemoryDreamResult>;
+
+  /**
+   * Check whether the ACP child can run managed-memory remember for the
+   * current workspace. Used by HTTP POST to return a synchronous 409 in
+   * bare/unavailable modes without creating a session.
+   */
+  isWorkspaceMemoryRememberAvailable(): Promise<boolean>;
 
   /**
    * Read discovered MCP tools for one server from the live ACP registry.
@@ -776,7 +988,11 @@ export interface AcpSessionBridge {
         toolCount: number;
         originatorClientId: string;
       }
-    | { name: string; skipped: true; reason: 'budget_warning_only' }
+    | {
+        name: string;
+        skipped: true;
+        reason: 'budget_warning_only' | 'runtime_name_conflict';
+      }
   >;
 
   /**
@@ -857,6 +1073,25 @@ export interface AcpSessionBridge {
 
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
+
+  /** Queued prompts across all sessions — accepted but not yet dispatched,
+   *  excluding the one running per session — i.e. the queue-depth gauge for the
+   *  Daemon Status charts (distinct from `activePromptCount`). Optional: a
+   *  bridge injected via `RunQwenServeDeps.bridge` may predate these Daemon
+   *  Status hooks, so the sampler treats them as absent (→ 0 / skipped). */
+  readonly pendingPromptTotal?: number;
+
+  /** Latest self-reported ACP-child rss/cpu (Daemon Status child-resource
+   *  chart), or undefined before the first successful poll / when no child is
+   *  live. Synchronous cache read for the metrics sampler. Optional — see
+   *  {@link pendingPromptTotal}. */
+  getChildResourceSnapshot?():
+    | { rssBytes: number; cpuPercent: number }
+    | undefined;
+  /** Poll the live child's resource extMethod and refresh the cache that
+   *  {@link getChildResourceSnapshot} reads. Fired fire-and-forget by the
+   *  sampler each tick. Optional — see {@link pendingPromptTotal}. */
+  refreshChildResource?(): Promise<void>;
 
   /**
    * Epoch-ms timestamp of the last "activity" event (prompt start/end,

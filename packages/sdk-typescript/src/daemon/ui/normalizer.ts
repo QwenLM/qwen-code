@@ -49,6 +49,7 @@ const MCP_RESTART_REFUSED_REASONS = new Set<string>([
   'budget_would_exceed',
 ]);
 
+const MALFORMED_MEMORY_CHANGED = 'malformed memory_changed payload';
 const MAX_DETAILS_LENGTH = 4096;
 
 export function normalizeDaemonEvent(
@@ -158,6 +159,7 @@ export function normalizeDaemonEvent(
     }
     case 'turn_error': {
       const code = getString(event.data, 'code');
+      const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       const promptId = getString(event.data, 'promptId');
       return [
         {
@@ -166,6 +168,7 @@ export function normalizeDaemonEvent(
           source: 'turn_error',
           recoverable: true,
           ...(code ? { code } : {}),
+          ...(errorKind ? { errorKind } : {}),
           ...(promptId ? { promptId } : {}),
           text:
             getString(event.data, 'message') ??
@@ -175,6 +178,9 @@ export function normalizeDaemonEvent(
     }
     case 'state_resync_required':
       return normalizeStateResyncRequired(event, base);
+
+    case 'history_truncated':
+      return normalizeHistoryTruncated(event, base);
 
     case 'session_rewound':
       return normalizeSessionRewound(event, base);
@@ -197,6 +203,11 @@ export function normalizeDaemonEvent(
 
     case 'mid_turn_message_injected':
       return normalizeMidTurnMessageInjected(event, base);
+
+    case 'pending_prompt_added':
+    case 'pending_prompt_started':
+    case 'pending_prompt_completed':
+      return [];
 
     case 'user_shell_command': {
       const command = getString(event.data, 'command');
@@ -260,6 +271,9 @@ export function normalizeDaemonEvent(
 
     case 'settings_changed':
       return normalizeSettingsChanged(event, base);
+
+    case 'settings_reloaded':
+      return normalizeSettingsReloaded(event, base);
 
     case 'trust_change_requested':
       return normalizeTrustChangeRequested(event, base);
@@ -345,6 +359,33 @@ function normalizeStateResyncRequired(
       reason,
       lastDeliveredId,
       earliestAvailableId,
+    },
+  ];
+}
+
+function normalizeHistoryTruncated(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const reason = getString(event.data, 'reason');
+  const truncatedEvents = numberField(event.data, 'truncatedEvents');
+  const retainedEvents = numberField(event.data, 'retainedEvents');
+  const maxBytes = numberField(event.data, 'maxBytes');
+  if (
+    reason !== 'replay_window_exceeded' ||
+    truncatedEvents === undefined ||
+    retainedEvents === undefined ||
+    maxBytes === undefined ||
+    (isRecord(event.data) && event.data['fullTranscriptAvailable'] !== false)
+  ) {
+    return fallbackDebug(event, base, 'malformed history_truncated payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'status',
+      text: `History truncated: retained ${retainedEvents}, dropped ${truncatedEvents} (window ${maxBytes} bytes).`,
+      source: 'history_truncated',
     },
   ];
 }
@@ -525,6 +566,7 @@ function normalizeSessionUpdate(
       ) {
         return [];
       }
+      const meta = extractUpdateMeta(update);
       const content = update['content'];
       const part = extractContentPart(content);
       if (part) {
@@ -549,13 +591,29 @@ function normalizeSessionUpdate(
         }
         if (part.kind === 'text') {
           return part.text
-            ? [{ ...base, type: 'user.text.delta', text: part.text }]
+            ? [
+                {
+                  ...base,
+                  type: 'user.text.delta',
+                  text: part.text,
+                  ...(meta ? { meta } : {}),
+                },
+              ]
             : [];
         }
         return [];
       }
       const text = getTextContent(content);
-      return text ? [{ ...base, type: 'user.text.delta', text }] : [];
+      return text
+        ? [
+            {
+              ...base,
+              type: 'user.text.delta',
+              text,
+              ...(meta ? { meta } : {}),
+            },
+          ]
+        : [];
     }
     case 'agent_message_chunk': {
       const text = getTextContent(update['content']);
@@ -1098,6 +1156,29 @@ function normalizeMemoryChanged(
   base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const scope = getString(event.data, 'scope');
+  if (scope === 'managed') {
+    const source = getString(event.data, 'source');
+    const taskId = getString(event.data, 'taskId');
+    const touchedScopes = (event.data as Record<string, unknown> | undefined)?.[
+      'touchedScopes'
+    ];
+    if (
+      !(source && taskId && Array.isArray(touchedScopes)) ||
+      touchedScopes.some((s) => s !== 'user' && s !== 'project')
+    ) {
+      return fallbackDebug(event, base, MALFORMED_MEMORY_CHANGED);
+    }
+    return [
+      {
+        ...base,
+        type: 'workspace.memory.changed',
+        scope,
+        source,
+        taskId,
+        touchedScopes: touchedScopes as Array<'user' | 'project'>,
+      },
+    ];
+  }
   const filePath = getString(event.data, 'filePath');
   const mode = getString(event.data, 'mode');
   // Use the `numberField` helper so NaN /
@@ -1114,7 +1195,7 @@ function normalizeMemoryChanged(
     (mode !== 'append' && mode !== 'replace') ||
     bytesWritten === undefined
   ) {
-    return fallbackDebug(event, base, 'malformed memory_changed payload');
+    return fallbackDebug(event, base, MALFORMED_MEMORY_CHANGED);
   }
   return [
     {
@@ -1191,6 +1272,24 @@ function normalizeSettingsChanged(
       key,
       scope: scope ?? 'workspace',
       value: isRecord(event.data) ? event.data['value'] : undefined,
+    },
+  ];
+}
+
+function normalizeSettingsReloaded(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  if (!isRecord(event.data)) {
+    return fallbackDebug(event, base, 'malformed settings_reloaded payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.settings.changed',
+      key: 'settings_reloaded',
+      scope: 'workspace',
+      value: event.data,
     },
   ];
 }

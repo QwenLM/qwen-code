@@ -25,6 +25,8 @@ import {
   SYSTEM_REMINDER_OPEN,
   LoopType,
   CronScheduler,
+  AUTONOMOUS_SENTINEL_CRON,
+  AUTONOMOUS_SENTINEL_DYNAMIC,
   LOOP_SENTINEL_CRON,
   LOOP_SENTINEL_DYNAMIC,
 } from '@qwen-code/qwen-code-core';
@@ -106,6 +108,27 @@ describe('skipHeadlessLoopSentinel', () => {
     expect(scheduler.sessionSize).toBe(1);
 
     expect(skipHeadlessLoopSentinel(scheduler, job)).toBe(true);
+
+    expect(scheduler.sessionSize).toBe(0);
+    expect(scheduler.list()).toHaveLength(0);
+  });
+
+  it('also cleans up recurring autonomous sentinel jobs', () => {
+    const scheduler = new CronScheduler();
+    const cron = scheduler.create(
+      '*/5 * * * *',
+      AUTONOMOUS_SENTINEL_CRON,
+      true,
+    );
+    const dynamic = scheduler.create(
+      '*/5 * * * *',
+      AUTONOMOUS_SENTINEL_DYNAMIC,
+      true,
+    );
+    expect(scheduler.sessionSize).toBe(2);
+
+    expect(skipHeadlessLoopSentinel(scheduler, cron)).toBe(true);
+    expect(skipHeadlessLoopSentinel(scheduler, dynamic)).toBe(true);
 
     expect(scheduler.sessionSize).toBe(0);
     expect(scheduler.list()).toHaveLength(0);
@@ -757,6 +780,42 @@ describe('runNonInteractive', () => {
     );
     expect(processStderrSpy).not.toHaveBeenCalledWith(
       expect.stringContaining('always-on guard'),
+    );
+  });
+
+  it('shows the maxToolCallsPerTurn hint when the per-turn cap halts the run', async () => {
+    setupMetricsMock();
+    const events: ServerGeminiStreamEvent[] = [
+      { type: GeminiEventType.Content, value: 'Partial work' },
+      {
+        type: GeminiEventType.LoopDetected,
+        value: { loopType: LoopType.TURN_TOOL_CALL_CAP },
+      },
+    ];
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Long turn',
+      'prompt-id-turn-cap',
+    );
+
+    expect(exitCode).toBe(1);
+    // The cap has its own knob, so the message must point at it rather than
+    // claiming the halt cannot be configured away.
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('`model.maxToolCallsPerTurn`'),
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('cannot be disabled'),
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Set the `model.skipLoopDetection` setting to true',
+      ),
     );
   });
 
@@ -3425,6 +3484,12 @@ describe('runNonInteractive', () => {
     const predicate = skipSpy.mock.calls[0][0];
     expect(predicate({ prompt: LOOP_SENTINEL_CRON } as CronJob)).toBe(true);
     expect(predicate({ prompt: LOOP_SENTINEL_DYNAMIC } as CronJob)).toBe(true);
+    expect(predicate({ prompt: AUTONOMOUS_SENTINEL_CRON } as CronJob)).toBe(
+      true,
+    );
+    expect(predicate({ prompt: AUTONOMOUS_SENTINEL_DYNAMIC } as CronJob)).toBe(
+      true,
+    );
     expect(predicate({ prompt: 'regular cron job' } as CronJob)).toBe(false);
   });
 

@@ -16,15 +16,20 @@ import {
 import { createUserContent, type Content } from '@google/genai';
 import {
   buildAddedMcpToolsReminder,
+  buildAddedAgentsReminder,
   buildDeferredToolsReminder,
   buildMcpServerInstructionsReminder,
   buildAvailableSkillsReminder,
   buildAddedSkillsReminder,
+  buildChangedAgentsReminder,
+  buildChangedMcpToolsReminder,
+  buildChangedSkillsReminder,
   getEnvironmentContext,
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
   isSystemReminderContent,
+  stripSystemReminderBlocks,
   stripStartupContext,
   formatDateForContext,
   SYSTEM_REMINDER_OPEN,
@@ -319,6 +324,20 @@ describe('getInitialChatHistory', () => {
     expect(mockToolRegistry.warmAll).toHaveBeenCalled();
     expect(history).toEqual([]);
   });
+
+  it('places deferred-tools reminder last so stable prefix stays cacheable on KV-caching servers', async () => {
+    mockToolRegistry.getDeferredToolSummary.mockReturnValue([
+      { name: 'web_fetch', description: 'Fetches web pages' },
+    ]);
+
+    const [history] = await getInitialChatHistory(mockConfig as Config);
+
+    const parts = history[0]?.parts ?? [];
+    const lastText = parts[parts.length - 1]?.text;
+    expect(lastText).toContain('reachable via `tool_search`');
+    expect(lastText).toContain('web_fetch');
+    expect(parts[0]?.text).not.toContain('reachable via `tool_search`');
+  });
 });
 
 describe('stripStartupContext', () => {
@@ -368,6 +387,20 @@ describe('stripStartupContext', () => {
     ).toEqual([{ role: 'user', parts: [{ text: 'Hello' }] }]);
   });
 
+  it('keeps a first user turn that mixes a reminder part with a prompt part', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { text: '<system-reminder>\nctx\n</system-reminder>' },
+          { text: 'real prompt' },
+        ],
+      },
+    ];
+
+    expect(stripStartupContext(history)).toEqual(history);
+  });
+
   it('should round-trip with getInitialChatHistory', async () => {
     const mockConfig = {
       getSkipStartupContext: vi.fn().mockReturnValue(false),
@@ -396,6 +429,25 @@ describe('stripStartupContext', () => {
     const stripped = stripStartupContext(withStartup);
 
     expect(stripped).toEqual(conversation);
+  });
+});
+
+describe('stripSystemReminderBlocks', () => {
+  it('strips complete reminder blocks and preserves surrounding text', () => {
+    expect(
+      stripSystemReminderBlocks('a<system-reminder>x</system-reminder>b'),
+    ).toBe('ab');
+    expect(
+      stripSystemReminderBlocks(
+        'a<system-reminder>x</system-reminder>b<system-reminder>y</system-reminder>c',
+      ),
+    ).toBe('abc');
+  });
+
+  it('drops a trailing unclosed reminder block', () => {
+    expect(stripSystemReminderBlocks('keep <system-reminder>secret')).toBe(
+      'keep ',
+    );
   });
 });
 
@@ -612,6 +664,186 @@ describe('getStartupContextLength', () => {
     );
     expect(getStartupContextLength([merged])).toBe(0);
   });
+
+  // Compressed history prefix: composePostCompactHistory produces
+  // [user(summary), model(ack), user(postAckParts)?, ...]. The ack sentinel
+  // is distinct from the legacy ack above.
+
+  it('is 0 for compressed prefixes by default', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'summary text\n\nResume the prior task...' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+    ];
+    expect(getStartupContextLength(history)).toBe(0);
+  });
+
+  it('is 0 for compressed prefixes with trailing prompts by default', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'summary text\n\nResume the prior task...' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      {
+        role: 'user',
+        parts: [{ text: 'Now do something else' }],
+      },
+    ];
+    expect(getStartupContextLength(history)).toBe(0);
+  });
+
+  it('is 0 for rewind when summary text lacks the resume sentinel', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'unrelated summary text' }] },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+    ];
+    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
+      0,
+    );
+  });
+
+  it('is 0 for rewind when the compression ack text does not match', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'summary text\n\nResume the prior task...' }],
+      },
+      { role: 'model', parts: [{ text: 'Understood, resuming now.' }] },
+    ];
+    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
+      0,
+    );
+  });
+
+  it('is 2 for rewind when a real prompt follows a compressed prefix', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'summary text\n\nResume the prior task...' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      {
+        role: 'user',
+        parts: [{ text: 'Now do something else' }],
+      },
+    ];
+    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
+      2,
+    );
+  });
+
+  it('includes compressed prefixes after startup reminders for rewind', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: wrap('env') }] },
+      {
+        role: 'user',
+        parts: [{ text: 'summary text\n\nResume the prior task...' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      {
+        role: 'user',
+        parts: [{ text: 'Now do something else' }],
+      },
+    ];
+    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
+      3,
+    );
+  });
+
+  it('is 3 for rewind with post-compact attachments', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'summary text\n\nResume the prior task...' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            text:
+              'Recently accessed file (full current content embedded):\n\n' +
+              '## /repo/file.ts\n\n```ts\nexport const x = 1;\n```',
+          },
+          { text: '<system-reminder>\nplan mode\n</system-reminder>' },
+        ],
+      },
+    ];
+    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
+      3,
+    );
+  });
+
+  it('is 4 for rewind with attachments and a trailing function call', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'summary\n\nResume the prior task...' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      {
+        role: 'user',
+        parts: [{ text: '<plan-mode-active>\nplan\n</plan-mode-active>' }],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'fn', args: {} } }],
+      },
+    ];
+    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
+      4,
+    );
+  });
+
+  it('is 2 for rewind with degraded compression fallback', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { text: 'summary\n\nResume the prior task...' },
+          { text: '<system-reminder>\nplan mode active\n</system-reminder>' },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [
+          { text: 'Got it. Thanks for the additional context!' },
+          { functionCall: { name: 'fn', args: {} } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [{ functionResponse: { name: 'fn', response: {} } }],
+      },
+    ];
+    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
+      2,
+    );
+  });
 });
 
 describe('buildAvailableSkillsReminder', () => {
@@ -763,5 +995,83 @@ describe('buildAddedSkillsReminder', () => {
     expect(result).toContain('First line only');
     expect(result).not.toContain('Drop this');
     expect(result).not.toContain('And this');
+  });
+});
+
+describe('changed capability reminders', () => {
+  it('renders removed skills and commands', () => {
+    const result = buildChangedSkillsReminder([], ['old-skill', 'old-command']);
+
+    expect(result).not.toBeNull();
+    expect(result).toContain(SYSTEM_REMINDER_OPEN);
+    expect(result).toContain('no longer available');
+    expect(result).toContain('"old-skill"');
+    expect(result).toContain('"old-command"');
+  });
+
+  it('renders removed MCP tools', () => {
+    const result = buildChangedMcpToolsReminder([], ['mcp__old__tool']);
+
+    expect(result).not.toBeNull();
+    expect(result).toContain(SYSTEM_REMINDER_OPEN);
+    expect(result).toContain('MCP tools are no longer available');
+    expect(result).toContain('"mcp__old__tool"');
+  });
+
+  it('renders tool_search hint for MCP tools in mixed added and removed reminders', () => {
+    const result = buildChangedMcpToolsReminder(
+      [
+        {
+          name: 'mcp__new__tool',
+          description: 'New tool',
+          serverName: 'new',
+        },
+      ],
+      ['mcp__old__tool'],
+    );
+
+    expect(result).not.toBeNull();
+    expect(result).toContain('reachable via `tool_search`');
+    expect(result).toContain('Call with `select:<name>`');
+    expect(result).toContain('"mcp__new__tool"');
+    expect(result).toContain('"mcp__old__tool"');
+  });
+
+  it('renders added and removed agents', () => {
+    const result = buildChangedAgentsReminder(
+      [{ name: 'reviewer', description: 'Reviews code' }],
+      ['old-agent'],
+    );
+
+    expect(result).not.toBeNull();
+    expect(result).toContain(SYSTEM_REMINDER_OPEN);
+    expect(result).toContain('"reviewer"');
+    expect(result).toContain('"Reviews code"');
+    expect(result).toContain('"old-agent"');
+  });
+
+  it('renders added-only agents with an added reminder', () => {
+    const result = buildAddedAgentsReminder([
+      { name: 'reviewer', description: 'Reviews code' },
+    ]);
+
+    expect(result).not.toBeNull();
+    expect(result).toContain('became available after startup');
+    expect(result).not.toContain('changed after startup');
+    expect(result).toContain('"reviewer"');
+  });
+
+  it('caps agent descriptions in reminders', () => {
+    const result = buildAddedAgentsReminder([
+      {
+        name: 'reviewer',
+        description: `${'A'.repeat(500)}\nsecond line should be omitted`,
+      },
+    ]);
+
+    expect(result).not.toBeNull();
+    expect(result).toContain('"reviewer"');
+    expect(result).not.toContain('second line should be omitted');
+    expect(result).not.toContain('A'.repeat(500));
   });
 });

@@ -64,6 +64,46 @@ export class SessionNotFoundError extends Error {
   }
 }
 
+export class SessionArchivedError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(`Session "${sessionId}" is archived. Unarchive it before loading.`);
+    this.name = 'SessionArchivedError';
+    this.sessionId = sessionId;
+  }
+}
+
+export class SessionConflictError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(
+      `Session "${sessionId}" exists in both active and archived directories. ` +
+        `Delete the session with POST /sessions/delete before loading.`,
+    );
+    this.name = 'SessionConflictError';
+    this.sessionId = sessionId;
+  }
+}
+
+export class SessionArchivingError extends Error {
+  readonly sessionId: string;
+  readonly lockKind: 'exclusive' | 'shared';
+
+  constructor(
+    sessionId: string,
+    lockKind: 'exclusive' | 'shared' = 'exclusive',
+  ) {
+    super(
+      `Session "${sessionId}" is being archived or unarchived; retry later.`,
+    );
+    this.name = 'SessionArchivingError';
+    this.sessionId = sessionId;
+    this.lockKind = lockKind;
+  }
+}
+
 export class RestoreInProgressError extends Error {
   readonly sessionId: string;
   readonly activeAction: 'load' | 'resume';
@@ -119,6 +159,16 @@ export class SessionLimitExceededError extends Error {
   constructor(limit: number) {
     super(`Session limit reached (${limit})`);
     this.name = 'SessionLimitExceededError';
+    this.limit = limit;
+  }
+}
+
+export class TotalSessionLimitExceededError extends Error {
+  readonly limit: number;
+  readonly scope = 'total' as const;
+  constructor(limit: number) {
+    super(`Total session limit reached (${limit})`);
+    this.name = 'TotalSessionLimitExceededError';
     this.limit = limit;
   }
 }

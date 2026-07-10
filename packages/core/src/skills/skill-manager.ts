@@ -409,7 +409,10 @@ export class SkillManager {
     const skillsCache = new Map<SkillLevel, SkillConfig[]>();
     this.parseErrors.clear();
 
-    const levels: SkillLevel[] = ['project', 'user', 'extension', 'bundled'];
+    // Safe mode: only load bundled (system) skills
+    const levels: SkillLevel[] = this.config.isSafeMode()
+      ? ['bundled']
+      : ['project', 'user', 'extension', 'bundled'];
 
     // Use allSettled so an unrecoverable error at one level (e.g. a hung
     // FS, a permission denial, an OS-level enoent on a removed config dir)
@@ -538,7 +541,7 @@ export class SkillManager {
     if (!registry || filePaths.length === 0) return [];
     const newlyAcrossPaths = new Set<string>();
     for (const filePath of filePaths) {
-      for (const name of registry.matchAndConsume(filePath)) {
+      for (const name of await registry.matchAndConsume(filePath)) {
         newlyAcrossPaths.add(name);
       }
     }

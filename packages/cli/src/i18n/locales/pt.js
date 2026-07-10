@@ -52,7 +52,7 @@ export default {
   'to search history': 'para pesquisar no histórico',
   'to paste images': 'para colar imagens',
   'for external editor': 'para editor externo',
-  'to toggle compact mode': 'alternar modo compacto',
+  'to view transcript': 'para ver a transcrição',
   'Jump through words in the input': 'Pular palavras na entrada',
   'Close dialogs, cancel requests, or quit application':
     'Fechar diálogos, cancelar solicitações ou sair do aplicativo',
@@ -244,6 +244,42 @@ export default {
   'Delete {{name}}': 'Excluir {{name}}',
   'Unknown Step': 'Etapa Desconhecida',
   'Esc to close': 'Esc para fechar',
+  Transcript: 'Transcrição',
+  'to close': 'para fechar',
+  'to scroll': 'para rolar',
+  'Failed to render transcript.': 'Falha ao renderizar a transcrição.',
+  'Read {{count}} file': 'Leu {{count}} arquivo',
+  'Read {{count}} files': 'Leu {{count}} arquivos',
+  'Reading {{count}} file': 'Lendo {{count}} arquivo',
+  'Reading {{count}} files': 'Lendo {{count}} arquivos',
+  'Edited {{count}} file': 'Editou {{count}} arquivo',
+  'Edited {{count}} files': 'Editou {{count}} arquivos',
+  'Editing {{count}} file': 'Editando {{count}} arquivo',
+  'Editing {{count}} files': 'Editando {{count}} arquivos',
+  'Wrote {{count}} file': 'Escreveu {{count}} arquivo',
+  'Wrote {{count}} files': 'Escreveu {{count}} arquivos',
+  'Writing {{count}} file': 'Escrevendo {{count}} arquivo',
+  'Writing {{count}} files': 'Escrevendo {{count}} arquivos',
+  'Searched {{count}} pattern': 'Pesquisou {{count}} padrão',
+  'Searched {{count}} patterns': 'Pesquisou {{count}} padrões',
+  'Searching {{count}} pattern': 'Pesquisando {{count}} padrão',
+  'Searching {{count}} patterns': 'Pesquisando {{count}} padrões',
+  'Listed {{count}} directory': 'Listou {{count}} diretório',
+  'Listed {{count}} directories': 'Listou {{count}} diretórios',
+  'Listing {{count}} directory': 'Listando {{count}} diretório',
+  'Listing {{count}} directories': 'Listando {{count}} diretórios',
+  'Ran {{count}} command': 'Executou {{count}} comando',
+  'Ran {{count}} commands': 'Executou {{count}} comandos',
+  'Running {{count}} command': 'Executando {{count}} comando',
+  'Running {{count}} commands': 'Executando {{count}} comandos',
+  'Ran {{count}} agent': 'Executou {{count}} agente',
+  'Ran {{count}} agents': 'Executou {{count}} agentes',
+  'Running {{count}} agent': 'Executando {{count}} agente',
+  'Running {{count}} agents': 'Executando {{count}} agentes',
+  'Used {{count}} tool': 'Usou {{count}} ferramenta',
+  'Used {{count}} tools': 'Usou {{count}} ferramentas',
+  'Using {{count}} tool': 'Usando {{count}} ferramenta',
+  'Using {{count}} tools': 'Usando {{count}} ferramentas',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter para selecionar, ↑↓ para navegar, Esc para fechar',
   'Esc to go back': 'Esc para voltar',
@@ -276,7 +312,7 @@ export default {
   'Open in editor': 'Abrir no editor',
   'Edit tools': 'Editar ferramentas',
   'Edit color': 'Editar cor',
-  '❌ Error:': '❌ Erro:',
+  '✗ Error:': '✗ Erro:',
   'Are you sure you want to delete agent "{{name}}"?':
     'Tem certeza que deseja excluir o agente "{{name}}"?',
 
@@ -285,12 +321,12 @@ export default {
   // ============================================================================
   'Project Level (.qwen/agents/)': 'Nível de Projeto (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': 'Nível de Usuário (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!': '✅ Subagente criado com sucesso!',
+  '✓ Subagent Created Successfully!': '✓ Subagente criado com sucesso!',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     'O subagente "{{name}}" foi salvo no nível {{level}}.',
   'Name: ': 'Nome: ',
   'Location: ': 'Localização: ',
-  '❌ Error saving subagent:': '❌ Erro ao salvar subagente:',
+  '✗ Error saving subagent:': '✗ Erro ao salvar subagente:',
   'Warnings:': 'Avisos:',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
     'O nome "{{name}}" já existe no nível {{level}} - o subagente existente será substituído',
@@ -1180,9 +1216,9 @@ export default {
     'Escolha como proceder com sua sessão:',
   'Start new chat session': 'Iniciar nova sessão de chat',
   'Continue previous conversation': 'Continuar conversa anterior',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 Bem-vindo de volta! (Última atualização: {{timeAgo}})',
-  '🎯 Overall Goal:': '🎯 Objetivo Geral:',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    'Bem-vindo de volta! (Última atualização: {{timeAgo}})',
+  'Overall Goal:': 'Objetivo Geral:',
   'Connect a Provider': 'Conectar um provedor',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     'Você deve conectar um provedor para prosseguir. Pressione Ctrl+C novamente para sair.',
@@ -1353,8 +1389,8 @@ export default {
   // MCP Status
   // ============================================================================
   'No MCP servers configured.': 'Nenhum MCP servers configurado.',
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCP servers estão iniciando ({{count}} inicializando)...',
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    '◌ MCP servers estão iniciando ({{count}} inicializando)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     'Nota: A primeira inicialização pode demorar mais. A disponibilidade da ferramenta será atualizada automaticamente.',
   'Configured MCP servers:': 'MCP servers configurados:',
@@ -1378,7 +1414,7 @@ export default {
   'Prompts:': 'Prompts:',
   'Resources:': 'Recursos:',
   Blocked: 'Bloqueado',
-  '💡 Tips:': '💡 Dicas:',
+  '★ Tips:': '★ Dicas:',
   'to show server and tool descriptions':
     'para mostrar descrições de servidores e ferramentas',
   'to show tool parameter schemas': 'para mostrar tool parameter schemas',
@@ -1412,8 +1448,6 @@ export default {
     'Você pode alternar o modo de permissão rapidamente com Shift+Tab ou /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Experimente /insight para gerar insights personalizados do seu histórico de conversas.',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Pressione Ctrl+O para alternar o modo compacto — ocultar saída de ferramentas e raciocínio.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Adicione um arquivo QWEN.md para dar ao Qwen Code um contexto persistente do projeto.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1828,8 +1862,8 @@ export default {
   'Enter your Coding Plan API key: ': 'Insira sua API Key do Coding Plan: ',
   'Select authentication method:': 'Selecione o método de autenticação:',
   '\n=== Authentication Status ===\n': '\n=== Status de Autenticação ===\n',
-  '⚠️  No authentication method configured.\n':
-    '⚠️  Nenhum método de autenticação configurado.\n',
+  '⚠  No authentication method configured.\n':
+    '⚠  Nenhum método de autenticação configurado.\n',
   'Run one of the following commands to get started:\n':
     'Execute um dos seguintes comandos para começar:\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -1850,8 +1884,8 @@ export default {
   '  Current Model: {{model}}': '  Modelo atual: {{model}}',
   '  Config Version: {{version}}': '  Versão da configuração: {{version}}',
   '  Status: API key configured\n': '  Status: API Key configurada\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    '⚠️  Método de autenticação: Alibaba Cloud Coding Plan (Incompleto)',
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠  Método de autenticação: Alibaba Cloud Coding Plan (Incompleto)',
   '  Issue: API key not found in environment or settings\n':
     '  Problema: API Key não encontrada no ambiente ou configurações\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':
@@ -1865,12 +1899,10 @@ export default {
     'Modo raw não disponível. Execute em um terminal interativo.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ para navegar, Enter para selecionar, Ctrl+C para sair)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Ocultar saída da ferramenta e raciocínio para uma visualização mais limpa (alternar com Ctrl+O).',
-  'Press Ctrl+O to show full tool output':
-    'Pressione Ctrl+O para exibir a saída completa da ferramenta',
   'Switch to plan mode or exit plan mode':
     'Alternar para o modo de planejamento ou sair do modo de planejamento',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    'Define a intensidade de raciocínio dos modelos compatíveis ({{tiers}}); mapeada e limitada por provedor.',
   'Exited plan mode. Previous approval mode restored.':
     'Modo de planejamento encerrado. Modo de aprovação anterior restaurado.',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -2089,4 +2121,81 @@ export default {
   in: 'ent.',
   out: 'saída',
   'In/Out': 'Ent/Saída',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Verificar atualizações do Qwen Code e instalar se disponível',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Atualização do Qwen Code disponível! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Uma nova versão do Qwen Code está disponível! {{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!':
+    'Qwen Code {{version}} está atualizado!',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'Falha ao verificar atualizações. Verifique sua rede ou configuração do registro.',
+  'Unable to check for updates: {{reason}}':
+    'Não foi possível verificar atualizações: {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    'Atualização bem-sucedida! A nova versão será usada na próxima execução.',
+  'Update downloaded. It will be applied after you exit this session.':
+    'Atualização baixada. Será aplicada após você sair desta sessão.',
+  'Update failed: {{error}}': 'Falha na atualização: {{error}}',
+  'Downloading update...': 'Baixando atualização...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Atualização bem-sucedida! Reinicie o Qwen Code para usar a nova versão. Alternar provedores de modelo antes de reiniciar pode não funcionar corretamente.',
+  'Automatic update failed. Please try updating manually.':
+    'Falha na atualização automática. Tente atualizar manualmente.',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Falha na atualização automática: {{error}}. Execute novamente o instalador para atualizar manualmente.',
+  'Running from a local git clone. Please update with "git pull".':
+    'Executando a partir de um clone Git local. Atualize com "git pull".',
+  'Running via npx, update not applicable.':
+    'Executando via npx, atualização não aplicável.',
+  'Running via pnpx, update not applicable.':
+    'Executando via pnpx, atualização não aplicável.',
+  'Running via bunx, update not applicable.':
+    'Executando via bunx, atualização não aplicável.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Instalado via Homebrew. Atualize com "brew upgrade".',
+  "Locally installed. Please update via your project's package.json.":
+    'Instalado localmente. Atualize via package.json do seu projeto.',
+  'Update requires sudo. Please run:': 'A atualização requer sudo. Execute:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'Instalação standalone detectada. Tentando atualizar automaticamente agora...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'Instalação standalone detectada. Execute novamente o instalador standalone para atualizar:',
+  'Run the following to update:': 'Execute o seguinte para atualizar:',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'Não foi possível atualizar automaticamente esta instalação independente. Reinstale de:',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Atualização manual necessária. Reinstale o Qwen Code.',
+
+  // ============================================================================
+  // reload-plugins command
+  // ============================================================================
+  '{{count}} extension': '{{count}} extension',
+  '{{count}} extensions': '{{count}} extensions',
+  '{{count}} command': '{{count}} command',
+  '{{count}} commands': '{{count}} commands',
+  '{{count}} skill': '{{count}} skill',
+  '{{count}} skills': '{{count}} skills',
+  '{{count}} agent': '{{count}} agent',
+  '{{count}} agents': '{{count}} agents',
+  '{{count}} hook': '{{count}} hook',
+  '{{count}} hooks': '{{count}} hooks',
+  '{{count}} extension MCP server': '{{count}} extension MCP server',
+  '{{count}} extension MCP servers': '{{count}} extension MCP servers',
+  '{{count}} extension LSP server': '{{count}} extension LSP server',
+  '{{count}} extension LSP servers': '{{count}} extension LSP servers',
+  'Reload extension changes from disk': 'Reload extension changes from disk',
+  'Reloaded extensions: {{summary}}': 'Reloaded extensions: {{summary}}',
+  'Reload failed: {{message}}': 'Reload failed: {{message}}',
+  'Reload failed.': 'Reload failed.',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    'Extensions changed on disk. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    'Extension reload did not complete. Run /reload-plugins to try again.',
 };

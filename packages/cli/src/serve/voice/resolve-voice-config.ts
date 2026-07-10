@@ -11,6 +11,7 @@ import {
   getAuthTypeFromEnv,
   resolveCliGenerationConfig,
 } from '../../utils/modelConfigUtils.js';
+import { snapshotProcessEnv } from '../env-snapshot.js';
 import {
   isStreamingVoiceModel,
   resolveVoiceTranscriptionConfig,
@@ -27,6 +28,7 @@ export interface DaemonVoiceContext {
   settings: LoadedSettings;
   /** A `ModelsConfig` — satisfies the resolver's structural `getAllConfiguredModels`. */
   models: VoiceModelLookup;
+  env?: Readonly<Record<string, string | undefined>>;
   voiceModel: string;
   /** True for realtime models (open an upstream WS); false → batch on stop. */
   streaming: boolean;
@@ -44,15 +46,18 @@ function readVoiceModel(settings: LoadedSettings): string | undefined {
  * `workspace-providers-status.ts` so the daemon resolves the same configured
  * models the CLI would — without constructing a full CLI `Config`.
  */
-function buildModelsConfig(settings: LoadedSettings): ModelsConfig {
+function buildModelsConfig(
+  settings: LoadedSettings,
+  env: Readonly<Record<string, string | undefined>>,
+): ModelsConfig {
   const merged = settings.merged;
   const selectedAuthType =
-    merged.security?.auth?.selectedType ?? getAuthTypeFromEnv();
+    merged.security?.auth?.selectedType ?? getAuthTypeFromEnv(env);
   const resolvedCliConfig = resolveCliGenerationConfig({
     argv: {},
     settings: merged,
     selectedAuthType,
-    env: process.env as Record<string, string | undefined>,
+    env,
   });
   return new ModelsConfig({
     initialAuthType: selectedAuthType,
@@ -69,18 +74,31 @@ function buildModelsConfig(settings: LoadedSettings): ModelsConfig {
  */
 export function loadDaemonVoiceContext(
   workspaceCwd: string,
+  options: { env?: Readonly<Record<string, string | undefined>> } = {},
 ): DaemonVoiceContext {
-  const settings = loadSettings(workspaceCwd);
+  const settings = loadSettings(
+    workspaceCwd,
+    options.env ? { skipLoadEnvironment: true } : true,
+  );
   const voiceModel = readVoiceModel(settings);
   if (!voiceModel) {
     throw new Error('No voice model is configured for this workspace.');
   }
-  const models = buildModelsConfig(settings);
+  const models = buildModelsConfig(
+    settings,
+    options.env ?? snapshotProcessEnv(),
+  );
   // Validates transcribable + baseUrl + apiKey presence (throws otherwise).
-  resolveVoiceTranscriptionConfig({ config: models, settings, voiceModel });
+  resolveVoiceTranscriptionConfig({
+    config: models,
+    settings,
+    voiceModel,
+    env: options.env,
+  });
   return {
     settings,
     models,
+    ...(options.env ? { env: options.env } : {}),
     voiceModel,
     streaming: isStreamingVoiceModel(voiceModel),
   };

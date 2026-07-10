@@ -6,11 +6,12 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
   stripSuppressOnRestore,
   expandCollapsedHistory,
 } from './resumeHistoryUtils.js';
-import { ToolCallStatus } from '../types.js';
+import { MessageType, ToolCallStatus } from '../types.js';
 import type {
   AnyDeclarativeTool,
   Config,
@@ -41,6 +42,80 @@ describe('resumeHistoryUtils', () => {
       description: 'Replace text',
       build: vi.fn().mockReturnValue(mockInvocation),
     } as unknown as AnyDeclarativeTool;
+  });
+
+  it('inserts a history-gap divider before the gap child record', () => {
+    // The gap child is the first reachable record; the notice sits above it and
+    // states the earlier history could not be recovered.
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          uuid: 'b1',
+          message: { parts: [{ text: 'first surviving turn' } as Part] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+      historyGaps: [{ childUuid: 'b1', missingParentUuid: 'gone' }],
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 1_000);
+
+    expect(items).toHaveLength(2);
+    expect(items[0].type).toBe(MessageType.INFO);
+    // Test locale has no translations loaded → t() returns the English source.
+    const text = (items[0] as { text: string }).text;
+    expect(text).toContain('History gap');
+    expect(text).toContain('could not be recovered');
+    expect(items[1]).toMatchObject({
+      type: 'user',
+      text: 'first surviving turn',
+    });
+  });
+
+  it('does not pair a pre-gap @-command with the post-gap user turn', () => {
+    // Defense-in-depth: reconstructHistory truncates to the tail island, so a
+    // pre-gap at_command is normally never replayed (the gap child is the first
+    // record). But convertToHistoryItems must stay robust if a divider ever
+    // lands with an unconsumed at_command buffered — the post-gap user turn must
+    // NOT inherit the pre-gap @file reads.
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'at_command',
+          uuid: 'a1',
+          systemPayload: {
+            userText: 'pre-gap @old.ts summarize',
+            filesRead: ['/pre/old.ts'],
+            status: 'success',
+          },
+        },
+        {
+          type: 'user',
+          uuid: 'b1',
+          message: { parts: [{ text: 'post-gap message' } as Part] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+      historyGaps: [{ childUuid: 'b1', missingParentUuid: 'gone' }],
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 1_000);
+
+    // Divider, then the post-gap user turn as authored — no @-command text
+    // leaked in, no file-read tool group synthesized.
+    const texts = items.map((i) => (i as { text?: string }).text ?? '');
+    expect(texts.some((t) => t.includes('pre-gap @old.ts'))).toBe(false);
+    expect(items.some((i) => i.type === 'tool_group')).toBe(false);
+    const userItem = items.find((i) => i.type === 'user') as { text: string };
+    expect(userItem.text).toBe('post-gap message');
   });
 
   it('converts conversation into history items with incremental ids', () => {
@@ -493,6 +568,259 @@ describe('resumeHistoryUtils', () => {
 
     expect(items).toEqual([{ id: 51, type: 'user', text: '/filecmd' }]);
     expect(items[0]).not.toHaveProperty('sentToModel');
+  });
+
+  describe('detailedDisplay (§4.9 Ctrl+O full detail on resume)', () => {
+    type ToolGroupItem = Extract<HistoryItem, { type: 'tool_group' }>;
+    const firstTool = (items: HistoryItem[]) =>
+      (items.find((i) => i.type === 'tool_group') as ToolGroupItem | undefined)
+        ?.tools[0];
+
+    // detailedDisplay is only derived for collapsible (read/search/list) tools,
+    // so use a read tool here (displayName 'Read File' → 'read' category) — an
+    // edit/write tool would correctly yield `undefined` under the gate.
+    const readTool = {
+      name: 'read_file',
+      displayName: 'Read File',
+      description: 'Read a file',
+      build: vi.fn().mockReturnValue({ getDescription: () => 'read' }),
+    } as unknown as AnyDeclarativeTool;
+
+    const buildWithToolResult = (toolResult: Record<string, unknown>) => {
+      const conversation = {
+        messages: [
+          {
+            type: 'assistant',
+            message: {
+              parts: [
+                {
+                  functionCall: { id: 'call-1', name: 'read_file', args: {} },
+                } as unknown as Part,
+              ],
+            },
+          },
+          { type: 'tool_result', ...toolResult },
+        ],
+      } as unknown as ConversationRecord;
+      return buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({ read_file: readTool }),
+        10,
+      );
+    };
+
+    it('derives detailedDisplay from toolCallResult.responseParts', () => {
+      const items = buildWithToolResult({
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: 'Read 1 file',
+          status: 'success',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'replace',
+                response: { output: 'FULL FILE CONTENTS' },
+              },
+            },
+          ],
+        },
+      });
+      const tool = firstTool(items);
+      expect(tool?.resultDisplay).toBe('Read 1 file');
+      expect(tool?.detailedDisplay).toBe('FULL FILE CONTENTS');
+    });
+
+    it('falls back to message.parts when responseParts is absent (older records)', () => {
+      const items = buildWithToolResult({
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: 'Found 2 matches',
+          status: 'success',
+        },
+        message: {
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'replace',
+                response: { output: 'match line 1\nmatch line 2' },
+              },
+            },
+          ],
+        },
+      });
+      const tool = firstTool(items);
+      expect(tool?.detailedDisplay).toBe('match line 1\nmatch line 2');
+    });
+
+    it('leaves detailedDisplay undefined when neither source carries output', () => {
+      const items = buildWithToolResult({
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: 'ok',
+          status: 'success',
+        },
+      });
+      const tool = firstTool(items);
+      expect(tool?.detailedDisplay).toBeUndefined();
+    });
+
+    it('does NOT populate detailedDisplay for errored tools (matches live path)', () => {
+      const items = buildWithToolResult({
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: 'Tool failed',
+          status: 'error',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'replace',
+                response: { output: 'raw error output that must not surface' },
+              },
+            },
+          ],
+        },
+      });
+      const tool = firstTool(items);
+      expect(tool?.status).toBe(ToolCallStatus.Error);
+      expect(tool?.detailedDisplay).toBeUndefined();
+    });
+
+    it('does NOT populate detailedDisplay for non-collapsible tools (matches live gate)', () => {
+      // An edit/write/command/agent tool is never read via `usingDetailedDisplay`,
+      // so the resume path must skip the extraction just like the live path.
+      const editTool = {
+        name: 'replace',
+        displayName: 'Edit',
+        description: 'Edit a file',
+        build: vi.fn().mockReturnValue({ getDescription: () => 'edit' }),
+      } as unknown as AnyDeclarativeTool;
+      const conversation = {
+        messages: [
+          {
+            type: 'assistant',
+            message: {
+              parts: [
+                {
+                  functionCall: { id: 'call-1', name: 'replace', args: {} },
+                } as unknown as Part,
+              ],
+            },
+          },
+          {
+            type: 'tool_result',
+            toolCallResult: {
+              callId: 'call-1',
+              resultDisplay: 'Edited 1 file',
+              status: 'success',
+              responseParts: [
+                {
+                  functionResponse: {
+                    id: 'call-1',
+                    name: 'replace',
+                    response: {
+                      output: 'large edit output not needed in Ctrl+O',
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({ replace: editTool }),
+        10,
+      );
+      const tool = firstTool(items);
+      expect(tool?.status).toBe(ToolCallStatus.Success);
+      expect(tool?.detailedDisplay).toBeUndefined();
+    });
+  });
+});
+
+describe('applyCollapsePolicyAndSummary', () => {
+  const makeItems = (): HistoryItem[] =>
+    [
+      { id: 1, type: MessageType.USER, text: 'first' },
+      { id: 2, type: MessageType.GEMINI, text: 'first response' },
+      { id: 3, type: MessageType.USER, text: 'second' },
+      { id: 4, type: MessageType.GEMINI, text: 'second response' },
+      { id: 5, type: MessageType.USER, text: 'third' },
+      { id: 6, type: MessageType.GEMINI, text: 'third response' },
+    ] as HistoryItem[];
+
+  const expectSuppressed = (item: HistoryItem) => {
+    expect(item.display).toEqual(
+      expect.objectContaining({ suppressOnRestore: true }),
+    );
+  };
+
+  const expectVisible = (item: HistoryItem) => {
+    expect(item.display?.suppressOnRestore).toBeUndefined();
+  };
+
+  it('suppresses all items and shows the full summary count by default', () => {
+    const result = applyCollapsePolicyAndSummary(makeItems(), true);
+
+    expect(result).toHaveLength(7);
+    result.slice(0, 6).forEach(expectSuppressed);
+    expect(result[6]).toEqual(
+      expect.objectContaining({
+        id: 7,
+        type: MessageType.INFO,
+        text: expect.stringContaining('6 messages hidden'),
+        display: { kind: 'collapse-summary' },
+      }),
+    );
+  });
+
+  it('keeps the most recent N user turns visible and summarizes only hidden items', () => {
+    const result = applyCollapsePolicyAndSummary(makeItems(), true, 2);
+
+    expect(result).toHaveLength(7);
+    result.slice(0, 2).forEach(expectSuppressed);
+    result.slice(2, 6).forEach(expectVisible);
+    expect(result[6]).toEqual(
+      expect.objectContaining({
+        id: 7,
+        type: MessageType.INFO,
+        text: expect.stringContaining('2 messages hidden'),
+        display: { kind: 'collapse-summary' },
+      }),
+    );
+  });
+
+  it('shows all items without a summary when preview count covers all user turns', () => {
+    const rawItems = makeItems();
+    const result = applyCollapsePolicyAndSummary(rawItems, true, 3);
+
+    expect(result).toEqual(rawItems);
+    expect(
+      result.some((item) => item.display?.kind === 'collapse-summary'),
+    ).toBe(false);
+    result.forEach(expectVisible);
+  });
+
+  it('shows all items without a summary when preview count is -1', () => {
+    const rawItems = makeItems();
+    const result = applyCollapsePolicyAndSummary(rawItems, true, -1);
+
+    expect(result).toBe(rawItems);
+  });
+
+  it('returns raw items unchanged when collapseOnResume is false', () => {
+    const rawItems = makeItems();
+    const result = applyCollapsePolicyAndSummary(rawItems, false, 1);
+
+    expect(result).toBe(rawItems);
+  });
+
+  it('returns empty history without a summary', () => {
+    expect(applyCollapsePolicyAndSummary([], true)).toEqual([]);
   });
 });
 

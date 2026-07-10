@@ -19,6 +19,7 @@ import { btwCommand } from '../ui/commands/btwCommand.js';
 import { bugCommand } from '../ui/commands/bugCommand.js';
 import { cdCommand } from '../ui/commands/cdCommand.js';
 import { clearCommand } from '../ui/commands/clearCommand.js';
+import { configCommand } from '../ui/commands/config-command.js';
 import { deleteCommand } from '../ui/commands/deleteCommand.js';
 import { compressCommand } from '../ui/commands/compressCommand.js';
 import { compressFastCommand } from '../ui/commands/compressFastCommand.js';
@@ -29,6 +30,7 @@ import { doctorCommand } from '../ui/commands/doctorCommand.js';
 import { diffCommand } from '../ui/commands/diffCommand.js';
 import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
+import { effortCommand } from '../ui/commands/effort-command.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
 import { forkCommand } from '../ui/commands/forkCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
@@ -52,6 +54,7 @@ import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
 import { trustCommand } from '../ui/commands/trustCommand.js';
 import { quitCommand } from '../ui/commands/quitCommand.js';
 import { recapCommand } from '../ui/commands/recapCommand.js';
+import { reloadPluginsCommand } from '../ui/commands/reload-plugins-command.js';
 import { renameCommand } from '../ui/commands/renameCommand.js';
 import { restoreCommand } from '../ui/commands/restoreCommand.js';
 import { resumeCommand } from '../ui/commands/resumeCommand.js';
@@ -69,6 +72,7 @@ import { setupGithubCommand } from '../ui/commands/setupGithubCommand.js';
 import { insightCommand } from '../ui/commands/insightCommand.js';
 import { statuslineCommand } from '../ui/commands/statuslineCommand.js';
 import { lspCommand } from '../ui/commands/lspCommand.js';
+import { updateCommand } from '../ui/commands/update-command.js';
 
 const builtinDebugLogger = createDebugLogger('BUILTIN_COMMAND_LOADER');
 
@@ -121,6 +125,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       clearCommand,
       compressCommand,
       compressFastCommand,
+      configCommand,
       contextCommand,
       copyCommand,
       diffCommand,
@@ -129,6 +134,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       doctorCommand,
       directoryCommand,
       editorCommand,
+      effortCommand,
       exportCommand,
       extensionsCommand,
       helpCommand,
@@ -151,6 +157,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       ...(this.config?.getFolderTrust() ? [trustCommand] : []),
       quitCommand,
       recapCommand,
+      reloadPluginsCommand,
       renameCommand,
       restoreCommand(this.config),
       resumeCommand,
@@ -162,6 +169,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       toolsCommand,
       settingsCommand,
       vimCommand,
+      updateCommand,
       voiceCommand,
       setupGithubCommand,
       terminalSetupCommand,

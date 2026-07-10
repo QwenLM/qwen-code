@@ -21,7 +21,6 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVimModeState } from '../contexts/VimModeContext.js';
-import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { GeminiSpinner } from './GeminiRespondingSpinner.js';
 import { GoalPill, useFooterGoalState } from './GoalPill.js';
 import { CronPill, useFooterCronTaskCount } from './CronPill.js';
@@ -97,8 +96,17 @@ export const Footer: React.FC = () => {
     <Text color={theme.text.secondary}>
       <GeminiSpinner /> {configInitMessage}
     </Text>
-  ) : showAutoAcceptIndicator !== undefined &&
-    showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
+  ) : uiState.startupIdeConnectionStatus.state === 'connecting' ? (
+    <Text color={theme.text.secondary}>
+      <GeminiSpinner /> {t('IDE connecting... context may be unavailable')}
+    </Text>
+  ) : uiState.startupIdeConnectionStatus.state === 'failed' ? (
+    <Text color={theme.status.warning}>
+      {t('IDE connection unavailable: {{message}}', {
+        message: uiState.startupIdeConnectionStatus.message,
+      })}
+    </Text>
+  ) : showAutoAcceptIndicator !== undefined ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
   ) : suppressHint ? null : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
@@ -108,7 +116,13 @@ export const Footer: React.FC = () => {
   if (sandboxInfo) {
     rightItems.push({
       key: 'sandbox',
-      node: <Text color={theme.status.success}>🔒 {sandboxInfo}</Text>,
+      node: <Text color={theme.status.success}>{sandboxInfo}</Text>,
+    });
+  }
+  if (config.isSafeMode()) {
+    rightItems.push({
+      key: 'safe-mode',
+      node: <Text color={theme.status.warning}>⚠ Safe Mode</Text>,
     });
   }
   if (debugMode) {
@@ -118,7 +132,7 @@ export const Footer: React.FC = () => {
     });
   }
   // Dream tasks now surface via the BackgroundTasksPill (e.g. "1 dream")
-  // alongside the other background-task kinds. The previous `✦ dreaming`
+  // alongside the other background-task kinds. The previous `◆ dreaming`
   // right-column indicator was removed to avoid two simultaneous signals
   // for the same underlying state.
   if (promptTokenCount > 0 && contextWindowSize && !hideContextIndicator) {
@@ -214,7 +228,7 @@ export const Footer: React.FC = () => {
           !uiState.ctrlCPressedOnce &&
           !uiState.ctrlDPressedOnce && (
             <Text color={theme.text.accent} wrap="truncate">
-              {`⚙ ${t('workflow active')}`}
+              {`▷ ${t('workflow active')}`}
             </Text>
           )}
         <Box flexDirection="row" flexShrink={1}>

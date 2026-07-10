@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs';
 import {
   createNonInteractivePromptId,
   main,
+  registerLspHotReload,
   setupUnhandledRejectionHandler,
   validateDnsResolutionOrder,
 } from './gemini.js';
@@ -29,6 +30,16 @@ import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockHandleListExtensions = vi.hoisted(() => vi.fn());
+const mockStartEarlyStartupPrefetches = vi.hoisted(() => vi.fn());
+const mockStartPostRenderPrefetches = vi.hoisted(() => vi.fn());
+const mockRunAcpAgent = vi.hoisted(() => vi.fn());
+const lspConfigWatcherMock = vi.hoisted(() => ({
+  instances: [] as Array<{
+    listener?: (event: unknown) => void | Promise<void>;
+    startWatching: ReturnType<typeof vi.fn>;
+    stopWatching: ReturnType<typeof vi.fn>;
+  }>,
+}));
 
 describe('gemini import boundary', () => {
   it('does not statically import ACP or noninteractive auth branches', () => {
@@ -78,7 +89,10 @@ vi.mock('./config/config.js', () => ({
     getSandbox: vi.fn(() => false),
     getQuestion: vi.fn(() => ''),
     isInteractive: () => false,
+    isLspEnabled: () => false,
+    getLspClient: () => undefined,
     getWarnings: vi.fn(() => []),
+    isSafeMode: vi.fn(() => false),
     getModelsConfig: vi.fn(() => ({ getCurrentAuthType: () => null })),
   } as unknown as Config),
   parseArguments: vi.fn().mockResolvedValue({}),
@@ -138,6 +152,17 @@ vi.mock('./core/initializer.js', () => ({
   }),
 }));
 
+vi.mock('./startup/startup-prefetch.js', () => ({
+  startEarlyStartupPrefetches: (...args: unknown[]) =>
+    mockStartEarlyStartupPrefetches(...args),
+  startPostRenderPrefetches: (...args: unknown[]) =>
+    mockStartPostRenderPrefetches(...args),
+}));
+
+vi.mock('./acp-integration/acpAgent.js', () => ({
+  runAcpAgent: (...args: unknown[]) => mockRunAcpAgent(...args),
+}));
+
 vi.mock('./commands/extensions/list.js', () => ({
   handleList: mockHandleListExtensions,
 }));
@@ -160,6 +185,43 @@ vi.mock('./config/settingsWatcher.js', () => ({
   },
 }));
 
+vi.mock('./config/lsp-config-watcher.js', () => ({
+  LspConfigWatcher: class {
+    listener?: (event: unknown) => void | Promise<void>;
+    startWatching = vi.fn(
+      (listener: (event: unknown) => void | Promise<void>) => {
+        this.listener = listener;
+      },
+    );
+    stopWatching = vi.fn();
+
+    constructor() {
+      lspConfigWatcherMock.instances.push(this);
+    }
+  },
+}));
+
+vi.mock('./config/extension-file-watcher.js', () => ({
+  ExtensionFileWatcher: class {
+    startWatching() {}
+    restartWatching() {}
+    stopWatching() {}
+  },
+}));
+
+function withLspDisabledConfig<T extends object>(
+  config: T,
+): T & {
+  isLspEnabled: () => boolean;
+  getLspClient: () => undefined;
+} {
+  return {
+    isLspEnabled: () => false,
+    getLspClient: () => undefined,
+    ...config,
+  };
+}
+
 describe('gemini.tsx main function', () => {
   let originalEnvGeminiSandbox: string | undefined;
   let originalEnvSandbox: string | undefined;
@@ -168,6 +230,7 @@ describe('gemini.tsx main function', () => {
     [];
 
   beforeEach(() => {
+    lspConfigWatcherMock.instances.length = 0;
     // Store and clear sandbox-related env variables to ensure a consistent test environment
     originalEnvGeminiSandbox = process.env['QWEN_SANDBOX'];
     originalEnvSandbox = process.env['SANDBOX'];
@@ -245,6 +308,7 @@ describe('gemini.tsx main function', () => {
         getProjectRoot: () => '/',
         getOutputFormat: () => OutputFormat.TEXT,
         getWarnings: () => [],
+        isSafeMode: () => false,
         getModelsConfig: () => ({ getCurrentAuthType: () => null }),
         getSessionId: () => 'test-session-id',
       } as unknown as Config;
@@ -372,6 +436,7 @@ describe('gemini.tsx main function', () => {
       getProjectRoot: () => '/',
       getOutputFormat: () => OutputFormat.TEXT,
       getWarnings: () => [],
+      isSafeMode: () => false,
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getSessionId: () => 'test-session-id',
     } as unknown as Config;
@@ -412,6 +477,187 @@ describe('gemini.tsx main function', () => {
       // settingsWatcher: not started in bare mode
       undefined,
     );
+  });
+
+  describe('registerLspHotReload', () => {
+    it('does not register a watcher when LSP is disabled', () => {
+      const registerCleanup = vi.fn();
+
+      registerLspHotReload(
+        withLspDisabledConfig({
+          getProjectRoot: () => '/workspace',
+        }) as unknown as Config,
+        registerCleanup,
+      );
+
+      expect(lspConfigWatcherMock.instances).toHaveLength(0);
+      expect(registerCleanup).not.toHaveBeenCalled();
+    });
+
+    it('does not register a watcher when the client cannot reinitialize', () => {
+      const registerCleanup = vi.fn();
+
+      registerLspHotReload(
+        {
+          isLspEnabled: () => true,
+          getLspClient: () => ({}),
+          getProjectRoot: () => '/workspace',
+        } as unknown as Config,
+        registerCleanup,
+      );
+
+      expect(lspConfigWatcherMock.instances).toHaveLength(0);
+      expect(registerCleanup).not.toHaveBeenCalled();
+    });
+
+    it('emits an LSP status update after successful reload', async () => {
+      const registerCleanup = vi.fn();
+      const reinitializeLsp = vi.fn(async () => ({
+        reconcile: {
+          added: ['clangd'],
+          removed: [],
+          restarted: [],
+          unchanged: [],
+          failed: [],
+        },
+        skipped: [],
+      }));
+
+      registerLspHotReload(
+        {
+          isLspEnabled: () => true,
+          getLspClient: () => ({ reinitialize: vi.fn() }),
+          getProjectRoot: () => '/workspace',
+          reinitializeLsp,
+        } as unknown as Config,
+        registerCleanup,
+      );
+
+      await lspConfigWatcherMock.instances[0]?.listener?.({
+        path: '/workspace/.lsp.json',
+        changeType: 'modified',
+      });
+
+      expect(reinitializeLsp).toHaveBeenCalledOnce();
+      expect(appEvents.emit).toHaveBeenCalledWith(AppEvent.LspStatusChanged);
+    });
+
+    it('emits an LSP status update when reload is skipped by the config', async () => {
+      const reinitializeLsp = vi.fn(async () => undefined);
+
+      registerLspHotReload(
+        {
+          isLspEnabled: () => true,
+          getLspClient: () => ({ reinitialize: vi.fn() }),
+          getProjectRoot: () => '/workspace',
+          reinitializeLsp,
+        } as unknown as Config,
+        vi.fn(),
+      );
+
+      await lspConfigWatcherMock.instances[0]?.listener?.({
+        path: '/workspace/.lsp.json',
+        changeType: 'modified',
+      });
+
+      expect(reinitializeLsp).toHaveBeenCalledOnce();
+      expect(appEvents.emit).not.toHaveBeenCalledWith(
+        AppEvent.LogError,
+        expect.any(String),
+      );
+      expect(appEvents.emit).toHaveBeenCalledWith(AppEvent.LspStatusChanged);
+    });
+
+    it('emits a user-visible error and rejects when reload fails', async () => {
+      const reinitializeLsp = vi.fn(async () => {
+        throw new Error('invalid lsp json');
+      });
+
+      registerLspHotReload(
+        {
+          isLspEnabled: () => true,
+          getLspClient: () => ({ reinitialize: vi.fn() }),
+          getProjectRoot: () => '/workspace',
+          reinitializeLsp,
+        } as unknown as Config,
+        vi.fn(),
+      );
+
+      await expect(
+        lspConfigWatcherMock.instances[0]?.listener?.({
+          path: '/workspace/.lsp.json',
+          changeType: 'modified',
+        }),
+      ).rejects.toThrow('invalid lsp json');
+
+      expect(appEvents.emit).toHaveBeenCalledWith(
+        AppEvent.LogError,
+        'Failed to reload LSP server settings: invalid lsp json. Some LSP servers may have been partially updated. Run with --debug for details.',
+      );
+    });
+
+    it('emits a user-visible error and rejects when reload has failed servers', async () => {
+      const reinitializeLsp = vi.fn(async () => ({
+        reconcile: {
+          added: [],
+          removed: [],
+          restarted: [],
+          unchanged: [],
+          failed: ['clangd'],
+        },
+        skipped: [],
+      }));
+
+      registerLspHotReload(
+        {
+          isLspEnabled: () => true,
+          getLspClient: () => ({ reinitialize: vi.fn() }),
+          getProjectRoot: () => '/workspace',
+          reinitializeLsp,
+        } as unknown as Config,
+        vi.fn(),
+      );
+
+      await expect(
+        lspConfigWatcherMock.instances[0]?.listener?.({
+          path: '/workspace/.lsp.json',
+          changeType: 'modified',
+        }),
+      ).rejects.toThrow('LSP reload partially completed');
+
+      expect(appEvents.emit).toHaveBeenCalledWith(
+        AppEvent.LogError,
+        'LSP reload partially completed: changed=<none>, failed=clangd. Run with --debug for details.',
+      );
+      expect(appEvents.emit).toHaveBeenCalledWith(AppEvent.LspStatusChanged);
+    });
+
+    it('surfaces invalid config without reinitializing LSP', async () => {
+      const reinitializeLsp = vi.fn();
+
+      registerLspHotReload(
+        {
+          isLspEnabled: () => true,
+          getLspClient: () => ({ reinitialize: vi.fn() }),
+          getProjectRoot: () => '/workspace',
+          reinitializeLsp,
+        } as unknown as Config,
+        vi.fn(),
+      );
+
+      await lspConfigWatcherMock.instances[0]?.listener?.({
+        path: '/workspace/.lsp.json',
+        changeType: 'invalid',
+        error:
+          'Invalid JSON in .lsp.json; existing LSP runtime state is unchanged.',
+      });
+
+      expect(reinitializeLsp).not.toHaveBeenCalled();
+      expect(appEvents.emit).toHaveBeenCalledWith(
+        AppEvent.LogError,
+        'Invalid JSON in .lsp.json; existing LSP runtime state is unchanged.',
+      );
+    });
   });
 
   it('writes non-interactive warnings discovered during config initialization', async () => {
@@ -481,6 +727,7 @@ describe('gemini.tsx main function', () => {
       getProjectRoot: () => '/',
       getOutputFormat: () => OutputFormat.TEXT,
       getWarnings: () => (initialized ? ['late memory warning'] : []),
+      isSafeMode: () => false,
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getContentGeneratorConfig: () => undefined,
       getUsageStatisticsEnabled: () => true,
@@ -530,6 +777,11 @@ describe('gemini.tsx main function', () => {
     }
 
     expect(mockWriteStderrLine).toHaveBeenCalledWith('late memory warning');
+    expect(initializerModule.initializeApp).toHaveBeenCalledWith(
+      configStub,
+      expect.any(Object),
+      { deferIdeConnection: false },
+    );
   });
 
   it('creates non-interactive prompt ids that preserve session correlation', () => {
@@ -806,6 +1058,7 @@ describe('gemini.tsx main function', () => {
       getInputFormat: () => 'stream-json',
       getContentGeneratorConfig: () => ({ authType: 'test-auth' }),
       getWarnings: () => [],
+      isSafeMode: () => false,
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
@@ -852,6 +1105,11 @@ describe('gemini.tsx main function', () => {
       undefined,
       configStub,
       expect.any(Object),
+    );
+    expect(initializerModule.initializeApp).toHaveBeenCalledWith(
+      configStub,
+      expect.any(Object),
+      { deferIdeConnection: false },
     );
     expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
   });
@@ -922,6 +1180,15 @@ describe('gemini.tsx main function kitty protocol', () => {
       './config/config.js'
     );
     const { loadSettings } = await import('./config/settings.js');
+    const initializerModule = await import('./core/initializer.js');
+    const initializeAppSpy = vi
+      .spyOn(initializerModule, 'initializeApp')
+      .mockResolvedValue({
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        geminiMdFileCount: 0,
+      });
     vi.mocked(loadCliConfig).mockResolvedValue({
       isInteractive: () => true,
       getQuestion: () => '',
@@ -937,6 +1204,376 @@ describe('gemini.tsx main function kitty protocol', () => {
       getScreenReader: () => false,
       getGeminiMdFileCount: () => 0,
       getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      isTelemetryInitializationDeferred: () => true,
+    } as unknown as Config);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(parseArguments).mockResolvedValue({
+      model: undefined,
+      sandbox: undefined,
+      sandboxImage: undefined,
+      debug: undefined,
+      prompt: undefined,
+      promptInteractive: undefined,
+      systemPrompt: undefined,
+      appendSystemPrompt: undefined,
+      query: undefined,
+      yolo: undefined,
+      bare: undefined,
+      approvalMode: undefined,
+      telemetry: undefined,
+      telemetryTarget: undefined,
+      telemetryOtlpEndpoint: undefined,
+      telemetryOtlpProtocol: undefined,
+      telemetryLogPrompts: undefined,
+      telemetryOutfile: undefined,
+      allowedMcpServerNames: undefined,
+      mcpConfig: undefined,
+      allowedTools: undefined,
+      acp: undefined,
+      experimentalAcp: undefined,
+      extensions: undefined,
+      listExtensions: undefined,
+      openaiLogging: undefined,
+      openaiApiKey: undefined,
+      openaiBaseUrl: undefined,
+      openaiLoggingDir: undefined,
+      proxy: undefined,
+      includeDirectories: undefined,
+      screenReader: undefined,
+      inputFormat: undefined,
+      outputFormat: undefined,
+      includePartialMessages: undefined,
+      continue: undefined,
+      resume: undefined,
+      coreTools: undefined,
+      excludeTools: undefined,
+      disabledSlashCommands: undefined,
+      authType: undefined,
+      maxSessionTurns: undefined,
+      maxWallTime: undefined,
+      maxToolCalls: undefined,
+      maxSubagentDepth: undefined,
+      experimentalLsp: undefined,
+      channel: undefined,
+      chatRecording: undefined,
+      sessionId: undefined,
+      fallbackModel: undefined,
+    });
+
+    await main();
+
+    expect(setRawModeSpy).toHaveBeenCalledWith(true);
+    expect(detectAndEnableKittyProtocol).toHaveBeenCalledTimes(1);
+    expect(initializeAppSpy).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      {
+        deferIdeConnection: true,
+      },
+    );
+    expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      {
+        connectIde: true,
+        initializeTelemetry: true,
+      },
+    );
+    expect(mockStartEarlyStartupPrefetches).toHaveBeenCalledWith(
+      expect.any(Object),
+    );
+  });
+
+  it('should await IDE connection when interactive mode has an initial prompt', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const initializerModule = await import('./core/initializer.js');
+    const initializeAppSpy = vi
+      .spyOn(initializerModule, 'initializeApp')
+      .mockResolvedValue({
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        geminiMdFileCount: 0,
+      });
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => true,
+      getQuestion: () => 'hello from prompt-interactive',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      isTelemetryInitializationDeferred: () => false,
+    } as unknown as Config);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(parseArguments).mockResolvedValue({
+      model: undefined,
+      sandbox: undefined,
+      sandboxImage: undefined,
+      debug: undefined,
+      prompt: undefined,
+      promptInteractive: undefined,
+      systemPrompt: undefined,
+      appendSystemPrompt: undefined,
+      query: undefined,
+      yolo: undefined,
+      bare: undefined,
+      approvalMode: undefined,
+      telemetry: undefined,
+      telemetryTarget: undefined,
+      telemetryOtlpEndpoint: undefined,
+      telemetryOtlpProtocol: undefined,
+      telemetryLogPrompts: undefined,
+      telemetryOutfile: undefined,
+      allowedMcpServerNames: undefined,
+      mcpConfig: undefined,
+      allowedTools: undefined,
+      acp: undefined,
+      experimentalAcp: undefined,
+      extensions: undefined,
+      listExtensions: undefined,
+      openaiLogging: undefined,
+      openaiApiKey: undefined,
+      openaiBaseUrl: undefined,
+      openaiLoggingDir: undefined,
+      proxy: undefined,
+      includeDirectories: undefined,
+      screenReader: undefined,
+      inputFormat: undefined,
+      outputFormat: undefined,
+      includePartialMessages: undefined,
+      continue: undefined,
+      resume: undefined,
+      coreTools: undefined,
+      excludeTools: undefined,
+      disabledSlashCommands: undefined,
+      authType: undefined,
+      maxSessionTurns: undefined,
+      maxWallTime: undefined,
+      maxToolCalls: undefined,
+      maxSubagentDepth: undefined,
+      experimentalLsp: undefined,
+      channel: undefined,
+      chatRecording: undefined,
+      sessionId: undefined,
+      fallbackModel: undefined,
+    });
+
+    await main();
+
+    expect(initializeAppSpy).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      {
+        deferIdeConnection: false,
+      },
+    );
+    expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      {
+        connectIde: false,
+        initializeTelemetry: false,
+      },
+    );
+    expect(mockStartEarlyStartupPrefetches).toHaveBeenCalledWith(
+      expect.any(Object),
+    );
+  });
+
+  it('should await IDE connection when interactive mode has an input file', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const initializerModule = await import('./core/initializer.js');
+    const initializeAppSpy = vi
+      .spyOn(initializerModule, 'initializeApp')
+      .mockResolvedValue({
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        geminiMdFileCount: 0,
+      });
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => true,
+      getQuestion: () => '',
+      getInputFile: () => '/tmp/qwen-input.jsonl',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      isTelemetryInitializationDeferred: () => true,
+    } as unknown as Config);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(parseArguments).mockResolvedValue({
+      model: undefined,
+      sandbox: undefined,
+      sandboxImage: undefined,
+      debug: undefined,
+      prompt: undefined,
+      promptInteractive: undefined,
+      systemPrompt: undefined,
+      appendSystemPrompt: undefined,
+      query: undefined,
+      yolo: undefined,
+      bare: undefined,
+      approvalMode: undefined,
+      telemetry: undefined,
+      telemetryTarget: undefined,
+      telemetryOtlpEndpoint: undefined,
+      telemetryOtlpProtocol: undefined,
+      telemetryLogPrompts: undefined,
+      telemetryOutfile: undefined,
+      allowedMcpServerNames: undefined,
+      mcpConfig: undefined,
+      allowedTools: undefined,
+      acp: undefined,
+      experimentalAcp: undefined,
+      extensions: undefined,
+      listExtensions: undefined,
+      openaiLogging: undefined,
+      openaiApiKey: undefined,
+      openaiBaseUrl: undefined,
+      openaiLoggingDir: undefined,
+      proxy: undefined,
+      includeDirectories: undefined,
+      screenReader: undefined,
+      inputFormat: undefined,
+      outputFormat: undefined,
+      includePartialMessages: undefined,
+      continue: undefined,
+      resume: undefined,
+      coreTools: undefined,
+      excludeTools: undefined,
+      disabledSlashCommands: undefined,
+      authType: undefined,
+      maxSessionTurns: undefined,
+      maxWallTime: undefined,
+      maxToolCalls: undefined,
+      maxSubagentDepth: undefined,
+      experimentalLsp: undefined,
+      channel: undefined,
+      chatRecording: undefined,
+      sessionId: undefined,
+      fallbackModel: undefined,
+    });
+
+    await main();
+
+    expect(initializeAppSpy).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      {
+        deferIdeConnection: false,
+      },
+    );
+    expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      {
+        connectIde: false,
+        initializeTelemetry: true,
+      },
+    );
+  });
+
+  it('should not defer IDE connection when Zed integration is enabled', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const initializerModule = await import('./core/initializer.js');
+    const initializeAppSpy = vi
+      .spyOn(initializerModule, 'initializeApp')
+      .mockResolvedValue({
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        geminiMdFileCount: 0,
+      });
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => true,
+      getQuestion: () => '',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => true,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
+      isSafeMode: () => false,
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
@@ -999,16 +1636,43 @@ describe('gemini.tsx main function kitty protocol', () => {
       maxSessionTurns: undefined,
       maxWallTime: undefined,
       maxToolCalls: undefined,
+      maxSubagentDepth: undefined,
       experimentalLsp: undefined,
       channel: undefined,
       chatRecording: undefined,
       sessionId: undefined,
+      fallbackModel: undefined,
     });
 
-    await main();
+    // Mock process.exit to throw instead of terminating the process
+    const originalExit = process.exit;
+    process.exit = ((code?: string | number | null | undefined) => {
+      throw new MockProcessExitError(code);
+    }) as unknown as typeof process.exit;
 
-    expect(setRawModeSpy).toHaveBeenCalledWith(true);
-    expect(detectAndEnableKittyProtocol).toHaveBeenCalledTimes(1);
+    try {
+      await main();
+    } catch (e) {
+      if (!(e instanceof MockProcessExitError)) throw e;
+    } finally {
+      process.exit = originalExit;
+    }
+
+    expect(initializeAppSpy).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      {
+        deferIdeConnection: false,
+      },
+    );
+    expect(mockRunAcpAgent).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      expect.any(Object),
+    );
+    expect(mockStartEarlyStartupPrefetches).toHaveBeenCalledWith(
+      expect.any(Object),
+    );
   });
 
   it('should run cleanup before exiting on interactive SIGINT', async () => {
@@ -1048,6 +1712,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getScreenReader: () => false,
       getGeminiMdFileCount: () => 0,
       getWarnings: () => [],
+      isSafeMode: () => false,
       getModelsConfig: () => ({
         getCurrentAuthType: () => null,
         getGenerationConfig: () => ({}),
@@ -1055,6 +1720,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getProxy: () => undefined,
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
+      isTelemetryInitializationDeferred: () => true,
     } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
@@ -1135,6 +1801,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getScreenReader: () => false,
       getGeminiMdFileCount: () => 0,
       getWarnings: () => [],
+      isSafeMode: () => false,
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
@@ -1217,7 +1884,8 @@ describe('startInteractiveUI', () => {
   const mockConfig = {
     getProjectRoot: () => '/root',
     getScreenReader: () => false,
-  } as Config;
+    isTelemetryInitializationDeferred: () => true,
+  } as unknown as Config;
   const mockSettings = {
     merged: {
       ui: {
@@ -1237,10 +1905,6 @@ describe('startInteractiveUI', () => {
   vi.mock('./ui/utils/kittyProtocolDetector.js', () => ({
     detectAndEnableKittyProtocol: vi.fn(() => Promise.resolve(true)),
     disableKittyProtocol: vi.fn(),
-  }));
-
-  vi.mock('./ui/utils/updateCheck.js', () => ({
-    checkForUpdates: vi.fn(() => Promise.resolve(null)),
   }));
 
   vi.mock('./utils/cleanup.js', () => ({
@@ -1293,7 +1957,6 @@ describe('startInteractiveUI', () => {
 
   it('should perform all startup tasks in correct order', async () => {
     const { getCliVersion } = await import('./utils/version.js');
-    const { checkForUpdates } = await import('./ui/utils/updateCheck.js');
     const { registerCleanup } = await import('./utils/cleanup.js');
 
     const mockInitializationResult = {
@@ -1319,15 +1982,14 @@ describe('startInteractiveUI', () => {
     const cleanupFn = vi.mocked(registerCleanup).mock.calls[0][0];
     expect(typeof cleanupFn).toBe('function');
 
-    // checkForUpdates should be called asynchronously (not waited for)
-    // We need a small delay to let it execute
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
+      mockConfig,
+      mockSettings,
+      { connectIde: false, initializeTelemetry: true },
+    );
   });
 
-  it('should not call checkForUpdates when enableAutoUpdate is false', async () => {
-    const { checkForUpdates } = await import('./ui/utils/updateCheck.js');
-
+  it('delegates disabled auto-update settings to post-render prefetch', async () => {
     const settingsWithAutoUpdateDisabled = {
       merged: {
         general: {
@@ -1354,9 +2016,38 @@ describe('startInteractiveUI', () => {
       mockInitializationResult,
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
+      mockConfig,
+      settingsWithAutoUpdateDisabled,
+      { connectIde: false, initializeTelemetry: true },
+    );
+  });
 
-    // checkForUpdates should NOT be called when enableAutoUpdate is false
-    expect(checkForUpdates).not.toHaveBeenCalled();
+  it('can skip post-render IDE connection after prompt-interactive awaited it', async () => {
+    const promptInteractiveConfig = {
+      ...mockConfig,
+      isTelemetryInitializationDeferred: () => false,
+    } as unknown as Config;
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      promptInteractiveConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+      { postRenderConnectIde: false },
+    );
+
+    expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
+      promptInteractiveConfig,
+      mockSettings,
+      { connectIde: false, initializeTelemetry: false },
+    );
   });
 });

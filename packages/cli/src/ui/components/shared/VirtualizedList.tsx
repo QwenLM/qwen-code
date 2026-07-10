@@ -833,13 +833,19 @@ function VirtualizedList<T>(
       <Box width={1} flexDirection="column" flexShrink={0}>
         {Array.from({ length: trackLen }, (_, i) => {
           const inThumb = i >= thumbTop && i < thumbTop + thumbLen;
-          // When the thumb is "active" (recent scroll), draw it bright
-          // (`█` without dimColor); otherwise collapse the thumb into a
-          // dim track glyph so the bar quietly disappears into the gutter.
-          const showActiveThumb = inThumb && scrollbarThumbActive;
+          // Overlay-style auto-hide: while idle (no recent scroll) the whole
+          // bar renders as blank cells so it doesn't sit permanently in the
+          // gutter competing with the conversation. On scroll it pops in —
+          // bright `█` thumb over a dim `│` track — then fades back to blank
+          // after the idle window. The column keeps width 1 in all states, so
+          // the viewport never reflows (which would force a per-item
+          // re-measure + visible jitter).
+          if (!scrollbarThumbActive) {
+            return <Text key={i}> </Text>;
+          }
           return (
-            <Text key={i} dimColor={!showActiveThumb}>
-              {showActiveThumb ? '█' : '│'}
+            <Text key={i} dimColor={!inThumb}>
+              {inThumb ? '█' : '│'}
             </Text>
           );
         })}
@@ -854,15 +860,22 @@ function VirtualizedList<T>(
     scrollbarThumbActive,
   ]);
 
+  // The host passes `containerHeight` as the *maximum* viewport height (the
+  // room available between the header and the composer). Pinning the root box
+  // to that height unconditionally left a tall empty gap below short content
+  // and pushed the composer far down the screen — the legacy <Static> path
+  // instead grows with its content. Collapse to `totalHeight` whenever the
+  // content fits so the composer sits right beneath the conversation; only
+  // when the content overflows do we clamp to `containerHeight` and let the
+  // viewport scroll. `scrollableContainerHeight` (the scroll math) still uses
+  // the full `containerHeight`, so scrolling is unaffected.
+  const rootHeight =
+    props.containerHeight !== undefined
+      ? Math.min(props.containerHeight, totalHeight)
+      : '100%';
+
   return (
-    <Box
-      ref={rootRef}
-      width="100%"
-      height={
-        props.containerHeight !== undefined ? props.containerHeight : '100%'
-      }
-      flexDirection="row"
-    >
+    <Box ref={rootRef} width="100%" height={rootHeight} flexDirection="row">
       <Box
         ref={containerRef}
         overflowY="hidden"

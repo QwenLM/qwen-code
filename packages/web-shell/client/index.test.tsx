@@ -7,6 +7,7 @@ import { createRoot, type Root } from 'react-dom/client';
 // top-level boundary sits *outside* the daemon providers (a boundary nested
 // under them couldn't catch their own throw).
 let workspaceShouldThrow = false;
+const sessionProviderProps: Array<Record<string, unknown>> = [];
 vi.mock('@qwen-code/webui/daemon-react-sdk', async () => {
   const React = await import('react');
   return {
@@ -14,8 +15,15 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async () => {
       if (workspaceShouldThrow) throw new Error('provider boom');
       return React.createElement(React.Fragment, null, children);
     },
-    DaemonSessionProvider: ({ children }: { children: React.ReactNode }) =>
-      React.createElement(React.Fragment, null, children),
+    DaemonSessionProvider: ({
+      children,
+      ...props
+    }: {
+      children: React.ReactNode;
+    }) => {
+      sessionProviderProps.push(props);
+      return React.createElement(React.Fragment, null, children);
+    },
   };
 });
 vi.mock('./App', async () => {
@@ -52,6 +60,7 @@ afterEach(() => {
     container.remove();
   }
   workspaceShouldThrow = false;
+  sessionProviderProps.length = 0;
   vi.restoreAllMocks();
 });
 
@@ -60,6 +69,26 @@ describe('WebShellWithProviders top-level boundary', () => {
     const container = render(<WebShellWithProviders />);
     expect(container.querySelector('[data-testid="app-ok"]')).not.toBeNull();
     expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('starts on an empty session by default', () => {
+    render(<WebShellWithProviders />);
+    expect(sessionProviderProps[0]).toMatchObject({
+      sessionId: undefined,
+    });
+    expect(sessionProviderProps[0]).not.toHaveProperty('deferSessionCreation');
+  });
+
+  it('passes controlled sessionId to the daemon session provider', () => {
+    render(<WebShellWithProviders sessionId="session-2" />);
+    expect(sessionProviderProps[0]).toMatchObject({
+      sessionId: 'session-2',
+    });
+  });
+
+  it('passes explicit undefined sessionId to the daemon session provider', () => {
+    render(<WebShellWithProviders sessionId={undefined} />);
+    expect(sessionProviderProps[0]).toHaveProperty('sessionId', undefined);
   });
 
   it('catches a daemon-provider render crash instead of white-screening', () => {

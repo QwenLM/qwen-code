@@ -57,6 +57,18 @@ describe('serve command args', () => {
     expect(parsed['permission-response-timeout-ms']).toBe(60000);
   });
 
+  it('parses --compacted-replay-max-bytes as a number', () => {
+    const parsed = buildParser().parseSync(
+      '--compacted-replay-max-bytes 4194304',
+    );
+    expect(parsed['compacted-replay-max-bytes']).toBe(4 * 1024 * 1024);
+  });
+
+  it('parses --max-total-sessions as a number', () => {
+    const parsed = buildParser().parseSync('--max-total-sessions 42');
+    expect(parsed['max-total-sessions']).toBe(42);
+  });
+
   it('leaves --permission-response-timeout-ms unset by default', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['permission-response-timeout-ms']).toBeUndefined();
@@ -85,6 +97,57 @@ describe('serve command args', () => {
     expect(buildParser().parseSync('')['open']).toBe(false);
     expect(buildParser().parseSync('--open')['open']).toBe(true);
   });
+
+  it('parses repeatable --channel values', () => {
+    const parsed = buildParser().parseSync(
+      '--channel telegram --channel feishu',
+    );
+
+    expect(parsed['channel']).toEqual(['telegram', 'feishu']);
+  });
+
+  it('parses a single --workspace value as a single-element array', () => {
+    const parsed = buildParser().parseSync('--workspace /tmp/primary');
+
+    expect(parsed['workspace']).toEqual(['/tmp/primary']);
+  });
+
+  it('parses repeatable --workspace values as an array', () => {
+    const parsed = buildParser().parseSync(
+      '--workspace /tmp/primary --workspace /tmp/secondary',
+    );
+
+    expect(parsed['workspace']).toEqual(['/tmp/primary', '/tmp/secondary']);
+  });
+
+  it('rejects valueless --workspace forms', () => {
+    for (const input of [
+      '--workspace',
+      '--workspace=',
+      '--workspace /tmp/primary --workspace',
+    ]) {
+      expect(() => buildParser().parseSync(input)).toThrow(
+        /Not enough arguments following: workspace/,
+      );
+    }
+  });
+
+  it('preserves repeatable --workspace values in command mode', () => {
+    let captured: unknown;
+    yargs([])
+      .exitProcess(false)
+      .fail(false)
+      .locale('en')
+      .command({
+        ...serveCommand,
+        handler: (argv) => {
+          captured = argv.workspace;
+        },
+      })
+      .parseSync('serve --workspace /tmp/primary --workspace /tmp/secondary');
+
+    expect(captured).toEqual(['/tmp/primary', '/tmp/secondary']);
+  });
 });
 
 describe('serve rate limit env parsing', () => {
@@ -111,6 +174,16 @@ describe('serve rate limit env parsing', () => {
     const handler = serveCommand.handler;
     if (!handler) throw new Error('serve handler missing');
     const argv = buildParser().parseSync('--rate-limit --no-web');
+    void handler(argv as Parameters<typeof handler>[0]);
+    await vi.waitFor(() => {
+      expect(mockRunQwenServe).toHaveBeenCalled();
+    });
+  }
+
+  async function startServeHandlerWithArgs(args: string) {
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync(args);
     void handler(argv as Parameters<typeof handler>[0]);
     await vi.waitFor(() => {
       expect(mockRunQwenServe).toHaveBeenCalled();
@@ -155,6 +228,85 @@ describe('serve rate limit env parsing', () => {
         rateLimitWindowMs: 60000,
       }),
     );
+  });
+
+  it('passes normalized named channels to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --channel telegram --channel telegram --channel feishu',
+    );
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channelSelection: { mode: 'names', names: ['telegram', 'feishu'] },
+      }),
+    );
+  });
+
+  it('passes compacted replay byte cap to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --compacted-replay-max-bytes 1048576',
+    );
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        compactedReplayMaxBytes: 1024 * 1024,
+      }),
+    );
+  });
+
+  it('passes --max-total-sessions to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --max-total-sessions 42');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTotalSessions: 42 }),
+    );
+  });
+
+  it('passes --channel all as an all-channel selection', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --channel all');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channelSelection: { mode: 'all' },
+      }),
+    );
+  });
+
+  it('rejects --channel all mixed with concrete channels', async () => {
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync(
+      '--no-web --channel all --channel telegram',
+    );
+
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+    expect(mockRunQwenServe).not.toHaveBeenCalled();
   });
 });
 

@@ -58,7 +58,11 @@ import {
   useBackgroundTaskViewState,
   useBackgroundTaskViewActions,
 } from '../contexts/BackgroundTaskViewContext.js';
-import { isLiveAgentPanelVisibleEntry } from './background-view/liveAgentPanelVisibility.js';
+import {
+  isLiveAgentPanelVisibleEntry,
+  LIVE_AGENT_PANEL_MAX_ROWS,
+} from './background-view/liveAgentPanelVisibility.js';
+import { panelDisplayOrder } from './background-view/agent-forest.js';
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
@@ -213,6 +217,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const uiState = useUIState();
   const uiActions = useUIActions();
   const settings = useSettings();
+  // Mouse interactions (suggestion list + click-to-position cursor) are enabled
+  // in alternate-screen mode (see RowMouseController's coordinate assumptions).
+  const mouseInteractionsEnabled = !!settings.merged.ui?.useTerminalBuffer;
   const { pasteWorkaround } = useKeypressContext();
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();
@@ -231,8 +238,17 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     setPillFocused: setBgPillFocused,
   } = useBackgroundTaskViewActions();
   const hasAgents = agents.size > 0;
+  // panelDisplayOrder + the maxRows tail-window mirror LiveAgentPanel's
+  // rendered rows exactly (oldest-first, nested agents grouped under
+  // their parent, windowed to the last LIVE_AGENT_PANEL_MAX_ROWS) so
+  // `livePanelSelectedIndex - 1` indexes the same agent the user sees
+  // highlighted. Filtering alone (snapshot order, newest-first, unsliced)
+  // opened the wrong agent's detail on Enter.
   const getVisibleBgAgents = useCallback(
-    () => bgEntries.filter((e) => isLiveAgentPanelVisibleEntry(e, Date.now())),
+    () =>
+      panelDisplayOrder(
+        bgEntries.filter((e) => isLiveAgentPanelVisibleEntry(e, Date.now())),
+      ).slice(-LIVE_AGENT_PANEL_MAX_ROWS),
     [bgEntries],
   );
   const hasActiveToolConfirmation = useMemo(
@@ -1877,6 +1893,88 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       ? activeCompletion.showSuggestions
       : false);
 
+  // Mouse hover/select must target the SAME completion source that builds
+  // suggestionDisplayProps. For reverse/command search, selecting also resets
+  // that controller and exits search mode, mirroring keyboard acceptance.
+  // Export completion has no index-based handler, so mouse selection is left
+  // disabled for it (handlers are undefined when its suggestions are shown).
+  const suggestionsFromExport =
+    shouldUseExportSuggestions && !!exportCompletion.suggestionDisplayProps;
+  const handleSuggestionHover = useCallback(
+    (index: number) => {
+      if (commandSearchActive) {
+        commandSearchCompletion.setActiveSuggestionIndex(index);
+      } else if (reverseSearchActive) {
+        reverseSearchCompletion.setActiveSuggestionIndex(index);
+      } else {
+        completion.setActiveSuggestionIndex(index);
+      }
+    },
+    [
+      commandSearchActive,
+      reverseSearchActive,
+      commandSearchCompletion,
+      reverseSearchCompletion,
+      completion,
+    ],
+  );
+  const handleSuggestionSelect = useCallback(
+    (index: number) => {
+      if (commandSearchActive || reverseSearchActive) {
+        const isCommandSearch = commandSearchActive;
+        const sc = isCommandSearch
+          ? commandSearchCompletion
+          : reverseSearchCompletion;
+        sc.handleAutocomplete(index);
+        sc.resetCompletionState();
+        (isCommandSearch ? setCommandSearchActive : setReverseSearchActive)(
+          false,
+        );
+      } else {
+        // Mirror the keyboard accept path (acceptActiveCompletionSuggestion +
+        // the ACCEPT_SUGGESTION handler) so a click behaves like Enter on the
+        // highlighted suggestion. Capture the suggestion BEFORE
+        // handleAutocomplete mutates the buffer/suggestions.
+        const accepted =
+          index >= 0 && index < completion.suggestions.length
+            ? completion.suggestions[index]
+            : undefined;
+        completion.handleAutocomplete(index);
+        exportCompletion.navigatedRef.current = false;
+        setExpandedSuggestionIndex(-1);
+        // For @folder paths, dismiss the completion so the dropdown stays
+        // closed (folder paths append no trailing space, so the @ pattern
+        // would otherwise re-match and re-open it).
+        if (
+          accepted?.isDirectory &&
+          completion.completionMode === CompletionMode.AT
+        ) {
+          dismissCompletion();
+        }
+        // A click is an explicit accept (the mouse equivalent of Enter, never
+        // Tab), so honor submitOnAccept unconditionally — clicking a leaf
+        // command like `/skills` submits it and opens the dialog in one click,
+        // matching the keyboard behavior.
+        if (accepted?.submitOnAccept) {
+          handleSubmitAndClear(`/${accepted.value}`);
+        }
+      }
+    },
+    [
+      commandSearchActive,
+      reverseSearchActive,
+      commandSearchCompletion,
+      reverseSearchCompletion,
+      completion,
+      exportCompletion,
+      dismissCompletion,
+      handleSubmitAndClear,
+      setExpandedSuggestionIndex,
+      setCommandSearchActive,
+      setReverseSearchActive,
+    ],
+  );
+
   // Whether any input-side handler would consume a Tab keystroke. AppContainer
   // feeds this into useAutoAcceptIndicator's `shouldBlockTab` so the
   // Windows-only "bare Tab cycles approval mode" fallback doesn't double-fire
@@ -2025,6 +2123,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         topRightLabel={voiceStatusLabel ?? uiState.sessionName ?? undefined}
         isActive={!isEmbeddedShellFocused}
         renderLine={renderLineWithHighlighting}
+        mouseEnabled={mouseInteractionsEnabled}
       />
       {shouldShowSuggestions && (
         <Box marginLeft={2} marginRight={2}>
@@ -2043,6 +2142,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
                 : 'reverse'
             }
             expandedIndex={expandedSuggestionIndex}
+            mouseEnabled={mouseInteractionsEnabled}
+            onHoverIndex={
+              suggestionsFromExport ? undefined : handleSuggestionHover
+            }
+            onSelectIndex={
+              suggestionsFromExport ? undefined : handleSuggestionSelect
+            }
           />
         </Box>
       )}
