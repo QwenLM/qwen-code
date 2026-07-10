@@ -16,6 +16,7 @@
 import type { CommandModule } from 'yargs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, ghApiAll } from './lib/gh.js';
 
@@ -30,7 +31,7 @@ import { ensureAuthenticated, gh, ghApiAll } from './lib/gh.js';
  */
 export const SUMMARY_MARKER = '<!-- qwen-review-suggestion-summary -->';
 
-interface PrMetadata {
+export interface PrMetadata {
   title: string;
   body: string | null;
   author: { login: string } | null;
@@ -43,7 +44,7 @@ interface PrMetadata {
   state: string;
 }
 
-interface RawComment {
+export interface RawComment {
   id: number;
   user?: { login: string };
   body?: string;
@@ -52,7 +53,7 @@ interface RawComment {
   in_reply_to_id?: number;
 }
 
-interface RawReview {
+export interface RawReview {
   id: number;
   user?: { login: string };
   body?: string;
@@ -126,7 +127,7 @@ function isReviewWorthShowing(body: string | undefined): boolean {
   return true;
 }
 
-function buildMarkdown(
+export function buildMarkdown(
   prNumber: string,
   ownerRepo: string,
   meta: PrMetadata,
@@ -210,6 +211,25 @@ function buildMarkdown(
     parts.push('');
   }
 
+  // Open threads come first. `read_file` stops at `truncateToolOutputThreshold`
+  // (25 000 chars by default) and pages by line, so whatever is written last is
+  // what a long context.md loses. On PR #5738 this section began at character
+  // 27 125 of a 31 220-character file: the review never saw the one Critical that
+  // was still live, and submitted "no blockers". The findings a round must answer
+  // outrank the ones already settled.
+  if (openRoots.length > 0) {
+    parts.push(
+      '## Open inline comments (no replies yet — may still need attention)',
+    );
+    parts.push('');
+    for (const c of openRoots) {
+      parts.push(
+        `- \`${c.path ?? '?'}\`:${c.line ?? '?'} by @${c.user?.login ?? '?'}: ${snippet(c.body)}`,
+      );
+    }
+    parts.push('');
+  }
+
   // Already-discussed threads — render the full conversation so review
   // agents can see whether the original concern was addressed (e.g. a
   // "Fixed in abc123" reply closes the topic). The previous version listed
@@ -256,20 +276,24 @@ function buildMarkdown(
     }
   }
 
-  if (openRoots.length > 0) {
-    parts.push(
-      '## Open inline comments (no replies yet — may still need attention)',
-    );
-    parts.push('');
-    for (const c of openRoots) {
-      parts.push(
-        `- \`${c.path ?? '?'}\`:${c.line ?? '?'} by @${c.user?.login ?? '?'}: ${snippet(c.body)}`,
-      );
-    }
-    parts.push('');
-  }
-
   return parts.join('\n');
+}
+
+/**
+ * Headings that begin past `truncateToolOutputThreshold`, which `read_file` will
+ * not return on a single read. Reordering buys headroom; it does not create it.
+ */
+export function truncatedHeadings(
+  markdown: string,
+  limit: number,
+): Array<{ offset: number; heading: string }> {
+  const out: Array<{ offset: number; heading: string }> = [];
+  const re = /^#{2,3} .*$/gm;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(markdown)) !== null) {
+    if (m.index >= limit) out.push({ offset: m.index, heading: m[0] });
+  }
+  return out;
 }
 
 async function runPrContext(args: PrContextArgs): Promise<void> {
@@ -322,6 +346,30 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   writeStdoutLine(
     `Wrote PR context to ${out} (${inline.length} inline, ${issue.length} issue comments, ${meaningfulReviewCount}/${reviews.length} review summaries)`,
   );
+
+  // A reader that stops at the threshold loses the tail in silence: `read_file`
+  // sets `isTruncated` and nothing looks at it. Warn on size, not on whether a
+  // heading happens to land past the cut — content is lost either way, and a
+  // section whose heading was read but whose body was not is the worse case,
+  // because it looks complete.
+  if (md.length > DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD) {
+    writeStdoutLine(
+      `warning: ${out} is ${md.length} chars; read_file returns the first ` +
+        `${DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD} and sets isTruncated. ` +
+        `Page the rest with offset/limit before reasoning about it.`,
+    );
+    const cut = truncatedHeadings(md, DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD);
+    if (cut.length > 0) {
+      writeStdoutLine('  sections that begin past the cut:');
+      for (const { offset, heading } of cut) {
+        writeStdoutLine(`    ${offset}  ${heading}`);
+      }
+    } else {
+      writeStdoutLine(
+        '  every heading is inside the cut; the loss is in the last section’s body.',
+      );
+    }
+  }
 }
 
 export const prContextCommand: CommandModule = {
