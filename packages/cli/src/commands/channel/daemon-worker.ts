@@ -39,6 +39,7 @@ import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
+  daemonSessionRoutesPath,
   loadChannelsConfig,
   loadChannelsFromExtensions,
   parseConfiguredChannels,
@@ -349,7 +350,8 @@ export async function runChannelDaemonWorker(
       bridgeFacade,
       daemonWorkspace,
       'user',
-      undefined,
+      daemonSessionRoutesPath(daemonWorkspace),
+      { recoveryMode: 'lazy' },
     );
     router = createdRouter;
     for (const { name, config } of parsed) {
@@ -358,6 +360,13 @@ export async function runChannelDaemonWorker(
         createdRouter.setChannelApprovalMode(name, config.approvalMode);
       }
     }
+    const restoredRoutes = createdRouter.restoreRoutes();
+    writeStdoutLine(
+      `[Channel] Restored ${restoredRoutes.restored} dormant route(s)` +
+        (restoredRoutes.dropped > 0
+          ? `; dropped ${restoredRoutes.dropped} invalid route(s)`
+          : ''),
+    );
 
     for (const { name, config } of parsed) {
       throwIfStartupAborted(startupSignal);
@@ -450,7 +459,7 @@ export async function runChannelDaemonWorker(
         try {
           bridge.stop();
         } finally {
-          createdRouter.clearAll();
+          createdRouter.dispose();
         }
       },
     };
@@ -461,7 +470,7 @@ export async function runChannelDaemonWorker(
     } catch {
       // best-effort during startup rollback
     } finally {
-      router?.clearAll();
+      router?.dispose();
     }
     throw err;
   }

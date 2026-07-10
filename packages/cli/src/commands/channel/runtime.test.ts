@@ -1,13 +1,17 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  daemonSessionRoutesPath,
   parseConfiguredChannels,
   registerPermissionRelay,
   registerSessionCleanup,
+  sessionsPath,
 } from './runtime.js';
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   Storage: { getGlobalQwenDir: () => '/tmp/qwen' },
+  hashDaemonWorkspace: (workspace: string) =>
+    workspace === '/workspace' ? 'workspace-hash' : 'other-hash',
 }));
 
 vi.mock('../../config/settings.js', () => ({
@@ -27,6 +31,16 @@ vi.mock('./channel-registry.js', () => ({
       : undefined,
   supportedTypes: async () => ['telegram'],
 }));
+
+it('isolates daemon route stores by workspace hash', () => {
+  expect(daemonSessionRoutesPath('/workspace')).toBe(
+    '/tmp/qwen/channels/daemon/workspace-hash/routes.json',
+  );
+  expect(daemonSessionRoutesPath('/other')).toBe(
+    '/tmp/qwen/channels/daemon/other-hash/routes.json',
+  );
+  expect(daemonSessionRoutesPath('/workspace')).not.toBe(sessionsPath());
+});
 
 describe('parseConfiguredChannels', () => {
   beforeEach(() => {

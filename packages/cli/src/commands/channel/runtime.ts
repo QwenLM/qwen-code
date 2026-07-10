@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { Storage } from '@qwen-code/qwen-code-core';
+import { hashDaemonWorkspace, Storage } from '@qwen-code/qwen-code-core';
 import type {
   SessionRouter,
   ChannelAgentBridge,
@@ -29,6 +29,16 @@ export interface ParsedChannel {
 
 export function sessionsPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'sessions.json');
+}
+
+export function daemonSessionRoutesPath(workspaceCwd: string): string {
+  return path.join(
+    Storage.getGlobalQwenDir(),
+    'channels',
+    'daemon',
+    hashDaemonWorkspace(workspaceCwd),
+    'routes.json',
+  );
 }
 
 export function channelLoopPath(): string {
