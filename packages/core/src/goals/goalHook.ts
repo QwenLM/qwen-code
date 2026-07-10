@@ -37,18 +37,10 @@ export const MAX_GOAL_ITERATIONS = 50;
 export const GOAL_JUDGE_TIMEOUT_MS = 25_000;
 export const GOAL_HOOK_TIMEOUT_SECONDS = 30;
 export const GOAL_HOOK_TIMEOUT_MS = GOAL_HOOK_TIMEOUT_SECONDS * 1000;
-/**
- * Minimum /goal iteration count before accepting an `impossible` judge verdict.
- * Gives the model at least one continuation turn after the judge first flags
- * impossibility, reducing premature failure from a single bad-judgment turn.
- * The goal can terminate as failed on the second impossible verdict.
- */
-export const MIN_IMPOSSIBLE_GOAL_ITERATIONS = 2;
-
 const GOAL_ABORTED_REASON =
   'Goal max iterations reached; cleared. Re-set with `/goal <condition>` if you still need it.';
-const GOAL_JUDGE_TIMEOUT_REASON =
-  'Goal judge timed out; continue working toward the goal and run `/goal clear` to stop early.';
+const GOAL_JUDGE_TIMEOUT_MESSAGE =
+  'Goal judge timed out; the automatic /goal loop paused. The goal remains active.';
 
 function continuationReasonForGoal(condition: string): string {
   return (
@@ -75,10 +67,10 @@ async function judgeGoalWithTimeout(
       new Promise<Awaited<ReturnType<typeof judgeGoal>>>((resolve) => {
         timeoutId = setTimeout(() => {
           debugLogger.debug(
-            `Goal judge exceeded ${GOAL_JUDGE_TIMEOUT_MS}ms; defaulting to not-met`,
+            `Goal judge exceeded ${GOAL_JUDGE_TIMEOUT_MS}ms; pausing goal loop`,
           );
           judgeController.abort();
-          resolve({ ok: false, reason: GOAL_JUDGE_TIMEOUT_REASON });
+          resolve({ kind: 'error', message: GOAL_JUDGE_TIMEOUT_MESSAGE });
         }, GOAL_JUDGE_TIMEOUT_MS);
       }),
     ]);
@@ -103,6 +95,14 @@ function removeGoalFunctionHook(
       }`,
     );
   }
+}
+
+function hasGoalBlockingBackgroundWork(config: Config): boolean {
+  return (
+    config.getBackgroundTaskRegistry().hasRunningTasks() ||
+    config.getBackgroundShellRegistry().hasRunningEntries() ||
+    config.getWorkflowRunRegistry().hasRunningEntries()
+  );
 }
 
 function finishGoal(
@@ -166,6 +166,10 @@ export function createGoalStopHookCallback(args: {
       return { continue: true };
     }
 
+    if (hasGoalBlockingBackgroundWork(config)) {
+      return { continue: true };
+    }
+
     const signal = context?.signal ?? new AbortController().signal;
     const verdict = await judgeGoalWithTimeout(config, {
       condition,
@@ -180,54 +184,55 @@ export function createGoalStopHookCallback(args: {
       return { continue: true };
     }
 
-    if (verdict.ok) {
-      finishGoal(config, sessionId, latest, {
+    if (verdict.kind === 'error') {
+      return { continue: true, systemMessage: verdict.message };
+    }
+
+    const evaluated = recordGoalIteration(sessionId, verdict.reason);
+    if (!isCurrentGoal(evaluated)) {
+      return { continue: true };
+    }
+
+    if (verdict.kind === 'met') {
+      finishGoal(config, sessionId, evaluated, {
         kind: 'achieved',
-        condition: latest.condition,
-        iterations: latest.iterations,
-        durationMs: Date.now() - latest.setAt,
+        condition: evaluated.condition,
+        iterations: evaluated.iterations,
+        durationMs: Date.now() - evaluated.setAt,
         lastReason: verdict.reason,
       });
       return { continue: true };
     }
 
-    if (
-      verdict.impossible &&
-      latest.iterations >= MIN_IMPOSSIBLE_GOAL_ITERATIONS
-    ) {
+    if (verdict.kind === 'impossible') {
       debugLogger.debug('Goal judge ruled impossible; clearing goal.', {
         reason: verdict.reason,
-        iterations: latest.iterations,
+        iterations: evaluated.iterations,
       });
-      finishGoal(config, sessionId, latest, {
+      finishGoal(config, sessionId, evaluated, {
         kind: 'failed',
-        condition: latest.condition,
-        iterations: latest.iterations,
-        durationMs: Date.now() - latest.setAt,
+        condition: evaluated.condition,
+        iterations: evaluated.iterations,
+        durationMs: Date.now() - evaluated.setAt,
         lastReason: verdict.reason,
       });
       return { continue: true };
-    }
-    if (verdict.impossible) {
-      debugLogger.debug(
-        `Impossible goal verdict suppressed: iterations=${latest.iterations} < MIN_IMPOSSIBLE_GOAL_ITERATIONS=${MIN_IMPOSSIBLE_GOAL_ITERATIONS}; continuing.`,
-      );
     }
 
     // Give the latest assistant output one final evaluation before aborting.
     // The iteration cap is a safety valve for still-not-met verdicts, not a
     // pre-judge hard stop; otherwise the final generated turn could satisfy
     // the goal but still be reported as aborted.
-    if (latest.iterations >= MAX_GOAL_ITERATIONS) {
+    if (evaluated.iterations > MAX_GOAL_ITERATIONS) {
       debugLogger.debug(
         `Goal exceeded MAX_GOAL_ITERATIONS=${MAX_GOAL_ITERATIONS}; clearing.`,
       );
-      finishGoal(config, sessionId, latest, {
+      finishGoal(config, sessionId, evaluated, {
         kind: 'aborted',
-        condition: latest.condition,
-        iterations: latest.iterations,
-        durationMs: Date.now() - latest.setAt,
-        lastReason: verdict.reason || latest.lastReason,
+        condition: evaluated.condition,
+        iterations: evaluated.iterations,
+        durationMs: Date.now() - evaluated.setAt,
+        lastReason: verdict.reason,
         systemMessage: GOAL_ABORTED_REASON,
       });
       return {
@@ -236,7 +241,6 @@ export function createGoalStopHookCallback(args: {
       };
     }
 
-    recordGoalIteration(sessionId, verdict.reason);
     // Keep the judge's free-form diagnostic in goal state/UI only. The Stop
     // hook reason is fed back to the model as the next continuation prompt, so
     // it must be fixed text derived from the original goal rather than

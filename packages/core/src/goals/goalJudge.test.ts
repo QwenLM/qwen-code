@@ -73,7 +73,7 @@ describe('judgeGoal', () => {
       signal: new AbortController().signal,
     });
 
-    expect(verdict).toEqual({ ok: true, reason: 'tests passing' });
+    expect(verdict).toEqual({ kind: 'met', reason: 'tests passing' });
     expect(client.generateContent.mock.calls[0][3]).toBe('fast-judge');
   });
 
@@ -87,8 +87,10 @@ describe('judgeGoal', () => {
       lastAssistantText: 'compiled',
       signal: new AbortController().signal,
     });
-    expect(verdict.ok).toBe(false);
-    expect(verdict.reason).toBe('missing unit test for auth');
+    expect(verdict).toEqual({
+      kind: 'not_met',
+      reason: 'missing unit test for auth',
+    });
   });
 
   it('parses impossible=true for genuinely unachievable goals', async () => {
@@ -104,8 +106,7 @@ describe('judgeGoal', () => {
     });
 
     expect(verdict).toEqual({
-      ok: false,
-      impossible: true,
+      kind: 'impossible',
       reason: 'required remote is unavailable',
     });
   });
@@ -121,7 +122,7 @@ describe('judgeGoal', () => {
       signal: new AbortController().signal,
     });
 
-    expect(verdict).toEqual({ ok: true, reason: 'tests passed' });
+    expect(verdict).toEqual({ kind: 'met', reason: 'tests passed' });
   });
 
   it('ignores non-boolean impossible values', async () => {
@@ -136,7 +137,10 @@ describe('judgeGoal', () => {
       signal: new AbortController().signal,
     });
 
-    expect(verdict).toEqual({ ok: false, reason: 'looks impossible' });
+    expect(verdict).toEqual({
+      kind: 'not_met',
+      reason: 'looks impossible',
+    });
   });
 
   it('falls back to main model when no fast model is configured', async () => {
@@ -160,10 +164,10 @@ describe('judgeGoal', () => {
       lastAssistantText: 'y',
       signal: new AbortController().signal,
     });
-    expect(verdict.ok).toBe(true);
+    expect(verdict.kind).toBe('met');
   });
 
-  it('defaults to ok=false when reply is not JSON', async () => {
+  it('returns an error when reply is not JSON', async () => {
     const client = makeMockClient({ reply: 'I have no idea sorry' });
     const config = makeConfig({ client });
     const verdict = await judgeGoal(config, {
@@ -171,25 +175,38 @@ describe('judgeGoal', () => {
       lastAssistantText: 'y',
       signal: new AbortController().signal,
     });
-    expect(verdict.ok).toBe(false);
-    expect(verdict.reason).toMatch(/unavailable/i);
+    expect(verdict.kind).toBe('error');
+    expect(verdict).toMatchObject({
+      message: expect.stringMatching(/unavailable/i),
+    });
   });
 
-  it('defaults to ok=false when ok field is missing or wrong type', async () => {
+  it('returns an error when ok field is missing or wrong type', async () => {
     const client = makeMockClient({ reply: '{"reason": "no ok field"}' });
     const config = makeConfig({ client });
-    expect(
-      (
-        await judgeGoal(config, {
-          condition: 'x',
-          lastAssistantText: 'y',
-          signal: new AbortController().signal,
-        })
-      ).ok,
-    ).toBe(false);
+    await expect(
+      judgeGoal(config, {
+        condition: 'x',
+        lastAssistantText: 'y',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({ kind: 'error' });
   });
 
-  it('defaults to ok=false when generateContent throws', async () => {
+  it('returns an error when reason field is missing', async () => {
+    const client = makeMockClient({ reply: '{"ok": false}' });
+    const config = makeConfig({ client });
+
+    await expect(
+      judgeGoal(config, {
+        condition: 'x',
+        lastAssistantText: 'y',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({ kind: 'error' });
+  });
+
+  it('returns an error when generateContent throws', async () => {
     const client = makeMockClient({ throws: new Error('boom') });
     const config = makeConfig({ client });
     const verdict = await judgeGoal(config, {
@@ -197,7 +214,7 @@ describe('judgeGoal', () => {
       lastAssistantText: 'y',
       signal: new AbortController().signal,
     });
-    expect(verdict.ok).toBe(false);
+    expect(verdict.kind).toBe('error');
     expect(reportErrorMock).toHaveBeenCalledTimes(1);
     expect(reportErrorMock.mock.calls[0][1]).toMatch(/goal judge failed/i);
   });
@@ -212,13 +229,13 @@ describe('judgeGoal', () => {
       signal: new AbortController().signal,
     });
 
-    expect(verdict.ok).toBe(false);
+    expect(verdict.kind).toBe('error');
     expect(reportErrorMock).toHaveBeenCalledTimes(1);
     const serializedCall = JSON.stringify(reportErrorMock.mock.calls[0]);
     expect(serializedCall).not.toContain('SECRET_TOKEN_PREFIX');
   });
 
-  it('short-circuits to not-met when signal is already aborted', async () => {
+  it('short-circuits to error when signal is already aborted', async () => {
     const client = makeMockClient({});
     const config = makeConfig({ client });
     const aborter = new AbortController();
@@ -228,11 +245,11 @@ describe('judgeGoal', () => {
       lastAssistantText: 'y',
       signal: aborter.signal,
     });
-    expect(verdict.ok).toBe(false);
+    expect(verdict.kind).toBe('error');
     expect(client.generateContent).not.toHaveBeenCalled();
   });
 
-  it('returns not-met for an empty condition without calling the model', async () => {
+  it('returns an error for an empty condition without calling the model', async () => {
     const client = makeMockClient({});
     const config = makeConfig({ client });
     const verdict = await judgeGoal(config, {
@@ -240,8 +257,22 @@ describe('judgeGoal', () => {
       lastAssistantText: 'y',
       signal: new AbortController().signal,
     });
-    expect(verdict.ok).toBe(false);
+    expect(verdict.kind).toBe('error');
     expect(client.generateContent).not.toHaveBeenCalled();
+  });
+
+  it('returns an error for an empty model response', async () => {
+    const client = makeMockClient({ reply: '' });
+    const config = makeConfig({ client });
+
+    await expect(
+      judgeGoal(config, {
+        condition: 'x',
+        lastAssistantText: 'y',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({ kind: 'error' });
+    expect(reportErrorMock).toHaveBeenCalledTimes(1);
   });
 
   it('feeds the conversation history (tail) plus a wrapped judgement prompt', async () => {
