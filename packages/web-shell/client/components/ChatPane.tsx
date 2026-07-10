@@ -110,12 +110,18 @@ export function ChatPane({
     pendingToolApproval !== null || pendingAskUserApproval !== null;
   const isResponding = streamingState !== 'idle';
   const artifactsByTurn = useMemo(
-    () => getArtifactsByTurn(messages, artifacts),
-    [messages, artifacts],
+    () =>
+      getArtifactsByTurn(messages, artifacts, connection.workspaceCwd || ''),
+    [messages, artifacts, connection.workspaceCwd],
   );
   const fileChangesByTurn = useMemo(
-    () => getFileChangesByTurn(messages, artifactsByTurn),
-    [messages, artifactsByTurn],
+    () =>
+      getFileChangesByTurn(
+        messages,
+        artifactsByTurn,
+        connection.workspaceCwd || '',
+      ),
+    [messages, artifactsByTurn, connection.workspaceCwd],
   );
   const scheduledTasksByTurn = useMemo(
     () => getScheduledTasksByTurn(messages),

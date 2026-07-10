@@ -1110,12 +1110,22 @@ export function App({
     return merged;
   }, [artifacts, artifactPanelExtraArtifacts]);
   const artifactsByTurn = useMemo(
-    () => getArtifactsByTurn(displayMessages, artifacts),
-    [displayMessages, artifacts],
+    () =>
+      getArtifactsByTurn(
+        displayMessages,
+        artifacts,
+        connection.workspaceCwd || '',
+      ),
+    [displayMessages, artifacts, connection.workspaceCwd],
   );
   const fileChangesByTurn = useMemo(
-    () => getFileChangesByTurn(displayMessages, artifactsByTurn),
-    [displayMessages, artifactsByTurn],
+    () =>
+      getFileChangesByTurn(
+        displayMessages,
+        artifactsByTurn,
+        connection.workspaceCwd || '',
+      ),
+    [displayMessages, artifactsByTurn, connection.workspaceCwd],
   );
   const scheduledTasksByTurn = useMemo(
     () => getScheduledTasksByTurn(displayMessages),
@@ -1362,6 +1372,11 @@ export function App({
   );
   const closeArtifactPanel = useCallback(() => {
     setArtifactPanelOpen(false);
+    setArtifactPanelTabs([]);
+    setActiveArtifactPanelTabId(null);
+    setReviewChanges([]);
+    setSelectedReviewPath(null);
+    setArtifactPanelExtraArtifacts([]);
   }, []);
   useLayoutEffect(() => {
     if (!artifactPanelOpen) return;

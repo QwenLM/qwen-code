@@ -28,6 +28,7 @@ interface RecordArtifactReference {
 export function getArtifactsByTurn(
   messages: readonly Message[],
   artifacts: readonly DaemonSessionArtifact[],
+  workspaceCwd?: string,
 ): ReadonlyMap<string, readonly DaemonSessionArtifact[]> {
   const toolCallTurn = new Map<string, string>();
   const recordArtifactReferences: RecordArtifactReference[] = [];
@@ -55,6 +56,7 @@ export function getArtifactsByTurn(
     const turnIds = getRecordArtifactTurnIds(
       recordArtifactReferences,
       artifact,
+      workspaceCwd,
     );
     if (turnIds.size === 0 && artifact.toolCallId) {
       const turnId = toolCallTurn.get(artifact.toolCallId);
@@ -93,13 +95,18 @@ function collectRecordArtifactReferences(
 function getRecordArtifactTurnIds(
   references: readonly RecordArtifactReference[],
   artifact: DaemonSessionArtifact,
+  workspaceCwd?: string,
 ) {
   const turnIds = new Set<string>();
   for (const reference of references) {
     if (
       reference.workspacePath &&
       artifact.workspacePath &&
-      isSameWorkspacePath(reference.workspacePath, artifact.workspacePath)
+      isSameWorkspacePath(
+        reference.workspacePath,
+        artifact.workspacePath,
+        workspaceCwd,
+      )
     ) {
       turnIds.add(reference.turnId);
       continue;
@@ -118,6 +125,7 @@ function getRecordArtifactTurnIds(
 export function getFileChangesByTurn(
   messages: readonly Message[],
   artifactsByTurn: ReadonlyMap<string, readonly DaemonSessionArtifact[]>,
+  workspaceCwd?: string,
 ): ReadonlyMap<string, readonly TurnOutputFileChange[]> {
   const byTurn = new Map<string, TurnOutputFileChange[]>();
   let currentTurnId: string | null = null;
@@ -133,7 +141,13 @@ export function getFileChangesByTurn(
         .filter((path): path is string => Boolean(path)),
     );
     for (const tool of message.tools) {
-      collectFileChanges(tool, currentTurnId, artifactPaths, byTurn);
+      collectFileChanges(
+        tool,
+        currentTurnId,
+        artifactPaths,
+        byTurn,
+        workspaceCwd,
+      );
     }
   }
   return byTurn;
@@ -204,8 +218,9 @@ function collectFileChanges(
   turnId: string,
   artifactPaths: ReadonlySet<string>,
   byTurn: Map<string, TurnOutputFileChange[]>,
+  workspaceCwd?: string,
 ) {
-  const change = getFileChange(tool, artifactPaths);
+  const change = getFileChange(tool, artifactPaths, workspaceCwd);
   if (change) {
     const list = byTurn.get(turnId);
     if (list) {
@@ -215,13 +230,14 @@ function collectFileChanges(
     }
   }
   for (const subTool of tool.subTools ?? []) {
-    collectFileChanges(subTool, turnId, artifactPaths, byTurn);
+    collectFileChanges(subTool, turnId, artifactPaths, byTurn, workspaceCwd);
   }
 }
 
 function getFileChange(
   tool: ACPToolCall,
   artifactPaths: ReadonlySet<string>,
+  workspaceCwd?: string,
 ): TurnOutputFileChange | null {
   if (tool.status !== 'completed') return null;
   const toolName = tool.toolName.toLowerCase();
@@ -237,7 +253,7 @@ function getFileChange(
     status,
     toolCallId: tool.callId,
     isArtifact: Array.from(artifactPaths).some((artifactPath) =>
-      isSameWorkspacePath(normalizedPath, artifactPath),
+      isSameWorkspacePath(normalizedPath, artifactPath, workspaceCwd),
     ),
     ...(lineStats
       ? { additions: lineStats.additions, deletions: lineStats.deletions }
@@ -489,6 +505,10 @@ function countLongestCommonSubsequence(left: string[], right: string[]) {
   return previous[right.length] ?? 0;
 }
 
-function isSameWorkspacePath(left: string, right: string) {
-  return isSamePath(left, right);
+function isSameWorkspacePath(
+  left: string,
+  right: string,
+  workspaceCwd?: string,
+) {
+  return isSamePath(left, right, workspaceCwd);
 }

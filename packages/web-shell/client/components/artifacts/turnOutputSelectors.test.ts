@@ -310,6 +310,52 @@ describe('turnOutputSelectors', () => {
     expect(change?.isArtifact).toBe(false);
   });
 
+  it('matches artifact paths through the workspace cwd', () => {
+    const messages = [
+      userMessage('u1', 'make artifact'),
+      toolGroup('tg1', [
+        {
+          callId: 'record-1',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { workspacePath: 'reports/summary.html' },
+        },
+        {
+          callId: 'write-1',
+          toolName: 'write_file',
+          status: 'completed',
+          args: {
+            file_path: 'reports/summary.html',
+            content: '<html>done</html>',
+          },
+        },
+      ]),
+    ];
+    const artifacts = [
+      {
+        id: 'artifact-1',
+        workspacePath: '/workspace/project/reports/summary.html',
+      },
+    ] as DaemonSessionArtifact[];
+
+    const artifactsByTurn = getArtifactsByTurn(
+      messages,
+      artifacts,
+      '/workspace/project',
+    );
+    expect(artifactsByTurn.get('u1')).toEqual(artifacts);
+
+    const change = getFileChangesByTurn(
+      messages,
+      artifactsByTurn,
+      '/workspace/project',
+    ).get('u1')?.[0];
+    expect(change).toMatchObject({
+      path: 'reports/summary.html',
+      isArtifact: true,
+    });
+  });
+
   it('extracts write_file changes from args content', () => {
     const messages = [
       userMessage('u1', 'write file'),
