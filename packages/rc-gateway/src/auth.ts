@@ -65,19 +65,45 @@ export function bearerResolve(
 ): RequestHandler {
   return (req, res, next) => {
     const header = req.headers.authorization ?? '';
-    const resolved = store.resolve(header);
-    if (!resolved) {
-      void audit?.record({ action: 'auth_failed', detail: { path: req.path } });
-      res.status(401).json({ error: 'Unauthorized', code: 'unauthorized' });
+    const cred = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+    const result = cred
+      ? store.verifyTokenDetailed(cred)
+      : { ok: false as const, reason: 'not_found' as const };
+
+    if (!result.ok) {
+      if (result.reason === 'token_expired_max_age') {
+        void audit?.record({
+          action: 'token_expired_max_age',
+          detail: { path: req.path },
+        });
+        res
+          .status(401)
+          .json({
+            error: 'Token exceeded maximum age',
+            code: 'token_expired_max_age',
+          });
+      } else {
+        void audit?.record({
+          action: 'auth_failed',
+          detail: { path: req.path },
+        });
+        res.status(401).json({ error: 'Unauthorized', code: 'unauthorized' });
+      }
       return;
     }
-    req.rcClient = resolved;
+
+    req.rcClient = {
+      id: result.id,
+      scopes: result.scopes,
+      sessionLockId: result.sessionLockId,
+      shareLabel: result.shareLabel,
+    };
     // A share token (the only kind with a session lock) gets its id + label
     // surfaced so guest-action routes can stamp audit rows with the share's
     // identity at action time. Normal tokens never get these fields.
-    if (resolved.sessionLockId !== undefined) {
-      req.rcClient.shareId = resolved.id;
-      req.rcClient.shareLabel = resolved.shareLabel;
+    if (result.sessionLockId !== undefined) {
+      req.rcClient.shareId = result.id;
+      req.rcClient.shareLabel = result.shareLabel;
     }
     next();
   };

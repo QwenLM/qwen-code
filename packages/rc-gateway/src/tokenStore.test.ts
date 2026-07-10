@@ -354,4 +354,166 @@ describe('TokenStore', () => {
       usesRemaining: 2,
     });
   });
+
+  // -----------------------------------------------------------------------
+  // Task 1.2: Argon2id hashing, qwk_ prefix, issuedAt, max-age, revokeAll
+  // -----------------------------------------------------------------------
+
+  it('issued token has qwk_ prefix', async () => {
+    const store = await TokenStore.open(path);
+    const { token } = await store.issue([SESSION_READ], 'phone');
+    expect(token).toMatch(/^qwk_/);
+  });
+
+  it('token with qwk_ prefix still resolves correctly', async () => {
+    const store = await TokenStore.open(path);
+    const { id, token } = await store.issue([SESSION_READ], 'phone');
+    expect(token.startsWith('qwk_')).toBe(true);
+    expect(store.resolve(`Bearer ${token}`)).toMatchObject({ id });
+  });
+
+  it('on-disk file stores argon2id hash, not sha256 hex, not raw token', async () => {
+    const store = await TokenStore.open(path);
+    const { token } = await store.issue([SESSION_READ], 'phone');
+    const onDisk = readFileSync(path, 'utf8');
+    expect(onDisk).not.toContain(token);
+    // argon2id self-describing format: starts with "argon2id$"
+    expect(onDisk).toContain('argon2id$');
+    // must NOT be a 64-char sha256 hex
+    expect(onDisk).not.toMatch(/"tokenHash"\s*:\s*"[0-9a-f]{64}"/);
+  });
+
+  it('issue sets issuedAt on the TokenRecord and list() surfaces it', async () => {
+    const now = 1_700_000_000_000;
+    const store = await TokenStore.open(path, () => now);
+    const { id } = await store.issue([SESSION_READ], 'phone');
+    const info = store.list().find((t) => t.id === id);
+    expect(info).toBeDefined();
+    expect(info!.issuedAt).toBe(now);
+    expect(info!.createdAt).toBe(now);
+  });
+
+  it('issuedAt is never slid by resolve (verify does not mutate issuedAt)', async () => {
+    let now = 1_000_000;
+    const store = await TokenStore.open(path, () => now);
+    const { id, token } = await store.issue([SESSION_READ], 'phone');
+    now = 2_000_000;
+    // resolve/verify is read-only; issuedAt stays at mint time
+    store.resolve(`Bearer ${token}`);
+    const info = store.list().find((t) => t.id === id)!;
+    expect(info.issuedAt).toBe(1_000_000);
+  });
+
+  it('verifyTokenDetailed returns { ok: true } for a valid token', async () => {
+    const store = await TokenStore.open(path);
+    const { token } = await store.issue([SESSION_READ], 'phone');
+    const result = store.verifyTokenDetailed(token);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.id).toBeDefined();
+  });
+
+  it('verifyTokenDetailed returns { ok: false, reason: "not_found" } for unknown token', async () => {
+    const store = await TokenStore.open(path);
+    const result = store.verifyTokenDetailed('qwk_notarealtoken');
+    expect(result).toEqual({ ok: false, reason: 'not_found' });
+  });
+
+  it('verifyTokenDetailed returns { ok: false, reason: "revoked" } for revoked token', async () => {
+    const store = await TokenStore.open(path);
+    const { id, token } = await store.issue([SESSION_READ], 'phone');
+    await store.revoke(id);
+    const result = store.verifyTokenDetailed(token);
+    expect(result).toEqual({ ok: false, reason: 'revoked' });
+  });
+
+  it('verifyTokenDetailed returns token_expired_max_age when past issuedAt + maxTokenAgeDays', async () => {
+    const DAY_MS = 86_400_000;
+    let now = 1_000_000;
+    const store = await TokenStore.open(path, () => now);
+    const { token } = await store.issue([SESSION_READ], 'phone');
+    // Advance past the 180-day default ceiling
+    now = 1_000_000 + 181 * DAY_MS;
+    const result = store.verifyTokenDetailed(token, { nowMs: now });
+    expect(result).toEqual({ ok: false, reason: 'token_expired_max_age' });
+  });
+
+  it('verifyTokenDetailed respects a custom maxTokenAgeDays', async () => {
+    const DAY_MS = 86_400_000;
+    let now = 1_000_000;
+    const store = await TokenStore.open(path, () => now);
+    const { token } = await store.issue([SESSION_READ], 'phone');
+    // 10 days later, within 30-day default but past custom 7-day ceiling
+    now = 1_000_000 + 8 * DAY_MS;
+    const result = store.verifyTokenDetailed(token, {
+      nowMs: now,
+      maxTokenAgeDays: 7,
+    });
+    expect(result).toEqual({ ok: false, reason: 'token_expired_max_age' });
+  });
+
+  it('verifyTokenDetailed: not yet at max-age ceiling → ok: true', async () => {
+    const DAY_MS = 86_400_000;
+    let now = 1_000_000;
+    const store = await TokenStore.open(path, () => now);
+    const { token } = await store.issue([SESSION_READ], 'phone');
+    now = 1_000_000 + 179 * DAY_MS;
+    const result = store.verifyTokenDetailed(token, { nowMs: now });
+    expect(result.ok).toBe(true);
+  });
+
+  it('revokeAll removes all tokens', async () => {
+    const store = await TokenStore.open(path);
+    const a = await store.issue([SESSION_READ], 'a');
+    const b = await store.issue([SESSION_READ], 'b');
+    const { revokedIds } = await store.revokeAll();
+    expect(revokedIds.sort()).toEqual([a.id, b.id].sort());
+    expect(store.list()).toHaveLength(0);
+    expect(store.resolve(`Bearer ${a.token}`)).toBeNull();
+    expect(store.resolve(`Bearer ${b.token}`)).toBeNull();
+  });
+
+  it('revokeAll with exceptTokenId spares that token', async () => {
+    const store = await TokenStore.open(path);
+    const a = await store.issue([SESSION_READ], 'a');
+    const b = await store.issue([SESSION_READ], 'b');
+    const c = await store.issue([SESSION_READ], 'c');
+    const { revokedIds } = await store.revokeAll({ exceptTokenId: b.id });
+    expect(revokedIds).not.toContain(b.id);
+    expect(revokedIds.sort()).toEqual([a.id, c.id].sort());
+    // b still resolves; a and c do not
+    expect(store.resolve(`Bearer ${b.token}`)).not.toBeNull();
+    expect(store.resolve(`Bearer ${a.token}`)).toBeNull();
+    expect(store.resolve(`Bearer ${c.token}`)).toBeNull();
+  });
+
+  it('revokeAll persists: revoked tokens gone after reopen', async () => {
+    const store = await TokenStore.open(path);
+    const a = await store.issue([SESSION_READ], 'a');
+    await store.revokeAll();
+    const reopened = await TokenStore.open(path);
+    expect(reopened.list()).toHaveLength(0);
+    expect(reopened.resolve(`Bearer ${a.token}`)).toBeNull();
+  });
+
+  it('revokeAll returns empty array when no tokens exist', async () => {
+    const store = await TokenStore.open(path);
+    const { revokedIds } = await store.revokeAll();
+    expect(revokedIds).toEqual([]);
+  });
+
+  it('revokeAll with exceptTokenId returns empty when only the excepted token exists', async () => {
+    const store = await TokenStore.open(path);
+    const a = await store.issue([SESSION_READ], 'a');
+    const { revokedIds } = await store.revokeAll({ exceptTokenId: a.id });
+    expect(revokedIds).toEqual([]);
+    expect(store.resolve(`Bearer ${a.token}`)).not.toBeNull();
+  });
+
+  it('argon2id tokens persist across reopen and still resolve', async () => {
+    const store = await TokenStore.open(path);
+    const { id, token } = await store.issue([SESSION_READ], 'phone');
+    const reopened = await TokenStore.open(path);
+    const result = reopened.resolve(`Bearer ${token}`);
+    expect(result).toMatchObject({ id, scopes: [SESSION_READ] });
+  });
 });

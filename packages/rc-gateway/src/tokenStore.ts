@@ -7,15 +7,125 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { argon2id } from '@noble/hashes/argon2';
 import type { RcScope } from './scopes.js';
+
+// ---------------------------------------------------------------------------
+// Argon2id parameters (RFC 9106 "second recommended" interactive-ish profile,
+// matching donor remoteControl/tokenStore.ts). Deliberately trimmed so unit
+// tests stay fast while remaining a real argon2id cost.
+// ---------------------------------------------------------------------------
+
+const ARGON2_PARAMS = {
+  /** memory cost in KiB */
+  m: 19456,
+  /** time cost (iterations) */
+  t: 2,
+  /** parallelism (lanes) */
+  p: 1,
+  /** derived key length in bytes */
+  dkLen: 32,
+  /** algorithm version (0x13 == 19) */
+  v: 19,
+} as const;
+
+const SALT_BYTES = 16;
+
+/** Default maximum token age in days, measured from issuedAt. */
+const DEFAULT_MAX_TOKEN_AGE_DAYS = 180;
+const DAY_MS = 86_400_000;
+
+/** Token prefix on every issued token (spec: "qwk_<base64url(32 bytes)>"). */
+export const TOKEN_PREFIX = 'qwk_';
+
+// ---------------------------------------------------------------------------
+// Argon2id encode / verify helpers
+// ---------------------------------------------------------------------------
+
+function b64url(bytes: Uint8Array | Buffer): string {
+  return Buffer.from(bytes).toString('base64url');
+}
+
+function fromB64url(s: string): Buffer {
+  return Buffer.from(s, 'base64url');
+}
+
+/**
+ * Encode a secret as a self-describing argon2id string with a fresh salt.
+ * Format: argon2id$v=19$m=<kb>,t=<iters>,p=<lanes>$<saltB64url>$<hashB64url>
+ */
+function argon2idEncode(plaintext: string): string {
+  const salt = randomBytes(SALT_BYTES);
+  const hash = argon2id(plaintext, salt, {
+    t: ARGON2_PARAMS.t,
+    m: ARGON2_PARAMS.m,
+    p: ARGON2_PARAMS.p,
+    dkLen: ARGON2_PARAMS.dkLen,
+  });
+  const params = `m=${ARGON2_PARAMS.m},t=${ARGON2_PARAMS.t},p=${ARGON2_PARAMS.p}`;
+  return `argon2id$v=${ARGON2_PARAMS.v}$${params}$${b64url(salt)}$${b64url(hash)}`;
+}
+
+/** Constant-time verify of a plaintext against an encoded argon2id string. */
+function argon2idVerify(plaintext: string, encoded: string): boolean {
+  const parts = encoded.split('$');
+  // ['argon2id', 'v=19', 'm=..,t=..,p=..', '<salt>', '<hash>']
+  if (parts.length !== 5 || parts[0] !== 'argon2id') return false;
+  const paramStr = parts[2];
+  const saltStr = parts[3];
+  const hashStr = parts[4];
+  if (paramStr === undefined || saltStr === undefined || hashStr === undefined)
+    return false;
+
+  const params: Record<string, number> = {};
+  for (const kv of paramStr.split(',')) {
+    const [k, v] = kv.split('=');
+    if (k === undefined || v === undefined) return false;
+    const n = Number(v);
+    if (!Number.isFinite(n)) return false;
+    params[k] = n;
+  }
+  const m = params['m'];
+  const t = params['t'];
+  const p = params['p'];
+  if (m === undefined || t === undefined || p === undefined) return false;
+
+  const salt = fromB64url(saltStr);
+  const expected = fromB64url(hashStr);
+  const actual = Buffer.from(
+    argon2id(plaintext, salt, { t, m, p, dkLen: expected.length }),
+  );
+  if (actual.length !== expected.length) return false;
+  return timingSafeEqual(actual, expected);
+}
+
+/**
+ * Non-secret SHA-256 lookup index (Base64URL) for O(1) candidate fetch.
+ * Because tokens are 32-byte random secrets, the SHA-256 index leaks nothing
+ * exploitable while keeping lookups cheap (argon2id is deliberately slow).
+ */
+function lookupHash(plaintext: string): string {
+  return b64url(createHash('sha256').update(plaintext, 'utf8').digest());
+}
+
+// ---------------------------------------------------------------------------
+// Record shapes
+// ---------------------------------------------------------------------------
 
 interface TokenRecord {
   id: string;
-  /** Hex-encoded sha256 of the raw token. The raw token is never stored. */
+  /** Self-describing argon2id hash. The raw token is never stored. */
   tokenHash: string;
+  /** SHA-256(token) in Base64URL for O(1) candidate lookup. */
+  lookupHash: string;
   scopes: RcScope[];
   label: string;
   createdAt: number;
+  /**
+   * Epoch ms at original mint; never advanced by sliding renewal. Anchors the
+   * absolute max-age ceiling (spec: "Absolute max age wins over sliding renewal").
+   */
+  issuedAt: number;
   /** Epoch ms after which this token no longer resolves. Share tokens only. */
   expiresAt?: number;
   /** The one session id a share token may touch. Share tokens only. */
@@ -26,6 +136,11 @@ interface TokenRecord {
   maxUses?: number;
   /** Redemptions consumed so far. Absent on pre-cycle-26 records → read as 0. */
   uses?: number;
+  /**
+   * Epoch ms at revocation, or undefined = not revoked. Set by revoke() and
+   * revokeAll(); never cleared. resolve() rejects revoked records.
+   */
+  revokedAt?: number;
 }
 
 /** Public metadata about an issued token. Never includes secret material. */
@@ -34,6 +149,7 @@ export interface TokenInfo {
   scopes: RcScope[];
   label: string;
   createdAt: number;
+  issuedAt: number;
 }
 
 /** Public metadata about a share token. Never includes secret material. */
@@ -45,6 +161,7 @@ export interface ShareInfo {
   expiresAt?: number;
   parentId?: string;
   createdAt: number;
+  issuedAt: number;
   /** Computed at read time: `expiresAt !== undefined && now >= expiresAt`. */
   expired: boolean;
   /** Max redemptions allowed; undefined = unlimited. */
@@ -59,10 +176,6 @@ interface PersistShape {
   tokens: TokenRecord[];
 }
 
-function sha256Hex(input: string): string {
-  return createHash('sha256').update(input, 'utf8').digest('hex');
-}
-
 /** Parse `Authorization: Bearer <token>` → credential, or null. */
 function parseBearer(header: string): string | null {
   const sp = header.indexOf(' ');
@@ -71,6 +184,36 @@ function parseBearer(header: string): string | null {
   const cred = header.slice(sp + 1).trim();
   return cred.length > 0 ? cred : null;
 }
+
+// ---------------------------------------------------------------------------
+// verifyTokenDetailed result type
+// ---------------------------------------------------------------------------
+
+export type VerifyTokenFailureReason =
+  | 'not_found'
+  | 'revoked'
+  | 'token_expired_max_age';
+
+export type VerifyTokenResult =
+  | {
+      ok: true;
+      id: string;
+      scopes: RcScope[];
+      sessionLockId?: string;
+      shareLabel?: string;
+    }
+  | { ok: false; reason: VerifyTokenFailureReason };
+
+export interface TokenAgeOptions {
+  /** Override now (epoch ms). Defaults to Date.now(). */
+  nowMs?: number;
+  /** Override max token age ceiling in days. Defaults to 180. */
+  maxTokenAgeDays?: number;
+}
+
+// ---------------------------------------------------------------------------
+// TokenStore
+// ---------------------------------------------------------------------------
 
 export class TokenStore {
   private constructor(
@@ -99,13 +242,17 @@ export class TokenStore {
     label: string,
   ): Promise<{ id: string; token: string }> {
     const id = randomBytes(8).toString('hex');
-    const token = randomBytes(32).toString('base64url');
+    const body = randomBytes(32).toString('base64url');
+    const token = `${TOKEN_PREFIX}${body}`;
+    const now = this.nowFn();
     this.records.push({
       id,
-      tokenHash: sha256Hex(token),
+      tokenHash: argon2idEncode(token),
+      lookupHash: lookupHash(token),
       scopes: [...scopes],
       label,
-      createdAt: this.nowFn(),
+      createdAt: now,
+      issuedAt: now,
     });
     await this.persist();
     return { id, token };
@@ -125,14 +272,18 @@ export class TokenStore {
     maxUses?: number;
   }): Promise<{ id: string; token: string; expiresAt: number }> {
     const id = randomBytes(8).toString('hex');
-    const token = randomBytes(32).toString('base64url');
-    const expiresAt = this.nowFn() + opts.ttlSec * 1000;
+    const body = randomBytes(32).toString('base64url');
+    const token = `${TOKEN_PREFIX}${body}`;
+    const now = this.nowFn();
+    const expiresAt = now + opts.ttlSec * 1000;
     this.records.push({
       id,
-      tokenHash: sha256Hex(token),
+      tokenHash: argon2idEncode(token),
+      lookupHash: lookupHash(token),
       scopes: [...opts.scopes],
       label: opts.label,
-      createdAt: this.nowFn(),
+      createdAt: now,
+      issuedAt: now,
       expiresAt,
       sessionLockId: opts.sessionLockId,
       parentId: opts.parentId,
@@ -177,6 +328,58 @@ export class TokenStore {
   }
 
   /**
+   * Auth-path lookup with a distinguishable outcome. Enforces, in order:
+   * existence + argon2id match, revocation, the absolute max-age ceiling
+   * (`nowMs > issuedAt + maxTokenAgeDays` → `token_expired_max_age` even when
+   * `expiresAt` is still in the future), then ordinary TTL expiry (share tokens
+   * only). Returns a discriminated union.
+   *
+   * LOOKUP STRATEGY: SHA-256(token) → O(1) candidate set → argon2id verify on
+   * candidates only. Because tokens are 32-byte random secrets, the SHA-256
+   * index leaks nothing exploitable.
+   */
+  verifyTokenDetailed(
+    plaintext: string,
+    opts: TokenAgeOptions = {},
+  ): VerifyTokenResult {
+    const nowMs = opts.nowMs ?? this.nowFn();
+    const maxAgeDays = opts.maxTokenAgeDays ?? DEFAULT_MAX_TOKEN_AGE_DAYS;
+
+    const lh = lookupHash(plaintext);
+    const candidates = this.records.filter((r) => r.lookupHash === lh);
+
+    for (const rec of candidates) {
+      if (!argon2idVerify(plaintext, rec.tokenHash)) continue;
+
+      if (rec.revokedAt !== undefined) {
+        return { ok: false, reason: 'revoked' };
+      }
+
+      // Absolute max-age check (wins over sliding renewal / expiresAt).
+      const maxAgeCeilingMs = rec.issuedAt + maxAgeDays * DAY_MS;
+      if (nowMs > maxAgeCeilingMs) {
+        return { ok: false, reason: 'token_expired_max_age' };
+      }
+
+      // TTL expiry (share tokens only; owner/normal tokens have no expiresAt).
+      if (rec.expiresAt !== undefined && nowMs >= rec.expiresAt) {
+        // Expired share → treated as not found (no distinct 'expired' reason
+        // exposed through resolve(); consistent with existing behaviour).
+        continue;
+      }
+
+      return {
+        ok: true,
+        id: rec.id,
+        scopes: [...rec.scopes],
+        sessionLockId: rec.sessionLockId,
+        shareLabel: rec.sessionLockId !== undefined ? rec.label : undefined,
+      };
+    }
+    return { ok: false, reason: 'not_found' };
+  }
+
+  /**
    * Resolve a raw `Authorization` header value to identity + scopes. An expired
    * share token (`expiresAt !== undefined && now >= expiresAt`) is treated as no
    * match (→ null → 401). On match, the record's `sessionLockId` is returned so
@@ -192,28 +395,14 @@ export class TokenStore {
   } | null {
     const cred = parseBearer(authHeader);
     if (!cred) return null;
-    const candidate = Buffer.from(sha256Hex(cred), 'hex');
-    for (const rec of this.records) {
-      const stored = Buffer.from(rec.tokenHash, 'hex');
-      if (
-        stored.length === candidate.length &&
-        timingSafeEqual(stored, candidate)
-      ) {
-        // Expired share token: strict >= means at exactly expiresAt it is dead.
-        if (rec.expiresAt !== undefined && this.nowFn() >= rec.expiresAt) {
-          continue;
-        }
-        return {
-          id: rec.id,
-          scopes: [...rec.scopes],
-          sessionLockId: rec.sessionLockId,
-          // Share tokens (those with a session lock) carry their label so the
-          // guest's audit rows can be tagged before the token expires.
-          shareLabel: rec.sessionLockId !== undefined ? rec.label : undefined,
-        };
-      }
-    }
-    return null;
+    const result = this.verifyTokenDetailed(cred);
+    if (!result.ok) return null;
+    return {
+      id: result.id,
+      scopes: result.scopes,
+      sessionLockId: result.sessionLockId,
+      shareLabel: result.shareLabel,
+    };
   }
 
   /**
@@ -225,6 +414,7 @@ export class TokenStore {
   scopesFor(id: string): RcScope[] | undefined {
     const rec = this.records.find((r) => r.id === id);
     if (!rec) return undefined;
+    if (rec.revokedAt !== undefined) return undefined;
     if (rec.expiresAt !== undefined && this.nowFn() >= rec.expiresAt) {
       return undefined;
     }
@@ -241,24 +431,28 @@ export class TokenStore {
     return this.records.find((r) => r.id === id)?.sessionLockId;
   }
 
-  /** List issued tokens as metadata only (no hash, no raw token). */
+  /** List issued tokens as metadata only (no hash, no raw token). Excludes revoked. */
   list(): TokenInfo[] {
-    return this.records.map((r) => ({
-      id: r.id,
-      scopes: [...r.scopes],
-      label: r.label,
-      createdAt: r.createdAt,
-    }));
+    return this.records
+      .filter((r) => r.revokedAt === undefined)
+      .map((r) => ({
+        id: r.id,
+        scopes: [...r.scopes],
+        label: r.label,
+        createdAt: r.createdAt,
+        issuedAt: r.issuedAt,
+      }));
   }
 
   /**
    * List share tokens (records carrying a `sessionLockId`) as metadata only.
    * `expired` is computed at read time; no secret material is exposed.
+   * Excludes revoked records.
    */
   listShares(): ShareInfo[] {
     const now = this.nowFn();
     return this.records
-      .filter((r) => r.sessionLockId !== undefined)
+      .filter((r) => r.sessionLockId !== undefined && r.revokedAt === undefined)
       .map((r) => {
         const uses = r.uses ?? 0;
         return {
@@ -269,6 +463,7 @@ export class TokenStore {
           expiresAt: r.expiresAt,
           parentId: r.parentId,
           createdAt: r.createdAt,
+          issuedAt: r.issuedAt,
           expired: r.expiresAt !== undefined && now >= r.expiresAt,
           maxUses: r.maxUses,
           uses,
@@ -278,16 +473,48 @@ export class TokenStore {
   }
 
   /**
-   * Remove a token by id. Returns true if a record was removed. Awaits the
-   * persist so a revoked credential is durable before the caller responds —
-   * a crash must never resurrect a revoked token on reopen.
+   * Revoke a token by id. Stamps `revokedAt` so `verifyTokenDetailed` returns
+   * `{ ok: false, reason: 'revoked' }` and the credential is permanently
+   * rejected. `list()` and `listShares()` exclude revoked records. Awaits
+   * persist so revocation is durable before the caller responds — a crash
+   * must never resurrect a revoked token on reopen.
+   *
+   * Returns true if a record was revoked, false if the id was unknown or was
+   * already revoked.
    */
   async revoke(id: string): Promise<boolean> {
-    const before = this.records.length;
-    this.records = this.records.filter((r) => r.id !== id);
-    if (this.records.length === before) return false;
+    const rec = this.records.find(
+      (r) => r.id === id && r.revokedAt === undefined,
+    );
+    if (!rec) return false;
+    rec.revokedAt = this.nowFn();
     await this.persist();
     return true;
+  }
+
+  /**
+   * Batch revocation (spec: "Batch revocation" — `POST /rc/tokens/revoke-all`):
+   * stamp `revokedAt` on every non-revoked token, except the caller's own token
+   * when `exceptTokenId` is given (`{ "except": "self" }`). Already-revoked
+   * records are untouched and never appear in `revokedIds`.
+   * Returns the revoked ids so the routes layer can write one `token_revoked`
+   * audit entry per id — the store is deliberately not coupled to audit.
+   * Persists atomically (single persist call after all stamps).
+   */
+  async revokeAll(
+    opts: { exceptTokenId?: string } = {},
+  ): Promise<{ revokedIds: string[] }> {
+    const revokedIds: string[] = [];
+    const now = this.nowFn();
+    for (const rec of this.records) {
+      if (rec.revokedAt !== undefined) continue; // already revoked
+      if (opts.exceptTokenId !== undefined && rec.id === opts.exceptTokenId)
+        continue;
+      rec.revokedAt = now;
+      revokedIds.push(rec.id);
+    }
+    if (revokedIds.length > 0) await this.persist();
+    return { revokedIds };
   }
 
   private async persist(): Promise<void> {
