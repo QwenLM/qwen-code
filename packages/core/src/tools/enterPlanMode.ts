@@ -106,6 +106,10 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
       this.config.getApprovalMode() === ApprovalMode.YOLO &&
       !this.params.userRequested
     ) {
+      debugLogger.info(
+        'Blocked model-initiated plan entry from YOLO (userRequested=%s)',
+        this.params.userRequested,
+      );
       return {
         llmContent:
           'Plan mode was not entered: the session is in YOLO mode, which the user explicitly chose for low-friction execution. Continue investigating and presenting your plan in the current mode without switching. If the user explicitly asked for plan mode in this turn, retry this tool call with userRequested: true.',

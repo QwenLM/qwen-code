@@ -150,10 +150,29 @@ describe('EnterPlanModeTool', () => {
     it('should not switch from YOLO to PLAN when userRequested is explicitly false', async () => {
       approvalMode = ApprovalMode.YOLO;
       const invocation = tool.build({ userRequested: false });
-      await invocation.execute(new AbortController().signal);
+      const result = await invocation.execute(new AbortController().signal);
 
       expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
       expect(approvalMode).toBe(ApprovalMode.YOLO);
+      expect(result.llmContent).toContain('YOLO');
+      expect(result.llmContent).not.toContain('Plan mode is now active');
+      expect(result.returnDisplay).toContain('Stayed in YOLO');
+    });
+
+    it('should treat userRequested as inert outside YOLO (DEFAULT enters PLAN normally)', async () => {
+      // Defensive: the flag only gates the YOLO no-op. If it ever gained
+      // significance in other modes, this pins the expected behavior.
+      approvalMode = ApprovalMode.DEFAULT;
+      const invocation = tool.build({ userRequested: true });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+        ApprovalMode.PLAN,
+        { enteredByModel: true },
+      );
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
+      expect(savedPrePlanMode).toBe(ApprovalMode.DEFAULT);
+      expect(result.llmContent).toContain('Plan mode is now active');
     });
 
     it('should switch from YOLO to PLAN when the user explicitly requested it', async () => {
