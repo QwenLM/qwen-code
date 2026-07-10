@@ -228,14 +228,14 @@ export function registerSessionCleanup(
     const safeId = sanitizeLogText(event.sessionId, 128);
     const safeReason = event.reason ? sanitizeLogText(event.reason, 512) : '';
     writeStderrLine(
-      `[Channel] Session ${safeId} died${safeReason ? ` (${safeReason})` : ''}, removing routing state`,
+      `[Channel] Session ${safeId} died${safeReason ? ` (${safeReason})` : ''}, updating routing state`,
     );
     const target = router.getTarget(event.sessionId);
     const channel = target ? channels.get(target.channelName) : undefined;
     if (channel) {
       channel.onSessionDied(event.sessionId);
     } else {
-      router.removeSessionId(event.sessionId);
+      router.handleSessionDied(event.sessionId);
     }
   });
 }
