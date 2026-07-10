@@ -148,12 +148,35 @@ export function startPostRenderPrefetches(
 
   if (settings.merged.general?.enableAutoUpdate !== false) {
     runDeferredTask('update_check', async () => {
-      const [{ checkForUpdates }, { handleAutoUpdate }] = await Promise.all([
+      const [
+        { checkForUpdatesDetailed },
+        { handleAutoUpdate },
+        { updateEventEmitter },
+        { t },
+      ] = await Promise.all([
         import('../ui/utils/updateCheck.js'),
         import('../utils/handleAutoUpdate.js'),
+        import('../utils/updateEventEmitter.js'),
+        import('../i18n/index.js'),
       ]);
-      const info = await checkForUpdates();
-      handleAutoUpdate(info, settings, config.getProjectRoot());
+      const updateFailedMessage = t(
+        'Failed to check for updates. Please check your network or registry configuration.',
+      );
+      try {
+        const result = await checkForUpdatesDetailed();
+        if (result.status === 'update') {
+          handleAutoUpdate(result.info, settings, config.getProjectRoot());
+        } else if (result.status === 'error') {
+          updateEventEmitter.emit('update-failed', {
+            message: updateFailedMessage,
+          });
+        }
+      } catch (error) {
+        updateEventEmitter.emit('update-failed', {
+          message: updateFailedMessage,
+        });
+        throw error;
+      }
     });
   }
 

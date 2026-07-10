@@ -3843,6 +3843,7 @@ describe('runQwenServe channel worker supervisor', () => {
     return {
       start: vi.fn().mockResolvedValue(undefined),
       stop: vi.fn().mockResolvedValue(undefined),
+      restart: vi.fn().mockResolvedValue(snapshot),
       killAllSync: vi.fn(),
       snapshot: vi.fn(() => snapshot),
     };
@@ -4544,6 +4545,8 @@ describe('runQwenServe channel worker supervisor', () => {
     const listenError = new Error('listen failed') as NodeJS.ErrnoException;
     listenError.code = 'EADDRINUSE';
     vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      // A real express app always exposes `locals`; the runtime parks the
+      // scheduled-task keepalive/launcher stoppers there, so the stub needs it.
       locals: {},
       listen: vi.fn(() => {
         const srv = createServer();

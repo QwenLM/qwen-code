@@ -87,6 +87,14 @@ export interface CronJob {
    * absent, the task uses the shared model: only the lock owner fires it.
    */
   boundSessionId?: string;
+  /**
+   * How a durable fire runs. Carried from the task so `onFire` can branch:
+   * `'isolated'` dispatches the fired prompt into a fresh sub-session instead
+   * of running it in the bound session. Absent/`'shared'` runs in-session (the
+   * #6389 model). The scheduler itself treats both identically — it only ferries
+   * the field. See {@link DurableCronTask.runMode}.
+   */
+  runMode?: 'shared' | 'isolated';
   /** One-shot that was due while no owning session ran — fired late. */
   missed?: boolean;
 }
@@ -1504,6 +1512,7 @@ function durableTaskToJob(
     jitterMs,
     durable: true,
     ...(task.sessionId ? { boundSessionId: task.sessionId } : {}),
+    ...(task.runMode ? { runMode: task.runMode } : {}),
   };
 }
 
@@ -1516,6 +1525,7 @@ function jobToDurableTask(job: CronJob): DurableCronTask {
     createdAt: job.createdAt,
     lastFiredAt: job.lastFiredAt ?? null,
     ...(job.boundSessionId ? { sessionId: job.boundSessionId } : {}),
+    ...(job.runMode ? { runMode: job.runMode } : {}),
   };
 }
 

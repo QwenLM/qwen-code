@@ -27,7 +27,10 @@ export function useIsLargeScreen(query: string = LARGE_SCREEN_QUERY): boolean {
   const [isLarge, setIsLarge] = useState<boolean>(() => matchesQuery(query));
 
   useEffect(() => {
-    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    if (
+      typeof window === 'undefined' ||
+      typeof window.matchMedia !== 'function'
+    ) {
       return;
     }
     const mql = window.matchMedia(query);
@@ -43,7 +46,10 @@ export function useIsLargeScreen(query: string = LARGE_SCREEN_QUERY): boolean {
 }
 
 function matchesQuery(query: string): boolean {
-  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+  if (
+    typeof window === 'undefined' ||
+    typeof window.matchMedia !== 'function'
+  ) {
     return false;
   }
   return window.matchMedia(query).matches;
