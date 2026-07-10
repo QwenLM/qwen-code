@@ -1123,7 +1123,11 @@ export function mountAcpHttp(
 
   const secondaryMounts = new Map<string, RuntimeAcpMount>();
   for (const rt of opts.workspaceRegistry?.list() ?? []) {
-    if (!rt.primary) {
+    // Only trusted non-primary runtimes get a mount: untrusted workspaces are
+    // rejected (403) before any mount lookup on both the HTTP and WS paths, so
+    // allocating a dispatcher/registry/remember-lane for them is pure waste and
+    // would pollute the aggregate snapshot with always-zero entries.
+    if (!rt.primary && rt.trusted) {
       secondaryMounts.set(rt.workspaceId, createSecondaryAcpMount(rt));
     }
   }

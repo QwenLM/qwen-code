@@ -12,6 +12,7 @@ import WebSocket from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { type AcpHttpHandle, mountAcpHttp } from './index.js';
 import { DeviceFlowRegistry } from '../auth/device-flow.js';
+import { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
 import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
@@ -72,6 +73,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
   let port: number;
   let handle: AcpHttpHandle | undefined;
   let deviceFlowRegistry: DeviceFlowRegistry | undefined;
+  let cdpRegistry: CdpTunnelRegistry;
 
   beforeEach(async () => {
     const primaryBridge = makeBridge();
@@ -108,6 +110,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       scheduleInterval: () => 0 as unknown as ReturnType<typeof setInterval>,
       clearScheduledInterval: () => {},
     });
+    cdpRegistry = new CdpTunnelRegistry();
 
     const app = express();
     app.use(express.json());
@@ -117,6 +120,8 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       enabled: true,
       workspaceRegistry: registry,
       deviceFlowRegistry,
+      cdpTunnelOverWs: true,
+      cdpTunnelRegistry: cdpRegistry,
       workspaceRememberLane: new WorkspaceRememberTaskLane(primaryBridge),
     });
 
@@ -237,14 +242,15 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(body.code).toBe('server_disposed');
   });
 
-  it('aggregates a connection snapshot across primary + secondary mounts', () => {
+  it('aggregates a connection snapshot across primary + trusted secondary mounts', () => {
     const snap = handle!.getSnapshot();
-    // primary (workspaceId null) + the two non-primary mounts.
-    expect(snap.mounts).toHaveLength(3);
+    // primary (workspaceId null) + the trusted secondary only; untrusted
+    // workspaces get no mount, so they never appear in the aggregate snapshot.
+    expect(snap.mounts).toHaveLength(2);
     expect(snap.mounts.find((m) => m.primary)?.workspaceId).toBeNull();
     const ids = snap.mounts.map((m) => m.workspaceId);
     expect(ids).toContain('secondary-id');
-    expect(ids).toContain('untrusted-id');
+    expect(ids).not.toContain('untrusted-id');
     expect(snap.connectionCount).toBe(0);
   });
 
@@ -327,5 +333,52 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     });
     expect(reply.error?.message ?? '').not.toContain('not configured');
     expect(reply.error?.data?.errorKind).toBe('unsupported_provider');
+  });
+
+  it('rejects a WS upgrade to an unknown workspace selector', async () => {
+    const status = await new Promise<number>((resolve, reject) => {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${port}/workspaces/does-not-exist/acp`,
+        { handshakeTimeout: 2000 },
+      );
+      ws.on('unexpected-response', (_req, res) => {
+        resolve(res.statusCode ?? 0);
+        ws.terminate();
+      });
+      ws.on('open', () => {
+        ws.close();
+        reject(new Error('unknown-selector WS upgrade should not open'));
+      });
+      ws.on('error', () => resolve(400));
+    });
+    expect(status).toBe(400);
+  });
+
+  it('does not let a secondary workspace claim the CDP tunnel', async () => {
+    // The CDP-bridge claim is gated on activeMount.primary, so a secondary
+    // workspace sending the CDP client name must NOT register the process-wide
+    // tunnel (which would hijack browser automation from the primary).
+    await new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${port}/workspaces/secondary-id/acp`,
+        { handshakeTimeout: 2000 },
+      );
+      ws.on('open', () =>
+        ws.send(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'initialize',
+            params: { clientInfo: { name: 'qwen-cdp-bridge' } },
+          }),
+        ),
+      );
+      ws.on('message', () => {
+        ws.close();
+        resolve();
+      });
+      ws.on('error', reject);
+    });
+    expect(cdpRegistry.hasActive()).toBe(false);
   });
 });
