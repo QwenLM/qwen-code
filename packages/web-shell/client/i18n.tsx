@@ -762,7 +762,7 @@ const EN: Messages = {
   'scheduledTasks.conditionPlaceholder':
     'e.g. Check whether anything landed on main since yesterday. If nothing did, the task should not run.',
   'scheduledTasks.condition.hint':
-    'Checked in this task's own session before each run. The prompt only runs in a fresh session when the check says yes — otherwise the run is skipped.',
+    "Checked in this task's own session before each run. The prompt only runs in a fresh session when the check says yes — otherwise the run is skipped.",
   'scheduledTasks.condition.cardPrefix': 'If:',
   'turnOutputs.filesEdited': (v) => `Edited ${v?.count ?? 0} files`,
   'turnOutputs.viewChanges': 'View changes',
