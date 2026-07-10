@@ -105,7 +105,10 @@ type DingTalkClientInternals = DWClient & {
 
 export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
+  private readonly atSender: boolean;
   private seenMessages: Map<string, number> = new Map();
+  private mentionTargets = new Map<string, string>();
+  private sessionMentionTargets = new Map<string, string>();
   private dedupTimer?: ReturnType<typeof setInterval>;
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
@@ -134,6 +137,9 @@ export class DingtalkChannel extends ChannelBase {
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);
+
+    this.atSender =
+      (config as unknown as Record<string, unknown>)['atSender'] === true;
 
     if (!config.clientId || !config.clientSecret) {
       throw new Error(
@@ -282,6 +288,7 @@ export class DingtalkChannel extends ChannelBase {
       for (const [id, ts] of this.seenMessages) {
         if (now - ts > DEDUP_TTL_MS) {
           this.seenMessages.delete(id);
+          this.mentionTargets.delete(id);
         }
       }
     }, 60_000);
@@ -301,7 +308,11 @@ export class DingtalkChannel extends ChannelBase {
     return isGroup && !conversationId;
   }
 
-  async sendMessage(chatId: string, text: string): Promise<void> {
+  private async sendReply(
+    chatId: string,
+    text: string,
+    atUserId?: string,
+  ): Promise<void> {
     // chatId is a conversationId — resolve to the latest sessionWebhook
     const webhook = this.webhooks.get(chatId);
     if (!webhook) {
@@ -315,13 +326,13 @@ export class DingtalkChannel extends ChannelBase {
     const title = extractTitle(text);
 
     for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i]!;
       const body = {
         msgtype: 'markdown',
         markdown: {
           title: i === 0 ? title : `${title} (cont.)`,
-          text: chunk,
+          text: chunks[i]!,
         },
+        ...(i === 0 && atUserId ? { at: { atUserIds: [atUserId] } } : {}),
       };
 
       const resp = await fetch(webhook, {
@@ -337,6 +348,10 @@ export class DingtalkChannel extends ChannelBase {
         );
       }
     }
+  }
+
+  async sendMessage(chatId: string, text: string): Promise<void> {
+    await this.sendReply(chatId, text);
   }
 
   override supportsProactiveSend(): boolean {
@@ -655,6 +670,11 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
+    if (messageId) {
+      const atUserId = this.mentionTargets.get(messageId);
+      this.mentionTargets.delete(messageId);
+      if (atUserId) this.sessionMentionTargets.set(sessionId, atUserId);
+    }
     this.startReaction(chatId, messageId, sessionId);
   }
 
@@ -663,7 +683,20 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
+    this.sessionMentionTargets.delete(sessionId);
     this.stopReaction(chatId, messageId, sessionId);
+  }
+
+  protected override async sendResponseMessage(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    const atUserId = this.atSender
+      ? this.sessionMentionTargets.get(sessionId)
+      : undefined;
+    if (atUserId) this.sessionMentionTargets.delete(sessionId);
+    await this.sendReply(chatId, text, atUserId);
   }
 
   /**
@@ -1007,6 +1040,10 @@ export class DingtalkChannel extends ChannelBase {
       // Reactions are resolved later via the chatId passed to
       // onPromptStart/onPromptEnd — no extra bookkeeping needed.
       envelope.messageId = msgId;
+
+      if (msgId && isGroup && senderStaffId) {
+        this.mentionTargets.set(msgId, senderStaffId);
+      }
 
       const processMessage = async () => {
         // Download media if present (first downloadCode only for images)

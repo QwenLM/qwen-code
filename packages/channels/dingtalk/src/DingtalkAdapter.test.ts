@@ -83,7 +83,9 @@ vi.mock('@qwen-code/channel-base', async () => {
 const { DingtalkChannel } = await import('./DingtalkAdapter.js');
 type DingtalkChannelInstance = InstanceType<typeof DingtalkChannel>;
 
-function createChannel(): DingtalkChannelInstance {
+function createChannel(
+  overrides: Record<string, unknown> = {},
+): DingtalkChannelInstance {
   return new DingtalkChannel(
     'test-dingtalk',
     {
@@ -98,6 +100,7 @@ function createChannel(): DingtalkChannelInstance {
       groupPolicy: 'open',
       dmPolicy: 'open',
       groups: {},
+      ...overrides,
     },
     {} as never,
   );
@@ -123,6 +126,15 @@ function getPromptHook(
   return fn.bind(channel);
 }
 
+function getResponseHook(
+  channel: DingtalkChannelInstance,
+): (chatId: string, text: string, sessionId: string) => Promise<void> {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'sendResponseMessage'
+  ] as (chatId: string, text: string, sessionId: string) => Promise<void>;
+  return fn.bind(channel);
+}
+
 function getLifecycleHook(
   channel: DingtalkChannelInstance,
 ): (event: ChannelTaskLifecycleEvent) => void {
@@ -140,6 +152,23 @@ function seedSeenMessage(
   (
     channel as unknown as { inboundMessageIds: Set<string> }
   ).inboundMessageIds.add(messageId);
+}
+
+function seedWebhook(channel: DingtalkChannelInstance, chatId: string): void {
+  (channel as unknown as { webhooks: Map<string, string> }).webhooks.set(
+    chatId,
+    'https://oapi.dingtalk.com/robot/send?access_token=token',
+  );
+}
+
+function seedMentionTarget(
+  channel: DingtalkChannelInstance,
+  messageId: string,
+  staffId: string,
+): void {
+  (
+    channel as unknown as { mentionTargets: Map<string, string> }
+  ).mentionTargets.set(messageId, staffId);
 }
 
 function deferredPromise<T>() {
@@ -1159,6 +1188,101 @@ describe('DingtalkChannel sender attribution', () => {
         messageId: 'header-m1',
       }),
     );
+  });
+});
+
+describe('DingtalkChannel reply mentions', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('mentions the originating group member when atSender is enabled', async () => {
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    await getResponseHook(channel)('cid123', 'hello', 'session-1');
+
+    expect(
+      JSON.parse(String((fetchSpy.mock.calls[0]![1] as RequestInit).body)),
+    ).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: 'hello' },
+      at: { atUserIds: ['staff-1'] },
+    });
+  });
+
+  it('does not mention the sender by default', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    await getResponseHook(channel)('cid123', 'hello', 'session-1');
+
+    expect(
+      JSON.parse(String((fetchSpy.mock.calls[0]![1] as RequestInit).body)),
+    ).not.toHaveProperty('at');
+  });
+
+  it('does not mention when the correlated prompt has no stored staff ID', async () => {
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    await getResponseHook(channel)('cid123', 'hello', 'session-1');
+
+    expect(
+      JSON.parse(String((fetchSpy.mock.calls[0]![1] as RequestInit).body)),
+    ).not.toHaveProperty('at');
+  });
+
+  it('mentions only the first chunk of a long response', async () => {
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    await getResponseHook(channel)('cid123', 'a'.repeat(3801), 'session-1');
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const bodies = fetchSpy.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    );
+    expect(bodies[0]).toMatchObject({ at: { atUserIds: ['staff-1'] } });
+    expect(bodies[1]).not.toHaveProperty('at');
+  });
+
+  it('mentions only the first block-streamed response', async () => {
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    await getResponseHook(channel)('cid123', 'first block', 'session-1');
+    await getResponseHook(channel)('cid123', 'second block', 'session-1');
+
+    const bodies = fetchSpy.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    );
+    expect(bodies[0]).toMatchObject({ at: { atUserIds: ['staff-1'] } });
+    expect(bodies[1]).not.toHaveProperty('at');
   });
 });
 
