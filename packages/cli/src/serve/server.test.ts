@@ -3933,7 +3933,7 @@ describe('createServeApp', () => {
             .set('Host', `127.0.0.1:${tokenOpts.port}`)
             .set('Authorization', 'Bearer secret');
           expect(operation.body).toMatchObject({
-            status: 'succeeded_with_refresh_error',
+            status: 'succeeded_with_warnings',
             warnings: [
               {
                 code: 'extension_temp_cleanup_failed',
@@ -3941,6 +3941,7 @@ describe('createServeApp', () => {
               },
             ],
           });
+          expect(operation.body.result).not.toHaveProperty('error');
         });
       } finally {
         restore();
@@ -4098,6 +4099,19 @@ describe('createServeApp', () => {
       const restore = mockExtensionManagerMethods({
         async prepareExtensionInstall() {
           return testExtension('installed-ext');
+        },
+        async commitPreparedExtension(prepared) {
+          return {
+            identity: prepared.identity,
+            version: prepared.version,
+            generation: 3,
+            warnings: [
+              {
+                code: 'extension_temp_cleanup_failed',
+                error: 'cleanup denied',
+              },
+            ],
+          };
         },
       });
       try {

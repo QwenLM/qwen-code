@@ -298,22 +298,22 @@ export function registerWorkspaceExtensionRoutes(
           });
           return;
         }
-        res.status(200).json(
+        const legacyRefreshFailure =
           base === '/workspace/extensions' &&
-            operation.status === 'succeeded_with_warnings'
+          operation.status === 'succeeded_with_warnings' &&
+          (operation.result?.failed ?? 0) > 0;
+        const legacyRefreshError =
+          operation.warnings?.find((warning) => warning.code === undefined)
+            ?.error ?? operation.result?.error;
+        res.status(200).json(
+          legacyRefreshFailure && operation.result
             ? {
                 ...operation,
                 status: 'succeeded_with_refresh_error',
-                ...(operation.result
-                  ? {
-                      result: {
-                        ...operation.result,
-                        ...(operation.warnings?.[0]?.error
-                          ? { error: operation.warnings[0].error }
-                          : {}),
-                      },
-                    }
-                  : {}),
+                result: {
+                  ...operation.result,
+                  ...(legacyRefreshError ? { error: legacyRefreshError } : {}),
+                },
               }
             : operation,
         );
