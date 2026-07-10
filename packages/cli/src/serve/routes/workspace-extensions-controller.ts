@@ -202,7 +202,6 @@ export function createExtensionsController(
       });
       return false;
     }
-    buildWorkspaceCtx(route, clientId);
     return true;
   };
 
