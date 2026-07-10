@@ -66,6 +66,47 @@ architecture is:
    advertised only when the ACP HTTP surface is enabled **and** multi-workspace
    sessions are active.
 
+## Post-review seam hardening
+
+The mount architecture above remains unchanged. The final repair pass closes
+six boundary gaps without replacing `AcpHttpHandle` or introducing a new route
+policy module.
+
+1. **One qualified-route readiness decision.** Workspace-qualified ACP is ready
+   only when ACP HTTP is enabled and the workspace registry contains more than
+   one runtime. HTTP route registration, WebSocket path recognition, capability
+   advertisement, and the outer rate-limiter exemption must agree with that
+   decision. Single-workspace daemons continue to expose legacy `/acp` only.
+2. **One rate-limit charge.** The outer Express limiter precisely exempts an
+   enabled `/workspaces/<single-selector>/acp` transport path, including the
+   route's existing case and trailing-slash behavior. Nearby paths remain
+   limited. The ACP transport remains responsible for applying the JSON-RPC
+   method tier, so a qualified prompt consumes only the prompt bucket rather
+   than both mutation and prompt buckets.
+3. **Structured malformed-path failure.** Express route-parameter decoding
+   failures that are both `URIError` instances and marked with HTTP status 400
+   return a structured `400 invalid_request`. Other thrown `URIError` values and
+   unrelated failures retain the generic 500 handling. The WebSocket path keeps
+   its existing explicit 400 response.
+4. **Log-safe selectors.** A decoded selector used in an operator-facing
+   WebSocket rejection log passes through the existing `logSafe` sanitizer, so
+   encoded terminal controls cannot forge or split stderr lines.
+5. **Terminal disposal.** `dispose()` is an irreversible lifecycle transition.
+   After it runs, `attachServer()` cannot recreate a WebSocket server or upgrade
+   listener. Repeated `dispose()` and `attachServer()` calls remain harmless.
+6. **Workspace-attributed full diagnostics.** The aggregate ACP snapshot gains
+   additive connection diagnostics decorated with `workspaceId`,
+   `workspaceCwd`, and `primary`. Summary counters remain unchanged, the public
+   primary `registry` remains available for compatibility, and daemon
+   `detail=full` reads the aggregate connection list. The existing connection
+   cap remains a per-mount limit because every mount is constructed with the
+   same configured cap.
+
+Each contract is pinned by a regression test written before its production
+change. Verification includes the focused ACP, rate-limit, daemon-status, and
+serve-server suites plus build, typecheck, lint, and the serve fast-path bundle
+closure check.
+
 ## Dependencies on Phase 3 (unmerged)
 
 Phase 4 consumes these Phase 3 seams. Because PR #6567 is `CHANGES_REQUESTED`,
@@ -147,9 +188,9 @@ bridge })` at server.ts L609, bound to the primary bridge).
 Keep Option B: one daemon, N independent workspace runtimes. For ACP:
 
 - Each registered runtime gets its own `AcpDispatcher` + `ConnectionRegistry` +
-  reverse-MCP provider factory + device-flow registry, all bound to that
-  runtime's `bridge` / `workspace` / `routeFileSystemFactory` /
-  `clientMcpSenderRegistry` / `env`.
+  reverse-MCP provider factory, all bound to that runtime's `bridge` /
+  `workspace` / `routeFileSystemFactory` / `clientMcpSenderRegistry` / `env`.
+  Every dispatcher receives the same daemon-global device-flow registry.
 - Legacy `/acp` stays bound to the primary runtime's dispatcher (unchanged wire
   behavior).
 - New `/workspaces/:workspace/acp` binds to the resolved runtime's dispatcher.
@@ -162,11 +203,9 @@ Keep Option B: one daemon, N independent workspace runtimes. For ACP:
   legacy `/acp` path.
 - Each `RuntimeAcpMount` is constructed with that runtime's own `bridge`,
   `workspace`, `routeFileSystemFactory`, `clientMcpSenderRegistry`, `env`, a new
-  per-runtime `deviceFlowRegistry`, a new per-runtime
-  `WorkspaceRememberTaskLane(runtime.bridge)`, its `AcpDispatcher`, and its
-  `ConnectionRegistry`. `archiveCoordinator` and `sessionShellCommandEnabled` can
-  be shared unless per-workspace archive state requires otherwise (see Open
-  Questions).
+  per-runtime `WorkspaceRememberTaskLane(runtime.bridge)`, its `AcpDispatcher`,
+  and its `ConnectionRegistry`. The daemon-global device-flow registry,
+  `archiveCoordinator`, and `sessionShellCommandEnabled` are shared.
 - All four dispatch entry points must select the resolved runtime's mount, not
   the primary one: `POST`, `GET` (SSE), and `DELETE` on the plural path (Express,
   via `resolveWorkspaceRuntimeFromParam`; today each closes over the single
@@ -339,8 +378,8 @@ should add a test asserting this, and confirm the same guard covers `session/new
 - Trust revoked: when a trust-mutation phase lands, revoking a runtime must
   drain/stop its ACP child and clear its session index; Phase 4 only guarantees
   the per-runtime ACP mount is drainable, it does not add trust mutation itself.
-- Global shutdown: dispose every runtime's dispatcher, `ConnectionRegistry`, and
-  device-flow registry — not only the primary/app-global ones.
+- Global shutdown: dispose every runtime's `ConnectionRegistry`, then dispose the
+  single daemon-global device-flow registry once.
 - Rate limiting: ACP HTTP/WS admission uses `checkRate` keyed per
   connection/session (index.ts L627-641, L1175-1178). The plural mounts share the
   one limiter; keys must stay unambiguous across runtimes so one workspace cannot
@@ -371,8 +410,9 @@ should add a test asserting this, and confirm the same guard covers `session/new
 - Consistency: connect to A, send `workspaceCwd: B` -> `WorkspaceMismatchError`.
 - Trust gate: `session/new|load|resume` on an untrusted runtime -> rejected, no
   child spawned.
-- Device-flow: a flow started under A is not visible/deletable via B's routes;
-  shutdown disposes all runtimes' registries.
+- Device-flow: every mount reaches the daemon-global registry; event publication
+  fans out to primary and trusted secondary bridges, one failing bridge does not
+  block the others, and shutdown disposes the registry once.
 - Reverse MCP: `mcp_register` on `/workspaces/B/acp` lands in B's
   `clientMcpSenderRegistry` and B's bridge only.
 - Rate limiting: prompts/mutations on `/workspaces/A/acp` and `/workspaces/B/acp`
@@ -387,10 +427,9 @@ should add a test asserting this, and confirm the same guard covers `session/new
    `resolveWorkspaceRuntimeFromParam`. Phase 4 depends on the pure resolver
    staying free of `req`/`res` coupling. If Phase 3 review changes that seam,
    preserve a pure `(registry, selector) => runtime | undefined` entry point.
-2. **Device-flow per-runtime ownership: Phase 3 or Phase 4?** It is currently
-   app-global. Phase 4 owns the change unless Phase 3 review prefers to add the
-   `WorkspaceRuntime.deviceFlowRegistry` field earlier. Decide who lands the
-   field to avoid a rebase collision.
+2. **Device-flow ownership (resolved).** Keep the registry daemon-global because
+   OAuth credentials are process-global. Phase 4 shares that registry with every
+   dispatcher and fans sanitized events out to trusted runtime bridges.
 3. **CDP tunnel per-workspace model.** One loopback puppeteer client + one `/cdp`
    endpoint does not map cleanly to N runtimes. Phase 4 keeps CDP on primary;
    confirm that is acceptable or scope a workspace-qualified CDP follow-up.
