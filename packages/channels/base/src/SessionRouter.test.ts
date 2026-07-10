@@ -896,6 +896,45 @@ describe('SessionRouter', () => {
       expect(router.getAll()).toHaveLength(1);
     });
 
+    it.each(['removeSession', 'removeSessionId'] as const)(
+      'invalidates a restore waiter when %s runs after reservation resolution',
+      async (removal) => {
+        const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+        tempDirs.push(dir);
+        const persistPath = join(dir, 'sessions.json');
+        writePersistedSession(persistPath, 'ch:alice:chat1');
+        let resolveLoadSession!: (sessionId: string) => void;
+        bridge = {
+          ...mockBridge(),
+          loadSession: vi.fn(
+            () =>
+              new Promise<string>((resolve) => {
+                resolveLoadSession = resolve;
+              }),
+          ),
+        };
+        const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+        const restore = router.restoreSessions();
+        await Promise.resolve();
+        const resolved = router.resolve('ch', 'alice', 'chat1');
+        resolveLoadSession('restored-session');
+        queueMicrotask(() => {
+          if (removal === 'removeSession') {
+            router.removeSession('ch', 'alice', 'chat1');
+          } else {
+            router.removeSessionId('restored-session');
+          }
+        });
+
+        await expect(resolved).rejects.toThrow('invalidated');
+        await expect(restore).resolves.toEqual({ restored: 1, failed: 0 });
+        expect(bridge.newSession).not.toHaveBeenCalled();
+        expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
+        expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+      },
+    );
+
     it('creates a fresh session for concurrent resolve when restore fails', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
       tempDirs.push(dir);

@@ -1592,6 +1592,39 @@ describe('DaemonChannelBridge', () => {
     expect(bridge.listSessions()).toEqual([]);
   });
 
+  it.each(['new', 'load'] as const)(
+    'does not attach a %s factory result after a queued stop',
+    async (operation) => {
+      const events = new EventQueue();
+      const sessionId =
+        operation === 'new' ? 'new-session' : 'existing-session';
+      const session = createFakeSession(events, sessionId);
+      let finishFactory!: (session: FakeSession) => void;
+      const bridge = new DaemonChannelBridge({
+        cwd: '/repo',
+        sessionFactory: vi.fn(
+          () =>
+            new Promise<DaemonChannelSessionClient>((resolve) => {
+              finishFactory = resolve;
+            }),
+        ),
+      });
+
+      await bridge.start();
+      const creating =
+        operation === 'new'
+          ? bridge.newSession('/repo')
+          : bridge.loadSession(sessionId, '/repo');
+      await Promise.resolve();
+      finishFactory(session);
+      queueMicrotask(() => bridge.stop());
+
+      await expect(creating).resolves.toBe(sessionId);
+      expect(session.cancel).toHaveBeenCalledOnce();
+      expect(bridge.listSessions()).toEqual([]);
+    },
+  );
+
   it('keeps a pre-stop factory result stale after restart', async () => {
     const staleEvents = new EventQueue();
     const staleSession = createFakeSession(staleEvents, 'stale-session');

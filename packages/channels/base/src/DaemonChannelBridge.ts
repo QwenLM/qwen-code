@@ -260,7 +260,9 @@ export class DaemonChannelBridge
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
     });
-    await this.rejectStaleSession(session, lifecycleGeneration);
+    if (lifecycleGeneration !== this.lifecycleGeneration) {
+      await this.rejectStaleSession(session);
+    }
     this.attachSession(session);
     return session.sessionId;
   }
@@ -278,7 +280,9 @@ export class DaemonChannelBridge
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
     });
-    await this.rejectStaleSession(session, lifecycleGeneration);
+    if (lifecycleGeneration !== this.lifecycleGeneration) {
+      await this.rejectStaleSession(session);
+    }
     if (session.sessionId !== sessionId) {
       throw new Error(
         `Daemon returned session ${session.sessionId} while loading ${sessionId}`,
@@ -461,9 +465,7 @@ export class DaemonChannelBridge
 
   private async rejectStaleSession(
     session: DaemonChannelSessionClient,
-    lifecycleGeneration: number,
   ): Promise<void> {
-    if (lifecycleGeneration === this.lifecycleGeneration) return;
     try {
       await session.cancel();
     } catch (error) {

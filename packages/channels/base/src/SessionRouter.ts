@@ -30,6 +30,7 @@ interface SessionOperation {
   promise: Promise<string>;
   target: SessionTarget;
   lifecycleGeneration: number;
+  routeGeneration: number;
   invalidationError?: Error;
 }
 
@@ -51,6 +52,7 @@ export class SessionRouter {
   private creatingSessions: Map<string, SessionOperation> = new Map();
   private sessionLoadWindows: Set<SessionLoadWindow> = new Set();
   private readonly liveSessionIds = new Set<string>();
+  private readonly routeGenerations = new Map<string, number>();
   private lifecycleGeneration = 0;
 
   private bridge: ChannelAgentBridge;
@@ -156,7 +158,7 @@ export class SessionRouter {
       if (creating) {
         try {
           const sessionId = await creating.promise;
-          this.assertOperationCurrent(creating);
+          this.assertOperationResultCurrent(key, sessionId, creating);
           this.promoteTargetToGroup(sessionId, isGroup);
           return sessionId;
         } catch (error) {
@@ -173,6 +175,7 @@ export class SessionRouter {
       }
 
       const operation = this.createSessionOperation(
+        key,
         {
           channelName: input.channelName,
           senderId: input.senderId,
@@ -188,7 +191,7 @@ export class SessionRouter {
       this.creatingSessions.set(key, operation);
       try {
         const sessionId = await operation.promise;
-        this.assertOperationCurrent(operation);
+        this.assertOperationResultCurrent(key, sessionId, operation);
         this.promoteTargetToGroup(sessionId, isGroup);
         return sessionId;
       } finally {
@@ -537,6 +540,7 @@ export class SessionRouter {
       const reservation = this.createSessionReservation();
       reservation.promise.catch(() => undefined);
       const operation = this.createSessionOperation(
+        key,
         entries[key]!.target,
         () => reservation.promise,
       );
@@ -614,6 +618,7 @@ export class SessionRouter {
     this.creatingSessions.clear();
     this.sessionLoadWindows.clear();
     this.liveSessionIds.clear();
+    this.routeGenerations.clear();
   }
 
   /** Clear in-memory state and delete persist file. Used on clean shutdown. */
@@ -783,6 +788,7 @@ export class SessionRouter {
   }
 
   private createSessionOperation(
+    key: string,
     target: SessionTarget,
     run: (operation: SessionOperation) => Promise<string>,
   ): SessionOperation {
@@ -790,6 +796,7 @@ export class SessionRouter {
       promise: Promise.resolve(''),
       target,
       lifecycleGeneration: this.lifecycleGeneration,
+      routeGeneration: this.routeGenerations.get(key) ?? 0,
     };
     operation.promise = Promise.resolve()
       .then(() => run(operation))
@@ -801,6 +808,7 @@ export class SessionRouter {
   }
 
   private invalidateRouteOperation(key: string): void {
+    this.routeGenerations.set(key, (this.routeGenerations.get(key) ?? 0) + 1);
     const operation = this.creatingSessions.get(key);
     if (!operation) return;
     this.invalidateOperation(operation);
@@ -820,6 +828,20 @@ export class SessionRouter {
     if (operation.invalidationError) {
       throw operation.invalidationError;
     }
+  }
+
+  private assertOperationResultCurrent(
+    key: string,
+    sessionId: string,
+    operation: SessionOperation,
+  ): void {
+    if (operation.routeGeneration !== (this.routeGenerations.get(key) ?? 0)) {
+      this.invalidateOperation(operation);
+    }
+    if (this.toSession.get(key) !== sessionId) {
+      this.invalidateOperation(operation);
+    }
+    this.assertOperationCurrent(operation);
   }
 
   private createSessionReservation(): SessionReservation {
