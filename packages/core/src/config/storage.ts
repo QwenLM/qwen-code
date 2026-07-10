@@ -91,6 +91,10 @@ export class Storage {
     return safeName || '_';
   }
 
+  static sanitizeTodoSessionId(sessionId: string): string {
+    return Storage.sanitizePlanSessionId(sessionId);
+  }
+
   private static resolveRuntimeBaseDir(
     dir: string | null | undefined,
     cwd?: string,

@@ -247,7 +247,7 @@ When in doubt, use this tool. Being proactive with task management demonstrates 
 `;
 
 function getTodoFilePath(todoDir: string, sessionId?: string): string {
-  const filename = `${Storage.sanitizePlanSessionId(
+  const filename = `${Storage.sanitizeTodoSessionId(
     sessionId || 'default',
   )}.json`;
   return path.join(todoDir, filename);
@@ -638,8 +638,15 @@ export async function listTodoSessions(
   todoDirOrConfig?: string | Config,
 ): Promise<string[]> {
   try {
-    const { todoDir: resolvedTodoDir } =
+    const { todoDir: resolvedTodoDir, projectRoot } =
       getTodoDirectoryContext(todoDirOrConfig);
+    if (projectRoot && isConfiguredTodoDir(resolvedTodoDir)) {
+      Storage.assertPathWithinDirectory(
+        resolvedTodoDir,
+        projectRoot,
+        `todosDirectory must resolve within the project root.`,
+      );
+    }
     const files = await fs.readdir(resolvedTodoDir);
     return files
       .filter((file: string) => file.endsWith('.json'))
@@ -705,8 +712,16 @@ export class TodoWriteTool extends BaseDeclarativeTool<
   protected createInvocation(params: TodoWriteParams) {
     // Determine if this is a create or update operation by checking if todos file exists
     const sessionId = this.config.getSessionId();
-    const todoFilePath = getTodoFilePath(this.config.getTodosDir(), sessionId);
-    const operationType = fsSync.existsSync(todoFilePath) ? 'update' : 'create';
+    const todoDir = this.config.getTodosDir();
+    const projectRoot = this.config.getTargetDir?.();
+    const todoFilePath = getTodoFilePath(todoDir, sessionId);
+    let operationType: 'create' | 'update' = 'create';
+    try {
+      assertTodoPathWithinAllowedDirectory(todoDir, todoFilePath, projectRoot);
+      operationType = fsSync.existsSync(todoFilePath) ? 'update' : 'create';
+    } catch {
+      operationType = 'create';
+    }
 
     return new TodoWriteToolInvocation(this.config, params, operationType);
   }

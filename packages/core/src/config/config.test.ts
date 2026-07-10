@@ -6013,6 +6013,38 @@ describe('setApprovalMode with folder trust', () => {
       );
     });
 
+    it('should warn when configured todosDirectory hides a legacy todo file', () => {
+      const targetDir = path.resolve(baseParams.targetDir);
+      const currentTodosDir = path.join(targetDir, 'project-todos');
+      const legacyTodosDir = Storage.getTodosDir();
+      (fs.readdirSync as Mock).mockImplementation((pathToCheck) => {
+        const resolvedPath = pathToCheck.toString();
+        if (resolvedPath === currentTodosDir) {
+          return [];
+        }
+        if (resolvedPath === legacyTodosDir) {
+          return ['other-session.json'];
+        }
+        return [];
+      });
+
+      try {
+        const config = new Config({
+          ...baseParams,
+          todosDirectory: './project-todos',
+        });
+
+        expect(config.getWarnings()).toContainEqual(
+          expect.stringContaining(legacyTodosDir),
+        );
+        expect(config.getWarnings()).toContainEqual(
+          expect.stringContaining('todosDirectory is configured'),
+        );
+      } finally {
+        (fs.readdirSync as Mock).mockReturnValue([]);
+      }
+    });
+
     it('should reject configured todosDirectory outside targetDir', () => {
       expect(
         () =>
