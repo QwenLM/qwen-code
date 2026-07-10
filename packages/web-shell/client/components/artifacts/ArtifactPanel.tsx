@@ -514,47 +514,55 @@ function ScheduledTaskDetail({
           {t('scheduledTasks.sessionScopedSnapshot')}
         </div>
       )}
-      <div className={styles.section}>
-        <div className={styles.fieldGrid}>
-          <span className={styles.fieldLabel}>{t('scheduledTasks.name')}</span>
-          <span className={styles.fieldValue}>{detailTitle}</span>
-          <span className={styles.fieldLabel}>
-            {t('scheduledTasks.taskId')}
-          </span>
-          <span className={styles.fieldValue}>{task.id}</span>
-          <span className={styles.fieldLabel}>
-            {t('scheduledTasks.schedule')}
-          </span>
-          <span className={styles.fieldValue}>
-            {describeCron(detailCron, t)}
-          </span>
-          <span className={styles.fieldLabel}>Cron</span>
-          <span className={styles.fieldValue}>{detailCron}</span>
-          <span className={styles.fieldLabel}>{t('scheduledTasks.type')}</span>
-          <span className={styles.fieldValue}>
-            {detailRecurring
-              ? t('scheduledTasks.repeats')
-              : t('scheduledTasks.runsOnce')}
-          </span>
-          {detailEnabled !== undefined && (
-            <>
-              <span className={styles.fieldLabel}>
-                {t('scheduledTasks.status')}
-              </span>
-              <span className={styles.fieldValue}>
-                {detailEnabled
-                  ? t('scheduledTasks.enable')
-                  : t('scheduledTasks.disable')}
-              </span>
-            </>
-          )}
+      {!isDeleted && (
+        <div className={styles.section}>
+          <div className={styles.fieldGrid}>
+            <span className={styles.fieldLabel}>
+              {t('scheduledTasks.name')}
+            </span>
+            <span className={styles.fieldValue}>{detailTitle}</span>
+            <span className={styles.fieldLabel}>
+              {t('scheduledTasks.taskId')}
+            </span>
+            <span className={styles.fieldValue}>{task.id}</span>
+            <span className={styles.fieldLabel}>
+              {t('scheduledTasks.schedule')}
+            </span>
+            <span className={styles.fieldValue}>
+              {describeCron(detailCron, t)}
+            </span>
+            <span className={styles.fieldLabel}>Cron</span>
+            <span className={styles.fieldValue}>{detailCron}</span>
+            <span className={styles.fieldLabel}>
+              {t('scheduledTasks.type')}
+            </span>
+            <span className={styles.fieldValue}>
+              {detailRecurring
+                ? t('scheduledTasks.repeats')
+                : t('scheduledTasks.runsOnce')}
+            </span>
+            {detailEnabled !== undefined && (
+              <>
+                <span className={styles.fieldLabel}>
+                  {t('scheduledTasks.status')}
+                </span>
+                <span className={styles.fieldValue}>
+                  {detailEnabled
+                    ? t('scheduledTasks.enable')
+                    : t('scheduledTasks.disable')}
+                </span>
+              </>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
-      <div className={styles.section}>
-        <div className={styles.sectionTitle}>Prompt</div>
-        <div className={styles.description}>{detailPrompt}</div>
-      </div>
+      {!isDeleted && (
+        <div className={styles.section}>
+          <div className={styles.sectionTitle}>Prompt</div>
+          <div className={styles.description}>{detailPrompt}</div>
+        </div>
+      )}
 
       {formError && <div className={taskStyles.formError}>{formError}</div>}
 

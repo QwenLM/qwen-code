@@ -1563,6 +1563,7 @@ export function App({
         setReviewChanges([]);
         setSelectedReviewPath(null);
         setArtifactPanelExtraArtifacts([]);
+        setPaneArtifactSnapshots(new Map());
         return nextTabs;
       }
       if (activeArtifactPanelTabIdRef.current === tabId) {
