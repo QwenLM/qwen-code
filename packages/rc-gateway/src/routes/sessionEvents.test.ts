@@ -20,6 +20,7 @@ import { SHARE, SESSION_READ, BRIDGE } from '../scopes.js';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { SessionWal } from '../wal.js';
 
 let gateway: Server | undefined;
 let stub: StubDaemon | undefined;
@@ -39,11 +40,18 @@ function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
 async function mountGateway(
   daemon: DaemonClient,
   audit?: AuditRecorder,
+  walDir?: string,
 ): Promise<string> {
   const app = express();
   app.get(
     '/session/:id/events',
-    createSessionEventsRoute(daemon, new ConnectionRegistry(), audit),
+    createSessionEventsRoute(
+      daemon,
+      new ConnectionRegistry(),
+      audit,
+      undefined,
+      walDir,
+    ),
   );
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -316,5 +324,96 @@ describe('session-events proxy', () => {
       expect(row!.shareId).toBe(share.id);
       expect(row!.shareLabel).toBe('review for Sam');
     }
+  });
+});
+
+describe('session-events WAL integration', () => {
+  it('appends daemon frames to WAL and replays them on reconnect', async () => {
+    // Use a unique session id to avoid collisions with walRegistry singleton.
+    const sessionId = 'wal-replay-sess';
+    stub = await startStubDaemon({
+      frames: [
+        { id: 1, type: 'session_update', data: { text: 'one' } },
+        { id: 2, type: 'session_update', data: { text: 'two' } },
+      ],
+    });
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-wal-'));
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url = await mountGateway(daemon, undefined, walDir);
+
+    // First connection: consume all frames (writes to WAL).
+    const res1 = await fetch(`${url}/session/${sessionId}/events`);
+    expect(res1.status).toBe(200);
+    const frames1 = await readFrames(res1);
+    expect(frames1.map((f) => f.id)).toEqual(['1', '2']);
+
+    // Verify WAL has the events.
+    const wal = new SessionWal({ dir: walDir, sessionId });
+    expect(wal.count()).toBe(2);
+    wal.close();
+
+    // Second connection with Last-Event-ID=1: should replay frame 2 from WAL.
+    // Stub now has no frames to emit (daemon stream ends immediately).
+    await stub.close();
+    stub = await startStubDaemon({ frames: [] });
+    const daemon2 = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url2 = await mountGateway(daemon2, undefined, walDir);
+
+    const res2 = await fetch(`${url2}/session/${sessionId}/events`, {
+      headers: { 'Last-Event-ID': '1' },
+    });
+    expect(res2.status).toBe(200);
+    const frames2 = await readFrames(res2);
+    expect(frames2.map((f) => f.id)).toEqual(['2']);
+    expect(frames2[0]!.data).toContain('"text":"two"');
+  });
+
+  it('returns 412 with replay_truncated when Last-Event-ID is before WAL horizon', async () => {
+    const sessionId = 'wal-truncated-sess';
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-wal-'));
+
+    // Seed the WAL with events starting at id=10 so that a resume from id=5
+    // is clearly before the WAL's earliest event. The route creates its own
+    // SessionWal with default options, so we use the same defaults here.
+    const wal = new SessionWal({ dir: walDir, sessionId });
+    wal.append({ id: 10, v: 1, type: 'session_update', data: {} });
+    wal.append({ id: 11, v: 1, type: 'session_update', data: {} });
+    wal.close();
+
+    stub = await startStubDaemon({ frames: [] });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    // Mount with a fresh app so the walRegistry picks up the pre-seeded dir.
+    const app = express();
+    app.get(
+      '/session/:id/events',
+      createSessionEventsRoute(
+        daemon,
+        new ConnectionRegistry(),
+        undefined,
+        undefined,
+        walDir,
+      ),
+    );
+    const server: Server = await new Promise((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    gateway = server;
+    const { port } = server.address() as AddressInfo;
+
+    // Resume from id=5 which is before the earliest retained (10) by > 1.
+    const res = await fetch(
+      `http://127.0.0.1:${port}/session/${sessionId}/events`,
+      {
+        headers: { 'Last-Event-ID': '5' },
+      },
+    );
+    expect(res.status).toBe(412);
+    const body = (await res.json()) as {
+      type: string;
+      data: { earliestAvailableId: number | null; reason: string };
+    };
+    expect(body.type).toBe('replay_truncated');
+    expect(body.data.reason).toBe('older_than_wal_horizon');
+    expect(body.data.earliestAvailableId).toBe(10);
   });
 });
