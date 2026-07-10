@@ -118,6 +118,37 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
   });
 
+  it('normalizes plural workspace agent routes to stable route labels', () => {
+    const mw = daemonTelemetryMiddleware(() => '/ws');
+    for (const [method, path, route] of [
+      ['GET', '/workspaces/ws-secondary/agents', 'GET /workspace/agents'],
+      [
+        'GET',
+        '/workspaces/ws-secondary/agents/reviewer',
+        'GET /workspace/agents/:agentType',
+      ],
+      ['POST', '/workspaces/ws-secondary/agents', 'POST /workspace/agents'],
+      [
+        'POST',
+        '/workspaces/ws-secondary/agents/reviewer',
+        'POST /workspace/agents/:agentType',
+      ],
+      [
+        'DELETE',
+        '/workspaces/ws-secondary/agents/reviewer',
+        'DELETE /workspace/agents/:agentType',
+      ],
+    ] as const) {
+      const res = mockRes(200);
+      mw(mockReq(method, path), res, vi.fn() as unknown as NextFunction);
+      res.emit('finish');
+      expect(coreMocks.withDaemonRequestSpan).toHaveBeenLastCalledWith(
+        expect.objectContaining({ method, route }),
+        expect.any(Function),
+      );
+    }
+  });
+
   it('excludes the dashboard status poll (GET /daemon/status) from recordRequest', () => {
     const recordRequest = vi.fn();
     const mw = daemonTelemetryMiddleware(() => '/ws', recordRequest);

@@ -42,6 +42,7 @@ export type {
   LoadingPhrasesResolver,
   WebShellAtItem,
   WebShellAtProvider,
+  WebShellBottomStatusItem,
   WebShellCodeBlockRenderInfo,
   WebShellTaskInfo,
   WebShellAgentTask,

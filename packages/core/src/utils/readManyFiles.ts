@@ -267,8 +267,13 @@ async function readFileContent(
       };
     }
 
-    // For binary files (images, PDFs), add prefix text before the inlineData/fileData part
-    const contentParts: Part[] = [prefixText, fileReadResult.llmContent];
+    // For binary files (images, PDFs), add prefix text before the media
+    // part(s). A page-rendered PDF yields an array of image parts (plus an
+    // optional truncation note), so flatten it after the prefix.
+    const mediaParts = fileReadResult.llmContent;
+    const contentParts: Part[] = Array.isArray(mediaParts)
+      ? [prefixText, ...(mediaParts as Part[])]
+      : [prefixText, mediaParts];
     return {
       contentParts,
       info: {
