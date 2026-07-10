@@ -2282,7 +2282,6 @@ export default {
   'Resume blocked': '恢复受阻',
   'Working dir': '工作目录',
   'Output file': '输出文件',
-  Transcript: '执行记录',
   'Topics touched ({{count}})': '触及的主题（{{count}}）',
   '{{count}} more': '{{count}} 个',
   'Lock release warning': '锁释放警告',
