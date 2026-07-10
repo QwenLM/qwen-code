@@ -686,12 +686,11 @@ const inlineComposerTagField = StateField.define<DecorationSet>({
 
 export function getInlineComposerTags(view: EditorView): WebShellComposerTag[] {
   const tags: WebShellComposerTag[] = [];
-  view.state
-    .field(inlineComposerTagField)
-    .between(0, view.state.doc.length, (_from, _to, value) => {
-      const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
-      if (tag) tags.push(toPublicComposerTag(tag));
-    });
+  const inlineTags = view.state.field(inlineComposerTagField, false);
+  inlineTags?.between(0, view.state.doc.length, (_from, _to, value) => {
+    const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
+    if (tag) tags.push(toPublicComposerTag(tag));
+  });
   return tags;
 }
 
@@ -1455,7 +1454,8 @@ export function useComposerCore(
           : null;
       const rawText = (textOverride ?? followupCompletion ?? editorText).trim();
       const tags = tagsOverride ?? composerTagsRef.current;
-      if (!rawText && tags.length === 0) return true;
+      const inlineTags = tagsOverride ? [] : getInlineComposerTags(view);
+      if (!rawText && tags.length === 0 && inlineTags.length === 0) return true;
       const text = expandLargePastePlaceholders(
         pendingPastesRef.current,
         rawText,
@@ -1466,7 +1466,7 @@ export function useComposerCore(
       const promptText = isShellMode ? `!${prompt}` : prompt;
       const inputAnnotations = createInputAnnotationsFromComposerTags(
         promptText,
-        tags,
+        [...tags, ...inlineTags],
       );
       let committed = false;
       const commitAccepted = () => {
