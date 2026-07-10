@@ -6367,6 +6367,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 1_000_000,
       ['samplingParams']: { temperature: 0.7 },
       ['enableCacheControl']: true,
+      ['forceGlobalCacheScope']: true,
     };
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -6392,6 +6393,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 128_000,
       ['samplingParams']: { temperature: 0.8 },
       ['enableCacheControl']: false,
+      ['forceGlobalCacheScope']: false,
       ['toolResultContentFormat']: 'string',
       ['modalities']: { image: true },
     };
@@ -6403,6 +6405,7 @@ describe('Model Switching and Config Updates', () => {
         contextWindowSize: { kind: 'computed', detail: 'auto' },
         samplingParams: { kind: 'settings' },
         enableCacheControl: { kind: 'settings' },
+        forceGlobalCacheScope: { kind: 'settings' },
         toolResultContentFormat: { kind: 'settings' },
         modalities: { kind: 'computed', detail: 'auto' },
       },
@@ -6424,6 +6427,7 @@ describe('Model Switching and Config Updates', () => {
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
     expect(updatedConfig['samplingParams']?.temperature).toBe(0.8);
     expect(updatedConfig['enableCacheControl']).toBe(false);
+    expect(updatedConfig['forceGlobalCacheScope']).toBe(false);
     expect(updatedConfig['toolResultContentFormat']).toBe('string');
     // Modalities are model-derived; a hot switch must refresh them so the
     // vision-bridge gate reflects the new model (it reads getEffectiveInputModalities()).
@@ -6438,6 +6442,7 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['contextWindowSize']?.detail).toBe('auto');
     expect(sources['samplingParams']?.kind).toBe('settings');
     expect(sources['enableCacheControl']?.kind).toBe('settings');
+    expect(sources['forceGlobalCacheScope']?.kind).toBe('settings');
     expect(sources['toolResultContentFormat']?.kind).toBe('settings');
     expect(sources['modalities']?.kind).toBe('computed');
   });

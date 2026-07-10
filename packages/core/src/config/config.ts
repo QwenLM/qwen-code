@@ -3603,6 +3603,8 @@ export class Config {
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;
+      this.contentGeneratorConfig.forceGlobalCacheScope =
+        config.forceGlobalCacheScope;
       this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
       this.contentGeneratorConfig.toolResultContentFormat =
         config.toolResultContentFormat;
@@ -3625,6 +3627,10 @@ export class Config {
       if ('enableCacheControl' in sources) {
         this.contentGeneratorConfigSources['enableCacheControl'] =
           sources['enableCacheControl'];
+      }
+      if ('forceGlobalCacheScope' in sources) {
+        this.contentGeneratorConfigSources['forceGlobalCacheScope'] =
+          sources['forceGlobalCacheScope'];
       }
       if ('contextWindowSize' in sources) {
         this.contentGeneratorConfigSources['contextWindowSize'] =
