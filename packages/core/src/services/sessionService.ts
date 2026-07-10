@@ -12,6 +12,10 @@ import { randomUUID } from 'node:crypto';
 import readline from 'node:readline';
 import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
+import {
+  buildOrderedUuidChain,
+  type HistoryGap,
+} from '../utils/conversation-chain.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
@@ -35,6 +39,12 @@ import {
   readLastJsonStringFieldsSync,
 } from '../utils/sessionStorageUtils.js';
 import { getUsageOutputTokenCountForPromptEstimate } from './tokenEstimation.js';
+import {
+  isSessionArtifactRecord,
+  rebuildSessionArtifactSnapshot,
+  remapSessionArtifactPayloadForFork,
+  type RebuiltSessionArtifactSnapshot,
+} from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
 
 const debugLogger = createDebugLogger('SESSION');
@@ -179,6 +189,15 @@ export interface ResumedSessionData {
   lastCompletedUuid: string | null;
   /** Deserialized file history snapshots for resume (enables /rewind across sessions) */
   fileHistorySnapshots?: FileHistorySnapshot[];
+  /** Persisted session artifact metadata reconstructed from JSONL records. */
+  artifactSnapshot?: RebuiltSessionArtifactSnapshot;
+  /**
+   * Breaks in the persisted parentUuid chain that were detected during
+   * reconstruction (an earlier segment of history was physically lost and could
+   * not be recovered). Lets the surface render a visible gap divider. Undefined
+   * when the chain was intact.
+   */
+  historyGaps?: HistoryGap[];
 }
 
 /**
@@ -931,12 +950,19 @@ export class SessionService {
 
   /**
    * Reconstructs a linear conversation from tree-structured records.
+   *
+   * Delegates the parentUuid walk to {@link buildOrderedUuidChain}. With
+   * `detectGaps`, a walk that stops on a physically-missing parent records the
+   * break in the returned `gaps` (see {@link HistoryGap}) so the surface can
+   * mark it — the earlier records are NOT reconstructed (reconnecting them
+   * could resurrect turns the user rewound away). Without `detectGaps` the
+   * result is identical to the historical walk.
    */
   private reconstructHistory(
     records: ChatRecord[],
-    leafUuid?: string,
-  ): ChatRecord[] {
-    if (records.length === 0) return [];
+    opts?: { leafUuid?: string; detectGaps?: boolean },
+  ): { messages: ChatRecord[]; gaps: HistoryGap[] } {
+    if (records.length === 0) return { messages: [], gaps: [] };
 
     const recordsByUuid = new Map<string, ChatRecord[]>();
     for (const record of records) {
@@ -945,29 +971,27 @@ export class SessionService {
       recordsByUuid.set(record.uuid, existing);
     }
 
-    let currentUuid: string | null =
-      leafUuid ?? records[records.length - 1].uuid;
-    const uuidChain: string[] = [];
-    const visited = new Set<string>();
+    const { uuids, gaps } = buildOrderedUuidChain(records, opts);
 
-    while (currentUuid && !visited.has(currentUuid)) {
-      visited.add(currentUuid);
-      uuidChain.push(currentUuid);
-      const recordsForUuid = recordsByUuid.get(currentUuid);
-      if (!recordsForUuid || recordsForUuid.length === 0) break;
-      currentUuid = recordsForUuid[0].parentUuid;
-    }
-
-    uuidChain.reverse();
     const messages: ChatRecord[] = [];
-    for (const uuid of uuidChain) {
+    for (const uuid of uuids) {
       const recordsForUuid = recordsByUuid.get(uuid);
       if (recordsForUuid && recordsForUuid.length > 0) {
         messages.push(this.aggregateRecords(recordsForUuid));
       }
     }
 
-    return messages;
+    return { messages, gaps };
+  }
+
+  private lastConversationRecordUuid(records: ChatRecord[]): string | null {
+    for (let index = records.length - 1; index >= 0; index--) {
+      const record = records[index];
+      if (record && !isSessionArtifactRecord(record)) {
+        return record.uuid;
+      }
+    }
+    return null;
   }
 
   /**
@@ -1001,9 +1025,30 @@ export class SessionService {
     }
 
     // Reconstruct linear history
-    const messages = this.reconstructHistory(records);
+    const leafUuid = this.lastConversationRecordUuid(records);
+    if (!leafUuid) {
+      return;
+    }
+
+    const { messages, gaps } = this.reconstructHistory(records, {
+      leafUuid,
+      detectGaps: true,
+    });
     if (messages.length === 0) {
       return;
+    }
+
+    if (gaps.length > 0) {
+      debugLogger.warn(
+        `loadSession: detected ${gaps.length} unrecoverable history gap(s) ` +
+          `for session ${sessionId}: ` +
+          gaps
+            .map(
+              (g) =>
+                `child=${g.childUuid} missingParent=${g.missingParentUuid}`,
+            )
+            .join('; '),
+      );
     }
 
     const lastMessage = messages[messages.length - 1];
@@ -1052,6 +1097,14 @@ export class SessionService {
       fileHistorySnapshots.length > MAX_SNAPSHOTS
         ? fileHistorySnapshots.slice(-MAX_SNAPSHOTS)
         : fileHistorySnapshots;
+    const activeBranchRecords = includeActiveSideArtifactRecords(
+      records,
+      messages,
+    );
+    const artifactSnapshot = rebuildSessionArtifactSnapshot(
+      activeBranchRecords,
+      firstRecord.sessionId,
+    );
 
     return {
       conversation,
@@ -1059,6 +1112,8 @@ export class SessionService {
       lastCompletedUuid: lastMessage.uuid,
       fileHistorySnapshots:
         cappedSnapshots.length > 0 ? cappedSnapshots : undefined,
+      ...(artifactSnapshot ? { artifactSnapshot } : {}),
+      historyGaps: gaps.length > 0 ? gaps : undefined,
     };
   }
 
@@ -1411,7 +1466,17 @@ export class SessionService {
 
     // Copy only the active branch. Rewind leaves old records in the JSONL as
     // abandoned parentUuid branches; copying raw records would resurrect them.
-    const sourceRecords = this.reconstructHistory(records);
+    const leafUuid = this.lastConversationRecordUuid(records);
+    if (!leafUuid) {
+      throw new Error(`Source session not found or empty: ${sourceSessionId}`);
+    }
+    const { messages: activeMessages } = this.reconstructHistory(records, {
+      leafUuid,
+    });
+    const sourceRecords = includeActiveSideArtifactRecords(
+      records,
+      activeMessages,
+    );
     if (sourceRecords.length === 0) {
       throw new Error(`Source session not found or empty: ${sourceSessionId}`);
     }
@@ -1420,27 +1485,29 @@ export class SessionService {
     // clean linear descendant. `forkedFrom` captures the origin of each
     // message.
     let prevUuid: string | null = null;
+    const remappedArtifactIds = new Map<string, string>();
     const forked: ChatRecord[] = sourceRecords.map((record) => {
-      const systemPayload =
-        record.type === 'system' && record.subtype === 'file_history_snapshot'
-          ? remapFileHistorySnapshotPayload(
-              record.systemPayload,
-              sourceSessionId,
-              newSessionId,
-            )
-          : record.systemPayload;
+      const isArtifactRecord = isSessionArtifactRecord(record);
+      const systemPayload = remapSystemPayloadForFork(
+        record,
+        sourceSessionId,
+        newSessionId,
+        remappedArtifactIds,
+      );
       const next: ChatRecord = {
         ...record,
         sessionId: newSessionId,
         cwd: this.projectRoot,
         systemPayload,
-        parentUuid: prevUuid,
+        parentUuid: isArtifactRecord ? record.parentUuid : prevUuid,
         forkedFrom: {
           sessionId: sourceSessionId,
           messageUuid: record.uuid,
         },
       };
-      prevUuid = record.uuid;
+      if (!isArtifactRecord) {
+        prevUuid = record.uuid;
+      }
       return next;
     });
 
@@ -1912,6 +1979,118 @@ function remapFileHistorySnapshotPayload(
   } catch {
     return payload;
   }
+}
+
+function remapSystemPayloadForFork(
+  record: ChatRecord,
+  sourceSessionId: string,
+  newSessionId: string,
+  remappedArtifactIds: Map<string, string>,
+): ChatRecord['systemPayload'] {
+  if (record.type !== 'system') return record.systemPayload;
+  if (record.subtype === 'file_history_snapshot') {
+    return remapFileHistorySnapshotPayload(
+      record.systemPayload,
+      sourceSessionId,
+      newSessionId,
+    );
+  }
+  if (
+    record.subtype === 'session_artifact_event' ||
+    record.subtype === 'session_artifact_snapshot'
+  ) {
+    return remapSessionArtifactPayloadForFork(
+      record.systemPayload,
+      sourceSessionId,
+      newSessionId,
+      remappedArtifactIds,
+    ) as ChatRecord['systemPayload'];
+  }
+  return record.systemPayload;
+}
+
+function includeActiveSideArtifactRecords(
+  records: ChatRecord[],
+  activeRecords: ChatRecord[],
+): ChatRecord[] {
+  const activeByUuid = new Map(
+    activeRecords.map((record) => [record.uuid, record]),
+  );
+  const activeUuids = new Set(activeByUuid.keys());
+  const firstActiveUuid = activeRecords[0]?.uuid;
+  const firstActiveIndex =
+    firstActiveUuid === undefined
+      ? -1
+      : records.findIndex((record) => record.uuid === firstActiveUuid);
+  const nextActiveUuidByIndex = new Map<number, string>();
+  const nextBlockingUuidByIndex = new Map<number, string>();
+  let nextActiveUuid: string | undefined;
+  let nextBlockingUuid: string | undefined;
+  for (let index = records.length - 1; index >= 0; index--) {
+    if (nextActiveUuid !== undefined) {
+      nextActiveUuidByIndex.set(index, nextActiveUuid);
+    }
+    if (nextBlockingUuid !== undefined) {
+      nextBlockingUuidByIndex.set(index, nextBlockingUuid);
+    }
+    if (activeUuids.has(records[index]!.uuid)) {
+      nextActiveUuid = records[index]!.uuid;
+      nextBlockingUuid = undefined;
+    } else if (
+      !isSessionArtifactRecord(records[index]!) &&
+      !isTailNeutralSideRecord(records[index]!)
+    ) {
+      nextBlockingUuid = records[index]!.uuid;
+    }
+  }
+  const selected: ChatRecord[] = [];
+  const includedSideArtifactUuids = new Set<string>();
+  let previousActiveUuid: string | undefined;
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index]!;
+    const activeRecord = activeByUuid.get(record.uuid);
+    if (activeRecord) {
+      selected.push(activeRecord);
+      activeByUuid.delete(record.uuid);
+      previousActiveUuid = record.uuid;
+      continue;
+    }
+    if (!isSessionArtifactRecord(record)) {
+      continue;
+    }
+    const nextUuid = nextActiveUuidByIndex.get(index);
+    const hasBlockingRecordBeforeNextActive =
+      nextBlockingUuidByIndex.has(index);
+    const isInActiveSegment =
+      !hasBlockingRecordBeforeNextActive &&
+      (nextUuid !== undefined
+        ? activeUuids.has(nextUuid)
+        : previousActiveUuid !== undefined &&
+          activeUuids.has(previousActiveUuid));
+    if (
+      record.parentUuid !== null &&
+      (activeUuids.has(record.parentUuid) ||
+        includedSideArtifactUuids.has(record.parentUuid)) &&
+      isInActiveSegment &&
+      (record.parentUuid === previousActiveUuid ||
+        includedSideArtifactUuids.has(record.parentUuid))
+    ) {
+      selected.push(record);
+      includedSideArtifactUuids.add(record.uuid);
+    } else if (
+      record.parentUuid === null &&
+      index < firstActiveIndex &&
+      isInActiveSegment
+    ) {
+      selected.push(record);
+      includedSideArtifactUuids.add(record.uuid);
+    }
+  }
+  return selected;
+}
+
+function isTailNeutralSideRecord(record: ChatRecord): boolean {
+  return record.type === 'system' && record.subtype === 'custom_title';
 }
 
 function collectFileHistorySnapshotPromptIds(

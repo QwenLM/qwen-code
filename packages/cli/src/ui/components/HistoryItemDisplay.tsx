@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useMemo, useRef, useCallback } from 'react';
+import { memo, useMemo, useRef, useCallback } from 'react';
 import type { DOMElement } from 'ink';
 import {
   escapeAnsiCtrlCodes,
@@ -61,7 +61,6 @@ import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
-import { useThinkingViewer } from '../contexts/ThinkingViewerContext.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import { measureElementPosition } from '../utils/measure-element-position.js';
@@ -80,8 +79,19 @@ interface HistoryItemDisplayProps {
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
   /** Force thinking blocks expanded (e.g. in SessionPreview). */
   thoughtExpanded?: boolean;
-  /** Aggregated text from this thought + its continuation items. */
-  thinkingFullText?: string;
+  /**
+   * Transcript full-detail mode (Ctrl+O). When true, collapse is lifted:
+   * thinking blocks render expanded and tool groups force `forceExpandAll`
+   * + `forceShowResult` (every tool with its full, untruncated result).
+   * Default false (main view stays at the #5661 partition baseline).
+   */
+  fullDetail?: boolean;
+  /**
+   * Head id of the thought group this item belongs to (the `gemini_thought`
+   * head id for both the head and its `gemini_thought_content` continuations).
+   * Used to expand/collapse the whole group as a unit on click.
+   */
+  thoughtHeadId?: number;
 }
 
 /**
@@ -91,32 +101,31 @@ interface HistoryItemDisplayProps {
  */
 const ClickableThinkMessage: React.FC<{
   text: string;
-  viewerText: string;
   isPending: boolean;
   expanded: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
   durationMs?: number;
+  onToggle: () => void;
 }> = ({
   text,
-  viewerText,
   isPending,
   expanded,
   availableTerminalHeight,
   contentWidth,
   durationMs,
+  onToggle,
 }) => {
   const ref = useRef<DOMElement>(null);
-  const { openThinkingViewer } = useThinkingViewer();
-  // Click-to-expand needs SGR mouse tracking. We do NOT pass `bypassVpGate`, so
-  // useMouseEvents enables it only in VP mode; in non-VP the click handler
-  // stays dormant and native terminal scrollback is preserved (the block still
-  // expands via Alt+T — the "option+t to expand" affordance it already shows).
-  const isActive = !isPending && !expanded;
-  const sanitizedViewerText = useMemo(
-    () => escapeAnsiCtrlCodes(viewerText),
-    [viewerText],
-  );
+  // Click toggles the thought's inline expansion in place (it then scrolls
+  // with the conversation). Click needs SGR mouse tracking; useMouseEvents
+  // enables it only in VP mode (no `bypassVpGate`), so in non-VP the handler
+  // stays dormant and native scrollback is preserved — the block still toggles
+  // via Alt+T. Advertise "click" in the collapsed hint only in VP, where the
+  // click actually does something.
+  const settings = useSettings();
+  const clickable = !!settings.merged.ui?.useTerminalBuffer;
+  const isActive = !isPending;
 
   useMouseEvents(
     useCallback(
@@ -131,10 +140,10 @@ const ClickableThinkMessage: React.FC<{
           row >= metrics.y &&
           row < metrics.y + metrics.height
         ) {
-          openThinkingViewer({ text: sanitizedViewerText, durationMs });
+          onToggle();
         }
       },
-      [openThinkingViewer, sanitizedViewerText, durationMs],
+      [onToggle],
     ),
     { isActive },
   );
@@ -148,6 +157,7 @@ const ClickableThinkMessage: React.FC<{
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}
         durationMs={durationMs}
+        clickable={clickable}
       />
     </Box>
   );
@@ -199,12 +209,27 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   availableTerminalHeightGemini,
   sourceCopyIndexOffsets,
   thoughtExpanded,
-  thinkingFullText,
+  fullDetail = false,
+  thoughtHeadId,
 }) => {
   const marginTop = getHistoryItemMarginTop(item);
 
-  const contextThoughtExpanded = useThoughtExpanded();
-  const resolvedThoughtExpanded = thoughtExpanded ?? contextThoughtExpanded;
+  const {
+    allExpanded,
+    expandedHeadIds,
+    toggle: toggleThought,
+  } = useThoughtExpanded();
+  // A thought spans the `gemini_thought` head plus its trailing
+  // `gemini_thought_content` items; all of them key off the head id so one
+  // click expands the whole group. Continuations receive the head id via
+  // `thoughtHeadId`; the head itself falls back to its own id.
+  const thoughtGroupHeadId = thoughtHeadId ?? item.id;
+  // Ctrl+O full-detail forces every thought open; otherwise honor an explicit
+  // `thoughtExpanded` prop, then the global Alt+T toggle / per-group click set.
+  const resolvedThoughtExpanded =
+    fullDetail ||
+    (thoughtExpanded ??
+      (allExpanded || expandedHeadIds.has(thoughtGroupHeadId)));
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
 
@@ -269,7 +294,6 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'gemini_thought' && (
         <ClickableThinkMessage
           text={itemForDisplay.text.trimEnd()}
-          viewerText={(thinkingFullText || itemForDisplay.text).trimEnd()}
           isPending={isPending}
           expanded={resolvedThoughtExpanded}
           availableTerminalHeight={
@@ -277,6 +301,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           }
           contentWidth={contentWidth}
           durationMs={itemForDisplay.durationMs}
+          onToggle={() => toggleThought(thoughtGroupHeadId)}
         />
       )}
       {itemForDisplay.type === 'gemini_thought_content' && (
@@ -352,6 +377,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           memoryWriteCount={itemForDisplay.memoryWriteCount}
           memoryReadCount={itemForDisplay.memoryReadCount}
           isUserInitiated={itemForDisplay.isUserInitiated}
+          fullDetail={fullDetail}
         />
       )}
       {itemForDisplay.type === 'tool_use_summary' && (
@@ -461,5 +487,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   );
 };
 
-// Export alias for backward compatibility
-export { HistoryItemDisplayComponent as HistoryItemDisplay };
+// Memoized so the Ctrl+O transcript — which re-renders on every scroll tick —
+// skips re-rendering frozen-snapshot items whose props are shallowly unchanged.
+// The transcript hands stable `item` references (from the freeze snapshot), so
+// the default shallow compare is effective. Harmless for the main view, whose
+// items live in Ink's `<Static>` and render once anyway.
+const HistoryItemDisplay = memo(HistoryItemDisplayComponent);
+HistoryItemDisplay.displayName = 'HistoryItemDisplay';
+
+export { HistoryItemDisplay };

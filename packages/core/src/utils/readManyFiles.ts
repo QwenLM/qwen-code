@@ -8,7 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { getErrorMessage } from './errors.js';
+import { getErrorMessage, isAbortError } from './errors.js';
 import type { ProcessedFileReadResult } from './fileUtils.js';
 import {
   isCacheableReadResult,
@@ -104,7 +104,11 @@ export async function readManyFiles(
   config: Config,
   options: ReadManyFilesOptions,
 ): Promise<ReadManyFilesResult> {
-  const { paths: inputPatterns, preserveUnsupportedImageForBridge } = options;
+  const {
+    paths: inputPatterns,
+    preserveUnsupportedImageForBridge,
+    signal,
+  } = options;
 
   const seenFiles = new Set<string>();
   const contentParts: Part[] = [];
@@ -114,6 +118,7 @@ export async function readManyFiles(
     const projectRoot = config.getProjectRoot();
 
     for (const rawPattern of inputPatterns) {
+      signal?.throwIfAborted();
       const normalizedPattern = rawPattern.replace(/\\/g, '/');
       const fullPath = path.resolve(projectRoot, normalizedPattern);
       const stats = fs.existsSync(fullPath) ? fs.statSync(fullPath) : null;
@@ -122,6 +127,7 @@ export async function readManyFiles(
         const { contentParts: dirParts, info } = await readDirectory(
           config,
           fullPath,
+          signal,
         );
         contentParts.push(...dirParts);
         files.push(info);
@@ -134,6 +140,7 @@ export async function readManyFiles(
           config,
           fullPath,
           preserveUnsupportedImageForBridge,
+          signal,
         );
         if (readResult) {
           contentParts.push(...readResult.contentParts);
@@ -142,6 +149,9 @@ export async function readManyFiles(
       }
     }
   } catch (error) {
+    if (signal?.aborted || isAbortError(error)) {
+      throw error;
+    }
     const errorMessage = `Error during file search: ${getErrorMessage(error)}`;
     return {
       contentParts: [errorMessage],
@@ -165,11 +175,14 @@ export async function readManyFiles(
 async function readDirectory(
   config: Config,
   directoryPath: string,
+  signal?: AbortSignal,
 ): Promise<{ contentParts: Part[]; info: FileReadInfo }> {
+  signal?.throwIfAborted();
   const structure = await getFolderStructure(directoryPath, {
     fileService: config.getFileService(),
     fileFilteringOptions: config.getFileFilteringOptions(),
   });
+  signal?.throwIfAborted();
 
   const contentParts: Part[] = [
     { text: `\nContent from ${directoryPath}:\n` },
@@ -190,10 +203,12 @@ async function readFileContent(
   config: Config,
   filePath: string,
   preserveUnsupportedImage = false,
+  signal?: AbortSignal,
 ): Promise<{ contentParts: Part[]; info: FileReadInfo } | null> {
   try {
     const fileReadResult = await processSingleFileContent(filePath, config, {
       preserveUnsupportedImage,
+      ...(signal !== undefined ? { signal } : {}),
       largePdfBehavior: 'reference',
     });
 
@@ -233,7 +248,11 @@ async function readFileContent(
       ) {
         const [start, end] = fileReadResult.linesShown!;
         const total = fileReadResult.originalLineCount!;
-        fileContentForLlm = `Showing lines ${start}-${end} of ${total} total lines.\n---\n${fileReadResult.llmContent}`;
+        const totalLabel =
+          fileReadResult.originalLineCountExact === false
+            ? `at least ${total}`
+            : total;
+        fileContentForLlm = `Showing lines ${start}-${end} of ${totalLabel} total lines.\n---\n${fileReadResult.llmContent}`;
       } else {
         fileContentForLlm = fileReadResult.llmContent;
       }
@@ -248,8 +267,13 @@ async function readFileContent(
       };
     }
 
-    // For binary files (images, PDFs), add prefix text before the inlineData/fileData part
-    const contentParts: Part[] = [prefixText, fileReadResult.llmContent];
+    // For binary files (images, PDFs), add prefix text before the media
+    // part(s). A page-rendered PDF yields an array of image parts (plus an
+    // optional truncation note), so flatten it after the prefix.
+    const mediaParts = fileReadResult.llmContent;
+    const contentParts: Part[] = Array.isArray(mediaParts)
+      ? [prefixText, ...(mediaParts as Part[])]
+      : [prefixText, mediaParts];
     return {
       contentParts,
       info: {
@@ -258,7 +282,10 @@ async function readFileContent(
         isDirectory: false,
       },
     };
-  } catch {
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) {
+      throw error;
+    }
     return null;
   }
 }

@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import {
@@ -39,6 +40,7 @@ export interface AcpBridgeOptions {
 }
 
 export const ACP_EVENT_LOOP_STALL_RESTART_MS = 5 * 60 * 1000;
+export const ACP_PERMISSION_RESPONSE_TIMEOUT_MS = 5 * 60 * 1000;
 const ACP_EVENT_LOOP_STALL_RE =
   /^\[perf\] acp agent event loop stall: max=(\d+(?:\.\d+)?)ms/m;
 
@@ -77,6 +79,14 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
   private channelLoopMcpRegistered = false;
   private channelLoopMcpRegistration: Promise<void> | null = null;
+  private readonly pendingPermissions = new Map<
+    string,
+    {
+      sessionId: string;
+      resolve: (response: RequestPermissionResponse) => void;
+      timeout: ReturnType<typeof setTimeout>;
+    }
+  >();
 
   constructor(options: AcpBridgeOptions) {
     super();
@@ -109,7 +119,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.child.stderr?.on('data', (data: Buffer) => {
       const msg = data.toString().trim();
       if (msg) {
-        process.stderr.write(`[AcpBridge] ${msg}\n`);
+        process.stderr.write(`[AcpBridge] ${sanitizeLogText(msg, 4096)}\n`);
         this.maybeKillOnEventLoopStall(msg);
       }
     });
@@ -120,6 +130,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       );
       // Do not emit sessionDied here: a full ACP process exit is handled by
       // channel start crash recovery, which reloads the persisted sessions.
+      this.resolvePendingPermissions();
       this.connection = null;
       this.child = null;
       this.emit('disconnected', code, signal);
@@ -147,15 +158,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
 
         requestPermission: async (
           params: RequestPermissionRequest,
-        ): Promise<RequestPermissionResponse> => {
-          // Auto-approve for now; Phase 5 will add interactive approval
-          const options = Array.isArray(params.options) ? params.options : [];
-          const optionId =
-            options.find((o) => o.optionId === 'proceed_once')?.optionId ||
-            options[0]?.optionId ||
-            'proceed_once';
-          return { outcome: { outcome: 'selected', optionId } };
-        },
+        ): Promise<RequestPermissionResponse> => this.requestPermission(params),
 
         extMethod: async (
           method: string,
@@ -245,10 +248,33 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
 
   async cancelSession(sessionId: string): Promise<void> {
     const conn = this.ensureConnection();
-    await conn.cancel({ sessionId });
+    try {
+      await conn.cancel({ sessionId });
+    } finally {
+      this.resolvePendingPermissions(sessionId);
+    }
+  }
+
+  async respondToPermission(
+    requestId: string,
+    response: RequestPermissionResponse,
+  ): Promise<boolean> {
+    const pending = this.pendingPermissions.get(requestId);
+    if (!pending) {
+      return false;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingPermissions.delete(requestId);
+    pending.resolve(response);
+    this.emit('permissionResolved', {
+      requestId,
+      outcome: response.outcome,
+    });
+    return true;
   }
 
   stop(): void {
+    this.resolvePendingPermissions();
     if (this.child) {
       this.child.kill();
       this.child = null;
@@ -317,6 +343,62 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       throw new Error('Not connected to ACP agent');
     }
     return this.connection;
+  }
+
+  private requestPermission(
+    request: RequestPermissionRequest,
+  ): Promise<RequestPermissionResponse> {
+    const requestId = `acp-permission-${randomUUID()}`;
+    const sessionId =
+      typeof request.sessionId === 'string' && request.sessionId.length > 0
+        ? request.sessionId
+        : request.toolCall.toolCallId;
+
+    return new Promise<RequestPermissionResponse>((resolve) => {
+      const timeout = setTimeout(() => {
+        const pending = this.pendingPermissions.get(requestId);
+        if (!pending) {
+          return;
+        }
+        process.stderr.write(
+          `[AcpBridge] permission request ${sanitizeLogText(requestId, 128)} timed out after ${ACP_PERMISSION_RESPONSE_TIMEOUT_MS}ms (session=${sanitizeLogText(pending.sessionId, 128)})\n`,
+        );
+        this.pendingPermissions.delete(requestId);
+        const response: RequestPermissionResponse = {
+          outcome: { outcome: 'cancelled' },
+        };
+        pending.resolve(response);
+        this.emit('permissionResolved', {
+          requestId,
+          outcome: response.outcome,
+        });
+      }, ACP_PERMISSION_RESPONSE_TIMEOUT_MS);
+      timeout.unref?.();
+      this.pendingPermissions.set(requestId, { sessionId, resolve, timeout });
+      this.emit('permissionRequest', {
+        requestId,
+        sessionId,
+        request,
+      });
+    });
+  }
+
+  private resolvePendingPermissions(sessionId?: string): void {
+    const response: RequestPermissionResponse = {
+      outcome: { outcome: 'cancelled' },
+    };
+    for (const [requestId, pending] of this.pendingPermissions) {
+      if (sessionId !== undefined && pending.sessionId !== sessionId) {
+        continue;
+      }
+      clearTimeout(pending.timeout);
+      this.pendingPermissions.delete(requestId);
+      pending.resolve(response);
+      this.emit('permissionResolved', {
+        requestId,
+        outcome: response.outcome,
+      });
+    }
   }
 
   private maybeKillOnEventLoopStall(stderr: string): void {

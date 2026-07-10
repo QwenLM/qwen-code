@@ -44,6 +44,28 @@ describe('shellPagerEnv', () => {
     });
   });
 
+  it('omits GIT_PAGER when git pager output is not requested', () => {
+    expect(
+      getShellPagerEnv('less', {
+        includeGitPager: false,
+        platform: 'linux',
+      }),
+    ).toEqual({
+      PAGER: 'less',
+    });
+  });
+
+  it('uses the default pager without GIT_PAGER when git pager output is not requested', () => {
+    expect(
+      getShellPagerEnv(undefined, {
+        includeGitPager: false,
+        platform: 'linux',
+      }),
+    ).toEqual({
+      PAGER: 'cat',
+    });
+  });
+
   it('treats an empty pager as an explicit request to disable pager env values', () => {
     expect(
       getShellPagerEnv('', { includeGitPager: true, platform: 'linux' }),

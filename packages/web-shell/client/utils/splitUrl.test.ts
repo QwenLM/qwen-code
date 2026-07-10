@@ -25,17 +25,21 @@ describe('buildSplitUrl', () => {
   });
 
   it('resets the path so no single-session deep-link competes', () => {
-    expect(new URL(buildSplitUrl(['a'], 'https://host/session/x')).pathname).toBe(
-      '/',
-    );
+    expect(
+      new URL(buildSplitUrl(['a'], 'https://host/session/x')).pathname,
+    ).toBe('/');
   });
 
   it('carries the daemon token in the fragment when provided', () => {
-    const url = new URL(buildSplitUrl(['a', 'b'], 'https://host/', 'secret-tok'));
+    const url = new URL(
+      buildSplitUrl(['a', 'b'], 'https://host/', 'secret-tok'),
+    );
     expect(url.searchParams.get('split')).toBe('a,b');
     // In the hash, not the query — never sent to the server / logs.
     expect(url.search).not.toContain('secret-tok');
-    expect(new URLSearchParams(url.hash.slice(1)).get('token')).toBe('secret-tok');
+    expect(new URLSearchParams(url.hash.slice(1)).get('token')).toBe(
+      'secret-tok',
+    );
   });
 
   it('adds no fragment when no token is given', () => {

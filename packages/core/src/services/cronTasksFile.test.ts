@@ -170,6 +170,31 @@ describe('cronTasksFile', () => {
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
     });
 
+    it('round-trips the optional runMode field', async () => {
+      const isolated = makeTask({ id: 'iso', runMode: 'isolated' });
+      const shared = makeTask({ id: 'sh', runMode: 'shared' });
+      await writeCronTasks(tmpDir, [isolated, shared]);
+      const result = await readCronTasks(tmpDir);
+      expect(result).toEqual([isolated, shared]);
+    });
+
+    it('accepts legacy tasks with no runMode field', async () => {
+      const legacy = makeTask();
+      await seedTasksFile(tmpDir, JSON.stringify([legacy]));
+      const result = await readCronTasks(tmpDir);
+      expect(result[0]!.runMode).toBeUndefined();
+    });
+
+    it('rejects a task whose runMode is an unknown string', async () => {
+      // A typo must route through fix-or-delete rather than being silently
+      // treated as 'shared' — otherwise per-run isolation would quietly turn off.
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), runMode: 'per-run' }]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
     it('round-trips the optional runs history', async () => {
       const task = makeTask({
         lastFiredAt: 1718000300000,

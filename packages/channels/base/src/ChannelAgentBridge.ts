@@ -1,3 +1,8 @@
+import type {
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+} from '@agentclientprotocol/sdk';
+
 export interface AvailableCommand {
   name: string;
   description: string;
@@ -47,10 +52,23 @@ export interface SessionDiedEvent {
   reason?: string;
 }
 
+export interface PermissionRequestEvent {
+  requestId: string;
+  sessionId: string;
+  request: RequestPermissionRequest;
+}
+
+export interface PermissionResolvedEvent {
+  requestId: string;
+  outcome?: RequestPermissionResponse['outcome'];
+}
+
 interface ChannelAgentBridgeEventMap {
   sessionDied: [SessionDiedEvent];
   textChunk: [sessionId: string, chunk: string];
   toolCall: [ToolCallEvent];
+  permissionRequest: [PermissionRequestEvent];
+  permissionResolved: [PermissionResolvedEvent];
 }
 
 export interface BridgeSessionInfo {
@@ -78,6 +96,10 @@ export interface ChannelAgentBridge {
     options?: { imageBase64?: string; imageMimeType?: string },
   ): Promise<string>;
   cancelSession(sessionId: string): Promise<void>;
+  respondToPermission?(
+    requestId: string,
+    response: RequestPermissionResponse,
+  ): Promise<boolean>;
   shellCommand?(
     sessionId: string,
     command: string,

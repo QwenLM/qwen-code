@@ -26,7 +26,12 @@ interface MockTask {
   lastFiredAt: number | null;
   nextRunAt: number | null;
   sessionId: string | null;
-  runs: Array<{ at: number; kind?: 'scheduled' | 'catch-up' }>;
+  runMode?: 'shared' | 'isolated';
+  runs: Array<{
+    at: number;
+    kind?: 'scheduled' | 'catch-up';
+    sessionId?: string;
+  }>;
 }
 
 const { actions } = vi.hoisted(() => ({
@@ -104,6 +109,23 @@ function findButton(label: string): HTMLButtonElement | undefined {
   );
 }
 
+// Run mode is a radio group; the frequency picker is the (only) <select>.
+function findRunModeRadio(
+  value: 'shared' | 'isolated',
+): HTMLInputElement | undefined {
+  return Array.from(
+    document.querySelectorAll<HTMLInputElement>(
+      'input[type="radio"][name="runMode"]',
+    ),
+  ).find((r) => r.value === value);
+}
+
+function findFrequencySelect(): HTMLSelectElement | undefined {
+  return Array.from(document.querySelectorAll('select')).find(
+    (s) => !!s.querySelector('option[value="weekdays"]'),
+  );
+}
+
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
@@ -138,7 +160,7 @@ describe('ScheduledTasksDialog editing', () => {
     // name/prompt are prefilled — not left blank as they would be for create.
     const name = document.querySelector<HTMLInputElement>('input[type="text"]');
     const prompt = document.querySelector<HTMLTextAreaElement>('textarea');
-    const frequency = document.querySelector<HTMLSelectElement>('select');
+    const frequency = findFrequencySelect();
     const time = document.querySelector<HTMLInputElement>('input[type="time"]');
     expect(name?.value).toBe('Digest');
     expect(prompt?.value).toBe('summarize the day');
@@ -154,6 +176,8 @@ describe('ScheduledTasksDialog editing', () => {
       cron: '30 12 * * 1-5',
       prompt: 'summarize the day',
       name: 'Digest',
+      // A task with no runMode prefills + saves as the default 'shared'.
+      runMode: 'shared',
     });
     expect(actions.createScheduledTask).not.toHaveBeenCalled();
   });
@@ -162,7 +186,7 @@ describe('ScheduledTasksDialog editing', () => {
     await mount([baseTask({ cron: '0 9 * * 1,3,5' })]); // day-of-week list
 
     click(document.querySelector('[aria-label="Edit"]'));
-    const frequency = document.querySelector<HTMLSelectElement>('select');
+    const frequency = findFrequencySelect();
     expect(frequency?.value).toBe('custom');
 
     click(findButton('Save'));
@@ -172,6 +196,51 @@ describe('ScheduledTasksDialog editing', () => {
       't1',
       expect.objectContaining({ cron: '0 9 * * 1,3,5' }),
     );
+  });
+});
+
+describe('ScheduledTasksDialog run mode', () => {
+  it('offers run-mode radios defaulting to shared in the create form', async () => {
+    await mount([]);
+    click(findButton('New scheduled task'));
+    // Both modes are offered as radios; shared is selected by default.
+    expect(findRunModeRadio('shared')?.checked).toBe(true);
+    expect(findRunModeRadio('isolated')?.checked).toBe(false);
+  });
+
+  it('prefills and saves runMode for an isolated task', async () => {
+    await mount([baseTask({ runMode: 'isolated', sessionId: 'anchor-1' })]);
+    click(document.querySelector('[aria-label="Edit"]'));
+
+    expect(findRunModeRadio('isolated')?.checked).toBe(true);
+    expect(findRunModeRadio('shared')?.checked).toBe(false);
+
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({ runMode: 'isolated' }),
+    );
+  });
+
+  it('opens the bound session for an isolated task, same as shared', async () => {
+    const onOpenSession = vi.fn();
+    await mount(
+      [
+        baseTask({
+          runMode: 'isolated',
+          sessionId: 'anchor-1',
+          runs: [
+            { at: 1_700_000_100_000, kind: 'scheduled', sessionId: 'anchor-1' },
+          ],
+        }),
+      ],
+      { onOpenSession },
+    );
+    // Isolated uses the SAME bound-session history button as shared — its
+    // transcript shows the model dispatching each run into a sub-session.
+    click(findButton('View conversation (1)'));
+    expect(onOpenSession).toHaveBeenCalledWith('anchor-1');
   });
 });
 
@@ -405,9 +474,9 @@ describe('ScheduledTasksDialog view-history (bound session)', () => {
       ],
       { onOpenSession },
     );
-    // A bound task shows a "View history" control (with a run count) that opens
-    // its session transcript — not the inline expand toggle.
-    const btn = findButton('View history (1)');
+    // A bound task shows a "View conversation" control (with a run count) that
+    // opens its session transcript — not the inline expand toggle.
+    const btn = findButton('View conversation (1)');
     expect(btn).toBeDefined();
     expect(document.querySelector('button[aria-expanded]')).toBeNull();
     click(btn);
@@ -420,7 +489,7 @@ describe('ScheduledTasksDialog view-history (bound session)', () => {
       onOpenSession,
     });
     // Discoverable even with zero runs — the original "can't find history" pain.
-    const btn = findButton('View history');
+    const btn = findButton('View conversation');
     expect(btn).toBeDefined();
     click(btn);
     expect(onOpenSession).toHaveBeenCalledWith('sess-42');
@@ -432,7 +501,7 @@ describe('ScheduledTasksDialog view-history (bound session)', () => {
     await mount([
       baseTask({ sessionId: 'sess-42', runs: [{ at: 1_700_000_100_000 }] }),
     ]);
-    expect(findButton('View history (1)')).toBeUndefined();
+    expect(findButton('View conversation (1)')).toBeUndefined();
     expect(document.querySelector('button[aria-expanded]')).not.toBeNull();
   });
 });

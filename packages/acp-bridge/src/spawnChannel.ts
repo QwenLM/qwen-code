@@ -104,6 +104,7 @@ export interface SpawnChannelFactoryOptions {
   onDiagnosticLine?: (line: string, level?: 'info' | 'warn' | 'error') => void;
   extraArgs?: string[];
   pipeHooks?: NdJsonStreamHooks;
+  sourceEnv?: Readonly<NodeJS.ProcessEnv>;
 }
 
 /**
@@ -119,12 +120,13 @@ export function createSpawnChannelFactory(
   options: SpawnChannelFactoryOptions = {},
 ): ChannelFactory {
   return async (workspaceCwd, childEnvOverrides) => {
-    const cliEntry = process.env['QWEN_CLI_ENTRY'] || process.argv[1];
+    const sourceEnv = options.sourceEnv ?? process.env;
+    const cliEntry = sourceEnv['QWEN_CLI_ENTRY'] || process.argv[1];
     if (!cliEntry) {
       throw new MissingCliEntryError();
     }
     const childEnv = scrubChildEnv(
-      process.env,
+      sourceEnv,
       SCRUBBED_CHILD_ENV_KEYS,
       childEnvOverrides,
     );
