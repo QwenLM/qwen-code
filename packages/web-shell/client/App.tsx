@@ -5082,17 +5082,16 @@ export function App({
                               </div>
                             ) : null;
 
-                          const contentArea = (
-                            <div style={contentStyle} className={contentClassName}>
-                              {messageList}
-                              {btwPanel}
-                            </div>
-                          );
-
                           if (showMobileWelcomeFooterMiddle) {
                             return (
                               <div className={styles.mobileWelcomeGroup}>
-                                {contentArea}
+                                <div
+                                  style={contentStyle}
+                                  className={contentClassName}
+                                >
+                                  {messageList}
+                                  {btwPanel}
+                                </div>
                                 <div
                                   className={styles.mobileWelcomeFooterMiddle}
                                 >
@@ -5101,7 +5100,15 @@ export function App({
                               </div>
                             );
                           }
-                          return contentArea;
+                          return (
+                            <div
+                              style={contentStyle}
+                              className={contentClassName}
+                            >
+                              {messageList}
+                              {btwPanel}
+                            </div>
+                          );
                         })()}
                       </TodoContextsProvider>
                     </CompactModeContext.Provider>
@@ -5262,7 +5269,35 @@ export function App({
                         />
                       </div>
                       {CustomFooter ? (
-                        <div className={styles.customFooter}>
+                        hasMobileComposerBottom ? (
+                          <div className={styles.customFooter}>
+                            <CustomFooter
+                              connected={connected}
+                              mode={currentMode}
+                              model={currentModel}
+                              streamingState={streamingState}
+                              contextUsageRatio={
+                                (connection.contextWindow ?? 0) > 0
+                                  ? (connection.tokenCount ?? 0) /
+                                    (connection.contextWindow ?? 0)
+                                  : 0
+                              }
+                              activeGoal={activeGoal}
+                              tasks={footerTasks}
+                              availableModes={MODES_CYCLE}
+                              availableModels={(connection.models ?? [])
+                                .filter(isVisibleComposerModel)
+                                .map((m) => ({
+                                  id: m.id,
+                                  label: getModelDisplayName(m.label || m.id),
+                                  contextWindow: m.contextWindow,
+                                }))}
+                              skills={loadedSkills}
+                              onSelectMode={handleSetMode}
+                              onSelectModel={handleModelSelect}
+                            />
+                          </div>
+                        ) : (
                           <CustomFooter
                             connected={connected}
                             mode={currentMode}
@@ -5288,7 +5323,7 @@ export function App({
                             onSelectMode={handleSetMode}
                             onSelectModel={handleModelSelect}
                           />
-                        </div>
+                        )
                       ) : (
                         <StatusBar
                           onSelectMode={() =>
