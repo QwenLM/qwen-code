@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useMemo, useRef, useCallback } from 'react';
+import { memo, useMemo, useRef, useCallback } from 'react';
 import type { DOMElement } from 'ink';
 import {
   escapeAnsiCtrlCodes,
@@ -79,6 +79,13 @@ interface HistoryItemDisplayProps {
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
   /** Force thinking blocks expanded (e.g. in SessionPreview). */
   thoughtExpanded?: boolean;
+  /**
+   * Transcript full-detail mode (Ctrl+O). When true, collapse is lifted:
+   * thinking blocks render expanded and tool groups force `forceExpandAll`
+   * + `forceShowResult` (every tool with its full, untruncated result).
+   * Default false (main view stays at the #5661 partition baseline).
+   */
+  fullDetail?: boolean;
   /**
    * Head id of the thought group this item belongs to (the `gemini_thought`
    * head id for both the head and its `gemini_thought_content` continuations).
@@ -202,6 +209,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   availableTerminalHeightGemini,
   sourceCopyIndexOffsets,
   thoughtExpanded,
+  fullDetail = false,
   thoughtHeadId,
 }) => {
   const marginTop = getHistoryItemMarginTop(item);
@@ -216,8 +224,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   // click expands the whole group. Continuations receive the head id via
   // `thoughtHeadId`; the head itself falls back to its own id.
   const thoughtGroupHeadId = thoughtHeadId ?? item.id;
+  // Ctrl+O full-detail forces every thought open; otherwise honor an explicit
+  // `thoughtExpanded` prop, then the global Alt+T toggle / per-group click set.
   const resolvedThoughtExpanded =
-    thoughtExpanded ?? (allExpanded || expandedHeadIds.has(thoughtGroupHeadId));
+    fullDetail ||
+    (thoughtExpanded ??
+      (allExpanded || expandedHeadIds.has(thoughtGroupHeadId)));
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
 
@@ -365,6 +377,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           memoryWriteCount={itemForDisplay.memoryWriteCount}
           memoryReadCount={itemForDisplay.memoryReadCount}
           isUserInitiated={itemForDisplay.isUserInitiated}
+          fullDetail={fullDetail}
         />
       )}
       {itemForDisplay.type === 'tool_use_summary' && (
@@ -474,5 +487,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   );
 };
 
-// Export alias for backward compatibility
-export { HistoryItemDisplayComponent as HistoryItemDisplay };
+// Memoized so the Ctrl+O transcript — which re-renders on every scroll tick —
+// skips re-rendering frozen-snapshot items whose props are shallowly unchanged.
+// The transcript hands stable `item` references (from the freeze snapshot), so
+// the default shallow compare is effective. Harmless for the main view, whose
+// items live in Ink's `<Static>` and render once anyway.
+const HistoryItemDisplay = memo(HistoryItemDisplayComponent);
+HistoryItemDisplay.displayName = 'HistoryItemDisplay';
+
+export { HistoryItemDisplay };

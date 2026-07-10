@@ -25,6 +25,109 @@ export function getResponseTextFromParts(parts: Part[]): string | undefined {
   return textSegments.join('');
 }
 
+/**
+ * Default `output` string `convertToFunctionResponse` (in `coreToolScheduler`)
+ * writes when a tool returned no text (e.g. media-only / empty results).
+ * Exported as the single source of truth so the producer (coreToolScheduler)
+ * and this consumer cannot drift: `getToolResponseDisplayText` treats it as
+ * non-informative and falls back to media placeholders / the summary
+ * `resultDisplay` instead of surfacing the literal.
+ */
+export const TOOL_SUCCEEDED_OUTPUT = 'Tool execution succeeded.';
+
+/**
+ * Sanitize a MIME type / file URI before interpolating it into a
+ * `<media: …>` placeholder: strip control characters and the angle brackets
+ * that delimit the placeholder, so a crafted tool response can't inject control
+ * codes or forge/mangle the placeholder markup. Returns undefined for
+ * non-strings or once emptied, so callers fall back to their default label.
+ */
+function sanitizeMediaLabel(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  // eslint-disable-next-line no-control-regex
+  const cleaned = value.replace(/[\x00-\x1f\x7f-\x9f<>]/g, '').trim();
+  return cleaned.length > 0 ? cleaned : undefined;
+}
+
+/**
+ * Extract the FULL tool-result text for display (Ctrl+O transcript full detail),
+ * from the persisted `functionResponse` parts.
+ *
+ * Tool results are wrapped as `{ functionResponse: { response: { output },
+ * parts?: media } }` (see `createFunctionResponsePart`). The complete content
+ * lives in `response.output`; media attachments live in the NESTED
+ * `functionResponse.parts`. `getResponseTextFromParts` only reads top-level
+ * `part.text`, so it cannot see this — hence a dedicated extractor.
+ *
+ * Rules:
+ * - concatenate every non-empty `response.output` (skipping the non-informative
+ *   "Tool execution succeeded." placeholder);
+ * - for nested media parts emit a `<media: mime>` placeholder; keep nested text;
+ * - output present → return it (+ any media placeholders);
+ * - no output but media present → return the placeholder(s);
+ * - nothing extractable → return `undefined` so the UI falls back to the
+ *   summary `resultDisplay`.
+ *
+ * Does NOT apply any character cap — the bound is whatever core already applied
+ * (truncateToolOutput / per-tool paging). Full-detail semantics, §4.9.
+ */
+export function getToolResponseDisplayText(
+  parts: Part[] | undefined,
+): string | undefined {
+  if (!parts || parts.length === 0) {
+    return undefined;
+  }
+  const segments: string[] = [];
+  for (const part of parts) {
+    const fr = part.functionResponse as
+      | {
+          response?: { output?: unknown };
+          parts?: Part[];
+        }
+      | undefined;
+    if (!fr) {
+      // Non-functionResponse part (rare inside tool results) — keep its text.
+      if (typeof part.text === 'string' && part.text.length > 0) {
+        segments.push(part.text);
+      }
+      continue;
+    }
+    const output = fr.response?.output;
+    if (
+      typeof output === 'string' &&
+      output.length > 0 &&
+      output !== TOOL_SUCCEEDED_OUTPUT
+    ) {
+      segments.push(output);
+    }
+    if (Array.isArray(fr.parts)) {
+      for (const nested of fr.parts) {
+        if (nested.inlineData) {
+          segments.push(
+            `<media: ${sanitizeMediaLabel(nested.inlineData.mimeType) ?? 'inline'}>`,
+          );
+        } else if (nested.fileData) {
+          segments.push(
+            `<media: ${
+              sanitizeMediaLabel(nested.fileData.mimeType) ??
+              sanitizeMediaLabel(nested.fileData.fileUri) ??
+              'file'
+            }>`,
+          );
+        } else if (typeof nested.text === 'string' && nested.text.length > 0) {
+          segments.push(nested.text);
+        }
+      }
+    }
+  }
+  if (segments.length === 0) {
+    return undefined;
+  }
+  return segments.join('\n');
+}
+
 export function getFunctionCalls(
   response: GenerateContentResponse,
 ): FunctionCall[] | undefined {

@@ -101,7 +101,12 @@ A **second** SIGTERM/SIGINT intentionally triggers `bridge.killAllSync()` + `pro
   "runtime": {
     "perf": {
       "eventLoop": { "meanMs": 1.2, "p50Ms": 1.0, "p99Ms": 9.5, "maxMs": 25 },
-      "promptQueueWait": { "count": 3, "meanMs": 12.5, "maxMs": 35, "lastMs": 4 },
+      "promptQueueWait": {
+        "count": 3,
+        "meanMs": 12.5,
+        "maxMs": 35,
+        "lastMs": 4
+      },
       "pipe": {
         "inbound": { "count": 42, "totalBytes": 100000, "maxBytes": 12000 },
         "outbound": { "count": 41, "totalBytes": 90000, "maxBytes": 11000 }
