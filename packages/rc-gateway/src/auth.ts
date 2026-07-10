@@ -6,7 +6,7 @@
 
 import type { RequestHandler } from 'express';
 import type { TokenStore } from './tokenStore.js';
-import { BRIDGE, type RcScope } from './scopes.js';
+import { BRIDGE, hasScope, type RcScope } from './scopes.js';
 import type { AuditRecorder } from './auditLog.js';
 import type { SubActorRateLimiter } from './bridges/subActorRateLimiter.js';
 import type { SubActorBanStore } from './bridges/subActorBans.js';
@@ -170,13 +170,17 @@ export function enforceSubActorRateLimit(
   };
 }
 
-/** Require a scope on the resolved client, or 403 (+ audit scope_denied). */
+/**
+ * Require a scope on the resolved client, or 403 (+ audit scope_denied).
+ * Uses {@link hasScope} for transitive implication: a token with `owner`
+ * passes a check for `write`, `approve`, or `session:read`.
+ */
 export function requireScope(
   scope: RcScope,
   audit?: AuditRecorder,
 ): RequestHandler {
   return (req, res, next) => {
-    if (!req.rcClient || !req.rcClient.scopes.includes(scope)) {
+    if (!req.rcClient || !hasScope(req.rcClient.scopes, scope)) {
       void audit?.record({
         action: 'scope_denied',
         actorTokenId: req.rcClient?.id,
@@ -186,7 +190,7 @@ export function requireScope(
       });
       res
         .status(403)
-        .json({ error: 'Insufficient scope', code: 'insufficient_scope' });
+        .json({ error: 'Insufficient scope', code: 'scope_required' });
       return;
     }
     next();

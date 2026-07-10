@@ -19,7 +19,7 @@ import {
   enforceSubActorRateLimit,
   enforceSubActorBan,
 } from './auth.js';
-import { SESSION_READ, APPROVE, WRITE, BRIDGE } from './scopes.js';
+import { SESSION_READ, APPROVE, WRITE, BRIDGE, OWNER } from './scopes.js';
 import { SubActorRateLimiter } from './bridges/subActorRateLimiter.js';
 import { SubActorBanStore } from './bridges/subActorBans.js';
 import type { AuditEntry, AuditRecorder } from './auditLog.js';
@@ -95,7 +95,28 @@ describe('auth middleware', () => {
     });
     expect(called).toBe(false);
     expect(res._status).toBe(403);
-    expect(res._json).toMatchObject({ code: 'insufficient_scope' });
+    expect(res._json).toMatchObject({ code: 'scope_required' });
+  });
+
+  it('requireScope passes when a higher scope implies the required scope (implication hierarchy)', () => {
+    // owner implies write, approve, and session:read
+    const req = { rcClient: { id: 'x', scopes: [OWNER] } } as Request;
+    const res = fakeRes();
+    let called = false;
+    requireScope(SESSION_READ)(req, res, () => {
+      called = true;
+    });
+    expect(called).toBe(true);
+  });
+
+  it('requireScope passes when write implies session:read', () => {
+    const req = { rcClient: { id: 'x', scopes: [WRITE] } } as Request;
+    const res = fakeRes();
+    let called = false;
+    requireScope(SESSION_READ)(req, res, () => {
+      called = true;
+    });
+    expect(called).toBe(true);
   });
 
   it('records auth_failed on a bad token', () => {

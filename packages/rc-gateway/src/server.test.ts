@@ -1179,11 +1179,14 @@ describe('gateway app', () => {
 
   it('403s GET /rc/commands for a token lacking session:read', async () => {
     const { url, pairing } = await boot();
-    const { code } = pairing.mint([WRITE]); // no session:read
+    // `share` is a pure marker scope with no functional implications — it does
+    // NOT imply session:read (unlike write/approve/owner which all do via the
+    // implication hierarchy). Use it to exercise the 403 path.
+    const { code } = pairing.mint([SHARE]);
     const redeem = await fetch(`${url}/rc/pair/redeem`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code, label: 'writer-only' }),
+      body: JSON.stringify({ code, label: 'share-marker-only' }),
     });
     const token = ((await redeem.json()) as { token: string }).token;
     const res = await fetch(`${url}/rc/commands`, {
@@ -1237,11 +1240,14 @@ describe('gateway app', () => {
 
   it('403s the push vapid route for a token lacking session:read', async () => {
     const { url, pairing } = await boot();
-    const { code } = pairing.mint([OWNER]); // owner lacks session:read
+    // `share` is a pure marker scope with no functional implications — it does
+    // NOT imply session:read (unlike owner/write/approve which all do). Use it
+    // to exercise the 403 path on the vapid route.
+    const { code } = pairing.mint([SHARE]);
     const redeem = await fetch(`${url}/rc/pair/redeem`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code, label: 'owner-only' }),
+      body: JSON.stringify({ code, label: 'share-marker-only' }),
     });
     const token = ((await redeem.json()) as { token: string }).token;
 
