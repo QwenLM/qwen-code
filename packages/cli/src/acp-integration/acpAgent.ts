@@ -55,6 +55,13 @@ import {
   InvalidMcpConfigError,
   MCPOAuthProvider,
   MCPOAuthTokenStorage,
+  InvalidSessionTranscriptCursorError,
+  SESSION_TRANSCRIPT_MAX_LIMIT,
+  SessionTranscriptReader,
+  SessionTranscriptSnapshotUnavailableError,
+  SessionTranscriptTooLargeError,
+  encodeSessionTranscriptCursor,
+  type SessionTranscriptCursorState,
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
@@ -70,30 +77,29 @@ import {
   normalizeEventPayload,
   normalizeSnapshotPayload,
   startEventLoopLagMonitor,
+  type AgentParams,
+  type ApprovalMode,
+  type ChatRecord,
+  type Config,
+  type ConfigInitializeOptions,
+  type DeviceAuthorizationData,
+  type DiscoveredMCPPrompt,
+  type DiscoveredMCPResource,
+  type HistoryGap,
+  type HookConfig,
+  type McpBudgetEvent,
+  type McpBudgetMode,
+  type McpTransportKind,
+  type ProviderConfig,
+  type ProviderModelConfig,
+  type ProviderSetupInputs,
+  type ResumedSessionData,
+  type SendSdkMcpMessage,
+  type SessionArtifactEventRecordPayload,
+  type SessionArtifactSnapshotRecordPayload,
+  type WorkspaceRememberContextMode,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
-import type {
-  AgentParams,
-  ApprovalMode,
-  Config,
-  DeviceAuthorizationData,
-  HookConfig,
-  McpBudgetEvent,
-  McpBudgetMode,
-  McpTransportKind,
-  ProviderConfig,
-  ProviderModelConfig,
-  ProviderSetupInputs,
-  ResumedSessionData,
-  SendSdkMcpMessage,
-  DiscoveredMCPResource,
-  DiscoveredMCPPrompt,
-  WorkspaceRememberContextMode,
-  SessionArtifactEventRecordPayload,
-  SessionArtifactSnapshotRecordPayload,
-  ChatRecord,
-  HistoryGap,
-} from '@qwen-code/qwen-code-core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   AgentSideConnection,
@@ -187,7 +193,10 @@ import {
 } from './extension-skills.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
-import { HistoryReplayer } from './session/HistoryReplayer.js';
+import {
+  HistoryReplayer,
+  type PendingReplayToolCall,
+} from './session/HistoryReplayer.js';
 import {
   formatAcpModelId,
   parseAcpBaseModelId,
@@ -420,6 +429,65 @@ function copyCumulativeUsage(
   target.apiTimeMs = source.apiTimeMs;
 }
 
+function isCumulativeUsage(value: unknown): value is CumulativeUsage {
+  if (!isObjectRecord(value)) return false;
+  return (
+    typeof value['promptTokens'] === 'number' &&
+    Number.isFinite(value['promptTokens']) &&
+    typeof value['cachedTokens'] === 'number' &&
+    Number.isFinite(value['cachedTokens']) &&
+    typeof value['candidateTokens'] === 'number' &&
+    Number.isFinite(value['candidateTokens']) &&
+    typeof value['apiTimeMs'] === 'number' &&
+    Number.isFinite(value['apiTimeMs'])
+  );
+}
+
+function isPendingReplayToolCall(
+  value: unknown,
+): value is PendingReplayToolCall {
+  if (!isObjectRecord(value)) return false;
+  return (
+    typeof value['callId'] === 'string' &&
+    typeof value['toolName'] === 'string' &&
+    (value['timestamp'] === undefined ||
+      typeof value['timestamp'] === 'string') &&
+    typeof value['recordId'] === 'string'
+  );
+}
+
+function parseTranscriptReplayState(replay: unknown): {
+  pendingToolCalls: PendingReplayToolCall[];
+  cumulativeUsage: CumulativeUsage;
+} {
+  if (!isObjectRecord(replay)) {
+    return {
+      pendingToolCalls: [],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    };
+  }
+  const rawPending = replay['pendingToolCalls'];
+  const pendingToolCalls = Array.isArray(rawPending)
+    ? rawPending.filter(isPendingReplayToolCall)
+    : [];
+  if (
+    Array.isArray(rawPending) &&
+    pendingToolCalls.length !== rawPending.length
+  ) {
+    // A cursor from a newer or corrupted daemon can carry pending tool calls
+    // whose shape no longer matches; drop them defensively but log it so an
+    // operator can tell this apart from a genuine "tool never completed".
+    const dropped = rawPending.length - pendingToolCalls.length;
+    debugLogger.warn(
+      `[transcript] replay state dropped ${dropped} of ${rawPending.length} malformed pending tool calls`,
+    );
+  }
+  const cumulativeUsage = isCumulativeUsage(replay['cumulativeUsage'])
+    ? { ...replay['cumulativeUsage'] }
+    : createReplayCumulativeUsage();
+  return { pendingToolCalls, cumulativeUsage };
+}
+
 async function collectHistoryReplayUpdates({
   sessionId,
   config,
@@ -457,6 +525,60 @@ async function collectHistoryReplayUpdates({
   }
 
   return { updates };
+}
+
+async function collectHistoryReplayUpdatesPage({
+  sessionId,
+  config,
+  records,
+  gaps,
+  cumulativeUsage,
+  pendingToolCalls,
+  finalizeDangling,
+}: {
+  sessionId: string;
+  config: Config;
+  records: ChatRecord[];
+  gaps?: HistoryGap[];
+  cumulativeUsage: CumulativeUsage;
+  pendingToolCalls: PendingReplayToolCall[];
+  finalizeDangling: boolean;
+}): Promise<{
+  updates: SessionUpdate[];
+  pendingToolCalls: PendingReplayToolCall[];
+  replayError?: string;
+}> {
+  const updates: SessionUpdate[] = [];
+  const replayContext: SessionContext = {
+    sessionId,
+    config,
+    sendUpdate: async (update) => {
+      updates.push(update);
+    },
+    cumulativeUsage,
+  };
+  const replayer = new HistoryReplayer(replayContext);
+
+  try {
+    const state = await replayer.replayPage(records, {
+      pendingToolCalls,
+      finalizeDangling,
+      gaps,
+    });
+    return { updates, pendingToolCalls: state.pendingToolCalls };
+  } catch (error) {
+    debugLogger.warn(
+      '[historyReplay] Paged history replay failed for session %s (partial updates: %d):',
+      sessionId,
+      updates.length,
+      error,
+    );
+    return {
+      updates,
+      pendingToolCalls: replayer.getPendingToolCalls(),
+      replayError: 'Replay conversion failed for this page',
+    };
+  }
 }
 
 function liftSessionUpdateTimestamps(
@@ -2831,8 +2953,18 @@ function parseAcpSessionListCursor(
   return parsedCursor;
 }
 
+interface TranscriptReplayConfigCacheEntry {
+  settings: LoadedSettings;
+  config?: Config;
+  pending?: Promise<Config>;
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
+  private readonly transcriptReplayConfigCache = new Map<
+    string,
+    TranscriptReplayConfigCacheEntry
+  >();
   private clientCapabilities: ClientCapabilities | undefined;
   // CPU-usage delta baseline for the daemon's `workspaceResource` extMethod
   // (Daemon Status child-resource chart). The daemon polls this at a fixed
@@ -3000,6 +3132,7 @@ class QwenAgent implements Agent {
       session.dispose();
     }
     this.sessions.clear();
+    this.disposeTranscriptReplayConfigs();
   }
 
   constructor(
@@ -5840,6 +5973,136 @@ class QwenAgent implements Agent {
           unknown
         >;
       }
+      case SERVE_STATUS_EXT_METHODS.sessionTranscript: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const rawCursor = params['cursor'];
+        if (rawCursor !== undefined && typeof rawCursor !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript cursor',
+          );
+        }
+        const rawLimit = params['limit'];
+        if (
+          rawLimit !== undefined &&
+          (!Number.isSafeInteger(rawLimit) ||
+            (rawLimit as number) < 1 ||
+            (rawLimit as number) > SESSION_TRANSCRIPT_MAX_LIMIT)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript limit',
+          );
+        }
+
+        try {
+          const settings = loadSettingsCached(cwd);
+          return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+            const reader = new SessionTranscriptReader(cwd);
+            const page = await reader.readPage(sessionId, {
+              ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
+              ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
+            });
+            const config = await this.getTranscriptReplayConfig(cwd, settings);
+            const replayState = parseTranscriptReplayState(page.replay);
+            const replay = await collectHistoryReplayUpdatesPage({
+              sessionId,
+              config,
+              records: page.records,
+              gaps: page.gaps,
+              cumulativeUsage: replayState.cumulativeUsage,
+              pendingToolCalls: replayState.pendingToolCalls,
+              finalizeDangling: !page.hasMore,
+            });
+            const updates = liftSessionUpdateTimestamps(replay.updates);
+            let nextCursor: string | undefined;
+            // On a mid-page replay error the page is partial: records after the
+            // failed record are dropped and pendingToolCalls reflect partial
+            // state. Withhold nextCursor so the client cannot paginate forward
+            // past the dropped records with a corrupted cursor — the page is
+            // already flagged partial + replayError below.
+            if (page.nextCursorState && replay.replayError === undefined) {
+              const nextCursorState: SessionTranscriptCursorState = {
+                ...page.nextCursorState,
+                replay: {
+                  pendingToolCalls: replay.pendingToolCalls,
+                  // Preserved for future replay emitters that need cumulative
+                  // usage across page boundaries; current frames expose per-record
+                  // usage metadata only.
+                  cumulativeUsage: replayState.cumulativeUsage,
+                },
+              };
+              nextCursor = encodeSessionTranscriptCursor(nextCursorState, cwd);
+            }
+            return {
+              v: 1,
+              sessionId,
+              events: updates.map((update) => ({
+                v: 1,
+                type: 'session_update',
+                data: update,
+              })),
+              ...(nextCursor !== undefined ? { nextCursor } : {}),
+              hasMore: page.hasMore,
+              startTime: page.startTime,
+              lastUpdated: page.lastUpdated,
+              ...(replay.replayError !== undefined
+                ? { partial: true, replayError: replay.replayError }
+                : {}),
+            } as Record<string, unknown>;
+          });
+        } catch (error) {
+          if (
+            error instanceof InvalidSessionTranscriptCursorError ||
+            error instanceof RangeError
+          ) {
+            throw new RequestError(
+              -32602,
+              error instanceof Error ? error.message : 'Invalid transcript',
+              {
+                errorKind:
+                  error instanceof InvalidSessionTranscriptCursorError
+                    ? 'invalid_transcript_cursor'
+                    : 'invalid_transcript_limit',
+              },
+            );
+          }
+          if (error instanceof SessionTranscriptSnapshotUnavailableError) {
+            throw new RequestError(-32010, error.message, {
+              errorKind: 'transcript_snapshot_unavailable',
+              sessionId,
+            });
+          }
+          if (error instanceof SessionTranscriptTooLargeError) {
+            throw new RequestError(-32011, error.message, {
+              errorKind: 'transcript_too_large',
+              sessionId,
+              snapshotSize: error.snapshotSize,
+              maxBytes: error.maxBytes,
+            });
+          }
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            if (typeof rawCursor === 'string') {
+              throw new RequestError(
+                -32010,
+                `Transcript snapshot is unavailable for session ${sessionId}`,
+                {
+                  errorKind: 'transcript_snapshot_unavailable',
+                  sessionId,
+                },
+              );
+            }
+            throw RequestError.resourceNotFound(`session:${sessionId}`);
+          }
+          throw error;
+        }
+      }
       case SERVE_STATUS_EXT_METHODS.sessionStats: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -8304,12 +8567,97 @@ class QwenAgent implements Agent {
       deliverClientMcpMessage(this.connection, serverName, message, sessionId);
   }
 
+  private disposeTranscriptReplayConfig(config: Config): void {
+    try {
+      void Promise.resolve(config.getToolRegistry()?.stop()).catch((err) => {
+        debugLogger.debug(
+          `Transcript replay config tool registry stop failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
+    } catch (err) {
+      debugLogger.debug(
+        `Transcript replay config tool registry stop failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  private disposeTranscriptReplayConfigs(): void {
+    for (const entry of this.transcriptReplayConfigCache.values()) {
+      if (entry.config) {
+        this.disposeTranscriptReplayConfig(entry.config);
+      }
+    }
+    this.transcriptReplayConfigCache.clear();
+  }
+
+  private async getTranscriptReplayConfig(
+    cwd: string,
+    settings: LoadedSettings,
+  ): Promise<Config> {
+    const key = path.resolve(cwd);
+    const cached = this.transcriptReplayConfigCache.get(key);
+    if (cached?.settings === settings) {
+      if (cached.config) {
+        return cached.config;
+      }
+      if (cached.pending) {
+        return cached.pending;
+      }
+    } else if (cached?.config) {
+      this.disposeTranscriptReplayConfig(cached.config);
+    }
+
+    const entry: TranscriptReplayConfigCacheEntry = { settings };
+    const pending = this.newSessionConfig(cwd, [], settings, undefined, false, {
+      skipMcpDiscovery: true,
+      skipHooks: true,
+      skipSkillManager: true,
+      skipFileCheckpointing: true,
+      // Read-only replay: tolerate tools that cannot construct without the
+      // subsystems skipped above (e.g. SkillTool needs the SkillManager). The
+      // registry is only consulted for optional tool_call metadata during
+      // replay, and ToolCallEmitter falls back to the recorded tool name.
+      lenientToolWarmup: true,
+    });
+    entry.pending = pending;
+    this.transcriptReplayConfigCache.set(key, entry);
+    try {
+      const config = await pending;
+      const current = this.transcriptReplayConfigCache.get(key);
+      if (current !== entry) {
+        this.disposeTranscriptReplayConfig(config);
+        if (current?.config) {
+          return current.config;
+        }
+        if (current?.pending) {
+          return current.pending;
+        }
+        throw new Error(
+          'Transcript replay config was invalidated while loading',
+        );
+      }
+      entry.config = config;
+      entry.pending = undefined;
+      return config;
+    } catch (error) {
+      if (this.transcriptReplayConfigCache.get(key) === entry) {
+        this.transcriptReplayConfigCache.delete(key);
+      }
+      throw error;
+    }
+  }
+
   private async newSessionConfig(
     cwd: string,
     mcpServers: McpServer[],
     settings: LoadedSettings,
     sessionId?: string,
     resume?: boolean,
+    initializeOptions: ConfigInitializeOptions = {},
   ): Promise<Config> {
     // ACP/IDE-injected servers are session-level: they must outrank a project
     // `.mcp.json` and stay un-gated. Collect them separately and pass them as
@@ -8373,9 +8721,13 @@ class QwenAgent implements Agent {
 
     const mergedSettings = settings.merged;
 
+    const sessionArg =
+      resume === true
+        ? { resume: sessionId, sessionId: undefined }
+        : { sessionId, resume: undefined };
     const argvForSession = {
       ...this.argv,
-      ...(resume ? { resume: sessionId } : { sessionId }),
+      ...sessionArg,
       continue: false,
     };
 
@@ -8404,7 +8756,10 @@ class QwenAgent implements Agent {
     // ACP sessions run with piped stdio (non-TTY), so the default
     // interactive-based gating disables file checkpointing. Enable it
     // explicitly so /rewind works across daemon session resume.
-    if (typeof config.enableFileCheckpointing === 'function') {
+    if (
+      !initializeOptions.skipFileCheckpointing &&
+      typeof config.enableFileCheckpointing === 'function'
+    ) {
       config.enableFileCheckpointing();
     }
     // Reverse tool channel (issue #5626, Phase 2). Runtime-added MCP servers
@@ -8474,6 +8829,7 @@ class QwenAgent implements Agent {
       });
     }
     await config.initialize({
+      ...initializeOptions,
       // Reverse tool channel (issue #5626, Phase 2): bind the session
       // manager's SDK MCP callback to the `client_mcp/message` ext-method so a
       // client-hosted (extension) MCP server added at runtime reaches the

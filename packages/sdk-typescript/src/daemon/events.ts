@@ -409,7 +409,7 @@ export interface DaemonHistoryTruncatedData {
   retainedEvents: number;
   maxBytes: number;
   truncatedTurns?: number;
-  fullTranscriptAvailable: false;
+  fullTranscriptAvailable: boolean;
   [key: string]: unknown;
 }
 
@@ -2621,7 +2621,7 @@ function isHistoryTruncatedData(
     !isFiniteNumber(value['truncatedEvents']) ||
     !isFiniteNumber(value['retainedEvents']) ||
     !isFiniteNumber(value['maxBytes']) ||
-    value['fullTranscriptAvailable'] !== false
+    typeof value['fullTranscriptAvailable'] !== 'boolean'
   ) {
     return false;
   }

@@ -254,6 +254,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_metadata',
   'session_organization',
   'session_export',
+  'session_transcript',
   // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
   // guardrail surface (`--mcp-client-budget`, `clientCount` /
   // `budgets[]` on `/workspace/mcp`, `disabledReason: 'budget'` on
@@ -485,6 +486,7 @@ interface FakeBridgeOpts {
   sessionStatsImpl?: (sessionId: string) => Promise<ServeSessionStatsStatus>;
   sessionTasksImpl?: (sessionId: string) => Promise<ServeSessionTasksStatus>;
   sessionLspImpl?: (sessionId: string) => Promise<ServeSessionLspStatus>;
+  sessionTranscriptImpl?: AcpSessionBridge['getSessionTranscriptPage'];
   cancelSessionTaskImpl?: (
     sessionId: string,
     taskId: string,
@@ -720,6 +722,9 @@ interface FakeBridge extends AcpSessionBridge {
   sessionStatsCalls: string[];
   sessionTasksCalls: string[];
   sessionLspCalls: string[];
+  sessionTranscriptCalls: Array<
+    Parameters<AcpSessionBridge['getSessionTranscriptPage']>[0]
+  >;
   cancelSessionTaskCalls: Array<{
     sessionId: string;
     taskId: string;
@@ -853,6 +858,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionStatsCalls: string[] = [];
   const sessionTasksCalls: string[] = [];
   const sessionLspCalls: string[] = [];
+  const sessionTranscriptCalls: FakeBridge['sessionTranscriptCalls'] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
   const clearSessionGoalCalls: string[] = [];
   const continueSessionCalls: string[] = [];
@@ -1169,6 +1175,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       notStartedServers: 0,
       servers: [],
     }));
+  const sessionTranscriptImpl =
+    opts.sessionTranscriptImpl ??
+    (async (req) => ({
+      v: 1 as const,
+      sessionId: req.sessionId,
+      events: [],
+      hasMore: false,
+    }));
   const cancelSessionTaskImpl =
     opts.cancelSessionTaskImpl ?? (async () => ({ cancelled: true }));
   const clearSessionGoalImpl =
@@ -1348,6 +1362,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionStatsCalls,
     sessionTasksCalls,
     sessionLspCalls,
+    sessionTranscriptCalls,
     cancelSessionTaskCalls,
     clearSessionGoalCalls,
     continueSessionCalls,
@@ -1585,6 +1600,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionLspStatus(sessionId) {
       sessionLspCalls.push(sessionId);
       return sessionLspImpl(sessionId);
+    },
+    async getSessionTranscriptPage(req) {
+      sessionTranscriptCalls.push(req);
+      return sessionTranscriptImpl(req);
     },
     async cancelSessionTask(sessionId, taskId, taskKind) {
       cancelSessionTaskCalls.push({ sessionId, taskId, taskKind });
@@ -11654,6 +11673,551 @@ describe('createServeApp', () => {
         code: 'session_archived',
         sessionId: sid,
       });
+    });
+  });
+
+  describe('GET /session/:id/transcript', () => {
+    let previousRuntimeDir: string | undefined;
+    let runtimeDir: string;
+    let wsDir: string;
+
+    beforeEach(async () => {
+      previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-serve-session-transcript-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+      wsDir = realpathSync(runtimeDir);
+    });
+
+    afterEach(async () => {
+      if (previousRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+      }
+      await fsp.rm(runtimeDir, { recursive: true, force: true });
+    });
+
+    async function writeTranscriptSession(
+      sessionId: string,
+      state: 'active' | 'archived' = 'active',
+      workspaceCwd = wsDir,
+    ): Promise<void> {
+      const chatsDir = path.join(
+        new Storage(workspaceCwd).getProjectDir(),
+        'chats',
+        ...(state === 'archived' ? ['archive'] : []),
+      );
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(chatsDir, `${sessionId}.jsonl`),
+        JSON.stringify({
+          uuid: `${sessionId}-user-1`,
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-05-28T12:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello transcript' }] },
+          cwd: workspaceCwd,
+          version: '1.0.0',
+        }) + '\n',
+      );
+    }
+
+    it('returns a paged transcript and does not expose EventBus cursors', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaaa';
+      const bridge = fakeBridge({
+        sessionTranscriptImpl: async (req) => ({
+          v: 1,
+          sessionId: req.sessionId,
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'hello transcript' },
+              },
+            },
+          ],
+          nextCursor: 'cursor-2',
+          hasMore: true,
+          startTime: '2026-05-28T12:00:00.000Z',
+          lastUpdated: '2026-05-28T12:00:01.000Z',
+        }),
+      });
+      await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript?limit=2&cursor=cursor-1`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.body).toMatchObject({
+        v: 1,
+        sessionId: sid,
+        nextCursor: 'cursor-2',
+        hasMore: true,
+      });
+      expect(res.body).not.toHaveProperty('lastEventId');
+      expect(res.body.events[0]).not.toHaveProperty('id');
+      expect(bridge.sessionTranscriptCalls).toEqual([
+        { sessionId: sid, limit: 2, cursor: 'cursor-1' },
+      ]);
+      expect(bridge.loadCalls).toHaveLength(0);
+      expect(bridge.resumeCalls).toHaveLength(0);
+    });
+
+    it('routes inactive active transcript pages through the owning workspace runtime', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-abababababab';
+      const secondaryDir = path.join(runtimeDir, 'secondary-workspace');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      await writeTranscriptSession(sid, 'active', secondaryWs);
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        sessionTranscriptImpl: async (req) => ({
+          v: 1,
+          sessionId: req.sessionId,
+          events: [],
+          hasMore: false,
+        }),
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(secondaryBridge.sessionTranscriptCalls).toEqual([
+        { sessionId: sid },
+      ]);
+    });
+
+    it('rejects transcript requests with ambiguous live session ownership', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-abcdabcdabcd';
+      const secondaryDir = path.join(runtimeDir, 'ambiguous-secondary');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      const summaryFor = (workspaceCwd: string): BridgeSessionSummary => ({
+        sessionId: sid,
+        workspaceCwd,
+        createdAt: '2026-05-28T12:00:00.000Z',
+        clientCount: 0,
+        hasActivePrompt: false,
+      });
+      const primaryBridge = fakeBridge({
+        summaryImpl: () => summaryFor(wsDir),
+      });
+      const secondaryBridge = fakeBridge({
+        summaryImpl: () => summaryFor(secondaryWs),
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(500);
+      expect(res.body).toMatchObject({
+        code: 'ambiguous_session_owner',
+        sessionId: sid,
+        workspaceIds: ['primary', 'secondary'],
+      });
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
+    });
+
+    it('rejects transcript pages owned by an untrusted secondary workspace', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-acacacacacac';
+      const secondaryDir = path.join(runtimeDir, 'untrusted-secondary');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      await writeTranscriptSession(sid, 'active', secondaryWs);
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          trusted: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({
+        code: 'untrusted_workspace',
+        sessionId: sid,
+        workspaceId: 'secondary',
+      });
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
+    });
+
+    it('preserves archived transcript errors during multi-workspace fallback', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-adadadadadad';
+      const secondaryDir = path.join(runtimeDir, 'archived-secondary');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      await writeTranscriptSession(sid, 'archived', secondaryWs);
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'session_archived',
+        sessionId: sid,
+      });
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
+    });
+
+    it('prefers structured transcript errors found after generic scan failures', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-afafafafafaf';
+      const secondaryDir = path.join(runtimeDir, 'archived-after-failure');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockRejectedValueOnce(new Error('EACCES: primary scan failed'))
+        .mockResolvedValueOnce('archived');
+      try {
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          { workspaceRegistry: registry },
+        );
+
+        const res = await request(app)
+          .get(`/session/${sid}/transcript`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({
+          code: 'session_archived',
+          sessionId: sid,
+        });
+        expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+        expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
+      } finally {
+        locationSpy.mockRestore();
+      }
+    });
+
+    it('sanitizes multi-workspace transcript scan errors in HTTP responses', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aeaeaeaeaeae';
+      const secondaryDir = path.join(runtimeDir, 'failing-secondary');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockRejectedValue(
+          new Error(`EACCES: permission denied, stat '${secondaryWs}'`),
+        );
+      try {
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          {
+            workspaceRegistry: registry,
+          },
+        );
+
+        const res = await request(app)
+          .get(`/session/${sid}/transcript`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(500);
+        expect(res.body.error).toContain(
+          'Transcript session resolution failed across 2 workspace(s)',
+        );
+        expect(res.body.error).not.toContain(wsDir);
+        expect(res.body.error).not.toContain(secondaryWs);
+        expect(res.body.error).not.toContain('EACCES: permission denied');
+        expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+        expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
+      } finally {
+        locationSpy.mockRestore();
+      }
+    });
+
+    it('rejects archived sessions before touching the bridge', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-bbbbbbbbbbbb';
+      const bridge = fakeBridge();
+      await writeTranscriptSession(sid, 'archived');
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(409);
+      expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+    });
+
+    it('returns 404 for missing active sessions before touching the bridge', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-bcdbcdbcdbcd';
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe(sid);
+      expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+    });
+
+    it('returns 409 when a cursor page no longer has an active transcript file', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-bdbdbdbdbdbd';
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript?cursor=stale`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'transcript_snapshot_unavailable',
+        sessionId: sid,
+      });
+      expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+    });
+
+    it.each(['501', '0', 'abc', '-1', '1&limit=2'])(
+      'rejects invalid transcript limit query %s before touching the bridge',
+      async (limitQuery) => {
+        const sid = '55555555-bbbb-cccc-dddd-cccccccccccc';
+        const bridge = fakeBridge();
+        await writeTranscriptSession(sid);
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          {
+            bridge,
+            boundWorkspace: wsDir,
+          },
+        );
+
+        const res = await request(app)
+          .get(`/session/${sid}/transcript?limit=${limitQuery}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_transcript_limit');
+        expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+      },
+    );
+
+    it('maps child invalid cursor errors to 400', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-dddddddddddd';
+      const bridge = fakeBridge({
+        sessionTranscriptImpl: async () => {
+          throw Object.assign(new Error('Invalid transcript cursor'), {
+            data: { errorKind: 'invalid_transcript_cursor' },
+          });
+        },
+      });
+      await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript?cursor=not-a-cursor`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_transcript_cursor');
+      expect(bridge.sessionTranscriptCalls).toEqual([
+        { sessionId: sid, cursor: 'not-a-cursor' },
+      ]);
+    });
+
+    it('maps frozen snapshot conflicts to 409', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
+      const bridge = fakeBridge({
+        sessionTranscriptImpl: async () => {
+          throw Object.assign(new Error('Transcript snapshot is unavailable'), {
+            data: {
+              errorKind: 'transcript_snapshot_unavailable',
+              sessionId: sid,
+            },
+          });
+        },
+      });
+      await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript?cursor=stale`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'transcript_snapshot_unavailable',
+        sessionId: sid,
+      });
+      expect(bridge.sessionTranscriptCalls).toEqual([
+        { sessionId: sid, cursor: 'stale' },
+      ]);
+    });
+
+    it('maps oversized transcript snapshots to 413', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-ffffffffffff';
+      const bridge = fakeBridge({
+        sessionTranscriptImpl: async () => {
+          throw Object.assign(new Error('Transcript snapshot is too large'), {
+            data: {
+              errorKind: 'transcript_too_large',
+              sessionId: sid,
+              snapshotSize: 300,
+              maxBytes: 200,
+            },
+          });
+        },
+      });
+      await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(413);
+      expect(res.body).toMatchObject({
+        code: 'transcript_too_large',
+        sessionId: sid,
+        snapshotSize: 300,
+        maxBytes: 200,
+      });
+      expect(bridge.sessionTranscriptCalls).toEqual([{ sessionId: sid }]);
     });
   });
 

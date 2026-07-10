@@ -24,6 +24,7 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'maxRetries',
   'retryErrorCodes',
   'enableCacheControl',
+  'forceGlobalCacheScope',
   'schemaCompliance',
   'reasoning',
   'contextWindowSize',

@@ -108,6 +108,7 @@ import type {
   BridgeWorkspaceMemoryForgetMatch,
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
+  BridgeSessionTranscriptPage,
 } from './bridgeTypes.js';
 import type {
   BridgeFreshSessionAdmissionContext,
@@ -1077,6 +1078,7 @@ const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
  */
 const SESSION_RECAP_TIMEOUT_MS = 60_000;
 const SESSION_BTW_TIMEOUT_MS = 60_000;
+const SESSION_TRANSCRIPT_TIMEOUT_MS = 60_000;
 const SHELL_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
 // Per-session cap on undrained mid-turn messages: a busy turn with no drain
@@ -5571,6 +5573,39 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionLspStatus,
       );
+    },
+
+    async getSessionTranscriptPage(req) {
+      const info = await ensureChannel();
+      try {
+        const response = await withWorkspaceControl(info, () =>
+          withTimeout(
+            Promise.race([
+              info.connection.extMethod(
+                SERVE_STATUS_EXT_METHODS.sessionTranscript,
+                { ...req, cwd: boundWorkspace },
+              ),
+              getChannelClosedReject(info),
+            ]),
+            Math.max(initTimeoutMs, SESSION_TRANSCRIPT_TIMEOUT_MS),
+            SERVE_STATUS_EXT_METHODS.sessionTranscript,
+          ),
+        );
+        return response as unknown as BridgeSessionTranscriptPage;
+      } catch (err) {
+        // A missing transcript file (ENOENT without a cursor) surfaces from the
+        // child as a raw resourceNotFound JSON-RPC error. Translate it to
+        // SessionNotFoundError so the route maps it to HTTP 404 — mirroring the
+        // load/resume path above — instead of falling through to a 500.
+        if (isAcpSessionResourceNotFound(err, req.sessionId)) {
+          throw new SessionNotFoundError(req.sessionId);
+        }
+        throw err;
+      } finally {
+        if (hasNoChannelWork(info)) {
+          await startIdleTimer(info, 'session transcript');
+        }
+      }
     },
 
     async cancelSessionTask(sessionId, taskId, taskKind) {

@@ -957,6 +957,97 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('getSessionTranscriptPage', () => {
+    it('GETs a paged transcript over direct REST', async () => {
+      const body = {
+        v: 1,
+        sessionId: 'with/slash',
+        events: [
+          {
+            v: 1,
+            type: 'session_update',
+            data: { sessionUpdate: 'user_message_chunk' },
+          },
+        ],
+        nextCursor: 'next',
+        hasMore: true,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch,
+      });
+
+      await expect(
+        client.getSessionTranscriptPage('with/slash', {
+          cursor: 'cur 1',
+          limit: 2,
+          clientId: 'client-1',
+        }),
+      ).resolves.toEqual(body);
+
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/session/with%2Fslash/transcript?cursor=cur+1&limit=2',
+        method: 'GET',
+        headers: {
+          authorization: 'Bearer secret',
+          'x-qwen-client-id': 'client-1',
+        },
+      });
+    });
+
+    it('uses direct REST fetch even when an ACP transport is configured', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          events: [],
+          hasMore: false,
+        }),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'transport should not be used' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await expect(client.getSessionTranscriptPage('s-1')).resolves.toEqual({
+        v: 1,
+        sessionId: 's-1',
+        events: [],
+        hasMore: false,
+      });
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/transcript');
+    });
+
+    it('throws DaemonHttpError on non-2xx transcript responses', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, {
+          error: 'Invalid transcript limit',
+          code: 'invalid_transcript_limit',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.getSessionTranscriptPage('s-1', { limit: 501 }),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+    });
+  });
+
   describe('bearer auth', () => {
     it('attaches Authorization: Bearer when token is set', async () => {
       const { fetch, calls } = recordingFetch(() =>
