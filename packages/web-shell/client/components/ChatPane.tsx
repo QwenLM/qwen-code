@@ -20,7 +20,12 @@ import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { getModelDisplayName } from '../utils/modelDisplay';
-import { localizeBuiltinDescriptions } from '../constants/localCommands';
+import {
+  getLocalCommands,
+  localizeBuiltinDescriptions,
+  skillDescriptionKey,
+} from '../constants/localCommands';
+import { mergeCommands } from '../hooks/daemonSessionMappers';
 import { MessageList } from './MessageList';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
@@ -149,10 +154,20 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
   // submitted (via sendPrompt), so e.g. `/clear` clears this pane's session, not
   // the outer one. The approval-mode and model pickers likewise drive this
   // session's own actions; the SDK reflects the change back on `connection`.
-  const commands = useMemo(
-    () => localizeBuiltinDescriptions(connection.commands ?? [], t),
-    [connection.commands, t],
-  );
+  const commands = useMemo(() => {
+    return localizeBuiltinDescriptions(
+      mergeCommands(connection.commands ?? [], getLocalCommands(t)),
+      t,
+    ).map((command) => {
+      const skillKey = skillDescriptionKey(command.name);
+      if (!skillKey) return command;
+      return {
+        ...command,
+        displayCategory: 'skill' as const,
+        description: t(skillKey),
+      };
+    });
+  }, [connection.commands, t]);
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((model) => ({

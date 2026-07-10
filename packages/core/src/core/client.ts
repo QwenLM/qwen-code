@@ -67,10 +67,7 @@ import { CommitAttributionService } from '../services/commitAttribution.js';
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
-import {
-  DEFAULT_AUTO_SKILL_MAX_TURNS,
-  DEFAULT_AUTO_SKILL_TIMEOUT_MS,
-} from '../memory/skillReviewAgentPlanner.js';
+import { DEFAULT_AUTO_SKILL_MAX_TURNS } from '../memory/skillReviewAgentPlanner.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
 
@@ -1594,7 +1591,6 @@ export class GeminiClient {
           enabled: autoSkillEnabled,
           threshold: AUTO_SKILL_THRESHOLD,
           maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
-          timeoutMs: DEFAULT_AUTO_SKILL_TIMEOUT_MS,
           confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
         });
         if (skillReviewResult.status === 'scheduled') {

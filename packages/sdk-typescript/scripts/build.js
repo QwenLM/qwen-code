@@ -41,10 +41,17 @@ const rootDir = join(__dirname, '..');
 // workspace remember (managed memory client methods + event validation).
 // Bumped from 133KB to 136KB after merging session artifacts plus sessionless
 // workspace memory forget/dream APIs and event validation.
-// Bumped from 136KB to 137KB for EventBus byte-backlog telemetry validation.
-// Bumped from 137KB to 138KB for history_truncated event validation and
+// Bumped from 136KB to 138KB for persistent session artifact APIs after
+// merging the upstream daemon SDK surface.
+// Bumped from 138KB to 139KB for EventBus byte-backlog telemetry validation.
+// Bumped from 139KB to 140KB for history_truncated event validation and
 // transcript status projection.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 138 * 1024;
+// Bumped from 138KB to 139KB for workspace ACP status/preheat APIs.
+// Bumped from 139KB to 141KB after merging main (ACP status/preheat) into
+// the history_truncated/transcript-status branch.
+// Bumped from 141KB to 150KB for WorkspaceDaemonClient's workspace-qualified
+// core REST helpers, including Phase 3 file/status/settings/agents/session APIs.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 150 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't

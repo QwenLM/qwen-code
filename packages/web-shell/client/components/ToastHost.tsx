@@ -23,7 +23,12 @@ export function ToastHost({
 }: ToastHostProps) {
   if (toasts.length === 0) return null;
   return (
-    <div className={styles.host} role="status" aria-live="polite">
+    <div
+      className={styles.host}
+      role="status"
+      aria-live="polite"
+      data-web-shell-toast-host
+    >
       {toasts.map((toast) => (
         <ToastItem
           key={toast.id}
@@ -52,7 +57,11 @@ function ToastItem({
   }, [autoDismissMs, onDismiss, toast.id]);
 
   return (
-    <div className={`${styles.toast} ${styles[toast.tone]}`}>
+    <div
+      className={`${styles.toast} ${styles[toast.tone]}`}
+      data-web-shell-toast
+      data-tone={toast.tone}
+    >
       <div className={styles.message}>{toast.message}</div>
       <button
         type="button"

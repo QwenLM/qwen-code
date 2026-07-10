@@ -17,12 +17,13 @@ import type { ServeWorkspaceSkillStatus } from '@qwen-code/acp-bridge/status';
 export function mapSkillConfigToStatus(
   skill: SkillConfig,
   disabledSkillNames: ReadonlySet<string> = new Set(),
+  opts: { disabled?: boolean } = {},
 ): ServeWorkspaceSkillStatus {
   const userDisabled = disabledSkillNames.has(skill.name.toLowerCase());
   const modelInvocable = skill.disableModelInvocation !== true;
   return {
     kind: 'skill',
-    status: userDisabled ? 'disabled' : 'ok',
+    status: opts.disabled || userDisabled ? 'disabled' : 'ok',
     name: skill.name,
     description: skill.description,
     level: skill.level,

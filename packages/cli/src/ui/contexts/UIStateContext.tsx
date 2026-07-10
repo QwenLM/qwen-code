@@ -130,6 +130,8 @@ export interface UIState {
   contextFileNames: string[];
   availableTerminalHeight: number | undefined;
   useTerminalBuffer: boolean;
+  /** Whether the VP scrollbar is shown (auto-hides while idle). */
+  showScrollbar?: boolean;
   mainAreaWidth: number;
   staticAreaMaxItemHeight: number;
   staticExtraHeight: number;

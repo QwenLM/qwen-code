@@ -33,6 +33,14 @@ const routeStep =
   workflow.match(
     /- name: 'Decide phases'[\s\S]*?(?=\n[ ]{2}# ==========)/,
   )?.[0] ?? '';
+const routeJob =
+  workflow.match(/\n {2}route:[\s\S]*?(?=\n[ ]{2}# ==========)/)?.[0] ?? '';
+const reviewScanJob =
+  workflow.match(/\n {2}review-scan:[\s\S]*?(?=\n[ ]{2}# ==========)/)?.[0] ??
+  '';
+const issueAutofixJob =
+  workflow.match(/\n {2}issue-autofix:[\s\S]*?(?=\n[ ]{2}# ==========)/)?.[0] ??
+  '';
 const publishPrStep =
   workflow.match(
     /- name: 'Publish PR'[\s\S]*?(?=\n[ ]{6}- name: 'Withdraw claim on failure')/,
@@ -192,15 +200,91 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('.[0:10] | map(. + {autofixTier: 1})');
   });
 
+  it('runs scheduled autofix as a 10-minute single-target worker', () => {
+    expect(workflow).toContain("cron: '*/10 * * * *'");
+    expect(workflow).not.toContain("cron: '0 0,12 * * *'");
+    expect(workflow).not.toContain("cron: '0 4,8,16,20 * * *'");
+    expect(workflow).toContain(
+      "pull_request_review:\n    types:\n      - 'submitted'",
+    );
+    expect(workflow).toContain(
+      'AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || \'qwen-code-dev-bot\' }}"',
+    );
+    expect(workflow).toContain("MAX_ROUNDS: '5'");
+    expect(workflow).toContain("MAX_OPEN_AUTOFIX_PRS: '5'");
+    expect(reviewScanJob).toContain('isCrossRepository');
+    expect(reviewScanJob).toContain('not an open in-repo main-targeting PR');
+    expect(reviewScanJob).toContain('.isCrossRepository != true');
+    expect(reviewScanJob).toContain('break # one PR per scheduled scan');
+    expect(reviewScanJob).toContain('statusCheckRollup');
+    expect(reviewScanJob).toContain('HAS_PENDING_CHECKS');
+    expect(reviewScanJob).toContain('N_FAILED_CHECKS');
+    expect(reviewScanJob).toContain('.status // .state // ""');
+    expect(reviewScanJob).toContain('.conclusion // .state // ""');
+    expect(reviewScanJob).toContain('.workflowName // ""');
+    expect(reviewScanJob).toContain('startswith("review-address")');
+    expect(
+      reviewScanJob.match(/startswith\("review-address"\)/g) ?? [],
+    ).toHaveLength(2);
+    expect(reviewScanJob).toContain('"${N_FAILED_CHECKS}" -eq 0');
+    expect(reviewScanJob).toContain('${N_FAILED_CHECKS} failed check(s) new');
+    expect(reviewScanJob).toContain('.completedAt // .updatedAt // ""');
+    expect(reviewScanJob.indexOf('EFF_WM="${PUSH_WM}"')).toBeLessThan(
+      reviewScanJob.indexOf('N_FAILED_CHECKS='),
+    );
+    expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
+    expect(reviewScanJob).toContain(
+      'PR has pending checks; skipping until the current verification finishes',
+    );
+  });
+
+  it('falls back to existing issue backlog only when review has no target', () => {
+    expect(issueAutofixJob).toContain("needs: ['route', 'review-scan']");
+    expect(issueAutofixJob).toContain('always()');
+    expect(issueAutofixJob).toContain("needs.review-scan.result == 'success'");
+    expect(issueAutofixJob).toContain(
+      "github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')",
+    );
+    expect(findCandidateIssuesStep).toContain('OPEN_AUTOFIX_PR_COUNT');
+    expect(findCandidateIssuesStep).toContain('MAX_OPEN_AUTOFIX_PRS');
+    expect(findCandidateIssuesStep).toContain('isCrossRepository');
+    expect(findCandidateIssuesStep).toContain(
+      'open autofix PR(s) already exist; WIP limit is ${MAX_OPEN_AUTOFIX_PRS}',
+    );
+  });
+
+  it('routes submitted review events only for trusted in-repo bot PRs', () => {
+    expect(routeStep).toContain('PR_AUTHOR');
+    expect(routeStep).toContain('PR_NUMBER_EVENT');
+    expect(routeStep).toContain(
+      'if [[ "${EVENT_NAME}" == \'pull_request_review\' ]]; then',
+    );
+    expect(routeStep).toContain('"${PR_AUTHOR}" != "${AUTOFIX_BOT}"');
+    expect(routeStep).toContain('"${PR_HEAD_REPO}" != "${REPO}"');
+    expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
+    expect(routeStep).toContain(
+      'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")',
+    );
+    expect(routeStep).toContain(
+      "review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}",
+    );
+  });
+
   it('keeps label-triggered issue routing guarded and diagnosable', () => {
     expect(workflow).toContain("issues:\n    types:\n      - 'labeled'");
+    expect(workflow).toContain("      - 'assigned'");
     expect(workflow).toContain(
       "ISSUE_LABELS_JSON: '${{ toJSON(github.event.issue.labels.*.name) }}'",
     );
     expect(workflow).toContain(
       "SENDER_LOGIN: '${{ github.event.sender.login }}'",
     );
+    expect(workflow).toContain(
+      "ASSIGNEE_LOGIN: '${{ github.event.assignee.login }}'",
+    );
     expect(workflow).toContain("permissions:\n      contents: 'read'");
+    expect(routeJob).toContain("group: 'qwen-autofix-route'");
+    expect(routeJob).toContain('cancel-in-progress: true');
     expect(workflow).toContain(
       'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
     );
@@ -220,6 +304,10 @@ describe('qwen-autofix workflow', () => {
       '[[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true',
     );
     expect(workflow).toContain(
+      '[[ "${ASSIGNEE_LOGIN}" == "${AUTOFIX_BOT}" ]] && label_is_trigger=true',
+    );
+    expect(routeStep).not.toContain('ROUTE_ISSUE="${ISSUE_NUMBER}"');
+    expect(workflow).toContain(
       'issue event ignored: state_open=$([[ "${ISSUE_STATE}" == \'open\' ]]',
     );
     expect(workflow).toContain('bug=${issue_is_bug}');
@@ -228,7 +316,9 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('trigger_label=${label_is_trigger}');
     expect(workflow).toContain('trigger_label=false label=');
     expect(workflow).toContain('sender_trusted=${sender_is_trusted}');
-    expect(workflow).toContain("group: 'qwen-autofix-issue'");
+    expect(issueAutofixJob).toContain(
+      "group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'",
+    );
     expect(workflow).toContain(
       '(.labels // []) | map(.name) as $labels | ($labels | index($ready))',
     );
@@ -271,11 +361,10 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain(
       "issue_comment:\n    types:\n      - 'created'",
     );
+    // pull_request_review_comment triggers are NOT used to avoid redundant
+    // runs on multi-comment reviews; only pull_request_review:submitted.
     expect(workflow).not.toContain(
       "pull_request_review_comment:\n    types:\n      - 'created'",
-    );
-    expect(workflow).not.toContain(
-      "pull_request_review:\n    types:\n      - 'submitted'",
     );
     expect(workflow).not.toContain(
       "COMMENT_BODY: '${{ github.event.comment.body }}'",
@@ -286,7 +375,84 @@ describe('qwen-autofix workflow', () => {
     expect(routeStep).not.toContain('comment command accepted');
     expect(routeStep).not.toContain('address-review command accepted');
     expect(routeStep).not.toContain('ROUTE_PR="${ISSUE_NUMBER}"');
-    expect(routeStep).not.toContain('ROUTE_ISSUE="${ISSUE_NUMBER}"');
+  });
+
+  it('gates real-time review triggers on bot author, trusted sender, and in-repo PR', () => {
+    // Route step must check PR author against AUTOFIX_BOT for review events.
+    expect(routeStep).toContain('"${PR_AUTHOR}" != "${AUTOFIX_BOT}"');
+    // Must verify sender is trusted (collaborator or review bot).
+    expect(routeStep).toContain('"${SENDER_LOGIN}" == "${REVIEW_BOT}"');
+    expect(routeStep).toContain(
+      'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
+    );
+    // Must reject fork PRs and non-main targets.
+    expect(routeStep).toContain('"${PR_HEAD_REPO}" != "${REPO}"');
+    expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
+    // Must set ROUTE_PR from the event payload.
+    expect(routeStep).toContain(
+      'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"',
+    );
+    // Review-scan must also verify in-repo and base-ref for forced PRs.
+    const reviewScanStep =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
+      )?.[0] ?? '';
+    expect(reviewScanStep).toContain('isCrossRepository');
+    expect(reviewScanStep).toContain('(.baseRefName // "") == "main"');
+    expect(reviewScanStep).toContain('--base main');
+    // review-address must check out trusted base, not PR merge ref.
+    expect(workflow).toContain("'Checkout trusted base'");
+    expect(workflow).toContain(
+      "ref: '${{ github.event.repository.default_branch }}'",
+    );
+  });
+
+  it('includes issue-level comments in review feedback scanning', () => {
+    const reviewScanStep =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
+      )?.[0] ?? '';
+    // Must count issue-level comments separately from inline review comments.
+    expect(reviewScanStep).toContain('N_ISSUE_COMMENTS=');
+    // Must fetch issue comments for the count (already fetched for markers).
+    expect(reviewScanStep).toContain('ic.json');
+    // Must exclude known non-actionable bot comments.
+    expect(reviewScanStep).toContain('qwen-triage');
+    expect(reviewScanStep).toContain('qwen-review-suggestion-summary');
+    // The "nothing new" gate must check all three feedback sources.
+    expect(reviewScanStep).toContain('"${N_ISSUE_COMMENTS}" -eq 0');
+    // review-address must also fetch ic.json and render issue-level comments.
+    expect(workflow).toContain(
+      'repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '2> /dev/null || echo \'[]\' > "${WORKDIR}/checks.json"',
+    );
+    expect(workflow).toContain('## Issue-level comments');
+    expect(workflow).toContain('## Failed checks');
+    expect(workflow).toContain('checks.json');
+    expect(workflow).toContain(
+      '.[3] | map(select((.conclusion // .state // "")',
+    );
+    expect(
+      prepareBranchAndFeedbackStep.match(/startswith\("review-address"\)/g) ??
+        [],
+    ).toHaveLength(2);
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]',
+    );
+    expect(prepareBranchAndFeedbackStep).not.toContain(
+      '.detailsUrl // .targetUrl',
+    );
+    expect(prepareBranchAndFeedbackStep).not.toContain(
+      '.name // .context // "?"',
+    );
+    // NEWEST watermark must consider issue-level comment timestamps.
+    expect(workflow).toContain('.[2] | map(select((.created_at // "")');
+    // Permission API failures in the review-trigger path must be logged.
+    expect(routeStep).toContain(
+      '::warning::Permission API call failed for ${SENDER_LOGIN}',
+    );
   });
 
   it('keeps forced issue routing bounded to open issues', () => {
@@ -343,7 +509,7 @@ describe('qwen-autofix workflow', () => {
       '($p + (.number | tostring)) as $branch',
     );
     expect(findCandidateIssuesStep).toContain(
-      'first($prs[] | select((.headRefName // "") == $branch)',
+      'first($prs[] | select((.isCrossRepository != true) and ((.headRefName // "") == $branch))',
     );
     expect(findCandidateIssuesStep).toContain('existingAutofixPr');
     expect(findCandidateIssuesStep).toContain('annotated-candidates.json');

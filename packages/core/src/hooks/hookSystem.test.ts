@@ -67,6 +67,7 @@ describe('HookSystem', () => {
 
     mockHookRegistry = {
       initialize: vi.fn().mockResolvedValue(undefined),
+      reloadConfiguredHooks: vi.fn().mockResolvedValue(undefined),
       setHookEnabled: vi.fn(),
       getAllHooks: vi.fn().mockReturnValue([]),
       getHooksForEvent: vi.fn().mockReturnValue([]),
@@ -138,6 +139,14 @@ describe('HookSystem', () => {
       await hookSystem.initialize();
 
       expect(mockHookRegistry.initialize).toHaveBeenCalled();
+    });
+  });
+
+  describe('reload', () => {
+    it('should reload configured hooks', async () => {
+      await hookSystem.reload();
+
+      expect(mockHookRegistry.reloadConfiguredHooks).toHaveBeenCalled();
     });
   });
 
