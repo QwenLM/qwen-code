@@ -347,6 +347,29 @@ export class DingtalkChannel extends ChannelBase {
         body: JSON.stringify(body),
       });
 
+      if (
+        i === 0 &&
+        atUserId &&
+        process.env['QWEN_CHANNEL_DEBUG_MENTIONS'] === '1'
+      ) {
+        const payload = (await resp
+          .clone()
+          .json()
+          .catch(() => undefined)) as unknown;
+        const response =
+          payload && typeof payload === 'object'
+            ? (payload as Record<string, unknown>)
+            : {};
+        const value = response['errcode'] ?? response['code'];
+        const code =
+          typeof value === 'number' || typeof value === 'string'
+            ? String(value)
+            : 'unknown';
+        process.stderr.write(
+          `[DingTalk:${this.name}] mention delivery status=${resp.status} code=${code}\n`,
+        );
+      }
+
       if (!resp.ok) {
         const detail = await resp.text().catch(() => '');
         process.stderr.write(

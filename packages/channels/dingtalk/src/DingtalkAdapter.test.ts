@@ -217,6 +217,7 @@ function deferredPromise<T>() {
 describe('DingtalkChannel prompt reactions', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it('maps lifecycle start and terminal events to the eye reaction', () => {
@@ -1233,6 +1234,7 @@ describe('DingtalkChannel sender attribution', () => {
 describe('DingtalkChannel reply mentions', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it('retains queued mention after dedup cleanup until onPromptStart', async () => {
@@ -1310,6 +1312,26 @@ describe('DingtalkChannel reply mentions', () => {
       markdown: { text: 'hello' },
       at: { atUserIds: ['staff-1'] },
     });
+  });
+
+  it('logs the redacted mention delivery result when diagnostics are enabled', async () => {
+    vi.stubEnv('QWEN_CHANNEL_DEBUG_MENTIONS', '1');
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
+    );
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    await getResponseHook(channel)('cid123', 'hello', 'session-1');
+
+    expect(writeSpy).toHaveBeenCalledWith(
+      '[DingTalk:test-dingtalk] mention delivery status=200 code=0\n',
+    );
   });
 
   it('does not mention the sender by default', async () => {
