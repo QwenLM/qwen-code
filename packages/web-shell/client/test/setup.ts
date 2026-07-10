@@ -6,8 +6,34 @@ import { vi } from 'vitest';
 
 const globalWithDom = globalThis as typeof globalThis & {
   Element?: typeof Element;
+  Range?: typeof Range;
   ResizeObserver?: typeof ResizeObserver;
 };
+
+function createEmptyDOMRect(): DOMRect {
+  if (typeof DOMRect === 'function') {
+    return new DOMRect(0, 0, 0, 0);
+  }
+
+  return {
+    bottom: 0,
+    height: 0,
+    left: 0,
+    right: 0,
+    top: 0,
+    width: 0,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+function createEmptyDOMRectList(): DOMRectList {
+  return {
+    length: 0,
+    item: () => null,
+  } as DOMRectList;
+}
 
 if (typeof globalWithDom.ResizeObserver === 'undefined') {
   globalWithDom.ResizeObserver = class ResizeObserverStub {
@@ -30,31 +56,14 @@ if (
 // "textRange(...).getClientRects is not a function" from a rAF callback after a
 // test has completed — an unhandled error that flakes the whole run even though
 // every assertion passed.
-if (typeof Range !== 'undefined') {
-  const emptyRectList = {
-    length: 0,
-    item: () => null,
-    *[Symbol.iterator] () {},
-  } as unknown as DOMRectList;
-  const emptyRect = {
-    x: 0,
-    y: 0,
-    width: 0,
-    height: 0,
-    top: 0,
-    right: 0,
-    bottom: 0,
-    left: 0,
-    toJSON() {
-      return {};
-    },
-  } as DOMRect;
-  if (!Range.prototype.getClientRects) {
-    Range.prototype.getClientRects = () => emptyRectList;
-  }
-  if (!Range.prototype.getBoundingClientRect) {
-    Range.prototype.getBoundingClientRect = () => emptyRect;
-  }
+if (typeof globalWithDom.Range !== 'undefined') {
+  const rangePrototype = globalWithDom.Range.prototype as Range & {
+    getBoundingClientRect?: () => DOMRect;
+    getClientRects?: () => DOMRectList;
+  };
+
+  rangePrototype.getBoundingClientRect ??= createEmptyDOMRect;
+  rangePrototype.getClientRects ??= createEmptyDOMRectList;
 }
 
 if (typeof navigator !== 'undefined' && !navigator.clipboard) {
