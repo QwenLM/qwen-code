@@ -9,6 +9,10 @@ on:
     types:
       - 'created'
       - 'edited'
+  pull_request_review:
+    types:
+      - 'submitted'
+      - 'edited'
 
 permissions:
   contents: 'read'
@@ -35,7 +39,7 @@ jobs:
             const highRiskExtension =
               /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|bat|ps1|node|dylib)(?![a-zA-Z0-9])/i;
             const linkPattern =
-              /https?:\/\/[^\s"'<>\]]+|\[[^\]]+\]\((?:[^()\s]|\([^()\s]*\))+\)/gi;
+              /(?:https?:\/\/|www\.)[^\s"'<>\]]+|\[[^\]]+\]\((?:[^()\s]|\([^()\s]*\))+\)/gi;
             const errorMessage = (error) =>
               `${error?.status ? `${error.status} ` : ''}${error?.message ?? error}`;
             const decodeTarget = (target) => {
@@ -49,9 +53,10 @@ jobs:
             };
             const highRiskTarget = (url) => {
               let target = url;
-              if (/^https?:\/\//i.test(url)) {
+              if (/^(?:https?:\/\/|www\.)/i.test(url)) {
                 try {
-                  target = new URL(url).pathname;
+                  target = new URL(/^www\./i.test(url) ? `https://${url}` : url)
+                    .pathname;
                 } catch {
                   target = url;
                 }
@@ -66,7 +71,8 @@ jobs:
               );
             };
 
-            const { comment, sender } = context.payload;
+            const { sender } = context.payload;
+            const comment = context.payload.comment ?? context.payload.review;
             const association = comment.author_association ?? '';
             const action = context.payload.action ?? '';
             const commentAuthor = comment.user?.login ?? 'ghost';
@@ -104,7 +110,11 @@ jobs:
             }
 
             const { owner, repo } = context.repo;
-            let deleted = false;
+            const moderationVerb =
+              eventName === 'pull_request_review' ? 'minimize' : 'delete';
+            let actionTaken = '';
+            let moderationErrorMessage = '';
+            let moderationErrorStatus;
             try {
               if (eventName === 'issue_comment') {
                 await github.rest.issues.deleteComment({
@@ -112,19 +122,31 @@ jobs:
                   repo,
                   comment_id: comment.id,
                 });
-                deleted = true;
+                actionTaken = 'removed';
               } else if (eventName === 'pull_request_review_comment') {
                 await github.rest.pulls.deleteReviewComment({
                   owner,
                   repo,
                   comment_id: comment.id,
                 });
-                deleted = true;
+                actionTaken = 'removed';
+              } else if (eventName === 'pull_request_review') {
+                await github.graphql(
+                  `mutation MinimizeComment($id: ID!) {
+                    minimizeComment(input: {subjectId: $id, classifier: SPAM}) {
+                      minimizedComment {
+                        isMinimized
+                      }
+                    }
+                  }`,
+                  { id: comment.node_id },
+                );
+                actionTaken = 'minimized';
               }
             } catch (error) {
-              core.warning(
-                `Failed to delete suspicious comment ${comment.id}: ${errorMessage(error)}`,
-              );
+              moderationErrorStatus = error?.status;
+              moderationErrorMessage = `Failed to ${moderationVerb} suspicious comment ${comment.id}: ${errorMessage(error)}`;
+              core.warning(moderationErrorMessage);
             }
 
             try {
@@ -140,11 +162,21 @@ jobs:
                   ['Association', association || 'none'],
                   ['Comment ID', String(comment.id)],
                   ['Reason', reasons.join(', ')],
-                  ['Action', deleted ? 'removed' : 'delete failed'],
+                  [
+                    'Action',
+                    actionTaken ||
+                      (eventName === 'pull_request_review'
+                        ? 'minimize failed'
+                        : 'delete failed'),
+                  ],
                 ])
                 .write();
             } catch (error) {
               core.warning(
                 `Failed to write suspicious comment summary: ${errorMessage(error)}`,
               );
+            }
+
+            if (moderationErrorMessage && moderationErrorStatus !== 404) {
+              core.setFailed(moderationErrorMessage);
             }
