@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
 import {
   useActions,
   useConnection,
@@ -17,15 +17,31 @@ import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptImage } from '../adapters/promptTypes';
 import type { ComposerSubmitCommit } from '../hooks/useComposerCore';
 import { isAskUserPermission } from '../utils/askUserPermission';
+import { isDaemonApprovalMode } from '../utils/sessionPreparation';
+import { isVisibleComposerModel } from '../utils/composerModels';
+import { getModelDisplayName } from '../utils/modelDisplay';
+import {
+  getLocalCommands,
+  localizeBuiltinDescriptions,
+  skillDescriptionKey,
+} from '../constants/localCommands';
+import { mergeCommands } from '../hooks/daemonSessionMappers';
 import { MessageList } from './MessageList';
 import { StreamingStatus } from './StreamingStatus';
-import { ChatEditor } from './ChatEditor';
+import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
 import styles from './ChatPane.module.css';
 
-const EMPTY_COMMANDS: never[] = [];
-const EMPTY_TOOLBAR: never[] = [];
+// Split-view panes get the same interactive composer controls as the main chat,
+// each scoped to the pane's own session: the approval-mode and model pickers,
+// plus voice dictation. The width toggle is omitted (panes size themselves); the
+// slash menu is populated from the session's own command list (see below).
+const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
+  'approvalMode',
+  'model',
+  'voice',
+];
 
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */
@@ -66,6 +82,11 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
     pendingApproval && !isAskUser ? pendingApproval : null;
   const pendingAskUserApproval =
     pendingApproval && isAskUser ? pendingApproval : null;
+  // Tracked in a ref so an async approval-mode switch (handleSelectMode) reads
+  // the approval current when setApprovalMode *resolves*, not a stale one
+  // captured at click time — mirrors App's pendingApprovalRef.
+  const pendingToolApprovalRef = useRef(pendingToolApproval);
+  pendingToolApprovalRef.current = pendingToolApproval;
   const approvalActive =
     pendingToolApproval !== null || pendingAskUserApproval !== null;
   const isResponding = streamingState !== 'idle';
@@ -127,6 +148,84 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
         reportError(error, 'Failed to cancel request'),
       );
   }, [actions, reportError]);
+
+  // Composer wiring, all scoped to THIS pane's own DaemonSession context. The
+  // slash menu lists the session's daemon commands — they run server-side when
+  // submitted (via sendPrompt), so e.g. `/clear` clears this pane's session, not
+  // the outer one. The approval-mode and model pickers likewise drive this
+  // session's own actions; the SDK reflects the change back on `connection`.
+  const commands = useMemo(() => {
+    return localizeBuiltinDescriptions(
+      mergeCommands(connection.commands ?? [], getLocalCommands(t)),
+      t,
+    ).map((command) => {
+      const skillKey = skillDescriptionKey(command.name);
+      if (!skillKey) return command;
+      return {
+        ...command,
+        displayCategory: 'skill' as const,
+        description: t(skillKey),
+      };
+    });
+  }, [connection.commands, t]);
+  const availableModels = useMemo(
+    () =>
+      (connection.models ?? []).filter(isVisibleComposerModel).map((model) => ({
+        id: model.id,
+        label: getModelDisplayName(model.label || model.id),
+      })),
+    [connection.models],
+  );
+  const handleSelectMode = useCallback(
+    (modeId: string) => {
+      // Modes always arrive from the toolbar's own picker, but narrow anyway so
+      // the daemon action gets a well-typed value (mirrors App's handleSetMode).
+      if (!isDaemonApprovalMode(modeId)) {
+        reportError(
+          new Error(`Unsupported approval mode: ${modeId}`),
+          'Failed to set approval mode',
+        );
+        return;
+      }
+      actions
+        .setApprovalMode(modeId)
+        .then(() => {
+          // Mirror App's handleSetMode: switching THIS pane to yolo (or
+          // auto-edit for an edit tool) auto-approves a tool call already
+          // awaiting approval in this pane, so the shortcut behaves the same as
+          // in the single-session chat.
+          const approval = pendingToolApprovalRef.current;
+          if (!approval) return;
+          const autoApprove =
+            modeId === 'yolo' ||
+            (modeId === 'auto-edit' && approval.toolKind === 'edit');
+          if (!autoApprove) return;
+          const allowOnce = approval.options.find(
+            (option) => option.kind === 'allow_once',
+          );
+          if (!allowOnce) return;
+          actions
+            .submitPermission(approval.id, allowOnce.id)
+            .catch((error: unknown) =>
+              reportError(error, 'Failed to auto-approve tool call'),
+            );
+        })
+        .catch((error: unknown) =>
+          reportError(error, 'Failed to set approval mode'),
+        );
+    },
+    [actions, reportError],
+  );
+  const handleSelectModel = useCallback(
+    (modelId: string) => {
+      actions
+        .setModel(modelId)
+        .catch((error: unknown) =>
+          reportError(error, 'Failed to switch model'),
+        );
+    },
+    [actions, reportError],
+  );
 
   const headerLabel =
     title || connection.displayName || connection.sessionId?.slice(0, 8) || '';
@@ -212,8 +311,13 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
           onSubmit={handleSubmit}
           onCancel={handleCancel}
           isRunning={isResponding}
-          commands={EMPTY_COMMANDS}
-          visibleToolbarActions={EMPTY_TOOLBAR}
+          commands={commands}
+          visibleToolbarActions={PANE_TOOLBAR_ACTIONS}
+          currentMode={connection.currentMode ?? 'default'}
+          currentModel={connection.currentModel ?? ''}
+          availableModels={availableModels}
+          onSelectMode={handleSelectMode}
+          onSelectModel={handleSelectModel}
           dialogOpen={approvalActive}
           placeholderText={t('splitView.composerPlaceholder')}
         />

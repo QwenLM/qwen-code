@@ -130,6 +130,7 @@ Plugins run in-process (no sandbox), same trust model as npm dependencies.
       "model": "qwen3.5-plus",
       "instructions": "Keep responses short.",
       "groupPolicy": "disabled", // disabled | allowlist | open
+      "dmPolicy": "open", // open | disabled
       "groups": { "*": { "requireMention": true } },
     },
   },

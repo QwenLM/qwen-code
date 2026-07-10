@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StrictMode, act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider, type WebShellLanguage } from '../../i18n';
+import { immediateClipboardWrite } from '../../test/reactHarness';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 
 (
@@ -10,6 +11,10 @@ import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+const originalDocumentHidden = Object.getOwnPropertyDescriptor(
+  document,
+  'hidden',
+);
 const originalElementFromPoint = document.elementFromPoint;
 const COLUMN_DRAG_MIME = 'application/x-qwen-web-shell-table-column';
 
@@ -21,6 +26,11 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
   document.getSelection()?.removeAllRanges();
+  if (originalDocumentHidden) {
+    Object.defineProperty(document, 'hidden', originalDocumentHidden);
+  } else {
+    Reflect.deleteProperty(document, 'hidden');
+  }
   if (originalElementFromPoint) {
     Object.defineProperty(document, 'elementFromPoint', {
       configurable: true,
@@ -163,7 +173,7 @@ function textButtonContaining(
 }
 
 function mockClipboard() {
-  const writeText = vi.fn(() => Promise.resolve());
+  const writeText = vi.fn(() => immediateClipboardWrite());
   Object.defineProperty(navigator, 'clipboard', {
     configurable: true,
     value: { writeText },
@@ -866,7 +876,7 @@ describe('EnhancedMarkdownTable', () => {
     );
   });
 
-  it('stops resizing a column when page visibility changes', () => {
+  it('flushes pending resize width when the window blurs', () => {
     const container = renderTable();
     const resize = button(container, 'Resize Team');
 
@@ -880,6 +890,35 @@ describe('EnhancedMarkdownTable', () => {
       );
     });
     act(() => {
+      window.dispatchEvent(
+        new MouseEvent('mousemove', { bubbles: true, clientX: 200 }),
+      );
+      window.dispatchEvent(new Event('blur'));
+    });
+
+    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
+      '260px',
+    );
+  });
+
+  it('stops resizing a column when page visibility changes', () => {
+    const container = renderTable();
+    const resize = button(container, 'Resize Team');
+
+    act(() => {
+      resize.dispatchEvent(
+        new MouseEvent('mousedown', {
+          bubbles: true,
+          button: 0,
+          clientX: 100,
+        }),
+      );
+    });
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      value: true,
+    });
+    act(() => {
       document.dispatchEvent(new Event('visibilitychange'));
     });
     act(() => {
@@ -890,6 +929,38 @@ describe('EnhancedMarkdownTable', () => {
 
     expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
       '160px',
+    );
+  });
+
+  it('keeps resizing when page visibility changes while visible', () => {
+    const container = renderTable();
+    const resize = button(container, 'Resize Team');
+
+    act(() => {
+      resize.dispatchEvent(
+        new MouseEvent('mousedown', {
+          bubbles: true,
+          button: 0,
+          clientX: 100,
+        }),
+      );
+    });
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      value: false,
+    });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    act(() => {
+      window.dispatchEvent(
+        new MouseEvent('mousemove', { bubbles: true, clientX: 220 }),
+      );
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
+
+    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
+      '280px',
     );
   });
 
@@ -924,6 +995,25 @@ describe('EnhancedMarkdownTable', () => {
     );
   });
 
+  it('ignores keyboard resize arrows with modifiers', () => {
+    const container = renderTable();
+    const resize = button(container, 'Resize Team');
+
+    act(() => {
+      resize.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          ctrlKey: true,
+          key: 'ArrowRight',
+        }),
+      );
+    });
+
+    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
+      '160px',
+    );
+  });
+
   it('shows column move handles only for the active column', () => {
     const container = renderWideTable();
     const teamHandle = button(container, 'Move Team');
@@ -943,6 +1033,66 @@ describe('EnhancedMarkdownTable', () => {
     expect(
       button(container, 'Sort by Team, ascending').closest('th')?.className,
     ).toContain('activeHeaderCell');
+  });
+
+  it('clears the active column move handle on outside click, cell selection, and Escape', () => {
+    const container = renderWideTable();
+    const teamHandle = button(container, 'Move Team');
+
+    click(button(container, 'Sort by Team'));
+    act(() => {
+      document.body.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true }),
+      );
+    });
+    expect(teamHandle.className).not.toContain('reorderHandleVisible');
+    expect(teamHandle.tabIndex).toBe(-1);
+
+    click(button(container, 'Sort by Team, ascending'));
+    act(() => {
+      dataCell(container, 0, 0).dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+    });
+    expect(teamHandle.className).not.toContain('reorderHandleVisible');
+    expect(teamHandle.tabIndex).toBe(-1);
+
+    click(button(container, 'Sort by Team, descending'));
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }),
+      );
+    });
+    expect(teamHandle.className).not.toContain('reorderHandleVisible');
+    expect(teamHandle.tabIndex).toBe(-1);
+  });
+
+  it('keeps the active column when Escape closes an open filter menu first', () => {
+    const container = renderWideTable();
+    const teamHandle = button(container, 'Move Team');
+
+    click(button(container, 'Sort by Team'));
+    click(button(container, 'Filter Team'));
+    expect(container.textContent).toContain('Custom filter');
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }),
+      );
+    });
+
+    expect(container.textContent).not.toContain('Custom filter');
+    expect(teamHandle.className).toContain('reorderHandleVisible');
+    expect(teamHandle.tabIndex).toBe(0);
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }),
+      );
+    });
+
+    expect(teamHandle.className).not.toContain('reorderHandleVisible');
+    expect(teamHandle.tabIndex).toBe(-1);
   });
 
   it('reorders columns and quick copies in the visible order', () => {
@@ -978,7 +1128,10 @@ describe('EnhancedMarkdownTable', () => {
     const source = renderWideTable();
     const target = renderWideTable();
 
-    dragColumnElements(button(source, 'Move Score'), button(target, 'Move Team'));
+    dragColumnElements(
+      button(source, 'Move Score'),
+      button(target, 'Move Team'),
+    );
 
     expect(rowTexts(source)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);
     expect(rowTexts(target)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);
@@ -1032,6 +1185,14 @@ describe('EnhancedMarkdownTable', () => {
       button(container, 'Sort by Team').closest('th')?.className,
     ).toContain('frozenHeaderCell');
     expect(dataCell(container, 0, 0).className).toContain('frozenCell');
+
+    click(button(container, 'Sort by Team'));
+    expect(
+      button(container, 'Sort by Team, ascending').closest('th')?.className,
+    ).toContain('activeHeaderCell');
+    expect(
+      button(container, 'Sort by Team, ascending').closest('th')?.className,
+    ).toContain('frozenHeaderCell');
 
     dragColumn(container, 'Move Score', 'Move Team');
     expect(

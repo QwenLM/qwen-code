@@ -1009,6 +1009,26 @@ export class BackgroundTaskRegistry {
   }
 
   /**
+   * True while any background entry is still actually executing. Unlike
+   * `hasUnfinalizedTasks()`, a `cancelled`-but-not-yet-finalized entry
+   * does NOT count: its work has already been aborted and only the
+   * terminal task-notification is outstanding. Session-switch gates
+   * (/clear, /resume) key off this instead — they abort-and-reset the
+   * registry right after passing the gate, which suppresses that very
+   * notification, so blocking on it made the command silently no-op
+   * when the user cleared immediately after cancelling (issue #5949).
+   * Headless holdback loops must keep using `hasUnfinalizedTasks()` so
+   * every task_started still pairs with a task_notification.
+   */
+  hasRunningTasks(): boolean {
+    for (const entry of this.agents.values()) {
+      if (!entry.isBackgrounded) continue;
+      if (entry.status === 'running') return true;
+    }
+    return false;
+  }
+
+  /**
    * Drops every in-memory entry without touching sidecar state.
    *
    * Used only when switching to a different session after the caller has

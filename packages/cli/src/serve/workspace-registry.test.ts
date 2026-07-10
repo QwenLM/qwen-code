@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { SessionNotFoundError } from './acp-session-bridge.js';
 import {
+  createWorkspaceSessionOwnerIndex,
   createWorkspaceRegistry,
   createSingleWorkspaceRegistry,
   type WorkspaceRuntime,
@@ -162,6 +163,77 @@ describe('createWorkspaceRegistry', () => {
     });
   });
 
+  it('uses the session owner index before scanning runtime bridges', () => {
+    const primarySummary = vi.fn(() => {
+      throw new SessionNotFoundError('sess-secondary');
+    });
+    const secondarySummary = vi.fn((sessionId: string) => ({
+      sessionId,
+      workspaceCwd: '/work/secondary',
+    }));
+    const primary = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      bridge: bridgeWithSummary(primarySummary),
+    });
+    const secondary = makeRuntime('/work/secondary', {
+      workspaceId: 'ws-secondary',
+      bridge: bridgeWithSummary(secondarySummary),
+    });
+    const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
+    sessionOwnerIndex.register('sess-secondary', '/work/secondary');
+
+    const registry = createWorkspaceRegistry([primary, secondary], {
+      sessionOwnerIndex,
+    });
+
+    expect(registry.resolveLiveSessionOwner('sess-secondary')).toEqual({
+      kind: 'found',
+      runtime: secondary,
+    });
+    expect(primarySummary).not.toHaveBeenCalled();
+    expect(secondarySummary).toHaveBeenCalledWith('sess-secondary');
+  });
+
+  it('drops stale indexed owners and caches the fallback scan result', () => {
+    const primarySummary = vi.fn((sessionId: string) => ({
+      sessionId,
+      workspaceCwd: '/work/primary',
+    }));
+    const secondarySummary = vi.fn(() => {
+      throw new SessionNotFoundError('stale');
+    });
+    const primary = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      bridge: bridgeWithSummary(primarySummary),
+    });
+    const secondary = makeRuntime('/work/secondary', {
+      workspaceId: 'ws-secondary',
+      bridge: bridgeWithSummary(secondarySummary),
+    });
+    const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
+    sessionOwnerIndex.register('stale', '/work/secondary');
+
+    const registry = createWorkspaceRegistry([primary, secondary], {
+      sessionOwnerIndex,
+    });
+
+    expect(registry.resolveLiveSessionOwner('stale')).toEqual({
+      kind: 'found',
+      runtime: primary,
+    });
+    expect(primarySummary).toHaveBeenCalledTimes(1);
+    expect(secondarySummary).toHaveBeenCalledTimes(2);
+
+    expect(registry.resolveLiveSessionOwner('stale')).toEqual({
+      kind: 'found',
+      runtime: primary,
+    });
+    expect(primarySummary).toHaveBeenCalledTimes(2);
+    expect(secondarySummary).toHaveBeenCalledTimes(2);
+  });
+
   it('fails closed when live session owner resolution is ambiguous', () => {
     const first = makeRuntime('/work/primary', {
       workspaceId: 'ws-primary',
@@ -200,5 +272,36 @@ describe('createWorkspaceRegistry', () => {
     const registry = createWorkspaceRegistry([primary]);
 
     expect(() => registry.resolveLiveSessionOwner('sess')).toThrow(lookupError);
+  });
+
+  it('does not cache partial scan results when live owner scan fails', () => {
+    const lookupError = new Error('bridge unavailable');
+    const primarySummary = vi.fn((sessionId: string) => ({
+      sessionId,
+      workspaceCwd: '/work/primary',
+    }));
+    const secondarySummary = vi.fn(() => {
+      throw lookupError;
+    });
+    const primary = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      bridge: bridgeWithSummary(primarySummary),
+    });
+    const secondary = makeRuntime('/work/secondary', {
+      workspaceId: 'ws-secondary',
+      bridge: bridgeWithSummary(secondarySummary),
+    });
+    const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
+    const registry = createWorkspaceRegistry([primary, secondary], {
+      sessionOwnerIndex,
+    });
+
+    expect(() => registry.resolveLiveSessionOwner('sess')).toThrow(lookupError);
+    expect(sessionOwnerIndex.getWorkspaceCwds('sess')).toEqual([]);
+
+    expect(() => registry.resolveLiveSessionOwner('sess')).toThrow(lookupError);
+    expect(primarySummary).toHaveBeenCalledTimes(2);
+    expect(secondarySummary).toHaveBeenCalledTimes(2);
   });
 });

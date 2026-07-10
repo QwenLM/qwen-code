@@ -8,22 +8,25 @@ name: 'Qwen Autofix'
 # The lifecycle is asynchronous — a PR is opened in one run and its review is
 # addressed in a later run once a reviewer has weighed in — so each scheduled
 # tick runs only the phase(s) that make sense, decided by the `route` job:
-#   • every 4h             → review phase (sweep the bot's open PRs)
-#   • every 12h (00/12 UTC) → also the issue phase (locate + fix one new bug)
+#   • every 10m            → review phase; issue phase only if no PR needs work
 #   • issues:labeled        → issue phase when ready label, state, and sender match
+#   • pull_request_review   → review phase for submitted feedback on bot PRs
 #   • workflow_dispatch     → force a phase, an issue, or a PR
 #
 # Every GitHub write (issue/PR comments, labels, branch push, PR create) goes
-# through CI_DEV_BOT_PAT so the bot acts as a single identity, qwen-code-dev-bot.
+# through CI_DEV_BOT_PAT so the bot acts as the configured autofix identity.
 # PAT label writes can emit issues:labeled events; the route guards below make
 # those runs exit unless the label, issue state, and ready label all match.
 on:
   issues:
     types:
       - 'labeled'
+      - 'assigned'
+  pull_request_review:
+    types:
+      - 'submitted'
   schedule:
-    - cron: '0 0,12 * * *' # Issue + review every 12h; must match route SCHEDULE check
-    - cron: '0 4,8,16,20 * * *' # Review only between issue runs
+    - cron: '*/10 * * * *' # Review first; issue fallback only when no PR needs work
   workflow_dispatch:
     inputs:
       phase:
@@ -41,7 +44,7 @@ on:
         required: false
         type: 'string'
       pr_number:
-        description: 'Force a specific autofix PR number (implies the review phase)'
+        description: 'Force a specific bot PR number (implies the review phase)'
         required: false
         type: 'string'
       dry_run:
@@ -58,9 +61,11 @@ permissions:
   contents: 'read'
 
 env:
-  # Identity of the autofix bot and the branches it owns. Only its own in-repo
-  # PRs are ever eligible for the review phase — never a fork or another branch.
-  AUTOFIX_BOT: 'qwen-code-dev-bot'
+  # Identity of the autofix bot. All open in-repo PRs authored by this bot are
+  # eligible for the review phase — not limited to autofix/issue-* branches.
+  AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
+  # Branch-name prefix used by the issue phase when creating PRs. Also used
+  # for duplicate-PR detection and issue-number extraction from branch names.
   BRANCH_PREFIX: 'autofix/issue-'
   # The automated Qwen PR reviewer posts as this account; its review counts as
   # actionable feedback even though it is not a human collaborator.
@@ -71,7 +76,9 @@ env:
   TRUSTED_ASSOC: '["OWNER", "MEMBER", "COLLABORATOR"]'
   # Hard cap on automated review-address rounds per PR. After this the bot stops
   # and leaves the PR for a human.
-  MAX_ROUNDS: '3'
+  MAX_ROUNDS: '5'
+  # Do not claim more issues when too many existing autofix PRs are still open.
+  MAX_OPEN_AUTOFIX_PRS: '5'
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -82,6 +89,9 @@ jobs:
       ${{ github.repository == 'QwenLM/qwen-code' }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
+    concurrency:
+      group: 'qwen-autofix-route'
+      cancel-in-progress: true
     permissions:
       contents: 'read'
     outputs:
@@ -109,7 +119,12 @@ jobs:
           AUTOFIX_APPROVED_LABEL: 'autofix/approved'
           REPO: '${{ github.repository }}'
           SENDER_LOGIN: '${{ github.event.sender.login }}'
+          ASSIGNEE_LOGIN: '${{ github.event.assignee.login }}'
           SCHEDULE: '${{ github.event.schedule }}'
+          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
+          PR_NUMBER_EVENT: '${{ github.event.pull_request.number }}'
+          PR_HEAD_REPO: '${{ github.event.pull_request.head.repo.full_name }}'
+          PR_BASE_REF: '${{ github.event.pull_request.base.ref }}'
         run: |-
           DO_ISSUE=false
           DO_REVIEW=false
@@ -137,14 +152,58 @@ jobs:
               if [[ "${EVENT_NAME}" == 'schedule' || "${EVENT_NAME}" == 'workflow_dispatch' ]]; then
                 DO_REVIEW=true
               fi
-              # Must match the issue-phase cron string on the schedule trigger.
-              if [[ "${EVENT_NAME}" == 'schedule' && "${SCHEDULE}" == '0 0,12 * * *' ]]; then
+              # Scheduled runs scan review PRs first; issue-autofix runs only
+              # when review-scan reports no target.
+              if [[ "${EVENT_NAME}" == 'schedule' ]]; then
                 DO_ISSUE=true
+              fi
+              # Real-time review triggers: only process in-repo bot PRs with
+              # reviews from trusted senders (collaborators or the review bot).
+              # This prevents arbitrary commenters from forcing expensive
+              # review-scan runs. Only pull_request_review:submitted triggers
+              # (not per-comment events) to avoid redundant runs on multi-comment
+              # reviews.
+              if [[ "${EVENT_NAME}" == 'pull_request_review' ]]; then
+                DO_ISSUE=false
+                if [[ "${PR_AUTHOR}" != "${AUTOFIX_BOT}" ]]; then
+                  echo "🧭 review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}"
+                elif [[ "${PR_HEAD_REPO}" != "${REPO}" ]]; then
+                  echo "🧭 review event ignored: PR is a fork (${PR_HEAD_REPO} != ${REPO})"
+                elif [[ "${PR_BASE_REF}" != "main" ]]; then
+                  echo "🧭 review event ignored: PR targets '${PR_BASE_REF}' not 'main'"
+                else
+                  # Verify the reviewer/commenter is trusted (prompt-injection gate).
+                  sender_permission=''
+                  sender_is_trusted=false
+                  if [[ "${SENDER_LOGIN}" == "${REVIEW_BOT}" ]]; then
+                    sender_is_trusted=true
+                  elif [[ -n "${SENDER_LOGIN}" ]]; then
+                    api_error_file="$(mktemp)"
+                    if sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>"${api_error_file}")"; then
+                      case "${sender_permission}" in
+                        admin|maintain|write) sender_is_trusted=true ;;
+                      esac
+                    else
+                      api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+                      echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error:-unknown error}"
+                      sender_permission=''
+                    fi
+                    rm -f "${api_error_file}"
+                  fi
+                  if [[ "${sender_is_trusted}" == "true" ]]; then
+                    DO_REVIEW=true
+                    ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"
+                    echo "🧭 review event on bot PR #${PR_NUMBER_EVENT} by ${SENDER_LOGIN} (${sender_permission:-review-bot}) → review phase"
+                  else
+                    echo "🧭 review event ignored: sender '${SENDER_LOGIN}' permission='${sender_permission:-none}' is not trusted"
+                  fi
+                fi
               fi
               if [[ "${EVENT_NAME}" == 'issues' ]]; then
                 DO_REVIEW=false
                 label_is_trigger=false
                 [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true
+                [[ "${ASSIGNEE_LOGIN}" == "${AUTOFIX_BOT}" ]] && label_is_trigger=true
                 if [[ "${label_is_trigger}" != 'true' ]]; then
                   echo "🧭 issue event ignored: trigger_label=false label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
                 else
@@ -190,19 +249,23 @@ jobs:
           echo "dry_run=${DRY_RUN}" >> "${GITHUB_OUTPUT}"
           echo "issue_number=${ROUTE_ISSUE}" >> "${GITHUB_OUTPUT}"
           echo "pr_number=${ROUTE_PR}" >> "${GITHUB_OUTPUT}"
-          echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' schedule='${SCHEDULE:-n/a}' dry_run=${DRY_RUN} → issue=${DO_ISSUE} review=${DO_REVIEW}"
+          echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' pr='#${PR_NUMBER_EVENT:-n/a}' schedule='${SCHEDULE:-n/a}' dry_run=${DRY_RUN} → issue=${DO_ISSUE} review=${DO_REVIEW}"
 
   # ===========================================================================
   # ISSUE PHASE — locate one maintainer-ready issue, fix it, open a PR.
   # ===========================================================================
   issue-autofix:
-    needs: 'route'
+    needs: ['route', 'review-scan']
     if: |-
-      ${{ needs.route.outputs.do_issue == 'true' }}
+      ${{
+        always() &&
+        needs.route.outputs.do_issue == 'true' &&
+        (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true'))
+      }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 180
     concurrency:
-      group: 'qwen-autofix-issue'
+      group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'
       cancel-in-progress: false
     permissions:
       contents: 'read'
@@ -215,7 +278,7 @@ jobs:
       AUTOFIX_ISSUE_EXCLUDES: 'no:assignee -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -319,6 +382,7 @@ jobs:
           FORCED_ISSUE: '${{ needs.route.outputs.issue_number || github.event.issue.number }}'
         run: |-
           mkdir -p "${WORKDIR}"
+          OPEN_AUTOFIX_PR_COUNT=0
 
           if [[ -n "${FORCED_ISSUE}" ]]; then
             echo "🎯 Forced issue #${FORCED_ISSUE}"
@@ -354,34 +418,51 @@ jobs:
               fi
             fi
           else
-            echo "🔍 Ready-for-agent issues (newest first)..."
-            if ! gh issue list --repo "${REPO}" \
+            if ! gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
+              --limit 100 --json number,headRefName,isCrossRepository > "${WORKDIR}/open-autofix-prs.json"; then
+              echo "::warning::Open autofix PR scan failed; proceeding without WIP-cap enforcement."
+            else
+              OPEN_AUTOFIX_PR_COUNT="$(jq --arg p "${BRANCH_PREFIX}" \
+                '[.[] | select((.isCrossRepository != true) and ((.headRefName // "") | startswith($p)))] | length' \
+                "${WORKDIR}/open-autofix-prs.json")"
+            fi
+
+            if [[ "${OPEN_AUTOFIX_PR_COUNT}" -ge "${MAX_OPEN_AUTOFIX_PRS}" ]]; then
+              echo "⏭️ ${OPEN_AUTOFIX_PR_COUNT} open autofix PR(s) already exist; WIP limit is ${MAX_OPEN_AUTOFIX_PRS}; skipping issue fallback."
+              jq -n -c '[]' > "${WORKDIR}/candidates.json"
+            else
+              echo "🔍 Ready-for-agent issues (newest first)..."
+              if ! gh issue list --repo "${REPO}" \
               --search "is:open is:issue label:${READY_FOR_AGENT_LABEL} label:${AUTOFIX_APPROVED_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}" \
               --limit 30 --json number,title,body,labels,createdAt,url \
               > "${WORKDIR}/scan.json"; then
-              echo "::warning::Ready-for-agent issue scan failed; falling back to an empty candidate list."
-              jq -n -c '[]' > "${WORKDIR}/candidates.json"
-            else
-              if ! jq -c '.[0:10] | map(. + {autofixTier: 1})' \
-                "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"; then
-                echo "::warning::Ready-for-agent result processing failed; falling back to an empty candidate list."
+                echo "::warning::Ready-for-agent issue scan failed; falling back to an empty candidate list."
                 jq -n -c '[]' > "${WORKDIR}/candidates.json"
+              else
+                if ! jq -c '.[0:10] | map(. + {autofixTier: 1})' \
+                  "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"; then
+                  echo "::warning::Ready-for-agent result processing failed; falling back to an empty candidate list."
+                  jq -n -c '[]' > "${WORKDIR}/candidates.json"
+                fi
               fi
             fi
           fi
 
           COUNT="$(jq length "${WORKDIR}/candidates.json")"
           if [[ "${COUNT}" -gt 0 ]]; then
-            if ! gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
-              --limit 100 --json number,headRefName > "${WORKDIR}/open-autofix-prs.json"; then
+            if [[ -s "${WORKDIR}/open-autofix-prs.json" ]]; then
+              echo "ℹ️ Reusing open autofix PR scan for duplicate-PR annotation."
+            elif ! gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
+              --limit 100 --json number,headRefName,isCrossRepository > "${WORKDIR}/open-autofix-prs.json"; then
               echo "::warning::Open autofix PR scan failed; candidates will proceed without duplicate-PR annotation."
-            else
+            fi
+            if [[ -s "${WORKDIR}/open-autofix-prs.json" ]]; then
               if ! jq -c --arg p "${BRANCH_PREFIX}" --slurpfile prs "${WORKDIR}/open-autofix-prs.json" '
                 ($prs[0] // []) as $prs
                 | map(
                     ($p + (.number | tostring)) as $branch
                     | (
-                        first($prs[] | select((.headRefName // "") == $branch) | {
+                        first($prs[] | select((.isCrossRepository != true) and ((.headRefName // "") == $branch)) | {
                           number,
                           headRefName
                         }) // null
@@ -752,8 +833,8 @@ jobs:
         if: |-
           ${{ steps.decision.outputs.go_issue != '' && needs.route.outputs.dry_run != 'true' }}
         env:
-          # CI_DEV_BOT_PAT (the qwen-code-dev-bot PAT) opens the PR as
-          # qwen-code-dev-bot. This is required: the default GITHUB_TOKEN is
+          # CI_DEV_BOT_PAT opens the PR as the configured autofix bot. This is
+          # required: the default GITHUB_TOKEN is
           # blocked from creating PRs ("GitHub Actions is not permitted to
           # create or approve pull requests"), and PRs it does create do not
           # trigger CI. The bot PAT clears both problems.
@@ -761,7 +842,7 @@ jobs:
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
         run: |-
           if [[ -z "${GITHUB_TOKEN}" ]]; then
-            echo '::error::CI_DEV_BOT_PAT is required to publish the PR as qwen-code-dev-bot.'
+            echo '::error::CI_DEV_BOT_PAT is required to publish the PR as the autofix bot.'
             exit 1
           fi
           api_error_file="$(mktemp)"
@@ -849,8 +930,8 @@ jobs:
           fi
 
   # ===========================================================================
-  # REVIEW PHASE (scan) — find every autofix PR with new, unaddressed feedback
-  # (or a base conflict) and emit them as a matrix. Cheap: GitHub API only.
+  # REVIEW PHASE (scan) — find one autofix PR with new, unaddressed feedback
+  # (or a base conflict) and emit it as a matrix. Cheap: GitHub API only.
   # ===========================================================================
   review-scan:
     needs: 'route'
@@ -872,35 +953,54 @@ jobs:
         run: |-
           WORKDIR="$(mktemp -d)"
 
-          # Candidate PRs: open, authored by the autofix bot, on autofix/issue-*.
-          # A forced PR must still pass these checks.
+          # Candidate PRs: open, same-repo, targeting main, authored by the
+          # dev-bot. A forced PR must still pass all these checks.
           if [[ -n "${FORCED_PR}" ]]; then
             META="$(gh pr view "${FORCED_PR}" --repo "${REPO}" \
-              --json number,state,author,headRefName 2> /dev/null || echo '{}')"
-            OK="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg p "${BRANCH_PREFIX}" \
+              --json number,state,author,headRefName,isCrossRepository,baseRefName 2> /dev/null || echo '{}')"
+            OK="$(jq -r --arg ab "${AUTOFIX_BOT}" \
               '(((.state // "") == "OPEN")
                  and ((.author.login // "") == $ab)
-                 and ((.headRefName // "") | startswith($p)))' <<< "${META}")"
+                 and ((.isCrossRepository // true) | not)
+                 and ((.baseRefName // "") == "main"))' <<< "${META}")"
             if [[ "${OK}" != "true" ]]; then
-              echo "❌ #${FORCED_PR} is not an open autofix PR owned by ${AUTOFIX_BOT}"
+              echo "❌ #${FORCED_PR} is not an open in-repo main-targeting PR owned by ${AUTOFIX_BOT}"
+              echo "targets=[]" >> "${GITHUB_OUTPUT}"
               echo "has_targets=false" >> "${GITHUB_OUTPUT}"
               exit 0
             fi
             CANDIDATES="${FORCED_PR}"
           else
             gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
-              --limit 100 --json number,headRefName > "${WORKDIR}/bot-prs.json"
-            CANDIDATES="$(jq -r --arg p "${BRANCH_PREFIX}" \
-              '.[] | select(.headRefName | startswith($p)) | .number' \
+              --base main \
+              --limit 100 --json number,headRefName,isCrossRepository > "${WORKDIR}/bot-prs.json"
+            CANDIDATES="$(jq -r \
+              '.[] | select(.isCrossRepository != true) | .number' \
               "${WORKDIR}/bot-prs.json")"
           fi
 
           TARGETS='[]'
           for PR in ${CANDIDATES}; do
             BRANCH="$(gh pr view "${PR}" --repo "${REPO}" --json headRefName --jq '.headRefName')"
-            ISSUE="${BRANCH#"${BRANCH_PREFIX}"}"
+            # Extract issue number: autofix/issue-<N> → N; otherwise use PR number.
+            if [[ "${BRANCH}" == "${BRANCH_PREFIX}"* ]]; then
+              ISSUE="${BRANCH#"${BRANCH_PREFIX}"}"
+            else
+              ISSUE="${PR}"
+            fi
             HEAD_SHA="$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha')"
-
+            CHECKS_JSON="$(gh pr view "${PR}" --repo "${REPO}" \
+              --json statusCheckRollup --jq '.statusCheckRollup // []' 2> /dev/null || echo '[]')"
+            HAS_PENDING_CHECKS="$(jq -r '
+              [ .[]
+                | select((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))
+                | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address")))) ]
+              | length > 0
+            ' <<< "${CHECKS_JSON}")"
+            if [[ "${HAS_PENDING_CHECKS}" == "true" ]]; then
+              echo "⏳ #${PR}: PR has pending checks; skipping until the current verification finishes"
+              continue
+            fi
             # Push watermark: the PR's last push. Feedback older than this was in
             # front of the agent on a previous round.
             PUSH_WM="$(gh api "repos/${REPO}/commits/${HEAD_SHA}" --jq '.commit.committer.date')"
@@ -924,6 +1024,13 @@ jobs:
               echo "🚧 #${PR}: hit MAX_ROUNDS (${ROUND}/${MAX_ROUNDS}) — leaving for a human"
               continue
             fi
+            N_FAILED_CHECKS="$(jq --arg wm "${EFF_WM}" '
+              [ .[]
+                | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
+                | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
+                | select((.completedAt // .updatedAt // "") > $wm) ]
+              | length
+            ' <<< "${CHECKS_JSON}")"
 
             gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate > "${WORKDIR}/rv.json"
             gh api "repos/${REPO}/pulls/${PR}/comments" --paginate > "${WORKDIR}/rc.json"
@@ -935,13 +1042,35 @@ jobs:
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
                 | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED")) ] | length' \
               "${WORKDIR}/rv.json")"
+            # /review posts Suggestion-level findings as inline comments prefixed
+            # `**[Suggestion]**`. They are recommendations, not blockers — keep them
+            # out of the autofix loop, exactly as the suggestion-summary comment they
+            # replaced always was. Anchored to the body start and paired with the
+            # /review footer so a human comment that merely quotes the prefix stays
+            # actionable. jq's `^` is string-anchored, so tolerate leading whitespace
+            # the review model may emit; `**[Critical]**` can never match either way.
+            QWEN_SUGGESTION_FILTER='^[[:space:]]*\*\*\[Suggestion\]\*\*'
             N_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson trust "${TRUSTED_ASSOC}" --arg sf "${QWEN_SUGGESTION_FILTER}" '
               [ .[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
-                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb) ] | length' \
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((((.body // "") | test($sf)) and ((.body // "") | test("via Qwen Code /review"))) | not) ] | length' \
               "${WORKDIR}/rc.json")"
+            # Issue-level PR comments are also actionable feedback. Exclude the
+            # bot's own eval markers, and known non-actionable bot comments
+            # (triage stages, coverage reports, legacy suggestion summaries,
+            # force-push reminders).
+            BOT_COMMENT_FILTER='<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) '
+            N_ISSUE_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+              --argjson trust "${TRUSTED_ASSOC}" --arg bf "${BOT_COMMENT_FILTER}" '
+              [ .[]
+                | select((.created_at // "") > $wm)
+                | select((.user.login // "") != $ab)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((.body // "") | test($bf) | not) ] | length' \
+              "${WORKDIR}/ic.json")"
 
             # mergeable: GitHub may report UNKNOWN until it recomputes; treat only
             # an explicit CONFLICTING as a conflict so we never block on UNKNOWN.
@@ -949,17 +1078,18 @@ jobs:
             HAS_CONFLICT='false'
             if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then HAS_CONFLICT='true'; fi
 
-            if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
+            if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${N_FAILED_CHECKS}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
               echo "✅ #${PR}: nothing new since ${EFF_WM} (conflict=${HAS_CONFLICT})"
               continue
             fi
 
-            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} comment(s) new, conflict=${HAS_CONFLICT}, round=${ROUND}"
+            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) + ${N_FAILED_CHECKS} failed check(s) new, conflict=${HAS_CONFLICT}, round=${ROUND}"
             TARGETS="$(jq -c \
               --arg pr "${PR}" --arg branch "${BRANCH}" --arg issue "${ISSUE}" \
               --arg round "${ROUND}" --arg wm "${EFF_WM}" \
               '. + [{pr: $pr, branch: $branch, issue: $issue, round: $round, watermark: $wm}]' \
               <<< "${TARGETS}")"
+            break # one PR per scheduled scan
           done
 
           COUNT="$(jq 'length' <<< "${TARGETS}")"
@@ -996,9 +1126,15 @@ jobs:
       ROUND: '${{ matrix.target.round }}'
       WATERMARK: '${{ matrix.target.watermark }}'
     steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+      # SECURITY: checkout trusted base code first. The PR branch is checked
+      # out later in "Prepare branch and feedback" after the trusted CLI bundle
+      # is built from this base. Without this pin, pull_request_review events
+      # would check out the PR merge ref by default, letting PR-controlled
+      # code influence the secret-bearing address run.
+      - name: 'Checkout trusted base'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
+          ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
           persist-credentials: false
 
@@ -1102,9 +1238,15 @@ jobs:
 
           gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate > "${WORKDIR}/rv.json"
           gh api "repos/${REPO}/pulls/${PR}/comments" --paginate > "${WORKDIR}/rc.json"
+          gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"
+          gh pr view "${PR}" --repo "${REPO}" \
+            --json statusCheckRollup --jq '.statusCheckRollup // []' > "${WORKDIR}/checks.json" \
+            2> /dev/null || echo '[]' > "${WORKDIR}/checks.json"
 
           # Newest actionable feedback timestamp — stamped into the eval marker so
           # the next scan knows everything up to here has been considered.
+          # Includes reviews, inline review comments, and issue-level PR comments
+          # (excluding the bot's own eval markers).
           NEWEST="$(jq -rs \
             --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
             --argjson trust "${TRUSTED_ASSOC}" '
@@ -1115,13 +1257,23 @@ jobs:
             + (.[1] | map(select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb) | .created_at))
-            | max // ""' "${WORKDIR}/rv.json" "${WORKDIR}/rc.json")"
+            + (.[2] | map(select((.created_at // "") > $wm)
+              | select((.user.login // "") != $ab)
+              | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+              | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not) | .created_at))
+            + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
+              | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
+              | select((.completedAt // .updatedAt // "") > $wm)
+              | (.completedAt // .updatedAt // "")))
+            | max // ""' "${WORKDIR}/rv.json" "${WORKDIR}/rc.json" "${WORKDIR}/ic.json" "${WORKDIR}/checks.json")"
           [[ -z "${NEWEST}" ]] && NEWEST="${WATERMARK}"
           echo "newest=${NEWEST}" >> "${GITHUB_OUTPUT}"
 
           # Render the actionable feedback into one prompt-ready file.
           {
-            echo "# Review feedback to triage on PR #${PR} (issue #${ISSUE})"
+            ISSUE_REF=""
+            [[ "${ISSUE}" != "${PR}" ]] && ISSUE_REF=" (issue #${ISSUE})"
+            echo "# Review feedback to triage on PR #${PR}${ISSUE_REF}"
             echo
             echo "Only feedback newer than the last evaluation (${WATERMARK}) from"
             echo "trusted maintainers or the automated reviewer is listed."
@@ -1138,14 +1290,37 @@ jobs:
               "${WORKDIR}/rv.json"
             echo
             echo "## Inline comments"
+            # Mirrors the review-scan gate: /review `**[Suggestion]**` findings are
+            # recommendations, not blockers, so they never become autofix work.
+            jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+              --argjson trust "${TRUSTED_ASSOC}" --arg sf '^[[:space:]]*\*\*\[Suggestion\]\*\*' '
+              .[]
+              | select((.created_at // "") > $wm)
+              | select((.user.login // "") != $ab)
+              | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+              | select((((.body // "") | test($sf)) and ((.body // "") | test("via Qwen Code /review"))) | not)
+              | "- \(.path // "?"):\(.line // "?") @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
+              "${WORKDIR}/rc.json"
+            echo
+            echo "## Issue-level comments"
             jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" '
               .[]
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | "- \(.path // "?"):\(.line // "?") @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
-              "${WORKDIR}/rc.json"
+              | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | "- @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
+              "${WORKDIR}/ic.json"
+            echo
+            echo "## Failed checks"
+            jq -r --arg wm "${WATERMARK}" '
+              .[]
+              | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
+              | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
+              | select((.completedAt // .updatedAt // "") > $wm)
+              | "- \((.workflowName // "external check") | gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]): \(.conclusion // .state // "?")"' \
+              "${WORKDIR}/checks.json"
           } > "${WORKDIR}/feedback.md"
           echo '--- feedback.md ---'
           cat "${WORKDIR}/feedback.md"
@@ -1364,7 +1539,9 @@ jobs:
           gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md"
 
           {
-            echo "### PR #${PR} (issue #${ISSUE}) — ${STATUS}"
+            ISSUE_REF=""
+            [[ "${ISSUE}" != "${PR}" ]] && ISSUE_REF=" (issue #${ISSUE})"
+            echo "### PR #${PR}${ISSUE_REF} — ${STATUS}"
             echo "- Base conflict: ${CONFLICT}"
             echo
             if [[ "${OUTCOME}" == "fixed" ]]; then
@@ -1388,7 +1565,9 @@ jobs:
           SUFFIX=''
           [[ "${DRY_RUN}" == "true" ]] && SUFFIX=' (dry-run, nothing pushed)'
           {
-            echo "### PR #${PR} (issue #${ISSUE}) — outcome=${OUTCOME:-unknown}${SUFFIX}"
+            ISSUE_REF=""
+            [[ "${ISSUE}" != "${PR}" ]] && ISSUE_REF=" (issue #${ISSUE})"
+            echo "### PR #${PR}${ISSUE_REF} — outcome=${OUTCOME:-unknown}${SUFFIX}"
             echo "- Base conflict: ${CONFLICT:-unknown}"
             echo
             for f in address-summary.md no-action.md failure.md handoff.md; do

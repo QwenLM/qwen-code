@@ -57,6 +57,13 @@ vi.mock('@qwen-code/channel-base', async () => {
       protected name: string;
       handleInbound = vi.fn().mockResolvedValue(undefined);
       onSessionDied(_sessionId: string): void {}
+      protected logDebugPayload(platform: string, payload: unknown): void {
+        (
+          real.ChannelBase.prototype as unknown as {
+            logDebugPayload(platform: string, payload: unknown): void;
+          }
+        ).logDebugPayload.call(this, platform, payload);
+      }
 
       constructor(
         name: string,
@@ -89,6 +96,7 @@ function createChannel(): DingtalkChannelInstance {
       sessionScope: 'user',
       cwd: '/tmp',
       groupPolicy: 'open',
+      dmPolicy: 'open',
       groups: {},
     },
     {} as never,
@@ -683,6 +691,50 @@ describe('DingtalkChannel unroutable-message logging', () => {
 });
 
 describe('DingtalkChannel parsed-message logging', () => {
+  it('logs debug payloads when enabled for the channel', () => {
+    const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+    process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'test-dingtalk';
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'debug-m1',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        text: { content: '@qwen-code hello' },
+      }),
+      headers: { messageId: 'debug-m1' },
+    } as unknown as DWClientDownStream;
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    let logged = '';
+
+    try {
+      (
+        channel as unknown as { onMessage(d: DWClientDownStream): void }
+      ).onMessage(downstream);
+      logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    } finally {
+      if (oldDebugPayload === undefined) {
+        delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      } else {
+        process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+      }
+      writeSpy.mockRestore();
+    }
+
+    expect(logged).toContain('[DingTalk:test-dingtalk] debug payload');
+    expect(logged).toContain('"msgId":"debug-m1"');
+    expect(logged).toContain('"sessionWebhook":"[redacted]"');
+    expect(logged).not.toContain('access_token=token');
+  });
+
   it('logs parsed routing and sender fields for routable group messages', () => {
     const channel = createChannel();
     const downstream = {
@@ -951,6 +1003,88 @@ describe('DingtalkChannel sender attribution', () => {
       expect.objectContaining({
         senderId: 'staff-1',
         senderName: 'staff-1',
+      }),
+    );
+  });
+
+  it('passes mention-stripped text with platform format characters to base', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'm1',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        text: { content: '@qwen-code 查看记忆\u200b' },
+      }),
+      headers: { messageId: 'm1' },
+    } as unknown as DWClientDownStream;
+
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+    writeSpy.mockRestore();
+
+    const handleInbound = (
+      channel as unknown as {
+        handleInbound: ReturnType<typeof vi.fn>;
+      }
+    ).handleInbound;
+
+    expect(handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '查看记忆\u200b',
+        isGroup: true,
+        isMentioned: true,
+      }),
+    );
+  });
+
+  it('does not consume text after a mention followed by a format character', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'm1',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        text: { content: '@qwen-code\u200b查看记忆' },
+      }),
+      headers: { messageId: 'm1' },
+    } as unknown as DWClientDownStream;
+
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+    writeSpy.mockRestore();
+
+    const handleInbound = (
+      channel as unknown as {
+        handleInbound: ReturnType<typeof vi.fn>;
+      }
+    ).handleInbound;
+
+    expect(handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '\u200b查看记忆',
+        isGroup: true,
+        isMentioned: true,
       }),
     );
   });
