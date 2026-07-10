@@ -28,6 +28,7 @@ import type {
   DaemonEvent,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
+  DaemonSessionContinueResult,
   BranchSessionRequest,
   DaemonBranchedSession,
   DaemonForkSessionResult,
@@ -2102,6 +2103,24 @@ export class DaemonClient {
     );
     if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/recap');
     return (await res.json()) as DaemonSessionRecapResult;
+  }
+
+  async continueSession(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionContinueResult> {
+    const res = await this.transport.fetch(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/continue`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: '{}',
+      },
+    );
+    if (!res.ok) {
+      throw await this.failOnError(res, 'POST /session/:id/continue');
+    }
+    return (await res.json()) as DaemonSessionContinueResult;
   }
 
   async btwSession(

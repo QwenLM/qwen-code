@@ -2155,6 +2155,13 @@ export interface DaemonSessionRecapResult {
   recap: string | null;
 }
 
+export interface DaemonSessionContinueResult {
+  accepted: boolean;
+  interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+  promptId?: string;
+  lastEventId?: number;
+}
+
 export interface DaemonSessionBtwResult {
   sessionId: string;
   answer: string | null;
