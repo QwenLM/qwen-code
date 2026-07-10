@@ -385,9 +385,9 @@ describe('cronTextHandler', () => {
     pvt['_ready'] = true;
     pvt['_inCronFlow'] = 1;
 
-    // First call fails with FALLBACK_FAILED
+    // First call fails with RATE_LIMITED
     mockSendQQMessage.mockRejectedValueOnce(
-      new DeliveryError('FALLBACK_FAILED', 'fallback failed'),
+      new DeliveryError('RATE_LIMITED', 'rate limited'),
     );
 
     const stderrSpy = vi

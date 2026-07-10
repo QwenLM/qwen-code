@@ -160,6 +160,7 @@ export class QQChannel extends ChannelBase {
       buffer: string;
       timer: ReturnType<typeof setTimeout> | null;
       pendingRetry?: string;
+      retryCount?: number;
     }
   > = new Map();
 
@@ -333,12 +334,14 @@ export class QQChannel extends ChannelBase {
                 );
                 if (
                   code === 'RETRY_EXHAUSTED' ||
-                  code === 'ACTIVE_MSG_DISABLED'
+                  code === 'ACTIVE_MSG_DISABLED' ||
+                  code === 'FALLBACK_FAILED'
                 ) {
                   this.cronBuffer.delete(sessionId);
                   return;
                 }
                 entry!.pendingRetry = toFlush;
+                entry!.retryCount = 1;
                 if (entry!.timer) {
                   clearTimeout(entry!.timer);
                 }
@@ -379,7 +382,8 @@ export class QQChannel extends ChannelBase {
                       entry!.pendingRetry = '';
                       if (
                         retryCode === 'RETRY_EXHAUSTED' ||
-                        retryCode === 'ACTIVE_MSG_DISABLED'
+                        retryCode === 'ACTIVE_MSG_DISABLED' ||
+                        retryCode === 'FALLBACK_FAILED'
                       ) {
                         if (
                           !entry!.buffer &&
@@ -389,47 +393,63 @@ export class QQChannel extends ChannelBase {
                         }
                         return;
                       }
-                      // Transient error on retry (RATE_LIMITED, FALLBACK_FAILED, etc.) — re-schedule
+                      // Transient error on retry (RATE_LIMITED, etc.) — re-schedule with backoff
+                      entry!.retryCount = (entry!.retryCount ?? 1) + 1;
                       if (entry!.timer) {
                         clearTimeout(entry!.timer);
                       }
                       entry!.pendingRetry = toFlush;
-                      entry!.timer = setTimeout(() => {
-                        entry!.timer = null;
-                        entry!.pendingRetry = '';
-                        if (this.cronBuffer.get(sessionId) !== entry) {
-                          return;
-                        }
-                        const retryTarget2 = this.router.getTarget(sessionId);
-                        if (!retryTarget2) {
-                          process.stderr.write(
-                            `[QQ:${this.name}] Cron flush dropped after retry: no target for session ${sanitizeLogText(sessionId, 32)}\n`,
-                          );
-                          this.cronBuffer.delete(sessionId);
-                          return;
-                        }
-                        this.sendMessage(retryTarget2.chatId, toFlush)
-                          .then(() => {
-                            entry!.pendingRetry = '';
-                            if (
-                              !entry!.buffer &&
-                              this.cronBuffer.get(sessionId) === entry
-                            )
-                              this.cronBuffer.delete(sessionId);
-                          })
-                          .catch((err2) => {
+                      entry!.timer = setTimeout(
+                        () => {
+                          entry!.timer = null;
+                          entry!.pendingRetry = '';
+                          if (this.cronBuffer.get(sessionId) !== entry) {
+                            return;
+                          }
+                          const retryTarget2 = this.router.getTarget(sessionId);
+                          if (!retryTarget2) {
                             process.stderr.write(
-                              `[QQ:${this.name}] Cron flush re-retry failed: ${sanitizeLogText(err2 instanceof Error ? err2.message : String(err2), 200)}\n`,
+                              `[QQ:${this.name}] Cron flush dropped after retry: no target for session ${sanitizeLogText(sessionId, 32)}\n`,
                             );
-                            entry!.pendingRetry = '';
-                            if (
-                              !entry!.buffer &&
-                              this.cronBuffer.get(sessionId) === entry
-                            ) {
+                            this.cronBuffer.delete(sessionId);
+                            return;
+                          }
+                          this.sendMessage(retryTarget2.chatId, toFlush)
+                            .then(() => {
+                              entry!.pendingRetry = '';
+                              if (
+                                !entry!.buffer &&
+                                this.cronBuffer.get(sessionId) === entry
+                              )
+                                this.cronBuffer.delete(sessionId);
+                            })
+                            .catch((err2) => {
+                              const code2 =
+                                err2 instanceof DeliveryError
+                                  ? err2.code
+                                  : null;
+                              const code2Str = code2 ? ` (${code2})` : '';
+                              process.stderr.write(
+                                `[QQ:${this.name}] Cron flush re-retry failed${code2Str}: ${sanitizeLogText(err2 instanceof Error ? err2.message : String(err2), 200)}, toFlush=${toFlush.length}, session=${sanitizeLogText(sessionId, 32)}\n`,
+                              );
+                              entry!.pendingRetry = '';
+                              if (
+                                code2 === 'RETRY_EXHAUSTED' ||
+                                code2 === 'ACTIVE_MSG_DISABLED' ||
+                                code2 === 'FALLBACK_FAILED'
+                              ) {
+                                this.cronBuffer.delete(sessionId);
+                                return;
+                              }
+                              // Transient error: retries exhausted after 3 total attempts
+                              process.stderr.write(
+                                `[QQ:${this.name}] Cron flush retries exhausted, dropped ${toFlush.length} chars for session ${sanitizeLogText(sessionId, 32)}\n`,
+                              );
                               this.cronBuffer.delete(sessionId);
-                            }
-                          });
-                      }, 5000);
+                            });
+                        },
+                        entry!.retryCount === 2 ? 10000 : 5000,
+                      );
                       entry!.timer.unref();
                     });
                 }, 5000);
@@ -2658,8 +2678,8 @@ export class QQChannel extends ChannelBase {
     // Clean up cron buffers targeting this group (always, regardless of config flag)
     let cleanedCron = 0;
     for (const [sid, entry] of this.cronBuffer) {
-      const target = this.router.getTarget(sid);
-      if (target?.chatId === groupId) {
+      const state = this.streamState.get(sid);
+      if (state?.chatId === groupId) {
         if (entry.timer) clearTimeout(entry.timer);
         this.cronBuffer.delete(sid);
         cleanedCron++;

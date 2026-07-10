@@ -859,6 +859,19 @@ describe('群管理事件', () => {
         chatId: 'group-cron',
       });
 
+      // Populate streamState so Fix 1's streamState-based matching works.
+      const streamState = (ch as unknown as Record<string, unknown>)[
+        'streamState'
+      ] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+        }
+      >;
+
       const cronBuffer = (ch as unknown as Record<string, unknown>)[
         'cronBuffer'
       ] as Map<
@@ -872,6 +885,19 @@ describe('群管理事件', () => {
       cronBuffer.set('cron-sid-2', {
         buffer: 'other cron text',
         timer: setTimeout(() => {}, 8888),
+      });
+
+      streamState.set('cron-sid-1', {
+        chatId: 'group-cron',
+        buffer: '',
+        timer: null,
+        retryCount: 0,
+      });
+      streamState.set('cron-sid-2', {
+        chatId: 'group-cron',
+        buffer: '',
+        timer: null,
+        retryCount: 0,
       });
 
       const spy = vi.spyOn(globalThis, 'clearTimeout');
