@@ -26,6 +26,13 @@ interface SessionReservation {
   reject: (error: unknown) => void;
 }
 
+interface SessionOperation {
+  promise: Promise<string>;
+  target: SessionTarget;
+  lifecycleGeneration: number;
+  invalidationError?: Error;
+}
+
 type SessionLoadWindow = Set<string>;
 interface ResolveOptions {
   routingThreadId?: string;
@@ -41,9 +48,10 @@ export class SessionRouter {
   private toSession: Map<string, string> = new Map(); // routing key → session ID
   private toTarget: Map<string, SessionTarget> = new Map(); // session ID → target
   private toCwd: Map<string, string> = new Map(); // session ID → cwd
-  private creatingSessions: Map<string, Promise<string>> = new Map();
+  private creatingSessions: Map<string, SessionOperation> = new Map();
   private sessionLoadWindows: Set<SessionLoadWindow> = new Set();
   private readonly liveSessionIds = new Set<string>();
+  private lifecycleGeneration = 0;
 
   private bridge: ChannelAgentBridge;
   private defaultCwd: string;
@@ -147,10 +155,14 @@ export class SessionRouter {
       const creating = this.creatingSessions.get(key);
       if (creating) {
         try {
-          const sessionId = await creating;
+          const sessionId = await creating.promise;
+          this.assertOperationCurrent(creating);
           this.promoteTargetToGroup(sessionId, isGroup);
           return sessionId;
         } catch (error) {
+          if (creating.invalidationError) {
+            throw creating.invalidationError;
+          }
           if (this.creatingSessions.get(key) === creating) {
             this.creatingSessions.delete(key);
           }
@@ -160,14 +172,23 @@ export class SessionRouter {
         }
       }
 
-      const operation = Promise.resolve().then(() =>
-        existing
-          ? this.loadOrReplaceSession(key, existing, input)
-          : this.createAndStoreSession(key, input),
+      const operation = this.createSessionOperation(
+        {
+          channelName: input.channelName,
+          senderId: input.senderId,
+          chatId: input.chatId,
+          threadId: input.threadId,
+          isGroup: input.isGroup,
+        },
+        (currentOperation) =>
+          existing
+            ? this.loadOrReplaceSession(key, existing, input, currentOperation)
+            : this.createAndStoreSession(key, input, currentOperation),
       );
       this.creatingSessions.set(key, operation);
       try {
-        const sessionId = await operation;
+        const sessionId = await operation.promise;
+        this.assertOperationCurrent(operation);
         this.promoteTargetToGroup(sessionId, isGroup);
         return sessionId;
       } finally {
@@ -192,6 +213,7 @@ export class SessionRouter {
       cwd: string;
       isGroup?: boolean;
     },
+    operation: SessionOperation,
   ): Promise<string> {
     const loadWindow = this.beginSessionLoad();
     try {
@@ -200,7 +222,9 @@ export class SessionRouter {
         loadWindow,
         key,
         this.sessionOptions(input.channelName),
+        operation,
       );
+      this.assertOperationCurrent(operation);
       this.toSession.set(key, sessionId);
       this.toTarget.set(sessionId, {
         channelName: input.channelName,
@@ -229,6 +253,7 @@ export class SessionRouter {
       cwd: string;
       isGroup?: boolean;
     },
+    operation: SessionOperation,
   ): Promise<string> {
     const savedCwd = this.toCwd.get(savedSessionId) ?? input.cwd;
     const loadWindow = this.beginSessionLoad();
@@ -239,6 +264,11 @@ export class SessionRouter {
           savedCwd,
           this.sessionOptions(input.channelName),
         );
+        this.assertOperationCurrent(operation);
+        if (this.toSession.get(key) !== savedSessionId) {
+          this.invalidateOperation(operation);
+          this.assertOperationCurrent(operation);
+        }
         if (
           typeof loadedSessionId !== 'string' ||
           loadedSessionId.length === 0 ||
@@ -257,13 +287,16 @@ export class SessionRouter {
         this.liveSessionIds.add(loadedSessionId);
         return loadedSessionId;
       } catch (loadError) {
+        this.assertOperationCurrent(operation);
         try {
           const replacement = await this.createLiveSession(
             input.cwd,
             loadWindow,
             key,
             this.sessionOptions(input.channelName),
+            operation,
           );
+          this.assertOperationCurrent(operation);
           this.deleteByKey(key);
           this.toSession.set(key, replacement);
           this.toTarget.set(replacement, {
@@ -281,6 +314,7 @@ export class SessionRouter {
           );
           return replacement;
         } catch (createError) {
+          this.assertOperationCurrent(operation);
           process.stderr.write(
             `[SessionRouter] Failed to load session ${sanitizeLogText(savedSessionId, 128)} for key ${sanitizeLogText(key, 256)} (${sanitizeLogText(loadError instanceof Error ? loadError.message : String(loadError), 512)}) and failed to create a replacement (${sanitizeLogText(createError instanceof Error ? createError.message : String(createError), 512)})\n`,
           );
@@ -347,6 +381,7 @@ export class SessionRouter {
     const scope = this.channelScopes.get(channelName) || this.defaultScope;
     if (chatId) {
       const key = this.routingKey(channelName, senderId, chatId, threadId);
+      this.invalidateRouteOperation(key);
       const sessionId = this.deleteByKey(key);
       if (sessionId) removedIds.push(sessionId);
     } else if (scope === 'single') {
@@ -359,8 +394,17 @@ export class SessionRouter {
           target?.channelName === channelName &&
           target.senderId === senderId
         ) {
+          this.invalidateRouteOperation(k);
           const sessionId = this.deleteByKey(k);
           if (sessionId) removedIds.push(sessionId);
+        }
+      }
+      for (const [key, operation] of [...this.creatingSessions]) {
+        if (
+          operation.target.channelName === channelName &&
+          operation.target.senderId === senderId
+        ) {
+          this.invalidateRouteOperation(key);
         }
       }
     }
@@ -373,6 +417,7 @@ export class SessionRouter {
     let removed = false;
     for (const [key, mappedSessionId] of [...this.toSession.entries()]) {
       if (mappedSessionId === sessionId) {
+        this.invalidateRouteOperation(key);
         this.toSession.delete(key);
         removed = true;
       }
@@ -471,11 +516,15 @@ export class SessionRouter {
     const persisted = this.readPersistedEntries();
     if (!persisted) return { restored: 0, failed: 0 };
     const entries = persisted.entries;
+    const restoreGeneration = this.lifecycleGeneration;
 
     let restored = 0;
     let failed = 0;
     let changed = persisted.dropped > 0;
-    const reservations = new Map<string, SessionReservation>();
+    const reservations = new Map<
+      string,
+      { reservation: SessionReservation; operation: SessionOperation }
+    >();
 
     for (const key of persisted.droppedKeys) {
       this.deleteByKey(key);
@@ -487,20 +536,30 @@ export class SessionRouter {
       this.deleteByKey(key);
       const reservation = this.createSessionReservation();
       reservation.promise.catch(() => undefined);
-      this.creatingSessions.set(key, reservation.promise);
-      reservations.set(key, reservation);
+      const operation = this.createSessionOperation(
+        entries[key]!.target,
+        () => reservation.promise,
+      );
+      operation.promise.catch(() => undefined);
+      this.creatingSessions.set(key, operation);
+      reservations.set(key, { reservation, operation });
     }
 
     const loadWindow = this.beginSessionLoad();
     try {
       for (const [key, entry] of Object.entries(entries)) {
-        const reservation = reservations.get(key);
-        if (!reservation) continue;
+        const reserved = reservations.get(key);
+        if (!reserved) continue;
+        const { reservation, operation } = reserved;
         try {
+          this.assertOperationCurrent(operation);
           const options = this.sessionOptions(entry.target.channelName);
-          const sessionId = options
-            ? await this.bridge.loadSession(entry.sessionId, entry.cwd, options)
-            : await this.bridge.loadSession(entry.sessionId, entry.cwd);
+          const sessionId = await this.bridge.loadSession(
+            entry.sessionId,
+            entry.cwd,
+            options,
+          );
+          this.assertOperationCurrent(operation);
           if (typeof sessionId !== 'string' || sessionId.length === 0) {
             throw new Error('Invalid restored session ID');
           }
@@ -527,7 +586,7 @@ export class SessionRouter {
           failed++;
           changed = true;
         } finally {
-          if (this.creatingSessions.get(key) === reservation.promise) {
+          if (this.creatingSessions.get(key) === operation) {
             this.creatingSessions.delete(key);
           }
         }
@@ -537,7 +596,7 @@ export class SessionRouter {
     }
 
     // Update persist file to only include successfully restored sessions
-    if (changed) {
+    if (changed && restoreGeneration === this.lifecycleGeneration) {
       this.persist();
     }
 
@@ -545,6 +604,10 @@ export class SessionRouter {
   }
 
   dispose(): void {
+    this.lifecycleGeneration++;
+    for (const operation of this.creatingSessions.values()) {
+      this.invalidateOperation(operation);
+    }
     this.toSession.clear();
     this.toTarget.clear();
     this.toCwd.clear();
@@ -691,6 +754,7 @@ export class SessionRouter {
     loadWindow: SessionLoadWindow,
     routingKey: string,
     options: { approvalMode?: string } | undefined,
+    operation: SessionOperation,
   ): Promise<string> {
     const maxAttempts = 2;
     let lastDeadSessionId: string | undefined;
@@ -698,6 +762,7 @@ export class SessionRouter {
       const sessionId = options
         ? await this.bridge.newSession(cwd, options)
         : await this.bridge.newSession(cwd);
+      this.assertOperationCurrent(operation);
       if (typeof sessionId !== 'string' || sessionId.length === 0) {
         throw new Error('Invalid session ID from bridge');
       }
@@ -715,6 +780,46 @@ export class SessionRouter {
     const loadWindow: SessionLoadWindow = new Set();
     this.sessionLoadWindows.add(loadWindow);
     return loadWindow;
+  }
+
+  private createSessionOperation(
+    target: SessionTarget,
+    run: (operation: SessionOperation) => Promise<string>,
+  ): SessionOperation {
+    const operation: SessionOperation = {
+      promise: Promise.resolve(''),
+      target,
+      lifecycleGeneration: this.lifecycleGeneration,
+    };
+    operation.promise = Promise.resolve()
+      .then(() => run(operation))
+      .catch((error: unknown) => {
+        this.assertOperationCurrent(operation);
+        throw error;
+      });
+    return operation;
+  }
+
+  private invalidateRouteOperation(key: string): void {
+    const operation = this.creatingSessions.get(key);
+    if (!operation) return;
+    this.invalidateOperation(operation);
+    this.creatingSessions.delete(key);
+  }
+
+  private invalidateOperation(operation: SessionOperation): void {
+    operation.invalidationError ??= new Error(
+      'Session route operation was invalidated',
+    );
+  }
+
+  private assertOperationCurrent(operation: SessionOperation): void {
+    if (operation.lifecycleGeneration !== this.lifecycleGeneration) {
+      this.invalidateOperation(operation);
+    }
+    if (operation.invalidationError) {
+      throw operation.invalidationError;
+    }
   }
 
   private createSessionReservation(): SessionReservation {

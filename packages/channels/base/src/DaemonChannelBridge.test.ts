@@ -1542,6 +1542,98 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('rejects and cancels a new session factory result that arrives after stop', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    let finishFactory!: (session: FakeSession) => void;
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn(
+        () =>
+          new Promise<DaemonChannelSessionClient>((resolve) => {
+            finishFactory = resolve;
+          }),
+      ),
+    });
+
+    await bridge.start();
+    const creating = bridge.newSession('/repo');
+    await Promise.resolve();
+    bridge.stop();
+    finishFactory(session);
+
+    await expect(creating).rejects.toThrow('stopped');
+    expect(session.cancel).toHaveBeenCalledOnce();
+    expect(bridge.listSessions()).toEqual([]);
+  });
+
+  it('rejects and cancels a load factory result that arrives after stop', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events, 'existing-session');
+    let finishFactory!: (session: FakeSession) => void;
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn(
+        () =>
+          new Promise<DaemonChannelSessionClient>((resolve) => {
+            finishFactory = resolve;
+          }),
+      ),
+    });
+
+    await bridge.start();
+    const loading = bridge.loadSession('existing-session', '/repo');
+    await Promise.resolve();
+    bridge.stop();
+    finishFactory(session);
+
+    await expect(loading).rejects.toThrow('stopped');
+    expect(session.cancel).toHaveBeenCalledOnce();
+    expect(bridge.listSessions()).toEqual([]);
+  });
+
+  it('keeps a pre-stop factory result stale after restart', async () => {
+    const staleEvents = new EventQueue();
+    const staleSession = createFakeSession(staleEvents, 'stale-session');
+    const currentEvents = new EventQueue();
+    const currentSession = createFakeSession(currentEvents, 'current-session');
+    let finishStaleFactory!: (session: FakeSession) => void;
+    const factory = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<DaemonChannelSessionClient>((resolve) => {
+            finishStaleFactory = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(currentSession);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: factory,
+    });
+
+    await bridge.start();
+    const staleCreation = bridge.newSession('/repo');
+    await Promise.resolve();
+    bridge.stop();
+    await bridge.start();
+    finishStaleFactory(staleSession);
+
+    await expect(staleCreation).rejects.toThrow('stopped');
+    await expect(bridge.newSession('/repo')).resolves.toBe('current-session');
+    expect(staleSession.cancel).toHaveBeenCalledOnce();
+    expect(bridge.listSessions()).toEqual([
+      {
+        sessionId: 'current-session',
+        workspaceCwd: '/repo',
+        hasActivePrompt: false,
+      },
+    ]);
+
+    currentEvents.close();
+    bridge.stop();
+  });
+
   it('rejects mismatched daemon session ids while loading', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events, 'different-session');

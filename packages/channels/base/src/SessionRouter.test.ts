@@ -1200,6 +1200,169 @@ describe('SessionRouter', () => {
       expect(lazyBridge.loadSession).toHaveBeenCalledTimes(1);
     });
 
+    it.each(['removeSession', 'removeSessionId'] as const)(
+      'rejects a dormant load invalidated by %s',
+      async (removal) => {
+        const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+        tempDirs.push(dir);
+        const persistPath = join(dir, 'routes.json');
+        writePersistedSession(persistPath, 'ch:alice:chat1');
+        let finishLoad!: (value: string) => void;
+        const lazyBridge = {
+          ...mockBridge(),
+          loadSession: vi.fn(
+            () =>
+              new Promise<string>((resolve) => {
+                finishLoad = resolve;
+              }),
+          ),
+        } satisfies ChannelAgentBridge;
+        const router = createLazyRouter(persistPath, lazyBridge);
+        router.restoreRoutes();
+
+        const resolving = router.resolve('ch', 'alice', 'chat1');
+        await Promise.resolve();
+        if (removal === 'removeSession') {
+          router.removeSession('ch', 'alice', 'chat1');
+        } else {
+          router.removeSessionId('old-session');
+        }
+        finishLoad('old-session');
+
+        await expect(resolving).rejects.toThrow('invalidated');
+        expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
+        expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+      },
+    );
+
+    it('does not install a replacement created after route removal', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      let finishCreation!: (value: string) => void;
+      const lazyBridge = {
+        ...mockBridge(),
+        loadSession: vi.fn().mockRejectedValue(new Error('gone')),
+        newSession: vi.fn(
+          () =>
+            new Promise<string>((resolve) => {
+              finishCreation = resolve;
+            }),
+        ),
+      } satisfies ChannelAgentBridge;
+      const router = createLazyRouter(persistPath, lazyBridge);
+      router.restoreRoutes();
+
+      const resolving = router.resolve('ch', 'alice', 'chat1');
+      await vi.waitFor(() => expect(lazyBridge.newSession).toHaveBeenCalled());
+      router.removeSession('ch', 'alice', 'chat1');
+      finishCreation('replacement-session');
+
+      await expect(resolving).rejects.toThrow('invalidated');
+      expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
+      expect(router.getTarget('replacement-session')).toBeUndefined();
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+    });
+
+    it('does not retry an invalidated shared recovery operation', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      let failLoad!: (error: Error) => void;
+      const lazyBridge = {
+        ...mockBridge(),
+        loadSession: vi.fn(
+          () =>
+            new Promise<string>((_resolve, reject) => {
+              failLoad = reject;
+            }),
+        ),
+        newSession: vi.fn().mockResolvedValue('replacement-session'),
+      } satisfies ChannelAgentBridge;
+      const router = createLazyRouter(persistPath, lazyBridge);
+      router.restoreRoutes();
+
+      const first = router.resolve('ch', 'alice', 'chat1');
+      const second = router.resolve('ch', 'alice', 'chat1');
+      await Promise.resolve();
+      router.removeSession('ch', 'alice', 'chat1');
+      failLoad(new Error('gone'));
+
+      await expect(first).rejects.toThrow('invalidated');
+      await expect(second).rejects.toThrow('invalidated');
+      expect(lazyBridge.loadSession).toHaveBeenCalledTimes(1);
+      expect(lazyBridge.newSession).not.toHaveBeenCalled();
+      expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
+    });
+
+    it('does not install an absent route created after its removal', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      let finishCreation!: (value: string) => void;
+      const lazyBridge = {
+        ...mockBridge(),
+        newSession: vi.fn(
+          () =>
+            new Promise<string>((resolve) => {
+              finishCreation = resolve;
+            }),
+        ),
+      } satisfies ChannelAgentBridge;
+      const router = createLazyRouter(persistPath, lazyBridge);
+
+      const resolving = router.resolve('ch', 'alice', 'chat1');
+      await Promise.resolve();
+      expect(router.removeSession('ch', 'alice', 'chat1')).toEqual([]);
+      finishCreation('late-session');
+
+      await expect(resolving).rejects.toThrow('invalidated');
+      expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
+      expect(router.getTarget('late-session')).toBeUndefined();
+      expect(existsSync(persistPath)).toBe(false);
+    });
+
+    it.each(['dormant load', 'absent creation'] as const)(
+      'rejects a late %s after disposal',
+      async (operation) => {
+        const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+        tempDirs.push(dir);
+        const persistPath = join(dir, 'routes.json');
+        let finish!: (value: string) => void;
+        const lazyBridge = {
+          ...mockBridge(),
+          loadSession: vi.fn(
+            () =>
+              new Promise<string>((resolve) => {
+                finish = resolve;
+              }),
+          ),
+          newSession: vi.fn(
+            () =>
+              new Promise<string>((resolve) => {
+                finish = resolve;
+              }),
+          ),
+        } satisfies ChannelAgentBridge;
+        const router = createLazyRouter(persistPath, lazyBridge);
+        if (operation === 'dormant load') {
+          writePersistedSession(persistPath, 'ch:alice:chat1');
+          router.restoreRoutes();
+        }
+
+        const resolving = router.resolve('ch', 'alice', 'chat1');
+        await Promise.resolve();
+        router.dispose();
+        finish(operation === 'dormant load' ? 'old-session' : 'late-session');
+
+        await expect(resolving).rejects.toThrow('invalidated');
+        expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
+        expect(router.getAll()).toEqual([]);
+      },
+    );
+
     it('replaces a route only after fallback creation succeeds', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
       tempDirs.push(dir);

@@ -202,6 +202,7 @@ export class DaemonChannelBridge
   >();
   private readonly turnBarriers = new Map<string, () => void>();
   private connected = false;
+  private lifecycleGeneration = 0;
   private latestAvailableCommandsSessionId: string | undefined;
   private lastError: unknown;
 
@@ -252,12 +253,14 @@ export class DaemonChannelBridge
     cwd: string,
     options?: { approvalMode?: string },
   ): Promise<string> {
+    const lifecycleGeneration = this.lifecycleGeneration;
     const session = await this.options.sessionFactory({
       workspaceCwd: cwd || this.options.cwd,
       modelServiceId: this.options.modelServiceId,
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
     });
+    await this.rejectStaleSession(session, lifecycleGeneration);
     this.attachSession(session);
     return session.sessionId;
   }
@@ -267,6 +270,7 @@ export class DaemonChannelBridge
     cwd: string,
     options?: { approvalMode?: string },
   ): Promise<string> {
+    const lifecycleGeneration = this.lifecycleGeneration;
     const session = await this.options.sessionFactory({
       workspaceCwd: cwd || this.options.cwd,
       modelServiceId: this.options.modelServiceId,
@@ -274,6 +278,7 @@ export class DaemonChannelBridge
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
     });
+    await this.rejectStaleSession(session, lifecycleGeneration);
     if (session.sessionId !== sessionId) {
       throw new Error(
         `Daemon returned session ${session.sessionId} while loading ${sessionId}`,
@@ -425,6 +430,7 @@ export class DaemonChannelBridge
   }
 
   stop(): void {
+    this.lifecycleGeneration++;
     for (const sessionId of Array.from(this.sessions.keys())) {
       const session = this.sessions.get(sessionId);
       if (session) {
@@ -451,6 +457,19 @@ export class DaemonChannelBridge
     const controller = new AbortController();
     this.eventControllers.set(session.sessionId, controller);
     void this.pumpEvents(session, controller.signal);
+  }
+
+  private async rejectStaleSession(
+    session: DaemonChannelSessionClient,
+    lifecycleGeneration: number,
+  ): Promise<void> {
+    if (lifecycleGeneration === this.lifecycleGeneration) return;
+    try {
+      await session.cancel();
+    } catch (error) {
+      this.lastError = error;
+    }
+    throw new Error('Daemon channel bridge stopped during session creation');
   }
 
   private ensureSession(sessionId: string): DaemonChannelSessionClient {
