@@ -1751,6 +1751,25 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Read the current in-memory runtime status for one live daemon session.
+   */
+  async sessionStatus(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionSummary> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/status`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/status');
+        }
+        return (await res.json()) as DaemonSessionSummary;
+      },
+    );
+  }
+
   async sessionContextUsage(
     sessionId: string,
     opts: { detail?: boolean } = {},

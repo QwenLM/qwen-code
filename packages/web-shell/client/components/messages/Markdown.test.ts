@@ -20,6 +20,7 @@ import {
   isSafeHref,
   isSafeImageSrc,
   Markdown,
+  markdownUrlTransform,
   resolveFenceLanguage,
 } from './Markdown';
 
@@ -117,6 +118,86 @@ describe('isSafeImageSrc', () => {
 
   it('allows relative paths', () => {
     expect(isSafeImageSrc('/images/logo.png')).toBe(true);
+  });
+});
+
+describe('markdownUrlTransform', () => {
+  it('lets the qwen-session scheme through untouched', () => {
+    expect(markdownUrlTransform('qwen-session://abc-123')).toBe(
+      'qwen-session://abc-123',
+    );
+    expect(markdownUrlTransform('  qwen-session://abc-123  ')).toBe(
+      '  qwen-session://abc-123  ',
+    );
+  });
+
+  it('defers every other url to react-markdown’s sanitizer', () => {
+    expect(markdownUrlTransform('https://example.com')).toBe(
+      'https://example.com',
+    );
+    expect(markdownUrlTransform('mailto:a@b.c')).toBe('mailto:a@b.c');
+    // defaultUrlTransform rewrites unsafe schemes to ''.
+    expect(markdownUrlTransform('javascript:alert(1)')).toBe('');
+    expect(markdownUrlTransform('data:text/html;base64,PHN2Zz4=')).toBe('');
+  });
+});
+
+describe('qwen-session:// links', () => {
+  function renderMd(content: string): HTMLDivElement {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(Markdown, { content }),
+        ),
+      );
+    });
+    (container as HTMLDivElement & { __unmount: () => void }).__unmount = () =>
+      act(() => root.unmount());
+    return container as HTMLDivElement;
+  }
+
+  it('survives react-markdown url sanitization and becomes a button', () => {
+    // Without `urlTransform`, react-markdown rewrites every non-http(s)/mailto
+    // href to '' before `components.a` runs, so the interception branch never
+    // fires and the link renders as an inert anchor.
+    const c = renderMd('[🧵 abc12345](qwen-session://abc12345-full-id)');
+    const a = c.querySelector('a')!;
+    expect(a).toBeTruthy();
+    expect(a.getAttribute('role')).toBe('button');
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
+  });
+
+  it('dispatches qwen:open-session with the session id on click', () => {
+    const seen: unknown[] = [];
+    const handler = (e: Event) => seen.push((e as CustomEvent).detail);
+    window.addEventListener('qwen:open-session', handler);
+    const c = renderMd('[🧵 abc12345](qwen-session://abc12345-full-id)');
+    act(() => {
+      c.querySelector('a')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+    window.removeEventListener('qwen:open-session', handler);
+    expect(seen).toEqual(['abc12345-full-id']);
+    // The scheme is never written to the DOM: the anchor is a plain '#'.
+    expect(c.querySelector('a')!.getAttribute('href')).toBe('#');
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
+  });
+
+  it('still sanitizes dangerous schemes', () => {
+    const c = renderMd('[x](javascript:alert(1))');
+    const a = c.querySelector('a')!;
+    expect(a.getAttribute('role')).not.toBe('button');
+    expect(a.getAttribute('href')).toBeNull();
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
   });
 });
 

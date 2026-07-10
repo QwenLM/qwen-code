@@ -94,6 +94,7 @@ type TestableAcpBridge = AcpBridge & {
   connection: {
     extMethod: ReturnType<typeof vi.fn>;
     newSession?: ReturnType<typeof vi.fn>;
+    prompt?: ReturnType<typeof vi.fn>;
   };
   channelLoopMcpServer: unknown;
   channelLoopToolHandlers: ChannelLoopToolHandler[];
@@ -102,6 +103,8 @@ type TestableAcpBridge = AcpBridge & {
     method: string,
     params: Record<string, unknown>,
   ): Promise<unknown>;
+  handleSessionUpdate(params: Record<string, unknown>): void;
+  requestPermission(params: Record<string, unknown>): Promise<unknown>;
   handleClientMcpMessage(params: Record<string, unknown>): Promise<unknown>;
   registerChannelLoopMcpServer(): Promise<void>;
   resolveChannelLoopToolHandler(sessionId: string): ChannelLoopToolHandler;
@@ -244,6 +247,161 @@ describe('AcpBridge', () => {
         sessionId: 's-1',
       }),
     ).resolves.toStrictEqual({ messages: [] });
+  });
+
+  it('returns only the final turn text after tool calls', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.emit('textChunk', 's-1', 'Let me search. ');
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            kind: 'search',
+            title: 'Search',
+            status: 'pending',
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'Now I will read. ');
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-2',
+            kind: 'read',
+            title: 'Read',
+            status: 'pending',
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'Final answer.');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Final answer.',
+    );
+  });
+
+  it('returns only the final turn text after auto-approved tool calls', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.emit('textChunk', 's-1', 'Let me inspect. ');
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            kind: 'read',
+            title: 'Read',
+            status: 'in_progress',
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'Final answer.');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Final answer.',
+    );
+  });
+
+  it('preserves text when tool calls are not pending', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.emit('textChunk', 's-1', 'Before. ');
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            kind: 'search',
+            title: 'Search',
+            status: 'completed',
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'After.');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Before. After.',
+    );
+  });
+
+  it('treats plan updates as turn boundaries for TodoWrite-only rounds', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.emit('textChunk', 's-1', 'Updating todos. ');
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'plan',
+            entries: [{ content: 'Task', status: 'pending' }],
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'Done.');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe('Done.');
+  });
+
+  it('treats permission requests as turn boundaries', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.on('permissionRequest', (event) => {
+      void bridge.respondToPermission(event.requestId, {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.emit('textChunk', 's-1', 'I need permission. ');
+        await bridge.requestPermission({
+          sessionId: 's-1',
+          toolCall: {
+            toolCallId: 'tool-1',
+            kind: 'shell',
+            title: 'Run command',
+          },
+          options: [{ optionId: 'proceed_once', name: 'Allow' }],
+        });
+        bridge.emit('textChunk', 's-1', 'Final answer.');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Final answer.',
+    );
   });
 
   it('rejects channel loop tool calls when no handler matches the session', () => {

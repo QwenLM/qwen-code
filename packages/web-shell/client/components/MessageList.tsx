@@ -24,7 +24,10 @@ import {
   isSubAgentToolCall,
 } from '../adapters/toolClassification';
 import { CompactModeContext } from '../App';
-import { useWebShellCustomization } from '../customization';
+import {
+  useWebShellCustomization,
+  type WebShellAssistantTurnFooterRenderInfo,
+} from '../customization';
 import { useI18n } from '../i18n';
 import { MessageItem } from './MessageItem';
 import { MessageTimestamp } from './MessageTimestamp';
@@ -406,10 +409,10 @@ function findFinalAnswerIndex(
   return -1;
 }
 
-function collectFinalAssistantIdsByTurn(
+function collectFinalAssistantTurnIds(
   items: readonly DisplayItem[],
   isResponding: boolean,
-): ReadonlySet<string> {
+): ReadonlyMap<string, string> {
   const userIdxs: number[] = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
@@ -418,19 +421,24 @@ function collectFinalAssistantIdsByTurn(
     }
   }
 
-  const ids = new Set<string>();
+  const turnIdByAssistantId = new Map<string, string>();
   for (let k = 0; k < userIdxs.length; k++) {
     if (k === userIdxs.length - 1 && isResponding) continue;
     const start = userIdxs[k];
     const end = (k + 1 < userIdxs.length ? userIdxs[k + 1] : items.length) - 1;
+    const turnHead = items[start];
     const answerIdx = findFinalAnswerIndex(items, start, end);
     if (answerIdx < 0) continue;
     const item = items[answerIdx];
-    if (item.type === 'message' && item.message.role === 'assistant') {
-      ids.add(item.message.id);
+    if (
+      turnHead?.type === 'message' &&
+      item.type === 'message' &&
+      item.message.role === 'assistant'
+    ) {
+      turnIdByAssistantId.set(item.message.id, turnHead.message.id);
     }
   }
-  return ids;
+  return turnIdByAssistantId;
 }
 
 /**
@@ -2158,8 +2166,8 @@ export const MessageList = memo(
       }
       return null;
     }, [isResponding, mergedMessages]);
-    const finalAssistantIdsByTurn = useMemo(
-      () => collectFinalAssistantIdsByTurn(displayItems, isResponding),
+    const finalAssistantTurnIdByAssistantId = useMemo(
+      () => collectFinalAssistantTurnIds(displayItems, isResponding),
       [displayItems, isResponding],
     );
 
@@ -3142,6 +3150,28 @@ export const MessageList = memo(
             );
           }
 
+          const finalAssistantTurnId =
+            displayItem.message.role === 'assistant'
+              ? finalAssistantTurnIdByAssistantId.get(displayItem.message.id)
+              : undefined;
+          let assistantTurnFooterInfo:
+            | WebShellAssistantTurnFooterRenderInfo
+            | undefined;
+          if (
+            displayItem.message.role === 'assistant' &&
+            finalAssistantTurnId
+          ) {
+            assistantTurnFooterInfo = {
+              turnId: finalAssistantTurnId,
+              message: {
+                id: displayItem.message.id,
+                content: displayItem.message.content,
+                isStreaming: displayItem.message.isStreaming,
+                timestamp: displayItem.message.timestamp,
+              },
+            };
+          }
+
           return (
             <MessageItem
               message={displayItem.message}
@@ -3154,7 +3184,7 @@ export const MessageList = memo(
               onBranchSession={onBranchSession}
               showAssistantActions={
                 displayItem.message.role === 'assistant' &&
-                finalAssistantIdsByTurn.has(displayItem.message.id)
+                finalAssistantTurnIdByAssistantId.has(displayItem.message.id)
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
@@ -3164,6 +3194,7 @@ export const MessageList = memo(
                 displayItem,
                 flashTarget,
               )}
+              assistantTurnFooterInfo={assistantTurnFooterInfo}
             />
           );
         };
@@ -3193,7 +3224,7 @@ export const MessageList = memo(
         headerOffset,
         visibleItems,
         flashTarget,
-        finalAssistantIdsByTurn,
+        finalAssistantTurnIdByAssistantId,
         lastCompletedAssistantId,
         workspaceCwd,
         showRetryHint,
