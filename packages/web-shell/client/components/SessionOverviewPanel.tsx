@@ -143,9 +143,8 @@ function SessionOverviewPanelInner({
   const connection = useConnection();
   const currentSessionId = connection.sessionId;
   const organizationEnabled =
-    connection.capabilities?.features?.includes(
-      SESSION_ORGANIZATION_FEATURE,
-    ) ?? false;
+    connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE) ??
+    false;
 
   const { sessions, loading, error, reload } = useSessions({
     autoLoad: true,
@@ -388,7 +387,9 @@ function SessionOverviewPanelInner({
               )}
             </div>
             <div className={styles.cardMeta}>
-              <span className={cx(styles.statusBadge, statusClass(card.status))}>
+              <span
+                className={cx(styles.statusBadge, statusClass(card.status))}
+              >
                 {t(`sessionsOverview.status.${card.status}`)}
               </span>
               {card.model && (
