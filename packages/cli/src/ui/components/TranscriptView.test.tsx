@@ -77,9 +77,7 @@ describe('<TranscriptView />', () => {
 
   it('enters and exits the alternate screen by default (useAlternateScreen defaults to true)', () => {
     setTTY(true);
-    const { unmount } = renderWithProviders(
-      <TranscriptView items={items} />,
-    );
+    const { unmount } = renderWithProviders(<TranscriptView items={items} />);
     // The default path drives AlternateScreen with disabled=false, which writes
     // the enter-alt-screen escape on mount.
     expect(writeRaw).toHaveBeenCalledWith(
