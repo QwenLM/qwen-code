@@ -21,6 +21,7 @@ on:
   issues:
     types:
       - 'labeled'
+      - 'assigned'
   pull_request_review:
     types:
       - 'submitted'
@@ -88,6 +89,9 @@ jobs:
       ${{ github.repository == 'QwenLM/qwen-code' }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
+    concurrency:
+      group: 'qwen-autofix-route'
+      cancel-in-progress: true
     permissions:
       contents: 'read'
     outputs:
@@ -115,6 +119,7 @@ jobs:
           AUTOFIX_APPROVED_LABEL: 'autofix/approved'
           REPO: '${{ github.repository }}'
           SENDER_LOGIN: '${{ github.event.sender.login }}'
+          ASSIGNEE_LOGIN: '${{ github.event.assignee.login }}'
           SCHEDULE: '${{ github.event.schedule }}'
           PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
           PR_NUMBER_EVENT: '${{ github.event.pull_request.number }}'
@@ -198,6 +203,7 @@ jobs:
                 DO_REVIEW=false
                 label_is_trigger=false
                 [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true
+                [[ "${ASSIGNEE_LOGIN}" == "${AUTOFIX_BOT}" ]] && label_is_trigger=true
                 if [[ "${label_is_trigger}" != 'true' ]]; then
                   echo "🧭 issue event ignored: trigger_label=false label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
                 else
@@ -259,7 +265,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 180
     concurrency:
-      group: 'qwen-autofix-issue'
+      group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'
       cancel-in-progress: false
     permissions:
       contents: 'read'

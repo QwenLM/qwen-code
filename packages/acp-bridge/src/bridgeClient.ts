@@ -105,6 +105,7 @@ function artifactPayloadFields(
     mimeType: artifact['mimeType'] as string | undefined,
     sizeBytes: artifact['sizeBytes'] as number | undefined,
     metadata: artifact['metadata'] as SessionArtifactInput['metadata'],
+    retention: artifact['retention'] as SessionArtifactInput['retention'],
   };
 }
 
@@ -717,6 +718,7 @@ export class BridgeClient implements Client {
   async seedSessionUpdates(
     entry: BridgeClientSessionEntry,
     updates: SessionUpdate[],
+    options: { ingestArtifacts?: boolean } = {},
   ): Promise<void> {
     const frames: Array<Omit<BridgeEvent, 'id' | 'v'>> = [];
     const artifactBatches: Array<{
@@ -729,7 +731,7 @@ export class BridgeClient implements Client {
         entry,
       );
       frames.push(...prepared.frames);
-      if (prepared.artifacts.length > 0) {
+      if (options.ingestArtifacts !== false && prepared.artifacts.length > 0) {
         artifactBatches.push({
           artifacts: prepared.artifacts,
           trustedPublisher: prepared.trustedPublisher,

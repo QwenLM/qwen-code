@@ -295,6 +295,7 @@ export class HistoryReplayer {
       success: !result?.error,
       message: record.message.parts,
       resultDisplay: result?.resultDisplay,
+      artifacts: result?.artifacts,
       // For TodoWriteTool fallback, try to extract args from the record
       // Note: args aren't stored in tool_result records by default
       args: undefined,
