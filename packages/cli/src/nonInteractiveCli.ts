@@ -1826,23 +1826,6 @@ export async function runNonInteractive(
                   checkCronDone();
                   return;
                 }
-                // A guarded task's prompt must not run until its precondition
-                // has been evaluated, and only the ACP/daemon session can do
-                // that (it owns the sub-session dispatch the verdict gates).
-                // Running it here would fire it unconditionally — the exact
-                // outcome the precondition exists to prevent — so fail closed.
-                // Reachable only for a task whose `condition` was hand-written
-                // onto an unbound entry in the tasks file; every writer binds
-                // one, and a bound task fires only in its own session.
-                if (job.condition) {
-                  debugLogger.warn(
-                    'Skipping a guarded scheduled task: preconditions are not ' +
-                      'evaluated in headless mode',
-                    { jobId: job.id },
-                  );
-                  checkCronDone();
-                  return;
-                }
                 const label = job.prompt.slice(0, 40);
                 localQueue.push({
                   displayText: `${job.cronExpr === '@wakeup' ? 'Loop' : 'Cron'}: ${label}`,

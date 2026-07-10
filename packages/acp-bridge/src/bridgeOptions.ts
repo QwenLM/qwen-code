@@ -503,6 +503,10 @@ export interface CreateSubSessionResult {
   sessionId: string;
   result?: string;
   stopReason?: string;
+  /** Whether the parent lineage was durably written to the sub-session's
+   * transcript. `false` = live-only (gone from the persisted list after a
+   * daemon restart). Absent when the spawn carried no parent. */
+  parentSessionPersisted?: boolean;
 }
 
 /** Daemon-host callback that spawns a sub-session and (for `'first-turn'`) waits

@@ -36,6 +36,7 @@ import {
   getCronFilePath,
   createDebugLogger,
   SessionService,
+  taskHasLegacyCondition,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
 import { scheduledTaskSessionName } from './routes/scheduled-tasks.js';
@@ -54,6 +55,7 @@ function collectBoundSessionIds(tasks: readonly DurableCronTask[]): string[] {
     const sessionId = task.sessionId;
     if (
       task.enabled === false || // disabled (e.g. archived) — let it be reaped
+      taskHasLegacyCondition(task) || // legacy guarded — can never fire, don't pin
       typeof sessionId !== 'string' ||
       sessionId.length === 0 ||
       seen.has(sessionId)
@@ -122,10 +124,18 @@ async function bindAndNameSessions(
   binding: Set<string>,
 ): Promise<void> {
   const unbound = tasks.filter(
-    (t) => !t.sessionId && t.enabled !== false && !binding.has(t.id),
+    (t) =>
+      !t.sessionId &&
+      t.enabled !== false &&
+      !taskHasLegacyCondition(t) &&
+      !binding.has(t.id),
   );
   const needsName = tasks.filter(
-    (t) => t.sessionId && t.enabled !== false && !renamed.has(t.sessionId),
+    (t) =>
+      t.sessionId &&
+      t.enabled !== false &&
+      !taskHasLegacyCondition(t) &&
+      !renamed.has(t.sessionId),
   );
 
   for (const task of unbound) {

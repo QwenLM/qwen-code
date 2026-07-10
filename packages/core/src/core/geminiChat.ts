@@ -1042,12 +1042,80 @@ function stripThoughtPartsFromContent(content: Content): Content | null {
  * which should trigger a retry.
  */
 export class InvalidStreamError extends Error {
-  readonly type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT';
+  readonly type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT' | 'PROTOCOL_TAG_LEAK';
 
-  constructor(message: string, type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT') {
+  constructor(
+    message: string,
+    type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT' | 'PROTOCOL_TAG_LEAK',
+  ) {
     super(message);
     this.name = 'InvalidStreamError';
     this.type = type;
+  }
+}
+
+const PROTOCOL_TAG_PREFIXES = [
+  '<analysis',
+  '</analysis',
+  '<summary',
+  '</summary',
+] as const;
+
+class LeadingProtocolTagLeakDetector {
+  private state: 'detecting' | 'clean' | 'leaked' = 'detecting';
+  private buffer = '';
+
+  accept(text: string): string {
+    if (this.state === 'clean') return text;
+    if (this.state === 'leaked') return '';
+
+    this.buffer += text;
+    const candidate = this.buffer.trimStart().toLowerCase();
+    if (!candidate) return '';
+    if (PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(candidate))) {
+      return '';
+    }
+
+    for (const prefix of PROTOCOL_TAG_PREFIXES) {
+      if (
+        candidate.startsWith(prefix) &&
+        /[\s/>]/.test(candidate[prefix.length] ?? '')
+      ) {
+        this.state = 'leaked';
+        this.buffer = '';
+        return '';
+      }
+    }
+
+    this.state = 'clean';
+    const output = this.buffer;
+    this.buffer = '';
+    return output;
+  }
+
+  finish(): string {
+    if (this.state !== 'detecting') return '';
+    const candidate = this.buffer.trimStart().toLowerCase();
+    if (
+      candidate &&
+      PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(candidate))
+    ) {
+      this.state = 'leaked';
+      this.buffer = '';
+      return '';
+    }
+    this.state = 'clean';
+    const output = this.buffer;
+    this.buffer = '';
+    return output;
+  }
+
+  get leaked(): boolean {
+    return this.state === 'leaked';
+  }
+
+  get blockingOutput(): boolean {
+    return this.state !== 'clean';
   }
 }
 
@@ -3477,6 +3545,8 @@ export class GeminiChat {
 
     let hasToolCall = false;
     let hasFinishReason = false;
+    const protocolTagDetector = new LeadingProtocolTagLeakDetector();
+    let protocolTextWasSuppressed = false;
     // Captured if the upstream stream throws mid-iteration (typical on weak
     // networks: SSE drops between `content_block_stop` of a tool_use and the
     // terminal `message_stop`). We still build / record / push a partial
@@ -3494,8 +3564,23 @@ export class GeminiChat {
           false;
 
         if (isValidResponse(chunk)) {
-          const content = chunk.candidates?.[0]?.content;
+          const candidate = chunk.candidates?.[0];
+          const content = candidate?.content;
           if (content?.parts) {
+            content.parts = content.parts.flatMap((part) => {
+              if (typeof part.text !== 'string' || part.thought) return [part];
+              const text = protocolTagDetector.accept(part.text);
+              if (text) return [{ ...part, text }];
+              protocolTextWasSuppressed ||= part.text.length > 0;
+              const { text: _text, ...rest } = part;
+              return Object.values(rest).some((value) => value !== undefined)
+                ? [rest]
+                : [];
+            });
+            if (candidate?.finishReason) {
+              const text = protocolTagDetector.finish();
+              if (text) content.parts.push({ text });
+            }
             content.parts = normalizeModelToolCallIds(
               content.parts,
               usedToolCallIds,
@@ -3585,7 +3670,17 @@ export class GeminiChat {
           }
         }
 
-        yield chunk; // Yield every chunk to the UI immediately.
+        const chunkHasToolCall =
+          chunk.candidates?.[0]?.content?.parts?.some(
+            (part) => part.functionCall,
+          ) ?? false;
+        if (
+          !protocolTextWasSuppressed ||
+          !protocolTagDetector.blockingOutput ||
+          chunkHasToolCall
+        ) {
+          yield chunk;
+        }
       }
     } catch (e) {
       streamError = e;
@@ -3633,6 +3728,13 @@ export class GeminiChat {
       .map((part) => part.text)
       .join('')
       .trim();
+
+    if (streamError === null && !hasToolCall && protocolTagDetector.leaked) {
+      throw new InvalidStreamError(
+        'Model response started with leaked protocol tags.',
+        'PROTOCOL_TAG_LEAK',
+      );
+    }
 
     // Record assistant turn with raw Content and metadata. Gate matches
     // the in-memory `this.history.push` decision below so chat-recording
