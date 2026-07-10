@@ -17,22 +17,59 @@ WebSocket, its mirrored workspace methods, and reverse MCP/CDP). Voice
 **Phase 4b**; dynamic workspace add/remove is **Phase 5**. Neither is in scope
 here.
 
-The core finding from the seam investigation: Phase 4 is mostly a *wiring and
-routing* change, not a rewrite. `AcpDispatcher` is already workspace-bound by
+The core finding from the seam investigation: Phase 4 is mostly a _wiring and
+routing_ change, not a rewrite. `AcpDispatcher` is already workspace-bound by
 construction, its `workspaceCwd` consistency check already exists, Phase 3
 already made the mirrored REST surface per-runtime, and `clientMcpSenderRegistry`
 is already a per-runtime field. The real work is (1) turning the single ACP mount
 into one dispatcher per runtime (each with its own remember-lane; still one
 `mountAcpHttp` call and one upgrade listener; an `AcpHttpHandle` that owns every
 runtime's registry), (2) extending that WebSocket upgrade listener to dispatch by
-URL path, (3) making the device-flow registry per-runtime, and (4) syncing the
+URL path, (3) keeping the device-flow registry daemon-global and shared across
+every mount (with best-effort event-sink fan-out to each trusted runtime's
+bridge), and (4) syncing the
 new `workspace_qualified_acp` capability tag across the SDK/CLI capability types
 and tests.
+
+## Systematic rework (hardening, PR #6621)
+
+Review surfaced a Critical: an earlier iteration made the device-flow registry
+per-runtime, which left secondary mounts unauthenticated (`device_flow "not
+configured"`). The ACP mount was reworked along eight axes; the final
+architecture is:
+
+1. **Runtime ACP mount factory.** One `mountAcpHttp` call owns a `primaryMount`
+   plus a `secondaryMounts` map (one `RuntimeAcpMount` per non-primary runtime),
+   each carrying a `primary` flag. HTTP and WS both resolve a mount by selector
+   and delegate to shared handlers.
+2. **Routing + connection isolation.** The plural selector aliases the primary
+   workspace to `primaryMount`, and resolves a per-runtime mount otherwise.
+   Untrusted non-primary workspaces are rejected (403) on both the HTTP and WS
+   paths before any child is spawned.
+3. **Raw request-target WS parsing.** The upgrade listener parses the raw
+   request-target (not `new URL().pathname`, which normalizes `%2e%2e`), so a
+   non-normalized dot-segment / backslash selector is destroyed before routing.
+4. **Daemon-global device-flow + fan-out.** The device-flow registry stays a
+   single daemon instance (OAuth credentials are process-global). Secondary
+   mounts share it via `opts.deviceFlowRegistry`; auth-flow events fan out
+   best-effort to every trusted runtime's bridge (`resolveEventBridges`).
+5. **Primary-only CDP + client-MCP.** CDP-tunnel claims are gated on
+   `activeMount.primary`; the plural POST returns the dispatch promise.
+6. **Disposed lifecycle gate.** After `dispose()`, the shared HTTP handlers
+   return `503 server_disposed` instead of racing torn-down registries during
+   the shutdown drain. `dispose()` is idempotent.
+7. **Aggregate observability.** `AcpHttpHandle.getSnapshot()` sums connection
+   and WS-stream counts across the primary and every secondary mount, so daemon
+   metrics report all workspaces' ACP connections, not just the primary's.
+8. **Capability advertisement.** `resolveAcpHttpEnabled()` is the single
+   interpretation of `QWEN_SERVE_ACP_HTTP`; `workspace_qualified_acp` is
+   advertised only when the ACP HTTP surface is enabled **and** multi-workspace
+   sessions are active.
 
 ## Dependencies on Phase 3 (unmerged)
 
 Phase 4 consumes these Phase 3 seams. Because PR #6567 is `CHANGES_REQUESTED`,
-treat them as *to-be-stabilized*; Phase 4 implementation must rebase onto the
+treat them as _to-be-stabilized_; Phase 4 implementation must rebase onto the
 merged Phase 3.
 
 - `packages/cli/src/serve/workspace-route-runtime.ts`:
@@ -103,7 +140,7 @@ merged Phase 3.
 - `WorkspaceRuntime` (workspace-registry.ts L28-38) carries
   `clientMcpSenderRegistry` per runtime but has **no `deviceFlowRegistry`
   field** — device-flow is still app-global (`setupDeviceFlowRegistry({ app,
-  bridge })` at server.ts L609, bound to the primary bridge).
+bridge })` at server.ts L609, bound to the primary bridge).
 
 ## Architecture: per-runtime ACP mount
 
@@ -222,7 +259,7 @@ should add a test asserting this, and confirm the same guard covers `session/new
 
 - Reverse tool channel: the `clientMcpProviderFactory` currently closes over
   `primaryRuntime.clientMcpSenderRegistry` + `primaryBridge` (server.ts
-  L1252-1257). Per-runtime mounts build the factory from the *resolved runtime's*
+  L1252-1257). Per-runtime mounts build the factory from the _resolved runtime's_
   `clientMcpSenderRegistry` + `bridge`, so a WS connection on `/workspaces/B/acp`
   registers client-hosted MCP servers in B's runtime only.
 - Per-connection `ClientMcpWsConnection` and `cdpEndpoint` stay per-connection;
