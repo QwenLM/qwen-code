@@ -24,6 +24,37 @@ if (
   globalWithDom.Element.prototype.scrollIntoView = () => {};
 }
 
+// jsdom implements `Element.getClientRects` but not `Range.prototype`'s.
+// CodeMirror's `measureTextSize` calls `range.getClientRects()` from a
+// `requestAnimationFrame` measure pass, so in jsdom that async callback
+// throws `TypeError: getClientRects is not a function`. Vitest surfaces it
+// as an *unhandled error* that fails the whole run (exit 1) even when every
+// test passes — and because it depends on rAF timing, it's flaky. Return an
+// empty rect list (CodeMirror already handles the no-layout case).
+if (typeof Range !== 'undefined') {
+  const emptyDomRect = (): DOMRect =>
+    ({
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      width: 0,
+      height: 0,
+      toJSON: () => ({}),
+    }) as DOMRect;
+  if (typeof Range.prototype.getClientRects !== 'function') {
+    Range.prototype.getClientRects = () =>
+      Object.assign([] as DOMRect[], {
+        item: () => null,
+      }) as unknown as DOMRectList;
+  }
+  if (typeof Range.prototype.getBoundingClientRect !== 'function') {
+    Range.prototype.getBoundingClientRect = emptyDomRect;
+  }
+}
+
 if (typeof navigator !== 'undefined' && !navigator.clipboard) {
   Object.defineProperty(navigator, 'clipboard', {
     configurable: true,
