@@ -41,7 +41,9 @@ interface CreateServeFeaturesDeps {
   opts: ServeOptions;
   boundWorkspace: string;
   persistSettingAvailable: boolean;
+  sessionArtifactsPersistenceAvailable: boolean;
   reloadAvailable: boolean;
+  channelReloadAvailable: boolean;
   sessionShellCommandEnabled: boolean;
   multiWorkspaceSessionsEnabled: boolean;
 }
@@ -59,7 +61,9 @@ export function createServeFeatures(
     opts,
     boundWorkspace,
     persistSettingAvailable,
+    sessionArtifactsPersistenceAvailable,
     reloadAvailable,
+    channelReloadAvailable,
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
   } = deps;
@@ -90,12 +94,17 @@ export function createServeFeatures(
           : {}),
         persistSettingAvailable,
         sessionShellCommandEnabled,
+        sessionArtifactsPersistenceAvailable,
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
+        channelReloadAvailable,
         multiWorkspaceSessionsEnabled,
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
-        browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts),
+        browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
+          opts,
+          process.env,
+        ),
         voiceTranscriptionAvailable: getCachedVoiceTranscriptionAvailable(),
         // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
         // on). A configured token no longer suppresses it — the browser carries

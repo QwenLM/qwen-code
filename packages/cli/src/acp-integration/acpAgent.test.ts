@@ -128,6 +128,23 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', () => ({
+  SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
+  normalizeEventPayload: vi.fn((payload: unknown) =>
+    typeof payload === 'object' &&
+    payload !== null &&
+    !Array.isArray(payload) &&
+    Array.isArray((payload as { changes?: unknown }).changes)
+      ? payload
+      : undefined,
+  ),
+  normalizeSnapshotPayload: vi.fn((payload: unknown) =>
+    typeof payload === 'object' &&
+    payload !== null &&
+    !Array.isArray(payload) &&
+    Array.isArray((payload as { artifacts?: unknown }).artifacts)
+      ? payload
+      : undefined,
+  ),
   createDebugLogger: () => mockDebugLogger,
   registerAcpEventLoopLagGauge: vi.fn(),
   startEventLoopLagMonitor: vi.fn(() => ({
@@ -634,6 +651,7 @@ import {
   unregisterGoalHook,
   startEventLoopLagMonitor,
   registerAcpEventLoopLagGauge,
+  SESSION_ARTIFACT_PERSISTENCE_VERSION,
 } from '@qwen-code/qwen-code-core';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { AgentSideConnection } from '@agentclientprotocol/sdk';
@@ -650,6 +668,7 @@ import {
   SERVE_STATUS_EXT_METHODS,
   SERVE_CONTROL_EXT_METHODS,
 } from '@qwen-code/acp-bridge/status';
+import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import {
   updateOutputLanguageFile,
   writeOutputLanguageAndRegisterPath,
@@ -1558,6 +1577,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       reloadModelProvidersConfig: vi.fn(),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
       getModel: vi.fn().mockReturnValue('m'),
+      getProjectRoot: vi.fn().mockReturnValue('/tmp'),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getAvailableModels: vi.fn().mockReturnValue([]),
@@ -1572,6 +1592,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       }),
       getFileSystemService: vi.fn().mockReturnValue(undefined),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        flush: vi.fn().mockResolvedValue(undefined),
+      }),
       setFileSystemService: vi.fn(),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -1826,6 +1849,241 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     return innerConfig;
   }
 
+  async function bootAcpAgent() {
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    return { agent, agentPromise };
+  }
+
+  it('sessionArtifactsPersist rejects a missing session id', async () => {
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        kind: 'event',
+        payload: {},
+      }),
+    ).rejects.toThrowError(/Invalid or missing sessionId/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionArtifactsPersist rejects an invalid kind', async () => {
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId: 'session-A',
+        kind: 'other',
+        payload: {},
+      }),
+    ).rejects.toThrowError(/Invalid or missing artifact persist kind/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionArtifactsPersist rejects a missing payload', async () => {
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId: 'session-A',
+        kind: 'event',
+      }),
+    ).rejects.toThrowError(/Invalid or missing artifact persist payload/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionArtifactsPersist rejects a missing live session', async () => {
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId: 'session-A',
+        kind: 'event',
+        payload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: 'session-A',
+          sequence: 1,
+          recordedAt: '2026-07-04T00:00:00.000Z',
+          changes: [],
+        },
+      }),
+    ).rejects.toThrowError(/Session not found for id: session-A/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionArtifactsPersist rejects when chat recording is unavailable', async () => {
+    const sessionId = 'session-A';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(undefined);
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId,
+        kind: 'event',
+        payload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId,
+          sequence: 1,
+          recordedAt: '2026-07-04T00:00:00.000Z',
+          changes: [],
+        },
+      }),
+    ).rejects.toThrowError(/Chat recording service unavailable/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionArtifactsPersist records artifact events and snapshots', async () => {
+    const sessionId = 'session-A';
+    const recording = {
+      flush: vi.fn().mockResolvedValue(undefined),
+      recordSessionArtifactEvent: vi.fn().mockResolvedValue(undefined),
+      recordSessionArtifactSnapshot: vi.fn().mockResolvedValue(undefined),
+    };
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
+    const { agent, agentPromise } = await bootAcpAgent();
+    const eventPayload = {
+      v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+      sessionId,
+      sequence: 1,
+      recordedAt: '2026-07-04T00:00:00.000Z',
+      changes: [],
+    };
+    const snapshotPayload = {
+      v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+      sessionId,
+      sequence: 2,
+      recordedAt: '2026-07-04T00:00:01.000Z',
+      artifacts: [],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+    };
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId,
+        kind: 'event',
+        payload: eventPayload,
+      }),
+    ).resolves.toEqual({ sessionId, persisted: true, kind: 'event' });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId,
+        kind: 'snapshot',
+        payload: snapshotPayload,
+      }),
+    ).resolves.toEqual({ sessionId, persisted: true, kind: 'snapshot' });
+
+    expect(recording.recordSessionArtifactEvent).toHaveBeenCalledWith(
+      eventPayload,
+    );
+    expect(recording.recordSessionArtifactSnapshot).toHaveBeenCalledWith(
+      snapshotPayload,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionArtifactsPersist rejects malformed event and snapshot payloads', async () => {
+    const sessionId = 'session-A';
+    const recording = {
+      flush: vi.fn().mockResolvedValue(undefined),
+      recordSessionArtifactEvent: vi.fn().mockResolvedValue(undefined),
+      recordSessionArtifactSnapshot: vi.fn().mockResolvedValue(undefined),
+    };
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId,
+        kind: 'event',
+        payload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId,
+          sequence: 1,
+          changes: [],
+        },
+      }),
+    ).rejects.toThrowError(/Invalid or missing artifact persist payload/);
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId,
+        kind: 'snapshot',
+        payload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId,
+          sequence: 2,
+          recordedAt: '2026-07-04T00:00:01.000Z',
+          changes: [],
+        },
+      }),
+    ).rejects.toThrowError(/Invalid or missing artifact persist payload/);
+
+    expect(recording.recordSessionArtifactEvent).not.toHaveBeenCalled();
+    expect(recording.recordSessionArtifactSnapshot).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionArtifactsPersist rejects payloads for a different session', async () => {
+    const sessionId = 'session-A';
+    const recording = {
+      flush: vi.fn().mockResolvedValue(undefined),
+      recordSessionArtifactEvent: vi.fn().mockResolvedValue(undefined),
+      recordSessionArtifactSnapshot: vi.fn().mockResolvedValue(undefined),
+    };
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId,
+        kind: 'event',
+        payload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: 'session-B',
+          sequence: 1,
+          recordedAt: '2026-07-04T00:00:00.000Z',
+          changes: [],
+        },
+      }),
+    ).rejects.toThrowError(/Invalid or missing artifact persist payload/);
+
+    expect(recording.recordSessionArtifactEvent).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('status ext methods expose workspace snapshots without secrets', async () => {
     vi.mocked(getMCPDiscoveryState).mockReturnValue(
       MCPDiscoveryState.COMPLETED,
@@ -1864,10 +2122,31 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         body: 'disabled secret body',
         filePath: '/disabled/SKILL.md',
       },
+      {
+        name: 'gsd-audit-uat',
+        description: 'Cross-phase audit',
+        level: 'extension',
+        extensionName: 'gsd-core',
+        disableModelInvocation: false,
+        body: 'extension secret body',
+        filePath: '/ext/gsd-core/skills/gsd-audit-uat/SKILL.md',
+      },
+      {
+        name: 'gsd-display-stale',
+        description: 'Display-name stale extension skill',
+        level: 'extension',
+        extensionName: 'GSD Core',
+        disableModelInvocation: false,
+        body: 'display stale body',
+        filePath: '/ext/gsd-core/skills/gsd-display-stale/SKILL.md',
+      },
     ]);
     mockConfig = {
       ...mockConfig,
       getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getExtensionManager: vi.fn().mockReturnValue({
+        refreshCache: vi.fn().mockResolvedValue(undefined),
+      }),
       getMcpServers: vi.fn().mockReturnValue({
         docs: {
           command: 'node',
@@ -1896,7 +2175,48 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getDisabledSkillNames: vi
         .fn()
         .mockReturnValue(new Set(['disabled-skill'])),
-      getSkillManager: vi.fn().mockReturnValue({ listSkills }),
+      getSkillManager: vi.fn().mockReturnValue({
+        refreshCache: vi.fn().mockResolvedValue(undefined),
+        listSkills,
+      }),
+      getExtensions: vi.fn().mockReturnValue([
+        {
+          id: 'gsd-core',
+          name: 'gsd-core',
+          displayName: 'GSD Core',
+          version: '1.0.0',
+          isActive: false,
+          path: '/ext/gsd-core',
+          config: { name: 'gsd-core', version: '1.0.0' },
+          contextFiles: [],
+          skills: [
+            {
+              name: 'gsd-audit-uat',
+              description: 'Cross-phase audit',
+              level: 'extension',
+              disableModelInvocation: false,
+              body: 'extension secret body',
+              filePath: '/ext/gsd-core/skills/gsd-audit-uat/SKILL.md',
+            },
+            {
+              name: 'gsd-display-stale',
+              description: 'Display-name stale extension skill',
+              level: 'extension',
+              disableModelInvocation: false,
+              body: 'display stale body',
+              filePath: '/ext/gsd-core/skills/gsd-display-stale/SKILL.md',
+            },
+            {
+              name: 'gsd-config-only',
+              description: 'Config-only extension skill',
+              level: 'extension',
+              disableModelInvocation: false,
+              body: 'config only body',
+              filePath: '/ext/gsd-core/skills/gsd-config-only/SKILL.md',
+            },
+          ],
+        },
+      ]),
       getAuthType: vi.fn().mockReturnValue('qwen'),
       getAllConfiguredModels: vi.fn().mockReturnValue([
         {
@@ -1959,10 +2279,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       SERVE_STATUS_EXT_METHODS.workspaceMcpResources,
       { serverName: 'not-configured' },
     );
-    const skills = await agent.extMethod(
+    const skills = (await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.workspaceSkills,
       {},
-    );
+    )) as unknown as ServeWorkspaceSkillsStatus;
     const providers = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.workspaceProviders,
       {},
@@ -2059,8 +2379,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       v: 1,
       workspaceCwd: '/work/status',
       initialized: true,
-      skills: [
-        {
+      skills: expect.arrayContaining([
+        expect.objectContaining({
           kind: 'skill',
           status: 'ok',
           name: 'review',
@@ -2068,8 +2388,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           level: 'project',
           argumentHint: '[path]',
           modelInvocable: true,
-        },
-        {
+        }),
+        expect.objectContaining({
           kind: 'skill',
           status: 'ok',
           name: 'manual-only',
@@ -2077,20 +2397,59 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           level: 'project',
           argumentHint: '[topic]',
           modelInvocable: false,
-        },
-        {
+        }),
+        expect.objectContaining({
           kind: 'skill',
           status: 'disabled',
           name: 'disabled-skill',
           description: 'Disabled by settings',
           level: 'project',
           modelInvocable: true,
-        },
-      ],
+        }),
+        expect.objectContaining({
+          kind: 'skill',
+          status: 'disabled',
+          name: 'gsd-audit-uat',
+          description: 'Cross-phase audit',
+          level: 'extension',
+          extensionName: 'gsd-core',
+          modelInvocable: true,
+        }),
+        expect.objectContaining({
+          kind: 'skill',
+          status: 'disabled',
+          name: 'gsd-display-stale',
+          description: 'Display-name stale extension skill',
+          level: 'extension',
+          extensionName: 'GSD Core',
+          modelInvocable: true,
+        }),
+        expect.objectContaining({
+          kind: 'skill',
+          status: 'disabled',
+          name: 'gsd-config-only',
+          description: 'Config-only extension skill',
+          level: 'extension',
+          extensionName: 'GSD Core',
+          modelInvocable: true,
+        }),
+      ]),
     });
+    expect(
+      skills.skills.filter((skill) => skill.name === 'gsd-audit-uat'),
+    ).toHaveLength(1);
+    expect(
+      skills.skills.filter((skill) => skill.name === 'gsd-display-stale'),
+    ).toHaveLength(1);
+    expect(
+      skills.skills.filter((skill) => skill.name === 'gsd-config-only'),
+    ).toHaveLength(1);
     expect(JSON.stringify(skills)).not.toContain('secret skill body');
     expect(JSON.stringify(skills)).not.toContain('manual secret body');
     expect(JSON.stringify(skills)).not.toContain('disabled secret body');
+    expect(JSON.stringify(skills)).not.toContain('extension secret body');
+    expect(JSON.stringify(skills)).not.toContain('display stale body');
+    expect(JSON.stringify(skills)).not.toContain('config only body');
     expect(JSON.stringify(skills)).not.toContain('/secret');
     expect(JSON.stringify(skills)).not.toContain('secret-hook');
 
@@ -7085,6 +7444,21 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   it('rewindSession extension method rewinds the active session', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     await setupSessionMocks(sessionId);
+    const artifactSnapshot = {
+      v: 1,
+      sessionId,
+      sequence: 0,
+      artifacts: [],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    };
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          loadSession: vi.fn().mockResolvedValue({ artifactSnapshot }),
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
 
     const agentPromise = runAcpAgent(
       mockConfig,
@@ -7116,7 +7490,96 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       apiTruncateIndex: 2,
       filesChanged: [],
       filesFailed: [],
+      artifactSnapshot,
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rewindSession extension method marks artifact snapshot unavailable when session reload is missing', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          loadSession: vi.fn().mockResolvedValue(undefined),
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const response = await agent.extMethod('rewindSession', {
+      sessionId,
+      targetTurnIndex: 1,
+      cwd: '/tmp',
+    });
+
+    expect(response).toMatchObject({
+      success: true,
+      artifactSnapshotUnavailable: 'session data unavailable after rewind',
+    });
+    expect(response).not.toHaveProperty('artifactSnapshot');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rewindSession extension method returns an empty artifact snapshot when reload has no artifact records', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          loadSession: vi.fn().mockResolvedValue({ conversation: {} }),
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const response = await agent.extMethod('rewindSession', {
+      sessionId,
+      targetTurnIndex: 1,
+      cwd: '/tmp',
+    });
+
+    expect(response).toMatchObject({
+      success: true,
+      artifactSnapshot: {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId,
+        sequence: 0,
+        artifacts: [],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      },
+    });
+    expect(response).not.toHaveProperty('artifactSnapshotUnavailable');
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -9594,9 +10057,13 @@ describe('sessionLanguage multi-session propagation', () => {
       refreshCache: vi.fn().mockResolvedValue(undefined),
       refreshTools: vi.fn().mockResolvedValue(undefined),
     };
+    const skillManager = {
+      refreshCache: vi.fn().mockResolvedValue(undefined),
+    };
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-ext'),
       getExtensionManager: vi.fn().mockReturnValue(extensionManager),
+      getSkillManager: vi.fn().mockReturnValue(skillManager),
     });
     const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
 
@@ -9638,6 +10105,7 @@ describe('sessionLanguage multi-session propagation', () => {
     ).resolves.toEqual({ ok: true });
 
     expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
+    expect(skillManager.refreshCache).toHaveBeenCalledOnce();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
     expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
 
@@ -9650,9 +10118,13 @@ describe('sessionLanguage multi-session propagation', () => {
       refreshCache: vi.fn().mockResolvedValue(undefined),
       refreshTools: vi.fn().mockRejectedValue(new Error('bad tool schema')),
     };
+    const skillManager = {
+      refreshCache: vi.fn().mockResolvedValue(undefined),
+    };
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-ext'),
       getExtensionManager: vi.fn().mockReturnValue(extensionManager),
+      getSkillManager: vi.fn().mockReturnValue(skillManager),
     });
     const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
 
@@ -9694,6 +10166,7 @@ describe('sessionLanguage multi-session propagation', () => {
     ).resolves.toEqual({ ok: true });
 
     expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
+    expect(skillManager.refreshCache).toHaveBeenCalledOnce();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
     expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
 

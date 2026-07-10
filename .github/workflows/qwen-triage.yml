@@ -260,7 +260,8 @@ jobs:
           fi
 
       - name: 'Run Qwen Triage'
-        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
+        id: 'triage'
+        uses: 'QwenLM/qwen-code-action@6d08e91aa807257b9c8af60edb5bb6bb2d7d951f'
         env:
           GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
@@ -288,6 +289,19 @@ jobs:
               "sandbox": false
             }
           prompt: '/triage ${{ steps.resolve.outputs.number }} --repo ${{ github.repository }}'
+
+      - name: 'Check triage response'
+        if: 'success() || failure()'
+        shell: 'bash'
+        env:
+          RESPONSE: '${{ steps.triage.outputs.summary }}'
+        run: |-
+          set -uo pipefail
+          if [[ -z "${RESPONSE}" || "${RESPONSE}" == "null" ]]; then
+            echo "::error title=Triage silent failure::Qwen Code exited without a response. Check the 'Run Qwen Triage' step stderr above for diagnostics."
+            exit 1
+          fi
+          echo "Triage response received (${#RESPONSE} chars)."
 
   # On-demand real-user testing: a write-permission user comments
   # `@qwen-code /tmux` on a PR to launch the changed app in a tmux TUI and

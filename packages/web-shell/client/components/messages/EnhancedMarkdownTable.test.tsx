@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StrictMode, act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider, type WebShellLanguage } from '../../i18n';
+import { immediateClipboardWrite } from '../../test/reactHarness';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 
 (
@@ -172,7 +173,7 @@ function textButtonContaining(
 }
 
 function mockClipboard() {
-  const writeText = vi.fn(() => Promise.resolve());
+  const writeText = vi.fn(() => immediateClipboardWrite());
   Object.defineProperty(navigator, 'clipboard', {
     configurable: true,
     value: { writeText },
