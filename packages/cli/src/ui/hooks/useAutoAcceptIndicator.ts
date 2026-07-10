@@ -19,7 +19,7 @@ import { t } from '../../i18n/index.js';
 const AUTO_MODE_FIRST_TIME_MESSAGE_KEY = 'auto_mode.entry_notice';
 const AUTO_MODE_FIRST_TIME_MESSAGE_FALLBACK =
   'Auto mode enabled.\n' +
-  '   An LLM classifier evaluates each tool call - safe actions auto-approve,\n' +
+  '   An LLM classifier evaluates each tool call — safe actions auto-approve,\n' +
   '   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.';
 
 const getAutoModeFirstTimeMessage = () => {

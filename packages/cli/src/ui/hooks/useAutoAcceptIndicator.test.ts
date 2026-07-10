@@ -24,7 +24,7 @@ import type { Config as ActualConfigType } from '@qwen-code/qwen-code-core';
 import type { Key } from './useKeypress.js';
 import { useKeypress } from './useKeypress.js';
 import { MessageType } from '../types.js';
-import { setLanguageAsync } from '../../i18n/index.js';
+import { setLanguage, setLanguageAsync } from '../../i18n/index.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 
 vi.mock('./useKeypress.js');
@@ -525,6 +525,35 @@ describe('useAutoAcceptIndicator', () => {
       },
       expect.any(Number),
     );
+  });
+
+  it('should fall back to readable English when the entry notice key is not loaded', async () => {
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    setLanguage('ca');
+    try {
+      const mockAddItem = vi.fn();
+
+      emitAutoModeEntryNotices({
+        config: mockConfigInstance as unknown as ActualConfigType,
+        addItem: mockAddItem,
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text:
+            'Auto mode enabled.\n' +
+            '   An LLM classifier evaluates each tool call — safe actions auto-approve,\n' +
+            '   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.',
+        },
+        expect.any(Number),
+      );
+    } finally {
+      stderrWrite.mockRestore();
+      await setLanguageAsync('en');
+    }
   });
 
   it('should persist acknowledgement after emitting the AUTO mode entry notice', async () => {

@@ -63,5 +63,28 @@ describe('approval mode display', () => {
         'Automatically approve all tools',
       );
     });
+
+    it('formats descriptions with the active locale', async () => {
+      await setLanguageAsync('zh');
+      try {
+        expect(formatApprovalModeDescription(ApprovalMode.PLAN)).toBe(
+          '仅分析，不修改文件或执行命令',
+        );
+        expect(formatApprovalModeDescription(ApprovalMode.DEFAULT)).toBe(
+          '需要批准文件编辑或 shell 命令',
+        );
+        expect(formatApprovalModeDescription(ApprovalMode.AUTO_EDIT)).toBe(
+          '自动批准文件编辑',
+        );
+        expect(formatApprovalModeDescription(ApprovalMode.AUTO)).toBe(
+          '使用分类器自动批准安全的工具调用',
+        );
+        expect(formatApprovalModeDescription(ApprovalMode.YOLO)).toBe(
+          '自动批准所有工具',
+        );
+      } finally {
+        await setLanguageAsync('en');
+      }
+    });
   });
 });

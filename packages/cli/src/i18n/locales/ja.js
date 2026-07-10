@@ -18,7 +18,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'シェルモード',
   'YOLO mode': 'YOLOモード',
-  'Auto mode': 'Autoモード',
+  'Auto mode': '自動モード',
   'auto_mode.entry_notice':
     '自動モードが有効です。\n   LLM 分類器が各ツール呼び出しを評価します — 安全な操作は自動承認され、\n   危険な操作はブロックされます。終了: Shift+Tab または /approval-mode default。',
   'plan mode': 'プランモード',
