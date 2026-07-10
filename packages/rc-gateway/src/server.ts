@@ -101,6 +101,7 @@ import { OwnerEventBus } from './ownerEvents.js';
 import { createPushRouter } from './routes/push.js';
 import { createRoutingRouter } from './routes/routing.js';
 import { createSearchRoute, type RankedSearch } from './routes/search.js';
+import { versionCheckMiddleware } from './middleware/versionCheck.js';
 import {
   resolveChatsDir,
   resolveSearchIndexDir,
@@ -455,6 +456,11 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // Resolve an asserted sub-actor (bridge "acting for @human") onto rcClient —
   // only honored for bridge-scope tokens. Must follow bearerResolve.
   app.use(resolveSubActor());
+  // Protocol version gate: if the client sends X-RC-Version and it does not
+  // match RC_PROTOCOL_VERSION, respond 426 before any route handler runs.
+  // Absent header → pass through (backward-compatible clients that don't
+  // negotiate the version header).
+  app.use(versionCheckMiddleware);
   // APNs registration for the iOS native shell (add-native-mobile-shells).
   // Gated at SESSION_READ to mirror the webpush router's floor (a notification
   // channel carries session-read-class payload data, so a zero-scope or guest

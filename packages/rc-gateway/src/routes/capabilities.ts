@@ -32,6 +32,12 @@ export function createCapabilityRoute(deps: {
     }
     const remoteControl: Record<string, unknown> = {
       version: RC_PROTOCOL_VERSION,
+      supportedTransports: ['sse', 'ws'],
+      supportedScopes: ['owner', 'write', 'approve', 'read'],
+      pairingEnabled: true,
+      auditEnabled: true,
+      walHorizonSec: 86400,
+      walMaxEvents: 10000,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {
