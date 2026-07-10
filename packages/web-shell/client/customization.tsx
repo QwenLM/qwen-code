@@ -109,6 +109,8 @@ export interface WebShellBottomStatusItem {
   onClick?: () => void;
 }
 
+export type WebShellIconSource = string;
+
 export interface WebShellAssistantMessageInfo {
   id: string;
   content: string;
@@ -144,8 +146,44 @@ export interface WebShellComposerTag {
   value?: string;
   removable?: boolean;
   kind?: WebShellComposerTagKind;
+  icon?: WebShellIconSource;
+  metadata?: unknown;
   serialized?: string;
 }
+
+export type WebShellComposerTagPlacementContext = 'composer' | 'user-message';
+
+export interface WebShellComposerTagRenderInfo {
+  tag: WebShellComposerTag;
+  placement: WebShellComposerTagPlacementContext;
+  readonly: boolean;
+  anchorRect?: DOMRectReadOnly;
+}
+
+/**
+ * Custom composer tag content. Inline composer tags are mounted from
+ * CodeMirror-managed React roots, so JSX returned for inline tags must not
+ * depend on React context from the surrounding app tree.
+ */
+export type ComposerTagRenderer = (
+  info: WebShellComposerTagRenderInfo,
+) => ReactNode | null | undefined;
+
+export type ComposerTagClickHandler = (
+  info: WebShellComposerTagRenderInfo,
+) => void;
+
+export type WebShellUserMessagePart =
+  | { type: 'text'; text: string }
+  | {
+      type: 'tag';
+      tag: WebShellComposerTag;
+      sourceRange?: readonly [number, number];
+    };
+
+export type UserMessageContentParser = (
+  content: string,
+) => readonly WebShellUserMessagePart[] | undefined | null;
 
 export type WebShellComposerTagPlacement = 'top' | 'inline';
 
@@ -167,20 +205,61 @@ export interface WebShellComposerInput {
 export interface WebShellAtItem {
   id: string;
   label: string;
+  subtitle?: string;
   description?: string;
   detail?: string;
+  icon?: WebShellIconSource;
+  iconMode?: 'mask' | 'image';
+  iconColor?: string;
+  iconSpin?: boolean;
+  iconTooltip?: string;
   insertText?: string;
   composerTag?: WebShellComposerTag;
 }
 
+export type WebShellBuiltinAtProviderId =
+  | 'files'
+  | 'extensions'
+  | 'mcp-resources';
+
+export type WebShellBuiltinAtProvidersConfig =
+  | boolean
+  | readonly WebShellBuiltinAtProviderId[]
+  | {
+      enabled?: boolean;
+      include?: readonly WebShellBuiltinAtProviderId[];
+      exclude?: readonly WebShellBuiltinAtProviderId[];
+    };
+
+export interface WebShellAtProviderTab {
+  id: string;
+  label: ReactNode;
+  textValue?: string;
+  disabled?: boolean;
+}
+
+export interface WebShellAtItemRenderInfo {
+  item: WebShellAtItem;
+  provider: WebShellAtProvider;
+  selected: boolean;
+}
+
+export type WebShellAtItemRenderer = (
+  info: WebShellAtItemRenderInfo,
+) => ReactNode | null | undefined;
+
 export interface WebShellAtProvider {
   id: string;
-  label: string;
+  label: ReactNode;
+  textValue?: string;
   description?: string;
   order?: number;
+  tabs?: readonly WebShellAtProviderTab[];
+  renderItem?: WebShellAtItemRenderer;
   search(params: {
     query: string;
     signal: AbortSignal;
+    tabId?: string;
   }): Promise<readonly WebShellAtItem[]>;
 }
 
@@ -314,7 +393,12 @@ export interface WebShellCustomization {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   renderWelcomeFooter?: WelcomeFooterRenderer;
+  parseUserMessageContent?: UserMessageContentParser;
   renderUserMessageContent?: UserMessageContentRenderer;
+  composerTagIcons?: WebShellComposerTagIconMap;
+  renderComposerTag?: ComposerTagRenderer;
+  renderComposerTagTooltip?: ComposerTagRenderer;
+  onComposerTagClick?: ComposerTagClickHandler;
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;

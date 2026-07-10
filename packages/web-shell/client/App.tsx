@@ -175,6 +175,7 @@ import {
   type WebShellMarkdownCustomization,
   type ToolHeaderExtraRenderer,
   type UserMessageContentRenderer,
+  type UserMessageContentParser,
   type AssistantTurnFooterRenderer,
   type WelcomeHeaderRenderer,
   type WelcomeFooterRenderer,
@@ -186,6 +187,9 @@ import {
   type MarkdownTableMode,
   type WebShellTaskInfo,
   type WebShellAtProvider,
+  type WebShellBuiltinAtProvidersConfig,
+  type ComposerTagClickHandler,
+  type ComposerTagRenderer,
   type WebShellComposerTagIconMap,
   type WebShellBottomStatusItem,
 } from './customization';
@@ -417,6 +421,8 @@ export interface WebShellProps {
   hiddenSlashCommands?: string[];
   /** Slash command category order. Defaults to custom, skill, system. */
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  /** Built-in @ mention providers to enable. Defaults to all built-ins. */
+  builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
   atProviders?: readonly WebShellAtProvider[];
   /** Icon URLs for custom composer tag kinds used by @ mention chips. */
@@ -427,8 +433,16 @@ export interface WebShellProps {
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
   renderWelcomeFooter?: WelcomeFooterRenderer;
+  /** Parse user-message text into display parts such as chips. */
+  parseUserMessageContent?: UserMessageContentParser;
   /** Custom renderer for the inside of user chat bubbles. Defaults to plain text. */
   renderUserMessageContent?: UserMessageContentRenderer;
+  /** Custom renderer for composer and user-message tags. */
+  renderComposerTag?: ComposerTagRenderer;
+  /** Custom hover content for composer and user-message tags. */
+  renderComposerTagTooltip?: ComposerTagRenderer;
+  /** Click handler for composer and user-message tags. */
+  onComposerTagClick?: ComposerTagClickHandler;
   /** Custom renderer displayed after the final assistant message of each turn. */
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
   /** Custom renderer inserted before the built-in chat composer toolbar controls. */
@@ -841,12 +855,17 @@ export function App({
   onBugReport,
   hiddenSlashCommands,
   slashCommandCategoryOrder,
+  builtinAtProviders,
   atProviders,
   composerTagIcons,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
+  parseUserMessageContent,
   renderUserMessageContent,
+  renderComposerTag,
+  renderComposerTagTooltip,
+  onComposerTagClick,
   renderAssistantTurnFooter,
   renderComposerToolbarStart,
   renderComposerToolbarEnd,
@@ -964,7 +983,11 @@ export function App({
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
+      parseUserMessageContent,
       renderUserMessageContent,
+      renderComposerTag,
+      renderComposerTagTooltip,
+      onComposerTagClick,
       renderAssistantTurnFooter,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
@@ -981,7 +1004,11 @@ export function App({
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
+      parseUserMessageContent,
       renderUserMessageContent,
+      renderComposerTag,
+      renderComposerTagTooltip,
+      onComposerTagClick,
       renderAssistantTurnFooter,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
@@ -5209,6 +5236,7 @@ export function App({
                           commands={commands}
                           skills={loadedSkills}
                           slashCommandCategoryOrder={slashCommandCategoryOrder}
+                          builtinAtProviders={builtinAtProviders}
                           atProviders={atProviders}
                           composerTagIcons={composerTagIcons}
                           queuedMessages={queuedTexts}

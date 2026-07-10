@@ -220,6 +220,260 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('returns only the final turn text after daemon tool calls', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Let me search. ' },
+          },
+        },
+      });
+      events.push({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            kind: 'search',
+            title: 'Search',
+            status: 'pending',
+          },
+        },
+      });
+      events.push({
+        id: 3,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Final answer.' },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.prompt('session-1', 'summarize')).resolves.toBe(
+      'Final answer.',
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('returns only the final turn text after daemon auto-approved tool calls', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Let me inspect. ' },
+          },
+        },
+      });
+      events.push({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            kind: 'read',
+            title: 'Read',
+            status: 'in_progress',
+          },
+        },
+      });
+      events.push({
+        id: 3,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Final answer.' },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.prompt('session-1', 'summarize')).resolves.toBe(
+      'Final answer.',
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('treats daemon permission requests as turn boundaries', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const permissionRequest: RequestPermissionRequest & { requestId: string } =
+      {
+        requestId: 'req-1',
+        sessionId: 'session-1',
+        toolCall: {
+          toolCallId: 'tool-1',
+          kind: 'shell',
+          title: 'Run command',
+        },
+        options: [
+          { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        ],
+      } as RequestPermissionRequest & { requestId: string };
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'I need permission. ' },
+          },
+        },
+      });
+      events.push({
+        id: 2,
+        v: 1,
+        type: 'permission_request',
+        data: permissionRequest,
+      });
+      events.push({
+        id: 3,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Final answer.' },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    bridge.on('permissionRequest', (event) => {
+      void bridge.respondToPermission(event.requestId, {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.prompt('session-1', 'summarize')).resolves.toBe(
+      'Final answer.',
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('treats daemon plan updates as turn boundaries', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Updating todos. ' },
+          },
+        },
+      });
+      events.push({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'plan',
+            entries: [{ content: 'Task', status: 'pending' }],
+          },
+        },
+      });
+      events.push({
+        id: 3,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Done.' },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.prompt('session-1', 'summarize')).resolves.toBe(
+      'Done.',
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
   it('rejects prompt and emits protocol error on turn_error', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
