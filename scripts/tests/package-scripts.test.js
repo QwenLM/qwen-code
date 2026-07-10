@@ -68,6 +68,22 @@ describe('package scripts', () => {
     );
   });
 
+  it('cleans package build artifacts before checking the serve fast path bundle', () => {
+    const packageJson = readPackageJson();
+
+    expect(packageJson.scripts['check:serve-fast-path-bundle']).toBe(
+      [
+        'node scripts/clean-package-build-artifacts.js',
+        '&& npm run build -- --cli-only',
+        '&& cross-env DEV=true npm run bundle',
+        '&& node scripts/check-serve-fast-path-bundle.js',
+      ].join(' '),
+    );
+    expect(packageJson.scripts['check:serve-fast-path-bundle']).not.toContain(
+      'npm run clean',
+    );
+  });
+
   it('defines a release test script that disables workspace coverage', () => {
     const packageJson = readPackageJson();
 

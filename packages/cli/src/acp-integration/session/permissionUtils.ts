@@ -68,6 +68,18 @@ function formatExecPermissionScopeLabel(
   return confirmation.rootCommand;
 }
 
+/** Metadata that lets daemon session polling distinguish questions from tools. */
+export function interactionMetaFields(
+  confirmation: ToolCallConfirmationDetails,
+): Record<string, unknown> {
+  return confirmation.type === 'ask_user_question'
+    ? {
+        qwenInteractionKind: 'user_question',
+        qwenQuestions: confirmation.questions,
+      }
+    : {};
+}
+
 export function buildPermissionRequestContent(
   confirmation: ToolCallConfirmationDetails,
 ): ToolCallContent[] {

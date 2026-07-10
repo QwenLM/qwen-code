@@ -11,7 +11,13 @@ This guide covers setting up Qwen Code with a WeCom intelligent robot (企业微
 ## Creating the Robot
 
 1. Open the WeCom admin console and create an intelligent robot.
+
+![](https://gw.alicdn.com/imgextra/i2/O1CN017w1jWj1TTvNBcfya8_!!6000000002384-2-tps-2212-887.png)
+
 2. Choose API mode.
+
+![](https://gw.alicdn.com/imgextra/i3/O1CN01buuik0207paQUuLQW_!!6000000006803-1-tps-1276-720.gif)
+
 3. Copy the Bot ID and Secret.
 4. Add the robot to the direct chats or groups where it should be available.
 
