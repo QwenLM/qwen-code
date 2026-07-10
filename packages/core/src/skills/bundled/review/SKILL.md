@@ -196,6 +196,7 @@ Ten agents all reading the same diff multiplies redundant reading of the early h
 - **What to do when paging cannot help.** A chunk whose `maxLineChars` exceeds ~25 000 contains a single line longer than one read returns — a minified bundle, a base64 blob. Paging starts every page at a line boundary, so the tail of that line is unreachable by any `offset`. Such a chunk MUST NOT be receipted as covered. Tell the agent to return, instead of the receipt: `Uncoverable: chunk <id> — line exceeds the read limit`. Report those chunks to the user in Step 6 and do not let the verdict be Approve on their strength.
 - Permission to read the **full source files** it covers (via `read_file` on the worktree path) whenever a hunk's correctness depends on code outside the hunk. Diff context lines are three lines deep; state invariants are not. A source file over ~25 000 characters comes back with `isTruncated` set — page through it rather than reasoning from the first screenful.
 - The review focus: it owns **all** of Agents 1–6's dimensions (correctness, security, code quality, performance, test coverage, and the three adversarial personas) **for its territory only**.
+  - **The severity definitions from the finding format below, verbatim.** A chunk agent owns the test-coverage dimension with no dedicated agent to calibrate it, and an uncalibrated agent files "zero test coverage" as Critical. It has happened.
 - Project-specific rules from Step 2 (if any).
 
 **Whole-diff agents — launched alongside the chunk agents, in the same response:**
@@ -274,6 +275,7 @@ After all agents return, verify that **every chunk id carries exactly one receip
 - `diffPathAbsolute`, plus the `offset` / `limit` it should pass to `read_file` (the whole file in 3A; its own chunk range in 3B). **Never give an agent a `git diff` command** — see "Diff capture and the review topology" in Step 1 for why. In worktree-mode PR reviews the agent's `working_dir` is the PR worktree, so `grep_search` and source-file reads resolve against the PR's code automatically — the agent must NOT `cd` into the worktree or prefix absolute paths for those.
 - A one-sentence summary of what the changes are about
 - Its review focus (copy the focus areas from its section below)
+- **The severity definitions**, verbatim, from the finding format below. An agent asked for a severity it has never been given the meaning of falls back on its own prior, and the priors disagree — in one measured run the same "zero test coverage" finding was filed as Critical four times and Suggestion twice.
 - Project-specific rules from Step 2 (if any)
 
 Apply the **Exclusion Criteria** (defined at the end of this document) — do NOT flag anything that matches those criteria.
@@ -289,6 +291,21 @@ Each agent must return findings in this structured format (one per issue):
 - **Severity:** Critical | Suggestion | Nice to have
 - **Confidence:** high | low
 ```
+
+**Severity describes the code, not the finding.** Every agent that fills in that field needs the same definitions, so they are here rather than only in Step 6, where they used to sit — after every severity had already been assigned.
+
+- **Critical** — the code does something wrong. A bug that produces incorrect behaviour, a security hole, data loss, a resource or state leak, a build or test failure. Not "important", not "large", not "I am confident": _wrong_.
+- **Suggestion** — a recommended improvement to code that works.
+- **Nice to have** — optional.
+
+**A missing test is a Suggestion.** Absent code that does something wrong, nothing is broken, and "this file has zero references to `X`" is a coverage statistic, not a defect. Two shapes are Critical, because in both of them something _is_ wrong:
+
+- a test that asserts the opposite of the intended behaviour — it will bless the very regression it was written to catch;
+- a test weakened, disabled, or deleted **in this diff** so that new behaviour passes.
+
+If a missing test would let a specific incorrect behaviour ship, report **that behaviour** as the Critical and cite the missing test as your evidence. Naming the bug is the work; naming the gap is not.
+
+A verdict of Request changes is computed from Criticals alone, so an inflated severity blocks a merge. Measured on one run of this skill: four "zero test coverage" findings were filed as Critical and two identical ones as Suggestion, in the same review, and the PR was blocked partly on the strength of the four.
 
 If an agent finds no issues in its dimension, it should explicitly return "No issues found." A chunk agent in Step 3B must still emit its `Covered:` receipt line in that case.
 
@@ -545,7 +562,7 @@ For **PR comments** (Step 7): do NOT include internal stats (agent count, raw/co
 
 Use severity levels:
 
-- **Critical** — Must fix before merging. Bugs that cause incorrect behavior (e.g., logic errors, wrong return values, skipped code paths), security vulnerabilities, data loss risks, build/test failures. If code does something wrong, it's Critical — not Suggestion.
+- **Critical** — Must fix before merging. Bugs that cause incorrect behavior (e.g., logic errors, wrong return values, skipped code paths), security vulnerabilities, data loss risks, build/test failures. If code does something wrong, it's Critical — not Suggestion. A missing test is not a Critical; see the severity definitions in Step 3, which every review agent receives.
 - **Suggestion** — Recommended improvement. Better patterns, clearer code, potential issues that don't cause incorrect behavior today but may in the future.
 - **Nice to have** — Optional optimization. Minor style tweaks, small performance gains.
 
