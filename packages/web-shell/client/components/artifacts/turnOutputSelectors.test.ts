@@ -282,6 +282,52 @@ describe('turnOutputSelectors', () => {
     ]);
   });
 
+  it('does not infer created status from file content text', () => {
+    const messages = [
+      userMessage('u1', 'edit changelog'),
+      toolGroup('tg1', [
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'CHANGELOG.md' },
+          rawOutput: {
+            originalContent: 'old\n',
+            newContent: 'created new file for the API module\n',
+            returnDisplay: 'Updated CHANGELOG.md',
+          },
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change?.status).toBe('modified');
+  });
+
+  it('keeps file changes when the visible transcript starts with a tool group', () => {
+    const messages = [
+      toolGroup('tg1', [
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          rawOutput: {
+            originalContent: 'one\n',
+            newContent: 'two\n',
+          },
+        },
+      ]),
+    ];
+
+    const changes = getFileChangesByTurn(messages, new Map()).get('tg1');
+    expect(changes).toHaveLength(1);
+    expect(changes?.[0]).toMatchObject({
+      path: 'src/app.ts',
+      status: 'modified',
+    });
+  });
+
   it('does not match two different relative paths by suffix', () => {
     const messages = [
       userMessage('u1', 'edit file'),

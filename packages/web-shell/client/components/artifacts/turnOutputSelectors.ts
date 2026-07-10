@@ -38,7 +38,8 @@ export function getArtifactsByTurn(
       currentTurnId = message.id;
       continue;
     }
-    if (message.role !== 'tool_group' || !currentTurnId) continue;
+    if (!currentTurnId) currentTurnId = message.id;
+    if (message.role !== 'tool_group') continue;
     for (const tool of message.tools) {
       for (const id of getToolCallIds(tool)) {
         toolCallTurn.set(id, currentTurnId);
@@ -134,7 +135,8 @@ export function getFileChangesByTurn(
       currentTurnId = message.id;
       continue;
     }
-    if (message.role !== 'tool_group' || !currentTurnId) continue;
+    if (!currentTurnId) currentTurnId = message.id;
+    if (message.role !== 'tool_group') continue;
     const artifactPaths = new Set(
       (artifactsByTurn.get(currentTurnId) ?? [])
         .map((artifact) => normalizePath(artifact.workspacePath))
@@ -163,7 +165,8 @@ export function getScheduledTasksByTurn(
       currentTurnId = message.id;
       continue;
     }
-    if (message.role !== 'tool_group' || !currentTurnId) continue;
+    if (!currentTurnId) currentTurnId = message.id;
+    if (message.role !== 'tool_group') continue;
     for (const tool of message.tools) {
       collectScheduledTasks(tool, currentTurnId, byTurn);
     }
@@ -304,7 +307,8 @@ function inferFileChangeStatus(
   tool: ACPToolCall,
 ): TurnOutputFileChange['status'] {
   if (tool.toolName.toLowerCase() === 'write_file') return 'created';
-  const output = collectText(tool.rawOutput).toLowerCase();
+  const raw = getRawOutputRecord(tool);
+  const output = (getStringField(raw, 'returnDisplay') ?? '').toLowerCase();
   if (
     output.includes('created new file') ||
     output.includes('successfully created') ||

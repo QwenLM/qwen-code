@@ -382,7 +382,7 @@ export function getDisplayItemVirtualKey(item: DisplayItem): string {
   return `msg:${item.key}`;
 }
 
-function attachTurnOutputs(
+export function attachTurnOutputs(
   items: DisplayItem[],
   isResponding: boolean,
   turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>,
@@ -399,12 +399,12 @@ function attachTurnOutputs(
 
   const result: DisplayItem[] = [];
   let currentTurnId: string | null = null;
-  const pushTurnOutputs = (isFinalTurn: boolean) => {
+  const pushTurnOutputs = (turnId: string | null, isFinalTurn: boolean) => {
     if (isFinalTurn && isResponding) return;
-    if (!currentTurnId) return;
-    const changes = turnFileChanges?.get(currentTurnId) ?? [];
-    const artifacts = turnArtifacts?.get(currentTurnId) ?? [];
-    const scheduledTasks = turnScheduledTasks?.get(currentTurnId) ?? [];
+    if (!turnId) return;
+    const changes = turnFileChanges?.get(turnId) ?? [];
+    const artifacts = turnArtifacts?.get(turnId) ?? [];
+    const scheduledTasks = turnScheduledTasks?.get(turnId) ?? [];
     if (
       changes.length === 0 &&
       artifacts.length === 0 &&
@@ -414,8 +414,8 @@ function attachTurnOutputs(
     }
     result.push({
       type: 'turn_outputs',
-      key: currentTurnId,
-      turnId: currentTurnId,
+      key: turnId,
+      turnId,
       changes,
       artifacts,
       scheduledTasks,
@@ -424,12 +424,14 @@ function attachTurnOutputs(
 
   for (const item of items) {
     if (item.type === 'message' && isTurnStartMessage(item.message)) {
-      pushTurnOutputs(false);
+      pushTurnOutputs(currentTurnId, false);
+      currentTurnId = item.message.id;
+    } else if (!currentTurnId && item.type === 'message') {
       currentTurnId = item.message.id;
     }
     result.push(item);
   }
-  pushTurnOutputs(true);
+  pushTurnOutputs(currentTurnId, true);
   return result;
 }
 
