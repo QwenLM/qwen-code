@@ -20,6 +20,14 @@ import type { TxtRecord } from './advert.js';
 /** The DNS-SD service type (library forms `_qwen-rc._tcp.local.` from this). */
 export const QWEN_RC_SERVICE_TYPE = 'qwen-rc';
 
+/**
+ * Log keyword emitted (as a `console.warn` prefix) when the optional
+ * `bonjour-service` package is not installed and mDNS advertisement is
+ * silently skipped. Pinned to this exact string so monitors / grep-verify
+ * tests can detect the condition without coupling to the full prose message.
+ */
+export const MDNS_UNAVAILABLE_KEYWORD = 'mdns_unavailable';
+
 /** A published service handle (we only ever destroy via the parent instance). */
 export interface BonjourServiceLike {
   stop?(cb?: () => void): void;

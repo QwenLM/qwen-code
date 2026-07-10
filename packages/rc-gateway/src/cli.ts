@@ -25,7 +25,11 @@ import {
   formatDaemonsJson,
   type MdnsSuppressReason,
 } from './mdns/advert.js';
-import { MdnsAdvertiser, type BonjourFactory } from './mdns/advertiser.js';
+import {
+  MdnsAdvertiser,
+  MDNS_UNAVAILABLE_KEYWORD,
+  type BonjourFactory,
+} from './mdns/advertiser.js';
 import { browseDaemons, type BrowserFactory } from './mdns/browser.js';
 import { startDaemon } from './daemonSupervisor.js';
 import { buildAcmeManager } from './tls/acme/buildAcmeStack.js';
@@ -796,7 +800,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
           if (!factory) {
             // eslint-disable-next-line no-console
             console.warn(
-              'mDNS: advertising skipped — optional bonjour-service dependency not installed',
+              `${MDNS_UNAVAILABLE_KEYWORD}: optional bonjour-service dependency not installed`,
             );
             return;
           }

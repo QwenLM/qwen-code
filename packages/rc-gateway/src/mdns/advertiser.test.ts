@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { MdnsAdvertiser, type BonjourLike } from './advertiser.js';
+import {
+  MdnsAdvertiser,
+  MDNS_UNAVAILABLE_KEYWORD,
+  type BonjourLike,
+} from './advertiser.js';
 import { buildTxtRecord } from './advert.js';
 
 function fakeBonjour() {
@@ -93,6 +97,10 @@ describe('MdnsAdvertiser', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('MDNS_UNAVAILABLE_KEYWORD is exactly "mdns_unavailable"', () => {
+    expect(MDNS_UNAVAILABLE_KEYWORD).toBe('mdns_unavailable');
   });
 
   it('stop() is a no-op when never started, and idempotent', async () => {
