@@ -8,8 +8,10 @@ import { useCallback, useMemo, useRef } from 'react';
 import {
   useActions,
   useConnection,
+  useDaemonFollowupSuggestion,
   useStreamingState,
   useTranscriptBlocks,
+  useTranscriptStore,
   useWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
@@ -17,7 +19,11 @@ import { useMessages } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptImage } from '../adapters/promptTypes';
-import type { ComposerSubmitCommit } from '../hooks/useComposerCore';
+import type {
+  ComposerSubmitCommit,
+  EditorHandle,
+} from '../hooks/useComposerCore';
+import { useQueuedPrompts } from '../hooks/useQueuedPrompts';
 import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
@@ -31,6 +37,7 @@ import { mergeCommands } from '../hooks/daemonSessionMappers';
 import { MessageList } from './MessageList';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import { QueuedPromptDisplay } from './QueuedPromptDisplay';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
 import type {
@@ -54,6 +61,7 @@ const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
   'model',
   'voice',
 ];
+
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */
   title?: string;
@@ -83,8 +91,22 @@ export function ChatPane({
   const workspaceActions = useWorkspaceActions();
   const messages = useMessages(t);
   const blocks = useTranscriptBlocks();
+  const store = useTranscriptStore();
   const streamingState = useStreamingState();
   const { artifacts } = useSessionArtifacts();
+  const streamingStateRef = useRef(streamingState);
+  streamingStateRef.current = streamingState;
+  const editorRef = useRef<EditorHandle | null>(null);
+  const {
+    followupState,
+    onAcceptFollowup,
+    onDismissFollowup,
+    clear: clearFollowup,
+  } = useDaemonFollowupSuggestion({
+    onAccept: (suggestion) => {
+      editorRef.current?.insertText(suggestion);
+    },
+  });
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -92,6 +114,10 @@ export function ChatPane({
       else console.error(fallback, error);
     },
     [onError],
+  );
+  const notifySuccess = useCallback(
+    (message: string) => store.dispatch([{ type: 'status', text: message }]),
+    [store],
   );
 
   const pendingApproval = useMemo(
@@ -133,6 +159,27 @@ export function ChatPane({
     () => new Set<TurnOutputKind>(messageTurnOutputs ?? TURN_OUTPUT_KINDS),
     [messageTurnOutputs],
   );
+  const {
+    queuedPrompts,
+    queuedTexts,
+    enqueuePrompt,
+    removeQueuedPrompt,
+    insertQueuedPrompt,
+    editQueuedPrompt,
+    editLastQueuedPrompt,
+    clearQueuedPrompts,
+  } = useQueuedPrompts({
+    connected: connection.status === 'connected',
+    sessionId: connection.sessionId,
+    clientId: connection.clientId,
+    streamingState,
+    sessionActions: actions,
+    store,
+    editorRef,
+    reportError,
+    notifySuccess,
+    t,
+  });
 
   // Anchor the streaming timer to the turn's own start (the last user message's
   // timestamp) rather than letting StreamingStatus fall back to "now" — so a
@@ -154,23 +201,24 @@ export function ChatPane({
     ): boolean => {
       const trimmed = text.trim();
       if (!trimmed) return false;
-      // Keep the draft (return false) and clear it only once the daemon ADMITS
-      // the prompt. `onAdmitted` fires at acceptance; the sendPrompt promise
-      // itself resolves only when the whole (possibly long) turn finishes, so
-      // committing on resolution would strand the sent text in the composer for
-      // the entire response. If the prompt is rejected before admission
-      // (transcript still loading, session disconnected, or a turn already
-      // active) onAdmitted never fires, so the draft is preserved and the error
-      // is surfaced.
-      actions
-        .sendPrompt(trimmed, {
-          ...(images && images.length ? { images } : {}),
-          onAdmitted: commitAccepted,
-        })
-        .catch((error: unknown) => reportError(error, 'Failed to send prompt'));
-      return false;
+      if (connection.status !== 'connected') return false;
+      if (streamingStateRef.current === 'idle') {
+        actions
+          .sendPrompt(trimmed, {
+            ...(images && images.length ? { images } : {}),
+            onAdmitted: () => {
+              clearFollowup();
+              commitAccepted?.();
+            },
+          })
+          .catch((error: unknown) =>
+            reportError(error, 'Failed to send prompt'),
+          );
+        return false;
+      }
+      return enqueuePrompt(trimmed, images);
     },
-    [actions, reportError],
+    [actions, clearFollowup, connection.status, enqueuePrompt, reportError],
   );
 
   const handleConfirm = useCallback(
@@ -374,11 +422,22 @@ export function ChatPane({
         {/* Panes keep the composer status compact: spinner + elapsed time +
             token count + cancel hint, but no rotating "witty" loading phrase. */}
         <StreamingStatus startedAt={activeTurnStartedAt} showPhrase={false} />
+        <QueuedPromptDisplay
+          prompts={queuedPrompts}
+          t={t}
+          onDelete={removeQueuedPrompt}
+          onInsert={insertQueuedPrompt}
+          onEdit={editQueuedPrompt}
+        />
         <ChatEditor
+          ref={editorRef}
           onSubmit={handleSubmit}
           onCancel={handleCancel}
           isRunning={isResponding}
           commands={commands}
+          queuedMessages={queuedTexts}
+          onPopQueuedMessages={editLastQueuedPrompt}
+          onClearQueuedMessages={clearQueuedPrompts}
           visibleToolbarActions={PANE_TOOLBAR_ACTIONS}
           currentMode={connection.currentMode ?? 'default'}
           currentModel={connection.currentModel ?? ''}
@@ -386,6 +445,9 @@ export function ChatPane({
           onSelectMode={handleSelectMode}
           onSelectModel={handleSelectModel}
           dialogOpen={approvalActive}
+          followupState={followupState}
+          onAcceptFollowup={onAcceptFollowup}
+          onDismissFollowup={onDismissFollowup}
           placeholderText={t('splitView.composerPlaceholder')}
         />
       </div>
