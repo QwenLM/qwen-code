@@ -182,10 +182,8 @@ describe('turnOutputSelectors', () => {
     ];
 
     const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
-    expect(change).toMatchObject({
-      additions: 1,
-      deletions: 0,
-    });
+    expect(change?.additions).toBeUndefined();
+    expect(change?.deletions).toBeUndefined();
     expect(change?.diffs).toEqual([
       { oldText: '', newText: 'one\n', fullContent: true },
       { oldText: 'one\n', newText: 'two\n' },
@@ -327,6 +325,49 @@ describe('turnOutputSelectors', () => {
     expect(changes?.[0]).toMatchObject({
       path: 'src/app.ts',
       status: 'modified',
+    });
+  });
+
+  it('keeps artifacts when the visible transcript starts with a tool group', () => {
+    const messages = [
+      toolGroup('tg1', [
+        {
+          callId: 'record-1',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { workspacePath: 'reports/a.html' },
+        },
+      ]),
+    ];
+    const artifacts = [
+      {
+        id: 'artifact-1',
+        title: 'Report',
+        workspacePath: 'reports/a.html',
+      },
+    ] as DaemonSessionArtifact[];
+
+    expect(getArtifactsByTurn(messages, artifacts).get('tg1')).toEqual(
+      artifacts,
+    );
+  });
+
+  it('keeps scheduled tasks when the visible transcript starts with a tool group', () => {
+    const messages = [
+      toolGroup('tg1', [
+        {
+          callId: 'cron-call',
+          toolName: 'cron_create',
+          status: 'completed',
+          args: { cron: '0 9 * * *', prompt: 'standup', recurring: true },
+          rawOutput: 'Scheduled cron_123 (0 9 * * *).',
+        },
+      ]),
+    ];
+
+    expect(getScheduledTasksByTurn(messages).get('tg1')?.[0]).toMatchObject({
+      id: 'cron_123',
+      title: 'standup',
     });
   });
 
@@ -483,6 +524,26 @@ describe('turnOutputSelectors', () => {
           rawOutput: {
             llmContent: 'Scheduled recurring job cron_123 (0 9 * * *).',
           },
+        },
+      ]),
+    ];
+
+    expect(getScheduledTasksByTurn(messages).get('u1')?.[0]).toMatchObject({
+      id: 'cron_123',
+      title: 'standup',
+    });
+  });
+
+  it('extracts cron ids from string raw output', () => {
+    const messages = [
+      userMessage('u1', 'schedule'),
+      toolGroup('tg1', [
+        {
+          callId: 'cron-call',
+          toolName: 'cron_create',
+          status: 'completed',
+          args: { cron: '0 9 * * *', prompt: 'standup', recurring: true },
+          rawOutput: 'Scheduled cron_123 (0 9 * * *).',
         },
       ]),
     ];

@@ -137,6 +137,7 @@ export type DisplayItem =
   | {
       type: 'parallel_agents';
       key: string;
+      turnId: string;
       agents: ACPToolCall[];
       /**
        * Wall-clock time of the first grouped launch, carried so the grouped
@@ -331,6 +332,7 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
         items.push({
           type: 'parallel_agents',
           key: `par-${grouped[0].id}`,
+          turnId: grouped[0].id,
           agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
           timestamp: grouped[0].timestamp,
         });
@@ -347,6 +349,7 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
         items.push({
           type: 'parallel_agents',
           key: `par-${grouped[0].id}`,
+          turnId: grouped[0].id,
           agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
           timestamp: grouped[0].timestamp,
         });
@@ -428,6 +431,8 @@ export function attachTurnOutputs(
       currentTurnId = item.message.id;
     } else if (!currentTurnId && item.type === 'message') {
       currentTurnId = item.message.id;
+    } else if (!currentTurnId && item.type === 'parallel_agents') {
+      currentTurnId = item.turnId;
     }
     result.push(item);
   }

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   useActions,
   useConnection,
@@ -13,7 +13,9 @@ import {
   useTranscriptBlocks,
   useTranscriptStore,
   useWorkspaceActions,
+  type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
 import { useMessages } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
@@ -68,6 +70,10 @@ export interface ChatPaneProps {
   onClose?: () => void;
   onError?: (error: unknown, fallback: string) => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onPaneArtifactsChange?: (
+    artifacts: readonly DaemonSessionArtifact[],
+    workspaceActions: DaemonWorkspaceActions,
+  ) => void;
   messageTurnOutputs?: readonly TurnOutputKind[];
 }
 
@@ -83,6 +89,7 @@ export function ChatPane({
   onClose,
   onError,
   onRightPanelOpen,
+  onPaneArtifactsChange,
   messageTurnOutputs,
 }: ChatPaneProps) {
   const { t } = useI18n();
@@ -94,6 +101,9 @@ export function ChatPane({
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
   const { artifacts } = useSessionArtifacts();
+  useEffect(() => {
+    onPaneArtifactsChange?.(artifacts, workspaceActions);
+  }, [artifacts, onPaneArtifactsChange, workspaceActions]);
   const streamingStateRef = useRef(streamingState);
   streamingStateRef.current = streamingState;
   const editorRef = useRef<EditorHandle | null>(null);

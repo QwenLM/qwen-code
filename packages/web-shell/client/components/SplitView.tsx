@@ -9,7 +9,9 @@ import {
   DaemonSessionProvider,
   useConnection,
   useSessions,
+  type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
 import { ChatPane } from './ChatPane';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -41,6 +43,10 @@ export interface SplitViewProps {
   onExit: () => void;
   onError?: (error: unknown, fallback: string) => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onPaneArtifactsChange?: (
+    artifacts: readonly DaemonSessionArtifact[],
+    workspaceActions: DaemonWorkspaceActions,
+  ) => void;
   messageTurnOutputs?: readonly TurnOutputKind[];
   /**
    * Bumped by the parent whenever the session list changes elsewhere (create /
@@ -63,6 +69,7 @@ export function SplitView({
   onExit,
   onError,
   onRightPanelOpen,
+  onPaneArtifactsChange,
   messageTurnOutputs,
   sessionListReloadToken,
 }: SplitViewProps) {
@@ -334,6 +341,7 @@ export function SplitView({
                     onClose={() => removePane(sessionId)}
                     onError={onError}
                     onRightPanelOpen={onRightPanelOpen}
+                    onPaneArtifactsChange={onPaneArtifactsChange}
                     messageTurnOutputs={messageTurnOutputs}
                   />
                 </DaemonSessionProvider>

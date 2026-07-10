@@ -22,6 +22,7 @@ import {
   useTranscriptStore,
   useWorkspaceActions,
   useWorkspaceEventSignals,
+  type DaemonWorkspaceActions,
   type DaemonSessionNotice,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
@@ -1111,16 +1112,27 @@ export function App({
   } = useSessionArtifacts();
   const [artifactPanelExtraArtifacts, setArtifactPanelExtraArtifacts] =
     useState<DaemonSessionArtifact[]>([]);
+  const [artifactPanelTabs, setArtifactPanelTabs] = useState<
+    ArtifactPanelTab[]
+  >([]);
   useEffect(() => {
     if (artifactPanelExtraArtifacts.length === 0 || artifacts.length === 0) {
       return;
     }
     const artifactIds = new Set(artifacts.map((artifact) => artifact.id));
+    const paneArtifactIds = new Set(
+      artifactPanelTabs
+        .filter((tab) => tab.kind === 'artifact' && tab.workspaceActions)
+        .map((tab) => (tab.kind === 'artifact' ? tab.artifactId : '')),
+    );
     setArtifactPanelExtraArtifacts((previous) => {
-      const next = previous.filter((artifact) => !artifactIds.has(artifact.id));
+      const next = previous.filter(
+        (artifact) =>
+          !artifactIds.has(artifact.id) || paneArtifactIds.has(artifact.id),
+      );
       return next.length === previous.length ? previous : next;
     });
-  }, [artifacts, artifactPanelExtraArtifacts.length]);
+  }, [artifacts, artifactPanelExtraArtifacts.length, artifactPanelTabs]);
   const artifactPanelArtifacts = useMemo(() => {
     if (artifactPanelExtraArtifacts.length === 0) return artifacts;
     const merged = [...artifacts];
@@ -1132,6 +1144,54 @@ export function App({
     }
     return merged;
   }, [artifacts, artifactPanelExtraArtifacts]);
+  const handlePaneArtifactsChange = useCallback(
+    (
+      paneArtifacts: readonly DaemonSessionArtifact[],
+      paneWorkspaceActions: DaemonWorkspaceActions,
+    ) => {
+      if (paneArtifacts.length === 0) return;
+      setArtifactPanelExtraArtifacts((current) => {
+        const next = [...current];
+        let changed = false;
+        for (const artifact of paneArtifacts) {
+          const index = next.findIndex((item) => item.id === artifact.id);
+          if (index < 0) {
+            next.push(artifact);
+            changed = true;
+          } else if (
+            next[index]?.updatedAt !== artifact.updatedAt ||
+            next[index]?.sizeBytes !== artifact.sizeBytes
+          ) {
+            next[index] = artifact;
+            changed = true;
+          }
+        }
+        return changed ? next : current;
+      });
+      const artifactIds = new Set(paneArtifacts.map((artifact) => artifact.id));
+      setArtifactPanelTabs((tabs) => {
+        let changed = false;
+        const next = tabs.map((tab) => {
+          if (tab.kind !== 'artifact' || !artifactIds.has(tab.artifactId)) {
+            return tab;
+          }
+          const updated = {
+            id: tab.id,
+            kind: 'artifact' as const,
+            title: tab.title,
+            artifactId: tab.artifactId,
+            workspaceActions: tab.workspaceActions ?? paneWorkspaceActions,
+          };
+          if (tab.previewContent !== undefined) changed = true;
+          if (tab.workspaceActions) return updated;
+          changed = true;
+          return updated;
+        });
+        return changed ? next : tabs;
+      });
+    },
+    [],
+  );
   const artifactsByTurn = useMemo(
     () =>
       getArtifactsByTurn(
@@ -1161,9 +1221,6 @@ export function App({
   const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
   artifactPanelOpenRef.current = artifactPanelOpen;
-  const [artifactPanelTabs, setArtifactPanelTabs] = useState<
-    ArtifactPanelTab[]
-  >([]);
   const [activeArtifactPanelTabId, setActiveArtifactPanelTabId] = useState<
     string | null
   >(null);
@@ -5404,6 +5461,7 @@ export function App({
                         onExit={handleSplitExit}
                         onError={reportError}
                         onRightPanelOpen={handleTurnOutputOpen}
+                        onPaneArtifactsChange={handlePaneArtifactsChange}
                         messageTurnOutputs={messageTurnOutputs}
                       />
                     </CompactModeContext.Provider>

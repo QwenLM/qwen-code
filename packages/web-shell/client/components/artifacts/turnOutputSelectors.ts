@@ -202,7 +202,9 @@ function getScheduledTask(tool: ACPToolCall): TurnOutputScheduledTask | null {
   const prompt = getStringField(tool.args, 'prompt');
   if (!cron || !prompt) return null;
   const outputText =
-    getStringField(raw, 'returnDisplay') ?? getStringField(raw, 'llmContent');
+    getStringField(raw, 'returnDisplay') ??
+    getStringField(raw, 'llmContent') ??
+    (typeof tool.rawOutput === 'string' ? tool.rawOutput : undefined);
   const display = outputText ? getFirstLine(outputText) : undefined;
   return {
     id: outputText ? (getCronTaskId(outputText) ?? tool.callId) : tool.callId,
@@ -388,9 +390,10 @@ function getFirstLine(text: string) {
 }
 
 function getCronTaskId(text: string) {
-  return text.match(
-    /\bScheduled\s+(?:recurring job|one-shot task)\s+([a-z0-9_-]+)\b/i,
-  )?.[1];
+  const match = text.match(
+    /\bScheduled\s+(?:(?:recurring job|one-shot task)\s+([a-z0-9_-]+)\b|([a-z0-9_-]+)\s*\()/i,
+  );
+  return match?.[1] ?? match?.[2];
 }
 
 function getScheduledTaskTitle(prompt: string) {
@@ -454,11 +457,8 @@ function mergeFileDiffs(
 }
 
 function getFinalFullContentDiff(diffs: TurnOutputFileChange['diffs']) {
-  for (let index = diffs.length - 1; index >= 0; index--) {
-    const diff = diffs[index];
-    if (diff?.fullContent) return diff;
-  }
-  return undefined;
+  const finalDiff = diffs.at(-1);
+  return finalDiff?.fullContent ? finalDiff : undefined;
 }
 
 function countChangedLines(oldText: string, newText: string) {

@@ -277,6 +277,31 @@ describe('ChatPane', () => {
     expect(container!.textContent).toContain('Refactor core');
   });
 
+  it('reports loaded pane artifacts to the outer panel owner', async () => {
+    const onPaneArtifactsChange = vi.fn();
+    connectionState.capabilities = { features: ['session_artifacts'] };
+    const artifact = {
+      id: 'artifact-1',
+      title: 'Report',
+      kind: 'html',
+      storage: 'workspace',
+      workspacePath: 'reports/a.html',
+      updatedAt: '2026-07-10T00:00:00Z',
+    };
+    loadArtifacts.mockResolvedValueOnce({ artifacts: [artifact] });
+
+    render({ onPaneArtifactsChange });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onPaneArtifactsChange).toHaveBeenLastCalledWith(
+      [artifact],
+      expect.any(Object),
+    );
+  });
+
   it('suppresses the rotating loading phrase in its compact status', () => {
     render();
     expect(testid('pane-streaming')?.getAttribute('data-show-phrase')).toBe(
