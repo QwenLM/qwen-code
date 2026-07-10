@@ -595,7 +595,7 @@ export const createMcpServer = (): McpServer => {
   tool(
     'mobile_get_screen_size',
     'Get Screen Size',
-    'Get the screen size of the mobile device in pixels',
+    'Get the screen size of the mobile device (returns width and height in device pixels).',
     {
       device: z
         .string()
@@ -614,7 +614,9 @@ export const createMcpServer = (): McpServer => {
   tool(
     'mobile_click_on_screen_at_coordinates',
     'Click Screen',
-    'Click on the screen at given x,y coordinates. If clicking on an element, use the list_elements_on_screen tool to find the coordinates.',
+    isNormalized()
+      ? 'Click on the screen at given x,y coordinates. Note: mobile_list_elements_on_screen returns coordinates in device pixels — convert them to 0-1000 normalized coordinates before passing to this tool.'
+      : 'Click on the screen at given x,y coordinates. If clicking on an element, use the list_elements_on_screen tool to find the coordinates.',
     {
       device: z
         .string()
@@ -668,7 +670,9 @@ export const createMcpServer = (): McpServer => {
   tool(
     'mobile_long_press_on_screen_at_coordinates',
     'Long Press Screen',
-    'Long press on the screen at given x,y coordinates. If long pressing on an element, use the list_elements_on_screen tool to find the coordinates.',
+    isNormalized()
+      ? 'Long press on the screen at given x,y coordinates. Note: mobile_list_elements_on_screen returns coordinates in device pixels — convert them to 0-1000 normalized coordinates before passing to this tool.'
+      : 'Long press on the screen at given x,y coordinates. If long pressing on an element, use the list_elements_on_screen tool to find the coordinates.',
     {
       device: z
         .string()
@@ -710,7 +714,7 @@ export const createMcpServer = (): McpServer => {
   tool(
     'mobile_list_elements_on_screen',
     'List Screen Elements',
-    'List elements on screen and their coordinates, with display text or accessibility label. Do not cache this result.',
+    'List elements on screen and their coordinates (in device pixels), with display text or accessibility label. Do not cache this result.',
     {
       device: z
         .string()
@@ -928,7 +932,7 @@ export const createMcpServer = (): McpServer => {
     {
       title: 'Take Screenshot',
       description:
-        "Take a screenshot of the mobile device. Use this to understand what's on screen, if you need to press an element that is available through view hierarchy then you must list elements on screen instead. Do not cache this result.",
+        "Take a screenshot of the mobile device. Use this to understand what's on screen. Do not cache this result.",
       inputSchema: {
         device: z
           .string()
