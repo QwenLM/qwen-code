@@ -193,6 +193,33 @@
   line-height: 16px;
 }
 
+.workspacePickerHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.workspaceAddIconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.workspaceAddIconButton:hover {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-foreground);
+}
+
 .workspacePickerSelect {
   width: 100%;
   padding: 6px 8px;
@@ -203,6 +230,77 @@
   font-size: 13px;
   line-height: 18px;
   cursor: pointer;
+}
+
+.workspaceList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.workspaceItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--sidebar-foreground);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.workspaceItem:hover {
+  background: var(--sidebar-accent);
+}
+
+.workspaceItemActive {
+  background: var(--sidebar-accent);
+  font-weight: 600;
+}
+
+.workspaceItemDisabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.workspaceItemName {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspaceItemBadge {
+  font-size: 10px;
+  color: var(--muted-foreground);
+  background: var(--sidebar-accent);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.addWorkspaceButton {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.addWorkspaceButton:hover {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-foreground);
 }
 
 .body {

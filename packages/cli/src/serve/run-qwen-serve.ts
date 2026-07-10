@@ -3163,8 +3163,160 @@ export async function runQwenServe(
       },
     };
 
+    // Factory for dynamically creating workspace runtimes (POST /workspaces).
+    const createDynamicWorkspaceRuntime = async (
+      cwd: string,
+    ): Promise<import('./workspace-registry.js').WorkspaceRuntime> => {
+      let wsSettings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
+      try {
+        wsSettings = settingsRuntime.settings.loadSettings(cwd);
+      } catch {
+        // Fall back to defaults if settings can't be read.
+      }
+      const trusted = wsSettings
+        ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
+            wsSettings.merged,
+            cwd,
+          ).effective.state === 'trusted'
+        : false;
+      const wsEnv = createRuntimeEnvMetadata(cwd, wsSettings);
+      const wsHash = core.hashDaemonWorkspace(cwd);
+      const wsFsFactory = runtime.resolveBridgeFsFactory({
+        boundWorkspaces: [cwd],
+        trusted,
+        emit: deps.fsAuditEmit,
+        pathLocks: sharedPathLocks,
+        ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
+      });
+      const wsChannelFactory = runtime.createSpawnChannelFactory({
+        sourceEnv: wsEnv.effectiveEnv,
+        onDiagnosticLine: diagnosticSink,
+        pipeHooks: {
+          onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
+          onMessageReceived: (bytes) => recordPipeMessage('inbound', bytes),
+          onMessageObserved: ({ direction, bytes, message }) =>
+            observeLargePipeFrame({
+              direction: daemonPipeDirection(direction),
+              bytes,
+              message,
+            }),
+        },
+        ...(opts.experimentalLsp === true
+          ? { extraArgs: ['--experimental-lsp'] }
+          : {}),
+      });
+      const wsClientMcpRegistry = new ClientMcpSenderRegistry();
+      // eslint-disable-next-line prefer-const
+      let wsBridgeRef:
+        | ReturnType<typeof runtime.createAcpSessionBridge>
+        | undefined;
+      const wsSubSessionLauncher = createSubSessionLauncher({
+        getBridge: () => wsBridgeRef,
+        boundWorkspace: cwd,
+      });
+      const wsBridge = runtime.createAcpSessionBridge({
+        clientMcpSender: wsClientMcpRegistry.lookup,
+        onCreateSubSession: wsSubSessionLauncher.launch,
+        maxSessions: opts.maxSessions,
+        freshSessionAdmission: totalSessionAdmission.admit,
+        sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
+        ...(opts.maxPendingPromptsPerSession !== undefined
+          ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
+          : {}),
+        ...(opts.eventRingSize !== undefined
+          ? { eventRingSize: opts.eventRingSize }
+          : {}),
+        ...(opts.compactedReplayMaxBytes !== undefined
+          ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
+          : {}),
+        ...(opts.channelIdleTimeoutMs !== undefined
+          ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
+          : {}),
+        ...(opts.sessionReapIntervalMs !== undefined
+          ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
+          : {}),
+        ...(opts.sessionIdleTimeoutMs !== undefined
+          ? { sessionIdleTimeoutMs: opts.sessionIdleTimeoutMs }
+          : {}),
+        ...(opts.permissionResponseTimeoutMs !== undefined
+          ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
+          : {}),
+        boundWorkspace: cwd,
+        sessionShellCommandEnabled,
+        childEnvOverrides,
+        channelFactory: wsChannelFactory,
+        onDiagnosticLine: diagnosticSink,
+        telemetry: createRuntimeBridgeTelemetry(wsHash),
+        ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+        ...(permissionConsensusQuorum !== undefined
+          ? { permissionConsensusQuorum }
+          : {}),
+        permissionAudit: permissionAuditPublisher,
+        statusProvider: runtime.createDaemonStatusProvider({
+          env: wsEnv.effectiveEnv,
+        }),
+        fileSystem: createBridgeFileSystemAdapter(wsFsFactory),
+        persistApprovalMode: (workspace, mode) =>
+          withSettingsLock(workspace, async () => {
+            const fresh = settingsRuntime.settings.loadSettings(workspace);
+            fresh.setValue(WORKSPACE_SETTING_SCOPE, 'tools.approvalMode', mode);
+          }),
+      });
+      wsBridgeRef = wsBridge;
+      runtimeBridges.push(wsBridge);
+      internalRuntimeBridgesForCleanup.push(wsBridge);
+      subSessionStoppers.push(wsSubSessionLauncher.stop);
+      const wsService = runtime.createDaemonWorkspaceService({
+        boundWorkspace: cwd,
+        contextFilename: contextFilenameForInit ?? 'QWEN.md',
+        statusProvider: runtime.createDaemonStatusProvider({
+          env: wsEnv.effectiveEnv,
+        }),
+        workspaceProvidersStatusProvider:
+          runtime.createWorkspaceProvidersStatusProvider({
+            env: wsEnv.effectiveEnv,
+          }),
+        workspaceSkillsStatusProvider:
+          runtime.createWorkspaceSkillsStatusProvider(),
+        isChannelLive: () => wsBridge.isChannelLive(),
+        preheatAcpChild: () => wsBridge.preheat(),
+        persistDisabledTools: persistDisabledToolsFn,
+        persistSetting: persistSettingFn,
+        persistSettings: persistSettingsFn,
+        reloadDaemonEnv: (workspace) =>
+          withSettingsLock(workspace, async () => {
+            const fresh = settingsRuntime.settings.loadSettings(workspace, {
+              skipLoadEnvironment: true,
+            });
+            return settingsRuntime.settings.reloadEnvironment(
+              fresh.merged,
+              workspace,
+            );
+          }),
+        queryWorkspaceStatus: (method, idle) =>
+          wsBridge.queryWorkspaceStatus(method, idle),
+        invokeWorkspaceCommand: (method, params, invokeOpts) =>
+          wsBridge.invokeWorkspaceCommand(method, params, invokeOpts),
+        refreshExtensionsForAllSessions: () =>
+          wsBridge.refreshExtensionsForAllSessions(),
+        publishWorkspaceEvent: (event) => wsBridge.publishWorkspaceEvent(event),
+      });
+      return {
+        workspaceId: wsHash,
+        workspaceCwd: cwd,
+        primary: false,
+        trusted,
+        env: wsEnv.metadata,
+        bridge: wsBridge,
+        workspaceService: wsService,
+        routeFileSystemFactory: wsFsFactory,
+        clientMcpSenderRegistry: wsClientMcpRegistry,
+      };
+    };
+
     const app = runtime.createServeApp(opts, () => actualPort, {
       workspaceRegistry,
+      createWorkspaceRuntime: createDynamicWorkspaceRuntime,
       bridge,
       webShellDir,
       boundWorkspace,

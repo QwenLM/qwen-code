@@ -225,6 +225,13 @@ export interface DaemonUpdateScheduledTaskRequest {
   runMode?: 'shared' | 'isolated';
 }
 
+export interface DaemonAddWorkspaceResult {
+  id: string;
+  cwd: string;
+  primary: boolean;
+  trusted: boolean;
+}
+
 export interface DaemonWorkspaceActions {
   // Sessions
   listSessions(
@@ -412,4 +419,7 @@ export interface DaemonWorkspaceActions {
   installAuthProvider(
     req: DaemonAuthProviderInstallRequest,
   ): Promise<DaemonAuthProviderInstallResult>;
+
+  // Workspace management
+  addWorkspace(cwd: string): Promise<DaemonAddWorkspaceResult>;
 }

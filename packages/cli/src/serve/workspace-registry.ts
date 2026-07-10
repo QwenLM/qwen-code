@@ -64,6 +64,11 @@ export interface WorkspaceSessionOwnerIndex {
   handleBridgeSessionLifecycle(event: WorkspaceSessionLifecycleEvent): void;
 }
 
+export type WorkspaceRegistryEvent = {
+  readonly type: 'added';
+  readonly runtime: WorkspaceRuntime;
+};
+
 export interface WorkspaceRegistry {
   readonly primary: WorkspaceRuntime;
   list(): readonly WorkspaceRuntime[];
@@ -73,6 +78,8 @@ export interface WorkspaceRegistry {
     workspaceCwd: string | undefined,
   ): WorkspaceRuntime | undefined;
   resolveLiveSessionOwner(sessionId: string): WorkspaceSessionOwnerResolution;
+  add(runtime: WorkspaceRuntime): void;
+  onChange(listener: (event: WorkspaceRegistryEvent) => void): () => void;
 }
 
 export interface WorkspaceRegistryOptions {
@@ -157,9 +164,10 @@ export function createWorkspaceRegistry(
     byId.set(runtime.workspaceId, runtime);
   }
 
-  const runtimes = Object.freeze([...inputRuntimes]);
+  const runtimes: WorkspaceRuntime[] = [...inputRuntimes];
   const primary = primaryRuntimes[0]!;
   const sessionOwnerIndex = options.sessionOwnerIndex;
+  const listeners = new Set<(event: WorkspaceRegistryEvent) => void>();
   const scanLiveOwners = (
     sessionId: string,
   ): WorkspaceSessionOwnerResolution => {
@@ -190,6 +198,31 @@ export function createWorkspaceRegistry(
     getByWorkspaceId: (workspaceId) => byId.get(workspaceId),
     resolveWorkspaceCwd: (workspaceCwd) =>
       workspaceCwd === undefined ? primary : byCwd.get(workspaceCwd),
+    add: (runtime) => {
+      if (byCwd.has(runtime.workspaceCwd)) {
+        throw new Error(
+          `Duplicate workspace runtime cwd ${JSON.stringify(runtime.workspaceCwd)}.`,
+        );
+      }
+      if (byId.has(runtime.workspaceId)) {
+        throw new Error(
+          `Duplicate workspace runtime id ${JSON.stringify(runtime.workspaceId)}.`,
+        );
+      }
+      byCwd.set(runtime.workspaceCwd, runtime);
+      byId.set(runtime.workspaceId, runtime);
+      runtimes.push(runtime);
+      const event: WorkspaceRegistryEvent = { type: 'added', runtime };
+      for (const listener of listeners) {
+        listener(event);
+      }
+    },
+    onChange: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
     resolveLiveSessionOwner: (sessionId) => {
       const indexedCwds = sessionOwnerIndex?.getWorkspaceCwds(sessionId) ?? [];
       if (indexedCwds.length > 0) {
