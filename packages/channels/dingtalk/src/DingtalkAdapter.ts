@@ -314,11 +314,7 @@ export class DingtalkChannel extends ChannelBase {
     return isGroup && !conversationId;
   }
 
-  private async sendReply(
-    chatId: string,
-    text: string,
-    atUserId?: string,
-  ): Promise<void> {
+  private async sendReply(chatId: string, text: string): Promise<void> {
     // chatId is a conversationId — resolve to the latest sessionWebhook
     const webhook = this.webhooks.get(chatId);
     if (!webhook) {
@@ -337,9 +333,8 @@ export class DingtalkChannel extends ChannelBase {
         msgtype: 'markdown',
         markdown: {
           title: i === 0 ? title : `${title} (cont.)`,
-          text: i === 0 && atUserId ? `@${atUserId}\n\n${chunk}` : chunk,
+          text: chunk,
         },
-        ...(i === 0 && atUserId ? { at: { atUserIds: [atUserId] } } : {}),
       };
 
       const resp = await fetch(webhook, {
@@ -348,35 +343,53 @@ export class DingtalkChannel extends ChannelBase {
         body: JSON.stringify(body),
       });
 
-      if (
-        i === 0 &&
-        atUserId &&
-        process.env['QWEN_CHANNEL_DEBUG_MENTIONS'] === '1'
-      ) {
-        const payload = (await resp
-          .clone()
-          .json()
-          .catch(() => undefined)) as unknown;
-        const response =
-          payload && typeof payload === 'object'
-            ? (payload as Record<string, unknown>)
-            : {};
-        const value = response['errcode'] ?? response['code'];
-        const code =
-          typeof value === 'number' || typeof value === 'string'
-            ? String(value)
-            : 'unknown';
-        process.stderr.write(
-          `[DingTalk:${this.name}] mention delivery status=${resp.status} code=${code}\n`,
-        );
-      }
-
       if (!resp.ok) {
         const detail = await resp.text().catch(() => '');
         process.stderr.write(
           `[DingTalk:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
         );
       }
+    }
+  }
+
+  private async sendMention(chatId: string, atUserId: string): Promise<void> {
+    const webhook = this.webhooks.get(chatId);
+    if (!webhook) return;
+
+    const resp = await fetch(webhook, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        msgtype: 'text',
+        text: { content: `@${atUserId}` },
+        at: { atUserIds: [atUserId] },
+      }),
+    });
+
+    if (process.env['QWEN_CHANNEL_DEBUG_MENTIONS'] === '1') {
+      const payload = (await resp
+        .clone()
+        .json()
+        .catch(() => undefined)) as unknown;
+      const response =
+        payload && typeof payload === 'object'
+          ? (payload as Record<string, unknown>)
+          : {};
+      const value = response['errcode'] ?? response['code'];
+      const code =
+        typeof value === 'number' || typeof value === 'string'
+          ? String(value)
+          : 'unknown';
+      process.stderr.write(
+        `[DingTalk:${this.name}] mention delivery status=${resp.status} code=${code}\n`,
+      );
+    }
+
+    if (!resp.ok) {
+      const detail = await resp.text().catch(() => '');
+      process.stderr.write(
+        `[DingTalk:${this.name}] sendMention failed: HTTP ${resp.status} ${detail}\n`,
+      );
     }
   }
 
@@ -814,7 +827,8 @@ export class DingtalkChannel extends ChannelBase {
       ? this.sessionMentionTargets.get(sessionId)
       : undefined;
     if (atUserId) this.sessionMentionTargets.delete(sessionId);
-    await this.sendReply(chatId, text, atUserId);
+    if (atUserId) await this.sendMention(chatId, atUserId);
+    await this.sendReply(chatId, text);
   }
 
   /**

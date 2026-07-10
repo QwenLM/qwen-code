@@ -1256,11 +1256,15 @@ describe('DingtalkChannel reply mentions', () => {
       getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
       await getResponseHook(channel)('cid123', 'hello', 'session-1');
 
-      expect(fetchSpy).toHaveBeenCalledOnce();
-      const body = JSON.parse(
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      const mention = JSON.parse(
         String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
       );
-      expect(body.at).toEqual({ atUserIds: ['staff-1'] });
+      expect(mention.at).toEqual({ atUserIds: ['staff-1'] });
+      const reply = JSON.parse(
+        String((fetchSpy.mock.calls[1]![1] as RequestInit).body),
+      );
+      expect(reply.markdown.text).toBe('hello');
     } finally {
       channel.disconnect();
       vi.useRealTimers();
@@ -1305,12 +1309,19 @@ describe('DingtalkChannel reply mentions', () => {
     getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
     await getResponseHook(channel)('cid123', 'hello', 'session-1');
 
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(
       JSON.parse(String((fetchSpy.mock.calls[0]![1] as RequestInit).body)),
     ).toMatchObject({
-      msgtype: 'markdown',
-      markdown: { text: '@staff-1\n\nhello' },
+      msgtype: 'text',
+      text: { content: '@staff-1' },
       at: { atUserIds: ['staff-1'] },
+    });
+    expect(
+      JSON.parse(String((fetchSpy.mock.calls[1]![1] as RequestInit).body)),
+    ).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: 'hello' },
     });
   });
 
@@ -1376,12 +1387,13 @@ describe('DingtalkChannel reply mentions', () => {
     getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
     await getResponseHook(channel)('cid123', 'a'.repeat(3801), 'session-1');
 
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
     const bodies = fetchSpy.mock.calls.map(([, init]) =>
       JSON.parse(String((init as RequestInit).body)),
     );
     expect(bodies[0]).toMatchObject({ at: { atUserIds: ['staff-1'] } });
     expect(bodies[1]).not.toHaveProperty('at');
+    expect(bodies[2]).not.toHaveProperty('at');
   });
 
   it('mentions only the first block-streamed response', async () => {
@@ -1401,6 +1413,7 @@ describe('DingtalkChannel reply mentions', () => {
     );
     expect(bodies[0]).toMatchObject({ at: { atUserIds: ['staff-1'] } });
     expect(bodies[1]).not.toHaveProperty('at');
+    expect(bodies[2]).not.toHaveProperty('at');
   });
 });
 
