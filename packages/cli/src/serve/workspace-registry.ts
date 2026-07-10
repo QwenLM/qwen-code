@@ -73,6 +73,7 @@ export interface WorkspaceRegistry {
     workspaceCwd: string | undefined,
   ): WorkspaceRuntime | undefined;
   resolveLiveSessionOwner(sessionId: string): WorkspaceSessionOwnerResolution;
+  add(runtime: WorkspaceRuntime): void;
 }
 
 export interface WorkspaceRegistryOptions {
@@ -157,7 +158,7 @@ export function createWorkspaceRegistry(
     byId.set(runtime.workspaceId, runtime);
   }
 
-  const runtimes = Object.freeze([...inputRuntimes]);
+  const runtimes: WorkspaceRuntime[] = [...inputRuntimes];
   const primary = primaryRuntimes[0]!;
   const sessionOwnerIndex = options.sessionOwnerIndex;
   const scanLiveOwners = (
@@ -185,11 +186,28 @@ export function createWorkspaceRegistry(
 
   return {
     primary,
-    list: () => runtimes,
+    // Return a frozen snapshot: `runtimes` is mutable internally (see `add`),
+    // but callers must not be able to push/splice into the registry's state.
+    list: () => Object.freeze([...runtimes]) as readonly WorkspaceRuntime[],
     getByWorkspaceCwd: (workspaceCwd) => byCwd.get(workspaceCwd),
     getByWorkspaceId: (workspaceId) => byId.get(workspaceId),
     resolveWorkspaceCwd: (workspaceCwd) =>
       workspaceCwd === undefined ? primary : byCwd.get(workspaceCwd),
+    add: (runtime) => {
+      if (byCwd.has(runtime.workspaceCwd)) {
+        throw new Error(
+          `Duplicate workspace runtime cwd ${JSON.stringify(runtime.workspaceCwd)}.`,
+        );
+      }
+      if (byId.has(runtime.workspaceId)) {
+        throw new Error(
+          `Duplicate workspace runtime id ${JSON.stringify(runtime.workspaceId)}.`,
+        );
+      }
+      byCwd.set(runtime.workspaceCwd, runtime);
+      byId.set(runtime.workspaceId, runtime);
+      runtimes.push(runtime);
+    },
     resolveLiveSessionOwner: (sessionId) => {
       const indexedCwds = sessionOwnerIndex?.getWorkspaceCwds(sessionId) ?? [];
       if (indexedCwds.length > 0) {

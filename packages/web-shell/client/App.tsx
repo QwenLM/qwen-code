@@ -503,7 +503,9 @@ export interface WebShellProps {
 }
 
 type SessionActionsWithCreate = {
-  createSession: () => Promise<{ sessionId: string }>;
+  createSession: (options?: {
+    workspaceCwd?: string;
+  }) => Promise<{ sessionId: string }>;
   attachSession: () => Promise<void>;
   closeSession: () => Promise<void>;
   clearSession: () => Promise<void>;
@@ -1040,6 +1042,14 @@ export function App({
   const sessionActions = useActions();
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
+  // Phase 4: the workspace picked for the *next* new session on multi-workspace
+  // daemons. Kept in a ref too because session creation is lazy (first prompt),
+  // so the ensureSessionForPrompt callback must read the latest value.
+  const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState<
+    string | undefined
+  >(undefined);
+  const selectedWorkspaceCwdRef = useRef(selectedWorkspaceCwd);
+  selectedWorkspaceCwdRef.current = selectedWorkspaceCwd;
   const onToastRef = useRef(onToast);
   onToastRef.current = onToast;
   const toastIdRef = useRef(0);
@@ -1748,7 +1758,12 @@ export function App({
             SessionActionsWithCreate,
           modelId,
           modeId,
+          workspaceCwd: selectedWorkspaceCwdRef.current,
         });
+        // One-shot: the picker targets only the *next* new session, so clear
+        // it after creation. The next new chat defaults back to the primary
+        // workspace unless the user picks one again.
+        setSelectedWorkspaceCwd(undefined);
       })().catch((error: unknown) => {
         createSessionPromiseRef.current = null;
         throw error;
@@ -4776,6 +4791,8 @@ export function App({
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
                   sessionListReloadToken={sessionListReloadToken}
+                  selectedWorkspaceCwd={selectedWorkspaceCwd}
+                  onSelectWorkspace={setSelectedWorkspaceCwd}
                 />
               </div>
             )}
