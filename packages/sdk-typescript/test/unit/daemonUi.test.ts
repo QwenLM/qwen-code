@@ -64,6 +64,72 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('stores input annotations on locally appended user messages', () => {
+    const store = createDaemonTranscriptStore();
+    const inputAnnotations = [
+      {
+        type: 'reference' as const,
+        start: 6,
+        end: 13,
+        text: '@file/a',
+        reference: {
+          id: 'file:@file/a',
+          kind: 'file',
+          value: 'file/a',
+          serialized: '@file/a',
+        },
+      },
+    ];
+
+    store.appendLocalUserMessage('hello @file/a', undefined, {
+      inputAnnotations,
+    });
+
+    expect(store.getSnapshot().blocks[0]).toMatchObject({
+      kind: 'user',
+      meta: { inputAnnotations },
+    });
+  });
+
+  it('stores input annotations from replayed user message chunks', () => {
+    const inputAnnotations = [
+      {
+        type: 'reference' as const,
+        start: 0,
+        end: 7,
+        text: '@file/a',
+        reference: {
+          id: 'file:@file/a',
+          kind: 'file',
+          value: 'file/a',
+          serialized: '@file/a',
+        },
+      },
+    ];
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 's1',
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: '@file/a' },
+            _meta: { inputAnnotations },
+          },
+        },
+      }),
+      { now: 2 },
+    );
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'user',
+      meta: { inputAnnotations },
+    });
+  });
+
   it('preserves assistant message metadata on transcript blocks', () => {
     const events = normalizeDaemonEvent({
       id: 10,

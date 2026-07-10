@@ -26,6 +26,7 @@ import {
 } from '../customization';
 import {
   useComposerCore,
+  type ComposerSubmitMetadata,
   type EditorHandle,
   type SlashMenuState,
   getComposerTagDisplay,
@@ -62,6 +63,7 @@ interface ChatEditorProps {
     text: string,
     images?: import('../adapters/promptTypes').PromptImage[],
     commitAccepted?: import('../hooks/useComposerCore').ComposerSubmitCommit,
+    metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
@@ -1267,8 +1269,10 @@ export const ChatEditor = memo(
     } = core.searchState;
 
     const renderComposerTagContent = (tag: WebShellComposerTag) => {
-      const { tagLabel, tagValue, iconUrl, fallback } =
-        getComposerTagViewModel(tag, composerTagIcons);
+      const { tagLabel, tagValue, iconUrl, fallback } = getComposerTagViewModel(
+        tag,
+        composerTagIcons,
+      );
       if (!tagLabel && !tagValue) {
         return <span className={styles.tagLabel}>{fallback}</span>;
       }

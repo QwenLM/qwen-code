@@ -10,8 +10,9 @@ import {
 } from 'react';
 import {
   getComposerTagViewModel,
-  splitComposerTagContent,
+  splitComposerTagContentByAnnotations,
 } from '../../utils/composerTag';
+import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from './Markdown';
 import {
   useWebShellCustomization,
@@ -31,6 +32,7 @@ interface UserMessageImage {
 interface UserMessageProps {
   content: string;
   images?: UserMessageImage[];
+  inputAnnotations?: readonly DaemonInputAnnotation[];
   isLocateFlashing?: boolean;
 }
 
@@ -63,13 +65,18 @@ function UserMessageReferenceChip({
 function DefaultUserMessageContent({
   composerTagIcons,
   content,
+  inputAnnotations,
 }: {
   composerTagIcons?: WebShellComposerTagIconMap;
   content: string;
+  inputAnnotations?: readonly DaemonInputAnnotation[];
 }) {
-  // The default user renderer upgrades serialized @ references to chips while
-  // still allowing hosts to replace message rendering entirely.
-  const segments = useMemo(() => splitComposerTagContent(content), [content]);
+  // Submit-time annotations are the source of truth for reference chips.
+  // Unannotated serialized text stays plain text.
+  const segments = useMemo(
+    () => splitComposerTagContentByAnnotations(content, inputAnnotations),
+    [content, inputAnnotations],
+  );
   return (
     <>
       {segments.map((segment, index) =>
@@ -90,6 +97,7 @@ function DefaultUserMessageContent({
 export const UserMessage = memo(function UserMessage({
   content,
   images,
+  inputAnnotations,
   isLocateFlashing = false,
 }: UserMessageProps) {
   const { t } = useI18n();
@@ -100,13 +108,20 @@ export const UserMessage = memo(function UserMessage({
   const [heightOverflowing, setHeightOverflowing] = useState(false);
   const renderedContent = useMemo(
     () =>
-      renderUserMessageContent?.({ content, images }) ?? (
+      renderUserMessageContent?.({ content, images, inputAnnotations }) ?? (
         <DefaultUserMessageContent
           composerTagIcons={composerTagIcons}
           content={content}
+          inputAnnotations={inputAnnotations}
         />
       ),
-    [composerTagIcons, content, images, renderUserMessageContent],
+    [
+      composerTagIcons,
+      content,
+      images,
+      inputAnnotations,
+      renderUserMessageContent,
+    ],
   );
 
   const measureOverflow = useCallback(() => {

@@ -2,6 +2,7 @@ import extensionIconUrl from '../assets/icons/at-extension.svg';
 import fileIconUrl from '../assets/icons/at-file.svg';
 import mcpIconUrl from '../assets/icons/at-mcp.svg';
 import skillIconUrl from '../assets/icons/at-skill.svg';
+import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import type {
   WebShellBuiltinComposerTagKind,
   WebShellComposerTag,
@@ -29,9 +30,6 @@ const builtinTagIconUrls: Record<WebShellBuiltinComposerTagKind, string> = {
   skill: skillIconUrl,
 };
 
-const AT_REFERENCE_CHAR_RE = /[\p{L}\p{N}_./:-]/u;
-const WINDOWS_DRIVE_REFERENCE_RE = /^[A-Za-z]:/;
-
 function getOwnIconUrl(
   iconUrls: WebShellComposerTagIconMap | undefined,
   kind: string,
@@ -43,112 +41,10 @@ function getOwnIconUrl(
   return typeof iconUrl === 'string' ? iconUrl : undefined;
 }
 
-function isAtReferenceBoundary(char: string | undefined): boolean {
-  return char === undefined || /[\s([{'"]/.test(char);
-}
-
-function readAtReferenceEnd(content: string, start: number): number {
-  let index = start + 1;
-  while (index < content.length) {
-    const char = content[index];
-    if (char === '\\' && index + 1 < content.length) {
-      const escapedCodePoint = content.codePointAt(index + 1);
-      index += 1 + (escapedCodePoint && escapedCodePoint > 0xffff ? 2 : 1);
-      continue;
-    }
-    if (!AT_REFERENCE_CHAR_RE.test(char)) break;
-    index += 1;
-  }
-  return index;
-}
-
-function trimReferenceTrailingPunctuation(
-  content: string,
-  end: number,
-): number {
-  let nextEnd = end;
-  while (nextEnd > 0) {
-    const last = content[nextEnd - 1];
-    if (
-      (last !== '.' && last !== ':') ||
-      !isAtReferenceBoundary(content[nextEnd])
-    ) {
-      break;
-    }
-    nextEnd -= 1;
-  }
-  return nextEnd;
-}
-
-function getReferenceDisplay(raw: string, prefix: string) {
-  const withoutAt = raw.slice(1);
-  const value = prefix ? withoutAt.slice(prefix.length) : withoutAt;
-  return value.replace(/\\(.)/gu, '$1') || raw;
-}
-
-// MCP resources are serialized as @server\:uri, with the server/URI delimiter
-// escaped by the composer. That is the only provider-prefixed form this parser
-// can recover without persisted composer tag metadata.
-function isEscapedMcpResourceReference(raw: string): boolean {
-  const value = raw.slice(1);
-  const escapedDelimiterIndex = value.indexOf('\\:');
-  if (escapedDelimiterIndex <= 0) return false;
-  const unescaped = getReferenceDisplay(raw, '');
-  const delimiterIndex = unescaped.indexOf(':');
-  if (delimiterIndex <= 0) return false;
-  return unescaped.slice(delimiterIndex + 1).includes(':');
-}
-
-// User messages persist only text, so ambiguous mentions like @alice or
-// @types/node must remain text. Only chipify file references with path cues.
-function isBuiltInFileReference(raw: string): boolean {
-  const value = getReferenceDisplay(raw, '');
+export function getComposerTagSerialized(tag: WebShellComposerTag): string {
   return (
-    value.startsWith('./') ||
-    value.startsWith('../') ||
-    value.startsWith('/') ||
-    value.endsWith('/') ||
-    value.includes('.') ||
-    WINDOWS_DRIVE_REFERENCE_RE.test(value)
+    tag.serialized?.trim() || tag.value?.trim() || tag.label?.trim() || tag.id
   );
-}
-
-function createComposerTagFromReference(
-  raw: string,
-): WebShellComposerTag | null {
-  if (raw.startsWith('@ext:')) {
-    return {
-      id: `extension:${raw}`,
-      kind: 'extension',
-      value: getReferenceDisplay(raw, 'ext:'),
-      serialized: raw,
-    };
-  }
-  if (raw.startsWith('@mcp:')) {
-    return {
-      id: `mcp:${raw}`,
-      kind: 'mcp',
-      value: getReferenceDisplay(raw, 'mcp:'),
-      serialized: raw,
-    };
-  }
-  if (isEscapedMcpResourceReference(raw)) {
-    return {
-      id: `mcp:${raw}`,
-      kind: 'mcp',
-      value: getReferenceDisplay(raw, ''),
-      serialized: raw,
-    };
-  }
-  if (isBuiltInFileReference(raw)) {
-    return {
-      id: `file:${raw}`,
-      kind: 'file',
-      value: getReferenceDisplay(raw, ''),
-      serialized: raw,
-    };
-  }
-  return null;
 }
 
 export function getComposerTagIconUrl(
@@ -162,34 +58,76 @@ export function getComposerTagIconUrl(
   );
 }
 
-// Sent user messages persist serialized prompt text, so reference chips must be
-// reconstructed from @ references when rendering the transcript.
-export function splitComposerTagContent(
+export function createInputAnnotationsFromComposerTags(
   content: string,
+  tags: readonly WebShellComposerTag[],
+): DaemonInputAnnotation[] {
+  const annotations: DaemonInputAnnotation[] = [];
+  let cursor = 0;
+  for (const tag of tags) {
+    const serialized = getComposerTagSerialized(tag);
+    if (!serialized) continue;
+    const start = content.indexOf(serialized, cursor);
+    if (start < 0) continue;
+    const end = start + serialized.length;
+    annotations.push({
+      type: 'reference',
+      start,
+      end,
+      text: serialized,
+      reference: {
+        id: tag.id,
+        ...(tag.kind ? { kind: tag.kind } : {}),
+        ...(tag.label ? { label: tag.label } : {}),
+        ...(tag.value ? { value: tag.value } : {}),
+        ...(tag.serialized ? { serialized: tag.serialized } : {}),
+        ...(tag.removable !== undefined ? { removable: tag.removable } : {}),
+      },
+    });
+    cursor = end;
+  }
+  return annotations;
+}
+
+// User messages render chips only from submit-time annotations. Without that
+// metadata, the serialized text remains plain text instead of being guessed.
+export function splitComposerTagContentByAnnotations(
+  content: string,
+  inputAnnotations?: readonly DaemonInputAnnotation[],
 ): ComposerTagContentSegment[] {
+  if (!inputAnnotations || inputAnnotations.length === 0) {
+    return [{ type: 'text', text: content }];
+  }
   const segments: ComposerTagContentSegment[] = [];
   let cursor = 0;
-  for (let index = 0; index < content.length; index += 1) {
-    if (content[index] !== '@' || !isAtReferenceBoundary(content[index - 1])) {
+  for (const annotation of inputAnnotations) {
+    if (annotation.type !== 'reference') continue;
+    const { start, end, reference, text } = annotation;
+    if (
+      start < cursor ||
+      end <= start ||
+      end > content.length ||
+      content.slice(start, end) !== text
+    ) {
       continue;
     }
-    const end = readAtReferenceEnd(content, index);
-    if (end === index + 1) continue;
-    const referenceEnd = trimReferenceTrailingPunctuation(content, end);
-    if (referenceEnd === index + 1) continue;
-    const tag = createComposerTagFromReference(
-      content.slice(index, referenceEnd),
-    );
-    if (!tag) continue;
-    if (cursor < index) {
-      segments.push({ type: 'text', text: content.slice(cursor, index) });
+    if (cursor < start) {
+      segments.push({ type: 'text', text: content.slice(cursor, start) });
     }
     segments.push({
       type: 'reference',
-      tag,
+      tag: {
+        id: reference.id,
+        ...(reference.kind ? { kind: reference.kind } : {}),
+        ...(reference.label ? { label: reference.label } : {}),
+        ...(reference.value ? { value: reference.value } : {}),
+        serialized: reference.serialized ?? text,
+        ...(reference.removable !== undefined
+          ? { removable: reference.removable }
+          : {}),
+      },
     });
-    cursor = referenceEnd;
-    index = referenceEnd - 1;
+    cursor = end;
   }
   if (cursor < content.length) {
     segments.push({ type: 'text', text: content.slice(cursor) });

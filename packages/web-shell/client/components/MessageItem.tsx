@@ -54,6 +54,7 @@ export const MessageItem = memo(function MessageItem({
           <UserMessage
             content={message.content}
             images={message.images}
+            inputAnnotations={message.inputAnnotations}
             isLocateFlashing={isLocateFlashing}
           />
         );

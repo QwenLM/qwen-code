@@ -285,12 +285,23 @@ export function createDaemonSessionActions({
           mimeType:
             img.mimeType || img.mediaType || img.media_type || 'image/*',
         }));
+        const inputAnnotations =
+          options?.inputAnnotations && options.inputAnnotations.length > 0
+            ? options.inputAnnotations
+            : undefined;
         if (options?.optimisticUserMessage !== false) {
-          store.appendLocalUserMessage(text, normalizedImages);
+          store.appendLocalUserMessage(
+            text,
+            normalizedImages,
+            inputAnnotations ? { inputAnnotations } : undefined,
+          );
         }
         const promptRequest: Record<string, unknown> = {
           prompt: toDaemonPromptContent(text, normalizedImages),
         };
+        if (inputAnnotations) {
+          promptRequest['_meta'] = { inputAnnotations };
+        }
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
@@ -357,12 +368,23 @@ export function createDaemonSessionActions({
         data: img.data,
         mimeType: img.mimeType || img.mediaType || img.media_type || 'image/*',
       }));
+      const inputAnnotations =
+        options?.inputAnnotations && options.inputAnnotations.length > 0
+          ? options.inputAnnotations
+          : undefined;
       if (options?.optimisticUserMessage !== false) {
-        store.appendLocalUserMessage(text, normalizedImages);
+        store.appendLocalUserMessage(
+          text,
+          normalizedImages,
+          inputAnnotations ? { inputAnnotations } : undefined,
+        );
       }
       const promptRequest: Record<string, unknown> = {
         prompt: toDaemonPromptContent(text, normalizedImages),
       };
+      if (inputAnnotations) {
+        promptRequest['_meta'] = { inputAnnotations };
+      }
       if (options?.retry) {
         promptRequest['retry'] = true;
       }

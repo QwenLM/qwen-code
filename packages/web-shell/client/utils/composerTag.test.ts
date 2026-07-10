@@ -1,9 +1,35 @@
 import { describe, expect, it } from 'vitest';
 import {
+  createInputAnnotationsFromComposerTags,
   getComposerTagIconUrl,
   getComposerTagViewModel,
-  splitComposerTagContent,
+  splitComposerTagContentByAnnotations,
 } from './composerTag';
+
+function referenceAnnotation(
+  content: string,
+  text: string,
+  reference: {
+    id: string;
+    kind?: string;
+    label?: string;
+    value?: string;
+    serialized?: string;
+    removable?: boolean;
+  },
+) {
+  const start = content.indexOf(text);
+  if (start < 0) {
+    throw new Error(`Missing annotation text: ${text}`);
+  }
+  return {
+    type: 'reference' as const,
+    start,
+    end: start + text.length,
+    text,
+    reference,
+  };
+}
 
 describe('composer tag icon URLs', () => {
   it('uses registered icons for custom tag kinds', () => {
@@ -24,191 +50,6 @@ describe('composer tag icon URLs', () => {
 
     expect(getComposerTagIconUrl('table', icons)).toBeUndefined();
     expect(getComposerTagIconUrl('toString')).toBeUndefined();
-  });
-});
-
-describe('splitComposerTagContent', () => {
-  it('returns text for empty content and bare @', () => {
-    expect(splitComposerTagContent('')).toEqual([{ type: 'text', text: '' }]);
-    expect(splitComposerTagContent('@')).toEqual([{ type: 'text', text: '@' }]);
-    expect(splitComposerTagContent('hello @ world')).toEqual([
-      { type: 'text', text: 'hello @ world' },
-    ]);
-    expect(splitComposerTagContent('end @')).toEqual([
-      { type: 'text', text: 'end @' },
-    ]);
-  });
-
-  it('splits file references into text and reference segments', () => {
-    expect(splitComposerTagContent('list @.qwen/ files')).toEqual([
-      { type: 'text', text: 'list ' },
-      {
-        type: 'reference',
-        tag: {
-          id: 'file:@.qwen/',
-          kind: 'file',
-          value: '.qwen/',
-          serialized: '@.qwen/',
-        },
-      },
-      { type: 'text', text: ' files' },
-    ]);
-  });
-
-  it('keeps adjacent non-boundary references as text', () => {
-    expect(splitComposerTagContent('@.qwen/@src/index.ts')).toEqual([
-      {
-        type: 'reference',
-        tag: {
-          id: 'file:@.qwen/',
-          kind: 'file',
-          value: '.qwen/',
-          serialized: '@.qwen/',
-        },
-      },
-      { type: 'text', text: '@src/index.ts' },
-    ]);
-  });
-
-  it('creates extension and MCP reference tags', () => {
-    expect(splitComposerTagContent('@ext:browser and @mcp:docs')).toEqual([
-      {
-        type: 'reference',
-        tag: {
-          id: 'extension:@ext:browser',
-          kind: 'extension',
-          value: 'browser',
-          serialized: '@ext:browser',
-        },
-      },
-      { type: 'text', text: ' and ' },
-      {
-        type: 'reference',
-        tag: {
-          id: 'mcp:@mcp:docs',
-          kind: 'mcp',
-          value: 'docs',
-          serialized: '@mcp:docs',
-        },
-      },
-    ]);
-  });
-
-  it('creates MCP resource tags from escaped server resource references', () => {
-    expect(splitComposerTagContent('open @docs\\:res\\://doc')).toEqual([
-      { type: 'text', text: 'open ' },
-      {
-        type: 'reference',
-        tag: {
-          id: 'mcp:@docs\\:res\\://doc',
-          kind: 'mcp',
-          value: 'docs:res://doc',
-          serialized: '@docs\\:res\\://doc',
-        },
-      },
-    ]);
-  });
-
-  it('does not split inline email-like text', () => {
-    expect(splitComposerTagContent('mail a@b.test')).toEqual([
-      { type: 'text', text: 'mail a@b.test' },
-    ]);
-  });
-
-  it('keeps package and handle-like references as text', () => {
-    expect(
-      splitComposerTagContent('install @types/node and ask @alice'),
-    ).toEqual([{ type: 'text', text: 'install @types/node and ask @alice' }]);
-  });
-
-  it('does not split references after non-boundary characters', () => {
-    expect(splitComposerTagContent('prefix/@.qwen/')).toEqual([
-      { type: 'text', text: 'prefix/@.qwen/' },
-    ]);
-  });
-
-  it('keeps custom provider-prefixed references as text', () => {
-    expect(splitComposerTagContent('open @dataset:users')).toEqual([
-      { type: 'text', text: 'open @dataset:users' },
-    ]);
-  });
-
-  it('keeps short Windows drive references as file tags', () => {
-    expect(splitComposerTagContent('open @C:file')).toEqual([
-      { type: 'text', text: 'open ' },
-      {
-        type: 'reference',
-        tag: {
-          id: 'file:@C:file',
-          kind: 'file',
-          value: 'C:file',
-          serialized: '@C:file',
-        },
-      },
-    ]);
-  });
-
-  it('keeps Windows drive references as file tags', () => {
-    expect(splitComposerTagContent('open @C:/Users/name/file.ts')).toEqual([
-      { type: 'text', text: 'open ' },
-      {
-        type: 'reference',
-        tag: {
-          id: 'file:@C:/Users/name/file.ts',
-          kind: 'file',
-          value: 'C:/Users/name/file.ts',
-          serialized: '@C:/Users/name/file.ts',
-        },
-      },
-    ]);
-  });
-
-  it('unescapes reference display text', () => {
-    expect(
-      splitComposerTagContent('open @path/file\\ with\\ spaces.txt'),
-    ).toEqual([
-      { type: 'text', text: 'open ' },
-      {
-        type: 'reference',
-        tag: {
-          id: 'file:@path/file\\ with\\ spaces.txt',
-          kind: 'file',
-          value: 'path/file with spaces.txt',
-          serialized: '@path/file\\ with\\ spaces.txt',
-        },
-      },
-    ]);
-  });
-
-  it('advances over escaped emoji code points', () => {
-    expect(splitComposerTagContent('open @path/\\😀.txt')).toEqual([
-      { type: 'text', text: 'open ' },
-      {
-        type: 'reference',
-        tag: {
-          id: 'file:@path/\\😀.txt',
-          kind: 'file',
-          value: 'path/😀.txt',
-          serialized: '@path/\\😀.txt',
-        },
-      },
-    ]);
-  });
-
-  it('leaves trailing sentence punctuation outside chips', () => {
-    expect(splitComposerTagContent('See @file.ts.')).toEqual([
-      { type: 'text', text: 'See ' },
-      {
-        type: 'reference',
-        tag: {
-          id: 'file:@file.ts',
-          kind: 'file',
-          value: 'file.ts',
-          serialized: '@file.ts',
-        },
-      },
-      { type: 'text', text: '.' },
-    ]);
   });
 });
 
@@ -278,5 +119,255 @@ describe('getComposerTagViewModel', () => {
       fallback: 'dataset:users',
       iconUrl: undefined,
     });
+  });
+});
+
+describe('composer tag input annotations', () => {
+  it('creates reference annotations using ranges from final prompt text', () => {
+    expect(
+      createInputAnnotationsFromComposerTags('@dataset:users\n\nshow rows', [
+        {
+          id: 'dataset:users',
+          kind: 'dataset',
+          label: 'Dataset',
+          value: 'users',
+          serialized: '@dataset:users',
+        },
+      ]),
+    ).toEqual([
+      {
+        type: 'reference',
+        start: 0,
+        end: 14,
+        text: '@dataset:users',
+        reference: {
+          id: 'dataset:users',
+          kind: 'dataset',
+          label: 'Dataset',
+          value: 'users',
+          serialized: '@dataset:users',
+        },
+      },
+    ]);
+  });
+
+  it('creates annotations for extensionless file references', () => {
+    expect(
+      createInputAnnotationsFromComposerTags(
+        '@Makefile @LICENSE @src/Makefile',
+        [
+          {
+            id: 'file:@Makefile',
+            kind: 'file',
+            value: 'Makefile',
+            serialized: '@Makefile',
+          },
+          {
+            id: 'file:@LICENSE',
+            kind: 'file',
+            value: 'LICENSE',
+            serialized: '@LICENSE',
+          },
+          {
+            id: 'file:@src/Makefile',
+            kind: 'file',
+            value: 'src/Makefile',
+            serialized: '@src/Makefile',
+          },
+        ],
+      ),
+    ).toEqual([
+      {
+        type: 'reference',
+        start: 0,
+        end: 9,
+        text: '@Makefile',
+        reference: {
+          id: 'file:@Makefile',
+          kind: 'file',
+          value: 'Makefile',
+          serialized: '@Makefile',
+        },
+      },
+      {
+        type: 'reference',
+        start: 10,
+        end: 18,
+        text: '@LICENSE',
+        reference: {
+          id: 'file:@LICENSE',
+          kind: 'file',
+          value: 'LICENSE',
+          serialized: '@LICENSE',
+        },
+      },
+      {
+        type: 'reference',
+        start: 19,
+        end: 32,
+        text: '@src/Makefile',
+        reference: {
+          id: 'file:@src/Makefile',
+          kind: 'file',
+          value: 'src/Makefile',
+          serialized: '@src/Makefile',
+        },
+      },
+    ]);
+  });
+
+  it('uses annotations for custom provider references', () => {
+    expect(
+      splitComposerTagContentByAnnotations('open @dataset:users now', [
+        {
+          type: 'reference',
+          start: 5,
+          end: 19,
+          text: '@dataset:users',
+          reference: {
+            id: 'dataset:users',
+            kind: 'dataset',
+            label: 'Dataset',
+            value: 'users',
+            serialized: '@dataset:users',
+          },
+        },
+      ]),
+    ).toEqual([
+      { type: 'text', text: 'open ' },
+      {
+        type: 'reference',
+        tag: {
+          id: 'dataset:users',
+          kind: 'dataset',
+          label: 'Dataset',
+          value: 'users',
+          serialized: '@dataset:users',
+        },
+      },
+      { type: 'text', text: ' now' },
+    ]);
+  });
+
+  it('uses annotations for extensionless file references', () => {
+    const content = 'open @Makefile and @src/Makefile';
+
+    expect(
+      splitComposerTagContentByAnnotations(content, [
+        referenceAnnotation(content, '@Makefile', {
+          id: 'file:@Makefile',
+          kind: 'file',
+          value: 'Makefile',
+          serialized: '@Makefile',
+        }),
+        referenceAnnotation(content, '@src/Makefile', {
+          id: 'file:@src/Makefile',
+          kind: 'file',
+          value: 'src/Makefile',
+          serialized: '@src/Makefile',
+        }),
+      ]),
+    ).toEqual([
+      { type: 'text', text: 'open ' },
+      {
+        type: 'reference',
+        tag: {
+          id: 'file:@Makefile',
+          kind: 'file',
+          value: 'Makefile',
+          serialized: '@Makefile',
+        },
+      },
+      { type: 'text', text: ' and ' },
+      {
+        type: 'reference',
+        tag: {
+          id: 'file:@src/Makefile',
+          kind: 'file',
+          value: 'src/Makefile',
+          serialized: '@src/Makefile',
+        },
+      },
+    ]);
+  });
+
+  it('keeps MCP resource trailing punctuation from annotations', () => {
+    const serialized = '@docs\\:res\\://doc.';
+    const content = `open ${serialized} now`;
+
+    expect(
+      splitComposerTagContentByAnnotations(content, [
+        referenceAnnotation(content, serialized, {
+          id: `mcp:${serialized}`,
+          kind: 'mcp',
+          value: 'docs:res://doc.',
+          serialized,
+        }),
+      ]),
+    ).toEqual([
+      { type: 'text', text: 'open ' },
+      {
+        type: 'reference',
+        tag: {
+          id: 'mcp:@docs\\:res\\://doc.',
+          kind: 'mcp',
+          value: 'docs:res://doc.',
+          serialized: '@docs\\:res\\://doc.',
+        },
+      },
+      { type: 'text', text: ' now' },
+    ]);
+  });
+
+  it('keeps escaped trailing punctuation from annotations', () => {
+    const serialized = '@path\\:';
+    const content = `open ${serialized}`;
+
+    expect(
+      splitComposerTagContentByAnnotations(content, [
+        referenceAnnotation(content, serialized, {
+          id: `file:${serialized}`,
+          kind: 'file',
+          value: 'path:',
+          serialized,
+        }),
+      ]),
+    ).toEqual([
+      { type: 'text', text: 'open ' },
+      {
+        type: 'reference',
+        tag: {
+          id: 'file:@path\\:',
+          kind: 'file',
+          value: 'path:',
+          serialized: '@path\\:',
+        },
+      },
+    ]);
+  });
+
+  it('leaves unannotated references as text', () => {
+    expect(splitComposerTagContentByAnnotations('list @.qwen/ files')).toEqual([
+      { type: 'text', text: 'list @.qwen/ files' },
+    ]);
+  });
+
+  it('leaves invalid annotation ranges as text', () => {
+    expect(
+      splitComposerTagContentByAnnotations('list @.qwen/ files', [
+        {
+          type: 'reference',
+          start: 5,
+          end: 12,
+          text: '@wrong/',
+          reference: {
+            id: 'file:@wrong/',
+            kind: 'file',
+            value: 'wrong/',
+            serialized: '@wrong/',
+          },
+        },
+      ]),
+    ).toEqual([{ type: 'text', text: 'list @.qwen/ files' }]);
   });
 });

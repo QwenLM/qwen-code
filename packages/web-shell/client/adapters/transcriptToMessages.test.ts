@@ -140,6 +140,36 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('preserves user input annotations metadata', () => {
+    const inputAnnotations = [
+      {
+        type: 'reference' as const,
+        start: 0,
+        end: 14,
+        text: '@dataset:users',
+        reference: {
+          id: 'dataset:users',
+          kind: 'dataset',
+          label: 'Dataset',
+          value: 'users',
+          serialized: '@dataset:users',
+        },
+      },
+    ];
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', '@dataset:users', 1, false, {
+        meta: { inputAnnotations },
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      id: 'user-1',
+      role: 'user',
+      content: '@dataset:users',
+      inputAnnotations,
+    });
+  });
+
   it('hides background task notifications by metadata', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock(
