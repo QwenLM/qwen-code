@@ -8,7 +8,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import {
   mkdtempSync,
   readFileSync,
-  existsSync,
+  readdirSync,
   mkdirSync,
   writeFileSync,
   rmSync,
@@ -97,9 +97,34 @@ async function boot(
 }
 
 function readAudit(path: string): Array<Record<string, unknown>> {
-  if (!existsSync(path)) return [];
-  const body = readFileSync(path, 'utf8').trim();
-  return body ? body.split('\n').map((l) => JSON.parse(l)) : [];
+  // With daily rotation, records land in audit-YYYY-MM-DD.log files in
+  // dirname(path). Read all of them (the AuditLog dir = dirname(path)).
+  const dir = path.endsWith('.log')
+    ? path.slice(0, path.lastIndexOf('/'))
+    : path;
+  let files: string[];
+  try {
+    files = readdirSync(dir)
+      .filter((f) => /^audit-.*\.log$/.test(f))
+      .sort();
+  } catch {
+    return [];
+  }
+  const rows: Array<Record<string, unknown>> = [];
+  for (const name of files) {
+    try {
+      const body = readFileSync(`${dir}/${name}`, 'utf8').trim();
+      if (body)
+        rows.push(
+          ...body
+            .split('\n')
+            .map((l) => JSON.parse(l) as Record<string, unknown>),
+        );
+    } catch {
+      // skip unreadable file
+    }
+  }
+  return rows;
 }
 
 async function pollAudit(
@@ -256,7 +281,12 @@ describe('gateway app', () => {
     const actions = rows.map((r) => r.action);
     expect(actions).toContain('pairing_redeemed');
     expect(actions).toContain('auth_failed');
-    const auditText = readFileSync(auditPath, 'utf8');
+    // Read all daily audit files from the audit dir (daily rotation).
+    const auditDir = auditPath.slice(0, auditPath.lastIndexOf('/'));
+    const auditText = readdirSync(auditDir)
+      .filter((f) => /^audit-.*\.log$/.test(f))
+      .map((f) => readFileSync(`${auditDir}/${f}`, 'utf8'))
+      .join('');
     expect(auditText).not.toContain('not-a-token');
     // Structural no-secret guarantee: no bearer material ever lands in audit.
     expect(auditText).not.toContain('Bearer');

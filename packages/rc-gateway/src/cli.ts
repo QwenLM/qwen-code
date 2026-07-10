@@ -126,6 +126,7 @@ import {
   formatSearchResults,
   formatSearchResultsJson,
 } from './search/searchCli.js';
+import { AuditLog } from './auditLog.js';
 
 export interface ServeOptions {
   gatewayPort?: number;
@@ -1547,4 +1548,31 @@ if (process.argv[2] === 'serve') {
     console.error(`daemons discover: ${(err as Error).message}`);
     process.exit(1);
   });
+} else if (process.argv[2] === 'audit' && process.argv[3] === 'verify') {
+  // `qwen-rc audit verify [--dir <path>]` -- walk all retained audit-*.log
+  // files in the audit directory and verify the prevHash chain of each file.
+  // Exits 0 when all chains are intact, 1 when any chain is broken (with a
+  // human-readable report on stdout), 2 on a usage error. Daemon-free and
+  // read-only: the verify pass never modifies any file.
+  const argv = process.argv.slice(4);
+  const dirFlag = argv.find((a) => a.startsWith('--dir='));
+  const auditDir = dirFlag
+    ? dirFlag.slice('--dir='.length)
+    : join(homedir(), '.qwen', 'rc');
+  const result = AuditLog.verifyChain(auditDir);
+  if (result.ok) {
+    // eslint-disable-next-line no-console
+    console.log(`audit verify: OK (directory: ${auditDir})`);
+    process.exit(0);
+  } else {
+    // eslint-disable-next-line no-console
+    console.error(
+      `audit verify: FAILED - ${result.failures.length} broken chain(s):`,
+    );
+    for (const { file, line } of result.failures) {
+      // eslint-disable-next-line no-console
+      console.error(`  ${file}:${line}`);
+    }
+    process.exit(1);
+  }
 }
