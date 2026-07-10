@@ -18,9 +18,38 @@ const dingtalkSdkMock = vi.hoisted(() => ({
 vi.mock('dingtalk-stream-sdk-nodejs', () => ({
   DWClient: class {
     debug = true;
+    connected = true;
+    registered = true;
+    config = { autoReconnect: true };
+    socket = new (class {
+      readyState = 1;
+      ping = vi.fn();
+      private listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+
+      on(event: string, listener: (...args: unknown[]) => void): void {
+        const listeners = this.listeners.get(event) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(event, listeners);
+      }
+
+      off(event: string, listener: (...args: unknown[]) => void): void {
+        this.listeners.get(event)?.delete(listener);
+      }
+
+      emit(event: string, ...args: unknown[]): void {
+        for (const listener of this.listeners.get(event) ?? []) {
+          listener(...args);
+        }
+      }
+    })();
+    callback?: (msg: DWClientDownStream) => void;
     disconnect = vi.fn();
     getConfig = vi.fn(() => ({ access_token: 'token' }));
-    registerCallbackListener = vi.fn();
+    registerCallbackListener = vi.fn(
+      (_topic: string, callback: (msg: DWClientDownStream) => void) => {
+        this.callback = callback;
+      },
+    );
     send = vi.fn();
     connect = vi.fn();
 
@@ -35,7 +64,7 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => ({
       if (msg.type === 'CALLBACK') this.onCallback(msg);
     });
 
-    constructor() {
+    constructor(readonly options: Record<string, unknown>) {
       dingtalkSdkMock.instances.push(this);
     }
   },
@@ -83,7 +112,9 @@ vi.mock('@qwen-code/channel-base', async () => {
 const { DingtalkChannel } = await import('./DingtalkAdapter.js');
 type DingtalkChannelInstance = InstanceType<typeof DingtalkChannel>;
 
-function createChannel(): DingtalkChannelInstance {
+function createChannel(
+  overrides: Record<string, unknown> = {},
+): DingtalkChannelInstance {
   return new DingtalkChannel(
     'test-dingtalk',
     {
@@ -98,7 +129,8 @@ function createChannel(): DingtalkChannelInstance {
       groupPolicy: 'open',
       dmPolicy: 'open',
       groups: {},
-    },
+      ...overrides,
+    } as never,
     {} as never,
   );
 }
@@ -110,6 +142,99 @@ function latestMockClient(): Record<string, unknown> {
   if (!client) throw new Error('No mock DingTalk client created');
   return client;
 }
+
+interface MockDingtalkClient {
+  callback?: (msg: DWClientDownStream) => void;
+  disconnect: ReturnType<typeof vi.fn>;
+  onDownStream(raw: string): void;
+  registerCallbackListener: ReturnType<typeof vi.fn>;
+  send: ReturnType<typeof vi.fn>;
+}
+
+function mockClientAt(index: number): MockDingtalkClient {
+  const client = dingtalkSdkMock.instances[index] as
+    | MockDingtalkClient
+    | undefined;
+  if (!client) throw new Error(`No mock DingTalk client at index ${index}`);
+  return client;
+}
+
+it('uses the connection manager by default', () => {
+  createChannel();
+
+  expect(latestMockClient().options).toEqual(
+    expect.objectContaining({
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      keepAlive: false,
+    }),
+  );
+  expect(
+    (latestMockClient().config as { autoReconnect: boolean }).autoReconnect,
+  ).toBe(false);
+});
+
+it('uses SDK keepalive when the connection manager is disabled', () => {
+  createChannel({ useConnectionManager: false });
+
+  expect(latestMockClient().options).toEqual(
+    expect.objectContaining({
+      keepAlive: true,
+    }),
+  );
+  expect(
+    (latestMockClient().config as { autoReconnect: boolean }).autoReconnect,
+  ).toBe(true);
+});
+
+it('rejects a non-boolean useConnectionManager value', () => {
+  expect(() => createChannel({ useConnectionManager: 'false' })).toThrow(
+    'useConnectionManager must be a boolean',
+  );
+});
+
+it('keeps callbacks and ACKs bound to the client that received them', async () => {
+  const firstIndex = dingtalkSdkMock.instances.length;
+  const channel = createChannel();
+  const firstClient = mockClientAt(firstIndex);
+  await channel.connect();
+
+  firstClient.onDownStream(
+    JSON.stringify({
+      type: 'SYSTEM',
+      headers: { topic: 'disconnect', messageId: 'system-message' },
+      data: '',
+    }),
+  );
+
+  await vi.waitFor(() => {
+    expect(dingtalkSdkMock.instances.length).toBe(firstIndex + 2);
+    expect(firstClient.disconnect).toHaveBeenCalledOnce();
+  });
+  const replacement = mockClientAt(firstIndex + 1);
+
+  firstClient.callback?.({
+    headers: { messageId: 'old-message' },
+    data: '{}',
+  } as DWClientDownStream);
+  replacement.callback?.({
+    headers: { messageId: 'new-message' },
+    data: '{}',
+  } as DWClientDownStream);
+
+  expect(firstClient.registerCallbackListener).toHaveBeenCalledOnce();
+  expect(replacement.registerCallbackListener).toHaveBeenCalledOnce();
+  expect(firstClient.send).toHaveBeenCalledWith('old-message', {
+    status: 'success',
+    message: 'ok',
+  });
+  expect(replacement.send).toHaveBeenCalledWith('new-message', {
+    status: 'success',
+    message: 'ok',
+  });
+  expect(firstClient.disconnect).toHaveBeenCalledOnce();
+  channel.disconnect();
+});
 
 function getPromptHook(
   channel: DingtalkChannelInstance,
