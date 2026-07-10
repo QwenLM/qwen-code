@@ -88,7 +88,13 @@ describe('Interactive protocol tag filtering', () => {
           sawVisibleSummary,
           'Expected visible summary marker after HTTP retries',
         ).toBe(true);
-        expect(fakeServer.requests.length).toBeGreaterThanOrEqual(3);
+        expect(fakeServer.requests).toHaveLength(3);
+        expect(fakeServer.requests[1]!.body).toEqual(
+          fakeServer.requests[0]!.body,
+        );
+        expect(fakeServer.requests[2]!.body).toEqual(
+          fakeServer.requests[0]!.body,
+        );
 
         const renderedOutput = stripAnsi(rig._interactiveOutput);
         expect(renderedOutput).toContain('VISIBLE_TMUX_RETRY_SUMMARY_DONE');
