@@ -2290,6 +2290,78 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
     expect(calledWith.contents[0].parts[0].text).toContain('first request');
   });
 
+  it('includes a pending tool result in the summary side-query', async () => {
+    const runSideQuerySpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: 'TEST SUMMARY',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'inspect the repository' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'tool-call-1',
+              name: 'read_file',
+              args: { file_path: 'README.md' },
+            },
+          },
+        ],
+      },
+    ];
+
+    const result = await new ChatCompressionService().compress(
+      makeFakeChat(history),
+      {
+        promptId: 'p',
+        force: true,
+        model: 'qwen-vl',
+        config: makeFakeConfig(),
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+        trigger: 'auto',
+        pendingUserMessage: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool-call-1',
+                name: 'read_file',
+                response: { output: 'README contents' },
+              },
+            },
+          ],
+        },
+      },
+    );
+
+    const calledWith = runSideQuerySpy.mock.calls[0]![1] as {
+      contents: Array<{
+        parts: Array<{
+          functionResponse?: { id?: string };
+          text?: string;
+        }>;
+      }>;
+    };
+    expect(calledWith.contents).toHaveLength(4);
+    expect(calledWith.contents[2].parts[0].functionResponse?.id).toBe(
+      'tool-call-1',
+    );
+    expect(
+      result.newHistory
+        ?.at(-1)
+        ?.parts?.some((part) => part.functionCall?.id === 'tool-call-1'),
+    ).toBe(true);
+  });
+
   it('produces newHistory composed via composePostCompactHistory', async () => {
     vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
       text: 'SUM_TXT',

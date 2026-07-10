@@ -424,7 +424,7 @@ export class ChatCompressionService {
       }
     }
 
-    // Compression only reads the existing history while deciding the split and
+    // Compression reads existing history plus any pending tool result while
     // preparing the side-query payload. Avoid `getHistory(true)` here: long
     // tool-heavy sessions can make a defensive deep clone larger than the
     // remaining V8 heap headroom at exactly the moment compaction is trying to
@@ -497,10 +497,21 @@ export class ChatCompressionService {
       }
     }
 
+    // A tool result is still pending when automatic compaction runs before
+    // sendMessageStream commits the current user turn to chat history. Include
+    // it in the side-query so Anthropic-compatible providers see it immediately
+    // after the preceding tool_use block.
+    const pendingToolResult = opts.pendingUserMessage?.parts?.some(
+      (part) => !!part.functionResponse,
+    );
+    const sideQueryHistory = pendingToolResult
+      ? [...curatedHistory, opts.pendingUserMessage!]
+      : curatedHistory;
+
     // Slim the side-query input: replace inlineData with placeholders.
     // The original history (with images) is preserved separately for
     // the post-compact image restoration block.
-    const slim = slimCompactionInput(curatedHistory);
+    const slim = slimCompactionInput(sideQueryHistory);
     if (slim.stats.imagesStripped > 0 || slim.stats.documentsStripped > 0) {
       config
         .getDebugLogger()
