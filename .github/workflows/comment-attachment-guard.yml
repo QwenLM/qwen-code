@@ -33,22 +33,12 @@ jobs:
               'COLLABORATOR',
             ]);
             const highRiskExtension =
-              /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|bat|ps1|node|dylib)(?:$|[\s)"'\]>?#&;,:!%])/i;
+              /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|bat|ps1|node|dylib)(?![a-zA-Z0-9])/i;
             const linkPattern =
               /https?:\/\/[^\s"'<>\]]+|\[[^\]]+\]\((?:[^()\s]|\([^()\s]*\))+\)/gi;
             const errorMessage = (error) =>
               `${error?.status ? `${error.status} ` : ''}${error?.message ?? error}`;
-            const highRiskTarget = (url) => {
-              let target = url.split('/').pop() || url;
-              if (!/^https?:\/\//i.test(url)) {
-                return target;
-              }
-              try {
-                const parsedUrl = new URL(url);
-                target = parsedUrl.pathname.split('/').pop() || '';
-              } catch {
-                return target;
-              }
+            const decodeTarget = (target) => {
               try {
                 return decodeURIComponent(target);
               } catch {
@@ -56,6 +46,24 @@ jobs:
                   String.fromCharCode(Number.parseInt(match.slice(1), 16)),
                 );
               }
+            };
+            const highRiskTarget = (url) => {
+              let target = url;
+              if (/^https?:\/\//i.test(url)) {
+                try {
+                  target = new URL(url).pathname;
+                } catch {
+                  target = url;
+                }
+              }
+              return (
+                target
+                  .split('/')
+                  .filter(Boolean)
+                  .map(decodeTarget)
+                  .find((segment) => highRiskExtension.test(segment)) ||
+                decodeTarget(target.split('/').pop() || target)
+              );
             };
 
             const { comment, sender } = context.payload;

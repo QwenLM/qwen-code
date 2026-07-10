@@ -20,8 +20,8 @@ describe('comment attachment guard workflow', () => {
     'utf8',
   );
 
-  it('treats common URL punctuation after a risky extension as a match boundary', () => {
-    expect(workflow).toContain('>?#&;,:!%]');
+  it('stops risky extensions only on alphanumeric continuation', () => {
+    expect(workflow).toContain('(?![a-zA-Z0-9])');
   });
 
   it('checks markdown link URLs instead of display text', () => {
@@ -32,9 +32,9 @@ describe('comment attachment guard workflow', () => {
   });
 
   it('checks URL paths instead of country-code TLD hosts', () => {
-    expect(workflow).toContain('const parsedUrl = new URL(url);');
+    expect(workflow).toContain('target = new URL(url).pathname;');
     expect(workflow).toContain(
-      "target = parsedUrl.pathname.split('/').pop() || '';",
+      '.find((segment) => highRiskExtension.test(segment))',
     );
     expect(workflow).not.toContain('|sh|');
     expect(workflow).not.toContain('|so)');
@@ -54,7 +54,7 @@ describe('comment attachment guard workflow', () => {
   });
 
   it('does not throw on malformed URL-like links', () => {
-    expect(workflow).toContain('} catch {\n                return target;');
+    expect(workflow).toContain('} catch {\n                  target = url;');
   });
 
   it('decodes escaped risky extensions in URL paths', () => {
