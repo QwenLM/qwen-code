@@ -1542,9 +1542,10 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
-  it('rejects and cancels a new session factory result that arrives after stop', async () => {
+  it('rejects and detaches a new session factory result that arrives after stop', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
+    session.detach = vi.fn().mockResolvedValue(undefined);
     let finishFactory!: (session: FakeSession) => void;
     const bridge = new DaemonChannelBridge({
       cwd: '/repo',
@@ -1563,13 +1564,15 @@ describe('DaemonChannelBridge', () => {
     finishFactory(session);
 
     await expect(creating).rejects.toThrow('stopped');
-    expect(session.cancel).toHaveBeenCalledOnce();
+    expect(session.detach).toHaveBeenCalledOnce();
+    expect(session.cancel).not.toHaveBeenCalled();
     expect(bridge.listSessions()).toEqual([]);
   });
 
-  it('rejects and cancels a load factory result that arrives after stop', async () => {
+  it('rejects and detaches a load factory result that arrives after stop', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events, 'existing-session');
+    session.detach = vi.fn().mockResolvedValue(undefined);
     let finishFactory!: (session: FakeSession) => void;
     const bridge = new DaemonChannelBridge({
       cwd: '/repo',
@@ -1588,9 +1591,44 @@ describe('DaemonChannelBridge', () => {
     finishFactory(session);
 
     await expect(loading).rejects.toThrow('stopped');
-    expect(session.cancel).toHaveBeenCalledOnce();
+    expect(session.detach).toHaveBeenCalledOnce();
+    expect(session.cancel).not.toHaveBeenCalled();
     expect(bridge.listSessions()).toEqual([]);
   });
+
+  it.each(['unavailable', 'rejected'] as const)(
+    'falls back to cancel when detach is %s for a stale factory result',
+    async (detachState) => {
+      const events = new EventQueue();
+      const session = createFakeSession(events, 'stale-session');
+      if (detachState === 'rejected') {
+        session.detach = vi.fn().mockRejectedValue(new Error('detach failed'));
+      }
+      let finishFactory!: (session: FakeSession) => void;
+      const bridge = new DaemonChannelBridge({
+        cwd: '/repo',
+        sessionFactory: vi.fn(
+          () =>
+            new Promise<DaemonChannelSessionClient>((resolve) => {
+              finishFactory = resolve;
+            }),
+        ),
+      });
+
+      await bridge.start();
+      const creating = bridge.newSession('/repo');
+      await Promise.resolve();
+      bridge.stop();
+      finishFactory(session);
+
+      await expect(creating).rejects.toThrow('stopped');
+      if (session.detach) {
+        expect(session.detach).toHaveBeenCalledOnce();
+      }
+      expect(session.cancel).toHaveBeenCalledOnce();
+      expect(bridge.listSessions()).toEqual([]);
+    },
+  );
 
   it.each(['new', 'load'] as const)(
     'does not attach a %s factory result after a queued stop',
@@ -1628,6 +1666,7 @@ describe('DaemonChannelBridge', () => {
   it('keeps a pre-stop factory result stale after restart', async () => {
     const staleEvents = new EventQueue();
     const staleSession = createFakeSession(staleEvents, 'stale-session');
+    staleSession.detach = vi.fn().mockResolvedValue(undefined);
     const currentEvents = new EventQueue();
     const currentSession = createFakeSession(currentEvents, 'current-session');
     let finishStaleFactory!: (session: FakeSession) => void;
@@ -1654,7 +1693,8 @@ describe('DaemonChannelBridge', () => {
 
     await expect(staleCreation).rejects.toThrow('stopped');
     await expect(bridge.newSession('/repo')).resolves.toBe('current-session');
-    expect(staleSession.cancel).toHaveBeenCalledOnce();
+    expect(staleSession.detach).toHaveBeenCalledOnce();
+    expect(staleSession.cancel).not.toHaveBeenCalled();
     expect(bridge.listSessions()).toEqual([
       {
         sessionId: 'current-session',

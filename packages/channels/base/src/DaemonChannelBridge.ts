@@ -412,6 +412,12 @@ export class DaemonChannelBridge
     }
     const session = this.removeSessionBinding(sessionId);
     if (!session) return;
+    await this.releaseSessionClient(session);
+  }
+
+  private async releaseSessionClient(
+    session: DaemonChannelSessionClient,
+  ): Promise<void> {
     if (session.detach) {
       try {
         await session.detach();
@@ -498,7 +504,7 @@ export class DaemonChannelBridge
     session: DaemonChannelSessionClient,
   ): Promise<void> {
     try {
-      await session.cancel();
+      await this.releaseSessionClient(session);
     } catch (error) {
       this.lastError = error;
     }
