@@ -43,6 +43,7 @@ import {
   CompressionStatus,
   detectLoopSentinel,
   detectAutonomousSentinel,
+  markCronRunWithheld,
   LoopTickResolver,
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
@@ -136,6 +137,7 @@ import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/b
 // so a rename can't desync caller and answerer into a silent -32601 latch.
 import { MID_TURN_QUEUE_DRAIN_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import { t } from '../../i18n/index.js';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 import { readVoiceModel } from '../../services/voice-settings.js';
@@ -605,9 +607,179 @@ interface BackgroundNotificationQueueItem {
   toolUseId?: string;
 }
 
+/**
+ * How a cron turn ended, as seen by {@link CronQueueItem.onComplete}.
+ *
+ * `'incomplete'` is NOT a `withInteractionSpan` outcome: it marks a turn that
+ * was cut short mid-tool-loop (a permission cancel or a detected tool loop),
+ * which neither aborts the turn's signal nor records an error, and so would
+ * otherwise be indistinguishable from a clean finish. A consumer that reads the
+ * turn's text — the precondition check — must not treat a truncated turn's
+ * last words as its answer.
+ */
+type CronTurnOutcome = 'ok' | 'error' | 'cancelled' | 'incomplete';
+
+/** The slice of `CronJob` a fire delivers to this session. Structural, not the
+ * imported type, so core stays a type-only dependency of the fire path. */
+interface CronFire {
+  id?: string;
+  prompt: string;
+  cronExpr?: string;
+  missed?: boolean;
+  runMode?: 'shared' | 'isolated';
+  condition?: string;
+  /** The minute this fire was stamped for. The scheduler assigns it before
+   * calling `onFire` and writes the run record under the same value, so it
+   * identifies this fire's entry in `runs[]`. */
+  lastFiredAt?: number;
+}
+
 interface CronQueueItem {
   prompt: string;
   source: 'cron' | 'loop';
+  /**
+   * What the client shows for this turn, when the text sent to the model is not
+   * fit to read. A precondition turn wraps the user's condition in several
+   * paragraphs of instructions the model needs and nobody wants to see repeated
+   * in the transcript on every fire. Absent = echo the prompt verbatim (the
+   * behaviour of every plain cron fire).
+   */
+  echoText?: string;
+  /**
+   * Invoked once the turn reaches a terminal state, with the assistant text of
+   * its FINAL model turn (tool-loop intermediates excluded, thoughts excluded).
+   * Runs on every exit path — clean finish, caught error, abort, token-limit
+   * bail, permission-cancel — so a consumer that gates further work on the turn
+   * can never be left hanging. Used by the isolated-task precondition; a plain
+   * cron/loop fire leaves it unset. A throw from the callback is logged and
+   * swallowed: it must not break the drain loop.
+   */
+  onComplete?: (outcome: CronTurnOutcome, finalText: string) => void;
+}
+
+/** Ceiling on the condition text echoed into the transcript. The condition may
+ * be up to `MAX_CONDITION_LENGTH` (10k) characters; a bubble that long is not a
+ * decision log, it is a wall. The model still receives the whole thing. */
+export const MAX_CRON_CONDITION_ECHO_CHARS = 280;
+
+/**
+ * What the client shows for a precondition turn, in place of the instruction
+ * wrapper the model actually receives: a localized label plus the user's own
+ * condition, whitespace-collapsed and capped.
+ *
+ * Truncation backs off a code unit when the cut would land inside a surrogate
+ * pair, so an emoji in the condition can never render as a lone `�`.
+ */
+export function buildCronConditionEcho(condition: string): string {
+  const cleaned = condition.replace(/\s+/g, ' ').trim();
+  let short = cleaned;
+  if (cleaned.length > MAX_CRON_CONDITION_ECHO_CHARS) {
+    let cut = MAX_CRON_CONDITION_ECHO_CHARS - 1;
+    const boundary = cleaned.charCodeAt(cut - 1);
+    if (boundary >= 0xd800 && boundary <= 0xdbff) cut -= 1;
+    short = `${cleaned.slice(0, cut)}…`;
+  }
+  return `⏰ ${t('Precondition check')}\n\n${short}`;
+}
+
+/** A `qwen-session://` link the Web Shell's markdown renderer turns into a
+ * "jump to session" control. Same shape the `create_sub_session` tool returns. */
+function subSessionLink(sessionId: string): string {
+  return `[🧵 ${sessionId.slice(0, 8)}](qwen-session://${sessionId})`;
+}
+
+/**
+ * Why a precondition turn that did not end cleanly withheld its fire. Kept as
+ * whole sentences rather than an interpolated outcome word: the outcome is an
+ * internal enum, and a translator needs the sentence, not a slot.
+ */
+function cronOutcomeSkipMessage(
+  outcome: Exclude<CronTurnOutcome, 'ok'>,
+): string {
+  switch (outcome) {
+    case 'cancelled':
+      return t(
+        'The precondition check was cancelled — this scheduled run was skipped.',
+      );
+    case 'incomplete':
+      return t(
+        'The precondition check was interrupted — this scheduled run was skipped.',
+      );
+    default:
+      return t(
+        'The precondition check failed — this scheduled run was skipped.',
+      );
+  }
+}
+
+/**
+ * The single line an isolated task's precondition turn must end on. The verdict
+ * must be the WHOLE line:
+ *
+ *  - anchored at the start, tolerating markdown bullet/emphasis/quote noise, so
+ *    a `DECISION: YES` quoted out of a file the check happened to read cannot
+ *    masquerade as the verdict;
+ *  - anchored at the end, tolerating only closing markdown and terminal
+ *    punctuation, so a hedged `DECISION: YES, but I could not verify it` is not
+ *    a verdict at all and fails closed. The prompt asks for a line that is
+ *    exactly one of the two; anything else is an answer we cannot trust to be a
+ *    decision.
+ *
+ * The trailing class deliberately excludes newlines: `\s` there would let the
+ * match run past the end of its own line.
+ */
+const CRON_CONDITION_VERDICT_RE =
+  /^[\s>*_#-]*DECISION:\s*(YES|NO)[ \t*_.!]*$/gim;
+
+/**
+ * Wraps a task's precondition into the turn the bound session actually runs.
+ *
+ * The task's own prompt is deliberately NOT included: the model is being asked
+ * to *judge*, and handing it the command it is judging invites it to just do the
+ * work inline — which would defeat the isolation the task asked for.
+ */
+export function wrapCronConditionPrompt(condition: string): string {
+  return (
+    'You are evaluating the PRECONDITION of a scheduled task. Do NOT perform ' +
+    'the task itself — your only job is to decide whether it should run now.\n\n' +
+    'Investigate as needed (read files, run read-only commands), then end your ' +
+    'reply with a final line that is exactly one of:\n\n' +
+    'DECISION: YES\n' +
+    'DECISION: NO\n\n' +
+    'Answer NO if the precondition does not hold, or if you cannot determine ' +
+    'whether it holds.\n\n' +
+    '--- Precondition ---\n' +
+    condition
+  );
+}
+
+/**
+ * Reads the verdict off a precondition turn's final assistant text.
+ *
+ * Only the LAST non-empty line is considered. The prompt asks the model to *end*
+ * its reply with the verdict, so a verdict merely present somewhere is not one:
+ * a model that answers "DECISION: YES" and then walks it back on the next line
+ * has not decided, and scanning the whole text would read its conclusion off the
+ * wrong line. This also subsumes the reasoning-out-loud case ("…that would be
+ * DECISION: NO, but…"), which never lands on the final line.
+ *
+ * Fail-closed: no parseable verdict means "do not run". A precondition exists to
+ * withhold an unattended run, so an ambiguous answer must withhold it too.
+ */
+export function isCronConditionMet(finalText: string): boolean {
+  const finalLine = finalText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .at(-1);
+  if (!finalLine) return false;
+
+  let verdict: string | undefined;
+  // matchAll on a /g regex; lastIndex is reset by matchAll's internal clone.
+  for (const match of finalLine.matchAll(CRON_CONDITION_VERDICT_RE)) {
+    verdict = match[1]?.toUpperCase();
+  }
+  return verdict === 'YES';
 }
 
 const MAX_NOTIFICATION_QUEUE = 20;
@@ -2970,39 +3142,164 @@ export class Session implements SessionContext {
 
     if (!scheduler.hasPendingWork) return;
 
-    scheduler.start(
-      (job: {
-        prompt: string;
-        cronExpr?: string;
-        missed?: boolean;
-        runMode?: 'shared' | 'isolated';
-      }) => {
-        if (this.cronDisabledByTokenLimit) return;
-        if (job.missed && detectAutonomousSentinel(job.prompt)) return;
-        // An `isolated` task gets a FRESH sub-session per fire instead of
-        // accumulating in this bound session. Dispatch it straight to the
-        // daemon rather than asking the model to call `create_sub_session`:
-        // that tool's permission is 'ask', and under the default approval mode
-        // an unattended fire has nobody to answer the prompt — the call would
-        // hang until the daemon's permission timeout cancels it. A `missed`
-        // one-shot keeps the in-session confirm-first path.
-        if (!job.missed && job.runMode === 'isolated') {
-          const spawner = this.config.getSubSessionSpawner();
-          if (spawner) {
-            void this.#dispatchIsolatedCronFire(spawner, job.prompt);
-            return;
-          }
-          // Defensive: an isolated task can only be created through the daemon's
-          // REST route, which binds it to a session that always has a spawner
-          // (and a bound task fires nowhere else). Should that ever change, run
-          // the fire in-session — losing the task is worse than losing isolation.
-        }
+    scheduler.start((job: CronFire) => {
+      if (this.cronDisabledByTokenLimit) return;
+      if (job.missed && detectAutonomousSentinel(job.prompt)) return;
+
+      // A guarded isolated task evaluates its precondition HERE, in the bound
+      // session, as an ordinary cron turn — same tool access and approval mode
+      // as a `shared` fire. Only a YES verdict releases the fire. Everything
+      // else (NO, no parseable verdict, error, cancellation) skips it: a
+      // precondition exists to withhold an unattended run.
+      //
+      // The check is not routed through a sub-session on purpose. The bound
+      // session of an isolated task is otherwise idle, so its transcript becomes
+      // the task's decision log — the record of why a fire did or did not
+      // happen — and no session is minted for a run that never occurs.
+      // A `missed` fire is NEVER judged. Its prompt is not the task's command:
+      // the scheduler batches every one-shot missed in this load into ONE
+      // synthetic carrier job whose prompt is a notification ("these tasks were
+      // missed … ask the user before running them"), built from a spread of the
+      // FIRST task. Gating that notification on one task's precondition would
+      // let a `NO` silently suppress the notice for unrelated tasks the
+      // scheduler has already deleted from disk. The scheduler also strips the
+      // guard state from the carrier; this guard is the second half of that
+      // contract.
+      if (job.condition && job.runMode === 'isolated' && !job.missed) {
         this.cronQueue.push({
-          prompt: job.prompt,
-          source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
+          prompt: wrapCronConditionPrompt(job.condition),
+          // The model needs the instruction wrapper; the transcript does not.
+          echoText: buildCronConditionEcho(job.condition),
+          source: 'cron',
+          onComplete: (outcome, finalText) => {
+            // The turn we just ran may itself have torn the session down or
+            // tripped the token breaker (which already emptied cronQueue).
+            // Nothing is emitted here: the client is going away.
+            if (this.disposed || this.cronDisabledByTokenLimit) {
+              debugLogger.debug(
+                `Precondition skipped (session gone) [task ${job.id ?? '?'}]`,
+              );
+              this.#markCronRunWithheld(job);
+              return;
+            }
+            if (outcome !== 'ok') {
+              // Say so in the transcript. A turn cut short can end on no verdict
+              // at all, and without this the run reads as a task that simply
+              // stopped talking mid-sentence.
+              this.#emitCronStatus(cronOutcomeSkipMessage(outcome));
+              // The scheduler has already booked this as a run, and the
+              // transcript of a turn that never finished may hold no verdict to
+              // read — so this must ALSO leave a trace where an operator looks.
+              // `debugLogger` writes nothing unless a debug log session is
+              // active; the daemon forwards child stderr.
+              writeStderrLine(
+                `qwen serve: scheduled task precondition did not complete ` +
+                  `(${outcome}) — the fire was withheld [session ${this.sessionId}]`,
+              );
+              debugLogger.warn(
+                `Precondition turn ended '${outcome}' — fire withheld ` +
+                  `[session ${this.sessionId}]`,
+              );
+              this.#markCronRunWithheld(job);
+              return;
+            }
+            if (!isCronConditionMet(finalText)) {
+              // The ordinary case. The model's own answer says why, so this adds
+              // only the consequence — that the run was skipped, which the model
+              // has no way to state.
+              this.#emitCronStatus(
+                t('Precondition not met — this scheduled run was skipped.'),
+              );
+              debugLogger.info(
+                `Precondition verdict is not YES — fire withheld ` +
+                  `[session ${this.sessionId}]`,
+              );
+              this.#markCronRunWithheld(job);
+              return;
+            }
+            debugLogger.info(
+              `Precondition met — dispatching fire [session ${this.sessionId}]`,
+            );
+            this.#deliverCronFire(job);
+          },
         });
         void this.#drainCronQueue();
+        return;
+      }
+
+      this.#deliverCronFire(job);
+    });
+  }
+
+  /**
+   * Marks this fire's run record as withheld, so the run history distinguishes
+   * "the precondition said no" from "the task ran". The scheduler books the run
+   * the moment it fires, before any verdict exists; without this amendment a
+   * guarded task that deliberately did nothing reports a clean run.
+   *
+   * Fire-and-forget and never awaited: the write is a cosmetic marker on a fire
+   * that has already been decided, and it must not delay or fail the decision.
+   * A session-only job (no `id`) or an unstamped fire has no record to amend.
+   */
+  #markCronRunWithheld(job: CronFire): void {
+    const projectRoot = this.config.getProjectRoot();
+    if (!projectRoot || !job.id || job.lastFiredAt === undefined) return;
+    void markCronRunWithheld(projectRoot, job.id, job.lastFiredAt).catch(
+      (err) => {
+        debugLogger.warn(
+          `Failed to mark scheduled-task run as withheld [task ${job.id}]: ${err}`,
+        );
       },
+    );
+  }
+
+  /**
+   * Routes one released cron fire: straight into a fresh sub-session for an
+   * `isolated` task, otherwise onto this session's cron queue.
+   *
+   * An `isolated` fire is dispatched daemon-side rather than by asking the model
+   * to call `create_sub_session`: that tool's permission is 'ask', and under the
+   * default approval mode an unattended fire has nobody to answer the prompt —
+   * the call would hang until the daemon's permission timeout cancels it. A
+   * `missed` one-shot keeps the in-session confirm-first path.
+   *
+   * Called either directly from `onFire` or, for a guarded task, from its
+   * precondition turn's `onComplete` — so a precondition never changes HOW a
+   * fire runs, only WHETHER it runs.
+   */
+  #deliverCronFire(job: CronFire): void {
+    if (!job.missed && job.runMode === 'isolated') {
+      const spawner = this.config.getSubSessionSpawner();
+      if (spawner) {
+        void this.#dispatchIsolatedCronFire(spawner, job.prompt);
+        return;
+      }
+      // Defensive: an isolated task can only be created through the daemon's
+      // REST route, which binds it to a session that always has a spawner
+      // (and a bound task fires nowhere else). Should that ever change, run
+      // the fire in-session — losing the task is worse than losing isolation.
+    }
+    this.cronQueue.push({
+      prompt: job.prompt,
+      source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
+    });
+    void this.#drainCronQueue();
+  }
+
+  /**
+   * One status line into the bound session's transcript, marked so it reads as
+   * the scheduler speaking rather than the model. Live-only, like the `[cron
+   * error]` line beside it: cron turns persist no client-side chunks.
+   *
+   * The leading blank line is load-bearing. This is an `agent_message_chunk`,
+   * which the client APPENDS to the assistant message already on screen — and
+   * that message ends on the verdict, with no trailing newline. Without the
+   * break the transcript renders `DECISION: NO⏰ Precondition not met…`.
+   */
+  #emitCronStatus(text: string): void {
+    void this.#emitAgentDiagnosticMessageSafely(
+      `\n\n⏰ ${text}`,
+      'Failed to emit scheduled-task status',
     );
   }
 
@@ -3023,11 +3320,24 @@ export class Session implements SessionContext {
   ): Promise<void> {
     try {
       const { sessionId } = await spawner({ prompt, completion: 'sent' });
+      // Without this the bound session of an isolated task shows nothing at all
+      // for a fire that DID run — the work happens in a sibling session the user
+      // has no link to. The link is what makes this transcript a run log.
+      this.#emitCronStatus(
+        t('Running this scheduled task in a new session: {{link}}', {
+          link: subSessionLink(sessionId),
+        }),
+      );
       debugLogger.info(
         `Isolated scheduled task dispatched into sub-session ${sessionId} [session ${this.sessionId}]`,
       );
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
+      this.#emitCronStatus(
+        t('This scheduled run could not be started: {{error}}', {
+          error: detail,
+        }),
+      );
       // Must reach stderr. `debugLogger.warn` writes nothing unless a debug log
       // session is active, and the scheduler has already persisted this fire as
       // a run — so a dropped dispatch would otherwise look like a successful
@@ -3136,6 +3446,17 @@ export class Session implements SessionContext {
           this.config.getSessionId() + '########cron' + Date.now();
 
         let cronHadError = false;
+        // Set before the two mid-tool-loop early returns below. Neither aborts
+        // `ac` nor sets `cronHadError`, so without this a turn that stopped on a
+        // permission cancel or a detected tool loop reaches `onComplete` as
+        // `'ok'` — and a model that emitted "DECISION: YES" as text in the SAME
+        // streaming round as its tool call would release the fire on a verdict
+        // it never got to revise.
+        let cronTurnIncomplete = false;
+        // Assistant text of the turn's FINAL model round — reset on every round
+        // so tool-loop intermediates ("let me check the log first…") don't reach
+        // `onComplete`. Only the last round is the turn's answer.
+        let finalRoundText = '';
         await withInteractionSpan(
           this.config,
           {
@@ -3254,19 +3575,21 @@ export class Session implements SessionContext {
               // sentinel or the full task dump (and the resolver never hands back
               // the absolute path, which would leak the OS username / dir layout
               // into the ACP client UI); otherwise echo the prompt verbatim.
-              const echoText = !loopTick
-                ? prompt
-                : // An autonomous tick (a bare-`/loop` sentinel, or a loop.md
-                  // sentinel whose file is gone and converged on the preamble).
-                  loopTick.autonomous
-                  ? 'Autonomous loop tick'
-                  : loopTick.sourceLabel
-                    ? `Loop tick — tasks from ${loopTick.sourceLabel}`
-                    : // The only remaining tick is a transient read failure
-                      // (buildTransientErrorTick): a loop.md exists but couldn't be
-                      // read this tick. A genuinely-absent loop.md converges on the
-                      // autonomous branch above, so there is no "not present" echo.
-                      'Loop tick — loop.md temporarily unavailable';
+              const echoText = item.echoText
+                ? item.echoText
+                : !loopTick
+                  ? prompt
+                  : // An autonomous tick (a bare-`/loop` sentinel, or a loop.md
+                    // sentinel whose file is gone and converged on the preamble).
+                    loopTick.autonomous
+                    ? 'Autonomous loop tick'
+                    : loopTick.sourceLabel
+                      ? `Loop tick — tasks from ${loopTick.sourceLabel}`
+                      : // The only remaining tick is a transient read failure
+                        // (buildTransientErrorTick): a loop.md exists but couldn't be
+                        // read this tick. A genuinely-absent loop.md converges on the
+                        // autonomous branch above, so there is no "not present" echo.
+                        'Loop tick — loop.md temporarily unavailable';
 
               // Echo the cron prompt as a user message so the client sees it
               await this.sendUpdate({
@@ -3287,6 +3610,7 @@ export class Session implements SessionContext {
               while (nextMessage !== null) {
                 turnCount++;
                 if (ac.signal.aborted) return;
+                finalRoundText = '';
 
                 const functionCalls: FunctionCall[] = [];
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
@@ -3339,7 +3663,11 @@ export class Session implements SessionContext {
                           'assistant',
                           part.thought,
                         );
+                        // Reasoning is not the answer — a model that muses
+                        // "DECISION: NO seems wrong" in a thought must not have
+                        // that read as its verdict.
                         if (!part.thought) {
+                          finalRoundText += part.text;
                           messageDisplay?.addChunk(part.text);
                         }
                       }
@@ -3389,6 +3717,7 @@ export class Session implements SessionContext {
                     toolLoopState,
                   );
                   if (toolRun.stopAfterPermissionCancel) {
+                    cronTurnIncomplete = true;
                     await this.#preserveStoppedToolRun(toolRun, ac.signal);
                     return;
                   }
@@ -3396,6 +3725,19 @@ export class Session implements SessionContext {
                     toolRun,
                     ac.signal,
                   );
+                  // A tool run that yields no follow-up message is a tool loop
+                  // cut short — today `loopDetected` and
+                  // `repeatedDuplicateProviderToolCall`, both of which end the
+                  // turn through the ordinary `nextMessage === null` exit with
+                  // no error recorded. Marked HERE, at the single choke point,
+                  // rather than per-flag: enumerating the reasons is how the
+                  // duplicate-tool-call sibling was missed the first time, and
+                  // the next reason added would be missed the same way. A turn
+                  // that ends normally never reaches this branch — it exits the
+                  // loop with no function calls at all.
+                  if (nextMessage === null) {
+                    cronTurnIncomplete = true;
+                  }
                   if (toolRun.loopDetected) {
                     await this.#preserveStoppedToolRun(toolRun, ac.signal);
                     return;
@@ -3425,6 +3767,31 @@ export class Session implements SessionContext {
                   turnCount,
                 ),
               );
+              if (item.onComplete) {
+                // Every `return` inside the try lands here — an aborted turn, a
+                // token-limit bail, a stream that never opened, a tool loop cut
+                // short. The last of those is why `cronTurnIncomplete` exists:
+                // it is the only truncation that leaves `finalRoundText` holding
+                // a COMPLETE final line, so it cannot be distinguished from a
+                // clean finish by the text alone. Never let a callback throw out
+                // of the finally: that would replace the turn's own outcome and
+                // kill the drain loop.
+                const outcome: CronTurnOutcome = ac.signal.aborted
+                  ? 'cancelled'
+                  : cronHadError
+                    ? 'error'
+                    : cronTurnIncomplete
+                      ? 'incomplete'
+                      : 'ok';
+                try {
+                  item.onComplete(outcome, finalRoundText);
+                } catch (err) {
+                  debugLogger.error(
+                    `Cron turn onComplete threw (outcome=${outcome})`,
+                    err,
+                  );
+                }
+              }
             }
           },
           () =>

@@ -6,10 +6,25 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type ReactNode,
 } from 'react';
 import { isSafeImageSrc } from './Markdown';
 import { useWebShellCustomization } from '../../customization';
+import type {
+  ComposerTagClickHandler,
+  ComposerTagRenderer,
+  WebShellComposerTag,
+  WebShellComposerTagIconMap,
+  WebShellUserMessagePart,
+} from '../../customization';
+import {
+  getComposerTagDisplay,
+  getComposerTagLabel,
+  getComposerTagValue,
+} from '../../hooks/useComposerCore';
 import { useI18n } from '../../i18n';
+import { cssUrlVar } from '../../utils/cssUrlVar';
+import { getComposerTagIconUrl } from '../composerTagIcons';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './UserMessage.module.css';
 
@@ -30,14 +45,51 @@ export const UserMessage = memo(function UserMessage({
   isLocateFlashing = false,
 }: UserMessageProps) {
   const { t } = useI18n();
-  const { renderUserMessageContent } = useWebShellCustomization();
+  const {
+    parseUserMessageContent,
+    renderUserMessageContent,
+    composerTagIcons,
+    renderComposerTag,
+    renderComposerTagTooltip,
+    onComposerTagClick,
+  } = useWebShellCustomization();
   const contentRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [heightOverflowing, setHeightOverflowing] = useState(false);
-  const renderedContent = useMemo(
-    () => renderUserMessageContent?.({ content, images }) ?? content,
-    [content, images, renderUserMessageContent],
-  );
+  const renderedContent = useMemo(() => {
+    const explicit = renderUserMessageContent?.({ content, images });
+    if (explicit !== undefined && explicit !== null) return explicit;
+    let parts: readonly WebShellUserMessagePart[] | undefined | null;
+    try {
+      parts = parseUserMessageContent?.(content);
+    } catch (error) {
+      console.warn('[WebShell] failed to parse user message content', error);
+      return content;
+    }
+    if (!parts || parts.length === 0) return content;
+    return parts.map((part, index) => {
+      if (part.type === 'text') return part.text;
+      return (
+        <UserMessageTag
+          key={`${part.tag.id}-${index}`}
+          tag={part.tag}
+          composerTagIcons={composerTagIcons}
+          renderComposerTag={renderComposerTag}
+          renderComposerTagTooltip={renderComposerTagTooltip}
+          onComposerTagClick={onComposerTagClick}
+        />
+      );
+    });
+  }, [
+    content,
+    images,
+    onComposerTagClick,
+    parseUserMessageContent,
+    composerTagIcons,
+    renderComposerTag,
+    renderComposerTagTooltip,
+    renderUserMessageContent,
+  ]);
 
   const measureOverflow = useCallback(() => {
     const el = contentRef.current;
@@ -122,3 +174,93 @@ export const UserMessage = memo(function UserMessage({
     </div>
   );
 });
+
+function getTagText(tag: WebShellComposerTag): string {
+  return getComposerTagDisplay(tag);
+}
+
+function UserMessageTag({
+  tag,
+  composerTagIcons,
+  renderComposerTag,
+  renderComposerTagTooltip,
+  onComposerTagClick,
+}: {
+  tag: WebShellComposerTag;
+  composerTagIcons: WebShellComposerTagIconMap | undefined;
+  renderComposerTag: ComposerTagRenderer | undefined;
+  renderComposerTagTooltip: ComposerTagRenderer | undefined;
+  onComposerTagClick: ComposerTagClickHandler | undefined;
+}) {
+  const info = { tag, placement: 'user-message' as const, readonly: true };
+  let custom: ReactNode | null | undefined;
+  let tooltip: ReactNode | null | undefined;
+  try {
+    custom = renderComposerTag?.(info);
+  } catch (error) {
+    console.warn('[WebShell] user message tag render failed', error);
+  }
+  try {
+    tooltip = renderComposerTagTooltip?.(info);
+  } catch (error) {
+    console.warn('[WebShell] user message tag tooltip render failed', error);
+  }
+  const clickable = Boolean(onComposerTagClick);
+  const rawTagLabel = getComposerTagLabel(tag);
+  const tagValue = getComposerTagValue(tag);
+  const tagLabel = tag.kind ? '' : rawTagLabel;
+  const iconUrl = tag.icon ?? getComposerTagIconUrl(tag.kind, composerTagIcons);
+  const safeIconUrl = iconUrl && isSafeImageSrc(iconUrl) ? iconUrl : undefined;
+  return (
+    <span
+      className={`${styles.messageTag}${
+        clickable ? ` ${styles.messageTagClickable}` : ''
+      }`}
+      role={clickable ? 'button' : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      title={getTagText(tag)}
+      onClick={(event) => {
+        if (!clickable) return;
+        event.stopPropagation();
+        onComposerTagClick?.({
+          ...info,
+          anchorRect: event.currentTarget.getBoundingClientRect(),
+        });
+      }}
+      onKeyDown={(event) => {
+        if (!clickable) return;
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        onComposerTagClick?.({
+          ...info,
+          anchorRect: event.currentTarget.getBoundingClientRect(),
+        });
+      }}
+    >
+      {custom ?? (
+        <>
+          {safeIconUrl && (
+            <span
+              className={styles.messageTagIcon}
+              style={cssUrlVar('--user-message-tag-icon-url', safeIconUrl)}
+              aria-hidden="true"
+            />
+          )}
+          {tagLabel && (
+            <span className={styles.messageTagLabel}>{tagLabel}</span>
+          )}
+          {tagValue ? (
+            <span className={styles.messageTagValue}>{tagValue}</span>
+          ) : !tagLabel ? (
+            <span className={styles.messageTagLabel}>{tag.id}</span>
+          ) : null}
+        </>
+      )}
+      {tooltip !== undefined && tooltip !== null && (
+        <span className={styles.messageTagTooltip} role="tooltip">
+          {tooltip}
+        </span>
+      )}
+    </span>
+  );
+}

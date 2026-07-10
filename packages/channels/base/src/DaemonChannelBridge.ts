@@ -300,12 +300,18 @@ export class DaemonChannelBridge
         chunks.push(chunk);
       }
     };
+    const clearChunks = (sid: string) => {
+      if (sid === sessionId) {
+        chunks.length = 0;
+      }
+    };
     const onSessionDied = (info: { sessionId: string }) => {
       if (info.sessionId === sessionId) {
         controller.abort();
       }
     };
     this.on('textChunk', onChunk);
+    this.on('responseBoundary', clearChunks);
     this.on('sessionDied', onSessionDied);
     const turnBarrier = this.createTurnBarrier(sessionId);
 
@@ -338,6 +344,7 @@ export class DaemonChannelBridge
     } finally {
       this.clearTurnBarrier(sessionId);
       this.off('textChunk', onChunk);
+      this.off('responseBoundary', clearChunks);
       this.off('sessionDied', onSessionDied);
       this.activePrompts.delete(sessionId);
       controllers.delete(controller);
@@ -574,7 +581,14 @@ export class DaemonChannelBridge
             ? update['rawInput']
             : undefined,
         };
+        if (event.status === 'pending' || event.status === 'in_progress') {
+          this.emitResponseBoundary(sessionId);
+        }
         this.emit('toolCall', event);
+        break;
+      }
+      case 'plan': {
+        this.emitResponseBoundary(sessionId);
         break;
       }
       case 'available_commands_update': {
@@ -609,6 +623,7 @@ export class DaemonChannelBridge
     }
     const requestId = data['requestId'];
     this.requestToSession.set(requestId, sessionId);
+    this.emitResponseBoundary(sessionId);
     this.emit('permissionRequest', {
       requestId,
       sessionId,
@@ -761,6 +776,10 @@ export class DaemonChannelBridge
       controller.abort();
     }
     this.activePromptControllers.delete(sessionId);
+  }
+
+  private emitResponseBoundary(sessionId: string): void {
+    this.emit('responseBoundary', sessionId);
   }
 
   private createTurnBarrier(sessionId: string): Promise<void> {
