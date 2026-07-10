@@ -699,6 +699,8 @@ const EN: Messages = {
   'scheduledTasks.runsOnce': 'Runs once',
   'scheduledTasks.lastFired': (v) => `Last run: ${v?.when ?? ''}`,
   'scheduledTasks.runNow': 'Run now',
+  'scheduledTasks.runNowIgnoresCondition':
+    'Run now (runs immediately, ignoring the precondition)',
   'scheduledTasks.enable': 'Enable',
   'scheduledTasks.disable': 'Disable',
   'scheduledTasks.delete': 'Delete',
@@ -722,6 +724,7 @@ const EN: Messages = {
   'scheduledTasks.viewHistoryHint': "Open the task's session to see its runs",
   'scheduledTasks.runKind.catchUp': 'late',
   'scheduledTasks.runKind.manual': 'manual',
+  'scheduledTasks.runKind.withheld': 'skipped (precondition)',
   'scheduledTasks.error.runFailed': 'Failed to record the run',
   'scheduledTasks.error.oneShotConsumedButFailed':
     'The task was deleted but the prompt could not be delivered — it never ran. Recreate it to try again.',
@@ -738,6 +741,12 @@ const EN: Messages = {
     'Runs accumulate in one session transcript.',
   'scheduledTasks.runMode.isolated.hint':
     'Each run gets a clean session context.',
+  'scheduledTasks.condition': 'Precondition (optional)',
+  'scheduledTasks.conditionPlaceholder':
+    'e.g. Check whether anything landed on main since yesterday. If nothing did, the task should not run.',
+  'scheduledTasks.condition.hint':
+    'Checked in this task’s own session before each run. The prompt only runs in a fresh session when the check says yes — otherwise the run is skipped.',
+  'scheduledTasks.condition.cardPrefix': 'If:',
   'sidebar.label': 'Workspace sidebar',
   'sidebar.toggleMenu': 'Toggle menu',
   'sidebar.newChat': 'New chat',
@@ -2388,6 +2397,7 @@ const ZH: Messages = {
   'scheduledTasks.runsOnce': '仅一次',
   'scheduledTasks.lastFired': (v) => `上次运行：${v?.when ?? ''}`,
   'scheduledTasks.runNow': '立即运行',
+  'scheduledTasks.runNowIgnoresCondition': '立即运行（忽略前置条件，直接执行）',
   'scheduledTasks.enable': '启用',
   'scheduledTasks.disable': '停用',
   'scheduledTasks.delete': '删除',
@@ -2411,6 +2421,7 @@ const ZH: Messages = {
   'scheduledTasks.viewHistoryHint': '打开该任务的会话查看运行详情',
   'scheduledTasks.runKind.catchUp': '补跑',
   'scheduledTasks.runKind.manual': '手动',
+  'scheduledTasks.runKind.withheld': '已跳过（前置条件不满足）',
   'scheduledTasks.error.runFailed': '记录运行失败',
   'scheduledTasks.error.oneShotConsumedButFailed':
     '任务已删除,但提示词未能送达——它没有运行。请重新创建后重试。',
@@ -2425,6 +2436,12 @@ const ZH: Messages = {
   'scheduledTasks.runMode.isolated': '隔离（每次运行新建会话）',
   'scheduledTasks.runMode.shared.hint': '所有运行记录累积在同一个会话中。',
   'scheduledTasks.runMode.isolated.hint': '每次运行获得独立的会话上下文。',
+  'scheduledTasks.condition': '前置条件（可选）',
+  'scheduledTasks.conditionPlaceholder':
+    '例如：检查昨天以来 main 分支有没有新提交。如果没有，则本次不应执行。',
+  'scheduledTasks.condition.hint':
+    '每次触发前，先在本任务自己的会话中检查该条件。只有判定为“是”，才会新建会话执行命令；否则跳过本次运行。',
+  'scheduledTasks.condition.cardPrefix': '若：',
   'sidebar.label': '工作区侧边栏',
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',
