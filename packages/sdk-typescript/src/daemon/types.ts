@@ -532,6 +532,10 @@ export interface DaemonSessionSummary {
   createdAt?: string;
   updatedAt?: string;
   displayName?: string;
+  /** Id of the session that spawned this one (via `create_sub_session`), or
+   * absent for a top-level session. Lets a UI link a sub-session back to its
+   * parent. */
+  parentSessionId?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
   isWaitingForPermission?: boolean;

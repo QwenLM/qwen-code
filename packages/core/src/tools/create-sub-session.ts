@@ -115,12 +115,6 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
    * when `finalPermission === 'allow'`, and DEFAULT mode skips confirmation,
    * so the delegated prompt would never be reviewed. `'ask'` lets AUTO route
    * the call through the classifier, which resolves it without a human.
-   *
-   * This gate applies to MODEL-initiated calls only. An `isolated` scheduled
-   * task is dispatched daemon-side (`Session.#dispatchIsolatedCronFire`) without
-   * going through the tool, so an unattended fire never blocks on a permission
-   * request nobody is there to answer. Its prompt was approved when the task was
-   * created; laundering it back through the model would re-open that gate.
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     return 'ask';

@@ -1191,72 +1191,6 @@ describe('CronScheduler', () => {
       });
     });
 
-    it('delivers runMode on the job so the Session layer can route isolated fires', async () => {
-      // Isolated tasks fire through the same onFire channel as any other durable
-      // task; the runMode ride-along is what lets Session.onFire dispatch the
-      // prompt into a fresh sub-session instead of running it in the bound
-      // session. The scheduler itself persists a run normally — no special
-      // isolated persist path.
-      await writeCronTasks(tmpDir, [
-        { ...diskTask('iso1'), runMode: 'isolated' },
-      ]);
-      await scheduler.enableDurable('session-1');
-      const fired: CronJob[] = [];
-      scheduler.start((job) => fired.push(job));
-
-      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
-      const firstMinute = new Date(2025, 0, 15, 10, 30, 0).getTime();
-
-      expect(fired).toHaveLength(1);
-      expect(fired[0]!.runMode).toBe('isolated');
-
-      await vi.waitFor(async () => {
-        const task = (await readCronTasks(tmpDir))[0]!;
-        expect(task.lastFiredAt).toBe(firstMinute);
-        // Records a run like any durable fire (attributed to this session).
-        expect(task.runs).toEqual([
-          { at: firstMinute, kind: 'scheduled', sessionId: 'session-1' },
-        ]);
-      });
-    });
-
-    it('delivers the precondition on the job, and fires regardless of it', async () => {
-      // The scheduler ferries `condition` exactly as it ferries `runMode`: it
-      // never evaluates one. The fire IS delivered — Session.onFire is what
-      // withholds the dispatch — and the run is persisted at fire time, so a
-      // skipped run still shows up in history.
-      await writeCronTasks(tmpDir, [
-        {
-          ...diskTask('guard1'),
-          runMode: 'isolated',
-          condition: 'anything new on main?',
-        },
-      ]);
-      await scheduler.enableDurable('session-1');
-      const fired: CronJob[] = [];
-      scheduler.start((job) => fired.push(job));
-
-      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
-
-      expect(fired).toHaveLength(1);
-      expect(fired[0]!.condition).toBe('anything new on main?');
-      expect(fired[0]!.runMode).toBe('isolated');
-    });
-
-    it('omits condition from the job when the task has none', async () => {
-      await writeCronTasks(tmpDir, [
-        { ...diskTask('plain1'), runMode: 'isolated' },
-      ]);
-      await scheduler.enableDurable('session-1');
-      const fired: CronJob[] = [];
-      scheduler.start((job) => fired.push(job));
-
-      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
-
-      expect(fired).toHaveLength(1);
-      expect(fired[0]!.condition).toBeUndefined();
-    });
-
     // Settle + tear down a second scheduler sharing this tmpDir, so its
     // fire-and-forget writes don't race the afterEach rm.
     async function settle(s: CronScheduler): Promise<void> {
@@ -1522,53 +1456,6 @@ describe('CronScheduler', () => {
           'loopmd',
         ]);
       });
-    });
-
-    it('deliverPending missed branch: the batched carrier never inherits the first task’s guard state', async () => {
-      // The carrier is synthetic — one notification covering EVERY missed
-      // one-shot, spread from `runnable[0]`. If that task's `condition` /
-      // `runMode` rode along, the consumer would gate the whole batch's notice
-      // behind one task's precondition, and `removeMissedFromDisk` has already
-      // deleted the batch: a withheld notice loses the siblings forever.
-      //
-      // The guarded task is bound to THIS session (that is the only shape the
-      // REST route creates) and this session owns the lock, so the unbound
-      // sibling joins the same batch — the mix that makes the leak reachable.
-      const past = Date.now() - 10 * 60_000;
-      await writeCronTasks(tmpDir, [
-        {
-          id: 'guarded',
-          cron: '* * * * *',
-          prompt: 'guarded one-shot',
-          recurring: false,
-          createdAt: past,
-          lastFiredAt: null,
-          sessionId: 'session-1',
-          runMode: 'isolated',
-          condition: 'only when the flag is set',
-        },
-        {
-          id: 'sibling',
-          cron: '* * * * *',
-          prompt: 'unguarded sibling',
-          recurring: false,
-          createdAt: past,
-          lastFiredAt: null,
-        },
-      ]);
-
-      const fired: CronJob[] = [];
-      scheduler.start((job) => fired.push(job));
-      await scheduler.enableDurable('session-1');
-
-      expect(fired).toHaveLength(1);
-      expect(fired[0]!.missed).toBe(true);
-      // One notice covering both tasks…
-      expect(fired[0]!.prompt).toContain('guarded one-shot');
-      expect(fired[0]!.prompt).toContain('unguarded sibling');
-      // …and it carries no per-task guard state.
-      expect(fired[0]!.condition).toBeUndefined();
-      expect(fired[0]!.runMode).toBeUndefined();
     });
 
     it('deliverPending missed branch: an ALL-sentinel batch fires nothing and leaves every task on disk', async () => {

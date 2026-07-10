@@ -82,6 +82,13 @@ export interface BridgeSpawnRequest {
    * omitted, the bridge-wide default applies.
    */
   sessionScope?: 'single' | 'thread';
+  /**
+   * Id of the session that spawned this one (a `create_sub_session` caller).
+   * Recorded as the new session's immutable parent lineage, only when a fresh
+   * session is created — an attach never adopts a parent. Absent for a
+   * top-level session that no other session spawned.
+   */
+  parentSessionId?: string;
 }
 
 export interface BridgeSession {
@@ -271,6 +278,10 @@ export interface BridgeSessionSummary {
   createdAt: string;
   updatedAt?: string;
   displayName?: string;
+  /** Id of the session that spawned this one (via `create_sub_session`), or
+   * absent for a top-level session. Lets a UI link a sub-session back to its
+   * parent. Immutable — set when the session is created. */
+  parentSessionId?: string;
   clientCount: number;
   hasActivePrompt: boolean;
   /** True while a non-question permission request awaits a response. */

@@ -6620,6 +6620,33 @@ class QwenAgent implements Agent {
         }
         return { sessionId, displayName, titleSource: source, persisted: ok };
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionParent: {
+        const sessionId = params['sessionId'];
+        const parentSessionId = params['parentSessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          typeof parentSessionId !== 'string' ||
+          parentSessionId.length === 0
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing parentSessionId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const recording = session.getConfig().getChatRecordingService();
+        let ok = false;
+        if (recording) {
+          ok = recording.recordParentSession(parentSessionId);
+          await recording.flush();
+        }
+        return { sessionId, parentSessionId, persisted: ok };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {

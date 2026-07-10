@@ -86,6 +86,10 @@ export interface SessionListItem {
    * chose.
    */
   titleSource?: TitleSource;
+  /** Id of the session that spawned this one (via `create_sub_session`), if
+   * any. Read from the transcript's `parent_session` record. Absent for a
+   * top-level session. */
+  parentSessionId?: string;
   /** True when the item was read from the archive directory. */
   isArchived?: boolean;
 }
@@ -547,6 +551,24 @@ export class SessionService {
   }
 
   /**
+   * Reads the `parent_session` record's `parentSessionId` off a transcript,
+   * or undefined when the session has no parent. Written once near the start of
+   * the file, so the shared tail-then-head scan finds it in the head window.
+   * Reuses the same scratch buffer as the title read on the listing pass.
+   */
+  private readParentSessionIdFromFile(
+    filePath: string,
+    scratchBuffer?: Buffer,
+  ): string | undefined {
+    return readLastJsonStringFieldSync(
+      filePath,
+      'parentSessionId',
+      '"subtype":"parent_session"',
+      scratchBuffer,
+    );
+  }
+
+  /**
    * Public accessor: returns both the current custom title and its source
    * for a given session. Used by `ChatRecordingService` on resume to
    * preserve the persisted `titleSource` rather than defaulting to manual.
@@ -851,6 +873,10 @@ export class SessionService {
       const prompt = this.extractFirstPromptFromRecords(records);
 
       const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
+      const parentSessionId = this.readParentSessionIdFromFile(
+        filePath,
+        tailBuffer,
+      );
       items.push({
         sessionId: firstRecord.sessionId,
         cwd: firstRecord.cwd,
@@ -863,6 +889,7 @@ export class SessionService {
         // and `countSessionMessages` for the rationale.
         customTitle: titleInfo.title,
         titleSource: titleInfo.source,
+        ...(parentSessionId ? { parentSessionId } : {}),
         isArchived,
       });
     }

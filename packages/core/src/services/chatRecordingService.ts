@@ -252,6 +252,7 @@ export interface ChatRecord {
     | 'cron'
     | 'mid_turn_user_message'
     | 'custom_title'
+    | 'parent_session'
     | 'rewind'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
@@ -301,6 +302,7 @@ export interface ChatRecord {
     | AtCommandRecordPayload
     | AttributionSnapshotPayload
     | CustomTitleRecordPayload
+    | ParentSessionRecordPayload
     | NotificationRecordPayload
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
@@ -428,6 +430,17 @@ export interface CustomTitleRecordPayload {
    * replaced by auto-generation after an upgrade.
    */
   titleSource?: TitleSource;
+}
+
+/**
+ * Stored payload recording the session that spawned this one (a
+ * `create_sub_session` caller). Immutable — written once, near the start of the
+ * transcript. Lets a management UI link a sub-session back to its parent, and
+ * survives a daemon restart via the session-list transcript scan.
+ */
+export interface ParentSessionRecordPayload {
+  /** Id of the session that spawned this one. */
+  parentSessionId: string;
 }
 
 /**
@@ -1361,6 +1374,32 @@ export class ChatRecordingService {
       return true;
     } catch (error) {
       debugLogger.error('Error saving custom title record:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Records the session that spawned this one (a `create_sub_session` caller).
+   * Appended as a system record near the start of the transcript so the parent
+   * lineage persists with the session and survives a daemon restart (the
+   * session list rehydrates it by scanning the transcript). Immutable — written
+   * once when the sub-session is created.
+   *
+   * @param parentSessionId Id of the spawning session.
+   * @returns true if the record was written successfully, false on I/O error.
+   */
+  recordParentSession(parentSessionId: string): boolean {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'parent_session',
+        systemPayload: { parentSessionId },
+      };
+      this.appendRecord(record);
+      return true;
+    } catch (error) {
+      debugLogger.error('Error saving parent session record:', error);
       return false;
     }
   }

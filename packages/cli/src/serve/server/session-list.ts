@@ -157,6 +157,7 @@ function toSummary(item: {
   mtime: number;
   prompt: string;
   customTitle?: string;
+  parentSessionId?: string;
   isArchived?: boolean;
 }): BridgeSessionSummary {
   return {
@@ -165,6 +166,7 @@ function toSummary(item: {
     createdAt: item.startTime,
     updatedAt: new Date(item.mtime).toISOString(),
     displayName: item.customTitle || item.prompt,
+    ...(item.parentSessionId ? { parentSessionId: item.parentSessionId } : {}),
     clientCount: 0,
     hasActivePrompt: false,
     isArchived: item.isArchived === true,
@@ -342,6 +344,10 @@ async function listOrganizedWorkspaceSessionsForResponse(
                 ...live,
                 createdAt: existing.createdAt,
                 displayName: live.displayName ?? existing.displayName,
+                // Immutable lineage; the persisted transcript is authoritative,
+                // and a live entry only carries it when spawned this run.
+                parentSessionId:
+                  existing.parentSessionId ?? live.parentSessionId,
                 updatedAt: live.updatedAt ?? existing.updatedAt,
                 clientCount: live.clientCount,
                 hasActivePrompt: live.hasActivePrompt,
@@ -477,6 +483,7 @@ export async function listWorkspaceSessionsForResponse(
         ...live,
         createdAt: existing.createdAt,
         displayName: live.displayName ?? existing.displayName,
+        parentSessionId: existing.parentSessionId ?? live.parentSessionId,
         updatedAt: live.updatedAt ?? existing.updatedAt,
         clientCount: live.clientCount,
         hasActivePrompt: live.hasActivePrompt,

@@ -348,6 +348,9 @@ export function createSubSessionLauncher(
       const sub = await bridge.spawnOrAttach({
         workspaceCwd: boundWorkspace,
         sessionScope: 'thread', // force a fresh top-level session, never attach
+        // Record the caller as the sub-session's parent so the UI can link it
+        // back. Persisted into the sub-session's transcript at spawn time.
+        parentSessionId: info.callerSessionId,
         ...(info.model ? { modelServiceId: info.model } : {}),
       });
       spawnedSessionId = sub.sessionId;

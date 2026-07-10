@@ -389,6 +389,10 @@ interface SessionEntry {
   workspaceCwd: string;
   createdAt: string;
   displayName?: string;
+  /** Id of the session that spawned this one (via `create_sub_session`).
+   * Immutable — written once at creation, never on attach. Absent for a
+   * top-level session. */
+  parentSessionId?: string;
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Per-session event bus drives `GET /session/:id/events`. */
@@ -1510,6 +1514,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       workspaceCwd: entry.workspaceCwd,
       createdAt: entry.createdAt,
       displayName: entry.displayName,
+      ...(entry.parentSessionId
+        ? { parentSessionId: entry.parentSessionId }
+        : {}),
       clientCount: entry.clientIds.size,
       hasActivePrompt: entry.promptActive,
       isWaitingForPermission,
@@ -1985,6 +1992,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     effectiveScope: 'single' | 'thread',
     requestedClientId?: string,
     onSessionRegistered?: () => void,
+    parentSessionId?: string,
   ): Promise<BridgeSession> {
     // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -2061,11 +2069,31 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ci,
         newSessionResp.sessionId,
         boundWorkspace,
+        undefined,
+        { parentSessionId },
       );
       sessionRegistered = true;
       onSessionRegistered?.();
       seedSnapshotCaches(entry, newSessionResp);
       const clientId = registerClient(entry, requestedClientId);
+      // Persist the parent lineage into the child's transcript so it survives a
+      // daemon restart (rehydrated by `listSessions`, same path as the display
+      // title). Fire-and-forget: a missing parent link is cosmetic and must not
+      // fail or delay the spawn. Only sub-sessions carry a parent.
+      if (entry.parentSessionId) {
+        entry.connection
+          .extMethod(SERVE_CONTROL_EXT_METHODS.sessionParent, {
+            sessionId: entry.sessionId,
+            parentSessionId: entry.parentSessionId,
+          })
+          .catch((err: unknown) => {
+            writeStderrLine(
+              `qwen serve: failed to persist parentSessionId for ${entry.sessionId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          });
+      }
       // `defaultEntry` is the single-scope attach target — only sessions
       // SPAWNED UNDER `'single'` may claim it. A thread-scope spawn must
       // never become the attach target, otherwise a later omitted-scope
@@ -2711,12 +2739,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     sessionId: string,
     workspaceCwd: string,
     events = createSessionEventBus(),
-    options: { drainEarlyEvents?: boolean; lifecycleReason?: string } = {},
+    options: {
+      drainEarlyEvents?: boolean;
+      lifecycleReason?: string;
+      parentSessionId?: string;
+    } = {},
   ): SessionEntry => {
     const entry: SessionEntry = {
       sessionId,
       workspaceCwd,
       createdAt: new Date().toISOString(),
+      ...(options.parentSessionId
+        ? { parentSessionId: options.parentSessionId }
+        : {}),
       channel: ci.channel,
       connection: ci.connection,
       events,
@@ -3780,6 +3815,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         effectiveScope,
         req.clientId,
         releaseAdmissionOnce,
+        req.parentSessionId,
       );
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
