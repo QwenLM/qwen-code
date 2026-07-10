@@ -21,7 +21,7 @@ describe('comment attachment guard workflow', () => {
   );
 
   it('treats common URL punctuation after a risky extension as a match boundary', () => {
-    expect(workflow).toContain('>?#/&;.,!:]');
+    expect(workflow).toContain('>?#/&;.,!:%]');
   });
 
   it('checks markdown link URLs instead of display text', () => {
@@ -48,6 +48,7 @@ describe('comment attachment guard workflow', () => {
 
   it('decodes escaped risky extensions in URL paths', () => {
     expect(workflow).toContain('return decodeURIComponent(target);');
+    expect(workflow).toContain('Number.parseInt(match.slice(1), 16)');
   });
 
   it('keeps parenthesized URL segments in link matches', () => {

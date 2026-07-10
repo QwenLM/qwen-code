@@ -33,7 +33,7 @@ jobs:
               'COLLABORATOR',
             ]);
             const highRiskExtension =
-              /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|sh|bat|ps1|node|dylib|so)(?:$|[\s)"'\]>?#/&;.,!:])/i;
+              /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|sh|bat|ps1|node|dylib|so)(?:$|[\s)"'\]>?#/&;.,!:%])/i;
             const linkPattern =
               /https?:\/\/[^\s"'<>\]]+|\[[^\]]+\]\((?:[^()\s]|\([^()\s]*\))+\)/gi;
             const highRiskTarget = (url) => {
@@ -50,7 +50,9 @@ jobs:
               try {
                 return decodeURIComponent(target);
               } catch {
-                return target;
+                return target.replace(/%[0-9a-f]{2}/gi, (match) =>
+                  String.fromCharCode(Number.parseInt(match.slice(1), 16)),
+                );
               }
             };
 
