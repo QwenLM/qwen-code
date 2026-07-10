@@ -445,9 +445,31 @@ interface RuntimeAcpMount {
   ) => ClientMcpServerProvider;
 }
 
+/** Per-mount ACP connection counts (primary + each trusted secondary). */
+export interface AcpHttpMountSnapshot {
+  /** Workspace id, or `null` for the primary/legacy `/acp` mount. */
+  workspaceId: string | null;
+  primary: boolean;
+  connectionCount: number;
+  wsStreams: number;
+}
+
+/** Aggregate ACP HTTP observability across every mounted runtime. */
+export interface AcpHttpSnapshot {
+  connectionCount: number;
+  wsStreams: number;
+  mounts: AcpHttpMountSnapshot[];
+}
+
 export interface AcpHttpHandle {
   dispose(): void;
   registry: ConnectionRegistry;
+  /**
+   * Aggregate connection snapshot across the primary mount and every trusted
+   * secondary runtime — so daemon metrics report all workspaces' ACP
+   * connections, not just the primary's.
+   */
+  getSnapshot(): AcpHttpSnapshot;
   /** Attach HTTP server post-listen to enable WebSocket upgrade. */
   attachServer(server: import('node:http').Server): void;
 }
@@ -474,6 +496,17 @@ export function mountAcpHttp(
 
   const path = opts.path ?? '/acp';
   const dispatcherRef: { current?: AcpDispatcher } = {};
+  // Lifecycle gate: once `dispose()` runs, late/in-flight HTTP requests get a
+  // 503 instead of racing torn-down registries (issue #6378 daemon shutdown).
+  let disposed = false;
+  const rejectIfDisposed = (res: Response): boolean => {
+    if (!disposed) return false;
+    res.status(503).json({
+      error: 'ACP HTTP transport has been disposed',
+      code: 'server_disposed',
+    });
+    return true;
+  };
   // When a session/connection tears down with a permission still pending,
   // cancel it on the bridge so the agent's prompt isn't left blocked.
   const registry = new ConnectionRegistry(
@@ -657,6 +690,7 @@ export function mountAcpHttp(
     req: Request,
     res: Response,
   ): void => {
+    if (rejectIfDisposed(res)) return;
     const connectionId = headerOf(req, ACP_CONNECTION_HEADER);
     if (!connectionId) {
       res.status(400).json({ error: 'Missing Acp-Connection-Id' });
@@ -683,6 +717,7 @@ export function mountAcpHttp(
     req: Request,
     res: Response,
   ): Promise<void> => {
+    if (rejectIfDisposed(res)) return;
     // RFD: Content-Type MUST be application/json; otherwise 415.
     const ct = req.headers['content-type'];
     if (!ct || !ct.startsWith('application/json')) {
@@ -833,6 +868,7 @@ export function mountAcpHttp(
     req: Request,
     res: Response,
   ): void => {
+    if (rejectIfDisposed(res)) return;
     // RFD: Accept MUST include text/event-stream; otherwise 406.
     const accept = req.headers['accept'] ?? '';
     if (!accept.includes('text/event-stream')) {
@@ -1873,6 +1909,8 @@ export function mountAcpHttp(
 
   return {
     dispose: () => {
+      if (disposed) return;
+      disposed = true;
       if (upgradeServer && upgradeListener) {
         upgradeServer.removeListener('upgrade', upgradeListener);
         upgradeListener = undefined;
@@ -1890,6 +1928,31 @@ export function mountAcpHttp(
       }
     },
     registry,
+    getSnapshot: () => {
+      const primarySnap = registry.getSnapshot();
+      const mounts: AcpHttpMountSnapshot[] = [
+        {
+          workspaceId: null,
+          primary: true,
+          connectionCount: primarySnap.connectionCount,
+          wsStreams: primarySnap.wsStreams,
+        },
+      ];
+      for (const [workspaceId, mount] of secondaryMounts) {
+        const snap = mount.registry.getSnapshot();
+        mounts.push({
+          workspaceId,
+          primary: false,
+          connectionCount: snap.connectionCount,
+          wsStreams: snap.wsStreams,
+        });
+      }
+      return {
+        connectionCount: mounts.reduce((n, m) => n + m.connectionCount, 0),
+        wsStreams: mounts.reduce((n, m) => n + m.wsStreams, 0),
+        mounts,
+      };
+    },
     attachServer(server: import('node:http').Server) {
       setupWebSocket(server);
     },
