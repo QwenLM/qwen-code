@@ -217,4 +217,58 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     });
     expect(status).toBe(403);
   });
+
+  it('returns 503 server_disposed after dispose()', async () => {
+    handle?.dispose();
+    const res = await postInitialize('/workspaces/secondary-id/acp');
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe('server_disposed');
+  });
+
+  it('aggregates a connection snapshot across primary + secondary mounts', () => {
+    const snap = handle!.getSnapshot();
+    // primary (workspaceId null) + the two non-primary mounts.
+    expect(snap.mounts).toHaveLength(3);
+    expect(snap.mounts.find((m) => m.primary)?.workspaceId).toBeNull();
+    const ids = snap.mounts.map((m) => m.workspaceId);
+    expect(ids).toContain('secondary-id');
+    expect(ids).toContain('untrusted-id');
+    expect(snap.connectionCount).toBe(0);
+  });
+
+  it('rejects a raw WS upgrade whose selector is a dot-segment (%2e%2e)', async () => {
+    // `ws` normalizes the client URL (/workspaces/%2e%2e/acp -> /acp), so the
+    // real attack surface — a raw, non-normalized request-target — must be
+    // exercised with a bare socket. The daemon parses the raw request-target
+    // (not `new URL().pathname`) and destroys the socket before any mount.
+    const { createConnection } = await import('node:net');
+    const outcome = await new Promise<'closed' | 'upgraded'>(
+      (resolve, reject) => {
+        const socket = createConnection(port, '127.0.0.1', () => {
+          socket.write(
+            'GET /workspaces/%2e%2e/acp HTTP/1.1\r\n' +
+              `Host: 127.0.0.1:${port}\r\n` +
+              'Upgrade: websocket\r\n' +
+              'Connection: Upgrade\r\n' +
+              'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n' +
+              'Sec-WebSocket-Version: 13\r\n\r\n',
+          );
+        });
+        let buf = '';
+        socket.setTimeout(2000, () => {
+          socket.destroy();
+          reject(new Error('timeout waiting for raw upgrade outcome'));
+        });
+        socket.on('data', (d) => {
+          buf += d.toString();
+        });
+        socket.on('close', () =>
+          resolve(buf.includes('101') ? 'upgraded' : 'closed'),
+        );
+        socket.on('error', () => resolve('closed'));
+      },
+    );
+    expect(outcome).toBe('closed');
+  });
 });
