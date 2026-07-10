@@ -308,6 +308,9 @@ describe('qwen-autofix workflow', () => {
       "group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'",
     );
     expect(workflow).toContain(
+      'issue #${ISSUE_NUMBER} assigned to ${AUTOFIX_BOT} → issue phase',
+    );
+    expect(workflow).toContain(
       '(.labels // []) | map(.name) as $labels | ($labels | index($ready))',
     );
     expect(workflow).toContain(
