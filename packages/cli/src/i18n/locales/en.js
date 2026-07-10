@@ -8,6 +8,164 @@
 // The key serves as both the translation key and the default English text
 
 export default {
+  'Cannot disable an extension-provided MCP server here.':
+    'Cannot disable an extension-provided MCP server here.',
+  'Cleared authentication for "{{name}}".':
+    'Cleared authentication for "{{name}}".',
+  'MCP "{{name}}" disabled for all projects.':
+    'MCP "{{name}}" disabled for all projects.',
+  'Enable extension "{{name}}" to manage this MCP server.':
+    'Enable extension "{{name}}" to manage this MCP server.',
+  'Extension-provided MCP servers cannot be favorited.':
+    'Extension-provided MCP servers cannot be favorited.',
+
+  'User level': 'User level',
+  'Project level': 'Project level',
+
+  // ==========================================================================
+  // Extensions manager dialog (Installed / Discover / Sources tabs)
+  // ==========================================================================
+  ' · {{marketplace}} (Tab to clear)': ' · {{marketplace}} (Tab to clear)',
+  '"{{name}}" {{state}}.': '"{{name}}" {{state}}.',
+  '(Tab / ←→ to switch)': '(Tab / ←→ to switch)',
+  '+ Add new marketplace': '+ Add new marketplace',
+  '+ Install a new extension': '+ Install a new extension',
+  Actions: 'Actions',
+  'Add Marketplace': 'Add Marketplace',
+  'Add a marketplace in the Sources tab to discover extensions.':
+    'Add a marketplace in the Sources tab to discover extensions.',
+  'Add new': 'Add new',
+  'Add to Favorites': 'Add to Favorites',
+  'Added "{{name}}" to favorites.': 'Added "{{name}}" to favorites.',
+  'Added marketplace "{{name}}".': 'Added marketplace "{{name}}".',
+  'Adding...': 'Adding...',
+  'Back to extension list': 'Back to extension list',
+  'Browse extensions ({{count}})': 'Browse extensions ({{count}})',
+  'By: {{a}}': 'By: {{a}}',
+  'Change scope': 'Change scope',
+  'Change scope for "{{name}}":': 'Change scope for "{{name}}":',
+  'Changing scope...': 'Changing scope...',
+  'Uninstalling "{{name}}"...': 'Uninstalling "{{name}}"...',
+  'Update available for "{{name}}".': 'Update available for "{{name}}".',
+  '"{{name}}" is already up to date.': '"{{name}}" is already up to date.',
+  'Checking "{{name}}" for updates...': 'Checking "{{name}}" for updates...',
+  '"{{name}}" does not support update checks.':
+    '"{{name}}" does not support update checks.',
+  '"{{name}}" cannot be update-checked (Claude marketplace plugins update by reinstalling).':
+    '"{{name}}" cannot be update-checked (Claude marketplace plugins update by reinstalling).',
+  'Failed to check "{{name}}" for updates.':
+    'Failed to check "{{name}}" for updates.',
+  'Claude plugin marketplace': 'Claude plugin marketplace',
+  Commands: 'Commands',
+  'Components:': 'Components:',
+  'Could not load this marketplace.': 'Could not load this marketplace.',
+  'Current: {{scope}}': 'Current: {{scope}}',
+  Disabled: 'Disabled',
+  Discover: 'Discover',
+  'Disabling "{{name}}"...': 'Disabling "{{name}}"...',
+  'Disabling MCP "{{name}}"...': 'Disabling MCP "{{name}}"...',
+  'Discover extensions': 'Discover extensions',
+  'Discovering extensions...': 'Discovering extensions...',
+  'Enabling "{{name}}"...': 'Enabling "{{name}}"...',
+  'Enabling MCP "{{name}}"...': 'Enabling MCP "{{name}}"...',
+  'Enter extension source:': 'Enter extension source:',
+  'Enter marketplace source (Claude format):':
+    'Enter marketplace source (Claude format):',
+  'Examples:': 'Examples:',
+  'Extension details': 'Extension details',
+  'Extension v{{version}}': 'Extension v{{version}}',
+  'Extensions are not available in this environment.':
+    'Extensions are not available in this environment.',
+  'Failed to open {{url}}': 'Failed to open {{url}}',
+  Favorites: 'Favorites',
+  'Global (User Scope)': 'Global (User Scope)',
+  'Install Extension': 'Install Extension',
+  'Install for the current workspace (project scope)':
+    'Install for the current workspace (project scope)',
+  'Install for you (user scope)': 'Install for you (user scope)',
+  'Install {{count}} extension(s) to which scope?':
+    'Install {{count}} extension(s) to which scope?',
+  Installed: 'Installed',
+  'Installed extension "{{name}}".': 'Installed extension "{{name}}".',
+  'Installed extensions ({{count}}):': 'Installed extensions ({{count}}):',
+  'Installed {{count}} extension(s).': 'Installed {{count}} extension(s).',
+  '{{name}}: installed, but the scope rollback failed — it may be disabled at all scopes; re-enable it from the Installed tab.':
+    '{{name}}: installed, but the scope rollback failed — it may be disabled at all scopes; re-enable it from the Installed tab.',
+  'Could not change scope, and the rollback also failed — "{{name}}" may be disabled at all scopes. Re-enable it from the Installed tab. ({{error}})':
+    'Could not change scope, and the rollback also failed — "{{name}}" may be disabled at all scopes. Re-enable it from the Installed tab. ({{error}})',
+  'Installed {{ok}}, failed {{fail}}: {{detail}}':
+    'Installed {{ok}}, failed {{fail}}: {{detail}}',
+  'Installing...': 'Installing...',
+  'Last updated: {{date}}': 'Last updated: {{date}}',
+  MCP: 'MCP',
+  'MCP "{{name}}" {{state}}.': 'MCP "{{name}}" {{state}}.',
+  'MCP servers': 'MCP servers',
+  'Mark for Update': 'Mark for Update',
+  Marketplaces: 'Marketplaces',
+  'No extensions discovered.': 'No extensions discovered.',
+  'No extensions match your search.': 'No extensions match your search.',
+  'No extensions or marketplaces added yet.':
+    'No extensions or marketplaces added yet.',
+  'No homepage available.': 'No homepage available.',
+  'No installable extensions selected.': 'No installable extensions selected.',
+  'No plugins or MCP servers installed.':
+    'No plugins or MCP servers installed.',
+  None: 'None',
+  'Note: Uninstall permanently removes this extension.':
+    'Note: Uninstall permanently removes this extension.',
+  'Open homepage': 'Open homepage',
+  'Project (Workspace)': 'Project (Workspace)',
+  'Refreshed {{count}} extension(s).': 'Refreshed {{count}} extension(s).',
+  'Remove from Favorites': 'Remove from Favorites',
+  'Remove marketplace': 'Remove marketplace',
+  'Remove marketplace "{{name}}"?': 'Remove marketplace "{{name}}"?',
+  'Removed "{{name}}" from favorites.': 'Removed "{{name}}" from favorites.',
+  'Removed marketplace "{{name}}".': 'Removed marketplace "{{name}}".',
+  'Scope:': 'Scope:',
+  'Set "{{name}}" scope to {{scope}}.': 'Set "{{name}}" scope to {{scope}}.',
+  Sources: 'Sources',
+  'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back':
+    'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back',
+  Uninstall: 'Uninstall',
+  'Uninstalled "{{name}}".': 'Uninstalled "{{name}}".',
+  'Update Now': 'Update Now',
+  'Update marketplace': 'Update marketplace',
+  'Update marketplace (last updated {{date}})':
+    'Update marketplace (last updated {{date}})',
+  'Could not update marketplace "{{name}}".':
+    'Could not update marketplace "{{name}}".',
+  'Updated "{{name}}".': 'Updated "{{name}}".',
+  'Updated marketplace "{{name}}".': 'Updated marketplace "{{name}}".',
+  'Use the Discover tab to find and install plugins.':
+    'Use the Discover tab to find and install plugins.',
+  'Version: {{v}}': 'Version: {{v}}',
+  'Will install:': 'Will install:',
+  'Would open: {{url}}': 'Would open: {{url}}',
+  'Y/Enter to confirm · N/Esc to cancel':
+    'Y/Enter to confirm · N/Esc to cancel',
+  'Press R to retry · Esc to go back': 'Press R to retry · Esc to go back',
+  'Enter to select · R refresh · Esc to go back':
+    'Enter to select · R refresh · Esc to go back',
+  'from {{marketplace}}': 'from {{marketplace}}',
+  installed: 'installed',
+  '{{count}} Agents': '{{count}} Agents',
+  '{{count}} Commands': '{{count}} Commands',
+  '{{count}} MCP': '{{count}} MCP',
+  '{{count}} Skills': '{{count}} Skills',
+  '{{count}} available extensions': '{{count}} available extensions',
+  '↑ more above': '↑ more above',
+  '↑↓ navigate · Enter open · d remove marketplace · Esc close':
+    '↑↓ navigate · Enter open · d remove marketplace · Esc close',
+  '↑↓ navigate · Enter select · Esc close':
+    '↑↓ navigate · Enter select · Esc close',
+  '↑↓ navigate · Enter select · d remove marketplace · Esc close':
+    '↑↓ navigate · Enter select · d remove marketplace · Esc close',
+  '↑↓ navigate · Space enable/disable · f favorite · Enter details · Esc close':
+    '↑↓ navigate · Space enable/disable · f favorite · Enter details · Esc close',
+  '↓ more below': '↓ more below',
+  '⚠ Make sure you trust an extension before installing, updating, or using it. We cannot verify what MCP servers, files, or other software an extension includes, or that it works as intended. See the extension homepage for more information.':
+    '⚠ Make sure you trust an extension before installing, updating, or using it. We cannot verify what MCP servers, files, or other software an extension includes, or that it works as intended. See the extension homepage for more information.',
+
   // ============================================================================
   // Tool display names (chat-stream badge labels)
   // ----------------------------------------------------------------------------
@@ -27,6 +185,8 @@ export default {
   'toolDisplayName.TodoList': 'toolDisplayName.TodoList',
   'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
+  'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
+  'toolDisplayName.RecordArtifact': 'toolDisplayName.RecordArtifact',
   'toolDisplayName.Skill': 'toolDisplayName.Skill',
   'toolDisplayName.EnterPlanMode': 'toolDisplayName.EnterPlanMode',
   'toolDisplayName.ExitPlanMode': 'toolDisplayName.ExitPlanMode',
@@ -39,12 +199,14 @@ export default {
   'toolDisplayName.CronList': 'toolDisplayName.CronList',
   'toolDisplayName.CronDelete': 'toolDisplayName.CronDelete',
   'toolDisplayName.LoopWakeup': 'toolDisplayName.LoopWakeup',
+  'toolDisplayName.CreateSubSession': 'toolDisplayName.CreateSubSession',
   'toolDisplayName.TaskCreate': 'toolDisplayName.TaskCreate',
   'toolDisplayName.TaskUpdate': 'toolDisplayName.TaskUpdate',
   'toolDisplayName.TaskList': 'toolDisplayName.TaskList',
   'toolDisplayName.TaskStop': 'toolDisplayName.TaskStop',
   'toolDisplayName.TeamCreate': 'toolDisplayName.TeamCreate',
   'toolDisplayName.TeamDelete': 'toolDisplayName.TeamDelete',
+  'toolDisplayName.TeamPlanApproval': 'toolDisplayName.TeamPlanApproval',
   'toolDisplayName.SendMessage': 'toolDisplayName.SendMessage',
   'toolDisplayName.StructuredOutput': 'toolDisplayName.StructuredOutput',
   'toolDisplayName.Monitor': 'toolDisplayName.Monitor',
@@ -53,6 +215,7 @@ export default {
   'toolDisplayName.EnterWorktree': 'toolDisplayName.EnterWorktree',
   'toolDisplayName.ExitWorktree': 'toolDisplayName.ExitWorktree',
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
+  'toolDisplayName.ReadMcpResource': 'toolDisplayName.ReadMcpResource',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -104,7 +267,7 @@ export default {
   'to search history': 'to search history',
   'to paste images': 'to paste images',
   'for external editor': 'for external editor',
-  'to toggle compact mode': 'to toggle compact mode',
+  'to view transcript': 'to view transcript',
   'Jump through words in the input': 'Jump through words in the input',
   'Close dialogs, cancel requests, or quit application':
     'Close dialogs, cancel requests, or quit application',
@@ -324,6 +487,42 @@ export default {
   'Delete {{name}}': 'Delete {{name}}',
   'Unknown Step': 'Unknown Step',
   'Esc to close': 'Esc to close',
+  Transcript: 'Transcript',
+  'to close': 'to close',
+  'to scroll': 'to scroll',
+  'Failed to render transcript.': 'Failed to render transcript.',
+  'Read {{count}} file': 'Read {{count}} file',
+  'Read {{count}} files': 'Read {{count}} files',
+  'Reading {{count}} file': 'Reading {{count}} file',
+  'Reading {{count}} files': 'Reading {{count}} files',
+  'Edited {{count}} file': 'Edited {{count}} file',
+  'Edited {{count}} files': 'Edited {{count}} files',
+  'Editing {{count}} file': 'Editing {{count}} file',
+  'Editing {{count}} files': 'Editing {{count}} files',
+  'Wrote {{count}} file': 'Wrote {{count}} file',
+  'Wrote {{count}} files': 'Wrote {{count}} files',
+  'Writing {{count}} file': 'Writing {{count}} file',
+  'Writing {{count}} files': 'Writing {{count}} files',
+  'Searched {{count}} pattern': 'Searched {{count}} pattern',
+  'Searched {{count}} patterns': 'Searched {{count}} patterns',
+  'Searching {{count}} pattern': 'Searching {{count}} pattern',
+  'Searching {{count}} patterns': 'Searching {{count}} patterns',
+  'Listed {{count}} directory': 'Listed {{count}} directory',
+  'Listed {{count}} directories': 'Listed {{count}} directories',
+  'Listing {{count}} directory': 'Listing {{count}} directory',
+  'Listing {{count}} directories': 'Listing {{count}} directories',
+  'Ran {{count}} command': 'Ran {{count}} command',
+  'Ran {{count}} commands': 'Ran {{count}} commands',
+  'Running {{count}} command': 'Running {{count}} command',
+  'Running {{count}} commands': 'Running {{count}} commands',
+  'Ran {{count}} agent': 'Ran {{count}} agent',
+  'Ran {{count}} agents': 'Ran {{count}} agents',
+  'Running {{count}} agent': 'Running {{count}} agent',
+  'Running {{count}} agents': 'Running {{count}} agents',
+  'Used {{count}} tool': 'Used {{count}} tool',
+  'Used {{count}} tools': 'Used {{count}} tools',
+  'Using {{count}} tool': 'Using {{count}} tool',
+  'Using {{count}} tools': 'Using {{count}} tools',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter to select, ↑↓ to navigate, Esc to close',
   'Esc to go back': 'Esc to go back',
@@ -355,7 +554,7 @@ export default {
   'Open in editor': 'Open in editor',
   'Edit tools': 'Edit tools',
   'Edit color': 'Edit color',
-  '❌ Error:': '❌ Error:',
+  '✗ Error:': '✗ Error:',
   'Are you sure you want to delete agent "{{name}}"?':
     'Are you sure you want to delete agent "{{name}}"?',
   // ============================================================================
@@ -363,12 +562,12 @@ export default {
   // ============================================================================
   'Project Level (.qwen/agents/)': 'Project Level (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': 'User Level (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!': '✅ Subagent Created Successfully!',
+  '✓ Subagent Created Successfully!': '✓ Subagent Created Successfully!',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     'Subagent "{{name}}" has been saved to {{level}} level.',
   'Name: ': 'Name: ',
   'Location: ': 'Location: ',
-  '❌ Error saving subagent:': '❌ Error saving subagent:',
+  '✗ Error saving subagent:': '✗ Error saving subagent:',
   'Warnings:': 'Warnings:',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
     'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent',
@@ -566,6 +765,8 @@ export default {
     'Show model-specific usage statistics.',
   'Show tool-specific usage statistics.':
     'Show tool-specific usage statistics.',
+  'Show skill-specific usage statistics.':
+    'Show skill-specific usage statistics.',
   'Show daily token usage statistics.': 'Show daily token usage statistics.',
   'Show monthly token usage statistics.':
     'Show monthly token usage statistics.',
@@ -633,6 +834,30 @@ export default {
   'Uninstall an extension': 'Uninstall an extension',
   'No extensions installed.': 'No extensions installed.',
   'Extension "{{name}}" not found.': 'Extension "{{name}}" not found.',
+  'The scope to install the extension in: "user" (global, default) or "project" (current workspace only).':
+    'The scope to install the extension in: "user" (global, default) or "project" (current workspace only).',
+  'Extension "{{name}}" installed successfully and enabled for the current workspace.':
+    'Extension "{{name}}" installed successfully and enabled for the current workspace.',
+  'Marketplace "{{name}}" not found.': 'Marketplace "{{name}}" not found.',
+  'No marketplace sources added yet.': 'No marketplace sources added yet.',
+  'No marketplaces added yet.': 'No marketplaces added yet.',
+  'Adds a marketplace source (Claude format).':
+    'Adds a marketplace source (Claude format).',
+  'The marketplace source to add: owner/repo (GitHub), a git or https URL, or a local path.':
+    'The marketplace source to add: owner/repo (GitHub), a git or https URL, or a local path.',
+  'Removes a marketplace source.': 'Removes a marketplace source.',
+  'The name of the marketplace to remove.':
+    'The name of the marketplace to remove.',
+  'Lists configured marketplace sources.':
+    'Lists configured marketplace sources.',
+  'Re-fetches a marketplace source and its plugin listing.':
+    'Re-fetches a marketplace source and its plugin listing.',
+  'The name of the marketplace to update.':
+    'The name of the marketplace to update.',
+  'Manage marketplace sources for discovering extensions.':
+    'Manage marketplace sources for discovering extensions.',
+  'You need at least one command before continuing.':
+    'You need at least one command before continuing.',
   'No extensions to update.': 'No extensions to update.',
   'Usage: /extensions install <source>': 'Usage: /extensions install <source>',
   'Installing extension from "{{source}}"...':
@@ -669,6 +894,16 @@ export default {
   'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
     'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.',
   'The git ref to install from.': 'The git ref to install from.',
+  '--registry is only applicable for npm extensions.':
+    '--registry is only applicable for npm extensions.',
+  'Custom npm registry URL (only for npm extensions).':
+    'Custom npm registry URL (only for npm extensions).',
+  '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).':
+    '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).',
+  'Installs an extension from a git repository URL, local path, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).':
+    'Installs an extension from a git repository URL, local path, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).',
+  Description: 'Description',
+  'Delete Session': 'Delete Session',
   'Enable auto-update for this extension.':
     'Enable auto-update for this extension.',
   'Enable pre-release versions for this extension.':
@@ -1004,6 +1239,26 @@ export default {
   'Terminal "{{terminal}}" is not supported yet.':
     'Terminal "{{terminal}}" is not supported yet.',
 
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    'Set history to collapse by default when resuming a session',
+  'Set history to expand by default when resuming a session':
+    'Set history to expand by default when resuming a session',
+  'Expand the currently collapsed history transcript':
+    'Expand the currently collapsed history transcript',
+  'Control history display preferences and visibility':
+    'Control history display preferences and visibility',
+  'History will be collapsed by default for future resumed sessions.':
+    'History will be collapsed by default for future resumed sessions.',
+  'History will be expanded by default for future resumed sessions.':
+    'History will be expanded by default for future resumed sessions.',
+  'History is already expanded in this session.':
+    'History is already expanded in this session.',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    'History collapsed: {{n}} messages hidden. Use /history expand-now to show.',
+
   // ============================================================================
   // Commands - Language
   // ============================================================================
@@ -1105,6 +1360,7 @@ export default {
   'Press Enter to confirm, Esc to cancel':
     'Press Enter to confirm, Esc to cancel',
   'View tools': 'View tools',
+  'View resources': 'View resources',
   Reconnect: 'Reconnect',
   Enable: 'Enable',
   Disable: 'Disable',
@@ -1119,9 +1375,12 @@ export default {
   'Error:': 'Error:',
   tool: 'tool',
   tools: 'tools',
+  resource: 'resource',
+  resources: 'resources',
   connected: 'connected',
   connecting: 'connecting',
   disconnected: 'disconnected',
+  'needs authentication': 'needs authentication',
 
   // MCP Server List
   'User MCPs': 'User MCPs',
@@ -1157,6 +1416,20 @@ export default {
   Parameters: 'Parameters',
   'No tool selected': 'No tool selected',
   Server: 'Server',
+
+  // MCP Resource List/Detail
+  'No resources available for this server.':
+    'No resources available for this server.',
+  'Resources for {{serverName}}': 'Resources for {{serverName}}',
+  'No resource selected': 'No resource selected',
+  'Resource Detail': 'Resource Detail',
+  'URI:': 'URI:',
+  'MIME Type:': 'MIME Type:',
+  'Size:': 'Size:',
+  '{{count}} bytes': '{{count}} bytes',
+  'Reference in chat': 'Reference in chat',
+  'MCP server': 'MCP server',
+  'MCP resource server': 'MCP resource server',
 
   // Invalid tool related translations
   '{{count}} invalid tools': '{{count}} invalid tools',
@@ -1198,8 +1471,74 @@ export default {
   // ============================================================================
   'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
+    'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+  "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
+    "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.",
+  "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
+    "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.",
+  "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.":
+    "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.",
   'Set a lighter model for prompt suggestions and speculative execution':
     'Set a lighter model for prompt suggestions and speculative execution',
+  'Toggle voice dictation input': 'Toggle voice dictation input',
+  'Set the model for voice transcription':
+    'Set the model for voice transcription',
+  'Set the image-capable model used to transcribe images for a text-only main model':
+    'Set the image-capable model used to transcribe images for a text-only main model',
+  'Persist the model selection to the project settings (workspace scope)':
+    'Persist the model selection to the project settings (workspace scope)',
+  'Persist the model selection to the user settings (global scope)':
+    'Persist the model selection to the user settings (global scope)',
+  'Select Fast Model': 'Select Fast Model',
+  'Select Vision Model': 'Select Vision Model',
+  'Select Voice Model': 'Select Voice Model',
+  'Vision Model': 'Vision Model',
+  'Voice Model': 'Voice Model',
+  'Selected voice model is unavailable.':
+    'Selected voice model is unavailable.',
+  "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
+    "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.",
+  'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).':
+    'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).',
+  'model: {{voiceModel}}': 'model: {{voiceModel}}',
+  'no voice model selected': 'no voice model selected',
+  'Voice dictation disabled.': 'Voice dictation disabled.',
+  'Usage: /voice [hold|tap|off|status]': 'Usage: /voice [hold|tap|off|status]',
+  'No voice model selected. Run /model --voice to choose one before enabling voice dictation.':
+    'No voice model selected. Run /model --voice to choose one before enabling voice dictation.',
+  'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using {{voiceModel}}.':
+    'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using {{voiceModel}}.',
+  'Voice dictation enabled (hold mode). Hold Space at an empty prompt to dictate with {{voiceModel}}.':
+    'Voice dictation enabled (hold mode). Hold Space at an empty prompt to dictate with {{voiceModel}}.',
+  'No models are configured.': 'No models are configured.',
+  'Configured models: {{models}}.': 'Configured models: {{models}}.',
+  'Configure a unique model id in settings.modelProviders or run /model --voice to select an available model.':
+    'Configure a unique model id in settings.modelProviders or run /model --voice to select an available model.',
+  "Voice model '{{modelName}}' is not configured.":
+    "Voice model '{{modelName}}' is not configured.",
+  "Voice model '{{modelName}}' cannot be used for transcription.":
+    "Voice model '{{modelName}}' cannot be used for transcription.",
+  "Voice model '{{modelName}}' cannot be used for transcription. Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.":
+    "Voice model '{{modelName}}' cannot be used for transcription. Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.",
+  'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.':
+    'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.',
+  'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.':
+    'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.',
+  'Voice dictation is not supported on {{platform}}.':
+    'Voice dictation is not supported on {{platform}}.',
+  'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.':
+    'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.',
+  'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.':
+    'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.',
+  'Voice: recording': 'Voice: recording',
+  'Voice: transcribing': 'Voice: transcribing',
+  'Voice: refining': 'Voice: refining',
+  'listening…': 'listening…',
+  'transcribing…': 'transcribing…',
+  'refining…': 'refining…',
   'Content generator configuration not available.':
     'Content generator configuration not available.',
   'Authentication type not available.': 'Authentication type not available.',
@@ -1310,9 +1649,9 @@ export default {
     'Choose how to proceed with your session:',
   'Start new chat session': 'Start new chat session',
   'Continue previous conversation': 'Continue previous conversation',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 Welcome back! (Last updated: {{timeAgo}})',
-  '🎯 Overall Goal:': '🎯 Overall Goal:',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    'Welcome back! (Last updated: {{timeAgo}})',
+  'Overall Goal:': 'Overall Goal:',
   'Connect a Provider': 'Connect a Provider',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     'You must connect a provider to proceed. Press Ctrl+C again to exit.',
@@ -1389,6 +1728,8 @@ export default {
   // Dialogs - Model
   // ============================================================================
   'Select Model': 'Select Model',
+  ' (this project)': ' (this project)',
+  ' (global)': ' (global)',
   'API Key': 'API Key',
   '(default)': '(default)',
   '(not set)': '(not set)',
@@ -1401,6 +1742,12 @@ export default {
   audio: 'audio',
   video: 'video',
   'not set': 'not set',
+  'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
+    'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.',
+  'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
+    'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
+  "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
+    "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.",
   none: 'none',
   unknown: 'unknown',
   // ============================================================================
@@ -1494,8 +1841,8 @@ export default {
   // MCP Status
   // ============================================================================
   'No MCP servers configured.': 'No MCP servers configured.',
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCP servers are starting up ({{count}} initializing)...',
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    '◌ MCP servers are starting up ({{count}} initializing)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     'Note: First startup may take longer. Tool availability will update automatically.',
   'Configured MCP servers:': 'Configured MCP servers:',
@@ -1517,8 +1864,9 @@ export default {
   'Tools:': 'Tools:',
   'Parameters:': 'Parameters:',
   'Prompts:': 'Prompts:',
+  'Resources:': 'Resources:',
   Blocked: 'Blocked',
-  '💡 Tips:': '💡 Tips:',
+  '★ Tips:': '★ Tips:',
   Use: 'Use',
   'to show server and tool descriptions':
     'to show server and tool descriptions',
@@ -1554,8 +1902,6 @@ export default {
     'You can switch permission mode quickly with Tab or /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Try /insight to generate personalized insights from your chat history.',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Add a QWEN.md file to give Qwen Code persistent project context.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1635,6 +1981,8 @@ export default {
   'No tasks currently running': 'No tasks currently running',
   'No entry to show.': 'No entry to show.',
   'needs approval': 'needs approval',
+  'rejected — edit config to re-approve':
+    'rejected — edit config to re-approve',
   'Background agent needs approval': 'Background agent needs approval',
   'Approve or deny the request above': 'Approve or deny the request above',
   Running: 'Running',
@@ -1991,14 +2339,44 @@ export default {
     'Failed to authenticate with Coding Plan: {{error}}',
   '中国 (China)': '中国 (China)',
   '阿里云百炼 (aliyun.com)': '阿里云百炼 (aliyun.com)',
+  'Get or set any setting by dot-path key':
+    'Get or set any setting by dot-path key',
+  'Invalid boolean value: "{{value}}". Use "true" or "false".':
+    'Invalid boolean value: "{{value}}". Use "true" or "false".',
+  'Cannot toggle a number setting. Provide a value: key=<number>.':
+    'Cannot toggle a number setting. Provide a value: key=<number>.',
+  'Invalid number value: "{{value}}".': 'Invalid number value: "{{value}}".',
+  'Cannot toggle a string setting. Provide a value: key=<value>.':
+    'Cannot toggle a string setting. Provide a value: key=<value>.',
+  'Cannot toggle an enum setting. Provide one of: {{options}}.':
+    'Cannot toggle an enum setting. Provide one of: {{options}}.',
+  'Invalid enum value: "{{value}}". Valid values: {{options}}.':
+    'Invalid enum value: "{{value}}". Valid values: {{options}}.',
+  'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.':
+    'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.',
+  'Unsupported setting type: "{{type}}".':
+    'Unsupported setting type: "{{type}}".',
+  'Available settings:': 'Available settings:',
+  'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?':
+    'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?',
+  'Unknown setting key: "{{key}}".': 'Unknown setting key: "{{key}}".',
+  'Failed to set "{{key}}": {{error}}': 'Failed to set "{{key}}": {{error}}',
+  'Set {{key}} = {{value}}': 'Set {{key}} = {{value}}',
+  '(This setting requires a restart to take effect.)':
+    '(This setting requires a restart to take effect.)',
+  '(Security-sensitive setting — verify you are not exposing credentials.)':
+    '(Security-sensitive setting — verify you are not exposing credentials.)',
+  'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.':
+    'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.',
+  '(empty)': '(empty)',
   Global: 'Global',
   'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
   'Select region for Coding Plan:': 'Select region for Coding Plan:',
   'Enter your Coding Plan API key: ': 'Enter your Coding Plan API key: ',
   'Select authentication method:': 'Select authentication method:',
   '\n=== Authentication Status ===\n': '\n=== Authentication Status ===\n',
-  '⚠️  No authentication method configured.\n':
-    '⚠️  No authentication method configured.\n',
+  '⚠  No authentication method configured.\n':
+    '⚠  No authentication method configured.\n',
   'Run one of the following commands to get started:\n':
     'Run one of the following commands to get started:\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -2020,8 +2398,8 @@ export default {
   '  Current Model: {{model}}': '  Current Model: {{model}}',
   '  Config Version: {{version}}': '  Config Version: {{version}}',
   '  Status: API key configured\n': '  Status: API key configured\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)',
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)',
   '  Issue: API key not found in environment or settings\n':
     '  Issue: API key not found in environment or settings\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':
@@ -2035,12 +2413,10 @@ export default {
     'Raw mode not available. Please run in an interactive terminal.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
-  'Press Ctrl+O to show full tool output':
-    'Press Ctrl+O to show full tool output',
   'Switch to plan mode or exit plan mode':
     'Switch to plan mode or exit plan mode',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.',
   'Set a goal — keep working until the condition is met':
     'Set a goal — keep working until the condition is met',
   'Exited plan mode. Previous approval mode restored.':
@@ -2207,4 +2583,84 @@ export default {
   reqs: 'reqs',
   in: 'in',
   out: 'out',
+
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Check for Qwen Code updates and install if available',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Qwen Code update available! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'A new version of Qwen Code is available! {{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!':
+    'Qwen Code {{version}} is up to date!',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'Failed to check for updates. Please check your network or registry configuration.',
+  'Unable to check for updates: {{reason}}':
+    'Unable to check for updates: {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    'Update successful! The new version will be used on your next run.',
+  'Update downloaded. It will be applied after you exit this session.':
+    'Update downloaded. It will be applied after you exit this session.',
+  'Update failed: {{error}}': 'Update failed: {{error}}',
+  'Downloading update...': 'Downloading update...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.',
+  'Automatic update failed. Please try updating manually.':
+    'Automatic update failed. Please try updating manually.',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Automatic update failed: {{error}}. Re-run the installer to update manually.',
+  'Running from a local git clone. Please update with "git pull".':
+    'Running from a local git clone. Please update with "git pull".',
+  'Running via npx, update not applicable.':
+    'Running via npx, update not applicable.',
+  'Running via pnpx, update not applicable.':
+    'Running via pnpx, update not applicable.',
+  'Running via bunx, update not applicable.':
+    'Running via bunx, update not applicable.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Installed via Homebrew. Please update with "brew upgrade".',
+  "Locally installed. Please update via your project's package.json.":
+    "Locally installed. Please update via your project's package.json.",
+  'Update requires sudo. Please run:': 'Update requires sudo. Please run:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'Standalone install detected. Attempting to automatically update now...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'Standalone install detected. Please rerun the standalone installer to update:',
+  'Run the following to update:': 'Run the following to update:',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'Unable to auto-update this standalone installation. Please reinstall from:',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Manual update required. Please reinstall Qwen Code.',
+  '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
+    '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.',
+
+  // ============================================================================
+  // reload-plugins command
+  // ============================================================================
+  '{{count}} extension': '{{count}} extension',
+  '{{count}} extensions': '{{count}} extensions',
+  '{{count}} command': '{{count}} command',
+  '{{count}} commands': '{{count}} commands',
+  '{{count}} skill': '{{count}} skill',
+  '{{count}} skills': '{{count}} skills',
+  '{{count}} agent': '{{count}} agent',
+  '{{count}} agents': '{{count}} agents',
+  '{{count}} hook': '{{count}} hook',
+  '{{count}} hooks': '{{count}} hooks',
+  '{{count}} extension MCP server': '{{count}} extension MCP server',
+  '{{count}} extension MCP servers': '{{count}} extension MCP servers',
+  '{{count}} extension LSP server': '{{count}} extension LSP server',
+  '{{count}} extension LSP servers': '{{count}} extension LSP servers',
+  'Reload extension changes from disk': 'Reload extension changes from disk',
+  'Reloaded extensions: {{summary}}': 'Reloaded extensions: {{summary}}',
+  'Reload failed: {{message}}': 'Reload failed: {{message}}',
+  'Reload failed.': 'Reload failed.',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    'Extensions changed on disk. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    'Extension reload did not complete. Run /reload-plugins to try again.',
 };

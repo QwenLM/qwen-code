@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  memo,
   useContext,
   useEffect,
   useImperativeHandle,
@@ -8,9 +9,13 @@ import {
   useCallback,
   useMemo,
   useState,
+  type CSSProperties,
   type ReactNode,
+  type FocusEvent as ReactFocusEvent,
+  type MouseEvent as ReactMouseEvent,
   type MutableRefObject,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Message, ACPToolCall, TurnCollapseHead } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
@@ -20,24 +25,22 @@ import {
 } from '../adapters/toolClassification';
 import { CompactModeContext } from '../App';
 import { useWebShellCustomization } from '../customization';
+import { useI18n } from '../i18n';
 import { MessageItem } from './MessageItem';
 import { MessageTimestamp } from './MessageTimestamp';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
-import { ToolApproval } from './messages/ToolApproval';
-import { AskUserQuestion } from './messages/AskUserQuestion';
+import { useSharedNow } from '../hooks/useSharedNow';
 import { toolContainsCallId } from './messages/toolFormatting';
+import turnCollapseStyles from './TurnCollapseRow.module.css';
+import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 
 interface MessageListProps {
   messages: Message[];
   pendingApproval: PermissionRequest | null;
-  onConfirm: (
-    id: string,
-    selectedOption: string,
-    answers?: Record<string, string>,
-  ) => void;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  loadingTranscript?: boolean;
   catchingUp?: boolean;
   /**
    * True while the agent is still answering. The newest turn then stays
@@ -49,41 +52,42 @@ interface MessageListProps {
   tailContent?: ReactNode;
   tailKey?: string;
   virtualScrollThreshold?: number;
-  shellOutputMaxLines: number;
+  activeTurnStartedAt?: number;
   /**
    * When true, scroll the tail content into view the moment it first appears
    * even if the user had scrolled up. Opt-in per caller so unrelated inline
    * panels don't yank the reader to the bottom. Defaults to false.
    */
   autoScrollTailIntoView?: boolean;
+  /**
+   * Height reserved for app-level floating UI below the transcript, such as the
+   * bottom todo/status panel. When it changes while the transcript is following
+   * the bottom, perform one more bottom alignment after layout settles.
+   */
+  bottomOverlayInset?: number;
+  hideSessionTimeline?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
-}
-
-function isAskUserQuestion(request: PermissionRequest): boolean {
-  return (
-    !!request.rawInput?.questions && Array.isArray(request.rawInput.questions)
-  );
-}
-
-function approvalMatchesToolGroup(
-  messages: Message[],
-  approval: PermissionRequest | null,
-): boolean {
-  if (!approval?.toolCallId) return false;
-  for (const msg of messages) {
-    if (msg.role === 'tool_group') {
-      if (msg.tools.some((t) => toolContainsCallId(t, approval.toolCallId!)))
-        return true;
-    }
-  }
-  return false;
+  onBranchSession?: () => void;
+  onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
 }
 
 function getLastUserMessageId(messages: Message[]): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
-    if (msg.role === 'user') return msg.id;
+    if (msg?.role === 'user') return msg.id;
+  }
+  return null;
+}
+
+function getLastMessage(messages: Message[]): Message | undefined {
+  return messages[messages.length - 1];
+}
+
+function getLastTurnStartMessageId(messages: Message[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg && isTurnStartMessage(msg)) return msg.id;
   }
   return null;
 }
@@ -93,11 +97,20 @@ export type DisplayItem =
       type: 'message';
       key: string;
       message: Message;
-      /**
-       * Present only on a turn's leading user-message row when the turn is
-       * collapsible; drives the prompt-row expand/collapse toggle.
-       */
-      collapse?: TurnCollapseHead;
+      /** Metrics info for the final answer assistant message. */
+      turnCollapse?: TurnCollapseHead;
+    }
+  | {
+      type: 'turn_collapse';
+      key: string;
+      turnCollapse: TurnCollapseHead;
+    }
+  | {
+      type: 'turn_content';
+      key: string;
+      turnId: string;
+      collapsed: boolean;
+      items: DisplayItem[];
     }
   | {
       type: 'parallel_agents';
@@ -109,6 +122,41 @@ export type DisplayItem =
        */
       timestamp?: number;
     };
+
+interface LocateFlashTarget {
+  messageId: string;
+  callId?: string;
+}
+
+export type TurnTimelineNodeKind =
+  | 'thought'
+  | 'commentary'
+  | 'tool'
+  | 'agents'
+  | 'plan'
+  | 'status'
+  | 'none';
+
+export interface TurnTimelineNode {
+  kind: TurnTimelineNodeKind;
+  timestamp?: number;
+  label?: string;
+}
+
+export interface SessionTimelineEntry {
+  id: string;
+  label: string;
+  detail: string;
+  timestamp?: number;
+  nodeKinds: TurnTimelineNodeKind[];
+  isScheduledTask?: boolean;
+}
+
+export interface SessionTimelineRange {
+  startIndex: number;
+  endIndex: number;
+  currentIndex: number;
+}
 
 function isAgentOnlyToolGroup(msg: Message): boolean {
   return (
@@ -132,7 +180,7 @@ function isBackgroundLaunchNarration(msg: Message): boolean {
   // those as internal launch narration and shows a single Parallel agents box.
   // Only skip thought-only messages here; any user-facing assistant content
   // still breaks the group and remains visible.
-  return msg.role === 'assistant' && Boolean(msg.thinking) && !msg.content;
+  return msg.role === 'thinking';
 }
 
 function isForceExpandGroup(
@@ -149,7 +197,7 @@ function isForceExpandGroup(
 }
 
 function isHiddenInCompactMode(msg: Message): boolean {
-  if (msg.role === 'assistant' && msg.thinking && !msg.content) return true;
+  if (msg.role === 'thinking') return true;
   return false;
 }
 
@@ -292,9 +340,15 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
 }
 
 export function getDisplayItemVirtualKey(item: DisplayItem): string {
-  return item.type === 'parallel_agents'
-    ? `group:${item.key}`
-    : `msg:${item.key}`;
+  if (item.type === 'parallel_agents') return `group:${item.key}`;
+  if (item.type === 'turn_collapse') {
+    const liveKey = item.turnCollapse.liveStartedAt;
+    return liveKey === undefined
+      ? `tc:${item.key}`
+      : `tc:${item.key}:${liveKey}`;
+  }
+  if (item.type === 'turn_content') return `turn-content:${item.key}`;
+  return `msg:${item.key}`;
 }
 
 export interface ApplyTurnCollapseOptions {
@@ -309,6 +363,7 @@ export interface ApplyTurnCollapseOptions {
    * and un-collapsible so live output is never hidden.
    */
   isResponding: boolean;
+  activeTurnStartedAt?: number;
   /**
    * Tool-call id of a pending approval, if any. The turn containing it is
    * force-expanded so the inline approve/reject UI is never folded away (mirrors
@@ -332,6 +387,51 @@ function isAssistantAnswer(item: DisplayItem): boolean {
   );
 }
 
+function findFinalAnswerIndex(
+  items: readonly DisplayItem[],
+  start: number,
+  end: number,
+): number {
+  let lastWorkStepIndex = start;
+  for (let i = end; i > start; i--) {
+    if (isExecutionWorkStep(items[i]!)) {
+      lastWorkStepIndex = i;
+      break;
+    }
+  }
+  for (let i = end; i > lastWorkStepIndex; i--) {
+    if (isAssistantAnswer(items[i]!)) return i;
+  }
+  return -1;
+}
+
+function collectFinalAssistantIdsByTurn(
+  items: readonly DisplayItem[],
+  isResponding: boolean,
+): ReadonlySet<string> {
+  const userIdxs: number[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.type === 'message' && isTurnStartMessage(item.message)) {
+      userIdxs.push(i);
+    }
+  }
+
+  const ids = new Set<string>();
+  for (let k = 0; k < userIdxs.length; k++) {
+    if (k === userIdxs.length - 1 && isResponding) continue;
+    const start = userIdxs[k];
+    const end = (k + 1 < userIdxs.length ? userIdxs[k + 1] : items.length) - 1;
+    const answerIdx = findFinalAnswerIndex(items, start, end);
+    if (answerIdx < 0) continue;
+    const item = items[answerIdx];
+    if (item.type === 'message' && item.message.role === 'assistant') {
+      ids.add(item.message.id);
+    }
+  }
+  return ids;
+}
+
 /**
  * A turn's hideable "steps": tool activity, plans, and mid-turn assistant text.
  * The final answer and any system/shell/insight rows (errors, cancellations,
@@ -339,14 +439,21 @@ function isAssistantAnswer(item: DisplayItem): boolean {
  */
 function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   if (item.type === 'parallel_agents') return true;
+  if (item.type === 'turn_collapse') return false;
+  if (item.type === 'turn_content') {
+    return item.items.some((child) => isHideableStep(child, isFinalAnswer));
+  }
   switch (item.message.role) {
     case 'tool_group':
     case 'plan':
       return true;
     case 'assistant':
       return !isFinalAnswer;
-    case 'user':
+    case 'thinking':
+      return true;
     case 'system':
+      return isMidTurnInjectedDebugMessage(item.message);
+    case 'user':
     case 'user_shell':
     case 'btw':
     case 'insight_progress':
@@ -358,21 +465,519 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
       // assign to `never` here. At runtime (e.g. a newer daemon sending an
       // unknown role) it falls through as not-hideable — kept visible rather
       // than crashing the transcript or vanishing from a collapsed turn.
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const _exhaustive: never = item.message;
       return false;
     }
   }
 }
 
+function isMidTurnInjectedDebugMessage(message: {
+  content?: string;
+  source?: string;
+}): boolean {
+  return (
+    message.source === 'mid_turn_message_injected' ||
+    message.content?.startsWith(
+      'mid_turn_message_injected (unrecognized daemon event):',
+    ) === true
+  );
+}
+
+export function getTurnTimelineNode(
+  item: DisplayItem,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): TurnTimelineNode {
+  if (item.type === 'parallel_agents') {
+    return {
+      kind: 'agents',
+      timestamp: item.timestamp,
+      label: t ? t('timeline.parallelAgents') : 'Parallel agents',
+    };
+  }
+  if (item.type !== 'message') return { kind: 'none' };
+
+  const { message } = item;
+  switch (message.role) {
+    case 'thinking':
+      return {
+        kind: 'thought',
+        timestamp: message.timestamp,
+        label: t ? t('timeline.thinking') : 'Thinking',
+      };
+    case 'assistant':
+      if (item.turnCollapse)
+        return { kind: 'none', timestamp: message.timestamp };
+      if (!compactTimelineText(message.content, 1))
+        return { kind: 'none', timestamp: message.timestamp };
+      return {
+        kind: 'commentary',
+        timestamp: message.timestamp,
+        label: t ? t('timeline.assistantUpdate') : 'Assistant update',
+      };
+    case 'tool_group': {
+      const count = message.tools.length;
+      return {
+        kind: 'tool',
+        timestamp: message.timestamp,
+        label: t
+          ? t('timeline.toolCalls', { count })
+          : `${count} tool call${count === 1 ? '' : 's'}`,
+      };
+    }
+    case 'plan':
+      return {
+        kind: 'plan',
+        timestamp: message.timestamp,
+        label: t ? t('timeline.planUpdate') : 'Plan update',
+      };
+    case 'system':
+      return isMidTurnInjectedDebugMessage(message)
+        ? {
+            kind: 'status',
+            timestamp: message.timestamp,
+            label: t ? t('timeline.statusUpdate') : 'Status update',
+          }
+        : { kind: 'none', timestamp: message.timestamp };
+    case 'user':
+    case 'user_shell':
+    case 'btw':
+    case 'insight_progress':
+    case 'insight_ready':
+    case 'insight_error':
+      return { kind: 'none', timestamp: message.timestamp };
+    default: {
+      const _exhaustive: never = message;
+      return { kind: 'none' };
+    }
+  }
+}
+
+function compactTimelineText(
+  raw: string | null | undefined,
+  maxLength: number,
+  options: { stripMarkdown?: boolean } = {},
+): string {
+  const source =
+    options.stripMarkdown === true ? cleanTimelineMarkdown(raw) : (raw ?? '');
+  const compact = source.replace(/\s+/g, ' ').trim();
+  if (maxLength <= 0) return '';
+  if (!compact) return '';
+  const chars = Array.from(compact);
+  return chars.length > maxLength
+    ? `${chars.slice(0, maxLength - 1).join('')}…`
+    : compact;
+}
+
+function cleanTimelineMarkdown(raw: string | null | undefined): string {
+  if (!raw) return '';
+  const inlinePlaceholders: string[] = [];
+  const stashInline = (value: string) => {
+    const key = `\u0000${inlinePlaceholders.length}\u0000`;
+    inlinePlaceholders.push(value);
+    return key;
+  };
+
+  let cleaned = raw
+    .replace(/```[^\n`]*\n?([\s\S]*?)```/g, (_match, code: string) =>
+      stashInline(code),
+    )
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/`([^`\n]+)`/g, (_match, code: string) => stashInline(code))
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/^\s{0,3}>\s?/gm, '')
+    .replace(/^\s*[-*+]\s+/gm, '');
+
+  cleaned = stripBalancedTimelineMarker(cleaned, '~~');
+  cleaned = stripBalancedTimelineMarker(cleaned, '**');
+  cleaned = stripBalancedTimelineMarker(cleaned, '__');
+  cleaned = cleaned
+    .replace(/\*([^*\s][^*]*?\S)\*/g, '$1')
+    .replace(
+      /(^|[^\p{L}\p{N}_])_([^_\s][^_]*?\S)_(?=$|[^\p{L}\p{N}_])/gu,
+      '$1$2',
+    );
+
+  for (const [index, value] of inlinePlaceholders.entries()) {
+    cleaned = cleaned.split(`\u0000${index}\u0000`).join(value);
+  }
+  return cleaned;
+}
+
+function stripBalancedTimelineMarker(raw: string, marker: string): string {
+  let result = '';
+  let index = 0;
+  while (index < raw.length) {
+    const start = raw.indexOf(marker, index);
+    if (start === -1) return result + raw.slice(index);
+
+    const contentStart = start + marker.length;
+    const end = raw.indexOf(marker, contentStart);
+    if (end === -1) return result + raw.slice(index);
+
+    const content = raw.slice(contentStart, end);
+    result +=
+      content.trim().length === 0
+        ? raw.slice(index, end + marker.length)
+        : raw.slice(index, start) + content;
+    index = end + marker.length;
+  }
+  return result;
+}
+
+function timelineLabelForTurn(
+  message: Message,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  const raw =
+    message.role === 'user'
+      ? message.content
+      : message.role === 'user_shell'
+        ? message.command
+        : '';
+  const compact = compactTimelineText(raw, 32);
+  if (!compact) return t ? t('timeline.userTurn') : 'User turn';
+  return compact;
+}
+
+function isScheduledTaskMessage(message: {
+  role: Message['role'];
+  source?: string;
+}): boolean {
+  return (
+    message.role === 'user' &&
+    (message.source === 'cron' || message.source === 'loop')
+  );
+}
+
+// Collapse and timeline turns start at chat prompts and shell prompts; new-chat
+// auto-follow still uses getLastUserMessageId so shell prompts do not jump.
+function isTurnStartMessage(message: Message): boolean {
+  return message.role === 'user' || message.role === 'user_shell';
+}
+
+function timelineDetailSnippetForMessage(
+  message: Message,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  switch (message.role) {
+    case 'thinking':
+      // Thinking content may include private model reasoning; keep details label-only.
+      return t ? t('timeline.kind.thought') : 'thinking';
+    case 'assistant':
+      return compactTimelineText(message.content, 120, { stripMarkdown: true });
+    case 'tool_group': {
+      const count = message.tools.length;
+      return t
+        ? t('timeline.toolCalls', { count })
+        : `${count} tool call${count === 1 ? '' : 's'}`;
+    }
+    case 'plan':
+      return t ? t('timeline.planDetail') : 'plan update';
+    case 'system':
+      return isMidTurnInjectedDebugMessage(message)
+        ? compactTimelineText(message.content, 120, { stripMarkdown: true })
+        : '';
+    case 'user':
+    case 'user_shell':
+    case 'btw':
+    case 'insight_progress':
+    case 'insight_ready':
+    case 'insight_error':
+      return '';
+    default: {
+      const _exhaustive: never = message;
+      return '';
+    }
+  }
+}
+
+function timelineDetailSnippetForItem(
+  item: DisplayItem,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  if (item.type === 'parallel_agents') {
+    const count = item.agents.length;
+    return t
+      ? t('timeline.parallelAgentsDetail', { count })
+      : `${count} parallel agent${count === 1 ? '' : 's'}`;
+  }
+  if (item.type !== 'message') return '';
+  return timelineDetailSnippetForMessage(item.message, t);
+}
+
+function getKindLabel(
+  kind: TurnTimelineNodeKind,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  if (!t) return SESSION_TIMELINE_KIND_LABEL[kind];
+  return t(`timeline.kind.${kind}`);
+}
+
+function timelineDetailForTurn(
+  turnItems: readonly DisplayItem[],
+  finalAssistantId: string | null,
+  nodeKinds: readonly TurnTimelineNodeKind[],
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  if (finalAssistantId !== null) {
+    for (const item of turnItems) {
+      if (item.type !== 'message') continue;
+      const { message } = item;
+      if (message.id !== finalAssistantId || message.role !== 'assistant') {
+        continue;
+      }
+      const finalAnswerDetail = compactTimelineText(message.content, 180, {
+        stripMarkdown: true,
+      });
+      if (finalAnswerDetail) return finalAnswerDetail;
+    }
+  }
+
+  const snippets: string[] = [];
+  for (let i = 0; i < turnItems.length; i += 1) {
+    const item = turnItems[i]!;
+    if (
+      item.type === 'message' &&
+      finalAssistantId !== null &&
+      item.message.id === finalAssistantId
+    ) {
+      continue;
+    }
+    const snippet = timelineDetailSnippetForItem(item, t);
+    if (snippet) snippets.push(snippet);
+  }
+
+  const detail = compactTimelineText(snippets.join(' · '), 180);
+  if (detail) return detail;
+  if (nodeKinds.length > 0) {
+    return nodeKinds.map((kind) => getKindLabel(kind, t)).join(' · ');
+  }
+  return t ? t('timeline.noActivity') : 'No activity';
+}
+
+export function getSessionTimelineEntries(
+  messages: readonly Message[],
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): SessionTimelineEntry[] {
+  const entries: SessionTimelineEntry[] = [];
+  let turnStart: Message | null = null;
+  let turnItems: Message[] = [];
+
+  const pushTurn = () => {
+    if (!turnStart) return;
+    const timelineItems = groupParallelAgents(turnItems);
+    const finalAssistantIndex = findFinalAnswerIndex(
+      timelineItems,
+      -1,
+      timelineItems.length - 1,
+    );
+    const finalAssistantItem =
+      finalAssistantIndex >= 0 ? timelineItems[finalAssistantIndex] : null;
+    const finalAssistantId =
+      finalAssistantItem?.type === 'message' &&
+      finalAssistantItem.message.role === 'assistant' &&
+      !finalAssistantItem.message.isStreaming &&
+      compactTimelineText(finalAssistantItem.message.content, 1, {
+        stripMarkdown: true,
+      }).length > 0
+        ? finalAssistantItem.message.id
+        : null;
+    const nodeKinds: TurnTimelineNodeKind[] = [];
+    for (const item of timelineItems) {
+      if (
+        item.type === 'message' &&
+        finalAssistantId !== null &&
+        item.message.id === finalAssistantId
+      ) {
+        continue;
+      }
+      const node = getTurnTimelineNode(item, t);
+      if (node.kind !== 'none' && !nodeKinds.includes(node.kind)) {
+        nodeKinds.push(node.kind);
+      }
+    }
+
+    entries.push({
+      id: turnStart.id,
+      label: timelineLabelForTurn(turnStart, t),
+      detail: timelineDetailForTurn(
+        timelineItems,
+        finalAssistantId,
+        nodeKinds,
+        t,
+      ),
+      timestamp: turnStart.timestamp,
+      nodeKinds,
+      ...(isScheduledTaskMessage(turnStart) ? { isScheduledTask: true } : {}),
+    });
+  };
+
+  for (const message of messages) {
+    if (isTurnStartMessage(message)) {
+      pushTurn();
+      turnStart = message;
+      turnItems = [];
+      continue;
+    }
+    if (turnStart) {
+      turnItems.push(message);
+    }
+  }
+  pushTurn();
+
+  return entries;
+}
+
+function TimelineClockIcon() {
+  return (
+    <svg
+      className={styles.sessionTimelineDetailsIcon}
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <circle cx="8" cy="8" r="6.25" />
+      <path d="M8 4.5v4l-2.5 2" />
+    </svg>
+  );
+}
+
+function toolTimelineSignature(tool: ACPToolCall): string {
+  const rawOutput =
+    tool.rawOutput && typeof tool.rawOutput === 'object'
+      ? (tool.rawOutput as Record<string, unknown>)
+      : undefined;
+  return [
+    tool.callId,
+    tool.toolName,
+    tool.kind ?? '',
+    tool.status,
+    tool.parentToolCallId ?? '',
+    tool.subContent ? 'sub-content' : '',
+    tool.subTools?.length ?? 0,
+    String(tool.args?.subagent_type ?? ''),
+    tool.args?.run_in_background === true ? 'background' : '',
+    String(rawOutput?.['type'] ?? ''),
+    String(rawOutput?.['status'] ?? ''),
+  ].join(':');
+}
+
+export function getSessionTimelineSignature(
+  messages: readonly Message[],
+): string {
+  return messages
+    .map((message) => {
+      const base = `${message.id}:${message.role}:${message.timestamp ?? ''}`;
+      switch (message.role) {
+        case 'assistant':
+        case 'thinking':
+          return `${base}:${message.isStreaming ? 'streaming' : message.content}`;
+        case 'tool_group':
+          return `${base}:${message.tools.map(toolTimelineSignature).join(',')}`;
+        case 'system':
+          return `${base}:${message.variant}:${message.source ?? ''}:${message.content}`;
+        case 'user':
+          return `${base}:${message.content}`;
+        case 'user_shell':
+          return `${base}:${message.command}`;
+        case 'plan':
+        case 'btw':
+        case 'insight_progress':
+        case 'insight_ready':
+        case 'insight_error':
+          return base;
+        default: {
+          const _exhaustive: never = message;
+          return base;
+        }
+      }
+    })
+    .join('|');
+}
+
 function isExecutionWorkStep(item: DisplayItem): boolean {
   if (item.type === 'parallel_agents') return true;
+  if (item.type === 'turn_collapse') return false;
+  if (item.type === 'turn_content') return item.items.some(isExecutionWorkStep);
   return item.message.role === 'tool_group' || item.message.role === 'plan';
 }
 
-/** Wall-clock stamp of a display row, whichever variant carries it. */
-function itemTimestamp(item: DisplayItem): number | undefined {
-  return item.type === 'message' ? item.message.timestamp : item.timestamp;
+function isActiveToolStatus(status: ACPToolCall['status'] | string): boolean {
+  return (
+    status === 'pending' || status === 'running' || status === 'in_progress'
+  );
+}
+
+function activeExecutionKey(item: DisplayItem): string | null {
+  if (item.type === 'turn_content') {
+    for (let i = item.items.length - 1; i >= 0; i--) {
+      const key = activeExecutionKey(item.items[i]!);
+      if (key) return key;
+    }
+    return null;
+  }
+
+  if (item.type === 'turn_collapse') {
+    if (item.turnCollapse.liveStartedAt === undefined) return null;
+    if (
+      item.turnCollapse.toolCallCount === undefined ||
+      item.turnCollapse.toolCallCount <= 0
+    ) {
+      return null;
+    }
+    return `turn:${item.turnCollapse.turnId}:${item.turnCollapse.toolCallCount}`;
+  }
+
+  if (item.type === 'parallel_agents') {
+    const activeAgents = item.agents.filter((agent) =>
+      isActiveToolStatus(agent.status),
+    );
+    if (activeAgents.length === 0) return null;
+    return `agents:${item.key}:${activeAgents.map((agent) => agent.callId).join(',')}`;
+  }
+
+  if (item.message.role !== 'tool_group') return null;
+  const activeTools = item.message.tools.filter((tool) =>
+    isActiveToolStatus(tool.status),
+  );
+  if (activeTools.length === 0) return null;
+  return `tools:${item.message.id}:${activeTools.map((tool) => tool.callId).join(',')}`;
+}
+
+function latestActiveExecutionKey(
+  items: readonly DisplayItem[],
+): string | null {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const key = activeExecutionKey(items[i]!);
+    if (key) return key;
+  }
+  return null;
+}
+
+function terminalTurnTimestamp(item: DisplayItem): number | undefined {
+  if (item.type !== 'message' || item.message.role !== 'system') {
+    return undefined;
+  }
+  return item.message.source === 'prompt_cancelled' ||
+    item.message.source === 'turn_error'
+    ? item.message.timestamp
+    : undefined;
+}
+
+function isTurnErrorItem(item: DisplayItem): boolean {
+  return (
+    item.type === 'message' &&
+    item.message.role === 'system' &&
+    item.message.source === 'turn_error'
+  );
+}
+
+function assistantContentTimestamp(item: DisplayItem): number | undefined {
+  if (item.type !== 'message' || item.message.role !== 'assistant') {
+    return undefined;
+  }
+  return item.message.content?.trim() ? item.message.timestamp : undefined;
 }
 
 /**
@@ -395,6 +1000,10 @@ function itemAssistantUsage(item: DisplayItem):
 
 function itemToolCallCount(item: DisplayItem): number {
   if (item.type === 'parallel_agents') return item.agents.length;
+  if (item.type === 'turn_collapse') return 0;
+  if (item.type === 'turn_content') {
+    return item.items.reduce((sum, child) => sum + itemToolCallCount(child), 0);
+  }
   return item.message.role === 'tool_group' ? item.message.tools.length : 0;
 }
 
@@ -408,11 +1017,90 @@ export function findTurnIdForIndex(
 ): string | null {
   for (let i = Math.min(index, items.length - 1); i >= 0; i--) {
     const item = items[i];
-    if (item.type === 'message' && item.message.role === 'user') {
+    if (item.type === 'message' && isTurnStartMessage(item.message)) {
       return item.message.id;
     }
   }
   return null;
+}
+
+export function getTurnIdByDisplayIndex(
+  items: readonly DisplayItem[],
+): Array<string | null> {
+  const turnIds: Array<string | null> = [];
+  let currentTurnId: string | null = null;
+  for (const item of items) {
+    if (item.type === 'message' && isTurnStartMessage(item.message)) {
+      currentTurnId = item.message.id;
+    }
+    turnIds.push(currentTurnId);
+  }
+  return turnIds;
+}
+
+function timelineIndexForDisplayIndex(
+  visibleItems: readonly DisplayItem[],
+  index: number,
+  entryIndexById: ReadonlyMap<string, number>,
+  turnIdByDisplayIndex?: readonly (string | null)[],
+): number | null {
+  const turnId =
+    turnIdByDisplayIndex === undefined
+      ? findTurnIdForIndex(visibleItems, index)
+      : (turnIdByDisplayIndex[index] ?? null);
+  if (!turnId) return null;
+  return entryIndexById.get(turnId) ?? null;
+}
+
+export function getSessionTimelineRangeForIndexes(
+  visibleItems: readonly DisplayItem[],
+  visibleItemIndexes: readonly number[],
+  entryIndexById: ReadonlyMap<string, number>,
+  currentItemIndex?: number | null,
+  turnIdByDisplayIndex: readonly (string | null)[] = getTurnIdByDisplayIndex(
+    visibleItems,
+  ),
+): SessionTimelineRange | null {
+  let startIndex = Number.POSITIVE_INFINITY;
+  let endIndex = -1;
+
+  for (const visibleItemIndex of visibleItemIndexes) {
+    if (visibleItemIndex < 0 || visibleItemIndex >= visibleItems.length) {
+      continue;
+    }
+    const timelineIndex = timelineIndexForDisplayIndex(
+      visibleItems,
+      visibleItemIndex,
+      entryIndexById,
+      turnIdByDisplayIndex,
+    );
+    if (timelineIndex === null) continue;
+    startIndex = Math.min(startIndex, timelineIndex);
+    endIndex = Math.max(endIndex, timelineIndex);
+  }
+
+  if (endIndex < 0) return null;
+
+  const currentIndex =
+    currentItemIndex === undefined || currentItemIndex === null
+      ? null
+      : timelineIndexForDisplayIndex(
+          visibleItems,
+          currentItemIndex,
+          entryIndexById,
+          turnIdByDisplayIndex,
+        );
+
+  return {
+    startIndex,
+    endIndex,
+    currentIndex:
+      currentIndex !== null &&
+      currentIndex >= startIndex &&
+      currentIndex <= endIndex
+        ? currentIndex
+        : endIndex,
+  };
 }
 
 /**
@@ -440,7 +1128,7 @@ function turnOwnsCallId(
       if (item.agents.some((agent) => toolContainsCallId(agent, callId))) {
         return true;
       }
-    } else if (item.message.role === 'tool_group') {
+    } else if (item.type === 'message' && item.message.role === 'tool_group') {
       if (item.message.tools.some((tool) => toolContainsCallId(tool, callId))) {
         return true;
       }
@@ -454,6 +1142,7 @@ export function applyTurnCollapse(
   {
     overrides,
     isResponding,
+    activeTurnStartedAt,
     pendingApprovalCallId,
     enabled,
   }: ApplyTurnCollapseOptions,
@@ -463,7 +1152,7 @@ export function applyTurnCollapse(
   const userIdxs: number[] = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    if (item.type === 'message' && item.message.role === 'user') {
+    if (item.type === 'message' && isTurnStartMessage(item.message)) {
       userIdxs.push(i);
     }
   }
@@ -479,6 +1168,7 @@ export function applyTurnCollapse(
     const end = (k + 1 < userIdxs.length ? userIdxs[k + 1] : items.length) - 1;
     const head = items[start] as Extract<DisplayItem, { type: 'message' }>;
     const turnId = head.message.id;
+    const promptTs = head.message.timestamp;
     const isActiveTurn = k === userIdxs.length - 1 && isResponding;
     const hasPendingApproval = turnOwnsCallId(
       items,
@@ -487,39 +1177,45 @@ export function applyTurnCollapse(
       pendingApprovalCallId,
     );
 
-    // Final answer = last assistant-with-content row after the turn's last
-    // non-assistant step. Assistant text that is followed by a tool/plan is
-    // narration for the execution trace, not the final answer; marking it as a
-    // step immediately keeps the trace indentation stable while a turn streams.
-    let answerIdx = -1;
-    let lastNonAssistantStepIdx = start;
-    for (let i = start + 1; i <= end; i++) {
-      if (isExecutionWorkStep(items[i])) lastNonAssistantStepIdx = i;
-    }
-    for (let i = end; i > lastNonAssistantStepIdx; i--) {
-      if (isAssistantAnswer(items[i])) {
-        answerIdx = i;
-        break;
-      }
-    }
-
+    const answerIdx = findFinalAnswerIndex(items, start, end);
     let hiddenCount = 0;
-    let lastStepTs: number | undefined;
+    let terminalTs: number | undefined;
+    let assistantTs: number | undefined;
     let inputTokens = 0;
     let outputTokens = 0;
     let cachedTokens = 0;
     let toolCallCount = 0;
+    let thinkingCount = 0;
     let hasUsage = false;
+    let hasTurnError = false;
     for (let i = start + 1; i <= end; i++) {
-      const isStep = isHideableStep(items[i], i === answerIdx);
-      if (isStep) hiddenCount++;
-      toolCallCount += itemToolCallCount(items[i]);
-      const ts =
-        isStep || i === answerIdx ? itemTimestamp(items[i]) : undefined;
-      if (ts !== undefined) {
-        lastStepTs = lastStepTs === undefined ? ts : Math.max(lastStepTs, ts);
+      const item = items[i]!;
+      const isStep = isHideableStep(item, i === answerIdx);
+      if (isStep) {
+        hiddenCount++;
       }
-      const usage = itemAssistantUsage(items[i]);
+      if (isTurnErrorItem(item)) {
+        hasTurnError = true;
+      }
+      toolCallCount += itemToolCallCount(item);
+      if (item.type === 'message' && item.message.role === 'thinking') {
+        thinkingCount++;
+      }
+      const terminalTimestamp = terminalTurnTimestamp(item);
+      if (terminalTimestamp !== undefined) {
+        terminalTs =
+          terminalTs === undefined
+            ? terminalTimestamp
+            : Math.max(terminalTs, terminalTimestamp);
+      }
+      const assistantTimestamp = assistantContentTimestamp(item);
+      if (assistantTimestamp !== undefined) {
+        assistantTs =
+          assistantTs === undefined
+            ? assistantTimestamp
+            : Math.max(assistantTs, assistantTimestamp);
+      }
+      const usage = itemAssistantUsage(item);
       if (usage) {
         inputTokens += usage.inputTokens;
         outputTokens += usage.outputTokens;
@@ -528,8 +1224,10 @@ export function applyTurnCollapse(
       }
     }
 
-    const promptTs = head.message.timestamp;
-    const liveStartedAt = isActiveTurn ? (promptTs ?? Date.now()) : undefined;
+    const liveStartedAt = isActiveTurn
+      ? (activeTurnStartedAt ?? promptTs ?? Date.now())
+      : undefined;
+    const lastStepTs = terminalTs ?? assistantTs;
     const elapsedMs =
       promptTs !== undefined &&
       lastStepTs !== undefined &&
@@ -547,63 +1245,109 @@ export function applyTurnCollapse(
     }
 
     // A turn with foldable steps gets a chevron and defaults to expanded while
-    // streaming, collapsed once complete. A step-less turn (e.g. a plain "hi"
+    // streaming, when the turn errored, or when there is no final answer;
+    // otherwise it collapses once complete. A step-less turn (e.g. a plain "hi"
     // reply) has nothing to fold, so it stays expanded and shows a chevron-less
     // metrics line. An explicit user toggle always wins.
+    const shouldStayOpen = isActiveTurn || hasTurnError || answerIdx < 0;
     const expanded =
       hiddenCount === 0
         ? true
         : overrides.has(turnId)
           ? (overrides.get(turnId) as boolean)
-          : isActiveTurn;
+          : shouldStayOpen;
     const collapsed = !expanded;
+    let turnContentGroupIndex = 0;
+    const pushTurnContentGroup = (groupItems: DisplayItem[]) => {
+      if (groupItems.length === 0) return;
+      result.push({
+        type: 'turn_content',
+        key: `${turnId}-content-${turnContentGroupIndex++}`,
+        turnId,
+        collapsed,
+        items: groupItems,
+      });
+    };
 
+    // Push the user message
     result.push({
       type: 'message',
       key: head.key,
       message: head.message,
-      collapse: {
-        turnId,
-        collapsed,
-        hiddenCount,
-        ...(elapsedMs !== undefined ? { elapsedMs } : {}),
-        ...(hasUsage ? { inputTokens, outputTokens } : {}),
-        ...(cachedTokens > 0 ? { cachedTokens } : {}),
-        ...(toolCallCount > 0 ? { toolCallCount } : {}),
-        ...(liveStartedAt !== undefined ? { liveStartedAt } : {}),
-      },
+    });
+
+    // Insert standalone turn_collapse item right after user message
+    // This keeps the toggle at the top of the turn regardless of expand state
+    const turnCollapseInfo: TurnCollapseHead = {
+      turnId,
+      collapsed,
+      hiddenCount,
+      ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+      ...(hasUsage ? { inputTokens, outputTokens } : {}),
+      ...(cachedTokens > 0 ? { cachedTokens } : {}),
+      ...(toolCallCount > 0 ? { toolCallCount } : {}),
+      ...(thinkingCount > 0 ? { thinkingCount } : {}),
+      ...(liveStartedAt !== undefined ? { liveStartedAt } : {}),
+    };
+    result.push({
+      type: 'turn_collapse',
+      key: `tc-${turnId}`,
+      turnCollapse: turnCollapseInfo,
     });
 
     if (!collapsed) {
+      let turnContentItems: DisplayItem[] = [];
       for (let i = start + 1; i <= end; i++) {
-        result.push(items[i]!);
+        const item = items[i]!;
+        // Attach turnCollapse to final answer for metrics display
+        if (
+          i === answerIdx &&
+          item.type === 'message' &&
+          item.message.role === 'assistant'
+        ) {
+          pushTurnContentGroup(turnContentItems);
+          turnContentItems = [];
+          result.push({
+            ...item,
+            turnCollapse: turnCollapseInfo,
+          });
+        } else {
+          turnContentItems.push(item);
+        }
       }
+      pushTurnContentGroup(turnContentItems);
       continue;
     }
 
-    // Collapsed: drop the hideable steps; keep the final answer (its own
-    // thinking stripped) and any non-step rows (errors, cancellations, command
-    // output) in their original places. On an active turn the "answer" is still
-    // streaming, so fold it away too rather than strand a provisional line.
+    // Collapsed: keep hideable steps mounted in a zero-height content group so
+    // the fold animation can run. Keep the final answer and non-step rows
+    // (errors, cancellations, command output) in their original places. On an
+    // active turn the "answer" is still streaming, so fold it away too rather
+    // than strand a provisional line.
+    const collapsedContentItems: DisplayItem[] = [];
+    const visibleCollapsedItems: DisplayItem[] = [];
     for (let i = start + 1; i <= end; i++) {
       const item = items[i];
       if (i === answerIdx && isActiveTurn) continue;
-      if (isHideableStep(item, i === answerIdx)) continue;
       if (
         i === answerIdx &&
         item.type === 'message' &&
-        item.message.role === 'assistant' &&
-        item.message.thinking
+        item.message.role === 'assistant'
       ) {
-        result.push({
-          type: 'message',
-          key: item.key,
-          message: { ...item.message, thinking: undefined },
+        visibleCollapsedItems.push({
+          ...item,
+          turnCollapse: turnCollapseInfo,
         });
-      } else {
-        result.push(item);
+        continue;
       }
+      if (isHideableStep(item, i === answerIdx)) {
+        collapsedContentItems.push(item);
+        continue;
+      }
+      visibleCollapsedItems.push(item);
     }
+    pushTurnContentGroup(collapsedContentItems);
+    result.push(...visibleCollapsedItems);
   }
 
   return result;
@@ -631,13 +1375,46 @@ export function findDisplayItemIndex(
         return i;
       }
     } else if (
+      item.type === 'parallel_agents' &&
       callId &&
       item.agents.some((agent) => toolContainsCallId(agent, callId))
+    ) {
+      return i;
+    } else if (
+      item.type === 'turn_content' &&
+      findDisplayItemIndex(item.items, messageId, callId) >= 0
     ) {
       return i;
     }
   }
   return -1;
+}
+
+function displayItemMatchesLocateTarget(
+  item: DisplayItem,
+  target: LocateFlashTarget | null,
+): boolean {
+  if (!target) return false;
+  const callId = target.callId;
+  if (item.type === 'message') {
+    if (item.message.id === target.messageId) return true;
+    return (
+      !!callId &&
+      item.message.role === 'tool_group' &&
+      item.message.tools.some((tool) => toolContainsCallId(tool, callId))
+    );
+  }
+  if (item.type === 'parallel_agents') {
+    return (
+      !!callId && item.agents.some((agent) => toolContainsCallId(agent, callId))
+    );
+  }
+  if (item.type === 'turn_content') {
+    return item.items.some((child) =>
+      displayItemMatchesLocateTarget(child, target),
+    );
+  }
+  return false;
 }
 
 export interface MessageListHandle {
@@ -646,14 +1423,18 @@ export interface MessageListHandle {
    * highlight it. Returns false when the message is not in the list.
    */
   scrollToMessage: (messageId: string, callId?: string) => boolean;
+  /** Resume bottom-follow mode and scroll to the latest output. */
+  scrollToBottom: (behavior?: ScrollBehavior) => void;
 }
 
 const HEADER_INDEX = 0;
 const ESTIMATE_HEADER = 120;
 const ESTIMATE_MESSAGE = 80;
-const ESTIMATE_APPROVAL = 200;
+const ESTIMATE_TURN_COLLAPSE = 32;
 const ESTIMATE_TAIL = 240;
+const FOLLOW_BOTTOM_THRESHOLD_PX = 30;
 export const VIRTUAL_SCROLL_THRESHOLD = 200;
+const SESSION_TIMELINE_MIN_VISIBLE_ENTRIES = 4;
 
 export function shouldUseVirtualScroll(
   totalCount: number,
@@ -662,27 +1443,645 @@ export function shouldUseVirtualScroll(
   return totalCount > threshold;
 }
 
-export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
-  function MessageList(
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds - minutes * 60;
+  return `${minutes}m ${seconds}s`;
+}
+
+function formatTokenCount(tokens: number): string {
+  return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : `${tokens}`;
+}
+
+type Translate = (
+  key: string,
+  vars?: Record<string, string | number>,
+) => string;
+
+function durationMetricText(elapsedMs: number | undefined): string {
+  return elapsedMs !== undefined ? formatDuration(elapsedMs) : '';
+}
+
+function tokenMetricText(collapse: TurnCollapseHead, t: Translate): string {
+  if (
+    collapse.inputTokens === undefined ||
+    collapse.outputTokens === undefined
+  ) {
+    return '';
+  }
+  const cachedTokens = collapse.cachedTokens ?? 0;
+  const cached =
+    cachedTokens > 0 && collapse.inputTokens > 0
+      ? ` (${formatTokenCount(cachedTokens)} ${t('turn.cached')}, ${Math.round(
+          (cachedTokens / collapse.inputTokens) * 100,
+        )}%)`
+      : '';
+  return `↑${formatTokenCount(collapse.inputTokens)}${cached} ↓${formatTokenCount(
+    collapse.outputTokens,
+  )}`;
+}
+
+function turnMetricsText(collapse: TurnCollapseHead, t: Translate): string {
+  const parts: string[] = [];
+  const tokenMetric = tokenMetricText(collapse, t);
+  if (tokenMetric) parts.push(tokenMetric);
+  if (collapse.toolCallCount !== undefined && collapse.toolCallCount > 0) {
+    parts.push(t('turn.toolCalls', { count: collapse.toolCallCount }));
+  }
+  if (collapse.thinkingCount !== undefined && collapse.thinkingCount > 0) {
+    parts.push(t('turn.thinkingCount', { count: collapse.thinkingCount }));
+  }
+  return parts.join(' · ');
+}
+
+function hasNonDurationMetrics(collapse: TurnCollapseHead): boolean {
+  return (
+    (collapse.inputTokens !== undefined &&
+      collapse.outputTokens !== undefined) ||
+    (collapse.toolCallCount !== undefined && collapse.toolCallCount > 0)
+  );
+}
+
+interface TurnCollapseRowProps {
+  turnCollapse: TurnCollapseHead;
+  onToggleCollapse: (turnId: string, nextExpanded: boolean) => void;
+}
+
+const TurnCollapseRow = memo(function TurnCollapseRow({
+  turnCollapse,
+  onToggleCollapse,
+}: TurnCollapseRowProps) {
+  const { t } = useI18n();
+  const hasToggle = turnCollapse.hiddenCount > 0;
+  const liveStartedAt = turnCollapse.liveStartedAt;
+  const showMetadataRow =
+    hasToggle ||
+    liveStartedAt !== undefined ||
+    hasNonDurationMetrics(turnCollapse);
+
+  const now = useSharedNow(liveStartedAt !== undefined && showMetadataRow);
+  const elapsedSeenRef = useRef(0);
+  const previousLiveStartedAtRef = useRef<number | undefined>(liveStartedAt);
+  if (previousLiveStartedAtRef.current !== liveStartedAt) {
+    previousLiveStartedAtRef.current = liveStartedAt;
+    elapsedSeenRef.current = 0;
+  }
+  let displayElapsedMs: number | undefined;
+  if (liveStartedAt !== undefined && showMetadataRow) {
+    elapsedSeenRef.current = Math.max(
+      elapsedSeenRef.current,
+      Math.max(0, now - liveStartedAt),
+    );
+    displayElapsedMs = elapsedSeenRef.current;
+  } else if (showMetadataRow && turnCollapse.elapsedMs !== undefined) {
+    elapsedSeenRef.current = 0;
+    displayElapsedMs = turnCollapse.elapsedMs;
+  } else {
+    elapsedSeenRef.current = 0;
+    displayElapsedMs = undefined;
+  }
+
+  const visibleMetrics = durationMetricText(displayElapsedMs);
+  const hiddenMetrics = turnMetricsText(turnCollapse, t);
+  const summaryMetrics = turnMetricsText(turnCollapse, t);
+  const statusLabel =
+    liveStartedAt !== undefined ? t('turn.processing') : t('turn.processed');
+  const showVisibleMetrics = !!visibleMetrics && showMetadataRow;
+  const showHiddenMetrics = !!hiddenMetrics && showMetadataRow;
+  const showSummaryMetrics = !!summaryMetrics && showMetadataRow;
+
+  if (!showMetadataRow) return null;
+  const toggleExpanded = () => {
+    if (!hasToggle) return;
+    const nextExpanded = turnCollapse.collapsed;
+    onToggleCollapse(turnCollapse.turnId, nextExpanded);
+  };
+
+  return (
+    <div
+      className={
+        hasToggle
+          ? `${turnCollapseStyles.collapseRow} ${turnCollapseStyles.collapseRowClickable}`
+          : turnCollapseStyles.collapseRow
+      }
+      role={hasToggle ? 'button' : undefined}
+      tabIndex={hasToggle ? 0 : undefined}
+      aria-expanded={hasToggle ? !turnCollapse.collapsed : undefined}
+      aria-label={
+        hasToggle
+          ? turnCollapse.collapsed
+            ? t('turn.expand')
+            : t('turn.collapse')
+          : undefined
+      }
+      title={
+        hasToggle
+          ? turnCollapse.collapsed
+            ? t('turn.expand')
+            : t('turn.collapse')
+          : undefined
+      }
+      onClick={hasToggle ? toggleExpanded : undefined}
+      onKeyDown={
+        hasToggle
+          ? (event) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return;
+              event.preventDefault();
+              toggleExpanded();
+            }
+          : undefined
+      }
+    >
+      <span className={turnCollapseStyles.collapseLabel}>
+        <span className={turnCollapseStyles.processedLabel}>
+          {statusLabel}
+          {showVisibleMetrics && (
+            <span className={turnCollapseStyles.processedMeta}>
+              {' '}
+              {visibleMetrics}
+            </span>
+          )}
+        </span>
+        {showSummaryMetrics && (
+          <span className={turnCollapseStyles.summaryMetrics}>
+            {summaryMetrics}
+          </span>
+        )}
+        {showHiddenMetrics && (
+          <span className={turnCollapseStyles.hiddenMetrics}>
+            {hiddenMetrics}
+          </span>
+        )}
+      </span>
+      {hasToggle && (
+        <span
+          data-testid={`toggle-${turnCollapse.turnId}`}
+          className={turnCollapseStyles.collapseIcon}
+          onClick={(event) => {
+            event.stopPropagation();
+            toggleExpanded();
+          }}
+        >
+          <span
+            className={
+              turnCollapse.collapsed
+                ? turnCollapseStyles.chevronRight
+                : turnCollapseStyles.chevronDown
+            }
+            aria-hidden="true"
+          />
+        </span>
+      )}
+    </div>
+  );
+});
+
+function getChatRowClassName(item: DisplayItem): string | undefined {
+  if (item.type === 'turn_collapse') return styles.turnStatusRow;
+  if (item.type === 'turn_content') {
+    return styles.turnContentRow;
+  }
+  if (item.type !== 'message') return undefined;
+  if (item.turnCollapse) return styles.turnAnswerRow;
+  return undefined;
+}
+
+const TurnContent = memo(function TurnContent({
+  collapsed,
+  children,
+}: {
+  collapsed: boolean;
+  children: ReactNode;
+}) {
+  const className = joinClassNames(
+    styles.turnContentClip,
+    collapsed ? styles.turnContentCollapsed : undefined,
+  );
+
+  return (
+    <div className={className} data-collapsed={collapsed ? 'true' : 'false'}>
+      <div className={styles.turnContentInner}>{children}</div>
+    </div>
+  );
+});
+
+const SESSION_TIMELINE_KIND_LABEL: Record<TurnTimelineNodeKind, string> = {
+  thought: 'thinking',
+  commentary: 'assistant update',
+  tool: 'tool calls',
+  agents: 'parallel agents',
+  plan: 'plan update',
+  status: 'status update',
+  none: 'turn',
+};
+
+type SessionTimelineTooltip = {
+  entry: SessionTimelineEntry;
+  top: number;
+  left: number;
+  clamped: boolean;
+  themeVars: CSSProperties;
+};
+
+const SESSION_TIMELINE_TOOLTIP_THEME_VARS = [
+  '--background',
+  '--foreground',
+  '--muted-foreground',
+  '--border',
+  '--font-sans',
+];
+
+const SESSION_TIMELINE_TOOLTIP_ID = 'session-timeline-detail-tooltip';
+
+const SessionTimeline = memo(function SessionTimeline({
+  entries,
+  currentTurnId,
+  currentRange,
+  hidden,
+  onSelect,
+}: {
+  entries: readonly SessionTimelineEntry[];
+  currentTurnId: string | null;
+  currentRange: SessionTimelineRange | null;
+  hidden: boolean;
+  onSelect: (turnId: string) => void;
+}) {
+  const { t } = useI18n();
+  const panelRef = useRef<HTMLElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const programmaticScrollRef = useRef(false);
+  const focusScrollGuardRef = useRef(false);
+  const focusScrollGuardFrameRef = useRef<number | null>(null);
+  const focusScrollGuardFallbackRef = useRef<number | null>(null);
+  const [tooltip, setTooltip] = useState<SessionTimelineTooltip | null>(null);
+
+  const currentIndex =
+    currentRange !== null
+      ? currentRange.currentIndex
+      : entries.findIndex((entry) => entry.id === currentTurnId);
+
+  const hideTooltip = useCallback(() => setTooltip(null), []);
+
+  const handleViewportScroll = useCallback(() => {
+    if (programmaticScrollRef.current || focusScrollGuardRef.current) return;
+    hideTooltip();
+  }, [hideTooltip]);
+
+  const buildTooltip = useCallback(
+    (entry: SessionTimelineEntry, el: HTMLElement) => {
+      const panel = panelRef.current;
+      if (!panel) return null;
+      const computedStyle = getComputedStyle(panel);
+      const rect = el.getBoundingClientRect();
+      return {
+        entry,
+        top: rect.top + rect.height / 2,
+        left: rect.right + 8,
+        clamped: false,
+        themeVars: Object.fromEntries(
+          SESSION_TIMELINE_TOOLTIP_THEME_VARS.map((name) => [
+            name,
+            computedStyle.getPropertyValue(name),
+          ]),
+        ) as CSSProperties,
+      };
+    },
+    [],
+  );
+
+  const findTooltipAnchor = useCallback((entry: SessionTimelineEntry) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return null;
+    const item = Array.from(
+      viewport.querySelectorAll<HTMLElement>(
+        '[data-testid="session-timeline-entry"]',
+      ),
+    ).find((node) => node.getAttribute('data-turn-id') === entry.id);
+    return item?.querySelector<HTMLButtonElement>('button') ?? null;
+  }, []);
+
+  const isTooltipAnchorVisible = useCallback((anchor: HTMLElement) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return false;
+    const viewportRect = viewport.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
+    return (
+      anchorRect.bottom >= viewportRect.top &&
+      anchorRect.top <= viewportRect.bottom
+    );
+  }, []);
+
+  const syncTooltip = useCallback(() => {
+    setTooltip((current) => {
+      if (!current) return null;
+      const anchor = findTooltipAnchor(current.entry);
+      if (!anchor || !isTooltipAnchorVisible(anchor)) return null;
+      return buildTooltip(current.entry, anchor);
+    });
+  }, [buildTooltip, findTooltipAnchor, isTooltipAnchorVisible]);
+
+  const showTooltip = useCallback(
+    (entry: SessionTimelineEntry, el: HTMLElement) => {
+      setTooltip(buildTooltip(entry, el));
+    },
+    [buildTooltip],
+  );
+
+  const guardFocusScroll = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    if (focusScrollGuardFrameRef.current !== null) {
+      window.cancelAnimationFrame(focusScrollGuardFrameRef.current);
+    }
+    if (focusScrollGuardFallbackRef.current !== null) {
+      window.clearTimeout(focusScrollGuardFallbackRef.current);
+    }
+    focusScrollGuardRef.current = true;
+    focusScrollGuardFrameRef.current = window.requestAnimationFrame(() => {
+      focusScrollGuardFrameRef.current = null;
+      focusScrollGuardRef.current = false;
+      syncTooltip();
+    });
+    focusScrollGuardFallbackRef.current = window.setTimeout(() => {
+      focusScrollGuardFallbackRef.current = null;
+      focusScrollGuardRef.current = false;
+    }, 100);
+  }, [syncTooltip]);
+
+  useLayoutEffect(() => {
+    if (hidden) return;
+    const viewport = viewportRef.current;
+    if (!viewport || currentIndex < 0) return;
+    const item = viewport.querySelector<HTMLElement>(
+      `[data-timeline-index="${currentIndex}"]`,
+    );
+    if (!item) return;
+    const itemCenter = item.offsetTop + item.offsetHeight / 2;
+    const maxScrollTop = viewport.scrollHeight - viewport.clientHeight;
+    const nextScrollTop = Math.max(
+      0,
+      Math.min(itemCenter - viewport.clientHeight / 2, maxScrollTop),
+    );
+    if (viewport.scrollTop === nextScrollTop) return;
+    programmaticScrollRef.current = true;
+    viewport.scrollTop = nextScrollTop;
+    const frame = window.requestAnimationFrame(() => {
+      programmaticScrollRef.current = false;
+      syncTooltip();
+    });
+    const fallback = window.setTimeout(() => {
+      programmaticScrollRef.current = false;
+    }, 100);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(fallback);
+      programmaticScrollRef.current = false;
+    };
+  }, [currentIndex, hidden, syncTooltip]);
+
+  useLayoutEffect(() => {
+    if (!tooltip || typeof window === 'undefined') return;
+    window.addEventListener('resize', syncTooltip);
+    return () => {
+      window.removeEventListener('resize', syncTooltip);
+    };
+  }, [syncTooltip, tooltip]);
+
+  useLayoutEffect(
+    () => () => {
+      if (focusScrollGuardFrameRef.current !== null) {
+        window.cancelAnimationFrame(focusScrollGuardFrameRef.current);
+      }
+      if (focusScrollGuardFallbackRef.current !== null) {
+        window.clearTimeout(focusScrollGuardFallbackRef.current);
+      }
+      focusScrollGuardRef.current = false;
+    },
+    [],
+  );
+
+  useLayoutEffect(() => {
+    if (!tooltip || tooltip.clamped) return;
+    const panel = panelRef.current;
+    const tooltipEl = tooltipRef.current;
+    if (!panel || !tooltipEl || typeof window === 'undefined') return;
+    const rect = tooltipEl.getBoundingClientRect();
+    const margin = 12;
+    let nextTop = tooltip.top;
+    if (rect.top < margin) {
+      nextTop += margin - rect.top;
+    } else if (rect.bottom > window.innerHeight - margin) {
+      nextTop -= rect.bottom - (window.innerHeight - margin);
+    }
+    if (nextTop === tooltip.top) return;
+    setTooltip((current) =>
+      current?.entry.id === tooltip.entry.id
+        ? { ...current, top: nextTop, clamped: true }
+        : current,
+    );
+  }, [tooltip]);
+
+  if (hidden || entries.length === 0) return null;
+
+  return (
+    <div className={styles.sessionTimelineLayer} aria-hidden="false">
+      <nav
+        ref={panelRef}
+        className={styles.sessionTimelinePanel}
+        aria-label={t('timeline.sessionTimeline')}
+        data-testid="session-timeline"
+        onMouseLeave={hideTooltip}
+      >
+        <div
+          ref={viewportRef}
+          className={styles.sessionTimelineViewport}
+          data-testid="session-timeline-viewport"
+          onScroll={handleViewportScroll}
+        >
+          <ol className={styles.sessionTimelineList}>
+            {entries.map((entry, index) => {
+              const isInCurrentRange =
+                currentRange !== null &&
+                index >= currentRange.startIndex &&
+                index <= currentRange.endIndex;
+              const isCurrent =
+                currentRange !== null
+                  ? index === currentRange.currentIndex
+                  : entry.id === currentTurnId;
+              const nodeKinds = entry.nodeKinds.join(',');
+              const ariaLabel = [
+                `${t('timeline.turnPrefix', { index: index + 1 })}: ${entry.label}`,
+                isCurrent ? t('timeline.currentTurn') : null,
+              ]
+                .filter(Boolean)
+                .join('. ');
+              const revealTooltip = (
+                event:
+                  | ReactMouseEvent<HTMLButtonElement>
+                  | ReactFocusEvent<HTMLButtonElement>,
+              ) => showTooltip(entry, event.currentTarget);
+              const revealFocusedTooltip = (
+                event: ReactFocusEvent<HTMLButtonElement>,
+              ) => {
+                guardFocusScroll();
+                showTooltip(entry, event.currentTarget);
+              };
+              const describedByTooltip = tooltip?.entry.id === entry.id;
+              return (
+                <li
+                  key={entry.id}
+                  className={styles.sessionTimelineItem}
+                  data-testid="session-timeline-entry"
+                  data-turn-id={entry.id}
+                  data-timeline-index={index}
+                  data-node-kinds={nodeKinds}
+                  data-in-current-range={isInCurrentRange ? 'true' : undefined}
+                >
+                  <button
+                    type="button"
+                    className={joinClassNames(
+                      styles.sessionTimelineButton,
+                      isInCurrentRange
+                        ? styles.sessionTimelineButtonInRange
+                        : undefined,
+                      isCurrent
+                        ? styles.sessionTimelineButtonCurrent
+                        : undefined,
+                    )}
+                    aria-current={isCurrent ? 'step' : undefined}
+                    aria-describedby={
+                      describedByTooltip
+                        ? SESSION_TIMELINE_TOOLTIP_ID
+                        : undefined
+                    }
+                    aria-label={ariaLabel}
+                    onClick={() => onSelect(entry.id)}
+                    onFocus={revealFocusedTooltip}
+                    onBlur={hideTooltip}
+                    onMouseEnter={revealTooltip}
+                    onMouseLeave={hideTooltip}
+                  >
+                    <span className={styles.sessionTimelineTick} />
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+        {tooltip &&
+          typeof document !== 'undefined' &&
+          createPortal(
+            <div
+              ref={tooltipRef}
+              className={styles.sessionTimelineDetails}
+              id={SESSION_TIMELINE_TOOLTIP_ID}
+              data-testid="session-timeline-detail"
+              data-title={tooltip.entry.label}
+              data-detail={tooltip.entry.detail}
+              data-scheduled-task={
+                tooltip.entry.isScheduledTask ? 'true' : undefined
+              }
+              role="tooltip"
+              style={{
+                ...tooltip.themeVars,
+                top: tooltip.top,
+                left: tooltip.left,
+              }}
+            >
+              <span className={styles.sessionTimelineDetailsTitle}>
+                {tooltip.entry.isScheduledTask && <TimelineClockIcon />}
+                <span className={styles.sessionTimelineDetailsTitleText}>
+                  {tooltip.entry.label}
+                </span>
+              </span>
+              <span className={styles.sessionTimelineDetailsDetail}>
+                {tooltip.entry.detail}
+              </span>
+            </div>,
+            document.body,
+          )}
+      </nav>
+    </div>
+  );
+});
+
+function joinClassNames(
+  ...classNames: Array<string | undefined>
+): string | undefined {
+  const result = classNames.filter(Boolean).join(' ');
+  return result || undefined;
+}
+
+const EMPTY_SESSION_TIMELINE_ENTRIES: SessionTimelineEntry[] = [];
+
+function LoadingTranscriptSkeleton({ label }: { label: string }) {
+  return (
+    <>
+      <div role="status" aria-live="polite" className={styles.srOnly}>
+        {label}
+      </div>
+      <div
+        className={styles.loadingSkeleton}
+        data-testid="message-list-loading-skeleton"
+        aria-hidden="true"
+      >
+        <div className={styles.loadingSkeletonUserRow}>
+          <div className={styles.loadingSkeletonUserBubble}>
+            <span className={styles.loadingSkeletonLineWide} />
+            <span className={styles.loadingSkeletonLineShort} />
+          </div>
+        </div>
+        <div className={styles.loadingSkeletonAssistantRow}>
+          <div className={styles.loadingSkeletonAssistantBlock}>
+            <span className={styles.loadingSkeletonLineMedium} />
+            <span className={styles.loadingSkeletonLineWide} />
+            <span className={styles.loadingSkeletonLineNarrow} />
+          </div>
+        </div>
+        <div className={styles.loadingSkeletonUserRow}>
+          <div className={styles.loadingSkeletonUserBubbleCompact}>
+            <span className={styles.loadingSkeletonLineMedium} />
+          </div>
+        </div>
+        <div className={styles.loadingSkeletonAssistantRow}>
+          <div className={styles.loadingSkeletonAssistantBlock}>
+            <span className={styles.loadingSkeletonLineWide} />
+            <span className={styles.loadingSkeletonLineMedium} />
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+export const MessageList = memo(
+  forwardRef<MessageListHandle, MessageListProps>(function MessageList(
     {
       messages,
       pendingApproval,
-      onConfirm,
       onShowContextDetail,
+      loadingTranscript,
       catchingUp,
       isResponding = false,
+      activeTurnStartedAt,
       welcomeHeader,
       workspaceCwd,
       tailContent,
       tailKey = 'tail',
       virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
-      shellOutputMaxLines,
       autoScrollTailIntoView = false,
+      bottomOverlayInset = 0,
+      hideSessionTimeline = false,
       showRetryHint = false,
       onRetryClick,
+      onBranchSession,
+      onCanScrollToBottomChange,
     },
     ref,
   ) {
+    const { t } = useI18n();
     const compactMode = useContext(CompactModeContext);
     const mergedMessages = useMemo(
       () =>
@@ -694,6 +2093,72 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const displayItems = useMemo(
       () => groupParallelAgents(mergedMessages),
       [mergedMessages],
+    );
+    const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
+      useState(false);
+    const sessionTimelineCache = useRef<{
+      signature: string;
+      t: typeof t;
+      entries: SessionTimelineEntry[];
+    } | null>(null);
+    // Signature + entries are O(transcript text); only pay for them while the
+    // rail can actually show (container >= 1160px — never on mobile).
+    const sessionTimelineEntries = useMemo(() => {
+      if (!isSessionTimelineVisible) return EMPTY_SESSION_TIMELINE_ENTRIES;
+      const signature = getSessionTimelineSignature(mergedMessages);
+      if (
+        sessionTimelineCache.current?.signature !== signature ||
+        sessionTimelineCache.current?.t !== t
+      ) {
+        sessionTimelineCache.current = {
+          signature,
+          t,
+          entries: getSessionTimelineEntries(mergedMessages, t),
+        };
+      }
+      return sessionTimelineCache.current.entries;
+    }, [isSessionTimelineVisible, mergedMessages, t]);
+    const sessionTimelineEntryIndexById = useMemo(
+      () =>
+        new Map(
+          sessionTimelineEntries.map((entry, index) => [entry.id, index]),
+        ),
+      [sessionTimelineEntries],
+    );
+    const fallbackCurrentTimelineTurnId = useMemo(
+      () => getLastTurnStartMessageId(mergedMessages),
+      [mergedMessages],
+    );
+    const [sessionTimelineRange, setSessionTimelineRange] =
+      useState<SessionTimelineRange | null>(null);
+    const currentTimelineTurnId =
+      sessionTimelineRange !== null
+        ? (sessionTimelineEntries[sessionTimelineRange.currentIndex]?.id ??
+          fallbackCurrentTimelineTurnId)
+        : fallbackCurrentTimelineTurnId;
+    const lastCompletedAssistantId = useMemo(() => {
+      if (isResponding) return null;
+      for (let i = mergedMessages.length - 1; i >= 0; i -= 1) {
+        const message = mergedMessages[i];
+        if (
+          message &&
+          (message.role === 'tool_group' || message.role === 'plan')
+        ) {
+          return null;
+        }
+        if (
+          message?.role === 'assistant' &&
+          !message.isStreaming &&
+          message.content?.trim()
+        ) {
+          return message.id;
+        }
+      }
+      return null;
+    }, [isResponding, mergedMessages]);
+    const finalAssistantIdsByTurn = useMemo(
+      () => collectFinalAssistantIdsByTurn(displayItems, isResponding),
+      [displayItems, isResponding],
     );
 
     // ── Per-turn collapse ────────────────────────────────────────────────
@@ -708,23 +2173,70 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const [collapseOverrides, setCollapseOverrides] = useState<
       ReadonlyMap<string, boolean>
     >(() => new Map());
-    const handleToggleCollapse = useCallback((turnId: string) => {
-      // (Un)folding a turn is the user reading history, not following the tail.
-      // Pause follow so the height change does not yank the viewport to the
-      // bottom — the toggled prompt row stays where it is on screen.
-      shouldFollow.current = false;
-      setCollapseOverrides((prev) => {
-        const currentlyExpanded = prev.get(turnId) ?? false;
-        const next = new Map(prev);
-        next.set(turnId, !currentlyExpanded);
-        return next;
-      });
-    }, []);
+    const shouldFollow = useRef(true);
+    const followPausedByUserRef = useRef(false);
+    const userScrollIntentUntil = useRef(0);
+    const lastScrollTop = useRef(0);
+    const scrollCooldown = useRef(false);
+    const scrollCooldownCount = useRef(0);
+    const sessionTimelineFrame = useRef<number | null>(null);
+    const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
+    const didTrackLastUserMsgRef = useRef(false);
+    const prevLastUserMsgId = useRef<string | null>(null);
+    const pendingNewUserSmoothScroll = useRef(false);
+    const prevLoadingTranscript = useRef(loadingTranscript);
+    const pendingTranscriptBottomScroll = useRef(Boolean(loadingTranscript));
+    const transcriptBottomScrollFrame = useRef<number | undefined>(undefined);
+    const transcriptBottomScrollSettleFrame = useRef<number | undefined>(
+      undefined,
+    );
+    const prevBottomOverlayInset = useRef(bottomOverlayInset);
+    const prevActiveExecutionKey = useRef<string | null>(null);
+    const prevCatchingUp: MutableRefObject<boolean | undefined> =
+      useRef(catchingUp);
+    const catchingUpRef = useRef(catchingUp);
+    const prevHasTailContent = useRef(false);
+    const pendingFollowRecheck = useRef(false);
+    const pendingFollowRecheckFrame = useRef<number | undefined>(undefined);
+    const pendingFollowRecheckTimer = useRef<number | undefined>(undefined);
+    const pendingOverflowFrame = useRef<number | undefined>(undefined);
+    catchingUpRef.current = catchingUp;
+    const containerRef = useRef<HTMLDivElement>(null);
+
+    const reportCanScrollToBottom = useCallback(() => {
+      const el = containerRef.current;
+      const distanceFromBottom = el
+        ? el.scrollHeight - el.scrollTop - el.clientHeight
+        : 0;
+      const canScrollToBottom = !shouldFollow.current && distanceFromBottom > 1;
+      if (lastReportedCanScrollToBottom.current === canScrollToBottom) return;
+      lastReportedCanScrollToBottom.current = canScrollToBottom;
+      onCanScrollToBottomChange?.(canScrollToBottom);
+    }, [onCanScrollToBottomChange]);
+
+    const scheduleScrollOverflowReport = useCallback(() => {
+      if (pendingOverflowFrame.current !== undefined) {
+        window.cancelAnimationFrame(pendingOverflowFrame.current);
+      }
+      pendingOverflowFrame.current = window.requestAnimationFrame(
+        reportCanScrollToBottom,
+      );
+    }, [reportCanScrollToBottom]);
+
+    const setShouldFollow = useCallback(
+      (value: boolean) => {
+        if (shouldFollow.current === value) return;
+        shouldFollow.current = value;
+        scheduleScrollOverflowReport();
+      },
+      [scheduleScrollOverflowReport],
+    );
     const visibleItems = useMemo(
       () =>
         applyTurnCollapse(displayItems, {
           overrides: collapseOverrides,
           isResponding,
+          activeTurnStartedAt,
           pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
           enabled: collapseEnabled,
         }),
@@ -732,12 +2244,42 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         displayItems,
         collapseOverrides,
         isResponding,
+        activeTurnStartedAt,
         pendingApproval?.toolCallId,
         collapseEnabled,
       ],
     );
+    const visibleTurnIdByDisplayIndex = useMemo(
+      () => getTurnIdByDisplayIndex(visibleItems),
+      [visibleItems],
+    );
 
-    const containerRef = useRef<HTMLDivElement>(null);
+    const hasEnoughSessionTimelineEntries =
+      sessionTimelineEntries.length >= SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
+
+    useLayoutEffect(() => {
+      if (hideSessionTimeline) {
+        setIsSessionTimelineVisible((prev) => (prev ? false : prev));
+        return;
+      }
+
+      const el = containerRef.current;
+      if (!el) return;
+
+      const updateVisibility = () => {
+        const width = el.getBoundingClientRect().width;
+        const nextVisible = width >= 1160;
+        setIsSessionTimelineVisible((prev) =>
+          prev === nextVisible ? prev : nextVisible,
+        );
+      };
+
+      updateVisibility();
+      if (typeof ResizeObserver === 'undefined') return;
+      const observer = new ResizeObserver(updateVisibility);
+      observer.observe(el);
+      return () => observer.disconnect();
+    }, [hideSessionTimeline]);
 
     // ── Scroll-follow state ──────────────────────────────────────────────
     //
@@ -753,7 +2295,8 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     //      Even if the model is still streaming, the viewport stays put.
     //
     //   3. Scroll-back-to-bottom resumes — when the user scrolls back
-    //      near the bottom (< 30px from edge), follow mode re-engages
+    //      near the bottom (within FOLLOW_BOTTOM_THRESHOLD_PX), follow mode
+    //      re-engages
     //      and new content resumes sticking.
     //
     //   4. New message resets follow — after the user sends a message,
@@ -784,42 +2327,118 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     // appearance — flows through this one effect.
     // ─────────────────────────────────────────────────────────────────────
 
-    const shouldFollow = useRef(true);
-    const lastScrollTop = useRef(0);
-    const scrollCooldown = useRef(false);
-    const scrollCooldownCount = useRef(0);
-    const prevLastUserMsgId = useRef<string | null>(null);
-    const prevCatchingUp: MutableRefObject<boolean | undefined> =
-      useRef(catchingUp);
-    const catchingUpRef = useRef(catchingUp);
-    const prevHasTailContent = useRef(false);
-    catchingUpRef.current = catchingUp;
-
-    const hasTailApproval = useMemo(() => {
-      if (!pendingApproval) return false;
-      if (isAskUserQuestion(pendingApproval)) return true;
-      return !approvalMatchesToolGroup(messages, pendingApproval);
-    }, [pendingApproval, messages]);
-
     const hasTailContent = tailContent !== undefined && tailContent !== null;
+    const showLoadingSkeleton = Boolean(loadingTranscript);
     const hasHeader = !!welcomeHeader;
     const headerOffset = hasHeader ? 1 : 0;
-    const tailApprovalIndex = headerOffset + visibleItems.length;
-    const tailContentIndex = tailApprovalIndex + (hasTailApproval ? 1 : 0);
+    const tailContentIndex = headerOffset + visibleItems.length;
     const totalCount = tailContentIndex + (hasTailContent ? 1 : 0);
     const useVirtualScroll = shouldUseVirtualScroll(
       totalCount,
       virtualScrollThreshold,
     );
+    const getScrollElement = useCallback((): HTMLElement | null => {
+      return containerRef.current;
+    }, []);
+
+    const recheckFollowFromScrollGeometry = useCallback(() => {
+      const el = containerRef.current;
+      if (!el) return;
+      const distanceFromBottom =
+        el.scrollHeight - el.scrollTop - el.clientHeight;
+      const isNearBottom = distanceFromBottom < FOLLOW_BOTTOM_THRESHOLD_PX;
+      followPausedByUserRef.current = !isNearBottom;
+      setShouldFollow(isNearBottom);
+      scheduleScrollOverflowReport();
+    }, [scheduleScrollOverflowReport, setShouldFollow]);
+
+    const markUserScrollIntent = useCallback(() => {
+      userScrollIntentUntil.current = Date.now() + 1000;
+    }, []);
+
+    const scheduleFollowRecheck = useCallback(() => {
+      pendingFollowRecheck.current = true;
+      if (pendingFollowRecheckFrame.current !== undefined) {
+        window.cancelAnimationFrame(pendingFollowRecheckFrame.current);
+      }
+      if (pendingFollowRecheckTimer.current !== undefined) {
+        window.clearTimeout(pendingFollowRecheckTimer.current);
+      }
+      pendingFollowRecheckFrame.current = window.requestAnimationFrame(
+        recheckFollowFromScrollGeometry,
+      );
+      // Turn content uses a 180ms grid transition. The real scrollHeight can
+      // cross the overflow threshold only after the animation advances, so do a
+      // final geometry read once the expansion has settled.
+      pendingFollowRecheckTimer.current = window.setTimeout(() => {
+        pendingFollowRecheck.current = false;
+        pendingFollowRecheckFrame.current = undefined;
+        pendingFollowRecheckTimer.current = undefined;
+        recheckFollowFromScrollGeometry();
+      }, 220);
+    }, [recheckFollowFromScrollGeometry]);
+
+    useEffect(
+      () => () => {
+        if (pendingFollowRecheckFrame.current !== undefined) {
+          window.cancelAnimationFrame(pendingFollowRecheckFrame.current);
+        }
+        if (pendingFollowRecheckTimer.current !== undefined) {
+          window.clearTimeout(pendingFollowRecheckTimer.current);
+        }
+        if (pendingOverflowFrame.current !== undefined) {
+          window.cancelAnimationFrame(pendingOverflowFrame.current);
+        }
+        if (transcriptBottomScrollFrame.current !== undefined) {
+          window.cancelAnimationFrame(transcriptBottomScrollFrame.current);
+        }
+        if (transcriptBottomScrollSettleFrame.current !== undefined) {
+          window.cancelAnimationFrame(
+            transcriptBottomScrollSettleFrame.current,
+          );
+        }
+      },
+      [],
+    );
+
+    const handleToggleCollapse = useCallback(
+      (turnId: string, nextExpanded: boolean) => {
+        // Expanding/collapsing a turn is an explicit reading action. Pause
+        // follow so streaming output does not yank the viewport back to the
+        // tail while the user is inspecting history.
+        const el = containerRef.current;
+        // If there is no scrollbar yet, there is no meaningful "not at
+        // bottom" state to report. The toggle may create overflow though, so
+        // re-check after the expanded/collapsed rows have been laid out.
+        if (!el || el.scrollHeight > el.clientHeight + 1) {
+          followPausedByUserRef.current = true;
+          setShouldFollow(false);
+        }
+        scheduleFollowRecheck();
+        setCollapseOverrides((prev) => {
+          const next = new Map(prev);
+          next.set(turnId, nextExpanded);
+          return next;
+        });
+      },
+      [scheduleFollowRecheck, setShouldFollow],
+    );
+
+    const handleDisclosureClickCapture = useCallback(
+      (event: ReactMouseEvent<HTMLDivElement>) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        if (!target.closest('[aria-expanded]')) return;
+        followPausedByUserRef.current = true;
+        setShouldFollow(false);
+        scheduleFollowRecheck();
+      },
+      [scheduleFollowRecheck, setShouldFollow],
+    );
 
     const getItemKey = useCallback(
       (index: number) => {
         if (hasHeader && index === HEADER_INDEX) return 'slot:header';
-        if (hasTailApproval && index === tailApprovalIndex) {
-          return pendingApproval
-            ? `slot:approval:${pendingApproval.id}`
-            : 'slot:approval';
-        }
         if (hasTailContent && index === tailContentIndex) {
           return `slot:tail:${tailKey}`;
         }
@@ -828,9 +2447,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       },
       [
         hasHeader,
-        hasTailApproval,
-        tailApprovalIndex,
-        pendingApproval,
         hasTailContent,
         tailContentIndex,
         tailKey,
@@ -840,52 +2456,197 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     );
 
     // Rule 6: skip if content doesn't overflow (no scrollbar).
-    const scrollToBottom = useCallback(() => {
-      const el = containerRef.current;
-      if (!el) return;
-      if (el.scrollHeight <= el.clientHeight) return;
-      scrollCooldownCount.current += 1;
-      const gen = scrollCooldownCount.current;
-      scrollCooldown.current = true;
-      el.scrollTop = el.scrollHeight;
-      lastScrollTop.current = el.scrollTop;
-      requestAnimationFrame(() => {
-        if (scrollCooldownCount.current === gen) {
-          scrollCooldown.current = false;
+    const scrollToBottom = useCallback(
+      (behavior: ScrollBehavior = 'auto') => {
+        const el = getScrollElement();
+        if (!el) return;
+        if (el.scrollHeight <= el.clientHeight) return;
+        scrollCooldownCount.current += 1;
+        const gen = scrollCooldownCount.current;
+        scrollCooldown.current = true;
+        if (behavior === 'smooth') {
+          el.scrollTo({ top: el.scrollHeight, behavior });
+        } else {
+          el.scrollTop = el.scrollHeight;
         }
-      });
-    }, []);
+        scheduleScrollOverflowReport();
+        lastScrollTop.current = Math.max(0, el.scrollHeight - el.clientHeight);
+        reportCanScrollToBottom();
+        const releaseCooldown = () => {
+          if (scrollCooldownCount.current === gen) {
+            scrollCooldown.current = false;
+          }
+        };
+        if (behavior === 'smooth') {
+          setTimeout(releaseCooldown, 350);
+        } else {
+          requestAnimationFrame(releaseCooldown);
+        }
+      },
+      [getScrollElement, reportCanScrollToBottom, scheduleScrollOverflowReport],
+    );
+
+    const resumeBottomFollow = useCallback(
+      (behavior: ScrollBehavior = 'smooth') => {
+        followPausedByUserRef.current = false;
+        setShouldFollow(true);
+        scrollToBottom(behavior);
+      },
+      [scrollToBottom, setShouldFollow],
+    );
 
     const virtualizer = useVirtualizer({
       count: totalCount,
       enabled: useVirtualScroll,
-      getScrollElement: () => containerRef.current,
+      getScrollElement,
       getItemKey,
       estimateSize: (index) => {
         if (hasHeader && index === HEADER_INDEX) return ESTIMATE_HEADER;
-        if (hasTailApproval && index === tailApprovalIndex) {
-          return ESTIMATE_APPROVAL;
-        }
         if (hasTailContent && index === tailContentIndex) return ESTIMATE_TAIL;
+        const item = visibleItems[index - headerOffset];
+        if (item?.type === 'turn_collapse') return ESTIMATE_TURN_COLLAPSE;
+        if (item?.type === 'turn_content') {
+          return Math.max(
+            ESTIMATE_MESSAGE,
+            item.items.length * ESTIMATE_MESSAGE,
+          );
+        }
         return ESTIMATE_MESSAGE;
       },
       overscan: 20,
       useFlushSync: false,
       useAnimationFrameWithResizeObserver: true,
     });
+    const virtualItems = virtualizer.getVirtualItems();
+    const totalVirtualSize = virtualizer.getTotalSize();
+    const sessionTimelineRangeState = useRef<{
+      entryIndexById: ReadonlyMap<string, number>;
+      headerOffset: number;
+      isVisible: boolean;
+      turnIdByDisplayIndex: readonly (string | null)[];
+      visibleItems: readonly DisplayItem[];
+    }>({
+      entryIndexById: new Map(),
+      headerOffset: 0,
+      isVisible: false,
+      turnIdByDisplayIndex: [],
+      visibleItems: [],
+    });
+    sessionTimelineRangeState.current = {
+      entryIndexById: sessionTimelineEntryIndexById,
+      headerOffset,
+      isVisible: isSessionTimelineVisible,
+      turnIdByDisplayIndex: visibleTurnIdByDisplayIndex,
+      visibleItems,
+    };
+
+    const updateSessionTimelineRange = useCallback(() => {
+      const el = getScrollElement();
+      const state = sessionTimelineRangeState.current;
+      if (!el || !state.isVisible || state.entryIndexById.size === 0) {
+        setSessionTimelineRange((prev) => (prev === null ? prev : null));
+        return;
+      }
+
+      const viewportRect = el.getBoundingClientRect();
+      const viewportTop = viewportRect.top;
+      const viewportBottom = viewportRect.bottom;
+      const viewportCenter = viewportTop + (viewportBottom - viewportTop) / 2;
+      const visibleItemIndexes: number[] = [];
+      let currentItemIndex: number | null = null;
+      let closestDistance = Number.POSITIVE_INFINITY;
+
+      el.querySelectorAll<HTMLElement>('[data-index]').forEach((row) => {
+        const rawIndex = row.dataset.index;
+        if (rawIndex === undefined) return;
+        const rowIndex = Number(rawIndex);
+        if (!Number.isFinite(rowIndex)) return;
+        const visibleItemIndex = rowIndex - state.headerOffset;
+        if (
+          visibleItemIndex < 0 ||
+          visibleItemIndex >= state.visibleItems.length
+        ) {
+          return;
+        }
+
+        const rowRect = row.getBoundingClientRect();
+        if (rowRect.bottom < viewportTop || rowRect.top > viewportBottom) {
+          return;
+        }
+
+        visibleItemIndexes.push(visibleItemIndex);
+        const rowCenter = rowRect.top + (rowRect.bottom - rowRect.top) / 2;
+        const distance = Math.abs(rowCenter - viewportCenter);
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          currentItemIndex = visibleItemIndex;
+        }
+      });
+
+      const next = getSessionTimelineRangeForIndexes(
+        state.visibleItems,
+        visibleItemIndexes,
+        state.entryIndexById,
+        currentItemIndex,
+        state.turnIdByDisplayIndex,
+      );
+      setSessionTimelineRange((prev) => {
+        if (
+          prev?.startIndex === next?.startIndex &&
+          prev?.endIndex === next?.endIndex &&
+          prev?.currentIndex === next?.currentIndex
+        ) {
+          return prev;
+        }
+        return next;
+      });
+    }, [getScrollElement]);
+
+    const scheduleSessionTimelineRangeUpdate = useCallback(() => {
+      if (sessionTimelineFrame.current !== null) {
+        cancelAnimationFrame(sessionTimelineFrame.current);
+      }
+      sessionTimelineFrame.current = requestAnimationFrame(() => {
+        sessionTimelineFrame.current = null;
+        updateSessionTimelineRange();
+      });
+    }, [updateSessionTimelineRange]);
+
+    useEffect(
+      () => () => {
+        if (sessionTimelineFrame.current !== null) {
+          cancelAnimationFrame(sessionTimelineFrame.current);
+          sessionTimelineFrame.current = null;
+        }
+      },
+      [],
+    );
+
+    useEffect(() => {
+      scheduleSessionTimelineRangeUpdate();
+    }, [
+      scheduleSessionTimelineRangeUpdate,
+      totalCount,
+      totalVirtualSize,
+      useVirtualScroll,
+      virtualItems.length,
+      isSessionTimelineVisible,
+    ]);
 
     // Imperative scroll-to-message (e.g. the floating TodoPanel's "show in
-    // transcript" button) with a brief highlight on the target row.
-    const [flashKey, setFlashKey] = useState<string | null>(null);
+    // transcript" button) with a brief highlight on the target message.
+    const [flashTarget, setFlashTarget] = useState<LocateFlashTarget | null>(
+      null,
+    );
     useEffect(() => {
-      if (!flashKey) return;
-      const timer = setTimeout(() => setFlashKey(null), 1600);
+      if (!flashTarget) return;
+      const timer = setTimeout(() => setFlashTarget(null), 1600);
       return () => clearTimeout(timer);
-    }, [flashKey]);
+    }, [flashTarget]);
 
-    // Scroll a visible row to center and flash it.
+    // Scroll a visible row to center and flash the target message inside it.
     const performScrollToRow = useCallback(
-      (rowIndex: number) => {
+      (rowIndex: number, target: LocateFlashTarget) => {
         // Explicit navigation away from the tail — pause follow so the
         // auto-scroll driver doesn't yank the viewport straight back down,
         // and engage the same cooldown scrollToBottom uses so the scroll
@@ -894,7 +2655,8 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         // target sits near the bottom, and the next streaming height change
         // would pull the viewport back to the tail. An instant (non-smooth)
         // scroll keeps that cooldown window short and deterministic.
-        shouldFollow.current = false;
+        followPausedByUserRef.current = true;
+        setShouldFollow(false);
         scrollCooldownCount.current += 1;
         const gen = scrollCooldownCount.current;
         scrollCooldown.current = true;
@@ -910,32 +2672,70 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         setTimeout(() => {
           if (scrollCooldownCount.current === gen) {
             scrollCooldown.current = false;
+            scheduleSessionTimelineRangeUpdate();
+            scheduleScrollOverflowReport();
           }
         }, 150);
-        const key = getItemKey(rowIndex);
-        setFlashKey(null);
-        requestAnimationFrame(() => setFlashKey(key));
+        setFlashTarget(null);
+        requestAnimationFrame(() => setFlashTarget(target));
       },
-      [useVirtualScroll, virtualizer, getItemKey],
+      [
+        useVirtualScroll,
+        virtualizer,
+        setShouldFollow,
+        scheduleSessionTimelineRangeUpdate,
+        scheduleScrollOverflowReport,
+      ],
     );
+
+    const scrollToMessageState = useRef<{
+      visibleItems: readonly DisplayItem[];
+      displayItems: readonly DisplayItem[];
+      headerOffset: number;
+      performScrollToRow: (rowIndex: number, target: LocateFlashTarget) => void;
+    }>({
+      visibleItems: [],
+      displayItems: [],
+      headerOffset: 0,
+      performScrollToRow: () => {},
+    });
+    scrollToMessageState.current = {
+      visibleItems,
+      displayItems,
+      headerOffset,
+      performScrollToRow,
+    };
 
     // A scroll target that currently sits inside a collapsed turn: expand the
     // turn, then finish the scroll once its rows materialize in `visibleItems`.
-    const pendingScrollRef = useRef<{
-      messageId: string;
-      callId?: string;
-    } | null>(null);
+    const pendingScrollRef = useRef<LocateFlashTarget | null>(null);
 
     const scrollToMessage = useCallback(
       (messageId: string, callId?: string): boolean => {
+        const { visibleItems, displayItems, headerOffset, performScrollToRow } =
+          scrollToMessageState.current;
         const visibleIndex = findDisplayItemIndex(
           visibleItems,
           messageId,
           callId,
         );
         if (visibleIndex >= 0) {
+          const visibleItem = visibleItems[visibleIndex];
+          if (visibleItem?.type === 'turn_content' && visibleItem.collapsed) {
+            pendingScrollRef.current = { messageId, callId };
+            setCollapseOverrides((prev) => {
+              if (prev.get(visibleItem.turnId) === true) return prev;
+              const next = new Map(prev);
+              next.set(visibleItem.turnId, true);
+              return next;
+            });
+            return true;
+          }
           pendingScrollRef.current = null;
-          performScrollToRow(visibleIndex + headerOffset);
+          performScrollToRow(visibleIndex + headerOffset, {
+            messageId,
+            callId,
+          });
           return true;
         }
         // Not on screen — it may be folded inside a collapsed turn. Locate it
@@ -953,10 +2753,14 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         });
         return true;
       },
-      [visibleItems, displayItems, headerOffset, performScrollToRow],
+      [],
     );
 
-    useImperativeHandle(ref, () => ({ scrollToMessage }), [scrollToMessage]);
+    useImperativeHandle(
+      ref,
+      () => ({ scrollToMessage, scrollToBottom: resumeBottomFollow }),
+      [scrollToMessage, resumeBottomFollow],
+    );
 
     // Flush a deferred scroll once the expanded turn's rows are visible.
     useEffect(() => {
@@ -969,47 +2773,142 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       );
       if (idx < 0) return;
       pendingScrollRef.current = null;
-      performScrollToRow(idx + headerOffset);
+      performScrollToRow(idx + headerOffset, pending);
     }, [visibleItems, headerOffset, performScrollToRow]);
 
     // Rules 2 & 3: detect scroll direction to toggle follow mode.
     // Runs synchronously in the scroll handler — no rAF needed since
     // the browser already coalesces scroll events.
     const handleScroll = useCallback(() => {
-      const el = containerRef.current;
+      const el = getScrollElement();
       if (!el) return;
       if (scrollCooldown.current) {
         lastScrollTop.current = el.scrollTop;
         return;
       }
+      scheduleSessionTimelineRangeUpdate();
       const prev = lastScrollTop.current;
       const curr = el.scrollTop;
       lastScrollTop.current = curr;
       const distanceFromBottom = el.scrollHeight - curr - el.clientHeight;
+      scheduleScrollOverflowReport();
 
       // Rule 2: scrolling up → pause follow
       if (curr < prev - 1) {
-        shouldFollow.current = false;
+        // Container resizes can clamp scrollTop downward while the viewport is
+        // still at the tail. Treat that as follow mode, not a manual scroll-up.
+        const isNearBottom = distanceFromBottom < FOLLOW_BOTTOM_THRESHOLD_PX;
+        const hasUserScrollIntent = Date.now() <= userScrollIntentUntil.current;
+        if (isNearBottom) {
+          followPausedByUserRef.current = false;
+          setShouldFollow(true);
+        } else if (hasUserScrollIntent) {
+          followPausedByUserRef.current = true;
+          setShouldFollow(false);
+        } else if (!followPausedByUserRef.current) {
+          setShouldFollow(false);
+        }
+        return;
       }
       // Rule 3: near bottom → resume follow
-      // (runs unconditionally so that container-resize-induced scrollTop
-      // clamping — which looks like scrolling up — doesn't permanently
-      // disable follow when the viewport is still near the bottom)
-      if (distanceFromBottom < 30) {
-        shouldFollow.current = true;
+      // Run only after non-upward scrolls. Otherwise a tiny wheel-up near the
+      // tail would pause follow and immediately re-enable it in the same event.
+      if (distanceFromBottom < FOLLOW_BOTTOM_THRESHOLD_PX) {
+        followPausedByUserRef.current = false;
+        setShouldFollow(true);
       }
-    }, []);
+    }, [
+      getScrollElement,
+      scheduleScrollOverflowReport,
+      scheduleSessionTimelineRangeUpdate,
+      setShouldFollow,
+    ]);
+
+    useEffect(() => {
+      const el = getScrollElement();
+      if (!el) return;
+      el.addEventListener('scroll', handleScroll, { passive: true });
+      return () => el.removeEventListener('scroll', handleScroll);
+    }, [getScrollElement, handleScroll]);
+
+    useEffect(() => {
+      const el = getScrollElement();
+      if (!el) return;
+      const markFromPointer = (event: PointerEvent) => {
+        const rect = el.getBoundingClientRect();
+        const scrollbarEdge = 20;
+        if (
+          event.clientX >= rect.right - scrollbarEdge ||
+          event.clientY >= rect.bottom - scrollbarEdge
+        ) {
+          markUserScrollIntent();
+        }
+      };
+      const markFromKey = (event: KeyboardEvent) => {
+        if (
+          event.key === 'ArrowUp' ||
+          event.key === 'ArrowDown' ||
+          event.key === 'PageUp' ||
+          event.key === 'PageDown' ||
+          event.key === 'Home' ||
+          event.key === 'End' ||
+          event.key === ' '
+        ) {
+          markUserScrollIntent();
+        }
+      };
+      el.addEventListener('wheel', markUserScrollIntent, { passive: true });
+      el.addEventListener('touchstart', markUserScrollIntent, {
+        passive: true,
+      });
+      el.addEventListener('pointerdown', markFromPointer, { passive: true });
+      el.addEventListener('keydown', markFromKey, { passive: true });
+      return () => {
+        el.removeEventListener('wheel', markUserScrollIntent);
+        el.removeEventListener('touchstart', markUserScrollIntent);
+        el.removeEventListener('pointerdown', markFromPointer);
+        el.removeEventListener('keydown', markFromKey);
+      };
+    }, [getScrollElement, markUserScrollIntent]);
+
+    useEffect(() => {
+      const el = getScrollElement();
+      if (!el || typeof ResizeObserver === 'undefined') return;
+      const observer = new ResizeObserver(scheduleScrollOverflowReport);
+      observer.observe(el);
+      for (const child of Array.from(el.children)) {
+        observer.observe(child);
+      }
+      const mutationObserver = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+          for (const node of Array.from(mutation.addedNodes)) {
+            if (node instanceof HTMLElement) observer.observe(node);
+          }
+          for (const node of Array.from(mutation.removedNodes)) {
+            if (node instanceof HTMLElement) observer.unobserve(node);
+          }
+        }
+        scheduleScrollOverflowReport();
+      });
+      mutationObserver.observe(el, { childList: true });
+      scheduleScrollOverflowReport();
+      return () => {
+        observer.disconnect();
+        mutationObserver.disconnect();
+      };
+    }, [getScrollElement, scheduleScrollOverflowReport]);
 
     // Clear screen (e.g. /clear) → reset to follow mode, drop stale per-turn
     // collapse overrides, and disarm any deferred scroll so it can't fire
     // against the next session.
     useEffect(() => {
       if (messages.length === 0) {
-        shouldFollow.current = true;
+        followPausedByUserRef.current = false;
+        setShouldFollow(true);
         pendingScrollRef.current = null;
         setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
       }
-    }, [messages.length]);
+    }, [messages.length, setShouldFollow]);
 
     // Container-resize guard: when floating panels (e.g. TodoPanel)
     // appear or disappear the scroll container's clientHeight changes.
@@ -1019,45 +2918,151 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       const el = containerRef.current;
       if (!el) return;
       const observer = new ResizeObserver(() => {
+        scheduleSessionTimelineRangeUpdate();
         if (catchingUpRef.current) return;
-        if (!shouldFollow.current) return;
+        if (followPausedByUserRef.current) return;
+        setShouldFollow(true);
         requestAnimationFrame(() => {
-          if (!catchingUpRef.current && shouldFollow.current) {
+          if (!catchingUpRef.current && !followPausedByUserRef.current) {
             scrollToBottom();
           }
         });
       });
       observer.observe(el);
       return () => observer.disconnect();
-    }, [scrollToBottom]);
+    }, [scrollToBottom, scheduleSessionTimelineRangeUpdate, setShouldFollow]);
 
     // Rule 4: new user message → force follow on so the model's reply
     // scrolls into view as it streams in.
-    useEffect(() => {
+    useLayoutEffect(() => {
       const lastId = getLastUserMessageId(messages);
-      if (catchingUp) {
+      if (catchingUp || loadingTranscript || prevLoadingTranscript.current) {
         prevLastUserMsgId.current = lastId;
+        didTrackLastUserMsgRef.current = true;
+        pendingNewUserSmoothScroll.current = false;
+        prevLoadingTranscript.current = loadingTranscript;
         return;
       }
-      if (lastId && lastId !== prevLastUserMsgId.current) {
-        shouldFollow.current = true;
+      prevLoadingTranscript.current = loadingTranscript;
+      if (!didTrackLastUserMsgRef.current) {
+        prevLastUserMsgId.current = lastId;
+        didTrackLastUserMsgRef.current = true;
+        pendingNewUserSmoothScroll.current = false;
+        return;
+      }
+      const lastMessage = getLastMessage(messages);
+      if (
+        lastId &&
+        lastMessage?.role === 'user' &&
+        lastId !== prevLastUserMsgId.current
+      ) {
+        followPausedByUserRef.current = false;
+        setShouldFollow(true);
         // A new prompt supersedes any pending "Show in transcript" scroll.
         pendingScrollRef.current = null;
-        requestAnimationFrame(scrollToBottom);
+        pendingNewUserSmoothScroll.current = true;
+      } else {
+        pendingNewUserSmoothScroll.current = false;
       }
       prevLastUserMsgId.current = lastId;
-    }, [messages, catchingUp, scrollToBottom]);
+    }, [messages, catchingUp, loadingTranscript, setShouldFollow]);
 
     // Rule 5: session restore — when catchingUp flips from true → falsy,
     // replay just finished. Scroll to bottom once so the user sees the
     // latest content without the viewport fighting the replay.
-    useEffect(() => {
+    useLayoutEffect(() => {
       if (prevCatchingUp.current && !catchingUp) {
-        shouldFollow.current = true;
-        requestAnimationFrame(scrollToBottom);
+        followPausedByUserRef.current = false;
+        setShouldFollow(true);
+        scrollToBottom('auto');
       }
       prevCatchingUp.current = catchingUp;
-    }, [catchingUp, scrollToBottom]);
+    }, [catchingUp, scrollToBottom, setShouldFollow]);
+
+    useLayoutEffect(() => {
+      if (loadingTranscript) {
+        pendingTranscriptBottomScroll.current = true;
+        return;
+      }
+      if (!pendingTranscriptBottomScroll.current) return;
+      if (catchingUp || messages.length === 0) return;
+
+      pendingTranscriptBottomScroll.current = false;
+      followPausedByUserRef.current = false;
+      setShouldFollow(true);
+      pendingScrollRef.current = null;
+
+      if (transcriptBottomScrollFrame.current !== undefined) {
+        window.cancelAnimationFrame(transcriptBottomScrollFrame.current);
+      }
+      if (transcriptBottomScrollSettleFrame.current !== undefined) {
+        window.cancelAnimationFrame(transcriptBottomScrollSettleFrame.current);
+      }
+      const scrollIfStillFollowing = () => {
+        if (catchingUpRef.current || followPausedByUserRef.current) return;
+        setShouldFollow(true);
+        scrollToBottom('auto');
+      };
+
+      transcriptBottomScrollFrame.current = window.requestAnimationFrame(() => {
+        transcriptBottomScrollFrame.current = undefined;
+        scrollIfStillFollowing();
+        transcriptBottomScrollSettleFrame.current =
+          window.requestAnimationFrame(() => {
+            transcriptBottomScrollSettleFrame.current = undefined;
+            scrollIfStillFollowing();
+          });
+      });
+    }, [
+      catchingUp,
+      loadingTranscript,
+      messages.length,
+      scrollToBottom,
+      setShouldFollow,
+    ]);
+
+    useLayoutEffect(() => {
+      const insetChanged =
+        prevBottomOverlayInset.current !== bottomOverlayInset;
+      prevBottomOverlayInset.current = bottomOverlayInset;
+      if (!insetChanged) return;
+      if (catchingUp) return;
+      if (followPausedByUserRef.current) return;
+      setShouldFollow(true);
+      requestAnimationFrame(() => {
+        if (!catchingUpRef.current && !followPausedByUserRef.current) {
+          scrollToBottom('auto');
+        }
+      });
+    }, [bottomOverlayInset, catchingUp, scrollToBottom, setShouldFollow]);
+
+    const runningExecutionKey = useMemo(
+      () => latestActiveExecutionKey(visibleItems),
+      [visibleItems],
+    );
+
+    // Tool summaries and parallel-agent boxes can grow after their first
+    // render, which used to leave the row clipped behind the fixed composer.
+    // Instead of observing every row resize (too noisy while streaming), scroll
+    // once when a new execution row starts, and only while the user is already
+    // following the bottom.
+    useLayoutEffect(() => {
+      if (catchingUp) return;
+      if (!runningExecutionKey) {
+        prevActiveExecutionKey.current = null;
+        return;
+      }
+      if (runningExecutionKey === prevActiveExecutionKey.current) return;
+      prevActiveExecutionKey.current = runningExecutionKey;
+      if (shouldFollow.current || !followPausedByUserRef.current) {
+        requestAnimationFrame(() => {
+          if (!followPausedByUserRef.current) {
+            setShouldFollow(true);
+            scrollToBottom();
+          }
+        });
+      }
+    }, [catchingUp, runningExecutionKey, scrollToBottom, setShouldFollow]);
 
     // Rule 6: an inline picker/dialog (tailContent) just appeared. It renders
     // at the very bottom of the virtualized list, so if the user had scrolled
@@ -1070,37 +3075,99 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         hasTailContent &&
         !prevHasTailContent.current
       ) {
-        shouldFollow.current = true;
+        followPausedByUserRef.current = false;
+        setShouldFollow(true);
         // Re-check follow inside the frame: if the user scrolls up in the gap
         // before it fires (Rule 2 clears the flag), don't fight them.
         requestAnimationFrame(() => {
-          if (shouldFollow.current) scrollToBottom();
+          if (!followPausedByUserRef.current) scrollToBottom();
         });
       }
       prevHasTailContent.current = hasTailContent;
-    }, [autoScrollTailIntoView, hasTailContent, scrollToBottom]);
+    }, [
+      autoScrollTailIntoView,
+      hasTailContent,
+      scrollToBottom,
+      setShouldFollow,
+    ]);
 
     const renderVirtualItem = useCallback(
       (index: number) => {
-        if (hasHeader && index === HEADER_INDEX) {
-          return welcomeHeader;
-        }
-
-        if (hasTailApproval && index === tailApprovalIndex) {
-          if (pendingApproval && isAskUserQuestion(pendingApproval)) {
+        const renderDisplayItem = (
+          displayItem: DisplayItem,
+          isLatest: boolean,
+        ): ReactNode => {
+          if (displayItem.type === 'parallel_agents') {
             return (
-              <AskUserQuestion
-                request={pendingApproval}
-                onConfirm={onConfirm}
+              <MessageTimestamp timestamp={displayItem.timestamp}>
+                <div
+                  className={
+                    displayItemMatchesLocateTarget(displayItem, flashTarget)
+                      ? flashStyles.flash
+                      : undefined
+                  }
+                >
+                  <ParallelAgentsGroup
+                    agents={displayItem.agents}
+                    pendingApproval={pendingApproval}
+                  />
+                </div>
+              </MessageTimestamp>
+            );
+          }
+
+          if (displayItem.type === 'turn_collapse') {
+            return (
+              <TurnCollapseRow
+                turnCollapse={displayItem.turnCollapse}
+                onToggleCollapse={handleToggleCollapse}
               />
             );
           }
-          if (pendingApproval) {
+
+          if (displayItem.type === 'turn_content') {
             return (
-              <ToolApproval request={pendingApproval} onConfirm={onConfirm} />
+              <TurnContent collapsed={displayItem.collapsed}>
+                {displayItem.items.map((child) => (
+                  <div
+                    key={getDisplayItemVirtualKey(child)}
+                    className={getChatRowClassName(child)}
+                  >
+                    {renderDisplayItem(child, false)}
+                  </div>
+                ))}
+              </TurnContent>
             );
           }
-          return null;
+
+          return (
+            <MessageItem
+              message={displayItem.message}
+              pendingApproval={pendingApproval}
+              onShowContextDetail={onShowContextDetail}
+              workspaceCwd={workspaceCwd}
+              isLatest={isLatest}
+              showRetryHint={showRetryHint}
+              onRetryClick={onRetryClick}
+              onBranchSession={onBranchSession}
+              showAssistantActions={
+                displayItem.message.role === 'assistant' &&
+                finalAssistantIdsByTurn.has(displayItem.message.id)
+              }
+              showAssistantBranch={
+                displayItem.message.role === 'assistant' &&
+                displayItem.message.id === lastCompletedAssistantId
+              }
+              isLocateFlashing={displayItemMatchesLocateTarget(
+                displayItem,
+                flashTarget,
+              )}
+            />
+          );
+        };
+
+        if (hasHeader && index === HEADER_INDEX) {
+          return welcomeHeader;
         }
 
         if (hasTailContent && index === tailContentIndex) {
@@ -1111,33 +3178,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         const item = visibleItems[itemIndex];
         if (!item) return null;
 
-        if (item.type === 'parallel_agents') {
-          return (
-            <MessageTimestamp timestamp={item.timestamp}>
-              <ParallelAgentsGroup
-                agents={item.agents}
-                pendingApproval={pendingApproval}
-                onConfirm={onConfirm}
-              />
-            </MessageTimestamp>
-          );
-        }
-
-        return (
-          <MessageItem
-            message={item.message}
-            pendingApproval={pendingApproval}
-            onConfirm={onConfirm}
-            onShowContextDetail={onShowContextDetail}
-            workspaceCwd={workspaceCwd}
-            isLatest={itemIndex === visibleItems.length - 1}
-            showRetryHint={showRetryHint}
-            onRetryClick={onRetryClick}
-            shellOutputMaxLines={shellOutputMaxLines}
-            collapse={item.collapse}
-            onToggleCollapse={handleToggleCollapse}
-          />
-        );
+        return renderDisplayItem(item, itemIndex === visibleItems.length - 1);
       },
       [
         hasHeader,
@@ -1145,28 +3186,25 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         hasTailContent,
         tailContent,
         tailContentIndex,
-        hasTailApproval,
-        tailApprovalIndex,
         pendingApproval,
-        onConfirm,
         onShowContextDetail,
         headerOffset,
         visibleItems,
+        flashTarget,
+        finalAssistantIdsByTurn,
+        lastCompletedAssistantId,
         workspaceCwd,
         showRetryHint,
         onRetryClick,
-        shellOutputMaxLines,
+        onBranchSession,
         handleToggleCollapse,
       ],
     );
 
-    const virtualItems = virtualizer.getVirtualItems();
-    const totalVirtualSize = virtualizer.getTotalSize();
-
     const getRowClassName = useCallback(
-      (key: string): string | undefined =>
-        flashKey === key ? styles.rowFlash : undefined,
-      [flashKey],
+      (item?: DisplayItem): string | undefined =>
+        item ? getChatRowClassName(item) : undefined,
+      [],
     );
 
     // ── Single auto-scroll driver (rules 1, 5, 6) ──────────────────────
@@ -1182,19 +3220,57 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     //         and is a no-op when there's no overflow.
     useLayoutEffect(() => {
       if (catchingUp) return;
-      if (shouldFollow.current) {
-        scrollToBottom();
+      const isNewUserMessage = pendingNewUserSmoothScroll.current;
+      if (scrollCooldown.current && !isNewUserMessage) return;
+      // Preserve the new-prompt scroll even if a previous disclosure resize is
+      // still settling; it targets the latest virtualizer size from this render.
+      if (pendingFollowRecheck.current && !isNewUserMessage) return;
+      if (
+        shouldFollow.current ||
+        isNewUserMessage ||
+        !followPausedByUserRef.current
+      ) {
+        if (!followPausedByUserRef.current) {
+          setShouldFollow(true);
+        }
+        scrollToBottom(isNewUserMessage ? 'smooth' : 'auto');
+        pendingNewUserSmoothScroll.current = false;
       }
-    }, [totalVirtualSize, messages, totalCount, catchingUp, scrollToBottom]);
+    }, [
+      totalVirtualSize,
+      messages,
+      totalCount,
+      catchingUp,
+      scrollToBottom,
+      setShouldFollow,
+    ]);
+
+    useLayoutEffect(() => {
+      scheduleScrollOverflowReport();
+    }, [messages, scheduleScrollOverflowReport, totalCount, totalVirtualSize]);
 
     return (
-      <div ref={containerRef} className={styles.list} onScroll={handleScroll}>
+      <div
+        ref={containerRef}
+        className={styles.list}
+        data-web-shell-message-list
+        onClickCapture={handleDisclosureClickCapture}
+      >
+        {showLoadingSkeleton && (
+          <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
+        )}
+        <SessionTimeline
+          entries={sessionTimelineEntries}
+          currentTurnId={currentTimelineTurnId}
+          currentRange={sessionTimelineRange}
+          hidden={!isSessionTimelineVisible || !hasEnoughSessionTimelineEntries}
+          onSelect={scrollToMessage}
+        />
         {useVirtualScroll ? (
           <div
+            className={styles.virtualSizer}
             style={{
               height: totalVirtualSize,
-              width: '100%',
-              position: 'relative',
             }}
           >
             {virtualItems.map((virtualRow) => (
@@ -1202,12 +3278,18 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
                 key={virtualRow.key}
                 data-index={virtualRow.index}
                 ref={virtualizer.measureElement}
-                className={getRowClassName(String(virtualRow.key))}
+                className={joinClassNames(
+                  styles.virtualRow,
+                  getRowClassName(
+                    visibleItems[virtualRow.index - headerOffset],
+                  ),
+                )}
+                data-web-shell-message-row
                 style={{
                   position: 'absolute',
                   top: 0,
                   left: 0,
-                  width: '100%',
+                  right: 0,
                   transform: `translateY(${virtualRow.start}px)`,
                 }}
               >
@@ -1218,11 +3300,13 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         ) : (
           Array.from({ length: totalCount }, (_, index) => {
             const key = getItemKey(index);
+            const item = visibleItems[index - headerOffset];
             return (
               <div
                 key={key}
                 data-index={index}
-                className={getRowClassName(key)}
+                className={getRowClassName(item)}
+                data-web-shell-message-row
               >
                 {renderVirtualItem(index)}
               </div>
@@ -1231,5 +3315,5 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         )}
       </div>
     );
-  },
+  }),
 );

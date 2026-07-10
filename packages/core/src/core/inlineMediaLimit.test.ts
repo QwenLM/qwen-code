@@ -60,6 +60,14 @@ describe('getMaxInlineMediaBytes', () => {
     process.env[ENV_KEY] = '0';
     expect(getMaxInlineMediaBytes()).toBe(DEFAULT_MAX_INLINE_MEDIA_BYTES);
   });
+
+  it('ignores fractional env overrides', () => {
+    process.env[ENV_KEY] = '0.5';
+    expect(getMaxInlineMediaBytes()).toBe(DEFAULT_MAX_INLINE_MEDIA_BYTES);
+
+    process.env[ENV_KEY] = '1024.9';
+    expect(getMaxInlineMediaBytes()).toBe(DEFAULT_MAX_INLINE_MEDIA_BYTES);
+  });
 });
 
 describe('clampInlineMediaPart', () => {

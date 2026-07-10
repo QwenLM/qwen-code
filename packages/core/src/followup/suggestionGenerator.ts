@@ -13,11 +13,6 @@ import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { getCacheSafeParams, runForkedAgent } from '../utils/forkedAgent.js';
 import { runSideQuery } from '../utils/sideQuery.js';
-import {
-  uiTelemetryService,
-  EVENT_API_RESPONSE,
-} from '../telemetry/uiTelemetry.js';
-import { ApiResponseEvent } from '../telemetry/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('FOLLOWUP');
@@ -155,30 +150,14 @@ async function generateViaForkedQuery(
   const cacheSafeParams = getCacheSafeParams();
   if (!cacheSafeParams) return null;
   const model = modelOverride ?? config.getFastModel() ?? cacheSafeParams.model;
-  const startTime = Date.now();
   const result = await runForkedAgent({
     config,
     userMessage: SUGGESTION_PROMPT,
     cacheSafeParams,
     jsonSchema: SUGGESTION_SCHEMA,
     model,
+    preserveTools: model === cacheSafeParams.model,
   });
-  const durationMs = Date.now() - startTime;
-
-  // Report usage to session stats
-  if (result.usage) {
-    reportSuggestionUsage(
-      config,
-      model,
-      {
-        promptTokenCount: result.usage.inputTokens,
-        candidatesTokenCount: result.usage.outputTokens,
-        totalTokenCount: result.usage.inputTokens + result.usage.outputTokens,
-        cachedContentTokenCount: result.usage.cacheHitTokens,
-      },
-      durationMs,
-    );
-  }
 
   if (result.jsonResult) {
     const raw = result.jsonResult['suggestion'];
@@ -213,7 +192,6 @@ async function generateViaBaseLlm(
     { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },
   ];
 
-  const startTime = Date.now();
   const result = await runSideQuery(config, {
     purpose: 'prompt-suggestion',
     contents,
@@ -223,12 +201,6 @@ async function generateViaBaseLlm(
     // the user shouldn't pay 7× the latency for a hint they may ignore.
     maxAttempts: 1,
   });
-  const durationMs = Date.now() - startTime;
-
-  // Report usage to session stats so /stats tracks suggestion model tokens
-  if (result.usage) {
-    reportSuggestionUsage(config, model, result.usage, durationMs);
-  }
 
   const text = result.text;
   if (text) {
@@ -266,6 +238,39 @@ const ALLOWED_SINGLE_WORDS = new Set([
   'quit',
   'no',
 ]);
+
+const KNOWN_ABBREVIATIONS = new Set([
+  'Mr',
+  'Mrs',
+  'Dr',
+  'Ms',
+  'Prof',
+  'Sr',
+  'Jr',
+  'St',
+  'vs',
+  'etc',
+]);
+
+const SENTENCE_BOUNDARY_RE = /[.!?]\s+[A-Z]/g;
+
+function hasSentenceBoundary(suggestion: string): boolean {
+  for (const m of suggestion.matchAll(SENTENCE_BOUNDARY_RE)) {
+    const i = m.index!;
+    const before = suggestion.slice(0, i);
+    const wordMatch = before.match(/(\w+)$/);
+    if (!wordMatch) return true;
+    const word = wordMatch[1];
+    if (KNOWN_ABBREVIATIONS.has(word)) continue;
+    if (
+      (word === 'g' && /e\.g$/i.test(before)) ||
+      (word === 'e' && /i\.e$/i.test(before))
+    )
+      continue;
+    return true;
+  }
+  return false;
+}
 
 /**
  * Returns the filter reason if the suggestion should be suppressed, or null if it passes.
@@ -327,7 +332,7 @@ export function getFilterReason(suggestion: string): string | null {
     if (suggestion.length > 30) return 'too_many_words';
   }
   if (suggestion.length >= 100) return 'too_long';
-  if (/[.!?]\s+[A-Z]/.test(suggestion)) return 'multiple_sentences';
+  if (hasSentenceBoundary(suggestion)) return 'multiple_sentences';
   if (/[\n*]|\*\*/.test(suggestion)) return 'has_formatting';
 
   if (
@@ -355,39 +360,4 @@ export function getFilterReason(suggestion: string): string | null {
  */
 export function shouldFilterSuggestion(suggestion: string): boolean {
   return getFilterReason(suggestion) !== null;
-}
-
-/**
- * Report suggestion API usage to the UI telemetry service so it appears in /stats.
- */
-function reportSuggestionUsage(
-  config: Config,
-  model: string,
-  usage: {
-    promptTokenCount?: number;
-    candidatesTokenCount?: number;
-    totalTokenCount?: number;
-    cachedContentTokenCount?: number;
-    thoughtsTokenCount?: number;
-  },
-  durationMs: number,
-): void {
-  const event = new ApiResponseEvent(
-    'suggestion-' + Date.now(),
-    model,
-    durationMs,
-    'prompt_suggestion',
-    undefined,
-    {
-      promptTokenCount: usage.promptTokenCount ?? 0,
-      candidatesTokenCount: usage.candidatesTokenCount ?? 0,
-      totalTokenCount: usage.totalTokenCount ?? 0,
-      cachedContentTokenCount: usage.cachedContentTokenCount ?? 0,
-      thoughtsTokenCount: usage.thoughtsTokenCount ?? 0,
-    },
-  );
-  const uiEvent = Object.assign(event, {
-    'event.name': EVENT_API_RESPONSE as typeof EVENT_API_RESPONSE,
-  });
-  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
 }

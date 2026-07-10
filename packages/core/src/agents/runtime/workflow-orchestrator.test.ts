@@ -26,16 +26,24 @@ import type { Config } from '../../config/config.js';
 // FIX-C8 (TST-2-I2): record the full 9-arg signature of AgentHeadless.create
 // and the (ctx, signal?) shape of execute so any drift between the production
 // call site and the real AgentHeadless surface becomes a test failure.
-const { created, nextTerminateMode, nextOutputTokens, nextExecuteThrow } =
-  vi.hoisted(() => ({
+const {
+  created,
+  nextFinalText,
+  nextTerminateMode,
+  nextOutputTokens,
+  nextExecuteThrow,
+} = vi.hoisted(() => ({
   created: [] as Array<{
     name: string;
     prompt: string;
     signal?: AbortSignal;
     promptConfigSystemPrompt?: string;
+    promptConfigInitialMessages?: unknown[];
     runConfig?: { max_turns?: number; max_time_minutes?: number };
     toolConfig?: { tools?: string[]; disallowedTools?: string[] };
+    agentId?: string | null;
   }>,
+  nextFinalText: { value: undefined as string | undefined },
   // T10 (PR #4732 R1): the production dispatch checks getTerminateMode() and
   // throws on non-GOAL. Tests set `nextTerminateMode.value` to simulate
   // CANCELLED / MAX_TURNS / TIMEOUT outcomes.
@@ -53,7 +61,7 @@ const { created, nextTerminateMode, nextOutputTokens, nextExecuteThrow } =
   // `createChat` early-return path, NOT the production reasoning-
   // loop throw path.
   nextExecuteThrow: { value: null as Error | null },
-  }));
+}));
 
 // P3 R2 self-review (P3-T6 gap, batch): tests below for
 // agent({isolation:'worktree'}) need to drive GitWorktreeService's
@@ -111,7 +119,7 @@ vi.mock('./agent-headless.js', () => ({
     create: async (
       name: string,
       _runtimeContext: unknown,
-      promptConfig: { systemPrompt?: string },
+      promptConfig: { systemPrompt?: string; initialMessages?: unknown[] },
       _modelConfig: unknown,
       runConfig: { max_turns?: number; max_time_minutes?: number },
       toolConfig?: { tools?: string[]; disallowedTools?: string[] },
@@ -127,13 +135,16 @@ vi.mock('./agent-headless.js', () => ({
         ctx: { get: (k: string) => unknown },
         signal?: AbortSignal,
       ) => {
+        const { getCurrentAgentId } = await import('./agent-context.js');
         created.push({
           name,
           prompt: ctx.get('task_prompt') as string,
           signal,
           promptConfigSystemPrompt: promptConfig.systemPrompt,
+          promptConfigInitialMessages: promptConfig.initialMessages,
           runConfig,
           toolConfig,
+          agentId: getCurrentAgentId(),
         });
         if (
           !promptConfig.systemPrompt?.includes('subagent spawned by a workflow')
@@ -152,6 +163,7 @@ vi.mock('./agent-headless.js', () => ({
         }
       },
       getFinalText: () =>
+        nextFinalText.value ??
         `headless-said:${created[created.length - 1]!.prompt}`,
       getTerminateMode: () => nextTerminateMode.value,
       // R1 (#1 + #3): expose `getExecutionSummary` so the production
@@ -745,6 +757,328 @@ describe('WorkflowOrchestrator', () => {
     });
     expect(outcome.result).toBe('done');
   });
+
+  // ── P-nested: workflow() global ───────────────────────────────────────
+
+  it('P-nested: workflow(name) resolves via injected resolver and returns nested result', async () => {
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `agent:${prompt}`,
+    );
+    const resolveSavedWorkflow = async (
+      ref: string | { scriptPath: string },
+    ) => {
+      expect(ref).toBe('child');
+      return {
+        script: `return 'nested-' + (await agent('inner'));`,
+        name: 'child',
+      };
+    };
+    const outcome = await orchestrator.run({
+      script: `const r = await workflow('child'); return 'parent:' + r;`,
+      args: undefined,
+      resolveSavedWorkflow,
+    });
+    expect(outcome.result).toBe('parent:nested-agent:inner');
+  });
+
+  it('P-nested: nested args are passed to the child script', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+    const resolveSavedWorkflow = async () => ({
+      script: `return args.x * 2;`,
+    });
+    const outcome = await orchestrator.run({
+      script: `return await workflow('child', { x: 21 });`,
+      args: undefined,
+      resolveSavedWorkflow,
+    });
+    expect(outcome.result).toBe(42);
+  });
+
+  it('P-nested: nested agents share the parent agent-count cap', async () => {
+    // Cap is read from env; set a tiny cap so parent(1) + nested(2) trips it.
+    const prev = process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+    process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '2';
+    try {
+      let dispatchCalls = 0;
+      const orchestrator = new WorkflowOrchestrator(async () => {
+        dispatchCalls += 1;
+        return 'ok';
+      });
+      const resolveSavedWorkflow = async () => ({
+        // nested fires 2 agents; with parent's 1 already spent and cap=2,
+        // the 2nd nested agent (3rd overall) must throw the cap error.
+        script: `await agent('n1'); await agent('n2'); return 'done';`,
+      });
+      let caught: unknown;
+      try {
+        await orchestrator.run({
+          script: `await agent('p1'); return await workflow('child');`,
+          args: undefined,
+          resolveSavedWorkflow,
+        });
+      } catch (e) {
+        caught = e;
+      }
+      // parent p1 (1) + nested n1 (2) pass; nested n2 (3) trips the cap.
+      expect(dispatchCalls).toBe(2);
+      expect(String(caught)).toMatch(/exceeded the maximum of 2 agent/);
+    } finally {
+      if (prev === undefined)
+        delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      else process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = prev;
+    }
+  });
+
+  it('P-nested: nested agents share the parent token budget', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(100);
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      budget.recordSpent(60); // each agent burns 60 → 2 agents = 120 > 100
+      return 'ok';
+    });
+    const resolveSavedWorkflow = async () => ({
+      script: `await agent('n1'); await agent('n2'); return 'done';`,
+    });
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `await agent('p1'); return await workflow('child');`,
+        args: undefined,
+        budget,
+        resolveSavedWorkflow,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    // parent p1 spends 60; nested n1 spends 60 (total 120); nested n2 gated.
+    expect(String(caught)).toMatch(/exceeded the token budget/);
+    expect(budget.spent()).toBe(120);
+  });
+
+  it('P-nested: single-level limit — a nested workflow() call throws', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+    const resolveSavedWorkflow = async () => ({
+      // The nested script tries to nest again — must throw.
+      script: `return await workflow('grandchild');`,
+    });
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `return await workflow('child');`,
+        args: undefined,
+        resolveSavedWorkflow,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(String(caught)).toMatch(/workflow\(\) is unavailable here/);
+    expect(String(caught)).toMatch(/single level/);
+  });
+
+  it('P-nested: workflow() throws when no resolver is wired', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `return await workflow('child');`,
+        args: undefined,
+        // resolveSavedWorkflow omitted
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(String(caught)).toMatch(/workflow\(\) is unavailable here/);
+  });
+
+  it('P-nested: resolver rejection (workflow not found) surfaces to the parent script', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+    const resolveSavedWorkflow = async () => {
+      throw new Error(`workflow('child'): no workflow with that name.`);
+    };
+    const outcome = await orchestrator.run({
+      script: `try { await workflow('child'); return 'no-throw'; }
+               catch (e) { return 'caught:' + e.message; }`,
+      args: undefined,
+      resolveSavedWorkflow,
+    });
+    expect(outcome.result).toMatch(/caught:.*no workflow with that name/);
+  });
+
+  // ── P6: resume journal ────────────────────────────────────────────────
+
+  it('P6: a normal run journals a started+result per agent() call', async () => {
+    const { buildReplay } = await import('./workflow-journal.js');
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal = {
+      path: 'mem',
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+      load: () => Promise.resolve(buildReplay(entries)),
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `r:${prompt}`,
+    );
+    await orchestrator.run({
+      script: `await agent('a'); await agent('b'); return 'done';`,
+      args: undefined,
+      journal,
+    });
+    // 2 agents → 2 started + 2 result.
+    expect(entries.filter((e) => e.type === 'started')).toHaveLength(2);
+    const results = entries.filter((e) => e.type === 'result');
+    expect(results).toHaveLength(2);
+    expect((results[0] as { result: unknown }).result).toBe('r:a');
+    expect((results[1] as { result: unknown }).result).toBe('r:b');
+  });
+
+  it('P6: resume serves the cached prefix without re-dispatching', async () => {
+    const { buildReplay } = await import('./workflow-journal.js');
+    // Run 1: record the journal.
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal1 = {
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const orch1 = new WorkflowOrchestrator(async (prompt) => `r:${prompt}`);
+    await orch1.run({
+      script: `await agent('a'); await agent('b'); return 'done';`,
+      args: undefined,
+      journal: journal1,
+    });
+
+    // Run 2 (resume): same script. The dispatch counter must stay 0 because
+    // both agents are cached.
+    let dispatchCalls = 0;
+    const orch2 = new WorkflowOrchestrator(async (prompt) => {
+      dispatchCalls += 1;
+      return `LIVE:${prompt}`;
+    });
+    const journal2 = {
+      append: () => Promise.resolve(),
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const outcome = await orch2.run({
+      script: `const a = await agent('a'); const b = await agent('b'); return a + '|' + b;`,
+      args: undefined,
+      journal: journal2,
+      resumeReplay: buildReplay(entries),
+    });
+    expect(dispatchCalls).toBe(0); // fully cached
+    expect(outcome.result).toBe('r:a|r:b'); // cached values, not LIVE
+  });
+
+  it('P6: first miss runs live and the suffix goes live (first-miss invalidates suffix)', async () => {
+    const { buildReplay } = await import('./workflow-journal.js');
+    // Run 1 journaled agents a, b, c.
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal1 = {
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const orch1 = new WorkflowOrchestrator(async (prompt) => `r:${prompt}`);
+    await orch1.run({
+      script: `await agent('a'); await agent('b'); await agent('c'); return 1;`,
+      args: undefined,
+      journal: journal1,
+    });
+
+    // Run 2: change agent #2's prompt ('b' → 'B'). #1 ('a') is cached; #2
+    // ('B') misses → live; #3 ('c') must ALSO run live even though 'c' was
+    // journaled (first-miss invalidates suffix + the prefix-hash chain from
+    // #2's new prompt changes #3's key anyway).
+    const dispatched: string[] = [];
+    const orch2 = new WorkflowOrchestrator(async (prompt) => {
+      dispatched.push(prompt);
+      return `LIVE:${prompt}`;
+    });
+    const outcome = await orch2.run({
+      script: `const a = await agent('a');
+               const b = await agent('B');
+               const c = await agent('c');
+               return [a, b, c].join('|');`,
+      args: undefined,
+      journal: { append: () => Promise.resolve() } as never,
+      resumeReplay: buildReplay(entries),
+    });
+    // 'a' cached; 'B' and 'c' live.
+    expect(dispatched).toEqual(['B', 'c']);
+    expect(outcome.result).toBe('r:a|LIVE:B|LIVE:c');
+  });
+
+  it('P6: cache hit advances the registry counters (agentDispatched + agentCompleted)', async () => {
+    const { buildReplay } = await import('./workflow-journal.js');
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal1 = {
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const orch1 = new WorkflowOrchestrator(async () => 'cached');
+    await orch1.run({
+      script: `await agent('a'); return 1;`,
+      args: undefined,
+      journal: journal1,
+    });
+
+    const events: string[] = [];
+    const orch2 = new WorkflowOrchestrator(async () => 'LIVE');
+    await orch2.run({
+      script: `await agent('a'); return 1;`,
+      args: undefined,
+      journal: { append: () => Promise.resolve() } as never,
+      resumeReplay: buildReplay(entries),
+      emitter: {
+        agentDispatched: () => events.push('dispatched'),
+        agentCompleted: () => events.push('completed'),
+      },
+    });
+    expect(events).toEqual(['dispatched', 'completed']);
+  });
+
+  it('P6: cached dispatches do NOT consume the agent-count cap', async () => {
+    const prev = process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+    process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '2';
+    try {
+      const { buildReplay } = await import('./workflow-journal.js');
+      const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+      const journal1 = {
+        append: (e: import('./workflow-journal.js').JournalEntry) => {
+          entries.push(e);
+          return Promise.resolve();
+        },
+      } as unknown as import('./workflow-journal.js').WorkflowJournal;
+      // Run 1 with a larger cap to record 3 agents.
+      process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '10';
+      const orch1 = new WorkflowOrchestrator(async (p) => `r:${p}`);
+      await orch1.run({
+        script: `await agent('a'); await agent('b'); await agent('c'); return 1;`,
+        args: undefined,
+        journal: journal1,
+      });
+      // Run 2 (resume) with cap=2: all 3 are cached, so the cap (which
+      // counts only LIVE dispatches) is never hit.
+      process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '2';
+      const orch2 = new WorkflowOrchestrator(async () => 'LIVE');
+      const outcome = await orch2.run({
+        script: `await agent('a'); await agent('b'); await agent('c'); return 'ok';`,
+        args: undefined,
+        journal: { append: () => Promise.resolve() } as never,
+        resumeReplay: buildReplay(entries),
+      });
+      expect(outcome.result).toBe('ok'); // no cap error despite 3 > 2
+    } finally {
+      if (prev === undefined)
+        delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      else process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = prev;
+    }
+  });
 });
 
 describe('createProductionDispatch', () => {
@@ -753,6 +1087,7 @@ describe('createProductionDispatch', () => {
   // terminate mode back to 'goal' (success).
   beforeEach(() => {
     created.length = 0;
+    nextFinalText.value = undefined;
     nextTerminateMode.value = 'GOAL';
   });
 
@@ -763,24 +1098,50 @@ describe('createProductionDispatch', () => {
     expect(created.length).toBe(1);
     expect(created[0]!.name).toBe('h1');
     expect(created[0]!.prompt).toBe('hello');
+    expect(created[0]!.agentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+  });
+
+  it('does not suppress env bootstrap with an empty initial history', async () => {
+    const dispatch = createProductionDispatch(fakeConfig());
+    await dispatch('hello', { label: 'h1' });
+    expect(created[0]!.promptConfigInitialMessages).toBeUndefined();
+  });
+
+  it('strips internal tags from fast-path final text', async () => {
+    nextFinalText.value =
+      '<analysis>scratch</analysis><summary>clean result</summary>';
+    const dispatch = createProductionDispatch(fakeConfig());
+
+    await expect(dispatch('hello', { label: 'h1' })).resolves.toBe(
+      'clean result',
+    );
   });
 
   // FIX-C4 (TST-2-C2): the previous test only asserted no-crash. This one
   // actually captures the signal in the mock and asserts identity, so a
   // regression that drops the second arg of subagent.execute() would fail.
-  it('threads abort signal through to subagent.execute', async () => {
+  // P-stall: the stall wrapper now interposes a per-attempt AbortController
+  // between the caller's signal and `subagent.execute()`, so the subagent
+  // receives a per-attempt signal (chained to the parent), not the caller's
+  // exact object. The behavioural parent-abort-propagates contract is
+  // covered by workflow-stall.test.ts where timing is controllable; here we
+  // assert the subagent always receives a live (non-aborted) signal.
+  it('threads a per-attempt abort signal through to subagent.execute', async () => {
     const controller = new AbortController();
     const dispatch = createProductionDispatch(fakeConfig(), controller.signal);
     await dispatch('hello', { label: 'h1' });
     expect(created.length).toBe(1);
-    expect(created[0]!.signal).toBe(controller.signal);
+    expect(created[0]!.signal).toBeDefined();
   });
 
-  it('passes undefined signal when none provided', async () => {
+  it('provides a per-attempt signal even when no caller signal is given', async () => {
     const dispatch = createProductionDispatch(fakeConfig());
     await dispatch('hello', { label: 'h1' });
     expect(created.length).toBe(1);
-    expect(created[0]!.signal).toBeUndefined();
+    // The stall wrapper always supplies a per-attempt signal (so the
+    // watchdog can abort it); it just isn't chained to any parent.
+    expect(created[0]!.signal).toBeDefined();
+    expect(created[0]!.signal!.aborted).toBe(false);
   });
 
   // FIX-C2 (UP-2-C1): the subagent system prompt must include the binary's
@@ -807,32 +1168,33 @@ describe('createProductionDispatch', () => {
     });
   });
 
-  // T11: disallow SendMessage / ExitPlanMode to mirror upstream Tg8.
-  it('disallows SendMessage and ExitPlanMode for workflow subagents', async () => {
+  // T11: disallow SendMessage plus tools that break workflow return/cleanup
+  // contracts.
+  it('disallows workflow-only floor tools for workflow subagents', async () => {
     const dispatch = createProductionDispatch(fakeConfig());
     await dispatch('hello', { label: 'h1' });
     expect(created[0]!.toolConfig?.tools).toEqual(['*']);
     expect(created[0]!.toolConfig?.disallowedTools).toEqual([
       'send_message',
+      'monitor',
+      'enter_plan_mode',
       'exit_plan_mode',
+      'agent',
     ]);
   });
 
   // T10 (PR #4732 R1): the production dispatch must throw when the
   // subagent terminates with a non-GOAL mode. Without this, `await agent(...)`
   // would resolve to '' on user cancel and the script would keep running.
-  it.each([
-    ['CANCELLED', /terminate mode: CANCELLED/],
-    ['MAX_TURNS', /terminate mode: MAX_TURNS/],
-    ['TIMEOUT', /terminate mode: TIMEOUT/],
-    ['ERROR', /terminate mode: ERROR/],
-  ])(
+  it.each([['CANCELLED'], ['MAX_TURNS'], ['TIMEOUT'], ['ERROR']])(
     'throws when subagent terminate mode is %s',
-    async (mode, expectedMessage) => {
+    async (mode) => {
       nextTerminateMode.value = mode;
       const dispatch = createProductionDispatch(fakeConfig());
       await expect(dispatch('hello', { label: 'h1' })).rejects.toThrow(
-        expectedMessage,
+        new RegExp(
+          `workflow-agent-[0-9a-f]{16} did not complete \\(terminate mode: ${mode}\\)\\.`,
+        ),
       );
     },
   );
@@ -1308,6 +1670,29 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       ).toBe(DEFAULT_MAX_AGENTS_PER_RUN);
     });
 
+    it('resolveMaxAgentsPerRun rejects hex / scientific / non-decimal-integer overrides', () => {
+      // Number('0x10')=16, Number('1e3')=1000, Number('1.0')=1 pass
+      // Number.isInteger; only plain decimal integers should override the cap.
+      for (const raw of ['0x10', '1e3', '1.0']) {
+        expect(
+          resolveMaxAgentsPerRun({ QWEN_CODE_MAX_WORKFLOW_AGENTS: raw }),
+        ).toBe(DEFAULT_MAX_AGENTS_PER_RUN);
+      }
+    });
+
+    it('resolveConcurrencyLimit treats hex / scientific overrides as invalid (cpu default)', () => {
+      // An invalid override falls back to the cpu-derived default in [1,16];
+      // 0x10/1e2 must be rejected too, not parsed as 16/100.
+      const cpuDefault = resolveConcurrencyLimit({
+        QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '-1',
+      });
+      for (const raw of ['0x10', '1e2']) {
+        expect(
+          resolveConcurrencyLimit({ QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: raw }),
+        ).toBe(cpuDefault);
+      }
+    });
+
     // PR #4947 R1 T4 (wenshao): an env override above the hard ceiling must
     // be clamped, not honored — protects operators from a fat-finger
     // QWEN_CODE_MAX_WORKFLOW_AGENTS=999999999 silently uncapping the run.
@@ -1403,6 +1788,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     runtimeContextSame: boolean;
     options?: { runConfigOverrides?: unknown };
     eventEmitterAttached: boolean;
+    executeAgentId?: string | null;
   };
 
   function fakeConfigWithMgr(opts: {
@@ -1489,6 +1875,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
                 _ctx: unknown,
                 signal?: AbortSignal,
               ): Promise<void> => {
+                const { getCurrentAgentId } = await import(
+                  './agent-context.js'
+                );
+                call.executeAgentId = getCurrentAgentId();
                 if (outcome.runWithEmitter && options?.eventEmitter) {
                   outcome.runWithEmitter(
                     options.eventEmitter as {
@@ -1557,13 +1947,45 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       }),
     });
     const dispatch = createProductionDispatch(config);
-    const result = await dispatch('find foo', { agentType: 'Explore' });
+    const result = await dispatch('find foo', {
+      agentType: 'Explore',
+      label: 'explore-1',
+    });
     expect(result).toBe('explore-output');
     expect(calls).toHaveLength(1);
     expect(calls[0].config.name).toBe('Explore');
-    // Workflow floor [SendMessage, ExitPlanMode] must be unioned in.
+    expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+    // Workflow floor [SendMessage, Monitor, EnterPlanMode, ExitPlanMode,
+    // Agent] must be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
-      expect.arrayContaining(['send_message', 'exit_plan_mode']),
+      expect.arrayContaining([
+        'send_message',
+        'monitor',
+        'enter_plan_mode',
+        'exit_plan_mode',
+        'agent',
+      ]),
+    );
+  });
+
+  it('strips internal tags from override-path final text', async () => {
+    const { config } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Explore',
+        description: 'fast read-only',
+        systemPrompt: 'You are Explore.',
+        level: 'builtin',
+      }),
+      onCreate: async () => ({
+        finalText:
+          '<analysis>scratch</analysis><summary>clean result</summary>',
+        terminateMode: 'GOAL',
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+
+    await expect(dispatch('find foo', { agentType: 'Explore' })).resolves.toBe(
+      'clean result',
     );
   });
 
@@ -1616,9 +2038,16 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const dispatch = createProductionDispatch(config);
     await dispatch('hi', { agentType: 'Permissive' });
     const disallowed = calls[0].config.disallowedTools ?? [];
-    // Union: Foo (from agentType) + send_message + exit_plan_mode (floor).
+    // Union: Foo (from agentType) + workflow-only floor.
     expect(disallowed).toEqual(
-      expect.arrayContaining(['Foo', 'send_message', 'exit_plan_mode']),
+      expect.arrayContaining([
+        'Foo',
+        'send_message',
+        'monitor',
+        'enter_plan_mode',
+        'exit_plan_mode',
+        'agent',
+      ]),
     );
   });
 
@@ -1692,10 +2121,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       }),
     });
     const reports: number[] = [];
-    const dispatch = createProductionDispatch(
-      config,
-      undefined,
-      (tokens) => reports.push(tokens),
+    const dispatch = createProductionDispatch(config, undefined, (tokens) =>
+      reports.push(tokens),
     );
     const result = await dispatch('extract', {
       schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
@@ -1723,10 +2150,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     nextExecuteThrow.value = new Error('override-path boom');
     nextOutputTokens.value = 9999;
     const reports: number[] = [];
-    const dispatch = createProductionDispatch(
-      config,
-      undefined,
-      (tokens) => reports.push(tokens),
+    const dispatch = createProductionDispatch(config, undefined, (tokens) =>
+      reports.push(tokens),
     );
     await expect(
       dispatch('q1', { label: 'thrown', schema: { type: 'object' } }),
@@ -2016,7 +2441,14 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     });
     const disallowed = calls[0].config.disallowedTools ?? [];
     expect(disallowed).toEqual(
-      expect.arrayContaining(['Foo', 'send_message', 'exit_plan_mode']),
+      expect.arrayContaining([
+        'Foo',
+        'send_message',
+        'monitor',
+        'enter_plan_mode',
+        'exit_plan_mode',
+        'agent',
+      ]),
     );
   });
 
@@ -2089,16 +2521,18 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const dispatch = createProductionDispatch(config);
     // newline + nul + del — all control codes < 0x20 or == 0x7f.
     const evil = 'Explore\n\rEvil\x00\x7f';
-    await expect(dispatch('hi', { agentType: evil })).rejects.toThrow();
     // The thrown message must NOT contain raw newlines / NULs.
+    let error: unknown;
     try {
       await dispatch('hi', { agentType: evil });
     } catch (err) {
-      const msg = (err as Error).message;
-      // eslint-disable-next-line no-control-regex
-      expect(msg).not.toMatch(/[\n\r\u0000\u007f]/);
-      expect(msg).toContain('not found');
+      error = err;
     }
+    expect(error).toBeInstanceOf(Error);
+    const msg = (error as Error).message;
+    // eslint-disable-next-line no-control-regex
+    expect(msg).not.toMatch(/[\n\r\u0000\u007f]/);
+    expect(msg).toContain('not found');
   });
 
   // R2 self-review (test-5): dispose() MUST still run even when
@@ -2617,7 +3051,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       await expect(
         dispatch('extract', { schema: { type: 'object' } }),
       ).rejects.toThrow(
-        new RegExp(`did not complete \\(terminate mode: ${mode}\\)\\.`),
+        new RegExp(
+          `workflow-agent-[0-9a-f]{16} did not complete \\(terminate mode: ${mode}\\)\\.`,
+        ),
       );
     },
   );

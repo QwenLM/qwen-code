@@ -43,6 +43,7 @@ export enum Command {
   // Text input
   SUBMIT = 'submit',
   NEWLINE = 'newline',
+  VOICE_PUSH_TO_TALK = 'voicePushToTalk',
 
   // External tools
   OPEN_EXTERNAL_EDITOR = 'openExternalEditor',
@@ -55,7 +56,6 @@ export enum Command {
   EXIT = 'exit',
   SHOW_MORE_LINES = 'showMoreLines',
   RETRY_LAST = 'retryLast',
-  TOGGLE_COMPACT_MODE = 'toggleCompactMode',
   TOGGLE_RENDER_MODE = 'toggleRenderMode',
   /**
    * Promote the running foreground shell command to a background task.
@@ -75,6 +75,12 @@ export enum Command {
   // Suggestion expansion
   EXPAND_SUGGESTION = 'expandSuggestion',
   COLLAPSE_SUGGESTION = 'collapseSuggestion',
+
+  // Thinking expansion
+  TOGGLE_THINKING_EXPANDED = 'toggleThinkingExpanded',
+
+  // Transcript full-detail screen (Ctrl+O)
+  TOGGLE_TRANSCRIPT = 'toggleTranscript',
 
   // Scroll commands
   SCROLL_UP = 'scrollUp',
@@ -196,6 +202,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
     { key: 'return', shift: true },
     { key: 'j', ctrl: true },
   ],
+  [Command.VOICE_PUSH_TO_TALK]: [{ key: 'space', ctrl: false, meta: false }],
 
   // External tools
   [Command.OPEN_EXTERNAL_EDITOR]: [
@@ -220,7 +227,6 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.EXIT]: [{ key: 'd', ctrl: true }],
   [Command.SHOW_MORE_LINES]: [{ key: 's', ctrl: true }],
   [Command.RETRY_LAST]: [{ key: 'y', ctrl: true }],
-  [Command.TOGGLE_COMPACT_MODE]: [{ key: 'o', ctrl: true }],
   [Command.TOGGLE_RENDER_MODE]: [{ key: 'm', meta: true }],
   [Command.PROMOTE_SHELL_TO_BACKGROUND]: [{ key: 'b', ctrl: true }],
 
@@ -234,6 +240,12 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // Suggestion expansion
   [Command.EXPAND_SUGGESTION]: [{ key: 'right' }],
   [Command.COLLAPSE_SUGGESTION]: [{ key: 'left' }],
+
+  // Thinking expansion
+  [Command.TOGGLE_THINKING_EXPANDED]: [{ key: 't', meta: true }],
+
+  // Transcript full-detail screen
+  [Command.TOGGLE_TRANSCRIPT]: [{ key: 'o', ctrl: true }],
 
   // Scroll commands
   [Command.SCROLL_UP]: [{ key: 'up', shift: true }],

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
-import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
+import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { WEB_SHELL_THEMES, type WebShellTheme } from '../../themeContext';
 
 interface ThemeDialogProps {
@@ -27,6 +27,20 @@ export function ThemeDialog({
   });
   const listRef = useRef<HTMLDivElement>(null);
 
+  const confirm = (index: number) => {
+    const theme = themes[index];
+    if (!theme) return;
+    onSelect(theme.id);
+    onClose();
+  };
+
+  const { keyboardMode } = useListboxKeyboard({
+    itemCount: themes.length,
+    activeIndex: selectedIdx,
+    onActiveIndexChange: setSelectedIdx,
+    onConfirm: confirm,
+  });
+
   useEffect(() => {
     const el = listRef.current?.children[selectedIdx] as
       | HTMLElement
@@ -34,94 +48,48 @@ export function ThemeDialog({
     el?.scrollIntoView({ block: 'nearest' });
   }, [selectedIdx]);
 
-  const handleSelect = useCallback(() => {
-    const theme = themes[selectedIdx];
-    if (theme) {
-      onSelect(theme.id);
-      onClose();
-    }
-  }, [onClose, onSelect, selectedIdx, themes]);
-
-  useDelayedGlobalKeyDown(
-    (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        onClose();
-        return;
-      }
-      if (event.key === 'ArrowDown' || event.key === 'j') {
-        event.preventDefault();
-        setSelectedIdx((index) => Math.min(index + 1, themes.length - 1));
-        return;
-      }
-      if (event.key === 'ArrowUp' || event.key === 'k') {
-        event.preventDefault();
-        setSelectedIdx((index) => Math.max(index - 1, 0));
-        return;
-      }
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        handleSelect();
-      }
-    },
-    [handleSelect, onClose, themes.length],
-  );
-
   return (
-    <div className={dp('resume-picker')}>
-      <div className={dp('resume-picker-header')}>
-        <span className={dp('resume-picker-title')}>{t('theme.title')}</span>
-        <span className={dp('resume-picker-count')}>
-          {t('theme.current', { theme: currentTheme })}
-        </span>
-        <button
-          className={dp('resume-picker-close')}
-          onClick={onClose}
-          title={t('common.close')}
-        >
-          ESC
-        </button>
-      </div>
-
-      <div className={dp('resume-picker-sep')} />
-
-      <div className={dp('resume-picker-list')} ref={listRef}>
-        {themes.map((theme, index) => (
+    <div
+      className={dp(
+        'picker-list',
+        'picker-list-compact',
+        keyboardMode ? 'picker-keyboard-only' : undefined,
+      )}
+      ref={listRef}
+      role="listbox"
+      aria-label={t('theme.title')}
+      tabIndex={0}
+      aria-activedescendant={
+        themes.length > 0 ? `theme-opt-${selectedIdx}` : undefined
+      }
+      data-web-shell-theme-dialog
+    >
+      {themes.map((theme, index) => {
+        const selected = theme.id === currentTheme;
+        return (
           <div
             key={theme.id}
+            id={`theme-opt-${index}`}
+            role="option"
+            aria-selected={selected}
             className={dp(
-              'resume-picker-item',
+              'picker-item',
+              'picker-session-item',
               index === selectedIdx ? 'selected' : undefined,
+              selected ? 'dialog-current' : undefined,
             )}
-            onClick={() => {
-              onSelect(theme.id);
-              onClose();
-            }}
-            onMouseEnter={() => setSelectedIdx(index)}
+            data-web-shell-theme-option
+            data-theme-id={theme.id}
+            onClick={() => confirm(index)}
+            onMouseMove={() => setSelectedIdx(index)}
           >
-            <div className={dp('resume-picker-item-row')}>
-              <span className={dp('resume-picker-item-prefix')}>
-                {index === selectedIdx ? '›' : ' '}
-              </span>
-              <span className={dp('resume-picker-item-title')}>
-                {theme.label}
-              </span>
-              {theme.id === currentTheme && (
-                <span className={dp('resume-picker-item-check')}> ✓</span>
-              )}
+            <div className={dp('picker-item-row')}>
+              <span className={dp('picker-item-title')}>{theme.label}</span>
             </div>
-            <div className={dp('resume-picker-item-meta')}>
-              {theme.description}
-            </div>
+            <div className={dp('picker-item-meta')}>{theme.description}</div>
           </div>
-        ))}
-      </div>
-
-      <div className={dp('resume-picker-sep')} />
-
-      <div className={dp('resume-picker-footer')}>
-        {t('dialog.footer.navSelectCancel')}
-      </div>
+        );
+      })}
     </div>
   );
 }

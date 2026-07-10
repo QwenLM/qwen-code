@@ -21,6 +21,17 @@ import { GIT_COMMIT_INFO } from '../generated/git-commit.js';
 const debugLogger = createDebugLogger('STATUS');
 
 /**
+ * The subset of {@link CommandContext} these helpers actually read: only
+ * `services.config` and `services.settings`. Narrowing the parameter to this
+ * shape lets call sites that don't have a full `CommandContext` (e.g. the
+ * Settings dialog, which holds `config` + `settings` as props) pass a plain
+ * object without an unsafe cast. A full `CommandContext` is still assignable.
+ */
+type SystemInfoContext = {
+  services: Partial<Pick<CommandContext['services'], 'config' | 'settings'>>;
+};
+
+/**
  * System information interface containing all system-related details
  * that can be collected for debugging and reporting purposes.
  */
@@ -106,7 +117,7 @@ export async function getGitVersion(): Promise<string> {
  * Returns empty string if IDE mode is disabled or IDE client is not detected.
  */
 export async function getIdeClientName(
-  context: CommandContext,
+  context: SystemInfoContext,
 ): Promise<string> {
   if (!context.services.config?.getIdeMode()) {
     return '';
@@ -154,7 +165,7 @@ export function getSandboxEnv(stripPrefix = false): string {
  * @returns Promise resolving to SystemInfo object with all collected information
  */
 export async function getSystemInfo(
-  context: CommandContext,
+  context: SystemInfoContext,
 ): Promise<SystemInfo> {
   const osPlatform = process.platform;
   const osArch = process.arch;
@@ -193,7 +204,7 @@ export async function getSystemInfo(
  * @returns Promise resolving to ExtendedSystemInfo object
  */
 export async function getExtendedSystemInfo(
-  context: CommandContext,
+  context: SystemInfoContext,
 ): Promise<ExtendedSystemInfo> {
   const baseInfo = await getSystemInfo(context);
   const memoryUsage = formatMemoryUsage(process.memoryUsage().rss);
@@ -232,7 +243,7 @@ export async function getExtendedSystemInfo(
   };
 }
 
-function getLspStatus(context: CommandContext): string | undefined {
+function getLspStatus(context: SystemInfoContext): string | undefined {
   try {
     const snapshot = context.services.config?.getLspStatusSnapshot?.();
     if (!snapshot) {

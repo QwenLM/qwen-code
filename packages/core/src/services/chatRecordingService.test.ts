@@ -169,6 +169,47 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('rewindRecording', () => {
+    it('preserves a resumed user turn parent when rebuilding rewind boundaries', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        lastCompletedUuid: 'assistant-1',
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      chatRecordingService = new ChatRecordingService(mockConfig);
+
+      chatRecordingService.rebuildTurnBoundaries([
+        {
+          uuid: 'user-1',
+          parentUuid: 'pre-resume-parent',
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:00.000Z',
+          type: 'user',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'user', parts: [{ text: 'first resumed turn' }] },
+        },
+        {
+          uuid: 'assistant-1',
+          parentUuid: 'user-1',
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:01.000Z',
+          type: 'assistant',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'model', parts: [{ text: 'response' }] },
+          model: 'gemini-pro',
+        },
+      ]);
+
+      chatRecordingService.rewindRecording(0, { truncatedCount: 2 });
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const rewind = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(rewind.subtype).toBe('rewind');
+      expect(rewind.parentUuid).toBe('pre-resume-parent');
+    });
+  });
+
   describe('recordAtCommand', () => {
     it('should record @-command metadata as a system payload', async () => {
       const userParts: Part[] = [{ text: 'Hello, world!' }];
@@ -1070,6 +1111,94 @@ describe('ChatRecordingService', () => {
       } finally {
         process.off('unhandledRejection', handler);
       }
+    });
+
+    it('does not rewind the shared parent pointer when strict artifact writes race with normal appends', async () => {
+      let rejectStrict!: (error: Error) => void;
+      const strictWrite = new Promise<void>((_resolve, reject) => {
+        rejectStrict = reject;
+      });
+      vi.mocked(jsonl.writeLine)
+        .mockImplementationOnce(() => strictWrite)
+        .mockResolvedValue(undefined);
+
+      const strict = chatRecordingService.recordSessionArtifactEvent({
+        v: 2,
+        sessionId: 'test-session-id',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [],
+      });
+      chatRecordingService.recordUserMessage([{ text: 'after strict write' }]);
+      rejectStrict(new Error('disk full'));
+
+      await expect(strict).rejects.toThrow('disk full');
+      await chatRecordingService.flush();
+
+      chatRecordingService.recordUserMessage([{ text: 'next message' }]);
+      await chatRecordingService.flush();
+
+      const first = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const second = vi.mocked(jsonl.writeLine).mock.calls[1][1] as ChatRecord;
+      const third = vi.mocked(jsonl.writeLine).mock.calls[2][1] as ChatRecord;
+      expect(second.parentUuid).not.toBe(first.uuid);
+      expect(third.parentUuid).toBe(second.uuid);
+    });
+
+    it('appends strict artifact records after a previous strict write failed', async () => {
+      vi.mocked(jsonl.writeLine)
+        .mockRejectedValueOnce(new Error('corrupt journal'))
+        .mockResolvedValue(undefined);
+
+      await expect(
+        chatRecordingService.recordSessionArtifactEvent({
+          v: 2,
+          sessionId: 'test-session-id',
+          sequence: 1,
+          recordedAt: '2026-07-04T00:00:00.000Z',
+          changes: [],
+        }),
+      ).rejects.toThrow('corrupt journal');
+
+      await expect(
+        chatRecordingService.recordSessionArtifactSnapshot({
+          v: 2,
+          sessionId: 'test-session-id',
+          sequence: 2,
+          recordedAt: '2026-07-04T00:00:01.000Z',
+          artifacts: [],
+          tombstonedIds: [],
+          stickyEphemeralIds: [],
+        }),
+      ).resolves.toBeUndefined();
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+      const snapshotRecord = vi.mocked(jsonl.writeLine).mock
+        .calls[1][1] as ChatRecord;
+      expect(snapshotRecord.subtype).toBe('session_artifact_snapshot');
+    });
+
+    it('keeps artifact journal records out of the active conversation chain', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'before artifact' }]);
+      await chatRecordingService.flush();
+
+      await chatRecordingService.recordSessionArtifactEvent({
+        v: 2,
+        sessionId: 'test-session-id',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [],
+      });
+
+      chatRecordingService.recordUserMessage([{ text: 'after artifact' }]);
+      await chatRecordingService.flush();
+
+      const before = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const artifact = vi.mocked(jsonl.writeLine).mock
+        .calls[1][1] as ChatRecord;
+      const after = vi.mocked(jsonl.writeLine).mock.calls[2][1] as ChatRecord;
+      expect(artifact.parentUuid).toBe(before.uuid);
+      expect(after.parentUuid).toBe(before.uuid);
+      expect(after.parentUuid).not.toBe(artifact.uuid);
     });
 
     // appendRecord can throw SYNCHRONOUSLY before returning a promise

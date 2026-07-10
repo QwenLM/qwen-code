@@ -38,6 +38,8 @@ export type DaemonUiEventType =
   | 'session.available_commands'
   | 'session.state_resync_required'
   | 'session.replay_complete'
+  | 'session.rewound'
+  | 'session.branched'
   // Prompt lifecycle (cross-client)
   | 'prompt.cancelled'
   // Daemon assist push (server-side ghost-text suggestion)
@@ -47,11 +49,14 @@ export type DaemonUiEventType =
   | 'workspace.agent.changed'
   | 'workspace.tool.toggled'
   | 'workspace.settings.changed'
+  | 'workspace.trust.change.requested'
   | 'workspace.initialized'
+  | 'workspace.github.setup.completed'
   | 'workspace.mcp.budget_warning'
   | 'workspace.mcp.child_refused'
   | 'workspace.mcp.server_restarted'
   | 'workspace.mcp.server_restart_refused'
+  | 'workspace.extensions.changed'
   // Auth flow events (Wave 4 OAuth)
   | 'auth.device_flow.started'
   | 'auth.device_flow.throttled'
@@ -86,6 +91,11 @@ export interface DaemonUiTextEvent extends DaemonUiEventBase {
   type: 'user.text.delta' | 'assistant.text.delta' | 'thought.text.delta';
   text: string;
   parentToolCallId?: string;
+  meta?: DaemonTextDeltaMeta;
+}
+
+export interface DaemonTextDeltaMeta extends Record<string, unknown> {
+  qwenDiscreteMessage?: boolean;
 }
 
 export interface DaemonUiUserImageEvent extends DaemonUiEventBase {
@@ -358,16 +368,33 @@ export interface DaemonUiReplayCompleteEvent extends DaemonUiEventBase {
   lastReplayedEventId?: number;
 }
 
+export interface DaemonUiSessionRewoundEvent extends DaemonUiEventBase {
+  type: 'session.rewound';
+  sessionId?: string;
+  promptId: string;
+  targetTurnIndex: number;
+}
+
+export interface DaemonUiSessionBranchedEvent extends DaemonUiEventBase {
+  type: 'session.branched';
+  sourceSessionId: string;
+  newSessionId: string;
+  displayName: string;
+}
+
 /* ──────────────────────────────────────────────────────────────────────────
  * Workspace events (Wave 3-4)
  * ──────────────────────────────────────────────────────────────────────── */
 
 export interface DaemonUiWorkspaceMemoryChangedEvent extends DaemonUiEventBase {
   type: 'workspace.memory.changed';
-  scope: 'workspace' | 'global';
-  filePath: string;
-  mode: 'append' | 'replace';
-  bytesWritten: number;
+  scope: 'workspace' | 'global' | 'managed';
+  filePath?: string;
+  mode?: 'append' | 'replace';
+  bytesWritten?: number;
+  source?: string;
+  taskId?: string;
+  touchedScopes?: Array<'user' | 'project'>;
 }
 
 export interface DaemonUiWorkspaceAgentChangedEvent extends DaemonUiEventBase {
@@ -391,10 +418,27 @@ export interface DaemonUiWorkspaceSettingsChangedEvent
   value: unknown;
 }
 
+export interface DaemonUiTrustChangeRequestedEvent extends DaemonUiEventBase {
+  type: 'workspace.trust.change.requested';
+  workspaceCwd: string;
+  desiredState: 'trusted' | 'untrusted';
+  reason?: string;
+}
+
 export interface DaemonUiWorkspaceInitializedEvent extends DaemonUiEventBase {
   type: 'workspace.initialized';
   path: string;
   action: 'created' | 'overwrote' | 'noop';
+}
+
+export interface DaemonUiGithubSetupCompletedEvent extends DaemonUiEventBase {
+  type: 'workspace.github.setup.completed';
+  releaseTag: string;
+  readmeUrl: string;
+  secretsUrl?: string;
+  workflows: unknown[];
+  gitignore: unknown;
+  warnings: string[];
 }
 
 export interface DaemonUiMcpBudgetWarningEvent extends DaemonUiEventBase {
@@ -429,6 +473,23 @@ export interface DaemonUiMcpServerRestartRefusedEvent
   type: 'workspace.mcp.server_restart_refused';
   serverName: string;
   reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+}
+
+export interface DaemonUiExtensionsChangedEvent extends DaemonUiEventBase {
+  type: 'workspace.extensions.changed';
+  refreshed: number;
+  failed: number;
+  status?:
+    | 'installed'
+    | 'enabled'
+    | 'disabled'
+    | 'updated'
+    | 'uninstalled'
+    | 'failed';
+  source?: string;
+  name?: string;
+  version?: string;
+  error?: string;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -499,6 +560,8 @@ export type DaemonUiEvent =
   | DaemonUiSessionAvailableCommandsEvent
   | DaemonUiStateResyncRequiredEvent
   | DaemonUiReplayCompleteEvent
+  | DaemonUiSessionRewoundEvent
+  | DaemonUiSessionBranchedEvent
   // Prompt lifecycle (cross-client)
   | DaemonUiPromptCancelledEvent
   // Daemon assist push (server-side ghost-text suggestion)
@@ -508,11 +571,14 @@ export type DaemonUiEvent =
   | DaemonUiWorkspaceAgentChangedEvent
   | DaemonUiWorkspaceToolToggledEvent
   | DaemonUiWorkspaceSettingsChangedEvent
+  | DaemonUiTrustChangeRequestedEvent
   | DaemonUiWorkspaceInitializedEvent
+  | DaemonUiGithubSetupCompletedEvent
   | DaemonUiMcpBudgetWarningEvent
   | DaemonUiMcpChildRefusedEvent
   | DaemonUiMcpServerRestartedEvent
   | DaemonUiMcpServerRestartRefusedEvent
+  | DaemonUiExtensionsChangedEvent
   // Auth device-flow events
   | DaemonUiAuthDeviceFlowEvent;
 
@@ -707,6 +773,8 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */
   parentToolCallId?: string;
+  /** Raw ACP update metadata used by renderers for display-only routing. */
+  meta?: DaemonTextDeltaMeta;
   /**
    * Token usage folded onto this assistant block by the reducer from the
    * round's `assistant.usage` event(s). Summed across a turn's assistant blocks
@@ -784,6 +852,7 @@ export interface DaemonStatusTranscriptBlock extends DaemonTranscriptBlockBase {
   text: string;
   code?: string;
   promptId?: string;
+  errorKind?: DaemonErrorKind;
   source?: string;
   data?: unknown;
 }

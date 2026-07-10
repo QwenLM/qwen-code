@@ -25,6 +25,7 @@ export {
   isInSafeToolAllowlist,
   passesAcceptEditsFastPath,
   shouldFirePermissionDeniedForAutoMode,
+  shouldClassifyAllShellForAutoMode,
   shouldForceAutoModeReviewForAllow,
   shouldRunAutoModeForCall,
 } from './autoMode.js';
@@ -44,3 +45,10 @@ export {
   shouldFallback,
 } from './denialTracking.js';
 export { MAX_TRANSCRIPT_MESSAGES } from './classifier-transcript.js';
+export {
+  isDestructiveCommand,
+  extractLastUserPrompt,
+  registerSessionCommit,
+  clearSessionCommits,
+  type DestructiveCommandResult,
+} from './destructive-commands.js';

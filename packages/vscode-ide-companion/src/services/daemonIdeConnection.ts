@@ -85,7 +85,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isLoopbackHostname(hostname: string): boolean {
   // Keep this client-side policy aligned with
-  // packages/cli/src/serve/loopbackBinds.ts when daemon bind rules change.
+  // packages/cli/src/serve/loopback-binds.ts when daemon bind rules change.
   const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (normalized === 'localhost' || normalized === '::1') {
     return true;

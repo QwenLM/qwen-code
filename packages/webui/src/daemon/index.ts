@@ -30,6 +30,7 @@ export {
   selectDaemonStreamingState,
   selectDaemonTodoLists,
   selectDaemonTranscriptStreamingState,
+  isMissingSessionHttpStatus,
   toDaemonPromptContent,
 } from './session/index.js';
 export type {
@@ -53,7 +54,10 @@ export type {
   DaemonTodoStatus,
   DaemonStreamingState,
   DaemonWorkspaceEventSignals,
+  PendingPromptActionOptions,
   SendPromptOptions,
+  SubmitPromptOptions,
+  SubmitPromptResult,
 } from './session/index.js';
 
 // ── Workspace axis (per-workspace, outlives sessions) ──────────────
@@ -72,6 +76,8 @@ export {
   useDaemonResource,
   useDaemonSessions,
   useDaemonSkills,
+  useDaemonStatusReport,
+  useDaemonUsageDashboard,
   useDaemonTools,
   useDaemonSettings,
 } from './workspace/index.js';
@@ -81,7 +87,13 @@ export type {
   DaemonFileStat,
   DaemonGlobOptions,
   DaemonGlobResult,
+  DaemonScheduledTask,
+  DaemonScheduledTaskRun,
+  DaemonCreateScheduledTaskRequest,
+  DaemonUpdateScheduledTaskRequest,
   DaemonResourceOptions,
+  DaemonStatusReportOptions,
+  DaemonUsageDashboardOptions,
   DaemonWorkspaceActions,
   DaemonWorkspaceContextValue,
   DaemonWorkspaceProviderProps,
@@ -96,6 +108,14 @@ export {
 } from './useDaemonFollowupSuggestion.js';
 
 export { useDaemonMidTurnInjected } from './useDaemonMidTurnInjected.js';
+
+export {
+  getPendingPromptVersion,
+  getPendingPromptEvents,
+  consumePendingPromptEvents,
+  subscribePendingPromptEvents,
+  subscribePendingPromptVersion,
+} from './pendingPromptVersion.js';
 
 // ── Re-exported SDK types/constants for UI consumers ──────────────
 // These allow web-shell and other UI packages to depend only on
@@ -120,11 +140,27 @@ export type {
   DaemonSessionStatsStatus,
   DaemonSessionStatsToolByName,
   DaemonSessionSummary,
+  DaemonUsageRange,
+  DaemonUsageDashboard,
+  DaemonUsageDashboardTotals,
+  DaemonUsageModelShare,
+  DaemonUsageSkillCall,
+  DaemonUsageDailyPoint,
+  DaemonUsageHeatmapDay,
+  DaemonStatusReport,
+  DaemonStatusReportDetail,
+  DaemonStatusReportIssue,
+  DaemonStatusReportLevel,
+  DaemonStatusReportSection,
+  DaemonStatusReportSession,
+  DaemonMetricsSeriesBucket,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentSummary,
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceMcpToolStatus,
   DaemonWorkspaceMcpToolsStatus,
+  DaemonWorkspaceMcpResourceStatus,
+  DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryFile,
   DaemonWorkspaceSkillStatus,
   DaemonWorkspaceToolStatus,

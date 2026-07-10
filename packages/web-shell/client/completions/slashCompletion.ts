@@ -4,6 +4,7 @@ import type {
   CompletionResult,
   CompletionSection,
 } from '@codemirror/autocomplete';
+import { Fzf } from 'fzf';
 import type { CommandInfo } from '../adapters/types';
 import type { WebShellLanguage } from '../i18n';
 import {
@@ -18,6 +19,26 @@ import {
 export interface SkillInfo {
   name: string;
   description: string;
+}
+
+export type SlashCommandCompletionKind = 'command' | 'subcommand';
+
+export interface SlashCommandCompletionItem {
+  id: string;
+  label: string;
+  apply: string;
+  detail?: string;
+  category?: CommandDisplayCategory;
+  section?: string;
+  type?: 'command-info' | 'skill';
+}
+
+export interface SlashCommandCompletionResult {
+  kind: SlashCommandCompletionKind;
+  from: number;
+  to: number;
+  query: string;
+  items: SlashCommandCompletionItem[];
 }
 
 type Translate = (key: string) => string;
@@ -55,6 +76,10 @@ const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
     },
     { name: 'output', description: '设置 LLM 输出语言' },
   ],
+  extensions: [
+    { name: 'manage', description: '管理扩展' },
+    { name: 'install', description: '安装扩展' },
+  ],
 };
 
 const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
@@ -82,6 +107,10 @@ const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
       ],
     },
     { name: 'output', description: 'Set LLM output language' },
+  ],
+  extensions: [
+    { name: 'manage', description: 'Manage installed extensions' },
+    { name: 'install', description: 'Install an extension from a source' },
   ],
 };
 
@@ -138,6 +167,7 @@ function resolveSubcommands(
   parts: string[],
   dynamicSkills: SkillInfo[] | undefined,
   language: WebShellLanguage,
+  commandSubcommands?: string[],
 ): SubcommandNode[] | null {
   if (cmdName === 'skills' && parts.length === 0) {
     if (!dynamicSkills || dynamicSkills.length === 0) return null;
@@ -156,6 +186,13 @@ function resolveSubcommands(
         ? IMPLICIT_SUBCOMMAND_TREE_ZH
         : IMPLICIT_SUBCOMMAND_TREE_EN;
     nodes = implicitTree[cmdName];
+  }
+
+  if (!nodes && parts.length === 0 && commandSubcommands?.length) {
+    nodes = commandSubcommands.map((name) => ({
+      name,
+      description: '',
+    }));
   }
 
   if (!nodes) return null;
@@ -282,6 +319,209 @@ export function getSlashCommandArgumentHint(
   return `[${nodes.map((node) => node.name).join('|')}]`;
 }
 
+function getLineBounds(text: string, cursor: number) {
+  const safeCursor = Math.max(0, Math.min(cursor, text.length));
+  const lineStart = text.lastIndexOf('\n', Math.max(0, safeCursor - 1)) + 1;
+  const nextNewline = text.indexOf('\n', safeCursor);
+  const lineEnd = nextNewline === -1 ? text.length : nextNewline;
+  return {
+    lineStart,
+    lineEnd,
+    lineText: text.slice(lineStart, lineEnd),
+    textBefore: text.slice(lineStart, safeCursor),
+    cursor: safeCursor,
+  };
+}
+
+// The visible slash menu (React SlashCommandPanel) drives its top-level command
+// list through getSlashCommandCompletionResult. For a non-empty query we rank
+// with fzf — the same fuzzy engine the TUI uses — so abbreviated input like
+// "mdl" surfaces "model" and "arf" surfaces "agent-reproduce-feature". Building
+// the index is keyed on the commands array identity, so it happens once per
+// command set rather than on every keystroke. (slashCompletionSource, the
+// CodeMirror source below, is not wired into the live editor and still does
+// substring filtering.)
+const commandFzfCache = new WeakMap<
+  readonly CommandInfo[],
+  { fzf: Fzf<readonly string[]>; byName: Map<string, CommandInfo> }
+>();
+
+function getCommandFzf(commands: CommandInfo[]) {
+  let entry = commandFzfCache.get(commands);
+  if (!entry) {
+    const names: string[] = [];
+    const byName = new Map<string, CommandInfo>();
+    for (const command of commands) {
+      if (byName.has(command.name)) continue;
+      names.push(command.name);
+      byName.set(command.name, command);
+    }
+    entry = {
+      fzf: new Fzf(names, { fuzzy: 'v2', casing: 'case-insensitive' }),
+      byName,
+    };
+    commandFzfCache.set(commands, entry);
+  }
+  return entry;
+}
+
+function fuzzyRankCommands(
+  commands: CommandInfo[],
+  query: string,
+): CommandInfo[] {
+  try {
+    const { fzf, byName } = getCommandFzf(commands);
+    const matches: CommandInfo[] = [];
+    for (const result of fzf.find(query)) {
+      const command = byName.get(result.item);
+      if (command) matches.push(command);
+    }
+    return matches;
+  } catch (error) {
+    console.warn(
+      '[web-shell] slash fuzzy search failed, falling back to substring match:',
+      error,
+    );
+    const lp = query.toLowerCase();
+    return commands.filter((command) =>
+      command.name.toLowerCase().includes(lp),
+    );
+  }
+}
+
+export function getSlashCommandCompletionResult(
+  text: string,
+  cursor: number,
+  commands: CommandInfo[],
+  skills: SkillInfo[] = [],
+  language: WebShellLanguage = 'en',
+  translate: Translate = (key) => key,
+  categoryOrder: CommandDisplayCategoryOrder = DEFAULT_COMMAND_CATEGORY_ORDER,
+): SlashCommandCompletionResult | null {
+  const {
+    lineStart,
+    lineEnd,
+    lineText,
+    textBefore,
+    cursor: safeCursor,
+  } = getLineBounds(text, cursor);
+
+  const subMatch = textBefore.match(
+    new RegExp(`^/${COMMAND_NAME_PATTERN}\\s+(.*)$`),
+  );
+  if (subMatch) {
+    const [, cmdName, rest] = subMatch;
+    const cmd = commands.find((c) => c.name === cmdName);
+    const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
+    const implicitTree =
+      language === 'zh-CN'
+        ? IMPLICIT_SUBCOMMAND_TREE_ZH
+        : IMPLICIT_SUBCOMMAND_TREE_EN;
+    const hasTree = !!tree[cmdName] || cmdName === 'skills';
+    const hasImplicitTree = !!implicitTree[cmdName];
+    if (!cmd?.subcommands?.length && !hasTree && !hasImplicitTree) {
+      return null;
+    }
+
+    const tokens = rest.split(/\s+/);
+    const currentTyping = tokens.pop() || '';
+    const completedParts = tokens;
+
+    if (
+      !cmd?.subcommands?.length &&
+      !hasTree &&
+      hasImplicitTree &&
+      !currentTyping
+    ) {
+      return null;
+    }
+
+    const nodes = resolveSubcommands(
+      cmdName,
+      completedParts,
+      skills,
+      language,
+      cmd?.subcommands,
+    );
+    if (!nodes) return null;
+
+    const lp = currentTyping.toLowerCase();
+    const prefix = `/${cmdName} ${
+      completedParts.length > 0 ? completedParts.join(' ') + ' ' : ''
+    }`;
+    const filteredNodes = nodes
+      .filter((n) => !currentTyping || n.name.toLowerCase().includes(lp))
+      .sort((a, b) =>
+        currentTyping ? comparePrefixFirst(a.name, b.name, lp) : 0,
+      );
+    const isSkillList = cmdName === 'skills' && completedParts.length === 0;
+    const items = filteredNodes.map((node): SlashCommandCompletionItem => {
+      const command = `${prefix}${node.name}`;
+      return {
+        id: command,
+        label: node.name,
+        detail: node.description || undefined,
+        apply: `${command} `,
+        ...(isSkillList ? { type: 'skill' as const } : {}),
+      };
+    });
+
+    if (items.length === 0) return null;
+    return {
+      kind: 'subcommand',
+      from: lineStart,
+      to: safeCursor,
+      query: currentTyping,
+      items,
+    };
+  }
+
+  const match = lineText.match(/^\/([^\s/]*)$/);
+  if (!match) return null;
+
+  const prefix = match[1];
+  // Empty query: browse the full list grouped and ordered by category.
+  // Non-empty query: fuzzy-rank by relevance (best match first), matching the
+  // TUI, so partial or abbreviated input surfaces the command the user means.
+  const isBrowsing = prefix.length === 0;
+  const filteredCommands = isBrowsing
+    ? [...commands].sort((a, b) =>
+        compareSlashCommands(a, b, '', categoryOrder),
+      )
+    : fuzzyRankCommands(commands, prefix);
+
+  const items = filteredCommands.map((command): SlashCommandCompletionItem => {
+    const apply = `/${command.name} `;
+    const category = getCommandDisplayCategory(command);
+    const showCommandInfo = category === 'custom' || category === 'skill';
+    return {
+      id: command.name,
+      label: `/${command.name}`,
+      detail: command.description || undefined,
+      apply,
+      category,
+      // Section headers only make sense while browsing the category-ordered
+      // list; a relevance-ranked result set interleaves categories, so headers
+      // would appear before nearly every row. Drop them during search.
+      ...(isBrowsing
+        ? { section: translate(COMMAND_SECTION_KEYS[category]) }
+        : {}),
+      ...(showCommandInfo && command.description
+        ? { type: 'command-info' as const }
+        : {}),
+    };
+  });
+
+  if (items.length === 0) return null;
+  return {
+    kind: 'command',
+    from: lineStart,
+    to: lineEnd,
+    query: prefix,
+    items,
+  };
+}
+
 export function slashCompletionSource(
   getCommands: () => CommandInfo[],
   getSkills: () => SkillInfo[] = () => [],
@@ -334,6 +574,7 @@ export function slashCompletionSource(
         completedParts,
         getSkills(),
         language,
+        cmd?.subcommands,
       );
       if (!nodes) return null;
 
@@ -360,9 +601,6 @@ export function slashCompletionSource(
               }
             : {}),
           detail: n.description || undefined,
-          ...(isSkillList && n.description
-            ? { info: `/${n.name}\n\n${n.description}` }
-            : {}),
           apply: `${command} `,
         };
       });
@@ -399,9 +637,7 @@ export function slashCompletionSource(
       return {
         label: command,
         detail: c.description || undefined,
-        ...(showCommandInfo && c.description
-          ? { info: `${command}\n\n${c.description}` }
-          : {}),
+        ...(showCommandInfo && c.description ? { type: 'command-info' } : {}),
         apply: `${command} `,
         section: getCommandSection(c, translate, categoryOrder),
       };

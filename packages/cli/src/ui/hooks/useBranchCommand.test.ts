@@ -8,10 +8,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useBranchCommand } from './useBranchCommand.js';
 import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
+import type { LoadedSettings } from '../../config/settings.js';
 
 vi.mock('../utils/restoreGoal.js', () => ({
   restoreGoalFromHistory: vi.fn(() => ({ restored: false })),
 }));
+
+const mockSettings = {
+  merged: { ui: { history: { collapseOnResume: false } } },
+} as unknown as LoadedSettings;
 
 describe('useBranchCommand', () => {
   let forkSession: ReturnType<typeof vi.fn>;
@@ -33,6 +38,7 @@ describe('useBranchCommand', () => {
 
   const makeOptions = () => ({
     config,
+    settings: mockSettings,
     historyManager: { clearItems, loadHistory, addItem },
     startNewSession: startNewSessionUI,
     setSessionName,
@@ -484,6 +490,37 @@ describe('useBranchCommand', () => {
         text: expect.stringMatching(/Failed to branch conversation.*core boom/),
       }),
       expect.any(Number),
+    );
+  });
+
+  it('applies collapse policy when collapseOnResume is true', async () => {
+    const settingsWithCollapse = {
+      merged: { ui: { history: { collapseOnResume: true } } },
+    } as unknown as LoadedSettings;
+
+    const { result } = renderHook(() =>
+      useBranchCommand({
+        ...makeOptions(),
+        settings: settingsWithCollapse,
+      }),
+    );
+    await act(async () => {
+      await result.current.handleBranch('my-branch');
+    });
+
+    // loadHistory should have been called with items that include
+    // suppressOnRestore and a collapse-summary item.
+    expect(loadHistory).toHaveBeenCalledTimes(1);
+    const loadedItems = loadHistory.mock.calls[0][0];
+    expect(loadedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          display: expect.objectContaining({ suppressOnRestore: true }),
+        }),
+        expect.objectContaining({
+          display: expect.objectContaining({ kind: 'collapse-summary' }),
+        }),
+      ]),
     );
   });
 });

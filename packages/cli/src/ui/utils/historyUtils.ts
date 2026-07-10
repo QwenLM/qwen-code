@@ -45,6 +45,7 @@ export function isSyntheticHistoryItem(
     case 'warning':
     case 'success':
     case 'retry_countdown':
+    case 'vision_notice':
     case 'notification':
     case 'tool_use_summary':
     case 'gemini_thought':
@@ -71,6 +72,7 @@ export function isSyntheticHistoryItem(
     case 'stats':
     case 'model_stats':
     case 'tool_stats':
+    case 'skill_stats':
     case 'quit':
     case 'compression':
     case 'summary':
@@ -123,4 +125,31 @@ export function findLastUserItemIndex(history: readonly HistoryItem[]): number {
     if (history[i].type === 'user') return i;
   }
   return -1;
+}
+
+/**
+ * Map every thought item to the id of its group's `gemini_thought` head.
+ *
+ * A "thought" is one `gemini_thought` head followed by zero or more
+ * `gemini_thought_content` continuations. Both the head and its continuations
+ * map to the head id, so a single click on the head can expand/collapse the
+ * whole group as a unit (see the per-thought inline expansion in
+ * HistoryItemDisplay).
+ */
+export function buildThoughtHeadIdMap(
+  items: readonly HistoryItem[],
+): Map<HistoryItem, number> {
+  const map = new Map<HistoryItem, number>();
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!;
+    if (item.type !== 'gemini_thought') continue;
+    const headId = item.id;
+    map.set(item, headId);
+    for (let j = i + 1; j < items.length; j++) {
+      const next = items[j]!;
+      if (next.type !== 'gemini_thought_content') break;
+      map.set(next, headId);
+    }
+  }
+  return map;
 }

@@ -12,6 +12,7 @@ import type {
   DaemonInsightReadyMessage,
   DaemonPlanMessage,
   DaemonSystemMessage,
+  DaemonThinkingMessage,
   DaemonToolGroupMessage,
   DaemonUserMessage,
   DaemonUserShellMessage,
@@ -29,6 +30,7 @@ export type StreamingState = DaemonStreamingState;
 
 export type UserMessage = DaemonUserMessage;
 export type AssistantMessage = DaemonAssistantMessage;
+export type ThinkingMessage = DaemonThinkingMessage;
 export type InsightErrorMessage = DaemonInsightErrorMessage;
 export type InsightProgressMessage = DaemonInsightProgressMessage;
 export type InsightReadyMessage = DaemonInsightReadyMessage;
@@ -69,6 +71,8 @@ export interface TurnCollapseHead {
   cachedTokens?: number;
   /** Number of tool calls shown in this turn. */
   toolCallCount?: number;
+  /** Number of assistant thinking blocks shown in this turn. */
+  thinkingCount?: number;
   /**
    * Prompt wall-clock (ms) for a still-running turn. Present only while the turn
    * is active; the row ticks `now - liveStartedAt` once a second so the elapsed

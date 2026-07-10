@@ -975,7 +975,7 @@ export class SourceCredentialManager {
 
     try {
       // 1. Resolve URL
-      const url = renewConfig.path.startsWith('http')
+      const url = /^https?:\/\//i.test(renewConfig.path)
         ? renewConfig.path
         : new URL(renewConfig.path, baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`).toString();
 

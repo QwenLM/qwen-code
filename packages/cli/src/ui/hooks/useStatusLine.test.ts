@@ -69,6 +69,10 @@ const mockConfig = {
   getTargetDir: vi.fn(() => '/test/dir'),
   getModel: vi.fn(() => 'test-model'),
   getModelDisplayName: vi.fn(() => 'Test Model'),
+  getModelsConfig: vi.fn(() => ({
+    getModelDisplayName: (model: string) =>
+      model === 'main-model' ? 'Main Model' : 'Test Model',
+  })),
   getCliVersion: vi.fn(() => '1.0.0'),
   getContentGeneratorConfig: vi.fn(getMockContentGeneratorConfig),
 };
@@ -95,6 +99,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...original,
     createDebugLogger: () => debugLogMock,
+    // Stub cron-task exports to avoid loading async-mutex under fake timers
+    readCronTasks: vi.fn(async () => []),
+    updateCronTasks: vi.fn(async () => undefined),
+    removeCronTasks: vi.fn(async () => undefined),
+    getCronFilePath: vi.fn(() => '/tmp/cron-tasks.json'),
+    generateCronTaskId: vi.fn(() => 'test-id'),
   };
 });
 
@@ -127,9 +137,11 @@ function setStatusLineConfig(
         useThemeColors?: boolean;
         hideContextIndicator?: boolean;
       }
+    | null
     | undefined,
 ) {
-  mockSettings.merged = config ? { ui: { statusLine: config } } : {};
+  mockSettings.merged =
+    config === undefined ? {} : { ui: { statusLine: config } };
 }
 
 describe('useStatusLine', () => {
@@ -183,6 +195,7 @@ describe('useStatusLine', () => {
     mockUIState.sessionStats.metrics.files.totalLinesRemoved = 0;
     mockVimMode.vimEnabled = false;
     mockVimMode.vimMode = 'INSERT';
+    mockConfig.getModelDisplayName.mockReturnValue('Test Model');
     mockConfig.getContentGeneratorConfig.mockReturnValue({
       contextWindowSize: 131072,
     });
@@ -199,7 +212,37 @@ describe('useStatusLine', () => {
   // --- getStatusLineConfig validation (tested through the hook) ---
 
   describe('config validation', () => {
-    it('returns null when no statusLine config is set', () => {
+    it('renders the default preset when no statusLine config is set', () => {
+      const { result } = renderHook(() => useStatusLine());
+      expect(child_process.exec).not.toHaveBeenCalled();
+      expect(result.current.lines).toEqual([
+        '\u279c dir \u00b7 git:(main) \u00b7 Test Model \u00b7 131.1k Context 0.1% used',
+      ]);
+    });
+
+    it('falls back to config model display name when the preset current model is empty', () => {
+      mockUIState.currentModel = '';
+
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual([
+        '\u279c dir \u00b7 git:(main) \u00b7 Test Model \u00b7 131.1k Context 0.1% used',
+      ]);
+    });
+
+    it('renders the session model when config is scoped to a fast subagent', () => {
+      mockUIState.currentModel = 'main-model';
+      mockConfig.getModelDisplayName.mockReturnValue('Fast Model');
+
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual([
+        '\u279c dir \u00b7 git:(main) \u00b7 Main Model \u00b7 131.1k Context 0.1% used',
+      ]);
+    });
+
+    it('renders no lines when statusLine is explicitly null (opt-out)', () => {
+      setStatusLineConfig(null);
       const { result } = renderHook(() => useStatusLine());
       expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
@@ -336,7 +379,7 @@ describe('useStatusLine', () => {
       const { result } = renderHook(() => useStatusLine());
 
       expect(child_process.exec).not.toHaveBeenCalled();
-      expect(result.current.lines).toEqual(['Test Model high | Test Model']);
+      expect(result.current.lines).toEqual(['Test Model high · Test Model']);
     });
 
     it('refreshes when status line settings are saved in the same process', async () => {
@@ -371,7 +414,7 @@ describe('useStatusLine', () => {
         vi.advanceTimersByTime(300);
       });
 
-      expect(result.current.lines).toEqual(['Test Model | #4118']);
+      expect(result.current.lines).toEqual(['Test Model · #4118']);
     });
 
     it('reloads status line settings from disk when streaming becomes idle', async () => {
@@ -422,8 +465,8 @@ describe('useStatusLine', () => {
       expect(lastExecCommand).toBe('echo from-settings');
     });
 
-    it('ignores a stale preset override when settings no longer have status line config', () => {
-      setStatusLineConfig(undefined);
+    it('ignores a stale preset override when status line is disabled (null)', () => {
+      setStatusLineConfig(null);
       mockUIState.statusLineConfigOverride = {
         type: 'preset',
         items: ['model'],
@@ -669,7 +712,10 @@ describe('useStatusLine', () => {
     });
 
     it('falls back to zero when contextWindowSize is unavailable', () => {
-      mockConfig.getContentGeneratorConfig.mockReturnValueOnce(null as never);
+      // Persistent (not Once): the hook reads getContentGeneratorConfig both at
+      // render scope (reasoning-effort trigger key) and inside the data builder,
+      // so simulate "unavailable" for every call rather than just the first.
+      mockConfig.getContentGeneratorConfig.mockReturnValue(null as never);
       setStatusLineConfig({ type: 'command', command: 'cat' });
       renderHook(() => useStatusLine());
 
@@ -694,6 +740,17 @@ describe('useStatusLine', () => {
 
       const input = JSON.parse(stdinWrittenData);
       expect(input.model.display_name).toBe('Test Model');
+    });
+
+    it('sends the session model when config is scoped to a fast subagent', () => {
+      mockUIState.currentModel = 'main-model';
+      mockConfig.getModelDisplayName.mockReturnValue('Fast Model');
+      setStatusLineConfig({ type: 'command', command: 'cat' });
+
+      renderHook(() => useStatusLine());
+
+      const input = JSON.parse(stdinWrittenData);
+      expect(input.model.display_name).toBe('Main Model');
     });
   });
 
@@ -764,10 +821,10 @@ describe('useStatusLine', () => {
     });
   });
 
-  // --- Config removal clears output ---
+  // --- Explicit opt-out via `ui.statusLine: null` ---
 
   describe('config removal', () => {
-    it('clears output when config is removed', async () => {
+    it('clears output when status line is explicitly disabled (null)', async () => {
       setStatusLineConfig({ type: 'command', command: 'echo hello' });
       const { result, rerender } = renderHook(() => useStatusLine());
 
@@ -776,14 +833,14 @@ describe('useStatusLine', () => {
       });
       expect(result.current.lines).toEqual(['hello']);
 
-      // Remove config
-      setStatusLineConfig(undefined);
+      // Explicit opt-out
+      setStatusLineConfig(null);
       rerender();
 
       expect(result.current.lines).toEqual([]);
     });
 
-    it('cancels pending debounce and kills child when config is removed', async () => {
+    it('cancels pending debounce and kills child when status line is disabled (null)', async () => {
       setStatusLineConfig({ type: 'command', command: 'echo hello' });
       const { rerender } = renderHook(() => useStatusLine());
       expect(child_process.exec).toHaveBeenCalledTimes(1);
@@ -792,8 +849,8 @@ describe('useStatusLine', () => {
       mockUIState.currentModel = 'new-model';
       rerender();
 
-      // Remove config before debounce fires
-      setStatusLineConfig(undefined);
+      // Disable before debounce fires
+      setStatusLineConfig(null);
       rerender();
 
       expect(mockKill).toHaveBeenCalled();

@@ -1,185 +1,207 @@
 .panel {
-  flex-shrink: 0;
-  padding: 6px 10px 8px;
-  margin: 0 16px 4px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  border-left: 3px solid var(--accent-color);
+  position: relative;
+  width: fit-content;
+  max-width: min(100%, 560px);
+  margin: 0 auto;
+  color: var(--muted-foreground);
+  outline: none;
 }
 
-.header {
-  display: flex;
+.summary {
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 8px 18px;
+  border: 1px solid color-mix(in srgb, var(--border) 74%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--background) 92%, transparent);
+  box-shadow: 0 10px 28px color-mix(in srgb, #000 9%, transparent);
+  font-size: 14px;
+  line-height: 1.2;
+  white-space: nowrap;
+  backdrop-filter: blur(8px);
+}
+
+.progressRing {
+  --todo-progress: 0;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, var(--background) 52%, transparent 54%),
+    conic-gradient(
+      var(--agent-blue-500) calc(var(--todo-progress) * 1turn),
+      color-mix(in srgb, var(--border) 70%, transparent) 0
+    );
+}
+
+.stepText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted-foreground);
+}
+
+.statusSegmentWrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
 }
 
-.toggle {
-  flex: 1;
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
+.separator {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, var(--muted-foreground) 72%, transparent);
+}
+
+.statusSegment,
+.statusSegmentButton {
   min-width: 0;
-  margin: 0;
-  padding: 2px 0;
-  background: none;
-  border: none;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusSegmentButton {
+  padding: 0;
+  border: 0;
+  background: transparent;
   cursor: pointer;
   font: inherit;
-  text-align: left;
-  color: var(--text-primary);
 }
 
-.chevron {
-  flex-shrink: 0;
-  width: 12px;
-  color: var(--text-dimmed);
+.statusSegmentButton:hover,
+.statusSegmentButton:focus-visible {
+  color: var(--foreground);
+  outline: none;
 }
 
-.title {
-  flex-shrink: 0;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
+.fullText {
+  display: inline;
 }
 
-.progress {
-  flex-shrink: 0;
-  font-size: 12px;
-  font-family: var(--font-mono);
-  color: var(--text-dimmed);
+.compactText {
+  display: none;
+  font-variant-numeric: tabular-nums;
 }
 
-.collapsedCurrent {
+@media (max-width: 599px) {
+  .fullText {
+    display: none;
+  }
+
+  .compactText {
+    display: inline;
+  }
+
+  .summary {
+    padding: 6px 12px;
+  }
+}
+
+.detail {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  z-index: 30;
   display: flex;
-  align-items: baseline;
-  gap: 4px;
-  min-width: 0;
-  margin-left: 6px;
-  font-size: 13px;
-  font-family: var(--font-mono);
-}
-
-.locate {
-  flex-shrink: 0;
-  margin: 0;
-  padding: 2px 6px;
-  background: none;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 13px;
-  line-height: 1;
-  color: var(--text-dimmed);
-}
-
-.locate:hover {
-  color: var(--accent-color);
-}
-
-.list {
-  display: flex;
+  width: min(560px, calc(100vw - 48px));
+  max-height: min(42vh, 360px);
   flex-direction: column;
-  gap: 3px;
-  margin-top: 6px;
-  padding-left: 4px;
-  max-height: 40vh;
+  gap: 8px;
+  padding: 14px 16px;
   overflow-y: auto;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--background) 96%, transparent);
+  box-shadow: 0 18px 42px color-mix(in srgb, #000 13%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 6px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+  backdrop-filter: blur(10px);
+}
+
+.panel:hover .detail,
+.panel:focus-within .detail {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
 }
 
 .item {
-  display: flex;
-  align-items: baseline;
-  gap: 4px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
   min-width: 0;
-  font-size: 13px;
-  font-family: var(--font-mono);
-  line-height: 1.5;
-}
-
-.num {
-  flex-shrink: 0;
-  color: var(--text-dimmed);
-  text-align: right;
+  font-size: 14px;
+  line-height: 1.45;
 }
 
 .icon {
-  flex-shrink: 0;
-  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-foreground);
+  font-size: 13px;
 }
 
-.pending .icon {
-  color: var(--text-dimmed);
-}
-
-.pending .content {
-  color: var(--text-dimmed);
-}
-
-.inProgress .icon {
-  color: var(--accent-color);
-}
-
-.inProgress .content {
-  color: var(--accent-color);
-}
-
-.completed .icon {
-  color: var(--success-color);
-}
-
-.completed .content {
-  color: var(--text-dimmed);
+.loadingIcon {
+  width: 12px;
+  height: 12px;
+  border: 2px solid color-mix(in srgb, var(--agent-blue-500) 24%, transparent);
+  border-top-color: var(--agent-blue-500);
+  border-radius: 50%;
+  animation: todoPanelSpin 0.8s linear infinite;
 }
 
 .content {
-  flex: 1;
   min-width: 0;
   overflow: hidden;
-  white-space: nowrap;
   text-overflow: ellipsis;
-  color: var(--text-secondary);
-}
-
-.moreLine {
-  display: flex;
-  align-items: baseline;
-  gap: 4px;
-  width: fit-content;
-  margin: 0;
-  padding: 0;
-  background: none;
-  border: none;
-  cursor: pointer;
-  /* Match .item so the num placeholder resolves to the same ch width. */
-  font-size: 13px;
-  font-family: var(--font-mono);
-  line-height: 1.5;
-  color: var(--text-dimmed);
-}
-
-.moreText {
-  font-size: 12px;
-}
-
-.moreLine:hover {
-  color: var(--text-secondary);
-}
-
-.moreLine:hover .moreText {
-  text-decoration: underline;
-}
-
-.allDone {
-  font-size: 13px;
-  font-family: var(--font-mono);
-  color: var(--success-color);
-}
-
-.collapsedCurrent.allDone {
-  overflow: hidden;
   white-space: nowrap;
-  text-overflow: ellipsis;
-  display: inline-block;
+  color: var(--muted-foreground);
+}
+
+.completed .icon,
+.completed .content {
+  color: var(--muted-foreground);
+}
+
+.completed .content {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(
+    in srgb,
+    var(--muted-foreground) 72%,
+    transparent
+  );
+}
+
+.inProgress .icon,
+.inProgress .content {
+  color: var(--foreground);
+}
+
+.pending .icon,
+.pending .content {
+  color: var(--muted-foreground);
+}
+
+@keyframes todoPanelSpin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loadingIcon {
+    animation: none;
+  }
 }

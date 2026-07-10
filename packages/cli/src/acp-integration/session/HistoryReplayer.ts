@@ -9,6 +9,7 @@ import type {
   AgentResultDisplay,
   SlashCommandRecordPayload,
   NotificationRecordPayload,
+  HistoryGap,
 } from '@qwen-code/qwen-code-core';
 import type {
   Content,
@@ -17,6 +18,22 @@ import type {
 import type { SessionContext } from './types.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
+import { getToolResultCallId } from '../../utils/chat-record-tool-call-id.js';
+import {
+  formatHistoryGapNotice,
+  indexGapsByChild,
+} from '../../ui/utils/history-gap-notice.js';
+
+export const MISSING_TOOL_RESULT_MESSAGE =
+  'Tool result missing from saved history; the previous run likely ended ' +
+  'before this tool completed.';
+
+interface PendingReplayToolCall {
+  callId: string;
+  toolName: string;
+  timestamp?: string;
+  recordId: string;
+}
 
 /**
  * Handles replaying session history on session load.
@@ -29,6 +46,10 @@ export class HistoryReplayer {
   private readonly ctx: SessionContext;
   private readonly messageEmitter: MessageEmitter;
   private readonly toolCallEmitter: ToolCallEmitter;
+  private readonly pendingReplayToolCalls = new Map<
+    string,
+    PendingReplayToolCall
+  >();
 
   constructor(ctx: SessionContext) {
     this.ctx = ctx;
@@ -40,10 +61,49 @@ export class HistoryReplayer {
    * Replays all chat records from a loaded session.
    *
    * @param records - Array of chat records to replay
+   * @param gaps - Optional detected history gaps; a visible notice is emitted
+   *   immediately before each gap's child record so the user sees that an
+   *   earlier segment was lost rather than assuming the halves are contiguous.
    */
-  async replay(records: ChatRecord[]): Promise<void> {
-    for (const record of records) {
-      await this.replayRecord(record);
+  async replay(records: ChatRecord[], gaps?: HistoryGap[]): Promise<void> {
+    this.pendingReplayToolCalls.clear();
+    const gapByChildUuid = indexGapsByChild(gaps);
+    try {
+      let replayError: unknown;
+      try {
+        for (const record of records) {
+          const gap = gapByChildUuid.get(record.uuid);
+          if (gap) {
+            await this.emitHistoryGapNotice(gap, record.timestamp);
+          }
+          await this.replayRecord(record);
+        }
+      } catch (error) {
+        replayError = error;
+      }
+
+      let danglingError: unknown;
+      try {
+        await this.failDanglingToolCalls();
+      } catch (error) {
+        danglingError = error;
+      }
+
+      if (replayError && danglingError) {
+        throw new AggregateError(
+          [replayError, danglingError],
+          'Replay and dangling-cleanup both failed',
+        );
+      }
+      if (replayError) {
+        throw replayError;
+      }
+      if (danglingError) {
+        throw danglingError;
+      }
+    } finally {
+      this.pendingReplayToolCalls.clear();
+      this.setActiveRecordId(null);
     }
   }
 
@@ -52,70 +112,103 @@ export class HistoryReplayer {
    */
   private async replayRecord(record: ChatRecord): Promise<void> {
     this.setActiveRecordId(record.uuid, record.timestamp);
-    switch (record.type) {
-      case 'user':
-        // Notification/cron records hold raw XML/prompt the user never
-        // typed; replay the friendly displayText so the assistant's reply
-        // has an antecedent in the ACP transcript.
-        if (record.subtype === 'notification' || record.subtype === 'cron') {
-          const displayText = (
-            record.systemPayload as NotificationRecordPayload | undefined
-          )?.displayText;
-          if (displayText) {
-            await this.messageEmitter.emitUserMessage(
-              displayText,
+    try {
+      switch (record.type) {
+        case 'user':
+          // Notification/cron records hold raw XML/prompt the user never
+          // typed; replay the friendly displayText so the assistant's reply
+          // has an antecedent in the ACP transcript.
+          if (record.subtype === 'notification' || record.subtype === 'cron') {
+            const displayText = (
+              record.systemPayload as NotificationRecordPayload | undefined
+            )?.displayText;
+            if (displayText) {
+              await this.messageEmitter.emitUserMessage(
+                displayText,
+                record.timestamp,
+                record.subtype === 'cron' ? { source: 'cron' } : undefined,
+              );
+            }
+            break;
+          }
+          if (record.subtype === 'mid_turn_user_message') {
+            const displayText = (
+              record.systemPayload as NotificationRecordPayload | undefined
+            )?.displayText;
+            if (displayText) {
+              await this.messageEmitter.emitUserMessage(
+                displayText,
+                record.timestamp,
+              );
+            } else if (record.message) {
+              await this.replayContent(
+                record.message,
+                'user',
+                record.timestamp,
+                record.uuid,
+              );
+            }
+            break;
+          }
+          if (record.message) {
+            await this.replayContent(
+              record.message,
+              'user',
               record.timestamp,
+              record.uuid,
             );
           }
           break;
-        }
-        if (record.subtype === 'mid_turn_user_message') {
-          const displayText = (
-            record.systemPayload as NotificationRecordPayload | undefined
-          )?.displayText;
-          if (displayText) {
-            await this.messageEmitter.emitUserMessage(
-              displayText,
+
+        case 'assistant':
+          if (record.message) {
+            await this.replayContent(
+              record.message,
+              'assistant',
               record.timestamp,
+              record.uuid,
             );
-          } else if (record.message) {
-            await this.replayContent(record.message, 'user', record.timestamp);
+          }
+          if (record.usageMetadata) {
+            await this.replayUsageMetadata(record.usageMetadata);
           }
           break;
-        }
-        if (record.message) {
-          await this.replayContent(record.message, 'user', record.timestamp);
-        }
-        break;
 
-      case 'assistant':
-        if (record.message) {
-          await this.replayContent(
-            record.message,
-            'assistant',
-            record.timestamp,
-          );
-        }
-        if (record.usageMetadata) {
-          await this.replayUsageMetadata(record.usageMetadata);
-        }
-        break;
+        case 'tool_result':
+          await this.replayToolResult(record);
+          break;
 
-      case 'tool_result':
-        await this.replayToolResult(record);
-        break;
+        case 'system':
+          if (record.subtype === 'slash_command') {
+            await this.replaySlashCommandResult(record);
+          }
+          // Other system subtypes (compression, telemetry, at_command) are skipped.
+          break;
 
-      case 'system':
-        if (record.subtype === 'slash_command') {
-          await this.replaySlashCommandResult(record);
-        }
-        // Other system subtypes (compression, telemetry, at_command) are skipped.
-        break;
-
-      default:
-        break;
+        default:
+          break;
+      }
+    } finally {
+      this.setActiveRecordId(null);
     }
-    this.setActiveRecordId(null);
+  }
+
+  /**
+   * Emits a visible notice marking a break in the persisted history chain: an
+   * earlier segment was physically lost (storage interruption) and could not be
+   * recovered, so the surviving turns below must not be read as contiguous with
+   * whatever came before the gap. Uses the agent message channel — the same one
+   * used for other system notices (see MessageEmitter.emitStopHookLoop) — so no
+   * new session-update kind is needed.
+   */
+  private async emitHistoryGapNotice(
+    gap: HistoryGap,
+    timestamp?: string,
+  ): Promise<void> {
+    await this.messageEmitter.emitAgentMessage(
+      formatHistoryGapNotice(gap),
+      timestamp,
+    );
   }
 
   /**
@@ -130,6 +223,7 @@ export class HistoryReplayer {
     content: Content,
     role: 'user' | 'assistant',
     timestamp?: string,
+    recordId?: string,
   ): Promise<void> {
     for (const part of content.parts ?? []) {
       // Text content
@@ -146,15 +240,25 @@ export class HistoryReplayer {
       // Function call (tool start)
       if ('functionCall' in part && part.functionCall) {
         const functionName = part.functionCall.name ?? '';
-        const callId = part.functionCall.id ?? `${functionName}-${Date.now()}`;
+        const sourceCallId = part.functionCall.id;
+        const callId = sourceCallId ?? `${functionName}-${Date.now()}`;
 
-        await this.toolCallEmitter.emitStart({
+        const emitted = await this.toolCallEmitter.emitStart({
           toolName: functionName,
           callId,
           args: part.functionCall.args as Record<string, unknown>,
           status: 'in_progress',
           timestamp,
         });
+
+        if (emitted && role === 'assistant' && recordId && sourceCallId) {
+          this.pendingReplayToolCalls.set(callId, {
+            callId,
+            toolName: functionName,
+            timestamp,
+            recordId,
+          });
+        }
       }
     }
   }
@@ -179,7 +283,8 @@ export class HistoryReplayer {
     }
 
     const result = record.toolCallResult;
-    const callId = result?.callId ?? record.uuid;
+    const callId = getToolResultCallId(record);
+    this.pendingReplayToolCalls.delete(callId);
 
     // Extract tool name from the function response in message if available
     const toolName = this.extractToolNameFromRecord(record);
@@ -190,6 +295,7 @@ export class HistoryReplayer {
       success: !result?.error,
       message: record.message.parts,
       resultDisplay: result?.resultDisplay,
+      artifacts: result?.artifacts,
       // For TodoWriteTool fallback, try to extract args from the record
       // Note: args aren't stored in tool_result records by default
       args: undefined,
@@ -207,6 +313,30 @@ export class HistoryReplayer {
       await this.emitTaskUsageFromResultDisplay(
         resultDisplay as AgentResultDisplay,
       );
+    }
+  }
+
+  private async failDanglingToolCalls(): Promise<void> {
+    let firstError: unknown;
+    for (const pending of this.pendingReplayToolCalls.values()) {
+      this.setActiveRecordId(pending.recordId, pending.timestamp);
+      try {
+        await this.toolCallEmitter.emitResult({
+          toolName: pending.toolName,
+          callId: pending.callId,
+          success: false,
+          message: [],
+          error: new Error(MISSING_TOOL_RESULT_MESSAGE),
+          timestamp: pending.timestamp,
+        });
+      } catch (error) {
+        firstError ??= error;
+      } finally {
+        this.setActiveRecordId(null);
+      }
+    }
+    if (firstError) {
+      throw firstError;
     }
   }
 

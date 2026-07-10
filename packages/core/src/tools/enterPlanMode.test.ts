@@ -7,6 +7,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EnterPlanModeTool } from './enterPlanMode.js';
 import { ApprovalMode, type Config } from '../config/config.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
 describe('EnterPlanModeTool', () => {
   let tool: EnterPlanModeTool;
@@ -48,6 +50,19 @@ describe('EnterPlanModeTool', () => {
       expect(tool.kind).toBe('think');
     });
 
+    it('should require user opt-in in the tool description', () => {
+      expect(tool.description).toContain(
+        'only after the user explicitly asks to switch into plan mode',
+      );
+      expect(tool.description).toContain(
+        'If plan mode seems helpful but the user has not asked for it, ask first',
+      );
+      expect(tool.description).not.toContain(
+        'before doing uncertain or complex work',
+      );
+      expect(tool.description).not.toContain('if complexity rises');
+    });
+
     it('should not defer (always visible)', () => {
       expect(tool.shouldDefer).toBe(false);
     });
@@ -78,6 +93,7 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
+        { enteredByModel: true },
       );
       expect(approvalMode).toBe(ApprovalMode.PLAN);
       expect(savedPrePlanMode).toBe(ApprovalMode.DEFAULT);
@@ -91,6 +107,7 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
+        { enteredByModel: true },
       );
       expect(savedPrePlanMode).toBe(ApprovalMode.AUTO_EDIT);
     });
@@ -102,6 +119,7 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
+        { enteredByModel: true },
       );
       expect(savedPrePlanMode).toBe(ApprovalMode.AUTO);
     });
@@ -113,6 +131,7 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
+        { enteredByModel: true },
       );
       expect(savedPrePlanMode).toBe(ApprovalMode.YOLO);
     });
@@ -139,6 +158,42 @@ describe('EnterPlanModeTool', () => {
 
       expect(result.llmContent).toContain('Failed to enter plan mode');
       expect(result.llmContent).toContain('trust gate');
+    });
+
+    it('rejects inside subagent context without changing approval mode', async () => {
+      approvalMode = ApprovalMode.DEFAULT;
+      const invocation = tool.build({});
+
+      const result = await runWithAgentContext('agent-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('not available inside subagents');
+      expect(result.llmContent).toContain('return your plan');
+      expect(result.error?.message).toBe(result.llmContent);
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+    });
+
+    it('rejects inside teammate context without changing approval mode', async () => {
+      approvalMode = ApprovalMode.AUTO_EDIT;
+      const invocation = tool.build({});
+
+      const result = await runWithTeammateIdentity(
+        {
+          agentId: 'agent@test',
+          agentName: 'agent',
+          teamName: 'test',
+          isTeamLead: false,
+        },
+        () => invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('not available inside subagents');
+      expect(result.llmContent).toContain('return your plan');
+      expect(result.error?.message).toBe(result.llmContent);
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.AUTO_EDIT);
     });
   });
 });

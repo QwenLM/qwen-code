@@ -36,6 +36,7 @@ import {
   getEffectiveDisplayValue,
   setNestedPropertySafe,
   setNestedPropertyForce,
+  validateSettingValue,
 } from './settingsUtils.js';
 import {
   getSettingsSchema,
@@ -77,6 +78,37 @@ describe('SettingsUtils', () => {
         requiresRestart: false,
         default: 'hello',
         description: 'A test field',
+        showInDialog: true,
+      },
+      numberWithMinimum: {
+        type: 'number',
+        label: 'Number With Minimum',
+        category: 'Basic',
+        requiresRestart: false,
+        default: 0,
+        minimum: 0,
+        description: 'A number field with a minimum.',
+        showInDialog: true,
+      },
+      numberWithMaximum: {
+        type: 'number',
+        label: 'Number With Maximum',
+        category: 'Basic',
+        requiresRestart: false,
+        default: 10,
+        maximum: 10,
+        description: 'A number field with a maximum.',
+        showInDialog: true,
+      },
+      integerWithBounds: {
+        type: 'integer',
+        label: 'Integer With Bounds',
+        category: 'Basic',
+        requiresRestart: false,
+        default: 1,
+        minimum: 1,
+        maximum: 10,
+        description: 'An integer field with bounds.',
         showInDialog: true,
       },
       advanced: {
@@ -208,6 +240,49 @@ describe('SettingsUtils', () => {
       it('should return undefined for invalid setting', () => {
         const definition = getSettingDefinition('invalidSetting');
         expect(definition).toBeUndefined();
+      });
+    });
+
+    describe('validateSettingValue', () => {
+      it('accepts finite numbers at the configured minimum', () => {
+        const definition = getSettingDefinition('numberWithMinimum');
+        expect(definition).toBeDefined();
+
+        expect(validateSettingValue(definition!, 0)).toBeUndefined();
+        expect(validateSettingValue(definition!, 1)).toBeUndefined();
+      });
+
+      it('rejects numbers below the configured minimum', () => {
+        const definition = getSettingDefinition('numberWithMinimum');
+        expect(definition).toBeDefined();
+
+        expect(validateSettingValue(definition!, -1)).toBe(
+          'Value must be >= 0',
+        );
+      });
+
+      it('rejects numbers above the configured maximum', () => {
+        const definition = getSettingDefinition('numberWithMaximum');
+        expect(definition).toBeDefined();
+
+        expect(validateSettingValue(definition!, 11)).toBe(
+          'Value must be <= 10',
+        );
+      });
+
+      it('validates integer settings', () => {
+        const definition = getSettingDefinition('integerWithBounds');
+        expect(definition).toBeDefined();
+
+        expect(validateSettingValue(definition!, 1)).toBeUndefined();
+        expect(validateSettingValue(definition!, 10)).toBeUndefined();
+        expect(validateSettingValue(definition!, 1.5)).toBe(
+          'Value must be an integer',
+        );
+        expect(validateSettingValue(definition!, 0)).toBe('Value must be >= 1');
+        expect(validateSettingValue(definition!, 11)).toBe(
+          'Value must be <= 10',
+        );
       });
     });
 

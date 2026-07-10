@@ -52,6 +52,8 @@ If you are in Normal Mode, **Shift+Tab** (or **Tab** on Windows) first switches 
 
 The `/plan` command provides a quick shortcut for entering and exiting Plan Mode:
 
+Regular planning requests do not switch modes by themselves. If you want the read-only Plan Mode workflow, use `/plan`, the keyboard shortcut, or set the approval mode to `plan` explicitly.
+
 ```bash
 /plan                          # Enter plan mode
 /plan refactor the auth module # Enter plan mode and start planning
@@ -298,6 +300,9 @@ reason inline and decide whether to switch to Ask Permissions Mode for that step
         "deny": ["Any network call to intranet.example.com"],
       },
       "environment": ["Open-source monorepo; commits are signed"],
+      // Optional: route ALL shell commands (including read-only ones like
+      // ls, cat) through the classifier for defense-in-depth.
+      // "classifyAllShell": true,
     },
   },
 }

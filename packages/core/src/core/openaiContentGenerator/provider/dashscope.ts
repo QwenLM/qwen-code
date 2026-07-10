@@ -4,10 +4,10 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
 import {
-  DEFAULT_TIMEOUT,
   DEFAULT_MAX_RETRIES,
   DEFAULT_DASHSCOPE_BASE_URL,
   DASHSCOPE_PROXY_BASE_URL,
+  resolveRequestTimeout,
 } from '../constants.js';
 import type {
   DashScopeRequestMetadata,
@@ -136,9 +136,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const {
       apiKey,
       baseUrl = DEFAULT_DASHSCOPE_BASE_URL,
-      timeout = DEFAULT_TIMEOUT,
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
+    const timeout = resolveRequestTimeout(this.contentGeneratorConfig.timeout);
     const defaultHeaders = this.buildHeaders();
     // Configure fetch options for proxy support and timeout handling.
     // With proxy, dispatcher timeouts are disabled so SDK timeout controls the
@@ -178,8 +178,24 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     let messages = request.messages;
     let tools = request.tools;
 
-    // Apply DashScope cache control if enabled (default is enabled).
-    if (this.shouldEnableCacheControl()) {
+    // glm-* models served via DashScope only parse structured "content parts"
+    // arrays when the request is in function-calling mode. A tool-less request
+    // (e.g. web_fetch's side-query: system + user, no tools, no tool messages)
+    // with array content has its prompt silently dropped server-side —
+    // prompt_tokens collapses and the model answers from an empty prompt. This
+    // is glm-specific; other DashScope models read array content fine. Caching
+    // is also moot for these one-shot side-queries, so for glm tool-less
+    // requests we skip cache control and collapse content to plain strings (the
+    // only form glm reliably reads here). Every other case keeps the existing
+    // cache-control path unchanged.
+    const flattenPlainTextForGlm =
+      this.isGlmModel(request.model) &&
+      !this.hasFunctionCallingContext(request);
+
+    if (flattenPlainTextForGlm) {
+      messages = this.flattenTextContent(messages);
+    } else if (this.shouldEnableCacheControl()) {
+      // Apply DashScope cache control if enabled (default is enabled).
       const { messages: updatedMessages, tools: updatedTools } =
         this.addDashScopeCacheControl(
           request,
@@ -189,32 +205,96 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       tools = updatedTools;
     }
 
-    // Apply output token limits using parent class logic
-    // Uses capped default (min of model limit and CAPPED_DEFAULT_MAX_TOKENS=8K)
-    // Requests hitting the cap get one clean retry at 64K (geminiChat.ts)
+    // Apply output token limits using parent class logic.
     const requestWithTokenLimits = this.applyOutputTokenLimit(request);
 
     const extraBody = this.contentGeneratorConfig.extra_body;
 
+    // When the user picks a reasoning effort (/effort), turn thinking on for
+    // qwen hybrid models. qwen has no per-tier `reasoning_effort` field yet, so
+    // the unified effort maps onto the on/off `enable_thinking` switch — extend
+    // this to a real tier mapping when qwen ships one. User extra_body wins
+    // (merged last); the disable path (reasoning: false) is handled upstream in
+    // the pipeline.
+    const enableThinkingFromEffort = this.shouldEnableThinkingFromEffort(
+      request.model,
+    );
+
     if (this.isVisionModel(request.model)) {
-      return {
+      // DashScope-exclusive fields not present in the OpenAI SDK types; spread
+      // through a loose record so they don't trip excess-property checks.
+      // Several vision models (e.g. qwen3.6-plus, qwen3.7-plus) are reasoning
+      // models that need `preserve_thinking` for multi-turn reasoning continuity.
+      const dashscopeExtras: Record<string, unknown> = {
+        vl_high_resolution_images: true,
+        preserve_thinking: true,
+        ...(enableThinkingFromEffort ? { enable_thinking: true } : {}),
+      };
+      const visionResult: Record<string, unknown> = {
         ...requestWithTokenLimits,
         messages,
         ...(tools ? { tools } : {}),
         ...(this.buildMetadata(userPromptId) || {}),
-        /* @ts-expect-error dashscope exclusive */
-        vl_high_resolution_images: true,
+        ...dashscopeExtras,
+      };
+      // qwen drives thinking via `enable_thinking`, not the OpenAI-style nested
+      // `reasoning` object the pipeline injects from /effort. Drop it so we
+      // don't ship two competing knobs (mirrors deepseek.ts / zai.ts). User
+      // extra_body still wins (merged last).
+      if (enableThinkingFromEffort && 'reasoning' in visionResult) {
+        delete visionResult['reasoning'];
+      }
+      return {
+        ...visionResult,
         ...(extraBody ? extraBody : {}),
-      } as OpenAI.Chat.ChatCompletionCreateParams;
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
     }
 
-    return {
+    // DashScope-exclusive fields not present in the OpenAI SDK types; user
+    // extra_body wins (merged last).
+    const dashscopeExtras: Record<string, unknown> = {
+      preserve_thinking: true,
+      ...(enableThinkingFromEffort ? { enable_thinking: true } : {}),
+    };
+    const result: Record<string, unknown> = {
       ...requestWithTokenLimits, // Preserve all original parameters including sampling params and adjusted max_tokens
       messages,
       ...(tools ? { tools } : {}),
       ...(this.buildMetadata(userPromptId) || {}),
+      ...dashscopeExtras,
+    };
+    // qwen drives thinking via `enable_thinking`, not the OpenAI-style nested
+    // `reasoning` object the pipeline injects from /effort. Drop it so we don't
+    // ship two competing knobs (mirrors deepseek.ts / zai.ts). User extra_body
+    // still wins (merged last).
+    if (enableThinkingFromEffort && 'reasoning' in result) {
+      delete result['reasoning'];
+    }
+    return {
+      ...result,
       ...(extraBody ? extraBody : {}),
-    } as OpenAI.Chat.ChatCompletionCreateParams;
+    } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+  }
+
+  /**
+   * Whether to send `enable_thinking: true` because the user selected a
+   * reasoning effort. qwen's hybrid-thinking models expose thinking as the
+   * boolean `enable_thinking` rather than a tiered `reasoning_effort`, so the
+   * unified effort ladder collapses to on/off here. Gated to qwen-family wire
+   * models (mirroring the pipeline's disable gate) so the qwen-specific field
+   * never leaks to a non-qwen model sharing the DashScope endpoint.
+   */
+  private shouldEnableThinkingFromEffort(model: string | undefined): boolean {
+    const reasoning = this.contentGeneratorConfig.reasoning;
+    if (!reasoning || reasoning.effort === undefined) {
+      return false;
+    }
+    const wireModel = (
+      model ??
+      this.contentGeneratorConfig.model ??
+      ''
+    ).toLowerCase();
+    return wireModel.startsWith('qwen') || wireModel === 'coder-model';
   }
 
   buildMetadata(userPromptId: string): DashScopeRequestMetadata {
@@ -348,6 +428,70 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     } as ChatCompletionContentPartTextWithCache;
 
     return contentArray;
+  }
+
+  /**
+   * True for glm-* models (e.g. glm-4.5, glm-5.2). Uses the same `^glm-` prefix
+   * convention as the GLM matchers in tokenLimits.ts, keeping model detection
+   * consistent across the codebase.
+   */
+  private isGlmModel(model: string | undefined): boolean {
+    return !!model && model.toLowerCase().startsWith('glm-');
+  }
+
+  /**
+   * Whether the request is in "function-calling mode" — it declares `tools`, or
+   * its history already contains a tool result / assistant tool_call. glm needs
+   * one of these present to parse structured content-part arrays.
+   */
+  private hasFunctionCallingContext(
+    request: OpenAI.Chat.ChatCompletionCreateParams,
+  ): boolean {
+    if (request.tools && request.tools.length > 0) {
+      return true;
+    }
+    return request.messages.some((message) => {
+      if (message.role === 'tool') {
+        return true;
+      }
+      if (message.role === 'assistant') {
+        const toolCalls = (message as { tool_calls?: unknown[] }).tool_calls;
+        return Array.isArray(toolCalls) && toolCalls.length > 0;
+      }
+      return false;
+    });
+  }
+
+  /**
+   * Collapse text-only content arrays back to a plain string, leaving
+   * media-bearing parts (image/audio/...) as arrays. Used for glm tool-less
+   * requests, where the array form would otherwise be dropped server-side.
+   * Multiple text parts are joined with a blank line, matching the DeepSeek
+   * provider's flattening (separate parts read as separate blocks).
+   * Only called on the flatten branch, which skips cache control, so no part
+   * here carries a `cache_control` marker.
+   */
+  private flattenTextContent(
+    messages: OpenAI.Chat.ChatCompletionMessageParam[],
+  ): OpenAI.Chat.ChatCompletionMessageParam[] {
+    return messages.map((message) => {
+      if (!('content' in message) || !Array.isArray(message.content)) {
+        return message;
+      }
+      const parts = message.content as Array<{ type?: string; text?: string }>;
+      if (parts.length === 0) {
+        return message;
+      }
+      const isTextOnly = parts.every((part) => part && part.type === 'text');
+      if (!isTextOnly) {
+        return message;
+      }
+      const text = parts.map((part) => part.text ?? '').join('\n\n');
+      return {
+        ...message,
+        content: text,
+      } as OpenAI.Chat.ChatCompletionMessageParam;
+    });
   }
 
   /**

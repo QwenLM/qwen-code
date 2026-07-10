@@ -28,6 +28,65 @@ const STANDALONE_UNIX_INSTALLER =
 const STANDALONE_WINDOWS_INSTALLER =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1';
 
+function getStandaloneInstallerUrl(): string {
+  return process.platform === 'win32'
+    ? STANDALONE_WINDOWS_INSTALLER
+    : STANDALONE_UNIX_INSTALLER;
+}
+
+export function resolveUpdateCommand(
+  updateCommand: string,
+  latestVersion: string,
+): string {
+  const isNightly = latestVersion.includes('nightly');
+  return updateCommand.replace(
+    '@latest',
+    isNightly ? '@nightly' : `@${latestVersion}`,
+  );
+}
+
+export function formatUpdateInstructions(
+  installationInfo: InstallationInfo,
+  latestVersion: string,
+): string[] {
+  const lines: string[] = [];
+
+  if (installationInfo.updateMessage && !installationInfo.updateCommand) {
+    lines.push(
+      ...formatUpdateMessage(installationInfo.updateMessage, latestVersion),
+    );
+  }
+
+  if (installationInfo.updateCommand) {
+    const updateCmd = resolveUpdateCommand(
+      installationInfo.updateCommand,
+      latestVersion,
+    );
+    lines.push('Run the following to update:', `  ${updateCmd}`);
+  } else if (!installationInfo.updateMessage) {
+    lines.push('Manual update required. Please reinstall Qwen Code.');
+  }
+
+  return lines;
+}
+
+function formatUpdateMessage(
+  updateMessage: string,
+  latestVersion: string,
+): string[] {
+  const message = resolveUpdateCommand(updateMessage, latestVersion);
+
+  const sudoPrefix = 'Update requires sudo. Please run: ';
+  if (message.startsWith(sudoPrefix)) {
+    return [
+      'Update requires sudo. Please run:',
+      `  ${message.slice(sudoPrefix.length)}`,
+    ];
+  }
+
+  return [message];
+}
+
 export interface InstallationInfo {
   packageManager: PackageManager;
   isGlobal: boolean;
@@ -56,7 +115,7 @@ export function getInstallationInfo(
     if (
       isGit &&
       normalizedProjectRoot &&
-      realPath.startsWith(normalizedProjectRoot) &&
+      isSamePathOrInside(realPath, normalizedProjectRoot) &&
       !realPath.includes('/node_modules/')
     ) {
       return {
@@ -158,7 +217,7 @@ export function getInstallationInfo(
     // Check for local install
     if (
       normalizedProjectRoot &&
-      realPath.startsWith(`${normalizedProjectRoot}/node_modules`)
+      isSamePathOrInside(realPath, `${normalizedProjectRoot}/node_modules`)
     ) {
       let pm = PackageManager.NPM;
       if (fs.existsSync(path.join(projectRoot, 'yarn.lock'))) {
@@ -217,6 +276,22 @@ export function getInstallationInfo(
   }
 }
 
+function stripTrailingSlashes(value: string): string {
+  return value.replace(/\/+$/, '') || '/';
+}
+
+function isSamePathOrInside(candidate: string, parent: string): boolean {
+  const normalizedCandidate = stripTrailingSlashes(candidate);
+  const normalizedParent = stripTrailingSlashes(parent);
+  if (normalizedParent === '/') {
+    return normalizedCandidate === '/' || normalizedCandidate.startsWith('/');
+  }
+  return (
+    normalizedCandidate === normalizedParent ||
+    normalizedCandidate.startsWith(`${normalizedParent}/`)
+  );
+}
+
 function getStandaloneInstallInfo(
   realPath: string,
   isAutoUpdateEnabled: boolean,
@@ -226,10 +301,11 @@ function getStandaloneInstallInfo(
     return null;
   }
 
+  const installerUrl = getStandaloneInstallerUrl();
   const updateCommand =
     process.platform === 'win32'
-      ? `powershell -ExecutionPolicy Bypass -c "irm ${STANDALONE_WINDOWS_INSTALLER} | iex"`
-      : `curl -fsSL ${STANDALONE_UNIX_INSTALLER} | bash`;
+      ? `powershell -ExecutionPolicy Bypass -c "irm ${installerUrl} | iex"`
+      : `curl -fsSL ${installerUrl} | bash`;
 
   return {
     packageManager: PackageManager.STANDALONE,

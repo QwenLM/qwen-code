@@ -208,6 +208,8 @@ export function splitCommands(command: string): string[] {
   let currentCommand = '';
   let inSingleQuotes = false;
   let inDoubleQuotes = false;
+  let inBackticks = false;
+  let substitutionDepth = 0;
   let i = 0;
 
   const previousNonWhitespaceChar = (index: number): string | undefined => {
@@ -235,13 +237,42 @@ export function splitCommands(command: string): string[] {
       continue;
     }
 
-    if (char === "'" && !inDoubleQuotes) {
+    if (!inSingleQuotes && char === '`') {
+      inBackticks = !inBackticks;
+    } else if (
+      !inSingleQuotes &&
+      !inBackticks &&
+      char === '$' &&
+      nextChar === '('
+    ) {
+      substitutionDepth++;
+      currentCommand += '$(';
+      i += 2;
+      continue;
+    } else if (!inBackticks && substitutionDepth > 0 && char === ')') {
+      substitutionDepth--;
+    } else if (
+      !inBackticks &&
+      substitutionDepth === 0 &&
+      char === "'" &&
+      !inDoubleQuotes
+    ) {
       inSingleQuotes = !inSingleQuotes;
-    } else if (char === '"' && !inSingleQuotes) {
+    } else if (
+      !inBackticks &&
+      substitutionDepth === 0 &&
+      char === '"' &&
+      !inSingleQuotes
+    ) {
       inDoubleQuotes = !inDoubleQuotes;
     }
 
-    if (!inSingleQuotes && !inDoubleQuotes) {
+    if (
+      !inSingleQuotes &&
+      !inDoubleQuotes &&
+      !inBackticks &&
+      substitutionDepth === 0
+    ) {
       if (
         (char === '&' && nextChar === '&') ||
         (char === '|' && (nextChar === '|' || nextChar === '&'))
@@ -366,7 +397,12 @@ export function stripShellWrapper(command: string): string {
     if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
       const commandToken = takeLeadingToken(token.rest);
       if (!commandToken) return trimmed;
-      const { value: innerCommand } = stripSymmetricQuotes(commandToken.token);
+      const { value: innerCommand, quote } = stripSymmetricQuotes(
+        commandToken.token,
+      );
+      if (!quote && shellWrapperCommandConsumesRest(wrapperToken.token)) {
+        return token.rest.trimStart() || trimmed;
+      }
       return innerCommand || trimmed;
     }
 
@@ -383,6 +419,529 @@ export function stripShellWrapper(command: string): string {
       rest = operandToken.rest;
     }
   }
+}
+
+const SELF_KILL_PROCESS_PATTERN =
+  /(^|[^a-z0-9_-])(node(?:\.exe)?|qwen(?:-code)?(?:\.exe)?)(?=$|[^a-z0-9_-])/i;
+const QWEN_PROCESS_PATTERN =
+  /(^|[^a-z0-9_-])qwen(?:-code)?(?:\.exe)?(?=$|[^a-z0-9_-])/i;
+const TASKKILL_IMAGE_FILTER_PATTERN = /\bimagename\s+eq\s+(.+)$/i;
+
+const SUDO_OPTIONS_WITH_VALUES = new Set([
+  '-u',
+  '--user',
+  '-g',
+  '--group',
+  '-h',
+  '--host',
+  '-p',
+  '--prompt',
+  '-C',
+  '--close-from',
+  '-T',
+  '--command-timeout',
+]);
+
+const COMMAND_OPTIONS_WITH_VALUES = new Set<string>();
+
+const ENV_OPTIONS_WITH_VALUES = new Set([
+  '-u',
+  '--unset',
+  '-S',
+  '--split-string',
+  '-C',
+  '--chdir',
+]);
+
+const KILLALL_OPTIONS_WITH_VALUES = new Set([
+  '-n',
+  '--ns',
+  '-o',
+  '--older-than',
+  '-s',
+  '--signal',
+  '-t',
+  '--tty',
+  '-u',
+  '--user',
+  '-y',
+  '--younger-than',
+  '-Z',
+  '--context',
+]);
+
+const PKILL_OPTIONS_WITH_VALUES = new Set([
+  '-F',
+  '--pidfile',
+  '-G',
+  '--group',
+  '-g',
+  '--pgroup',
+  '-P',
+  '--parent',
+  '-s',
+  '--session',
+  '-t',
+  '--terminal',
+  '-T',
+  '--thread',
+  '-U',
+  '--uid',
+  '-u',
+  '--euid',
+]);
+
+const XARGS_OPTIONS_WITH_VALUES = new Set([
+  '-I',
+  '-n',
+  '-P',
+  '-s',
+  '-E',
+  '-d',
+  '-L',
+  '-l',
+  '-a',
+  '-J',
+  '-R',
+  '--replace',
+  '--max-args',
+  '--max-procs',
+  '--max-chars',
+  '--eof',
+  '--delimiter',
+  '--max-lines',
+  '--arg-file',
+]);
+
+export const SHELL_SELF_KILL_REJECTION =
+  'Blocked: this command may terminate the running qwen-code process because it targets all node/qwen-code processes. Use task_stop for managed background shells, or kill a specific PID instead.';
+
+function parseShellSegment(segment: string): string[] | null {
+  try {
+    return parse(segment, (key) => '$' + key)
+      .map((token) => {
+        if (typeof token === 'string') {
+          return token;
+        }
+        if (
+          typeof token === 'object' &&
+          token !== null &&
+          'pattern' in token &&
+          typeof token.pattern === 'string'
+        ) {
+          return token.pattern;
+        }
+        return null;
+      })
+      .filter((token): token is string => token !== null);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeExecutableName(token: string): string {
+  const executable = token.split(/[\\/]/).pop() ?? token;
+  return executable.toLowerCase().replace(/\.exe$/, '');
+}
+
+function isOptionToken(token: string): boolean {
+  return token.startsWith('-');
+}
+
+function optionKey(token: string): string {
+  return token.startsWith('--') ? token.toLowerCase() : token;
+}
+
+function optionHasInlineValue(token: string): boolean {
+  return token.includes('=') || token.includes(':');
+}
+
+function shortOptionBundleHasFlag(token: string, flag: string): boolean {
+  return (
+    token.startsWith('-') &&
+    !token.startsWith('--') &&
+    token.length > 2 &&
+    token.slice(1).toLowerCase().includes(flag.toLowerCase().slice(1))
+  );
+}
+
+function matchesSelfProcessPattern(value: string): boolean {
+  return SELF_KILL_PROCESS_PATTERN.test(value);
+}
+
+function matchesQwenProcessPattern(value: string): boolean {
+  return QWEN_PROCESS_PATTERN.test(value);
+}
+
+function isBroadNodeFullPattern(value: string): boolean {
+  const normalized = value
+    .trim()
+    .replace(/^(\^|\\b|\.\*)+/, '')
+    .replace(/(\$|\\b|\.\*)+$/, '');
+  const base = normalized.split(/[\\/]/).pop()?.toLowerCase();
+  return (
+    base === 'node' ||
+    base === 'node.exe' ||
+    /^node(?:\.exe)?[*?]+$/.test(base ?? '')
+  );
+}
+
+function consumeOptionsWithValues(
+  tokens: string[],
+  startIndex: number,
+  optionsWithValues: Set<string>,
+): number {
+  let index = startIndex;
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    const normalized = optionKey(token);
+    if (!isOptionToken(token)) {
+      break;
+    }
+
+    index++;
+    if (
+      (optionsWithValues.has(normalized) ||
+        [...optionsWithValues].some((option) =>
+          shortOptionBundleHasFlag(token, option),
+        )) &&
+      !optionHasInlineValue(token)
+    ) {
+      index++;
+    }
+  }
+  return index;
+}
+
+function unwrapExecutionPrefixes(tokens: string[]): string[] {
+  let index = 0;
+  while (index < tokens.length && ENV_ASSIGNMENT_REGEX.test(tokens[index]!)) {
+    index++;
+  }
+
+  while (index < tokens.length) {
+    const root = normalizeExecutableName(tokens[index]!);
+    if (root === 'sudo') {
+      index = consumeOptionsWithValues(
+        tokens,
+        index + 1,
+        SUDO_OPTIONS_WITH_VALUES,
+      );
+      continue;
+    }
+
+    if (root === 'command') {
+      index = consumeOptionsWithValues(
+        tokens,
+        index + 1,
+        COMMAND_OPTIONS_WITH_VALUES,
+      );
+      continue;
+    }
+
+    if (root === 'env') {
+      index = consumeOptionsWithValues(
+        tokens,
+        index + 1,
+        ENV_OPTIONS_WITH_VALUES,
+      );
+      while (
+        index < tokens.length &&
+        ENV_ASSIGNMENT_REGEX.test(tokens[index]!)
+      ) {
+        index++;
+      }
+      continue;
+    }
+
+    break;
+  }
+
+  return tokens.slice(index);
+}
+
+function getCommandSegments(command: string, depth = 0): string[] {
+  const segments: string[] = [];
+  for (const segment of splitCommands(command)) {
+    const stripped = stripShellWrapper(segment);
+    if (stripped !== segment && depth < 3) {
+      segments.push(...getCommandSegments(stripped, depth + 1));
+    } else if (stripped !== segment) {
+      segments.push(stripped);
+    } else {
+      segments.push(segment);
+    }
+  }
+  return segments;
+}
+
+function commandArguments(tokens: string[], optionsWithValues: Set<string>) {
+  const args: string[] = [];
+  for (let index = 1; index < tokens.length; index++) {
+    const token = tokens[index]!;
+    if (token === '--') {
+      args.push(...tokens.slice(index + 1));
+      break;
+    }
+
+    const normalized = optionKey(token);
+    if (isOptionToken(token)) {
+      if (optionsWithValues.has(normalized) && !optionHasInlineValue(token)) {
+        index++;
+      }
+      continue;
+    }
+
+    args.push(token);
+  }
+  return args;
+}
+
+function taskkillTargetsSelf(tokens: string[]): boolean {
+  for (let index = 1; index < tokens.length; index++) {
+    const token = tokens[index]!;
+    const normalized = token.toLowerCase();
+
+    if (normalized === '/im' || normalized === '-im') {
+      const imageName = tokens[index + 1];
+      if (imageName && matchesSelfProcessPattern(imageName)) {
+        return true;
+      }
+      index++;
+      continue;
+    }
+
+    if (normalized.startsWith('/im:') || normalized.startsWith('-im:')) {
+      if (matchesSelfProcessPattern(token.slice(4))) {
+        return true;
+      }
+      continue;
+    }
+
+    if (normalized === '/fi' || normalized === '-fi') {
+      const filter = tokens[index + 1];
+      const imageName = filter?.match(TASKKILL_IMAGE_FILTER_PATTERN)?.[1];
+      if (imageName && matchesSelfProcessPattern(imageName)) {
+        return true;
+      }
+      index++;
+      continue;
+    }
+
+    if (normalized.startsWith('/fi:') || normalized.startsWith('-fi:')) {
+      const imageName = token
+        .slice(4)
+        .match(TASKKILL_IMAGE_FILTER_PATTERN)?.[1];
+      if (imageName && matchesSelfProcessPattern(imageName)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function killallTargetsSelf(tokens: string[]): boolean {
+  return commandArguments(tokens, KILLALL_OPTIONS_WITH_VALUES).some((arg) =>
+    matchesSelfProcessPattern(arg),
+  );
+}
+
+function pkillTargetsSelf(tokens: string[]): boolean {
+  let usesFullCommandLine = false;
+  const args: string[] = [];
+  for (let index = 1; index < tokens.length; index++) {
+    const token = tokens[index]!;
+    if (token === '--') {
+      args.push(...tokens.slice(index + 1));
+      break;
+    }
+
+    const normalized = optionKey(token);
+    if (
+      normalized === '-f' ||
+      normalized === '--full' ||
+      shortOptionBundleHasFlag(token, '-f')
+    ) {
+      usesFullCommandLine = true;
+      continue;
+    }
+
+    if (isOptionToken(token)) {
+      if (
+        PKILL_OPTIONS_WITH_VALUES.has(normalized) &&
+        !optionHasInlineValue(token)
+      ) {
+        index++;
+      }
+      continue;
+    }
+
+    args.push(token);
+  }
+
+  if (usesFullCommandLine) {
+    return args.some(
+      (arg) => matchesQwenProcessPattern(arg) || isBroadNodeFullPattern(arg),
+    );
+  }
+
+  return args.some((arg) => matchesSelfProcessPattern(arg));
+}
+
+function pgrepTargetsSelf(tokens: string[]): boolean {
+  return pkillTargetsSelf(['pkill', ...tokens.slice(1)]);
+}
+
+function pgrepSubstitutionArgs(segment: string): string[] {
+  let quote: '"' | "'" | '' = '';
+  let escaped = false;
+  const args: string[] = [];
+
+  for (let index = 0; index < segment.length; index++) {
+    const char = segment[index]!;
+
+    if (quote === "'") {
+      if (char === "'") quote = '';
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      quote = quote === '"' ? '' : '"';
+      continue;
+    }
+
+    if (char === "'" && quote === '') {
+      quote = "'";
+      continue;
+    }
+
+    if (char === '`') {
+      let end = index + 1;
+      let innerEscaped = false;
+      for (; end < segment.length; end++) {
+        const innerChar = segment[end]!;
+        if (innerEscaped) {
+          innerEscaped = false;
+          continue;
+        }
+        if (innerChar === '\\') {
+          innerEscaped = true;
+          continue;
+        }
+        if (innerChar === '`') break;
+      }
+      if (end >= segment.length) {
+        break;
+      }
+
+      const inner = segment.slice(index + 1, end).trim();
+      const match = inner.match(/^pgrep\b(.*)$/i);
+      if (match) {
+        args.push(match[1] ?? '');
+      }
+      index = end;
+      continue;
+    }
+
+    if (char !== '$' || segment[index + 1] !== '(') {
+      continue;
+    }
+
+    const end = segment.indexOf(')', index + 2);
+    if (end === -1) {
+      break;
+    }
+
+    const inner = segment.slice(index + 2, end).trim();
+    const match = inner.match(/^pgrep\b(.*)$/i);
+    if (match) {
+      args.push(match[1] ?? '');
+    }
+    index = end;
+  }
+
+  return args;
+}
+
+function killCommandTargetsSelf(segment: string): boolean {
+  return pgrepSubstitutionArgs(segment).some((args) => {
+    const parsed = parseShellSegment(`pgrep ${args}`);
+    return parsed !== null && pgrepTargetsSelf(parsed);
+  });
+}
+
+function xargsInvokesKill(segment: string | undefined): boolean {
+  if (!segment) {
+    return false;
+  }
+  const parsed = parseShellSegment(segment);
+  if (!parsed) {
+    return false;
+  }
+  const tokens = unwrapExecutionPrefixes(parsed);
+  if (normalizeExecutableName(tokens[0] ?? '') !== 'xargs') {
+    return false;
+  }
+
+  const commandTokens = unwrapExecutionPrefixes(
+    commandArguments(tokens, XARGS_OPTIONS_WITH_VALUES),
+  );
+  const command = commandTokens.find((token) => !isOptionToken(token));
+  return normalizeExecutableName(command ?? '') === 'kill';
+}
+
+export function detectSelfKillCommand(command: string): boolean {
+  if (!/kill/i.test(command)) {
+    return false;
+  }
+
+  const segments = getCommandSegments(command);
+  for (let index = 0; index < segments.length; index++) {
+    const segment = segments[index]!;
+    const parsed = parseShellSegment(segment);
+    if (!parsed) {
+      continue;
+    }
+
+    const tokens = unwrapExecutionPrefixes(parsed);
+    if (tokens.length === 0) {
+      continue;
+    }
+
+    const root = normalizeExecutableName(tokens[0]!);
+    if (root === 'taskkill' && taskkillTargetsSelf(tokens)) {
+      return true;
+    }
+    if (root === 'killall' && killallTargetsSelf(tokens)) {
+      return true;
+    }
+    if (root === 'pkill' && pkillTargetsSelf(tokens)) {
+      return true;
+    }
+    if (root === 'kill' && killCommandTargetsSelf(segment)) {
+      return true;
+    }
+    if (root === 'pgrep' && pgrepTargetsSelf(tokens)) {
+      for (let j = index + 1; j < segments.length; j++) {
+        if (xargsInvokesKill(segments[j])) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
 }
 
 /**
@@ -670,7 +1229,11 @@ function isKnownMonitorWrapperToken(token: string): boolean {
     base === 'zsh' ||
     base === 'zsh.exe' ||
     base === 'cmd' ||
-    base === 'cmd.exe'
+    base === 'cmd.exe' ||
+    base === 'powershell' ||
+    base === 'powershell.exe' ||
+    base === 'pwsh' ||
+    base === 'pwsh.exe'
   );
 }
 
@@ -684,7 +1247,31 @@ function isShellWrapperFlagToken(normalizedToken: string): boolean {
 
 function shellWrapperFlagConsumesOperand(token: string): boolean {
   const normalized = getNormalizedShellToken(token);
-  return normalized === '-o' || normalized === '+o';
+  if (optionHasInlineValue(token)) {
+    return false;
+  }
+  return (
+    normalized === '-o' ||
+    normalized === '+o' ||
+    normalized === '-executionpolicy' ||
+    normalized === '-file' ||
+    normalized === '-encodedcommand'
+  );
+}
+
+function shellWrapperCommandConsumesRest(wrapperToken: string): boolean {
+  const base = getShellWrapperBase(wrapperToken);
+  // POSIX shells pass exactly one argument after -c as the command string.
+  // cmd.exe and PowerShell treat the remaining tokens after /c or -Command as
+  // the command, so unquoted inner commands need the full rest of the line.
+  return (
+    base === 'cmd' ||
+    base === 'cmd.exe' ||
+    base === 'powershell' ||
+    base === 'powershell.exe' ||
+    base === 'pwsh' ||
+    base === 'pwsh.exe'
+  );
 }
 
 function isMonitorCommandMarker(wrapperToken: string, token: string): boolean {
@@ -693,6 +1280,15 @@ function isMonitorCommandMarker(wrapperToken: string, token: string): boolean {
 
   if (base === 'cmd' || base === 'cmd.exe') {
     return normalized === '/c';
+  }
+
+  if (
+    base === 'powershell' ||
+    base === 'powershell.exe' ||
+    base === 'pwsh' ||
+    base === 'pwsh.exe'
+  ) {
+    return normalized === '-command' || normalized === '-c';
   }
 
   return normalized === '-c' || /^-[a-z]*c[a-z]*$/i.test(normalized);

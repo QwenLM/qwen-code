@@ -685,6 +685,21 @@ describe('findMidInputSlashCommand', () => {
     // "hello/review", no space before slash
     expect(findMidInputSlashCommand('hello/review', 12)).toBeNull();
   });
+
+  it('handles a non-BMP prefix before the token (code-point offsets)', () => {
+    // "please 👍 /sto": 👍 is one code point but two UTF-16 units, so the
+    // code-point cursor offset (13) is one short of the UTF-16 offset (14).
+    // A UTF-16-based implementation slices one char early and returns null.
+    const input = 'please 👍 /sto';
+    const cursorOffset = [...input].length; // 13 code points, cursor at end
+    expect(cursorOffset).toBe(13);
+    const result = findMidInputSlashCommand(input, cursorOffset);
+    expect(result).toEqual({
+      token: '/sto',
+      startPos: 9, // code-point index of "/"
+      partialCommand: 'sto',
+    });
+  });
 });
 
 describe('findSlashCommandTokens', () => {

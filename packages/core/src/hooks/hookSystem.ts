@@ -12,7 +12,11 @@ import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import type { DefaultHookOutput, HookPhase } from './types.js';
+import type {
+  ContextUsageData,
+  DefaultHookOutput,
+  HookPhase,
+} from './types.js';
 import { createHookOutput, PermissionMode } from './types.js';
 import type {
   SessionStartSource,
@@ -84,6 +88,11 @@ export class HookSystem {
   async initialize(): Promise<void> {
     await this.hookRegistry.initialize();
     debugLogger.debug('Hook system initialized successfully');
+  }
+
+  async reload(): Promise<void> {
+    await this.hookRegistry.reloadConfiguredHooks();
+    debugLogger.debug('Hook system reloaded successfully');
   }
 
   /**
@@ -200,11 +209,13 @@ export class HookSystem {
   async fireStopEvent(
     stopHookActive: boolean = false,
     lastAssistantMessage: string = '',
+    contextUsage?: ContextUsageData,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     return this.hookEventHandler.fireStopEvent(
       stopHookActive,
       lastAssistantMessage,
+      contextUsage,
       signal,
     );
   }

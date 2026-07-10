@@ -17,12 +17,12 @@ import type { Intent, ResolvedPath } from './paths.js';
  * typical source files, small enough that an SSE replay buffer
  * doesn't fill on a single read.
  *
- * Files **above** this cap are refused with `file_too_large` rather
- * than truncated — the underlying `readFileWithLineAndLimit`
- * reads the whole file into memory before slicing lines, so soft
- * truncation past the cap would still OOM the daemon. Files
- * **at or below** the cap honor a tighter `opts.maxBytes` via
- * post-decode truncation (`enforceReadSize`); that's where the
+ * Full-snapshot reads above this cap are refused with `file_too_large`
+ * rather than truncated. `readText` can serve explicit line windows
+ * from larger files, but the default read/edit contract still needs a
+ * bounded snapshot for hash stability, SSE buffering, and oldText
+ * matching. Files at or below the cap honor a tighter `opts.maxBytes`
+ * via post-decode truncation (`enforceReadSize`); that's where the
  * `meta.truncated = true` flag fires.
  *
  * `enforceReadBytesSize` (the `readBytes` gate) and `edit()` use the
@@ -167,7 +167,7 @@ export interface ReadSizeOutcome {
  * when `opts.maxBytes < fileSize <= MAX_READ_BYTES`. It runs only
  * AFTER `readText`'s pre-stat hard-cap check has rejected files
  * above `MAX_READ_BYTES` with `file_too_large` (see
- * `workspaceFileSystem.ts:readText`). Within the hard cap the
+ * `workspace-file-system.ts:readText`). Within the hard cap the
  * caller can opt into a tighter byte ceiling via `opts.maxBytes`,
  * and we surface that truncation via `truncated: true` rather
  * than throwing — operators want to see a partial config file

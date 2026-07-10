@@ -2,17 +2,23 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  color: var(--text-primary);
-  border: 1px solid var(--border-color);
+  color: var(--foreground);
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 10px 14px;
-  background: var(--bg-primary);
-  margin: 0 14px;
+  background: var(--background);
+}
+
+.embeddedPanel {
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
 }
 
 .title {
   font-weight: 700;
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .sectionTitle {
@@ -20,7 +26,7 @@
 }
 
 .overflowHint {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   padding-left: 2ch;
 }
 
@@ -31,7 +37,7 @@
 }
 
 .secondary {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .row {
@@ -43,20 +49,57 @@
 }
 
 .selected {
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .pointer {
   display: inline-block;
   width: 2ch;
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .nameCell {
   display: inline-block;
+  min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.treeMarker {
+  color: var(--muted-foreground);
+}
+
+.orphanNote {
+  color: var(--muted-foreground);
+}
+
+.status {
+  flex: 0 0 auto;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.chevronCell {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: var(--muted-foreground);
+}
+
+.chevron {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.8;
+  transition: transform 120ms ease;
+}
+
+.chevronExpanded {
+  transform: rotate(90deg);
 }
 
 .truncate {
@@ -66,13 +109,24 @@
 }
 
 .separator {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .list {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.task {
+  display: flex;
+  flex-direction: column;
+  border-radius: 8px;
+}
+
+.taskExpanded {
+  background: var(--secondary);
+  padding: 4px;
 }
 
 .success {
@@ -96,21 +150,174 @@
   padding-right: 4px;
 }
 
-.detailField {
-  display: grid;
-  grid-template-columns: 18ch minmax(0, 1fr);
+.detailTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.detailTopMain {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.embeddedPanel .detail {
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
+}
+
+.embeddedPanel .list {
+  gap: 3px;
+}
+
+.embeddedPanel .row {
+  align-items: center;
+  min-height: 32px;
   gap: 8px;
-  align-items: baseline;
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+
+.embeddedPanel .row:hover {
+  color: var(--foreground);
+  background: var(--secondary);
+}
+
+.embeddedPanel .selected {
+  color: var(--foreground);
+  background: var(--secondary);
+}
+
+.embeddedPanel .pointer {
+  display: none;
+}
+
+.embeddedPanel .inlineDetail {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin: 5px 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.embeddedPanel .detail {
+  margin: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.embeddedPanel .nameCell {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.taskIcon {
+  position: relative;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid currentColor;
+  border-radius: 4px;
+  color: var(--muted-foreground);
+}
+
+.taskIcon::before,
+.taskIcon::after {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: currentColor;
+  content: '';
+}
+
+.taskIcon::before {
+  top: 4px;
+}
+
+.taskIcon::after {
+  top: 8px;
+}
+
+.detailField {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 6px;
 }
 
 .detailFieldLabel {
-  color: var(--text-primary);
-  font-weight: 700;
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.detailContent {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.compactSummary {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 4px 6px;
+}
+
+.actionBar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.actionHint {
+  color: var(--warning-color);
+  font-size: 12px;
+}
+
+.actionButton {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--muted);
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 9px;
+}
+
+.actionButton:hover:not(:disabled) {
+  border-color: var(--agent-blue-500);
+}
+
+.actionButton:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.dangerButton {
+  color: var(--error-color);
 }
 
 .shortcuts {
-  color: var(--text-dimmed);
-  border-top: 1px solid var(--border-color);
+  color: var(--muted-foreground);
+  border-top: 1px solid var(--border);
   padding-top: 8px;
 }
 
@@ -125,20 +332,22 @@
 }
 
 .activityCurrent {
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  color: var(--foreground);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .activityPast {
-  color: var(--text-dimmed);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .promptContent {
-  color: var(--text-secondary);
-  font-size: 0.9em;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }

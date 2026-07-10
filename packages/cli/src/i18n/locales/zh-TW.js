@@ -9,7 +9,156 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
-  // ============================================================================
+  'Cannot disable an extension-provided MCP server here.':
+    '無法在此處停用擴展提供的 MCP 伺服器。',
+  'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的認證資訊。',
+  'MCP "{{name}}" disabled for all projects.':
+    'MCP "{{name}}" 已在所有專案中停用。',
+  'Enable extension "{{name}}" to manage this MCP server.':
+    '啟用擴展 "{{name}}" 後才能管理此 MCP 伺服器。',
+  'Extension-provided MCP servers cannot be favorited.':
+    '擴展提供的 MCP 伺服器無法單獨收藏。',
+
+  'User level': '使用者層級',
+  'Project level': '專案層級',
+
+  // ==========================================================================
+  // Extensions manager dialog (Installed / Discover / Sources tabs)
+  // ==========================================================================
+  ' · {{marketplace}} (Tab to clear)': ' · {{marketplace}}（Tab 清除）',
+  '"{{name}}" {{state}}.': '"{{name}}" {{state}}。',
+  '(Tab / ←→ to switch)': '（Tab / ←→ 切換）',
+  '+ Add new marketplace': '+ 新增市場來源',
+  '+ Install a new extension': '+ 安裝一個新擴展',
+  Actions: '操作',
+  'Add Marketplace': '新增市場來源',
+  'Add a marketplace in the Sources tab to discover extensions.':
+    '在「來源」分頁中新增市場來源以發現擴展。',
+  'Add new': '新增',
+  'Add to Favorites': '加入收藏',
+  'Added "{{name}}" to favorites.': '已將 "{{name}}" 加入收藏。',
+  'Added marketplace "{{name}}".': '已新增市場來源 "{{name}}"。',
+  'Adding...': '新增中...',
+  'Back to extension list': '返回擴展清單',
+  'Browse extensions ({{count}})': '瀏覽擴展（{{count}}）',
+  'By: {{a}}': '作者：{{a}}',
+  'Change scope': '變更作用域',
+  'Change scope for "{{name}}":': '變更 "{{name}}" 的作用域：',
+  'Changing scope...': '正在變更作用域...',
+  'Uninstalling "{{name}}"...': '正在卸載 "{{name}}"...',
+  'Update available for "{{name}}".': '"{{name}}" 有可用更新。',
+  '"{{name}}" is already up to date.': '"{{name}}" 已是最新。',
+  'Checking "{{name}}" for updates...': '正在檢查 "{{name}}" 的更新...',
+  '"{{name}}" does not support update checks.': '"{{name}}" 不支援檢查更新。',
+  '"{{name}}" cannot be update-checked (Claude marketplace plugins update by reinstalling).':
+    '"{{name}}" 無法檢查更新（Claude 市場源插件需卸載後重裝來更新）。',
+  'Failed to check "{{name}}" for updates.': '檢查 "{{name}}" 的更新失敗。',
+  'Claude plugin marketplace': 'Claude 外掛市場',
+  Commands: '命令',
+  'Components:': '元件：',
+  'Could not load this marketplace.': '無法載入此市場來源。',
+  'Current: {{scope}}': '目前：{{scope}}',
+  Disabled: '已禁用',
+  Discover: '發現',
+  'Disabling "{{name}}"...': '正在禁用 "{{name}}"...',
+  'Disabling MCP "{{name}}"...': '正在禁用 MCP "{{name}}"...',
+  'Discover extensions': '發現擴展',
+  'Discovering extensions...': '正在發現擴展...',
+  'Enabling "{{name}}"...': '正在啟用 "{{name}}"...',
+  'Enabling MCP "{{name}}"...': '正在啟用 MCP "{{name}}"...',
+  'Enter extension source:': '輸入擴展來源：',
+  'Enter marketplace source (Claude format):':
+    '輸入市場來源位址（Claude 格式）：',
+  'Examples:': '範例：',
+  'Extension details': '擴展詳情',
+  'Extension v{{version}}': '擴展 v{{version}}',
+  'Extensions are not available in this environment.': '目前環境中擴展不可用。',
+  'Failed to open {{url}}': '開啟 {{url}} 失敗',
+  Favorites: '收藏',
+  'Global (User Scope)': '全域（使用者作用域）',
+  'Install Extension': '安裝擴展',
+  'Install for the current workspace (project scope)':
+    '為目前工作區安裝（專案作用域）',
+  'Install for you (user scope)': '僅為你安裝（使用者作用域）',
+  'Install {{count}} extension(s) to which scope?':
+    '將 {{count}} 個擴展安裝到哪個作用域？',
+  Installed: '已安裝',
+  'Installed extension "{{name}}".': '已安裝擴展 "{{name}}"。',
+  'Installed extensions ({{count}}):': '已安裝的擴展（{{count}}）：',
+  'Installed {{count}} extension(s).': '已安裝 {{count}} 個擴展。',
+  '{{name}}: installed, but the scope rollback failed — it may be disabled at all scopes; re-enable it from the Installed tab.':
+    '{{name}}：已安裝,但作用域回滾失敗 —— 該擴展可能在所有作用域均被停用;請在「已安裝」頁重新啟用。',
+  'Could not change scope, and the rollback also failed — "{{name}}" may be disabled at all scopes. Re-enable it from the Installed tab. ({{error}})':
+    '無法變更作用域,且回滾也失敗 ——「{{name}}」可能在所有作用域均被停用。請在「已安裝」頁重新啟用。({{error}})',
+  'Installed {{ok}}, failed {{fail}}: {{detail}}':
+    '成功 {{ok}} 個，失敗 {{fail}} 個：{{detail}}',
+  'Installing...': '安裝中...',
+  'Last updated: {{date}}': '最近更新：{{date}}',
+  MCP: 'MCP',
+  'MCP "{{name}}" {{state}}.': 'MCP "{{name}}" {{state}}。',
+  'MCP servers': 'MCP 伺服器',
+  'Mark for Update': '標記為待更新',
+  Marketplaces: '市場來源',
+  'No extensions discovered.': '未發現任何擴展。',
+  'No extensions match your search.': '沒有與搜尋相符的擴展。',
+  'No extensions or marketplaces added yet.': '尚未新增任何擴展或市場來源。',
+  'No homepage available.': '沒有可用的主頁。',
+  'No installable extensions selected.': '未選取可安裝的擴展。',
+  'No plugins or MCP servers installed.': '尚未安裝任何外掛或 MCP 伺服器。',
+  None: '無',
+  'Note: Uninstall permanently removes this extension.':
+    '注意：卸載將永久移除此擴展。',
+  'Open homepage': '開啟主頁',
+  'Project (Workspace)': '專案（工作區）',
+  'Refreshed {{count}} extension(s).': '已刷新 {{count}} 個擴充。',
+  'Remove from Favorites': '從收藏中移除',
+  'Remove marketplace': '移除市場來源',
+  'Remove marketplace "{{name}}"?': '移除市場來源 "{{name}}"？',
+  'Removed "{{name}}" from favorites.': '已將 "{{name}}" 從收藏中移除。',
+  'Removed marketplace "{{name}}".': '已移除市場來源 "{{name}}"。',
+  'Scope:': '作用域：',
+  'Set "{{name}}" scope to {{scope}}.':
+    '已將 "{{name}}" 的作用域設為 {{scope}}。',
+  Sources: '來源',
+  'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back':
+    '輸入以搜尋 · Space 切換 · Enter 查看 · Ctrl+R 刷新 · Esc 返回',
+  Uninstall: '卸載',
+  'Uninstalled "{{name}}".': '已卸載 "{{name}}"。',
+  'Update Now': '立即更新',
+  'Update marketplace': '更新市場來源',
+  'Update marketplace (last updated {{date}})':
+    '更新市場來源（最近更新 {{date}}）',
+  'Could not update marketplace "{{name}}".': '無法更新市場來源 "{{name}}"。',
+  'Updated "{{name}}".': '已更新 "{{name}}"。',
+  'Updated marketplace "{{name}}".': '已更新市場來源 "{{name}}"。',
+  'Use the Discover tab to find and install plugins.':
+    '使用「發現」分頁尋找並安裝擴展。',
+  'Version: {{v}}': '版本：{{v}}',
+  'Will install:': '將安裝：',
+  'Would open: {{url}}': '將開啟：{{url}}',
+  'Y/Enter to confirm · N/Esc to cancel': 'Y/Enter 確認 · N/Esc 取消',
+  'Press R to retry · Esc to go back': '按 R 重試 · Esc 返回',
+  'Enter to select · R refresh · Esc to go back':
+    'Enter 選擇 · R 刷新 · Esc 返回',
+  'from {{marketplace}}': '來自 {{marketplace}}',
+  installed: '已安裝',
+  '{{count}} Agents': '{{count}} 個智能體',
+  '{{count}} Commands': '{{count}} 個命令',
+  '{{count}} MCP': '{{count}} 個 MCP',
+  '{{count}} Skills': '{{count}} 個技能',
+  '{{count}} available extensions': '{{count}} 個可用擴展',
+  '↑ more above': '↑ 上方更多',
+  '↑↓ navigate · Enter open · d remove marketplace · Esc close':
+    '↑↓ 導覽 · Enter 開啟 · d 移除市場來源 · Esc 關閉',
+  '↑↓ navigate · Enter select · Esc close': '↑↓ 導覽 · Enter 選擇 · Esc 關閉',
+  '↑↓ navigate · Enter select · d remove marketplace · Esc close':
+    '↑↓ 導覽 · Enter 選擇 · d 移除市場來源 · Esc 關閉',
+  '↑↓ navigate · Space enable/disable · f favorite · Enter details · Esc close':
+    '↑↓ 導覽 · Space 啟用/禁用 · f 收藏 · Enter 查看詳情 · Esc 關閉',
+  '↓ more below': '↓ 下方更多',
+  '⚠ Make sure you trust an extension before installing, updating, or using it. We cannot verify what MCP servers, files, or other software an extension includes, or that it works as intended. See the extension homepage for more information.':
+    '⚠ 在安裝、更新或使用擴展前，請確保你信任它。我們無法驗證擴展包含哪些 MCP 伺服器、檔案或其他軟體，也無法保證其按預期運作。更多資訊請查看擴展主頁。',
+
   // Tool display names (chat-stream badge labels)
   // ----------------------------------------------------------------------------
   // Keyed by `toolDisplayName.<English display name>` (from core
@@ -27,6 +176,8 @@ export default {
   'toolDisplayName.TodoList': '任務清單',
   'toolDisplayName.SaveMemory': '儲存記憶',
   'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Artifact': '製品',
+  'toolDisplayName.RecordArtifact': '記錄製品',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '進入計畫模式',
   'toolDisplayName.ExitPlanMode': '退出計畫模式',
@@ -39,12 +190,14 @@ export default {
   'toolDisplayName.CronList': '定時任務清單',
   'toolDisplayName.CronDelete': '刪除定時任務',
   'toolDisplayName.LoopWakeup': '循環喚醒',
+  'toolDisplayName.CreateSubSession': '建立子會話',
   'toolDisplayName.TaskCreate': '建立任務',
   'toolDisplayName.TaskUpdate': '更新任務',
   'toolDisplayName.TaskList': '任務列表',
   'toolDisplayName.TaskStop': '停止任務',
   'toolDisplayName.TeamCreate': '建立團隊',
   'toolDisplayName.TeamDelete': '刪除團隊',
+  'toolDisplayName.TeamPlanApproval': '團隊計畫審批',
   'toolDisplayName.SendMessage': '傳送訊息',
   'toolDisplayName.StructuredOutput': '結構化輸出',
   'toolDisplayName.Monitor': '監控',
@@ -53,6 +206,8 @@ export default {
   'toolDisplayName.EnterWorktree': '進入 Worktree',
   'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流程',
+  'toolDisplayName.ReadMcpResource': '讀取 MCP 資源',
+
   '↑ to manage attachments': '↑ 管理附件',
   '← → select, Delete to remove, ↓ to exit': '← → 選擇，Delete 刪除，↓ 退出',
   'Attachments: ': '附件：',
@@ -97,7 +252,7 @@ export default {
   'to search history': '搜索歷史',
   'to paste images': '粘貼圖片',
   'for external editor': '外部編輯器',
-  'to toggle compact mode': '切換緊湊模式',
+  'to view transcript': '檢視完整記錄',
   'Jump through words in the input': '在輸入中按單詞跳轉',
   'Close dialogs, cancel requests, or quit application':
     '關閉對話框、取消請求或退出應用程序',
@@ -290,6 +445,42 @@ export default {
   'Delete {{name}}': '刪除 {{name}}',
   'Unknown Step': '未知步驟',
   'Esc to close': '按 Esc 關閉',
+  Transcript: '完整記錄',
+  'to close': '關閉',
+  'to scroll': '捲動',
+  'Failed to render transcript.': '無法呈現完整記錄。',
+  'Read {{count}} file': '讀取了 {{count}} 個檔案',
+  'Read {{count}} files': '讀取了 {{count}} 個檔案',
+  'Reading {{count}} file': '正在讀取 {{count}} 個檔案',
+  'Reading {{count}} files': '正在讀取 {{count}} 個檔案',
+  'Edited {{count}} file': '編輯了 {{count}} 個檔案',
+  'Edited {{count}} files': '編輯了 {{count}} 個檔案',
+  'Editing {{count}} file': '正在編輯 {{count}} 個檔案',
+  'Editing {{count}} files': '正在編輯 {{count}} 個檔案',
+  'Wrote {{count}} file': '寫入了 {{count}} 個檔案',
+  'Wrote {{count}} files': '寫入了 {{count}} 個檔案',
+  'Writing {{count}} file': '正在寫入 {{count}} 個檔案',
+  'Writing {{count}} files': '正在寫入 {{count}} 個檔案',
+  'Searched {{count}} pattern': '搜尋了 {{count}} 個模式',
+  'Searched {{count}} patterns': '搜尋了 {{count}} 個模式',
+  'Searching {{count}} pattern': '正在搜尋 {{count}} 個模式',
+  'Searching {{count}} patterns': '正在搜尋 {{count}} 個模式',
+  'Listed {{count}} directory': '列出了 {{count}} 個目錄',
+  'Listed {{count}} directories': '列出了 {{count}} 個目錄',
+  'Listing {{count}} directory': '正在列出 {{count}} 個目錄',
+  'Listing {{count}} directories': '正在列出 {{count}} 個目錄',
+  'Ran {{count}} command': '執行了 {{count}} 個命令',
+  'Ran {{count}} commands': '執行了 {{count}} 個命令',
+  'Running {{count}} command': '正在執行 {{count}} 個命令',
+  'Running {{count}} commands': '正在執行 {{count}} 個命令',
+  'Ran {{count}} agent': '執行了 {{count}} 個代理',
+  'Ran {{count}} agents': '執行了 {{count}} 個代理',
+  'Running {{count}} agent': '正在執行 {{count}} 個代理',
+  'Running {{count}} agents': '正在執行 {{count}} 個代理',
+  'Used {{count}} tool': '使用了 {{count}} 個工具',
+  'Used {{count}} tools': '使用了 {{count}} 個工具',
+  'Using {{count}} tool': '正在使用 {{count}} 個工具',
+  'Using {{count}} tools': '正在使用 {{count}} 個工具',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter 選擇，↑↓ 導航，Esc 關閉',
   'Esc to go back': '按 Esc 返回',
@@ -321,17 +512,17 @@ export default {
   'Open in editor': '在編輯器中打開',
   'Edit tools': '編輯工具',
   'Edit color': '編輯顏色',
-  '❌ Error:': '❌ 錯誤:',
+  '✗ Error:': '✗ 錯誤:',
   'Are you sure you want to delete agent "{{name}}"?':
     '您確定要刪除智能體 "{{name}}" 嗎？',
   'Project Level (.qwen/agents/)': '項目級 (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': '用戶級 (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!': '✅ 子智能體創建成功！',
+  '✓ Subagent Created Successfully!': '✓ 子智能體創建成功！',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     '子智能體 "{{name}}" 已保存到 {{level}} 級別。',
   'Name: ': '名稱: ',
   'Location: ': '位置: ',
-  '❌ Error saving subagent:': '❌ 保存子智能體時出錯:',
+  '✗ Error saving subagent:': '✗ 保存子智能體時出錯:',
   'Warnings:': '警告:',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
     '名稱 "{{name}}" 在 {{level}} 級別已存在 - 將覆蓋現有子智能體',
@@ -438,6 +629,35 @@ export default {
   'checking...': '檢查中...',
   'not updatable': '不可更新',
   error: '錯誤',
+  'Get or set any setting by dot-path key':
+    '透過點號路徑鍵查看或設定任意設定項',
+  'Invalid boolean value: "{{value}}". Use "true" or "false".':
+    '無效的布林值："{{value}}"。請使用 "true" 或 "false"。',
+  'Cannot toggle a number setting. Provide a value: key=<number>.':
+    '無法切換數字類型的設定。請提供值：key=<number>。',
+  'Invalid number value: "{{value}}".': '無效的數字值："{{value}}"。',
+  'Cannot toggle a string setting. Provide a value: key=<value>.':
+    '無法切換字串類型的設定。請提供值：key=<value>。',
+  'Cannot toggle an enum setting. Provide one of: {{options}}.':
+    '無法切換列舉類型的設定。請提供以下選項之一：{{options}}。',
+  'Invalid enum value: "{{value}}". Valid values: {{options}}.':
+    '無效的列舉值："{{value}}"。有效值：{{options}}。',
+  'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.':
+    '"{{type}}" 類型的設定無法透過 /config 修改。請直接編輯 settings.json。',
+  'Unsupported setting type: "{{type}}".': '不支援的設定類型："{{type}}"。',
+  'Available settings:': '可用設定：',
+  'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?':
+    '未知的設定鍵："{{key}}"。您是不是想設定 "{{suggestion}}"？',
+  'Unknown setting key: "{{key}}".': '未知的設定鍵："{{key}}"。',
+  'Failed to set "{{key}}": {{error}}': '設定 "{{key}}" 失敗：{{error}}',
+  'Set {{key}} = {{value}}': '已設定 {{key}} = {{value}}',
+  '(This setting requires a restart to take effect.)':
+    '（此設定需要重新啟動才能生效。）',
+  '(Security-sensitive setting — verify you are not exposing credentials.)':
+    '（安全敏感設定 — 請確認您沒有洩露憑證。）',
+  'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.':
+    '出於安全原因，禁止透過 /config 將 tools.approvalMode 設定為 "yolo"。如果您了解相關風險，請直接編輯 settings.json。',
+  '(empty)': '(空)',
   'View and edit Qwen Code settings': '查看和編輯 Qwen Code 設置',
   Settings: '設置',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
@@ -500,6 +720,7 @@ export default {
   'toggle vim mode on/off': '切換 vim 模式開關',
   'Show model-specific usage statistics.': '顯示模型相關的使用統計資訊',
   'Show tool-specific usage statistics.': '顯示工具相關的使用統計資訊',
+  'Show skill-specific usage statistics.': '顯示技能相關的使用統計資訊',
   'Show daily token usage statistics.': '顯示每日 token 使用統計資訊',
   'Show monthly token usage statistics.': '顯示每月 token 使用統計資訊',
   'Export token usage statistics to CSV or JSON.':
@@ -562,6 +783,27 @@ export default {
   'Uninstall an extension': '卸載擴展',
   'No extensions installed.': '未安裝擴展。',
   'Extension "{{name}}" not found.': '未找到擴展 "{{name}}"。',
+  'The scope to install the extension in: "user" (global, default) or "project" (current workspace only).':
+    '安裝擴展的作用域："user"（全域，預設）或 "project"（僅當前工作區）。',
+  'Extension "{{name}}" installed successfully and enabled for the current workspace.':
+    '擴展 "{{name}}" 安裝成功，並已在當前工作區啟用。',
+  'Marketplace "{{name}}" not found.': '未找到市場源 "{{name}}"。',
+  'No marketplace sources added yet.': '尚未添加任何市場源。',
+  'No marketplaces added yet.': '尚未添加任何市場源。',
+  'Adds a marketplace source (Claude format).':
+    '添加一個市場源（Claude 格式）。',
+  'The marketplace source to add: owner/repo (GitHub), a git or https URL, or a local path.':
+    '要添加的市場源：owner/repo（GitHub）、git 或 https URL，或本地路徑。',
+  'Removes a marketplace source.': '移除一個市場源。',
+  'The name of the marketplace to remove.': '要移除的市場源名稱。',
+  'Lists configured marketplace sources.': '列出已配置的市場源。',
+  'Re-fetches a marketplace source and its plugin listing.':
+    '重新拉取市場源及其插件列表。',
+  'The name of the marketplace to update.': '要更新的市場源名稱。',
+  'Manage marketplace sources for discovering extensions.':
+    '管理用於發現擴展的市場源。',
+  'You need at least one command before continuing.':
+    '需要至少提供一個子命令。',
   'No extensions to update.': '沒有可更新的擴展。',
   'Usage: /extensions install <source>': '用法：/extensions install <來源>',
   'Installing extension from "{{source}}"...':
@@ -595,6 +837,16 @@ export default {
   'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
     '要安裝的擴展的 GitHub URL、本地路徑或市場源（marketplace-url:plugin-name）。',
   'The git ref to install from.': '要安裝的 Git 引用。',
+  '--registry is only applicable for npm extensions.':
+    '--registry 僅適用於 npm 擴展。',
+  'Custom npm registry URL (only for npm extensions).':
+    '自訂 npm registry URL（僅適用於 npm 擴展）。',
+  '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).':
+    '--ref 不適用於 npm 擴展。請改用 @version 後綴（例如 @scope/package@1.2.0）。',
+  'Installs an extension from a git repository URL, local path, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).':
+    '從 Git 倉庫 URL、本地路徑、帶作用域的 npm 套件（@scope/name）或 Claude 市場源（marketplace-url:plugin-name）安裝擴展。',
+  Description: '描述',
+  'Delete Session': '刪除會話',
   'Enable auto-update for this extension.': '為此擴展啟用自動更新。',
   'Enable pre-release versions for this extension.': '為此擴展啟用預發佈版本。',
   'Acknowledge the security risks of installing an extension and skip the confirmation prompt.':
@@ -951,6 +1203,7 @@ export default {
     '選擇將伺服器添加到排除列表的位置：',
   'Press Enter to confirm, Esc to cancel': '按 Enter 確認，Esc 取消',
   'View tools': '查看工具',
+  'View resources': '查看資源',
   Reconnect: '重新連接',
   Enable: '啟用',
   Disable: '禁用',
@@ -965,9 +1218,12 @@ export default {
   'Error:': '錯誤：',
   tool: '工具',
   tools: '個工具',
+  resource: '資源',
+  resources: '個資源',
   connected: '已連接',
   connecting: '連接中',
   disconnected: '已斷開',
+  'needs authentication': '需要認證',
   'User MCPs': '用戶 MCP',
   'Project MCPs': '項目 MCP',
   'Extension MCPs': '擴展 MCP',
@@ -996,6 +1252,19 @@ export default {
   Parameters: '參數',
   'No tool selected': '未選擇工具',
   Server: '伺服器',
+
+  // MCP Resource List/Detail
+  'No resources available for this server.': '此伺服器沒有可用資源。',
+  'Resources for {{serverName}}': '{{serverName}} 的資源',
+  'No resource selected': '未選擇資源',
+  'Resource Detail': '資源詳情',
+  'URI:': 'URI：',
+  'MIME Type:': 'MIME 類型：',
+  'Size:': '大小：',
+  '{{count}} bytes': '{{count}} 位元組',
+  'Reference in chat': '在對話中引用',
+  'MCP server': 'MCP 伺服器',
+  'MCP resource server': 'MCP 資源伺服器',
   '{{count}} invalid tools': '{{count}} 個無效工具',
   invalid: '無效',
   'invalid: {{reason}}': '無效：{{reason}}',
@@ -1028,8 +1297,72 @@ export default {
     '生成摘要失敗 - 未從 LLM 響應中接收到文本內容',
   'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     '切換此會話的模型（--fast 可設置建議模型）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
+    '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，[model-id] 可立即切換）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    '切換此會話的模型（--fast 建議模型，--voice 語音轉寫模型，--vision 視覺橋接模型，--project 持久化到專案設定，--global 持久化到使用者設定，[model-id] 立即切換，或用 [model-id] [prompt] 在另一個模型上執行一次性提示；內聯提示按原文發送，不展開 @file）',
+  "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
+    "此模式不支援內聯一次性覆寫——請先執行 '/model {{model}}'，再發送你的提示。",
+  "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
+    "內聯一次性覆寫無法切換 provider。'{{model}}' 屬於另一個 provider——請先執行 '/model {{model}}'，再發送你的提示。",
+  "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.":
+    "⚠ '{{model}}' 不是已知的圖像能力模型；視覺橋接處理圖片時可能會失敗。",
   'Set a lighter model for prompt suggestions and speculative execution':
     '設置用於輸入建議和推測執行的輕量模型',
+  'Toggle voice dictation input': '切換語音聽寫輸入',
+  'Set the model for voice transcription': '設定語音轉寫模型',
+  'Set the image-capable model used to transcribe images for a text-only main model':
+    '設定用於為純文字主模型轉寫圖像的圖像能力模型',
+  'Persist the model selection to the project settings (workspace scope)':
+    '將模型選擇持久化到專案設定（工作區）',
+  'Persist the model selection to the user settings (global scope)':
+    '將模型選擇持久化到使用者設定（全域）',
+  'Select Fast Model': '選擇快速模型',
+  'Select Vision Model': '選擇視覺模型',
+  'Select Voice Model': '選擇語音模型',
+  'Vision Model': '視覺模型',
+  'Voice Model': '語音模型',
+  'Selected voice model is unavailable.': '所選語音模型不可用。',
+  "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
+    "語音模型 '{{model}}' 被配置了多次。請先移除重複的模型 ID，再將其選為語音轉寫模型。",
+  'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).':
+    '語音聽寫：{{status}}（模式：{{mode}}，{{modelText}}）。',
+  'model: {{voiceModel}}': '模型：{{voiceModel}}',
+  'no voice model selected': '未選擇語音模型',
+  'Voice dictation disabled.': '語音聽寫已停用。',
+  'Usage: /voice [hold|tap|off|status]': '用法：/voice [hold|tap|off|status]',
+  'No voice model selected. Run /model --voice to choose one before enabling voice dictation.':
+    '未選擇語音模型。請先執行 /model --voice 選擇模型，再啟用語音聽寫。',
+  'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using {{voiceModel}}.':
+    '語音聽寫已啟用（點按模式）。在空輸入框中點按 Space 開始，再點按一次或停頓後停止並提交，使用 {{voiceModel}}。',
+  'Voice dictation enabled (hold mode). Hold Space at an empty prompt to dictate with {{voiceModel}}.':
+    '語音聽寫已啟用（按住模式）。在空輸入框中按住 Space，使用 {{voiceModel}} 聽寫。',
+  'No models are configured.': '未設定模型。',
+  'Configured models: {{models}}.': '已設定模型：{{models}}。',
+  'Configure a unique model id in settings.modelProviders or run /model --voice to select an available model.':
+    '請在 settings.modelProviders 中設定唯一的模型 ID，或執行 /model --voice 選擇可用模型。',
+  "Voice model '{{modelName}}' is not configured.":
+    "語音模型 '{{modelName}}' 未設定。",
+  "Voice model '{{modelName}}' cannot be used for transcription.":
+    "語音模型 '{{modelName}}' 不能用於轉寫。",
+  "Voice model '{{modelName}}' cannot be used for transcription. Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.":
+    "語音模型 '{{modelName}}' 不能用於轉寫。請在 settings.modelProviders 中設定帶 baseUrl 的 OpenAI 相容模型。",
+  'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.':
+    '請在 settings.modelProviders 中設定帶 baseUrl 的 OpenAI 相容模型。',
+  'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.':
+    '麥克風存取被拒絕。請在系統設定 → 隱私權與安全性 → 麥克風中允許目前終端機存取，然後重新啟動語音聽寫。',
+  'Voice dictation is not supported on {{platform}}.':
+    '語音聽寫不支援 {{platform}}。',
+  'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.':
+    '語音聽寫需要麥克風存取，但目前 WSL 會話不可用。請使用 WSLg/PulseAudio，或在具備麥克風的主機上執行 Qwen Code。',
+  'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.':
+    '語音聽寫需要麥克風存取。macOS 會在你首次錄音時彈出授權請求——請同意後重新開始。彈窗開啟期間的首次錄音可能為空。',
+  'Voice: recording': '語音：錄音中',
+  'Voice: transcribing': '語音：轉寫中',
+  'Voice: refining': '語音：優化中',
+  'listening…': '聆聽中…',
+  'transcribing…': '轉寫中…',
+  'refining…': '優化中…',
   'Content generator configuration not available.': '內容生成器配置不可用',
   'Authentication type not available.': '認證類型不可用',
   'No models available for the current authentication type ({{authType}}).':
@@ -1105,9 +1438,9 @@ export default {
   'Choose how to proceed with your session:': '選擇如何繼續您的會話：',
   'Start new chat session': '開始新的聊天會話',
   'Continue previous conversation': '繼續之前的對話',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 歡迎回來！（最後更新：{{timeAgo}}）',
-  '🎯 Overall Goal:': '🎯 總體目標：',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    '歡迎回來！（最後更新：{{timeAgo}}）',
+  'Overall Goal:': '總體目標：',
   'Connect a Provider': '連接服務商',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     '必須連接一個服務商才能繼續。再次按 Ctrl+C 退出',
@@ -1177,6 +1510,8 @@ export default {
   'Invalid QWEN_DEFAULT_AUTH_TYPE value: "{{value}}". Valid values are: {{validValues}}':
     '無效的 QWEN_DEFAULT_AUTH_TYPE 值："{{value}}"。有效值為：{{validValues}}',
   'Select Model': '選擇模型',
+  ' (this project)': '（當前專案）',
+  ' (global)': '（全域）',
   'API Key': 'API Key',
   '(default)': '(默認)',
   '(not set)': '(未設置)',
@@ -1189,6 +1524,12 @@ export default {
   audio: '音頻',
   video: '視頻',
   'not set': '未設置',
+  'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
+    '當前語音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 設置語音模型。',
+  'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
+    '當前視覺模型：{{visionModel}}\n使用 "/model --vision <model-id>" 設置視覺橋接模型。',
+  "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
+    "語音模型 '{{modelName}}' 不唯一。請先配置唯一的模型 ID，再使用 /model --voice。",
   none: '無',
   unknown: '未知',
   'Manage folder trust settings': '管理檔案夾信任設置',
@@ -1268,8 +1609,8 @@ export default {
   'Press Esc again to clear.': '再次按 Esc 清除',
   'Press ↑ to edit queued messages': '按 ↑ 編輯排隊消息',
   'No MCP servers configured.': '未配置 MCP servers',
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCP servers 正在啟動（{{count}} 個正在初始化）...',
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    '◌ MCP servers 正在啟動（{{count}} 個正在初始化）...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     '注意：首次啟動可能需要更長時間。工具可用性將自動更新',
   'Configured MCP servers:': '已配置的 MCP servers：',
@@ -1290,8 +1631,9 @@ export default {
   'Tools:': '工具：',
   'Parameters:': '參數：',
   'Prompts:': '提示：',
+  'Resources:': '資源：',
   Blocked: '已阻止',
-  '💡 Tips:': '💡 提示：',
+  '★ Tips:': '★ 提示：',
   Use: '使用',
   'to show server and tool descriptions': '顯示伺服器和工具描述',
   'to show tool parameter schemas': '顯示 tool parameter schemas',
@@ -1322,8 +1664,6 @@ export default {
     '按 Tab 或輸入 /approval-mode 可快速切換權限模式。',
   'Try /insight to generate personalized insights from your chat history.':
     '試試 /insight，從聊天記錄中生成個性化洞察。',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    '按 Ctrl+O 切換緊湊模式 ── 隱藏工具輸出和思考過程，界面更簡潔。',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     '添加 QWEN.md 檔案，為 Qwen Code 提供持久的項目上下文。',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1577,7 +1917,7 @@ export default {
   'Enter your Coding Plan API key: ': '請輸入您的 Coding Plan API Key：',
   'Select authentication method:': '選擇認證方式：',
   '\n=== Authentication Status ===\n': '\n=== 認證狀態 ===\n',
-  '⚠️  No authentication method configured.\n': '⚠️  未配置認證方式。\n',
+  '⚠  No authentication method configured.\n': '⚠  未配置認證方式。\n',
   'Run one of the following commands to get started:\n':
     '運行以下命令之一開始配置：\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -1599,8 +1939,8 @@ export default {
   '  Current Model: {{model}}': '  當前模型：{{model}}',
   '  Config Version: {{version}}': '  配置版本：{{version}}',
   '  Status: API key configured\n': '  狀態：API Key 已配置\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    '⚠️  認證方式：阿里雲百鍊 Coding Plan（不完整）',
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠  認證方式：阿里雲百鍊 Coding Plan（不完整）',
   '  Issue: API key not found in environment or settings\n':
     '  問題：在環境變量或設置中未找到 API Key\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':
@@ -1614,10 +1954,9 @@ export default {
     '原始模式不可用。請在交互式終端中運行。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭頭導航，Enter 選擇，Ctrl+C 退出)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    '緊湊模式下隱藏工具輸出和思考過程，界面更簡潔（Ctrl+O 切換）。',
-  'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看詳細工具調用結果',
   'Switch to plan mode or exit plan mode': '切換到計劃模式或退出計劃模式',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    '設定具備推理能力的模型思考的強度（{{tiers}}）；依各供應商進行映射與鉗制。',
   'Set a goal — keep working until the condition is met':
     '設定目標 — 持續工作直到條件滿足',
   'Exited plan mode. Previous approval mode restored.':
@@ -1713,6 +2052,7 @@ export default {
   'No tasks currently running': '目前沒有正在執行的任務',
   'No entry to show.': '沒有可顯示的項目。',
   'needs approval': '待審批',
+  'rejected — edit config to re-approve': '已拒絕 — 編輯設定以重新審批',
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',
   Running: '執行中',
@@ -1815,8 +2155,102 @@ export default {
   '\u2191 tabs \u00B7 r to cycle dates \u00B7 esc to close':
     '\u2191 tab 切換標籤 \u00B7 r 切換時間範圍 \u00B7 esc 關閉',
 
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    '恢復會話時預設摺疊歷史記錄',
+  'Set history to expand by default when resuming a session':
+    '恢復會話時預設展開歷史記錄',
+  'Expand the currently collapsed history transcript': '展開當前摺疊的歷史記錄',
+  'Control history display preferences and visibility':
+    '控制歷史記錄顯示偏好和可見性',
+  'History will be collapsed by default for future resumed sessions.':
+    '未來恢復的會話將預設摺疊歷史記錄。',
+  'History will be expanded by default for future resumed sessions.':
+    '未來恢復的會話將預設展開歷史記錄。',
+  'History is already expanded in this session.': '當前會話的歷史記錄已展開。',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    '用法：/history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    '歷史記錄已摺疊：{{n}} 條訊息已隱藏。使用 /history expand-now 展開。',
+
   // === Same-as-English optimization ===
   ' (not in model registry)': '（不在模型註冊表中）',
   'start server': '啟動伺服器',
   'No compression needed.': '無需壓縮。',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    '檢查 Qwen Code 更新並安裝（如果可用）',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Qwen Code 有可用更新！{{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Qwen Code 有新版本可用！{{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} 已是最新！',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    '檢查更新失敗。請檢查網路或 registry 設定。',
+  'Unable to check for updates: {{reason}}': '無法檢查更新：{{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    '更新成功！新版本將在下次執行時生效。',
+  'Update downloaded. It will be applied after you exit this session.':
+    '更新已下載。將在結束目前工作階段後套用。',
+  'Update failed: {{error}}': '更新失敗：{{error}}',
+  'Downloading update...': '正在下載更新...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    '更新成功！請重新啟動 Qwen Code 以使用新版本。重新啟動前切換模型提供商可能無法正常運作。',
+  'Automatic update failed. Please try updating manually.':
+    '自動更新失敗。請嘗試手動更新。',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    '自動更新失敗：{{error}}。請重新執行安裝程式以手動更新。',
+  'Running from a local git clone. Please update with "git pull".':
+    '正在從本機 Git 複製執行。請使用 "git pull" 更新。',
+  'Running via npx, update not applicable.': '正在透過 npx 執行，更新不適用。',
+  'Running via pnpx, update not applicable.':
+    '正在透過 pnpx 執行，更新不適用。',
+  'Running via bunx, update not applicable.':
+    '正在透過 bunx 執行，更新不適用。',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    '透過 Homebrew 安裝。請使用 "brew upgrade" 更新。',
+  "Locally installed. Please update via your project's package.json.":
+    '本機安裝。請透過專案的 package.json 更新。',
+  'Update requires sudo. Please run:': '更新需要 sudo。請執行：',
+  'Standalone install detected. Attempting to automatically update now...':
+    '偵測到獨立安裝。正在嘗試自動更新...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    '偵測到獨立安裝。請重新執行獨立安裝程式以更新：',
+  'Run the following to update:': '執行以下命令進行更新：',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    '無法自動更新此獨立安裝。請從以下位址重新安裝：',
+  'Manual update required. Please reinstall Qwen Code.':
+    '需要手動更新。請重新安裝 Qwen Code。',
+  '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
+    '⚠️ 歷史記錄缺口：此處之前的會話記錄已遺失（儲存中斷），且無法找回。',
+
+  // ============================================================================
+  // reload-plugins 命令
+  // ============================================================================
+  '{{count}} extension': '{{count}} 個擴充',
+  '{{count}} extensions': '{{count}} 個擴充',
+  '{{count}} command': '{{count}} 個指令',
+  '{{count}} commands': '{{count}} 個指令',
+  '{{count}} skill': '{{count}} 個技能',
+  '{{count}} skills': '{{count}} 個技能',
+  '{{count}} agent': '{{count}} 個代理',
+  '{{count}} agents': '{{count}} 個代理',
+  '{{count}} hook': '{{count}} 個鉤子',
+  '{{count}} hooks': '{{count}} 個鉤子',
+  '{{count}} extension MCP server': '{{count}} 個擴充 MCP 伺服器',
+  '{{count}} extension MCP servers': '{{count}} 個擴充 MCP 伺服器',
+  '{{count}} extension LSP server': '{{count}} 個擴充 LSP 伺服器',
+  '{{count}} extension LSP servers': '{{count}} 個擴充 LSP 伺服器',
+  'Reload extension changes from disk': '從磁碟重新載入擴充變更',
+  'Reloaded extensions: {{summary}}': '已重新載入擴充：{{summary}}',
+  'Reload failed: {{message}}': '重新載入失敗：{{message}}',
+  'Reload failed.': '重新載入失敗。',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    '磁碟上的擴充已變更。執行 /reload-plugins 來套用更新。',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    '擴充內容重新整理失敗：{{message}}。執行 /reload-plugins 來套用更新。',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    '擴充內容重新整理失敗。執行 /reload-plugins 來套用更新。',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    '擴充重新載入未完成。執行 /reload-plugins 重試。',
 };

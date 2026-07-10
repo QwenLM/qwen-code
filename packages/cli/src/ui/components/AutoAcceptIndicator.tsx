@@ -45,6 +45,9 @@ export const AutoAcceptIndicator: React.FC<AutoAcceptIndicatorProps> = ({
       subText = cycleText;
       break;
     case ApprovalMode.DEFAULT:
+      textContent = `⏸ ${t('Ask permissions')}`;
+      subText = cycleText;
+      break;
     default:
       break;
   }

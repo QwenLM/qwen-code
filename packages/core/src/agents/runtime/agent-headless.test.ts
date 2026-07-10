@@ -621,6 +621,38 @@ describe('subagent.ts', () => {
         expect(history).toEqual(initialMessages);
       });
 
+      it('should skip env history when initialMessages is an empty array', async () => {
+        const { config } = await createMockConfig();
+        vi.mocked(GeminiChat).mockClear();
+        vi.mocked(getInitialChatHistory).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'System ${name}.',
+          initialMessages: [],
+        };
+        const context = new ContextState();
+        context.set('name', 'Agent');
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(context);
+
+        const callArgs = vi.mocked(GeminiChat).mock.calls[0];
+        const generationConfig = getGenerationConfigFromMock();
+
+        expect(generationConfig.systemInstruction).toContain('System Agent.');
+        expect(callArgs[2]).toEqual([]);
+        expect(getInitialChatHistory).not.toHaveBeenCalled();
+      });
+
       it('should use renderedSystemPrompt verbatim and bypass templating', async () => {
         const { config } = await createMockConfig();
         vi.mocked(GeminiChat).mockClear();
@@ -1145,6 +1177,188 @@ describe('subagent.ts', () => {
           'Duplicate provider tool call id "call_1"',
         );
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      });
+
+      it('should stop repeated duplicate provider tool-call responses', async () => {
+        const listFilesToolDef: FunctionDeclaration = {
+          name: 'list_files',
+          description: 'Lists files',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listFilesToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_files'] };
+        const [duplicateNormalizedPart] = normalizeModelToolCallIds(
+          [
+            {
+              functionCall: {
+                id: 'call_1',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+            },
+          ],
+          new Set(['call_1']),
+          new Set<string>(),
+        );
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_1',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+            ],
+            [duplicateNormalizedPart!.functionCall!],
+            [
+              duplicateNormalizedPart!.functionCall!,
+              {
+                id: 'call_2',
+                name: 'list_files',
+                args: { path: './fresh' },
+              },
+            ],
+          ]),
+        );
+
+        const listFilesInvocation = {
+          params: { path: '.' },
+          getDescription: vi.fn().mockReturnValue('List files'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file1.txt\nfile2.ts',
+            returnDisplay: 'Listed 2 files',
+          }),
+        };
+        const listFilesTool = {
+          name: 'list_files',
+          displayName: 'List Files',
+          description: 'List files in directory',
+          kind: 'READ' as const,
+          schema: listFilesToolDef,
+          build: vi.fn().mockImplementation(() => listFilesInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_files' ? listFilesTool : undefined,
+        );
+
+        const toolResultEvents: AgentToolResultEvent[] = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as AgentToolResultEvent);
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(listFilesInvocation.execute).toHaveBeenCalledTimes(1);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+        expect(toolResultEvents).toHaveLength(2);
+        expect(toolResultEvents[1].error).toContain(
+          'Duplicate provider tool call id "call_1"',
+        );
+
+        const thirdCallArgs = mockSendMessageStream.mock.calls[2][1];
+        const parts = thirdCallArgs.message as Part[];
+        expect(parts[0].functionResponse?.id).toBe('call_1__qwen_dup_2');
+        expect(parts[0].functionResponse?.response?.['error']).toContain(
+          'Duplicate provider tool call id "call_1"',
+        );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+      });
+
+      it('should stop consecutive identical tool calls with fresh ids', async () => {
+        const listDirectoryToolDef: FunctionDeclaration = {
+          name: 'list_directory',
+          description: 'Lists a directory',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listDirectoryToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_directory'] };
+        const missingPath = '/workspace/project/missing-directory';
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            ...Array.from({ length: 5 }, (_, index) => [
+              {
+                id: `call_${index + 1}`,
+                name: 'list_directory',
+                args: { path: missingPath },
+              },
+            ]),
+            'stop',
+          ]),
+        );
+
+        const listDirectoryInvocation = {
+          params: { path: missingPath },
+          getDescription: vi.fn().mockReturnValue('List directory'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent:
+              'Error: ENOENT: no such file or directory, scandir ' +
+              missingPath,
+            returnDisplay: 'Directory not found',
+          }),
+        };
+        const listDirectoryTool = {
+          name: 'list_directory',
+          displayName: 'List Directory',
+          description: 'List directory contents',
+          kind: 'READ' as const,
+          schema: listDirectoryToolDef,
+          build: vi.fn().mockImplementation(() => listDirectoryInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_directory' ? listDirectoryTool : undefined,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
+        expect(listDirectoryInvocation.execute).toHaveBeenCalledTimes(4);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
       });
 
       it('should ignore duplicate provider tool-call ids already present in chat history', async () => {

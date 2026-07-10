@@ -14,13 +14,22 @@ import type {
   ToolResultDisplay,
   SlashCommandRecordPayload,
   AtCommandRecordPayload,
+  HistoryGap,
 } from '@qwen-code/qwen-code-core';
+import { getToolResponseDisplayText } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
+  HistoryItemInfo,
   HistoryItemWithoutId,
   IndividualToolCallDisplay,
 } from '../types.js';
-import { ToolCallStatus } from '../types.js';
+import { ToolCallStatus, MessageType } from '../types.js';
+import { t } from '../../i18n/index.js';
+import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
+import {
+  formatHistoryGapNotice,
+  indexGapsByChild,
+} from './history-gap-notice.js';
 
 /**
  * Extracts text content from a Content object's parts (excluding thought parts).
@@ -137,6 +146,18 @@ function restoreHistoryItem(raw: unknown): HistoryItemWithoutId | undefined {
 }
 
 /**
+ * INFO divider shown at a detected history gap: an earlier segment of the
+ * session was physically lost (storage interruption) and could not be
+ * recovered. Mirrors the ACP replay notice so both surfaces read the same.
+ */
+function createHistoryGapItem(gap: HistoryGap): HistoryItemInfo {
+  return {
+    type: MessageType.INFO,
+    text: formatHistoryGapNotice(gap),
+  };
+}
+
+/**
  * Converts ChatRecord messages to UI history items for display.
  *
  * This function transforms the raw ChatRecords into a format suitable
@@ -149,8 +170,10 @@ function restoreHistoryItem(raw: unknown): HistoryItemWithoutId | undefined {
 function convertToHistoryItems(
   conversation: ConversationRecord,
   config: Config | null,
+  historyGaps?: HistoryGap[],
 ): HistoryItemWithoutId[] {
   const items: HistoryItemWithoutId[] = [];
+  const gapByChildUuid = indexGapsByChild(historyGaps);
   const pendingAtCommands: AtCommandRecordPayload[] = [];
   let atCommandCounter = 0;
 
@@ -164,6 +187,7 @@ function convertToHistoryItems(
     name: string;
     description: string;
     resultDisplay: ToolResultDisplay | undefined;
+    detailedDisplay?: string;
     status: ToolCallStatus;
     confirmationDetails: undefined;
   }> = [];
@@ -222,6 +246,27 @@ function convertToHistoryItems(
   };
 
   for (const record of conversation.messages) {
+    // A detected history gap begins at this record — surface a visible divider
+    // so the surviving turns below are not read as contiguous across the lost
+    // segment. Flush any pending tool group first so the divider is not
+    // swallowed into it.
+    const gap = gapByChildUuid.get(record.uuid);
+    if (gap) {
+      if (currentToolGroup.length > 0) {
+        items.push({ type: 'tool_group', tools: [...currentToolGroup] });
+        currentToolGroup = [];
+      }
+      // Reset pending @-command state at the boundary as well: the divider
+      // means the records below begin a fresh reachable island, so an
+      // unconsumed pre-gap at_command must never be shift()-paired with the
+      // post-gap user turn (which would attach @file reads to a turn the user
+      // never wrote them on). Today reconstructHistory truncates to the tail,
+      // so the buffer is already empty here; this keeps the invariant if that
+      // ever changes.
+      pendingAtCommands.length = 0;
+      items.push(createHistoryGapItem(gap));
+    }
+
     if (record.type === 'system') {
       if (record.subtype === 'slash_command') {
         // Flush any pending tool group to avoid mixing contexts.
@@ -380,7 +425,11 @@ function convertToHistoryItems(
             });
             currentToolGroup = [];
           }
-          items.push({ type: 'gemini', text });
+          items.push({
+            type: 'gemini',
+            text,
+            timestamp: new Date(record.timestamp).getTime(),
+          });
         }
 
         // Track function calls for pairing with results
@@ -419,6 +468,25 @@ function convertToHistoryItems(
               rawStatus === 'error'
                 ? ToolCallStatus.Error
                 : ToolCallStatus.Success;
+            // Full detail for the Ctrl+O transcript (§4.9): the complete
+            // functionResponse parts are persisted on the tool_result record
+            // (only resultDisplay is sanitized), so resume yields full detail
+            // too. Fall back to message.parts for older records. Only derive it
+            // for SUCCESS + collapsible (read/search/list) tools, mirroring the
+            // live path's gate in useReactToolScheduler — the renderer's
+            // `usingDetailedDisplay` only consumes it for collapsible tools, so
+            // extracting it for edit/write/command/agent calls would store a
+            // large (~25K char) string the transcript never reads. Errored /
+            // cancelled tools are excluded so raw output never surfaces.
+            if (
+              toolCall.status === ToolCallStatus.Success &&
+              isCollapsibleTool(toolCall.name)
+            ) {
+              toolCall.detailedDisplay = getToolResponseDisplayText(
+                (record.toolCallResult.responseParts as Part[] | undefined) ??
+                  (record.message?.parts as Part[] | undefined),
+              );
+            }
           }
           pendingToolCalls.delete(callId || '');
         }
@@ -492,7 +560,11 @@ export function buildResumedHistoryItems(
   const getNextId = (): number => baseTimestamp + idCounter++;
 
   // Convert conversation directly to history items
-  const historyItems = convertToHistoryItems(sessionData.conversation, config);
+  const historyItems = convertToHistoryItems(
+    sessionData.conversation,
+    config,
+    sessionData.historyGaps,
+  );
   for (const item of historyItems) {
     items.push({
       ...item,
@@ -501,4 +573,100 @@ export function buildResumedHistoryItems(
   }
 
   return items;
+}
+
+/**
+ * Applies the quiet-restore display policy to resumed history items.
+ * Marks each item with `display.suppressOnRestore` so the rendering layer
+ * skips them while the canonical history (used by /rewind turn mapping) is preserved.
+ */
+function applyResumeDisplayPolicy(items: HistoryItem[]): HistoryItem[] {
+  return items.map((item) => ({
+    ...item,
+    display: { ...item.display, suppressOnRestore: true },
+  }));
+}
+
+/**
+ * Creates the summary INFO item shown when resume-time collapse suppresses
+ * the transcript display.
+ */
+function createHistoryCollapseSummaryItem(
+  messageCount: number,
+): HistoryItemInfo & { display: { kind: 'collapse-summary' } } {
+  const n = String(messageCount);
+  return {
+    type: MessageType.INFO,
+    text: t(
+      'History collapsed: {{n}} messages hidden. Use /history expand-now to show.',
+      { n },
+    ),
+    display: { kind: 'collapse-summary' },
+  };
+}
+
+/**
+ * Strips the suppressOnRestore flag from a history item's display property.
+ * Used when rewinding into collapsed history to ensure rewound items remain visible.
+ */
+export function stripSuppressOnRestore(item: HistoryItem): HistoryItem {
+  if (!item.display?.suppressOnRestore) return item;
+  const { suppressOnRestore: _, ...rest } = item.display;
+  return {
+    ...item,
+    display: Object.keys(rest).length > 0 ? rest : undefined,
+  };
+}
+
+/**
+ * Removes collapse-summary items and strips suppressOnRestore from the rest.
+ * Shared between the rewind path and the expand-now command.
+ */
+export function expandCollapsedHistory(items: HistoryItem[]): HistoryItem[] {
+  return items
+    .filter((item) => item.display?.kind !== 'collapse-summary')
+    .map(stripSuppressOnRestore);
+}
+
+/**
+ * Helper to apply the collapse policy and append the summary item if needed.
+ */
+export function applyCollapsePolicyAndSummary(
+  rawItems: HistoryItem[],
+  collapseOnResume: boolean,
+  collapsePreviewCount: number = 0,
+): HistoryItem[] {
+  if (!collapseOnResume) return rawItems;
+  if (collapsePreviewCount === -1) return rawItems;
+
+  let boundary = rawItems.length;
+  if (collapsePreviewCount > 0) {
+    let userTurnCount = 0;
+    for (let i = rawItems.length - 1; i >= 0; i--) {
+      if (rawItems[i].type === MessageType.USER) {
+        userTurnCount++;
+        if (userTurnCount === collapsePreviewCount) {
+          boundary = i;
+          break;
+        }
+      }
+    }
+    if (userTurnCount < collapsePreviewCount) {
+      boundary = 0;
+    }
+  }
+
+  const hiddenItems = applyResumeDisplayPolicy(rawItems.slice(0, boundary));
+  const visibleItems = rawItems.slice(boundary);
+  const uiHistoryItems = [...hiddenItems, ...visibleItems];
+
+  if (boundary > 0) {
+    const nextId = rawItems[rawItems.length - 1].id + 1;
+    return [
+      ...uiHistoryItems,
+      { id: nextId, ...createHistoryCollapseSummaryItem(boundary) },
+    ];
+  }
+
+  return uiHistoryItems;
 }

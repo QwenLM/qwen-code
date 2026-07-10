@@ -2,9 +2,14 @@
 
 ## Overview
 
-`packages/channels/` contains the **IM channel adapters** that turn a chat platform's incoming message into a daemon prompt and the daemon's outbound events into chat platform messages. Four concrete channels ship today: DingTalk, WeChat (Weixin), Telegram, and Feishu. They share a base layer (`packages/channels/base/`) plus a `DaemonChannelBridge` that handles session multiplexing and SSE consumption.
+`packages/channels/` contains the **IM channel adapters** that turn a chat platform's incoming message into an agent prompt and send the agent response back to the chat platform. Four concrete channels ship today: DingTalk, WeChat (Weixin), Telegram, and Feishu. They share a base layer (`packages/channels/base/`) and an adapter-facing `ChannelAgentBridge` contract.
 
-Each channel maps inbound chat traffic to daemon sessions under a configurable `SessionScope` (`user`, `thread`, or `single`). The adapter delegates to `DaemonChannelBridge`, which delegates to the SDK's `DaemonSessionClient` (see [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)).
+There are two current host modes:
+
+- `qwen channel start [name]` is the standalone ACP-backed channel service. It passes adapters an `AcpBridge` implementation of `ChannelAgentBridge`.
+- `qwen serve --channel <name>` and `qwen serve --channel all` are experimental daemon-managed modes. `qwen serve` starts one out-of-process channel worker, the worker connects to the daemon through the SDK, and adapters receive a `DaemonChannelBridge`-backed `ChannelAgentBridge` facade.
+
+In daemon-managed mode, each channel maps inbound chat traffic to daemon sessions under a configurable `SessionScope` (`user`, `thread`, or `single`). The adapter delegates to `DaemonChannelBridge`, which delegates to the SDK's `DaemonSessionClient` (see [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)). Channel workers remain primary-workspace only in Phase 2a, so every selected channel's `cwd` must resolve to the daemon primary workspace.
 
 ## Responsibilities
 
@@ -157,6 +162,15 @@ sequenceDiagram
 - `shutdown()` closes every active session and the underlying transport (the channel's WebSocket / long-poll).
 - DingTalk's WebSocket stream supports server-push; WeChat's long-poll requires a backoff strategy on idle responses; Telegram's long-poll has a built-in `timeout` parameter.
 
+### Settings reload (`POST /workspace/channel/reload`)
+
+The daemon reads channel settings from `settings.json` once, when the channel worker starts (`packages/cli/src/commands/channel/daemon-worker.ts` → `loadSettings` → `loadChannelsConfig`). To apply changes without a full daemon restart, the daemon exposes `POST /workspace/channel/reload` (strict mutation gate; SDK `DaemonClient.reloadChannelWorker()`; CLI `qwen channel reload`):
+
+- The route calls `ChannelWorkerSupervisor.restart()` (`packages/cli/src/serve/channel-worker-supervisor.ts`), which stops the current worker child and relaunches it. The relaunched worker re-reads `settings.json`, so channel tokens, `proxy`, and per-channel `model` all take effect.
+- Concurrent reloads coalesce onto a single stop+relaunch. `restart()` also resets the crash-restart budget, so a worker parked in `failed` recovers on an explicit reload.
+- If the relaunch fails (for example, settings were edited into an invalid state), the channels stay down, the route returns 5xx with the latest snapshot, and `GET /daemon/status` reports `failed`.
+- The `channel_reload` capability and the route are advertised only when the daemon was started with `--channel`. Adding a brand-new channel name to a `--channel <names>` selection still requires a daemon restart; `--channel all` picks up newly-configured channels on reload.
+
 ## Dependencies
 
 - `packages/channels/base/` — `ChannelBase`, `DaemonChannelBridge`, `types.ts` (`ChannelConfig`, `Envelope`, `SessionScope`, `ChannelPlugin`).
@@ -191,6 +205,8 @@ Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilin
 - `packages/channels/base/src/DaemonChannelBridge.ts`
 - `packages/channels/base/src/ChannelBase.ts`
 - `packages/channels/base/src/types.ts`
+- `packages/cli/src/serve/channel-worker-supervisor.ts` (worker supervision + `restart()`)
+- `packages/cli/src/serve/routes/workspace-channel-control.ts` (`POST /workspace/channel/reload`)
 - `packages/channels/dingtalk/src/DingtalkAdapter.ts`
 - `packages/channels/weixin/src/WeixinAdapter.ts`
 - `packages/channels/telegram/src/TelegramAdapter.ts`

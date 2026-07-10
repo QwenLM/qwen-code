@@ -19,6 +19,12 @@ import {
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
 
+// Consecutive identical tool calls (same name + identical args) tolerated
+// before the always-on guard halts the turn. Repeating an identical call
+// yields an identical result, so this is never a productive pattern. Kept
+// below the DashScope server-side "Repetitive tool calls detected" threshold
+// so the client breaks the loop before the server rejects the whole
+// conversation with a 400 (issue #5019).
 const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
@@ -44,6 +50,12 @@ const FILE_READ_WINDOW = 15;
 // Action stagnation tracking
 const STAGNATION_THRESHOLD = 8;
 
+// Similar shell inspection commands are precise enough to guard always-on
+// when the model keeps rewriting overview-style repository checks instead of
+// making progress. Use the same threshold as the heuristic action-stagnation
+// guard to leave room for legitimate branch-review inspection.
+const SHELL_COMMAND_STAGNATION_THRESHOLD = STAGNATION_THRESHOLD;
+
 // Global tool call duplicate tracking: how many times the same (tool, args)
 // pair must appear across the entire turn (not necessarily consecutively)
 // before it is treated as a loop.
@@ -53,10 +65,17 @@ const GLOBAL_DUPLICATE_THRESHOLD = 6;
 // trip the detector (3 cycles = 6 calls: A B A B A B).
 const ALTERNATING_PATTERN_CYCLES = 3;
 
-// Hard per-turn tool call cap. Always-on circuit breaker — not gated by
-// skipLoopDetection. If a single turn exceeds this many tool calls the
-// turn is halted regardless of loop-detection configuration.
-const TURN_TOOL_CALL_CAP = 100;
+// Default hard per-turn tool call cap. Circuit breaker against runaway
+// turns that no pattern detector catches (e.g. the model varies arguments
+// on every call). Not gated by skipLoopDetection, but configurable via the
+// `model.maxToolCallsPerTurn` setting (values <= 0 disable the cap) and
+// suppressed by an explicit in-session disable. A "turn" for cap purposes
+// is one model turn plus its ToolResult continuations; a blocking Stop-hook
+// continuation (e.g. a /goal iteration) starts a fresh budget via
+// loopDetector.reset() in client.ts, so the cap bounds each iteration
+// rather than an entire goal chain — which is what keeps 100 sufficient
+// for legitimate work.
+export const DEFAULT_MAX_TOOL_CALLS_PER_TURN = 100;
 
 /**
  * Service for detecting and preventing infinite loops in AI responses.
@@ -93,6 +112,12 @@ export class LoopDetectionService {
   private sameNameStreak = 0;
   private lastSeenToolName: string | null = null;
 
+  // Always-on shell inspection stagnation tracking. This is narrower than
+  // action stagnation: it only covers overview-style git inspection commands
+  // and excludes file-specific diffs that are normal during code review.
+  private lastShellInspectionKey: string | null = null;
+  private shellInspectionStreak = 0;
+
   // Cold-start gate for READ_FILE_LOOP: the opening exploration of a prompt
   // is almost always read-heavy (list + parallel reads). Until at least one
   // non-read-like tool fires, a window full of reads is treated as legitimate
@@ -109,8 +134,9 @@ export class LoopDetectionService {
   private recentToolCallKeys: string[] = [];
 
   // Total tool calls emitted in the current turn. Always-on circuit breaker;
-  // exceeds TURN_TOOL_CALL_CAP → hard-stop. Accumulates across ToolResult
-  // continuations within a turn (reset() only runs for top-level interactions).
+  // exceeds the configured per-turn cap → hard-stop. Accumulates across
+  // ToolResult continuations within a turn (reset() only runs for top-level
+  // interactions).
   private turnToolCallTotal = 0;
 
   // Rollback floor for turnToolCallTotal: the committed total as of the last
@@ -159,12 +185,19 @@ export class LoopDetectionService {
   }
 
   /**
-   * Processes a stream event and checks for loop conditions.
+   * Convenience aggregate that runs every tier in order: the always-on
+   * safeties (consecutive-identical guard, shell inspection-command
+   * stagnation guard, and per-turn cap) followed by the opt-in heuristics.
+   * Intended as a single "check everything" entry point for unit tests.
+   * Production code (client.ts) intentionally calls the tiers separately so
+   * the `skipLoopDetection` gate can sit between them — a new guard added here
+   * will NOT take effect in production unless it is also wired into
+   * checkAlwaysOnSafeties or addAndCheckHeuristicLoops.
    * @param event - The stream event to process
-   * @returns true if a loop is detected, false otherwise
+   * @returns true if any tier detects a loop, false otherwise
    */
   addAndCheck(event: ServerGeminiStreamEvent): boolean {
-    if (this.addAndCheckDeterministicToolCallLoop(event)) {
+    if (this.checkAlwaysOnSafeties(event)) {
       return true;
     }
 
@@ -199,12 +232,12 @@ export class LoopDetectionService {
       }
       case GeminiEventType.Retry: {
         // A retry replays the failed attempt's tool calls (Turn clears
-        // pendingToolCalls on retry), so drop the counters this PR added to
-        // avoid the heuristic detectors firing on a duplicated replay — e.g.
-        // 3 identical calls + Retry + 3 more would otherwise hit the
-        // global-duplicate threshold of 6. Mirrors the deterministic path's
-        // resetToolCallCount() on Retry; the always-on cap keeps its own
-        // counter accurate via commit/rollback instead.
+        // pendingToolCalls on retry), so drop the heuristic duplicate counters
+        // to avoid firing on a duplicated replay — e.g. 3 identical calls +
+        // Retry + 3 more would otherwise hit the global-duplicate threshold of
+        // 6. The always-on guards reset their own counters in
+        // checkAlwaysOnSafeties' Retry branch (cap rollback + always-on
+        // streak reset).
         this.globalToolCallCounts.clear();
         this.recentToolCallKeys = [];
         break;
@@ -224,35 +257,14 @@ export class LoopDetectionService {
     return this.loopDetected;
   }
 
-  addAndCheckDeterministicToolCallLoop(
-    event: ServerGeminiStreamEvent,
-  ): boolean {
-    if (this.loopDetected) {
-      return true;
-    }
-
-    if (event.type === GeminiEventType.Retry) {
-      this.resetToolCallCount();
-      return false;
-    }
-
-    if (
-      this.disabledForSession ||
-      event.type !== GeminiEventType.ToolCallRequest
-    ) {
-      return false;
-    }
-
-    if (this.checkToolCallLoop(event.value)) {
-      this.loopDetected = true;
-    }
-    return this.loopDetected;
-  }
-
   /**
-   * Always-on safety checks that fire regardless of skipLoopDetection.
-   * Currently enforces the per-turn tool call cap. Call this before the
-   * gated checks so the hard cap cannot be bypassed by configuration.
+   * Always-on safety checks that fire regardless of the `skipLoopDetection`
+   * config default. Enforces three guards: the consecutive-identical tool-call
+   * loop, the shell inspection-command stagnation loop, and the per-turn
+   * tool-call cap. Call this before the gated heuristic checks so none of the
+   * guards can be bypassed by `skipLoopDetection`. All three honor an
+   * explicit in-session disable; the cap is additionally tunable via the
+   * `model.maxToolCallsPerTurn` setting.
    */
   checkAlwaysOnSafeties(event: ServerGeminiStreamEvent): boolean {
     if (this.loopDetected) {
@@ -269,10 +281,13 @@ export class LoopDetectionService {
     }
 
     // A retry re-streams the failed attempt's tool calls, which would
-    // double-count against the cap. Roll back to the last committed round-trip
-    // so only executed calls count — never below it (prior round-trips stay).
+    // double-count against both always-on guards. Roll the per-turn cap back
+    // to the last committed round-trip (never below it — prior round-trips
+    // stay) and drop the consecutive-identical streak so the replayed attempt
+    // cannot push it over the threshold.
     if (event.type === GeminiEventType.Retry) {
       this.turnToolCallTotal = this.turnToolCallTotalCommitted;
+      this.resetToolCallCount();
       return false;
     }
 
@@ -280,7 +295,29 @@ export class LoopDetectionService {
       return false;
     }
 
-    if (this.checkTurnToolCallCap()) {
+    // Consecutive identical tool calls (same name AND identical args) are the
+    // one repetition signal precise enough to halt unconditionally — an
+    // identical call returns an identical result, so it is never productive.
+    // Promoted here from the opt-in tier so it protects every user regardless
+    // of the `skipLoopDetection` config default: the DashScope server rejects
+    // this pattern with a 400 (issue #5019) far below the per-turn cap, so
+    // the gated default left users unprotected. Like the per-turn cap below,
+    // it honors an explicit in-session disable — the user's active "stop
+    // detecting" choice.
+    if (!this.disabledForSession && this.checkToolCallLoop(event.value)) {
+      this.loopDetected = true;
+      return true;
+    }
+
+    if (
+      !this.disabledForSession &&
+      this.checkShellCommandStagnation(event.value)
+    ) {
+      this.loopDetected = true;
+      return true;
+    }
+
+    if (!this.disabledForSession && this.checkTurnToolCallCap()) {
       this.loopDetected = true;
       return true;
     }
@@ -307,6 +344,112 @@ export class LoopDetectionService {
       return true;
     }
     return false;
+  }
+
+  private checkShellCommandStagnation(toolCall: {
+    name: string;
+    args: object;
+  }): boolean {
+    const key = this.getShellInspectionKey(toolCall);
+    if (!key) {
+      this.lastShellInspectionKey = null;
+      this.shellInspectionStreak = 0;
+      return false;
+    }
+
+    if (this.lastShellInspectionKey === key) {
+      this.shellInspectionStreak++;
+    } else {
+      this.lastShellInspectionKey = key;
+      this.shellInspectionStreak = 1;
+    }
+
+    if (this.shellInspectionStreak >= SHELL_COMMAND_STAGNATION_THRESHOLD) {
+      this.lastLoopType = LoopType.SHELL_COMMAND_STAGNATION;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(LoopType.SHELL_COMMAND_STAGNATION, this.promptId),
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  private getShellInspectionKey(toolCall: {
+    name: string;
+    args: object;
+  }): string | null {
+    if (toolCall.name !== 'run_shell_command') {
+      return null;
+    }
+
+    const command = (toolCall.args as { command?: unknown }).command;
+    if (typeof command !== 'string') {
+      return null;
+    }
+
+    return this.isGitOverviewInspectionCommand(command)
+      ? 'run_shell_command:git-inspection'
+      : null;
+  }
+
+  private isGitOverviewInspectionCommand(command: string): boolean {
+    // Only classify a command as overview inspection when *every* segment of
+    // the shell chain is a git status/diff/ls-files overview. A chain that also
+    // stages, commits, runs another tool, or inspects file-specific diffs is
+    // making progress, so it must not share the stagnation bucket and trip a
+    // false halt. Failing open is the safe direction for an always-on guard.
+    const segments = command
+      .split(/&&|\|\||[;&|\n]/)
+      .map((segment) => segment.trim())
+      .filter(Boolean);
+    if (segments.length === 0) {
+      return false;
+    }
+    return segments.every((segment) => {
+      const match =
+        /^git(?:\s+(?:-C\s+\S+|--no-pager))*\s+(status|diff|ls-files)\b/i.exec(
+          segment,
+        );
+      if (!match) {
+        return false;
+      }
+      return (
+        match[1]?.toLowerCase() !== 'diff' ||
+        this.isOverviewGitDiff(segment.slice(match[0].length))
+      );
+    });
+  }
+
+  private isOverviewGitDiff(args: string): boolean {
+    const trimmedArgs = args.trim();
+    if (!trimmedArgs) {
+      return true;
+    }
+
+    const tokens = trimmedArgs.split(/\s+/);
+    const pathspecSeparatorIndex = tokens.indexOf('--');
+    if (
+      pathspecSeparatorIndex !== -1 &&
+      pathspecSeparatorIndex < tokens.length - 1
+    ) {
+      return false;
+    }
+
+    return tokens.every(
+      (token) => token.startsWith('-') || this.isGitRevisionToken(token),
+    );
+  }
+
+  private isGitRevisionToken(token: string): boolean {
+    return (
+      token === 'HEAD' ||
+      token === '@' ||
+      /^(?:HEAD|@)(?:[~^]\d*)+$/.test(token) ||
+      /^[0-9a-f]{7,40}$/i.test(token) ||
+      /^[^\s]+\.{2,3}[^\s]+$/.test(token)
+    );
   }
 
   /**
@@ -640,14 +783,15 @@ export class LoopDetectionService {
   }
 
   /**
-   * Always-on hard cap: if the turn exceeds TURN_TOOL_CALL_CAP tool calls
-   * the turn is halted. This is a safety net independent of
-   * skipLoopDetection and fires on the very next tool call that pushes the
-   * total past the cap, not retroactively.
+   * Per-turn hard cap: if the turn exceeds the configured maximum number of
+   * tool calls (getMaxToolCallsPerTurn — already resolved to an effective
+   * value, Infinity when disabled) the turn is halted. This is a safety net
+   * independent of skipLoopDetection and fires on the very next tool call
+   * that pushes the total past the cap, not retroactively.
    */
   private checkTurnToolCallCap(): boolean {
     this.turnToolCallTotal++;
-    if (this.turnToolCallTotal > TURN_TOOL_CALL_CAP) {
+    if (this.turnToolCallTotal > this.config.getMaxToolCallsPerTurn()) {
       this.lastLoopType = LoopType.TURN_TOOL_CALL_CAP;
       logLoopDetected(
         this.config,
@@ -747,6 +891,8 @@ export class LoopDetectionService {
   private resetToolCallCount(): void {
     this.lastToolCallKey = null;
     this.toolCallRepetitionCount = 0;
+    this.lastShellInspectionKey = null;
+    this.shellInspectionStreak = 0;
   }
 
   private resetContentTracking(resetHistory = true): void {

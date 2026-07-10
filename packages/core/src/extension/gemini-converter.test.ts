@@ -16,10 +16,20 @@ import {
 // Mock fs module
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
+  // Imported inside the (hoisted) factory — the top-level `path` import isn't
+  // initialized yet when this runs.
+  const nodePath = await import('node:path');
   return {
     ...actual,
     existsSync: vi.fn(),
     readFileSync: vi.fn(),
+    // The symlink-confinement guard (realPathWithin) resolves both the config
+    // path and its dir via realpathSync. These unit tests use in-memory mock
+    // dirs that don't exist on disk; normalize via path.resolve (as the real
+    // realpathSync would) so the config path and its dir share separators —
+    // otherwise on Windows path.join() backslashes vs. the raw forward-slash
+    // mock dir make the containment startsWith() spuriously fail.
+    realpathSync: vi.fn((p: string) => nodePath.resolve(p)),
   };
 });
 
@@ -100,6 +110,19 @@ describe('convertGeminiToQwenConfig', () => {
       'Gemini extension config must have name and version fields',
     );
   });
+
+  it('throws when gemini-extension.json resolves through a symlink outside the extension', () => {
+    const mockDir = '/mock/extension/dir';
+    // realPathWithin resolves the config path first: pretend it points outside
+    // the extension dir (a symlink escape). The root resolves normally.
+    vi.mocked(fs.realpathSync).mockReturnValueOnce(
+      '/outside/extension/gemini-extension.json',
+    );
+
+    expect(() => convertGeminiToQwenConfig(mockDir)).toThrow(
+      /resolves through a symlink outside the extension/,
+    );
+  });
 });
 
 describe('isGeminiExtensionConfig', () => {
@@ -170,6 +193,17 @@ describe('isGeminiExtensionConfig', () => {
     vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(basicConfig));
 
     expect(isGeminiExtensionConfig(mockDir)).toBe(true);
+  });
+
+  it('returns false when gemini-extension.json symlink escapes during detection', () => {
+    const mockDir = '/mock/extension/dir';
+
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    // The config path resolves outside the extension dir (symlink escape);
+    // detection must refuse to read it and report "not a Gemini extension".
+    vi.mocked(fs.realpathSync).mockReturnValueOnce('/outside/path');
+
+    expect(isGeminiExtensionConfig(mockDir)).toBe(false);
   });
 });
 

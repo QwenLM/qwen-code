@@ -4,6 +4,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   edit: 'Edit',
   write_file: 'WriteFile',
   read_file: 'ReadFile',
+  grep: 'Grep',
   grep_search: 'Grep',
   glob: 'Glob',
   run_shell_command: 'Shell',
@@ -13,6 +14,8 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   skill: 'Skill',
   exit_plan_mode: 'ExitPlanMode',
   web_fetch: 'WebFetch',
+  webfetch: 'WebFetch',
+  fetch: 'WebFetch',
   list_directory: 'ListFiles',
   lsp: 'Lsp',
   ask_user_question: 'AskUserQuestion',
@@ -43,7 +46,14 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
 };
 
 export function formatToolDisplayName(toolName: string): string {
-  return TOOL_DISPLAY_NAMES[toolName] ?? toolName;
+  if (!toolName.trim()) return 'Tool';
+  const exact = TOOL_DISPLAY_NAMES[toolName];
+  if (exact) return exact;
+  const lower = toolName.toLowerCase();
+  if (lower === 'web_fetch' || lower === 'webfetch' || lower === 'fetch') {
+    return 'WebFetch';
+  }
+  return toolName;
 }
 
 /**
@@ -56,9 +66,17 @@ export function localizeToolDisplayName(
   toolName: string,
   t: (key: string, vars?: Record<string, string | number>) => string,
 ): string {
-  const key = `toolName.${toolName}`;
-  const translated = t(key);
-  return translated === key ? formatToolDisplayName(toolName) : translated;
+  const displayName = formatToolDisplayName(toolName);
+  const keys = [
+    `toolName.${toolName}`,
+    `toolName.${toolName.toLowerCase()}`,
+    `toolName.${displayName.toLowerCase()}`,
+  ];
+  for (const key of keys) {
+    const translated = t(key);
+    if (translated !== key) return translated;
+  }
+  return displayName;
 }
 
 export function isAskUserQuestionToolName(toolName: string): boolean {
@@ -82,11 +100,38 @@ export function getToolDescription(
   tool: ACPToolCall,
   workspaceCwd?: string,
 ): string {
+  if (isSkillToolName(tool.toolName)) {
+    const skillName = getStringArg(tool.args, 'skill');
+    if (skillName) return truncateText(skillName, MAX_DESCRIPTION_LENGTH);
+  }
   const fromTitle = getDescriptionFromTitle(tool, workspaceCwd);
   if (fromTitle) return truncateText(fromTitle, MAX_DESCRIPTION_LENGTH);
   const fromArgs = getDescriptionFromArgs(tool, workspaceCwd);
   if (fromArgs) return truncateText(fromArgs, MAX_DESCRIPTION_LENGTH);
   return '';
+}
+
+export function getToolSummaryDescription(
+  tool: ACPToolCall,
+  workspaceCwd?: string,
+): string {
+  if (!isShellToolName(tool.toolName)) {
+    return getToolDescription(tool, workspaceCwd);
+  }
+
+  const description = getStringArg(tool.args, 'description');
+  if (description) return truncateText(description, MAX_DESCRIPTION_LENGTH);
+
+  const fromArgs = getDescriptionFromArgs(tool, workspaceCwd, {
+    includeTimeout: false,
+  });
+  if (fromArgs) return truncateText(fromArgs, MAX_DESCRIPTION_LENGTH);
+  return '';
+}
+
+export function getShellToolSemanticDescription(tool: ACPToolCall): string {
+  if (!isShellToolName(tool.toolName)) return '';
+  return getStringArg(tool.args, 'description');
 }
 
 export function extractText(tool: ACPToolCall): string | null {
@@ -205,9 +250,11 @@ function parseGrepSummary(text: string): string | null {
 function getDescriptionFromArgs(
   tool: ACPToolCall,
   workspaceCwd?: string,
+  options: { includeTimeout?: boolean } = {},
 ): string {
   const args = tool.args || {};
   const name = tool.toolName.toLowerCase();
+  const includeTimeout = options.includeTimeout ?? true;
 
   if (args.command) {
     let description = String(args.command);
@@ -216,11 +263,12 @@ function getDescriptionFromArgs(
     }
     if (args.is_background) {
       description += ' [background]';
-    } else if (args.timeout) {
+    } else if (includeTimeout && args.timeout) {
       description += ` [timeout: ${String(args.timeout)}ms]`;
     }
-    if (args.description) {
-      description += ` (${String(args.description).replace(/\n/g, ' ')})`;
+    const argDescription = getStringArg(args, 'description');
+    if (argDescription) {
+      description += ` (${argDescription})`;
     }
     return truncateText(description, MAX_DESCRIPTION_LENGTH);
   }
@@ -267,6 +315,14 @@ function getDescriptionFromArgs(
   return '';
 }
 
+function getStringArg(
+  args: Record<string, unknown> | undefined,
+  key: string,
+): string {
+  const value = args?.[key];
+  return typeof value === 'string' ? value.trim().replace(/\n/g, ' ') : '';
+}
+
 export function isShellToolName(name: string): boolean {
   const normalized = name.toLowerCase();
   return (
@@ -275,6 +331,10 @@ export function isShellToolName(name: string): boolean {
     normalized === 'shell' ||
     normalized === 'execute_command'
   );
+}
+
+export function isSkillToolName(name: string): boolean {
+  return name.toLowerCase() === 'skill';
 }
 
 export function toolContainsCallId(

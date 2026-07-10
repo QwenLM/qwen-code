@@ -30,6 +30,7 @@ import { ArenaSelectDialog } from './arena/ArenaSelectDialog.js';
 import { ArenaStopDialog } from './arena/ArenaStopDialog.js';
 import { ArenaStatusDialog } from './arena/ArenaStatusDialog.js';
 import { ApprovalModeDialog } from './ApprovalModeDialog.js';
+import { EffortDialog } from './EffortDialog.js';
 import { theme } from '../semantic-colors.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
@@ -53,6 +54,7 @@ import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
 import { DiffDialog } from './DiffDialog.js';
 import { MemoryDialog } from './MemoryDialog.js';
+import { SkillReviewDialog } from './SkillReviewDialog.js';
 import { Help } from './Help.js';
 import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.js';
 import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
@@ -170,7 +172,13 @@ export const DialogManager = ({
       />
     );
   }
-  if (uiState.confirmUpdateExtensionRequests.length > 0) {
+  // Extension install/update requests (consent, setting input, plugin choice)
+  // are rendered inside the ExtensionsManagerDialog when it is open, so the
+  // dialog keeps its tab/list state instead of being unmounted.
+  if (
+    uiState.confirmUpdateExtensionRequests.length > 0 &&
+    !uiState.isExtensionsManagerDialogOpen
+  ) {
     const request = uiState.confirmUpdateExtensionRequests[0];
     return (
       <ConsentPrompt
@@ -189,7 +197,10 @@ export const DialogManager = ({
       />
     );
   }
-  if (uiState.settingInputRequests.length > 0) {
+  if (
+    uiState.settingInputRequests.length > 0 &&
+    !uiState.isExtensionsManagerDialogOpen
+  ) {
     const request = uiState.settingInputRequests[0];
     // Use settingName as key to force re-mount when switching between different settings
     return (
@@ -204,7 +215,10 @@ export const DialogManager = ({
       />
     );
   }
-  if (uiState.pluginChoiceRequests.length > 0) {
+  if (
+    uiState.pluginChoiceRequests.length > 0 &&
+    !uiState.isExtensionsManagerDialogOpen
+  ) {
     const request = uiState.pluginChoiceRequests[0];
     return (
       <PluginChoicePrompt
@@ -256,6 +270,10 @@ export const DialogManager = ({
       <ModelDialog
         onClose={uiActions.closeModelDialog}
         isFastModelMode={uiState.isFastModelMode}
+        isVoiceModelMode={uiState.isVoiceModelMode}
+        isVisionModelMode={uiState.isVisionModelMode}
+        persistScope={uiState.modelDialogPersistScope}
+        availableTerminalHeight={listDialogHeight}
       />
     );
   }
@@ -277,10 +295,15 @@ export const DialogManager = ({
               uiActions.openModelDialog({ fastModelMode: true });
               return;
             }
+            if (settingName === 'visionModel') {
+              uiActions.openModelDialog({ visionModelMode: true });
+              return;
+            }
             uiActions.closeSettingsDialog();
           }}
           onRestartRequest={() => process.exit(0)}
           availableTerminalHeight={listDialogHeight}
+          width={mainAreaWidth}
           config={config}
         />
       </Box>
@@ -323,6 +346,16 @@ export const DialogManager = ({
           currentMode={currentMode}
           onSelect={uiActions.handleApprovalModeSelect}
           availableTerminalHeight={constrainedDialogHeight}
+        />
+      </Box>
+    );
+  }
+  if (uiState.isEffortDialogOpen) {
+    return (
+      <Box flexDirection="column">
+        <EffortDialog
+          currentEffort={config.getReasoningEffort()}
+          onSelect={uiActions.handleEffortSelect}
         />
       </Box>
     );
@@ -528,6 +561,19 @@ export const DialogManager = ({
         fileHistoryService={config.getFileHistoryService()}
         fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
         onClose={uiActions.closeDiffDialog}
+      />
+    );
+  }
+
+  if (uiState.isSkillReviewDialogOpen && uiState.skillReviewPending) {
+    return (
+      <SkillReviewDialog
+        key={uiState.skillReviewPending.taskId}
+        skills={uiState.skillReviewPending.skills}
+        onAccept={uiActions.acceptPendingSkill}
+        onReject={uiActions.rejectPendingSkill}
+        onClose={uiActions.closeSkillReviewDialog}
+        onDismiss={uiActions.dismissSkillReviewDialog}
       />
     );
   }

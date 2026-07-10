@@ -65,6 +65,34 @@ afterEach(() => {
 })
 
 describe('chunked transfer handlers', () => {
+  it('rejects fractional chunk counts', async () => {
+    const { start } = createHarness()
+
+    setTransferableHandler('test:echo', async (_ctx, _placeholder, body) => body)
+
+    await expect(start(ctx('client-1'), {
+      totalBytes: 10,
+      chunkCount: 1.5,
+      channel: 'test:echo',
+      args: [null, null],
+      largeArgIndex: 1,
+    })).rejects.toThrow('Invalid chunkCount')
+  })
+
+  it('rejects fractional total byte counts', async () => {
+    const { start } = createHarness()
+
+    setTransferableHandler('test:echo', async (_ctx, _placeholder, body) => body)
+
+    await expect(start(ctx('client-1'), {
+      totalBytes: 10.5,
+      chunkCount: 1,
+      channel: 'test:echo',
+      args: [null, null],
+      largeArgIndex: 1,
+    })).rejects.toThrow('Invalid totalBytes')
+  })
+
   it('rejects chunk uploads from a different client', async () => {
     const { start, chunk } = createHarness()
     const payload = encodeParts({ hello: 'world' })

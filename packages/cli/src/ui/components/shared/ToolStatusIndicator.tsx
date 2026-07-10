@@ -15,7 +15,7 @@ import {
 } from '../../constants.js';
 import { theme } from '../../semantic-colors.js';
 
-export const STATUS_INDICATOR_WIDTH = 3;
+export const STATUS_INDICATOR_WIDTH = 2;
 
 type ToolStatusIndicatorProps = {
   status: ToolCallStatus;

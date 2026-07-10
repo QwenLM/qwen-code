@@ -50,6 +50,8 @@ describe('keyMatchers', () => {
       key.name === 'return' && !key.ctrl && !key.meta && !key.paste,
     [Command.NEWLINE]: (key: Key) =>
       key.name === 'return' && (key.ctrl || key.meta || key.paste),
+    [Command.VOICE_PUSH_TO_TALK]: (key: Key) =>
+      key.name === 'space' && !key.ctrl && !key.meta,
     [Command.OPEN_EXTERNAL_EDITOR]: (key: Key) =>
       key.ctrl && (key.name === 'x' || key.sequence === '\x18'),
     [Command.PASTE_CLIPBOARD_IMAGE]: (key: Key) =>
@@ -62,7 +64,6 @@ describe('keyMatchers', () => {
     [Command.EXIT]: (key: Key) => key.ctrl && key.name === 'd',
     [Command.SHOW_MORE_LINES]: (key: Key) => key.ctrl && key.name === 's',
     [Command.RETRY_LAST]: (key: Key) => key.ctrl && key.name === 'y',
-    [Command.TOGGLE_COMPACT_MODE]: (key: Key) => key.ctrl && key.name === 'o',
     [Command.TOGGLE_RENDER_MODE]: (key: Key) => key.meta && key.name === 'm',
     [Command.PROMOTE_SHELL_TO_BACKGROUND]: (key: Key) =>
       key.ctrl && key.name === 'b',
@@ -90,6 +91,9 @@ describe('keyMatchers', () => {
     [Command.PAGE_DOWN]: (key: Key) => key.name === 'pagedown',
     [Command.SCROLL_HOME]: (key: Key) => key.ctrl && key.name === 'home',
     [Command.SCROLL_END]: (key: Key) => key.ctrl && key.name === 'end',
+    [Command.TOGGLE_THINKING_EXPANDED]: (key: Key) =>
+      key.meta && key.name === 't',
+    [Command.TOGGLE_TRANSCRIPT]: (key: Key) => key.ctrl && key.name === 'o',
   };
 
   // Test data for each command with positive and negative test cases
@@ -293,11 +297,6 @@ describe('keyMatchers', () => {
       positive: [createKey('y', { ctrl: true })],
       negative: [createKey('y'), createKey('r', { ctrl: true })],
     },
-    {
-      command: Command.TOGGLE_COMPACT_MODE,
-      positive: [createKey('o', { ctrl: true })],
-      negative: [createKey('o'), createKey('p', { ctrl: true })],
-    },
 
     // Selection list navigation
     {
@@ -408,6 +407,16 @@ describe('keyMatchers', () => {
       command: Command.SCROLL_END,
       positive: [createKey('end', { ctrl: true })],
       negative: [createKey('end'), createKey('end', { shift: true })],
+    },
+    {
+      command: Command.TOGGLE_THINKING_EXPANDED,
+      positive: [createKey('t', { meta: true })],
+      negative: [createKey('t'), createKey('t', { ctrl: true })],
+    },
+    {
+      command: Command.TOGGLE_TRANSCRIPT,
+      positive: [createKey('o', { ctrl: true })],
+      negative: [createKey('o'), createKey('o', { meta: true })],
     },
   ];
 

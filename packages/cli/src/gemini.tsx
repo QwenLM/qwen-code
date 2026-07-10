@@ -6,6 +6,7 @@
 
 import {
   AuthType,
+  type Config,
   InputFormat,
   isDebugLoggingDegraded,
   isBareMode,
@@ -14,18 +15,14 @@ import {
   Storage,
   SessionService,
   setStartupEventSink,
-  type Config,
   createDebugLogger,
-  writeRuntimeStatus,
   persistSessionUsage,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
-import { render } from 'ink';
 import dns from 'node:dns';
 import os from 'node:os';
-import path, { basename } from 'node:path';
+import path from 'node:path';
 import v8 from 'node:v8';
-import React from 'react';
 import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
 import {
@@ -33,7 +30,7 @@ import {
   loadCliConfig,
   parseArguments,
 } from './config/config.js';
-import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
+import type { DnsResolutionOrder } from './config/settings.js';
 import {
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
@@ -43,45 +40,24 @@ import {
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
 import { SettingsWatcher } from './config/settingsWatcher.js';
-import {
-  initializeApp,
-  type InitializationResult,
-} from './core/initializer.js';
-import { handleList as handleListExtensions } from './commands/extensions/list.js';
-import {
-  initializeI18n,
-  resolveLanguageSetting,
-} from './i18n/index.js';
-import { runNonInteractive } from './nonInteractiveCli.js';
+import { registerMcpHotReload } from './config/hot-reload.js';
+import { LspConfigWatcher } from './config/lsp-config-watcher.js';
+import { ExtensionFileWatcher } from './config/extension-file-watcher.js';
+import { ExtensionRefreshState } from './config/extension-refresh-state.js';
+import { initializeI18n, resolveLanguageSetting } from './i18n/index.js';
 import {
   setupStartupWorktree,
   persistStartupWorktreeSidecar,
   buildStartupWorktreeNotice,
   type StartupWorktreeContext,
 } from './startup/worktreeStartup.js';
-import { runNonInteractiveStreamJson } from './nonInteractive/session.js';
-import { AppContainer } from './ui/AppContainer.js';
-import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
-import { KeypressProvider } from './ui/contexts/KeypressContext.js';
-import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
-import { SettingsContext } from './ui/contexts/SettingsContext.js';
-import { VimModeProvider } from './ui/contexts/VimModeContext.js';
-import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
-import { BackgroundTaskViewProvider } from './ui/contexts/BackgroundTaskViewContext.js';
-import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
-import { themeManager, AUTO_THEME_NAME } from './ui/themes/theme-manager.js';
-import {
-  detectAndEnableKittyProtocol,
-  disableKittyProtocol,
-} from './ui/utils/kittyProtocolDetector.js';
-import { checkForUpdates } from './ui/utils/updateCheck.js';
+import { startEarlyStartupPrefetches } from './startup/startup-prefetch.js';
 import {
   cleanupCheckpoints,
   registerCleanup,
   runExitCleanup,
 } from './utils/cleanup.js';
 import { AppEvent, appEvents } from './utils/events.js';
-import { handleAutoUpdate } from './utils/handleAutoUpdate.js';
 import { readStdin } from './utils/readStdin.js';
 import {
   profileCheckpoint,
@@ -97,27 +73,31 @@ import {
 import { start_sandbox } from './utils/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
-import { getCliVersion } from './utils/version.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
-import { computeWindowTitle, writeTerminalTitle } from './utils/windowTitle.js';
-import {
-  startEarlyInputCapture,
-  stopAndGetCapturedInput,
-} from './utils/earlyInputCapture.js';
-import { preconnectApi } from './utils/apiPreconnect.js';
-import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
-import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
-import { DualOutputBridge } from './dualOutput/DualOutputBridge.js';
-import { DualOutputContext } from './dualOutput/DualOutputContext.js';
-import { RemoteInputWatcher } from './remoteInput/RemoteInputWatcher.js';
-import { RemoteInputContext } from './remoteInput/RemoteInputContext.js';
-import { installTerminalRedrawOptimizer } from './ui/utils/terminalRedrawOptimizer.js';
-import { installSynchronizedOutput } from './ui/utils/synchronizedOutput.js';
 
 const debugLogger = createDebugLogger('STARTUP');
+
+interface RuntimeLspReinitializeResult {
+  reconcile: {
+    added: string[];
+    removed: string[];
+    restarted: string[];
+    unchanged: string[];
+    failed: string[];
+  };
+  skipped: Array<{ name: string }>;
+}
+
+interface RuntimeLspClient {
+  reinitialize?: () => Promise<RuntimeLspReinitializeResult>;
+}
+
+interface RuntimeLspConfig {
+  reinitializeLsp?: () => Promise<RuntimeLspReinitializeResult | undefined>;
+}
 
 function clearCorruptionEnvVars(): void {
   delete process.env[ENV_CORRUPTED_PATH];
@@ -173,7 +153,6 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 }
 
 import { loadSandboxConfig } from './config/sandboxConfig.js';
-import { runAcpAgent } from './acp-integration/acpAgent.js';
 
 export function setupUnhandledRejectionHandler() {
   let unhandledRejectionOccurred = false;
@@ -237,183 +216,6 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
     process.removeListener('SIGTERM', handleSigterm);
     process.removeListener('SIGINT', handleSigint);
   };
-}
-
-export async function startInteractiveUI(
-  config: Config,
-  settings: LoadedSettings,
-  startupWarnings: string[],
-  workspaceRoot: string = process.cwd(),
-  initializationResult: InitializationResult,
-) {
-  const version = await getCliVersion();
-  setWindowTitle(settings, basename(workspaceRoot));
-
-  // Write a small runtime.json sidecar next to the chat log so external
-  // tools (terminal multiplexers, IDE integrations, status daemons) can
-  // map the running PID back to its session id and work directory.
-  // Best-effort: a read-only filesystem must not prevent the UI from
-  // starting up. Marking the runtime status as enabled is what arms the
-  // session-swap refresh in `Config.refreshSessionId()` — without this
-  // call, the sidecar would never update on `/clear` or `/resume`.
-  try {
-    const sessionId = config.getSessionId();
-    const runtimeStatusPath = config.storage.getRuntimeStatusPath(sessionId);
-    await writeRuntimeStatus(runtimeStatusPath, {
-      sessionId,
-      workDir: config.getTargetDir(),
-      qwenVersion: version,
-    });
-    config.markRuntimeStatusEnabled();
-  } catch {
-    // ignored: best-effort, never block UI startup.
-  }
-
-  const restoreTerminalRedrawOptimizer =
-    process.stdout.isTTY && !config.getScreenReader()
-      ? installTerminalRedrawOptimizer(process.stdout)
-      : () => {};
-  const restoreSynchronizedOutput =
-    process.stdout.isTTY && !config.getScreenReader()
-      ? installSynchronizedOutput(process.stdout)
-      : () => {};
-
-  // Create dual output bridge if --json-fd or --json-file is specified.
-  // Errors are caught so a bad fd/path degrades gracefully instead of
-  // preventing the TUI from launching.
-  let dualOutputBridge: DualOutputBridge | null = null;
-  const jsonFd = config.getJsonFd?.();
-  const jsonFile = config.getJsonFile?.();
-  try {
-    if (jsonFd != null) {
-      dualOutputBridge = new DualOutputBridge(
-        config,
-        { fd: jsonFd },
-        { version },
-      );
-    } else if (jsonFile != null) {
-      dualOutputBridge = new DualOutputBridge(
-        config,
-        { filePath: jsonFile },
-        { version },
-      );
-    }
-  } catch (err) {
-    debugLogger.error('Failed to initialize dual output bridge:', err);
-    writeStderrLine(
-      `Warning: dual output disabled — ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
-  // Create remote input watcher if --input-file is specified.
-  // This enables bidirectional sync: an external process writes JSONL
-  // commands to this file, and the TUI processes them as user messages.
-  let remoteInputWatcher: RemoteInputWatcher | null = null;
-  const inputFile = config.getInputFile?.();
-  if (inputFile) {
-    try {
-      remoteInputWatcher = new RemoteInputWatcher(inputFile);
-    } catch (err) {
-      debugLogger.error('Failed to initialize remote input watcher:', err);
-      writeStderrLine(
-        `Warning: remote input disabled — ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
-
-  // Drain the early-captured input exactly once, before any React rendering.
-  // Must be outside any component/effect so StrictMode's mount/cleanup/remount
-  // always reads from the same stable prop rather than the (now empty) module buffer.
-  const initialCapturedInput = stopAndGetCapturedInput();
-
-  // Create wrapper component to use hooks inside render
-  const AppWrapper = () => {
-    const kittyProtocolStatus = useKittyKeyboardProtocol();
-    const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
-    return (
-      <RemoteInputContext.Provider value={remoteInputWatcher}>
-        <DualOutputContext.Provider value={dualOutputBridge}>
-          <SettingsContext.Provider value={settings}>
-            <KeypressProvider
-              kittyProtocolEnabled={kittyProtocolStatus.enabled}
-              config={config}
-              debugKeystrokeLogging={
-                settings.merged.general?.debugKeystrokeLogging
-              }
-              pasteWorkaround={
-                process.platform === 'win32' || nodeMajorVersion < 20
-              }
-              initialCapturedInput={initialCapturedInput}
-            >
-              <SessionStatsProvider sessionId={config.getSessionId()}>
-                <VimModeProvider settings={settings}>
-                  <AgentViewProvider config={config}>
-                    <BackgroundTaskViewProvider config={config}>
-                      <AppContainer
-                        config={config}
-                        settings={settings}
-                        startupWarnings={startupWarnings}
-                        version={version}
-                        initializationResult={initializationResult}
-                      />
-                    </BackgroundTaskViewProvider>
-                  </AgentViewProvider>
-                </VimModeProvider>
-              </SessionStatsProvider>
-            </KeypressProvider>
-          </SettingsContext.Provider>
-        </DualOutputContext.Provider>
-      </RemoteInputContext.Provider>
-    );
-  };
-
-  const instance = render(
-    process.env['DEBUG'] ? (
-      <React.StrictMode>
-        <AppWrapper />
-      </React.StrictMode>
-    ) : (
-      <AppWrapper />
-    ),
-    {
-      exitOnCtrlC: false,
-      isScreenReaderEnabled: config.getScreenReader(),
-    },
-  );
-  // Records the moment Ink's `render()` call has returned, which is
-  // synchronous and happens before React reconciliation actually pushes
-  // bytes to the terminal. We intentionally keep the legacy name
-  // `first_paint` for backward compatibility with previously-collected
-  // profile files; the value is best read as "render call returned"
-  // rather than literal pixel paint. AppContainer's mount effect runs
-  // after this — it carries the `config_initialize_*` and
-  // `input_enabled` checkpoints that complete the first-screen picture.
-  profileCheckpoint('first_paint');
-
-  // Check for updates only if enableAutoUpdate is not explicitly disabled.
-  // Using !== false ensures updates are enabled by default when undefined.
-  if (settings.merged.general?.enableAutoUpdate !== false) {
-    checkForUpdates()
-      .then((info) => {
-        handleAutoUpdate(info, settings, config.getProjectRoot());
-      })
-      .catch((err) => {
-        // Silently ignore update check errors.
-        debugLogger.warn(`Update check failed: ${err}`);
-      });
-  }
-
-  registerCleanup(async () => {
-    remoteInputWatcher?.shutdown();
-    await dualOutputBridge?.shutdown();
-    // Explicitly disable the Kitty keyboard protocol before unmounting Ink so
-    // that the disable escape sequence is written while stdout is still fully
-    // operational, preventing garbled terminal output after the app exits.
-    disableKittyProtocol();
-    instance.unmount();
-    restoreSynchronizedOutput();
-    restoreTerminalRedrawOptimizer();
-  });
 }
 
 export async function main() {
@@ -482,6 +284,9 @@ export async function main() {
     await initializeI18n(
       resolveLanguageSetting(settings.merged.general?.language as string),
     );
+    const { handleList: handleListExtensions } = await import(
+      './commands/extensions/list.js'
+    );
     await handleListExtensions();
     process.exit(0);
   }
@@ -500,6 +305,9 @@ export async function main() {
     validateDnsResolutionOrder(settings.merged.advanced?.dnsResolutionOrder),
   );
 
+  const { themeManager, AUTO_THEME_NAME } = await import(
+    './ui/themes/theme-manager.js'
+  );
   // Load custom themes from settings
   themeManager.loadCustomThemes(settings.merged.ui?.customThemes);
 
@@ -740,6 +548,9 @@ export async function main() {
 
     if (argv.resume === '') {
       // No argument — show picker
+      const { showResumeSessionPicker } = await import(
+        './ui/components/StandaloneSessionPicker.js'
+      );
       resolvedSessionId = await showResumeSessionPicker();
     } else if (!cliConfig.isValidSessionId(argv.resume)) {
       // Non-UUID argument — treat as custom title search
@@ -751,6 +562,9 @@ export async function main() {
         // Multiple matches — show picker to let user choose
         writeStderrLine(
           `Multiple sessions found with title "${argv.resume}". Please select one:`,
+        );
+        const { showResumeSessionPicker } = await import(
+          './ui/components/StandaloneSessionPicker.js'
         );
         resolvedSessionId = await showResumeSessionPicker(
           process.cwd(),
@@ -806,6 +620,43 @@ export async function main() {
       settingsWatcher,
     );
     profileCheckpoint('after_load_cli_config');
+
+    // Subscribe the running Config to settings changes so MCP servers
+    // reconnect / disconnect / restart without a session restart (#3696,
+    // sub-task 3). Skipped in bare mode (no watcher).
+    if (settingsWatcher) {
+      const disposeMcpHotReload = registerMcpHotReload(
+        settingsWatcher,
+        settings,
+        config,
+        config.getTopTierMcpServers(),
+      );
+      registerCleanup(disposeMcpHotReload);
+    }
+
+    registerLspHotReload(config, registerCleanup);
+
+    const extensionRefreshState = new ExtensionRefreshState();
+    const extensionFileWatcher =
+      isBareMode(argv.bare) || config.isSafeMode()
+        ? undefined
+        : new ExtensionFileWatcher(config, undefined, extensionRefreshState);
+    extensionFileWatcher?.startWatching();
+    if (extensionFileWatcher) {
+      const restartExtensionWatcher = () =>
+        extensionFileWatcher.restartWatching();
+      extensionRefreshState.on(
+        AppEvent.ExtensionsReloaded,
+        restartExtensionWatcher,
+      );
+      registerCleanup(() => {
+        extensionRefreshState.off(
+          AppEvent.ExtensionsReloaded,
+          restartExtensionWatcher,
+        );
+        extensionFileWatcher.stopWatching();
+      });
+    }
 
     // Phase D-1: persist the WorktreeSession sidecar so Phase C's restore
     // machinery on a subsequent `--resume` picks the worktree back up, and
@@ -879,20 +730,7 @@ export async function main() {
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
 
-    // Startup optimization: preconnect API to warm TCP+TLS connection
-    // Fires early; cost is one HEAD request even for local-only commands
-    try {
-      const modelsConfig = config.getModelsConfig();
-      const authType = modelsConfig.getCurrentAuthType();
-      const resolvedBaseUrl = modelsConfig.getGenerationConfig().baseUrl;
-      const proxy = config.getProxy();
-      preconnectApi(authType, { resolvedBaseUrl, proxy });
-    } catch (error) {
-      // If we can't get authType, skip preconnect - it's optional optimization
-      debugLogger.debug(
-        `Preconnect skipped due to error getting authType: ${error}`,
-      );
-    }
+    startEarlyStartupPrefetches(config);
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
@@ -901,6 +739,12 @@ export async function main() {
       registerCleanup(installInteractiveSignalHandlers(wasRaw));
     }
     if (config.isInteractive() && !wasRaw && process.stdin.isTTY) {
+      const { startEarlyInputCapture, stopAndGetCapturedInput } = await import(
+        './utils/earlyInputCapture.js'
+      );
+      const { detectAndEnableKittyProtocol } = await import(
+        './ui/utils/kittyProtocolDetector.js'
+      );
       // Set this as early as possible to avoid spurious characters from
       // input showing up in the output.
       process.stdin.setRawMode(true);
@@ -932,7 +776,12 @@ export async function main() {
       }
     }
 
-    setMaxSizedBoxDebugging(isDebugMode);
+    if (config.isInteractive()) {
+      const { setMaxSizedBoxDebugging } = await import(
+        './ui/components/shared/MaxSizedBox.js'
+      );
+      setMaxSizedBoxDebugging(isDebugMode);
+    }
 
     // Check input format early to determine initialization flow
     // In TTY mode, ignore stream-json input format to prevent process from hanging
@@ -944,38 +793,34 @@ export async function main() {
 
     // For stream-json mode, defer config.initialize() until after the initialize control request
     // For other modes, initialize normally
-    const initializationResult = await initializeApp(config, settings);
+    const { initializeApp } = await import('./core/initializer.js');
+    let input = config.getQuestion();
+    const hasRemoteInput = Boolean(config.getInputFile?.());
+    const deferIdeConnection =
+      config.isInteractive() &&
+      !config.getExperimentalZedIntegration() &&
+      !input &&
+      !hasRemoteInput;
+    const initializationResult = await initializeApp(config, settings, {
+      deferIdeConnection,
+    });
     profileCheckpoint('after_initialize_app');
 
     if (config.getExperimentalZedIntegration()) {
+      const { runAcpAgent } = await import('./acp-integration/acpAgent.js');
       await runAcpAgent(config, settings, argv);
       // Clean up child processes and force exit, matching other non-interactive modes
       await runExitCleanup();
       process.exit(0);
     }
 
-    // Background housekeeping: file-history cleanup and (future) other
-    // periodic disk maintenance. Interactive-only — serve/SDK/ACP modes
-    // don't create the file-history dirs this cleans, so they skip.
-    // Dynamic import keeps --help / one-shot --prompt paths from loading
-    // this code at all. Timers inside are .unref()'d so they never block
-    // process exit.
-    if (config.isInteractive()) {
-      // .catch() is intentional: a dynamic-import or module-init failure
-      // (theoretically near-impossible — the module has no top-level side
-      // effects — but defense in depth matches the runPass try/catch in
-      // scheduler.ts) becomes a swallowed log instead of an unhandled
-      // promise rejection that crashes the REPL.
-      void import('./utils/housekeeping/scheduler.js')
-        .then((m) => m.startBackgroundHousekeeping(config, settings))
-        .catch((err) => {
-          debugLogger.warn('failed to start background housekeeping:', err);
-        });
-    }
-
-    let input = config.getQuestion();
     const startupWarnings = [
       ...new Set([
+        ...(config.isSafeMode()
+          ? [
+              '⚠ SAFE MODE — all customizations disabled (hooks, extensions, skills, MCP servers, QWEN.md). Restart without --safe-mode to resume normal operation.',
+            ]
+          : []),
         ...(await getStartupWarnings()),
         ...(await getUserStartupWarnings({
           workspaceRoot: process.cwd(),
@@ -1039,12 +884,17 @@ export async function main() {
       // startInteractiveUI) and so the first paint uses the refined theme
       // when the probe finishes in time.
       await themeAutoDetectionComplete;
+      const { startInteractiveUI } = await import('./ui/startInteractiveUI.js');
       await startInteractiveUI(
         config,
         settings,
         startupWarnings,
         process.cwd(),
         initializationResult!,
+        {
+          postRenderConnectIde: deferIdeConnection,
+          extensionRefreshState,
+        },
       );
       // Clean up corruption env vars so subsequent relaunch children
       // and subprocesses don't inherit stale state.
@@ -1153,6 +1003,9 @@ export async function main() {
       }
     }
 
+    const { validateNonInteractiveAuth } = await import(
+      './validateNonInterActiveAuth.js'
+    );
     const nonInteractiveConfig = await validateNonInteractiveAuth(
       settings.merged.security?.auth?.useExternal,
       config,
@@ -1163,6 +1016,9 @@ export async function main() {
 
     if (inputFormat === InputFormat.STREAM_JSON) {
       const trimmedInput = (input ?? '').trim();
+      const { runNonInteractiveStreamJson } = await import(
+        './nonInteractive/session.js'
+      );
 
       await runNonInteractiveStreamJson(
         nonInteractiveConfig,
@@ -1200,6 +1056,7 @@ export async function main() {
 
     debugLogger.debug(`Session ID: ${config.getSessionId()}`);
 
+    const { runNonInteractive } = await import('./nonInteractiveCli.js');
     const exitCode = await runNonInteractive(
       nonInteractiveConfig,
       settings,
@@ -1220,22 +1077,112 @@ export function createNonInteractivePromptId(sessionId: string): string {
   return `${sessionId}########0`;
 }
 
-function setWindowTitle(settings: LoadedSettings, folderName?: string) {
+/**
+ * Watches `.lsp.json` for changes and reconciles running LSP servers
+ * (add / remove / restart) without requiring a session restart.
+ *
+ * Silently no-ops when LSP is disabled or the active client does not
+ * support runtime reinitialization.
+ *
+ * Emits {@link AppEvent.LspStatusChanged} after every successful reload
+ * so the UI can reflect the new server state.
+ */
+export function registerLspHotReload(
+  config: Config,
+  registerCleanup: (fn: () => void | Promise<void>) => void,
+): void {
+  const lspClient = config.getLspClient?.() as
+    | (ReturnType<Config['getLspClient']> & RuntimeLspClient)
+    | undefined;
+  const runtimeConfig = config as Config & RuntimeLspConfig;
+  const reinitializeLsp = runtimeConfig.reinitializeLsp;
   if (
-    settings.merged.ui?.hideWindowTitle ||
-    settings.merged.ui?.showStatusInTitle === false
+    config.isLspEnabled?.() !== true ||
+    !lspClient?.reinitialize ||
+    !reinitializeLsp
   ) {
     return;
   }
-  const windowTitle = computeWindowTitle(folderName);
-  writeTerminalTitle((value) => process.stdout.write(value), windowTitle);
-
-  process.on('exit', () => {
+  const lspConfigWatcher = new LspConfigWatcher(config.getProjectRoot());
+  debugLogger.info(
+    `Registering LSP config hot reload watcher for ${config.getProjectRoot()}`,
+  );
+  lspConfigWatcher.startWatching(async (event) => {
+    if (event.changeType === 'invalid') {
+      debugLogger.warn(`Invalid LSP config file ${event.path}: ${event.error}`);
+      appEvents.emit(AppEvent.LogError, event.error);
+      return;
+    }
+    debugLogger.info(
+      `Reloading LSP server settings: changeType=${event.changeType}, path=${event.path}`,
+    );
+    let errorReported = false;
     try {
-      writeTerminalTitle((value) => process.stdout.write(value), '');
-    } catch {
-      // Best-effort: clearing the title during exit must not produce
-      // a visible error (e.g. EPIPE if stdout is already closed).
+      const result = await reinitializeLsp();
+      if (result) {
+        const failedServers = getRuntimeReloadFailedNames(result.reconcile);
+        debugLogger.info(
+          `Reloaded LSP server settings: added=${formatRuntimeReloadNames(
+            result.reconcile.added,
+          )}, removed=${formatRuntimeReloadNames(
+            result.reconcile.removed,
+          )}, restarted=${formatRuntimeReloadNames(
+            result.reconcile.restarted,
+          )}, unchanged=${formatRuntimeReloadNames(
+            result.reconcile.unchanged,
+          )}, failed=${formatRuntimeReloadNames(
+            failedServers,
+          )}, skipped=${formatRuntimeReloadNames(
+            result.skipped.map((server) => server.name),
+          )}`,
+        );
+        if (failedServers.length > 0) {
+          appEvents.emit(AppEvent.LspStatusChanged);
+          const changedServers = [
+            ...result.reconcile.added,
+            ...result.reconcile.removed,
+            ...result.reconcile.restarted,
+          ];
+          const message = `LSP reload partially completed: changed=${formatRuntimeReloadNames(
+            changedServers,
+          )}, failed=${formatRuntimeReloadNames(
+            failedServers,
+          )}. Run with --debug for details.`;
+          appEvents.emit(AppEvent.LogError, message);
+          errorReported = true;
+          throw new Error(message);
+        }
+      } else {
+        debugLogger.info(
+          'Skipped LSP server settings reload because LSP is disabled or no client is available',
+        );
+      }
+      appEvents.emit(AppEvent.LspStatusChanged);
+    } catch (error) {
+      debugLogger.warn('Failed to reload LSP server settings:', error);
+      if (!errorReported) {
+        const message =
+          error instanceof Error
+            ? `Failed to reload LSP server settings: ${error.message}. Some LSP servers may have been partially updated. Run with --debug for details.`
+            : 'Failed to reload LSP server settings; some LSP servers may have been partially updated. Run with --debug for details.';
+        appEvents.emit(AppEvent.LogError, message);
+      }
+      throw error;
     }
   });
+  registerCleanup(() => lspConfigWatcher.stopWatching());
+}
+
+function formatRuntimeReloadNames(names: readonly string[]): string {
+  return names.length === 0 ? '<none>' : names.join(',');
+}
+
+/**
+ * Reads the optional failed bucket defensively because the CLI may typecheck
+ * against stale core dist declarations during local development.
+ */
+function getRuntimeReloadFailedNames(reconcile: {
+  failed?: readonly string[];
+}): readonly string[] {
+  return reconcile.failed ?? [];
 }

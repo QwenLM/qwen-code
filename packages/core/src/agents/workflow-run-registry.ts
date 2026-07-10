@@ -98,6 +98,21 @@ export interface WorkflowTask extends TaskBase {
    * than hidden.
    */
   perPhaseTokens: Map<string | null, number>;
+  /**
+   * P7b: the workflow script source (verbatim, as the tool received it).
+   * Used by the run-snapshot writer (so a persisted run carries its
+   * script) and the save-to-disk dialog (so a completed run can be saved
+   * to `.qwen/workflows/<name>.js`). Empty string for legacy callers that
+   * don't supply it.
+   */
+  script: string;
+  /**
+   * P7b: the path the script was loaded from, when the run was launched
+   * from a saved workflow (`Workflow({scriptPath})` or a `/workflow-name`
+   * slash command). `undefined` for inline scripts. Recorded as run
+   * provenance (e.g. for the snapshot).
+   */
+  scriptPath?: string;
   /** Final script return value once the run completes (success path). */
   result?: unknown;
   /** Error message on `failed` (terminal). */
@@ -123,6 +138,7 @@ export type WorkflowTaskRegistration = Omit<
   | 'tokensSpent'
   | 'tokenBudgetTotal'
   | 'perPhaseTokens'
+  | 'script'
   | 'description'
 > & {
   // Allow the caller to omit `description` — we synthesize it from
@@ -135,6 +151,11 @@ export type WorkflowTaskRegistration = Omit<
    * does NOT re-write it because the budget's `total` is immutable.
    */
   tokenBudgetTotal?: number | null;
+  /**
+   * P7b: the workflow script source. Defaults to `''` when omitted (legacy
+   * callers / tests). Needed for run snapshots + the save-to-disk dialog.
+   */
+  script?: string;
 };
 
 /** Fires when a new entry is registered. */
@@ -148,11 +169,21 @@ export type WorkflowRunRegisterCallback = (entry: WorkflowTask) => void;
  */
 export type WorkflowRunStatusChangeCallback = (entry?: WorkflowTask) => void;
 
+/**
+ * P-notif: fires once when a run reaches a terminal state worth surfacing to
+ * the user — `completed` / `failed`, but NOT a user-initiated `cancel` (the
+ * user already knows). The CLI wires this to the terminal-bell notification
+ * service. A separate slot from `statusChangeCallback` (which the dialog's
+ * `useBackgroundTaskView` owns), so the two never clobber each other.
+ */
+export type WorkflowRunNotificationCallback = (entry: WorkflowTask) => void;
+
 export class WorkflowRunRegistry {
   private readonly entries = new Map<string, WorkflowTask>();
 
   private registerCallback: WorkflowRunRegisterCallback | undefined;
   private statusChangeCallback: WorkflowRunStatusChangeCallback | undefined;
+  private notificationCallback: WorkflowRunNotificationCallback | undefined;
   /**
    * P5 T7: one-time usage-warning latch. The first `Workflow` tool
    * invocation per session checks `shouldShowUsageWarning()`; if true,
@@ -187,6 +218,22 @@ export class WorkflowRunRegistry {
     this.statusChangeCallback = cb;
   }
 
+  setNotificationCallback(
+    cb: WorkflowRunNotificationCallback | undefined,
+  ): void {
+    this.notificationCallback = cb;
+  }
+
+  /** Fire the terminal-completion notification (best-effort). */
+  private emitNotification(entry: WorkflowTask): void {
+    if (!this.notificationCallback) return;
+    try {
+      this.notificationCallback(entry);
+    } catch (error) {
+      debugLogger.error('Failed to emit workflow notification:', error);
+    }
+  }
+
   /**
    * Register a new run. Mutates the registration in place to graduate
    * it to a `WorkflowTask` (sets `id`, `kind`, derived counters), so
@@ -213,6 +260,9 @@ export class WorkflowRunRegistry {
       entry.tokenBudgetTotal = null;
     }
     entry.perPhaseTokens = new Map();
+    // P7b: default the script source so the snapshot writer + save dialog
+    // always have a (possibly empty) string to work with.
+    if (entry.script === undefined) entry.script = '';
     if (!entry.description) {
       entry.description = entry.meta?.name ?? entry.runId;
     }
@@ -273,11 +323,7 @@ export class WorkflowRunRegistry {
    * race window is bounded but not zero. Tasks before the first
    * `phase()` call attribute to the sentinel `null` key.
    */
-  onBudgetUpdated(
-    runId: string,
-    spent: number,
-    total: number | null,
-  ): void {
+  onBudgetUpdated(runId: string, spent: number, total: number | null): void {
     const entry = this.entries.get(runId);
     if (!entry || entry.status !== 'running') return;
     const delta = spent - entry.tokensSpent;
@@ -333,6 +379,7 @@ export class WorkflowRunRegistry {
     entry.result = result;
     entry.notified = true;
     this.emitStatusChange(entry);
+    this.emitNotification(entry);
     this.evictTerminal();
   }
 
@@ -344,6 +391,7 @@ export class WorkflowRunRegistry {
     entry.error = message;
     entry.notified = true;
     this.emitStatusChange(entry);
+    this.emitNotification(entry);
     this.evictTerminal();
   }
 

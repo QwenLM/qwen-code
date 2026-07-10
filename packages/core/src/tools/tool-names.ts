@@ -38,17 +38,20 @@ export const ToolNames = {
   CRON_LIST: 'cron_list',
   CRON_DELETE: 'cron_delete',
   LOOP_WAKEUP: 'loop_wakeup',
+  CREATE_SUB_SESSION: 'create_sub_session',
   TASK_STOP: 'task_stop',
   TASK_CREATE: 'task_create',
   TASK_UPDATE: 'task_update',
   TASK_LIST: 'task_list',
   TEAM_CREATE: 'team_create',
   TEAM_DELETE: 'team_delete',
+  TEAM_PLAN_APPROVAL: 'team_plan_approval',
   SEND_MESSAGE: 'send_message',
   STRUCTURED_OUTPUT: 'structured_output',
   MONITOR: 'monitor',
   NOTEBOOK_EDIT: 'notebook_edit',
   TOOL_SEARCH: 'tool_search',
+  READ_MCP_RESOURCE: 'read_mcp_resource',
   ENTER_WORKTREE: 'enter_worktree',
   EXIT_WORKTREE: 'exit_worktree',
   // Computer Use tools (computer_use__*) are intentionally NOT enumerated here.
@@ -58,6 +61,8 @@ export const ToolNames = {
   // round 1 removed the old ocu-era 9-name list, which still carried
   // `get_app_state` / `perform_secondary_action` that no longer exist.
   WORKFLOW: 'workflow',
+  ARTIFACT: 'artifact',
+  RECORD_ARTIFACT: 'record_artifact',
 } as const;
 
 /**
@@ -86,21 +91,26 @@ export const ToolDisplayNames = {
   CRON_LIST: 'CronList',
   CRON_DELETE: 'CronDelete',
   LOOP_WAKEUP: 'LoopWakeup',
+  CREATE_SUB_SESSION: 'CreateSubSession',
   TASK_STOP: 'TaskStop',
   TASK_CREATE: 'TaskCreate',
   TASK_UPDATE: 'TaskUpdate',
   TASK_LIST: 'TaskList',
   TEAM_CREATE: 'TeamCreate',
   TEAM_DELETE: 'TeamDelete',
+  TEAM_PLAN_APPROVAL: 'TeamPlanApproval',
   SEND_MESSAGE: 'SendMessage',
   STRUCTURED_OUTPUT: 'StructuredOutput',
   MONITOR: 'Monitor',
   NOTEBOOK_EDIT: 'NotebookEdit',
   TOOL_SEARCH: 'ToolSearch',
+  READ_MCP_RESOURCE: 'ReadMcpResource',
   ENTER_WORKTREE: 'EnterWorktree',
   EXIT_WORKTREE: 'ExitWorktree',
   // computer_use__* display names are not enumerated here (see ToolNames).
   WORKFLOW: 'Workflow',
+  ARTIFACT: 'Artifact',
+  RECORD_ARTIFACT: 'RecordArtifact',
 } as const;
 
 // Migration from old tool names to new tool names

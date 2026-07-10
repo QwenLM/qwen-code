@@ -63,6 +63,7 @@ const external = [
   '@lydell/node-pty-linux-x64',
   '@lydell/node-pty-win32-arm64',
   '@lydell/node-pty-win32-x64',
+  '@qwen-code/audio-capture',
   '@teddyzhu/clipboard',
   '@teddyzhu/clipboard-darwin-arm64',
   '@teddyzhu/clipboard-darwin-x64',
@@ -81,7 +82,7 @@ const external = [
 const BUNDLE_CHUNK_DIR = 'chunks';
 
 const mainBuild = esbuild.build({
-  entryPoints: { cli: 'packages/cli/index.ts' },
+  entryPoints: { cli: 'packages/cli/src/cli.ts' },
   bundle: true,
   outdir: 'dist',
   entryNames: '[name]',

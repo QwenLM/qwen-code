@@ -12,6 +12,7 @@ import {
 import {
   __resetActiveGoalStoreForTests,
   type Config,
+  uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from './config/settings.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
@@ -37,6 +38,7 @@ describe('handleSlashCommand', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    uiTelemetryService.reset();
     __resetActiveGoalStoreForTests();
     // getCommandsForMode applies real mode filtering on top of getCommands()
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
@@ -87,6 +89,7 @@ describe('handleSlashCommand', () => {
   });
 
   afterEach(() => {
+    uiTelemetryService.reset();
     __resetActiveGoalStoreForTests();
   });
 
@@ -371,6 +374,248 @@ describe('handleSlashCommand', () => {
     if (result.type === 'submit_prompt') {
       expect(result.content).toEqual([{ text: 'Custom prompt' }]);
     }
+  });
+
+  it('passes a submit_prompt modelOverride through to the result', async () => {
+    const mockCommand = {
+      name: 'custom',
+      description: 'Custom command with a per-turn model override',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Run on the override model' }],
+        modelOverride: 'glm-5.1',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    if (result.type === 'submit_prompt') {
+      expect(result.content).toEqual([{ text: 'Run on the override model' }]);
+      expect(result.modelOverride).toBe('glm-5.1');
+    }
+  });
+
+  it('omits modelOverride when the command does not set one', async () => {
+    const mockCommand = {
+      name: 'custom',
+      description: 'Custom command without a model override',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Run on the session model' }],
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    if (result.type === 'submit_prompt') {
+      expect(result.modelOverride).toBeUndefined();
+    }
+  });
+
+  it('records successful SKILL submit_prompt commands in session metrics', async () => {
+    const mockSkillCommand = {
+      name: 'review',
+      description: 'Review code',
+      kind: CommandKind.SKILL,
+      skillDetail: { name: 'review-skill' },
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Review prompt' }],
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockSkillCommand]);
+
+    const result = await handleSlashCommand(
+      '/review',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    expect(
+      uiTelemetryService.getMetricsForSession('test-session').skills,
+    ).toEqual({
+      totalCalls: 1,
+      totalSuccess: 1,
+      totalFail: 0,
+      byName: {
+        'review-skill': { count: 1, success: 1, fail: 0 },
+      },
+    });
+  });
+
+  it('records ACP SKILL submit_prompt commands in session metrics', async () => {
+    vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(true);
+    const mockSkillCommand = {
+      name: 'review',
+      description: 'Review code',
+      kind: CommandKind.SKILL,
+      supportedModes: ['acp'] as const,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Review prompt' }],
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockSkillCommand]);
+
+    const result = await handleSlashCommand(
+      '/review',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    expect(
+      uiTelemetryService.getMetricsForSession('test-session').skills,
+    ).toEqual({
+      totalCalls: 1,
+      totalSuccess: 1,
+      totalFail: 0,
+      byName: {
+        review: { count: 1, success: 1, fail: 0 },
+      },
+    });
+  });
+
+  it('records failed SKILL commands when action throws', async () => {
+    const mockSkillCommand = {
+      name: 'review',
+      description: 'Review code',
+      kind: CommandKind.SKILL,
+      action: vi.fn().mockRejectedValue(new Error('boom')),
+    };
+    mockGetCommands.mockReturnValue([mockSkillCommand]);
+
+    await expect(
+      handleSlashCommand('/review', abortController, mockConfig, mockSettings),
+    ).rejects.toThrow('boom');
+
+    expect(
+      uiTelemetryService.getMetricsForSession('test-session').skills,
+    ).toEqual({
+      totalCalls: 1,
+      totalSuccess: 0,
+      totalFail: 1,
+      byName: {
+        review: { count: 1, success: 0, fail: 1 },
+      },
+    });
+  });
+
+  it('records blocked SKILL submit_prompt commands as failures', async () => {
+    mockFireUserPromptExpansionEvent.mockResolvedValue({
+      getBlockingError: () => ({
+        blocked: true,
+        reason: 'Blocked by policy',
+      }),
+      shouldStopExecution: () => false,
+    });
+    const mockSkillCommand = {
+      name: 'review',
+      description: 'Review code',
+      kind: CommandKind.SKILL,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'Review prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockSkillCommand]);
+
+    const result = await handleSlashCommand(
+      '/review',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('message');
+    expect(
+      uiTelemetryService.getMetricsForSession('test-session').skills,
+    ).toEqual({
+      totalCalls: 1,
+      totalSuccess: 0,
+      totalFail: 1,
+      byName: {
+        review: { count: 1, success: 0, fail: 1 },
+      },
+    });
+  });
+
+  it('records SKILL submit_prompt commands as failures when hooks throw', async () => {
+    mockFireUserPromptExpansionEvent.mockRejectedValue(new Error('hook crash'));
+    const mockSkillCommand = {
+      name: 'review',
+      description: 'Review code',
+      kind: CommandKind.SKILL,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'Review prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockSkillCommand]);
+
+    await expect(
+      handleSlashCommand('/review', abortController, mockConfig, mockSettings),
+    ).rejects.toThrow('hook crash');
+
+    expect(
+      uiTelemetryService.getMetricsForSession('test-session').skills,
+    ).toEqual({
+      totalCalls: 1,
+      totalSuccess: 0,
+      totalFail: 1,
+      byName: {
+        review: { count: 1, success: 0, fail: 1 },
+      },
+    });
+  });
+
+  it('does not record FILE submit_prompt commands as skill metrics', async () => {
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Custom prompt' }],
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    expect(
+      uiTelemetryService.getMetricsForSession('test-session').skills,
+    ).toEqual({
+      totalCalls: 0,
+      totalSuccess: 0,
+      totalFail: 0,
+      byName: {},
+    });
   });
 
   it('should fire UserPromptExpansion hooks for submit_prompt commands', async () => {
@@ -713,19 +958,290 @@ describe('handleSlashCommand', () => {
 
       expect(result.type).toBe('no_command');
     });
+
+    it('does not expose disabled model-invocable commands through SkillTool', async () => {
+      const modelInvocableCommand = {
+        name: 'custom',
+        description: 'Custom file command',
+        kind: CommandKind.FILE,
+        modelInvocable: true,
+        supportedModes: ['non_interactive'] as ExecutionMode[],
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: 'Expanded prompt',
+        }),
+      };
+      mockGetCommands.mockReturnValue([modelInvocableCommand]);
+      vi.mocked(mockConfig.getDisabledSlashCommands).mockReturnValue([
+        'custom',
+      ]);
+      mockCommandServiceCreate.mockImplementation(
+        async (_loaders, _signal, disabledNames?: ReadonlySet<string>) => {
+          const commands =
+            disabledNames?.has('custom') === true
+              ? []
+              : [modelInvocableCommand];
+          return {
+            getCommands: () => commands,
+            getCommandsForMode: (mode: ExecutionMode) =>
+              filterCommandsForMode(commands, mode),
+            getModelInvocableCommands: () =>
+              commands.filter((command) => command.modelInvocable === true),
+          };
+        },
+      );
+
+      const result = await handleSlashCommand(
+        '/custom',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('unsupported');
+      if (result.type === 'unsupported') {
+        expect(result.reason).toContain('disabled');
+      }
+      const provider = vi.mocked(mockConfig.setModelInvocableCommandsProvider)
+        .mock.calls[0]?.[0];
+      expect(provider?.()).toEqual([]);
+      const executor = vi.mocked(mockConfig.setModelInvocableCommandsExecutor)
+        .mock.calls[0]?.[0];
+      await expect(executor?.('custom')).resolves.toBeNull();
+    });
+  });
+
+  describe('stacked skill invocations', () => {
+    const createSkillCommand = (name: string, body: string) => ({
+      name,
+      description: `Skill ${name}`,
+      kind: CommandKind.SKILL,
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: `SKILL_BODY:${name}:${body}` }],
+      }),
+    });
+
+    it('combines two stacked skills into a single submit_prompt', async () => {
+      const skillA = createSkillCommand('feat-dev', 'feature workflow');
+      const skillB = createSkillCommand('e2e-testing', 'e2e workflow');
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /e2e-testing implement X',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        const content = result.content as Array<{ text: string }>;
+        const texts = content.map((c) => c.text);
+        expect(texts).toContain('SKILL_BODY:feat-dev:feature workflow');
+        expect(texts).toContain('SKILL_BODY:e2e-testing:e2e workflow');
+        expect(texts).toContain('implement X');
+      }
+    });
+
+    it('calls each skill action once', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const skillB = createSkillCommand('review', 'b');
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      await handleSlashCommand(
+        '/feat-dev /review do stuff',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(skillA.action).toHaveBeenCalledTimes(1);
+      expect(skillB.action).toHaveBeenCalledTimes(1);
+    });
+
+    it('handles stacked skills with no remaining text', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const skillB = createSkillCommand('bugfix', 'b');
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /bugfix',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        const content = result.content as Array<{ text: string }>;
+        const texts = content.map((c) => c.text);
+        expect(texts).toContain('SKILL_BODY:feat-dev:a');
+        expect(texts).toContain('SKILL_BODY:bugfix:b');
+        expect(texts).toHaveLength(2);
+      }
+    });
+
+    it('falls through to normal dispatch for a single skill', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      mockGetCommands.mockReturnValue([skillA]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev build something',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      // Single skill goes through normal dispatch, not stacked path
+      expect(result.type).toBe('submit_prompt');
+      expect(skillA.action).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips skills whose action is undefined', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const noActionSkill = {
+        name: 'no-action',
+        description: 'No action',
+        kind: CommandKind.SKILL,
+        supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+        action: undefined,
+      };
+      const skillB = createSkillCommand('review', 'b');
+      mockGetCommands.mockReturnValue([skillA, noActionSkill, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /no-action /review do it',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        const content = result.content as Array<{ text: string }>;
+        const texts = content.map((c) => c.text);
+        expect(texts).toContain('SKILL_BODY:feat-dev:a');
+        expect(texts).toContain('SKILL_BODY:review:b');
+      }
+    });
+
+    it('excludes non-submit_prompt results from combined content', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const errorSkill = {
+        name: 'error-skill',
+        description: 'Skill returning error',
+        kind: CommandKind.SKILL,
+        supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'error',
+          content: 'Something failed',
+        }),
+      };
+      const skillB = createSkillCommand('review', 'b');
+      mockGetCommands.mockReturnValue([skillA, errorSkill, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /error-skill /review do it',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        const content = result.content as Array<{ text: string }>;
+        const texts = content.map((c) => c.text);
+        expect(texts).toContain('SKILL_BODY:feat-dev:a');
+        expect(texts).toContain('SKILL_BODY:review:b');
+        // Error message is not in combined content
+        expect(texts).not.toContain('Something failed');
+      }
+    });
+
+    it('records telemetry success=false for non-submit_prompt results', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const errorSkill = {
+        name: 'error-skill',
+        description: 'Skill returning error',
+        kind: CommandKind.SKILL,
+        supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'error',
+          content: 'fail',
+        }),
+      };
+      mockGetCommands.mockReturnValue([skillA, errorSkill]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /error-skill do it',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      // Verify the error skill's action was actually called
+      // (telemetry recording logic is tested in slashCommandProcessor.test.ts)
+      expect(errorSkill.action).toHaveBeenCalledTimes(1);
+      expect(result.type).toBe('submit_prompt');
+    });
+
+    it('propagates modelOverride from first submit_prompt skill', async () => {
+      const skillA = {
+        name: 'feat-dev',
+        description: 'Skill with model override',
+        kind: CommandKind.SKILL,
+        supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'SKILL_BODY:feat-dev' }],
+          modelOverride: 'gemini-2.5-pro',
+        }),
+      };
+      const skillB = createSkillCommand('review', 'b');
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /review do it',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        expect(result.modelOverride).toBe('gemini-2.5-pro');
+      }
+    });
   });
 });
 
 describe('getAvailableCommands', () => {
   let mockConfig: Config;
+  let notifyConfigChanged: ReturnType<typeof vi.fn>;
+  let fireUserPromptExpansionEvent: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
+      filterCommandsForMode(mockGetCommands(), mode),
+    );
+    mockGetModelInvocableCommands.mockImplementation(() =>
+      mockGetCommands().filter(
+        (command: { modelInvocable?: boolean; hidden?: boolean }) =>
+          !command.hidden && command.modelInvocable === true,
+      ),
+    );
     mockCommandServiceCreate.mockResolvedValue({
       getCommands: mockGetCommands,
       getCommandsForMode: mockGetCommandsForMode,
       getModelInvocableCommands: mockGetModelInvocableCommands,
     });
+    notifyConfigChanged = vi.fn().mockResolvedValue(undefined);
+    fireUserPromptExpansionEvent = vi.fn().mockResolvedValue(undefined);
 
     mockConfig = {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -735,6 +1251,14 @@ describe('getAvailableCommands', () => {
       getFolderTrust: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getDisabledSlashCommands: vi.fn().mockReturnValue([]),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getHookSystem: vi.fn().mockReturnValue({
+        fireUserPromptExpansionEvent,
+      }),
+      setModelInvocableCommandsProvider: vi.fn(),
+      setModelInvocableCommandsExecutor: vi.fn(),
+      getSkillManager: vi.fn().mockReturnValue({ notifyConfigChanged }),
       storage: {},
     } as unknown as Config;
   });
@@ -755,5 +1279,83 @@ describe('getAvailableCommands', () => {
     );
 
     expect(commands.map((command) => command.name)).toContain('export');
+  });
+
+  it('does not partially register model-invocable commands without settings', async () => {
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'expand-prompt',
+        description: 'Expand prompt',
+        kind: CommandKind.FILE,
+        modelInvocable: true,
+        supportedModes: ['acp'] as const,
+      },
+    ]);
+
+    await getAvailableCommands(mockConfig, new AbortController().signal, 'acp');
+
+    expect(mockConfig.setModelInvocableCommandsProvider).not.toHaveBeenCalled();
+    expect(mockConfig.setModelInvocableCommandsExecutor).not.toHaveBeenCalled();
+    expect(notifyConfigChanged).not.toHaveBeenCalled();
+  });
+
+  it('registers model-invocable commands for ACP command snapshots', async () => {
+    const promptCommand = {
+      name: 'expand-prompt',
+      description: 'Fallback description',
+      modelDescription: 'Model-facing description',
+      kind: CommandKind.FILE,
+      modelInvocable: true,
+      supportedModes: ['acp'] as const,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'expanded prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([promptCommand]);
+    vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+    const expiredSnapshotSignal = new AbortController();
+    expiredSnapshotSignal.abort();
+
+    await getAvailableCommands(
+      mockConfig,
+      expiredSnapshotSignal.signal,
+      'acp',
+      {
+        system: { path: '', settings: {} },
+        systemDefaults: { path: '', settings: {} },
+        user: { path: '', settings: {} },
+        workspace: { path: '', settings: {} },
+      } as LoadedSettings,
+    );
+
+    const provider = vi.mocked(mockConfig.setModelInvocableCommandsProvider)
+      .mock.calls[0]?.[0];
+    expect(provider?.()).toEqual([
+      {
+        name: 'expand-prompt',
+        description: 'Model-facing description',
+      },
+    ]);
+
+    const executor = vi.mocked(mockConfig.setModelInvocableCommandsExecutor)
+      .mock.calls[0]?.[0];
+    await expect(executor?.('expand-prompt', 'with args')).resolves.toBe(
+      'expanded prompt',
+    );
+    expect(fireUserPromptExpansionEvent).toHaveBeenCalledTimes(1);
+    expect(fireUserPromptExpansionEvent.mock.calls[0]?.[3].aborted).toBe(false);
+    expect(promptCommand.action).toHaveBeenCalledWith(
+      expect.objectContaining({
+        executionMode: 'acp',
+        invocation: {
+          raw: '/expand-prompt with args',
+          name: 'expand-prompt',
+          args: 'with args',
+        },
+      }),
+      'with args',
+    );
+    expect(notifyConfigChanged).toHaveBeenCalledTimes(1);
   });
 });

@@ -6,7 +6,7 @@
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
-import { isLoopbackBind } from './loopbackBinds.js';
+import { isLoopbackBind } from './loopback-binds.js';
 
 /**
  * Reject any request that carries an `Origin` header. CLI/SDK clients never
@@ -90,14 +90,23 @@ export function parseAllowOriginPatterns(
     } catch {
       throw new InvalidAllowOriginPatternError(entry, 'not a parseable URL');
     }
-    if (parsed.origin !== entry) {
+    // Browser-extension schemes (`chrome-extension:`, `moz-extension:`) get an
+    // opaque `null` origin from the URL spec, so they can't round-trip through
+    // `.origin`. Rebuild their canonical origin from scheme+host; the equality
+    // check below still rejects a trailing slash / path / userinfo / query
+    // because each of those makes `entry` differ from `<scheme>//<host>`.
+    const canonical =
+      parsed.origin === 'null'
+        ? `${parsed.protocol}//${parsed.host}`
+        : parsed.origin;
+    if (canonical !== entry) {
       throw new InvalidAllowOriginPatternError(
         entry,
-        `expected the canonical origin ${JSON.stringify(parsed.origin)} ` +
+        `expected the canonical origin ${JSON.stringify(canonical)} ` +
           'without trailing slash, path, userinfo, or query',
       );
     }
-    origins.add(parsed.origin.toLowerCase());
+    origins.add(canonical.toLowerCase());
   }
   return { allowAny, origins };
 }
@@ -221,11 +230,11 @@ export function hostAllowlist(
       `host.docker.internal:${port}`,
     ]);
     // RFC 7230 §5.4: clients may omit the port suffix when it matches
-    // the URI scheme's default. http → 80, https → 443. The qwen
-    // serve daemon is plain HTTP, so accept the no-port forms when
-    // we're listening on port 80 (uncommon but valid for an operator
-    // who points at a privileged port for clean URLs).
-    if (port === 80) {
+    // the URI scheme's default. http → 80, https → 443. Accept the
+    // no-port forms when we're listening on either default port
+    // (uncommon but valid for an operator who points at a privileged
+    // port for clean URLs, or who enables TLS on 443).
+    if (port === 80 || port === 443) {
       cachedAllowed.add('localhost');
       cachedAllowed.add('127.0.0.1');
       cachedAllowed.add('[::1]');
@@ -428,7 +437,7 @@ export function createMutationGate(
   // cache is visible.
   const strictDenier: RequestHandler = (_req: Request, res: Response) => {
     // Only list remediations that work standalone. `--require-auth` is
-    // paired-required-with-a-token at boot (`runQwenServe.ts` refuses
+    // paired-required-with-a-token at boot (`run-qwen-serve.ts` refuses
     // to start with the flag set but no token), so naming it as a
     // third standalone option here would loop the operator into a
     // different boot error. Configuring a token via `QWEN_SERVER_TOKEN`

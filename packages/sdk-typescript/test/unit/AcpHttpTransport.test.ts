@@ -571,3 +571,977 @@ describe('AcpHttpTransport', () => {
     });
   });
 });
+
+// A streamed text/event-stream Response that emits the given raw SSE frames
+// then closes, so subscribeEvents' read loop ends and the generator returns.
+function sseResponse(frames: string[]): Response {
+  const enc = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const f of frames) controller.enqueue(enc.encode(f));
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+}
+
+describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', () => {
+  // One SSE frame: optional `id:` (bus cursor) + a `data:` JSON-RPC payload.
+  function frame(id: number | undefined, msg: unknown): string {
+    const idLine = id !== undefined ? `id: ${id}\n` : '';
+    return `${idLine}data: ${JSON.stringify(msg)}\n\n`;
+  }
+
+  function sessionStreamFetch(frames: string[]) {
+    return initAwareFetch({
+      connectionIdHeader: 'conn-1',
+      subsequentReply: (req) =>
+        req.method === 'GET' && req.headers['acp-session-id']
+          ? sseResponse(frames)
+          : jsonResponse(200, { jsonrpc: '2.0', id: 1, result: { ok: true } }),
+    });
+  }
+
+  async function collect(
+    t: AcpHttpTransport,
+    sessionId: string,
+  ): Promise<Array<{ id?: number; type: string; data: unknown }>> {
+    const out: Array<{ id?: number; type: string; data: unknown }> = [];
+    for await (const e of t.subscribeEvents(sessionId)) {
+      out.push(e as { id?: number; type: string; data: unknown });
+    }
+    return out;
+  }
+
+  it('opens GET /acp with Acp-Session-Id + Acp-Connection-Id (not REST /session/:id/events)', async () => {
+    const { fetch, calls } = sessionStreamFetch([]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    await collect(t, 'sess-1');
+
+    const getCall = calls.find(
+      (c) => c.method === 'GET' && c.url.endsWith('/acp'),
+    );
+    expect(getCall).toBeDefined();
+    expect(getCall?.headers['acp-session-id']).toBe('sess-1');
+    expect(getCall?.headers['acp-connection-id']).toBe('conn-1');
+    // Must NOT use the REST session-events endpoint.
+    expect(calls.some((c) => c.url.includes('/session/'))).toBe(false);
+  });
+
+  it('yields a session/update notification as a DaemonEvent stamped with the bus id from the `id:` line', async () => {
+    const { fetch } = sessionStreamFetch([
+      frame(42, {
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'agent_message_chunk', text: 'hi' },
+        },
+      }),
+    ]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const events = await collect(t, 'sess-1');
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('agent_message_chunk');
+    expect(events[0].id).toBe(42); // real bus cursor, not the synthetic id
+  });
+
+  it('RESOLVES the matching pending request from a JSON-RPC response frame WITHOUT yielding it as an event — the W2 no-hang dispatch', async () => {
+    // A response frame (id, no method) must dispatch to pending-RESOLUTION (the
+    // core W2 fix — a `session/prompt` reply routed onto the session stream by
+    // the daemon's `replySession` settles its promise instead of hanging), not
+    // merely be swallowed. The following notification proves the stream keeps
+    // flowing past it.
+    const { fetch } = sessionStreamFetch([
+      frame(undefined, {
+        jsonrpc: '2.0',
+        id: 999,
+        result: { stopReason: 'end_turn' },
+      }),
+      frame(7, {
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'agent_thought_chunk', text: 't' },
+        },
+      }),
+    ]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+
+    // Register a pending request with the response's id so we can assert the
+    // frame RESOLVES it (and clears the entry), not just that it isn't yielded.
+    const pending = (
+      t as unknown as {
+        pending: Map<
+          number,
+          { resolve: (r: unknown) => void; reject: (e: Error) => void }
+        >;
+      }
+    ).pending;
+    let resolved: unknown;
+    pending.set(999, {
+      resolve: (r) => {
+        resolved = r;
+      },
+      reject: () => {},
+    });
+
+    const events = await collect(t, 'sess-1');
+
+    expect(resolved).toMatchObject({
+      id: 999,
+      result: { stopReason: 'end_turn' },
+    });
+    expect(pending.has(999)).toBe(false); // deleted on resolve
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('agent_thought_chunk');
+  });
+
+  it('resets the bus cursor when a later id: line in the same frame is invalid, rather than keeping the stale earlier one (MselW)', async () => {
+    // A proxy-mangled trailing `id:` must not let a wrong cursor ride the event.
+    const raw =
+      `id: 5\n` +
+      `id: notanumber\n` +
+      `data: ${JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'agent_message_chunk', text: 'x' },
+        },
+      })}\n\n`;
+    const { fetch } = sessionStreamFetch([raw]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const events = await collect(t, 'sess-1');
+
+    expect(events).toHaveLength(1);
+    // The valid `5` was overridden+reset by the invalid second `id:` line.
+    expect(events[0].id).toBeUndefined();
+  });
+
+  it('yields a _qwen/notify envelope tagged with `kind` (as the daemon sends it) as a DaemonEvent, not silently dropped (M2bvl)', async () => {
+    // The daemon's translateEvent stamps session-stream notifies under `kind`
+    // (state_resync_required / replay_complete / stream_error). Reading only
+    // `type` would drop them — starving the SDK of the resume signals.
+    const { fetch } = sessionStreamFetch([
+      frame(11, {
+        jsonrpc: '2.0',
+        method: '_qwen/notify',
+        params: {
+          kind: 'state_resync_required',
+          data: { reason: 'ring_evicted' },
+        },
+      }),
+    ]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const events = await collect(t, 'sess-1');
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('state_resync_required');
+    expect(events[0].id).toBe(11);
+  });
+
+  it('throws when an SSE reader buffer exceeds MAX_SSE_BUF_CHARS without a frame boundary (M3w6g)', async () => {
+    // A server/proxy that streams bytes without ever emitting a `\n\n` boundary
+    // would grow the buffer unbounded (OOM). The 16 MiB cap must fire.
+    const oversized = 'a'.repeat(16 * 1024 * 1024 + 1); // one chunk, no boundary
+    const { fetch } = sessionStreamFetch([oversized]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    await expect(collect(t, 'sess-1')).rejects.toThrow(/exceeded/i);
+    t.dispose();
+  });
+
+  it('rejects (not strands) a session-scoped pending when the subscription fails fast before its read loop (M4DWq fast-fail)', async () => {
+    // The session GET returns 401, so subscribeEventsInner throws at the res.ok
+    // check — BEFORE its read-loop finally. The pending sweep lives in the
+    // wrapper finally (which always runs), so the pending must still be rejected.
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const method = init?.method ?? 'GET';
+        const headers: Record<string, string> = {};
+        if (init?.headers && typeof init.headers === 'object') {
+          for (const [k, v] of Object.entries(
+            init.headers as Record<string, string>,
+          )) {
+            headers[k.toLowerCase()] = v;
+          }
+        }
+        const body = typeof init?.body === 'string' ? init.body : null;
+        if (url.endsWith('/acp') && method === 'POST') {
+          const parsed = body ? JSON.parse(body) : {};
+          return jsonResponse(
+            200,
+            { jsonrpc: '2.0', id: parsed.id, result: { v: 1 } },
+            { 'acp-connection-id': 'conn-1' },
+          );
+        }
+        // Session GET → 401, throws before the read loop.
+        if (
+          url.endsWith('/acp') &&
+          method === 'GET' &&
+          headers['acp-session-id']
+        ) {
+          return new Response('unauthorized', { status: 401 });
+        }
+        return jsonResponse(200, {});
+      },
+    ) as unknown as typeof globalThis.fetch;
+
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+    const pending = (
+      t as unknown as {
+        pending: Map<
+          number,
+          {
+            resolve: (r: unknown) => void;
+            reject: (e: Error) => void;
+            sessionId?: string;
+          }
+        >;
+      }
+    ).pending;
+    const reject = vi.fn();
+    pending.set(7, { resolve: () => {}, reject, sessionId: 'sess-1' });
+
+    await expect(collect(t, 'sess-1')).rejects.toThrow();
+    expect(reject).toHaveBeenCalledTimes(1); // swept by the wrapper finally
+    // ...and with the REAL cause (the 401), not a generic message (M4W9a).
+    const reason = reject.mock.calls[0][0] as Error;
+    expect(reason.message).toMatch(/401/);
+    expect(pending.has(7)).toBe(false);
+    t.dispose();
+  });
+
+  it('does not resolve a pending scoped to a DIFFERENT session — cross-session guard, consumer path (M4W9e)', async () => {
+    // A reply with id 7 arrives on sess-1's stream, but pending 7 belongs to
+    // sess-2. The scope guard must not cross-deliver it.
+    const { fetch } = sessionStreamFetch([
+      frame(undefined, { jsonrpc: '2.0', id: 7, result: { ok: true } }),
+    ]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const pending = (
+      t as unknown as {
+        pending: Map<
+          number,
+          {
+            resolve: (r: unknown) => void;
+            reject: (e: Error) => void;
+            sessionId?: string;
+          }
+        >;
+      }
+    ).pending;
+    const resolve = vi.fn();
+    pending.set(7, { resolve, reject: () => {}, sessionId: 'sess-2' });
+
+    await collect(t, 'sess-1');
+
+    expect(resolve).not.toHaveBeenCalled();
+    expect(pending.has(7)).toBe(true); // untouched — wrong session
+    t.dispose();
+  });
+
+  it('pumpSessionReplies does not resolve a pending scoped to a different session — cross-session guard, pump path (M4W9e)', async () => {
+    const { fetch } = sessionStreamFetch([
+      frame(undefined, { jsonrpc: '2.0', id: 7, result: { ok: true } }),
+    ]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const internals = t as unknown as {
+      pending: Map<
+        number,
+        {
+          resolve: (r: unknown) => void;
+          reject: (e: Error) => void;
+          sessionId?: string;
+        }
+      >;
+      pumpSessionReplies: (s: string, sig: AbortSignal) => Promise<void>;
+    };
+    const resolve = vi.fn();
+    internals.pending.set(7, {
+      resolve,
+      reject: () => {},
+      sessionId: 'sess-2',
+    });
+
+    await internals.pumpSessionReplies('sess-1', new AbortController().signal);
+
+    expect(resolve).not.toHaveBeenCalled();
+    expect(internals.pending.has(7)).toBe(true);
+    t.dispose();
+  });
+
+  it('rejects in-flight session-scoped pendings when the subscription stream closes (M2iHz) — a session/prompt caller does not hang', async () => {
+    const { fetch } = sessionStreamFetch([]); // stream closes with no frames
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+
+    const pending = (
+      t as unknown as {
+        pending: Map<
+          number,
+          {
+            resolve: (r: unknown) => void;
+            reject: (e: Error) => void;
+            sessionId?: string;
+          }
+        >;
+      }
+    ).pending;
+    const sessionReject = vi.fn();
+    const connReject = vi.fn();
+    pending.set(42, {
+      resolve: () => {},
+      reject: sessionReject,
+      sessionId: 'sess-1',
+    });
+    // A connection-scoped pending must survive — different scope, different route.
+    pending.set(43, {
+      resolve: () => {},
+      reject: connReject,
+      sessionId: undefined,
+    });
+
+    // Drain the (empty) session stream to its close; the inner finally sweeps.
+    await collect(t, 'sess-1');
+
+    expect(sessionReject).toHaveBeenCalledTimes(1);
+    expect(pending.has(42)).toBe(false);
+    expect(connReject).not.toHaveBeenCalled();
+    expect(pending.has(43)).toBe(true);
+    t.dispose();
+  });
+
+  type ReplyPumpInternals = {
+    sessionReplyPumps: Map<string, { abort: AbortController; refs: number }>;
+    pending: Map<
+      number,
+      {
+        resolve: (r: unknown) => void;
+        reject: (e: Error) => void;
+        sessionId?: string;
+      }
+    >;
+  };
+
+  it('a consumer subscription that takes over from a reply pump aborts+removes it synchronously and DELIVERS the reply (M3BYa/M3w6Y happy path)', async () => {
+    // The session stream is single-reader: a consumer GET makes the daemon
+    // detach an earlier no-iter reply pump. The consumer now owns delivery — its
+    // stream carries the prompt reply, which must resolve the pending.
+    const { fetch } = sessionStreamFetch([
+      frame(undefined, {
+        jsonrpc: '2.0',
+        id: 7,
+        result: { stopReason: 'end_turn' },
+      }),
+    ]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const internals = t as unknown as ReplyPumpInternals;
+    const pumpAbort = new AbortController();
+    internals.sessionReplyPumps.set('sess-1', { abort: pumpAbort, refs: 1 });
+    let resolved: unknown;
+    internals.pending.set(7, {
+      resolve: (r) => {
+        resolved = r;
+      },
+      reject: () => {},
+      sessionId: 'sess-1',
+    });
+
+    await collect(t, 'sess-1');
+
+    expect(pumpAbort.signal.aborted).toBe(true); // pump aborted...
+    expect(internals.sessionReplyPumps.has('sess-1')).toBe(false); // ...AND removed synchronously
+    expect(resolved).toMatchObject({
+      id: 7,
+      result: { stopReason: 'end_turn' },
+    });
+    expect(internals.pending.has(7)).toBe(false);
+    t.dispose();
+  });
+
+  it('a consumer that exits WITHOUT delivering rejects the taken-over pending instead of stranding it (M3w6Y)', async () => {
+    // The async-cleanup race: if the pump entry were only aborted (not deleted
+    // synchronously), the consumer sweep would defer to the still-present entry
+    // while the pump's own sweep skips on abort — stranding the pending forever.
+    // Synchronous removal makes the consumer sweep reject it.
+    const { fetch } = sessionStreamFetch([]); // consumer stream opens then closes empty
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const internals = t as unknown as ReplyPumpInternals;
+    const pumpAbort = new AbortController();
+    internals.sessionReplyPumps.set('sess-1', { abort: pumpAbort, refs: 1 });
+    const reject = vi.fn();
+    internals.pending.set(7, {
+      resolve: () => {},
+      reject,
+      sessionId: 'sess-1',
+    });
+
+    await collect(t, 'sess-1');
+
+    expect(pumpAbort.signal.aborted).toBe(true);
+    expect(internals.sessionReplyPumps.has('sess-1')).toBe(false);
+    expect(reject).toHaveBeenCalledTimes(1); // rejected, NOT stranded
+    expect(internals.pending.has(7)).toBe(false);
+    t.dispose();
+  });
+
+  it('surfaces a session/request_permission request as a permission_request event', async () => {
+    const { fetch } = sessionStreamFetch([
+      frame(9, {
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'session/request_permission',
+        params: {
+          sessionId: 'sess-1',
+          toolCall: { name: 'write_file' },
+          options: [{ optionId: 'allow' }],
+          _meta: { qwen: { requestId: 'req-1' } },
+        },
+      }),
+    ]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const events = await collect(t, 'sess-1');
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('permission_request');
+    expect((events[0].data as { requestId: string }).requestId).toBe('req-1');
+    expect(events[0].id).toBe(9);
+  });
+
+  it('writes the Last-Event-ID header on the outbound GET when resuming', async () => {
+    // The entire resume value proposition depends on this cursor reaching the
+    // wire; without this assertion a regression would silently degrade to
+    // live-only with no test failing.
+    const { fetch, calls } = sessionStreamFetch([]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    for await (const _e of t.subscribeEvents('sess-1', { lastEventId: 42 })) {
+      // drain (empty stream)
+    }
+
+    const getCall = calls.find(
+      (c) => c.method === 'GET' && c.url.endsWith('/acp'),
+    );
+    expect(getCall).toBeDefined();
+    expect(getCall?.headers['last-event-id']).toBe('42');
+  });
+
+  it('omits the Last-Event-ID header on a first (non-resume) connect', async () => {
+    const { fetch, calls } = sessionStreamFetch([]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    await collect(t, 'sess-1');
+
+    const getCall = calls.find(
+      (c) => c.method === 'GET' && c.url.endsWith('/acp'),
+    );
+    expect(getCall?.headers['last-event-id']).toBeUndefined();
+  });
+
+  it('does not raise an unhandled rejection when the signal is already aborted at entry', async () => {
+    // The mock fetch ignores the signal, so the read loop is reached with
+    // `signal.aborted === true`: the loop never enters and `Promise.race`
+    // never consumes the abort rejection. The no-op `.catch` on abortPromise
+    // keeps that from surfacing as an unhandled rejection (which vitest would
+    // fail the run on).
+    const { fetch } = sessionStreamFetch([
+      frame(1, {
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'agent_message_chunk', text: 'x' },
+        },
+      }),
+    ]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const ctrl = new AbortController();
+    ctrl.abort();
+
+    const out: unknown[] = [];
+    for await (const e of t.subscribeEvents('sess-1', {
+      signal: ctrl.signal,
+    })) {
+      out.push(e);
+    }
+    expect(out).toEqual([]); // aborted at entry → no frames consumed
+    // Give any stray rejection a tick to surface before the test ends.
+    await new Promise((r) => setTimeout(r, 0));
+  });
+});
+
+describe('AcpHttpTransport — session-reply pump (no-subscriber session RPC)', () => {
+  it('resolves a session/prompt whose reply rides the session stream WITHOUT the caller iterating subscribeEvents', async () => {
+    // wenshao MsOpi: the daemon answers POST /session/:id/prompt with 202 and
+    // routes the final JSON-RPC result onto the SESSION stream. A DaemonClient
+    // that never opens subscribeEvents would hang. The transport now opens a
+    // background reply pump for session-reply methods, so fetch() resolves.
+    let promptId: number | undefined;
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const method = init?.method ?? 'GET';
+        const headers: Record<string, string> = {};
+        if (init?.headers && typeof init.headers === 'object') {
+          for (const [k, v] of Object.entries(
+            init.headers as Record<string, string>,
+          )) {
+            headers[k.toLowerCase()] = v;
+          }
+        }
+        const body = typeof init?.body === 'string' ? init.body : null;
+
+        if (url.endsWith('/acp') && method === 'POST') {
+          const parsed = body ? JSON.parse(body) : {};
+          if (parsed.method === 'initialize') {
+            return jsonResponse(
+              200,
+              { jsonrpc: '2.0', id: parsed.id, result: { v: 1 } },
+              { 'acp-connection-id': 'conn-1' },
+            );
+          }
+          if (parsed.method === 'session/prompt') {
+            promptId = parsed.id as number;
+            return new Response(null, { status: 202 });
+          }
+          return jsonResponse(200, {
+            jsonrpc: '2.0',
+            id: parsed.id,
+            result: { ok: true },
+          });
+        }
+
+        // Background session-reply pump: GET /acp + Acp-Session-Id → serve the
+        // prompt's JSON-RPC result (id captured from the POST above).
+        if (
+          url.endsWith('/acp') &&
+          method === 'GET' &&
+          headers['acp-session-id']
+        ) {
+          return sseResponse([
+            `data: ${JSON.stringify({
+              jsonrpc: '2.0',
+              id: promptId,
+              result: { stopReason: 'end_turn' },
+            })}\n\n`,
+          ]);
+        }
+        // Connection-scoped stream (no Acp-Session-Id) → nothing to deliver.
+        if (url.endsWith('/acp') && method === 'GET') {
+          return sseResponse([]);
+        }
+        return jsonResponse(200, {});
+      },
+    ) as unknown as typeof globalThis.fetch;
+
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+    const res = await t.fetch('http://d/session/sess-1/prompt', {
+      method: 'POST',
+      body: JSON.stringify({ prompt: [{ type: 'text', text: 'hi' }] }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ stopReason: 'end_turn' });
+    t.dispose();
+  });
+
+  it('two concurrent session-scoped requests SHARE one reply pump (ref-counted): one GET /acp, both resolve, pump tears down only after both settle', async () => {
+    // doudouOUC: the ref-counting contract (entry.refs++ per request, abort only
+    // on the LAST release) is the core correctness property — a double-release
+    // would abort the pump while a second request is still in-flight. Fire two
+    // session/prompt POSTs concurrently and assert they share ONE GET /acp.
+    const promptIds: number[] = [];
+    let sessionGetCalls = 0;
+    const enc = new TextEncoder();
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const method = init?.method ?? 'GET';
+        const headers: Record<string, string> = {};
+        if (init?.headers && typeof init.headers === 'object') {
+          for (const [k, v] of Object.entries(
+            init.headers as Record<string, string>,
+          )) {
+            headers[k.toLowerCase()] = v;
+          }
+        }
+        const body = typeof init?.body === 'string' ? init.body : null;
+        if (url.endsWith('/acp') && method === 'POST') {
+          const parsed = body ? JSON.parse(body) : {};
+          if (parsed.method === 'initialize') {
+            return jsonResponse(
+              200,
+              { jsonrpc: '2.0', id: parsed.id, result: { v: 1 } },
+              { 'acp-connection-id': 'conn-1' },
+            );
+          }
+          if (parsed.method === 'session/prompt') {
+            promptIds.push(parsed.id as number);
+            return new Response(null, { status: 202 });
+          }
+          return jsonResponse(200, {
+            jsonrpc: '2.0',
+            id: parsed.id,
+            result: { ok: true },
+          });
+        }
+        // The shared session reply pump: ONE GET /acp with Acp-Session-Id serves
+        // BOTH prompt replies. Enqueue on a macrotask so both POSTs have
+        // registered their ids first.
+        if (
+          url.endsWith('/acp') &&
+          method === 'GET' &&
+          headers['acp-session-id']
+        ) {
+          sessionGetCalls++;
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                setTimeout(() => {
+                  for (const id of promptIds) {
+                    controller.enqueue(
+                      enc.encode(
+                        `data: ${JSON.stringify({
+                          jsonrpc: '2.0',
+                          id,
+                          result: { stopReason: 'end_turn' },
+                        })}\n\n`,
+                      ),
+                    );
+                  }
+                  controller.close();
+                }, 0);
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'text/event-stream' } },
+          );
+        }
+        if (url.endsWith('/acp') && method === 'GET') return sseResponse([]);
+        return jsonResponse(200, {});
+      },
+    ) as unknown as typeof globalThis.fetch;
+
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+    const mkPrompt = () =>
+      t
+        .fetch('http://d/session/sess-1/prompt', {
+          method: 'POST',
+          body: JSON.stringify({ prompt: [{ type: 'text', text: 'hi' }] }),
+        })
+        .then((r) => r.json());
+    const [a, b] = await Promise.all([mkPrompt(), mkPrompt()]);
+
+    expect(a).toEqual({ stopReason: 'end_turn' });
+    expect(b).toEqual({ stopReason: 'end_turn' });
+    // Both shared a single reply pump (one session-scoped GET), not one each.
+    expect(sessionGetCalls).toBe(1);
+    // The pump tore down after the last release.
+    expect(
+      (
+        t as unknown as { sessionReplyPumps: Map<string, unknown> }
+      ).sessionReplyPumps.has('sess-1'),
+    ).toBe(false);
+    t.dispose();
+  });
+
+  it('rejects (does not parse garbage / hang) a no-subscriber session/prompt when the reply pump GET returns a non-SSE content-type (M3pAM)', async () => {
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const method = init?.method ?? 'GET';
+        const headers: Record<string, string> = {};
+        if (init?.headers && typeof init.headers === 'object') {
+          for (const [k, v] of Object.entries(
+            init.headers as Record<string, string>,
+          )) {
+            headers[k.toLowerCase()] = v;
+          }
+        }
+        const body = typeof init?.body === 'string' ? init.body : null;
+        if (url.endsWith('/acp') && method === 'POST') {
+          const parsed = body ? JSON.parse(body) : {};
+          if (parsed.method === 'initialize') {
+            return jsonResponse(
+              200,
+              { jsonrpc: '2.0', id: parsed.id, result: { v: 1 } },
+              { 'acp-connection-id': 'conn-1' },
+            );
+          }
+          if (parsed.method === 'session/prompt') {
+            return new Response(null, { status: 202 });
+          }
+          return jsonResponse(200, {
+            jsonrpc: '2.0',
+            id: parsed.id,
+            result: { ok: true },
+          });
+        }
+        // Reply pump GET → 200 but a non-SSE HTML body (CDN/proxy error page).
+        // Must be rejected by the content-type guard, not fed to the parser.
+        if (
+          url.endsWith('/acp') &&
+          method === 'GET' &&
+          headers['acp-session-id']
+        ) {
+          return new Response('<html>error</html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          });
+        }
+        if (url.endsWith('/acp') && method === 'GET') {
+          return sseResponse([]);
+        }
+        return jsonResponse(200, {});
+      },
+    ) as unknown as typeof globalThis.fetch;
+
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+    // The rejection must carry the pump's actual cause (content-type guard),
+    // not a generic "closed unexpectedly" — proves pumpError reaches the caller.
+    await expect(
+      t.fetch('http://d/session/sess-1/prompt', {
+        method: 'POST',
+        body: JSON.stringify({ prompt: [{ type: 'text', text: 'hi' }] }),
+      }),
+    ).rejects.toThrow(/expected content-type/i);
+    t.dispose();
+  });
+
+  it('a connection-stream failure rejects only CONNECTION-scoped pendings, never a session-scoped reply the session stream will deliver (MselM)', async () => {
+    // The two stream pumps share one `pending` map. A connection-stream error
+    // must sweep only its own scope — rejecting a session-scoped `session/prompt`
+    // here would spuriously fail a request the session stream is about to
+    // resolve (the non-deterministic cross-stream race MselM reports).
+    const fetchImpl = vi.fn(async () => {
+      // Any GET /acp (the conn stream pump) fails → triggers the catch sweep.
+      throw new Error('conn stream boom');
+    }) as unknown as typeof globalThis.fetch;
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+
+    const pending = (
+      t as unknown as {
+        pending: Map<
+          number,
+          {
+            resolve: (r: unknown) => void;
+            reject: (e: Error) => void;
+            sessionId?: string;
+          }
+        >;
+      }
+    ).pending;
+    const sessionReject = vi.fn();
+    const connReject = vi.fn();
+    pending.set(1, {
+      resolve: () => {},
+      reject: sessionReject,
+      sessionId: 'sess-1',
+    });
+    pending.set(2, {
+      resolve: () => {},
+      reject: connReject,
+      sessionId: undefined,
+    });
+
+    // Open the connection stream; its pump rejects → the catch runs the sweep.
+    (t as unknown as { openConnStream: () => void }).openConnStream();
+    // Let the rejected pump's microtasks settle.
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Connection-scoped pending swept; session-scoped one preserved.
+    expect(connReject).toHaveBeenCalledTimes(1);
+    expect(pending.has(2)).toBe(false);
+    expect(sessionReject).not.toHaveBeenCalled();
+    expect(pending.has(1)).toBe(true);
+    t.dispose();
+  });
+
+  it('resolves a conn-scoped reply delivered with CRLF (`\\r\\n\\r\\n`) frame separators, not just LF', async () => {
+    // The conn-stream pump must use the same CRLF-aware framing as the session
+    // readers. A server/proxy emitting `\r\n\r\n` separators produces no `\n\n`
+    // substring, so the old LF-only `indexOf('\n\n')` never found a boundary —
+    // the buffer grew to the cap and the pump died, leaving every conn-scoped
+    // reply unresolved.
+    const crlfFrame = `data: ${JSON.stringify({
+      jsonrpc: '2.0',
+      id: 7,
+      result: { ok: true },
+    })}\r\n\r\n`;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      if (url.endsWith('/acp')) return sseResponse([crlfFrame]);
+      return jsonResponse(200, { ok: true });
+    }) as unknown as typeof globalThis.fetch;
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+
+    const pending = (
+      t as unknown as {
+        pending: Map<
+          number,
+          {
+            resolve: (r: unknown) => void;
+            reject: (e: Error) => void;
+            sessionId?: string;
+          }
+        >;
+      }
+    ).pending;
+    let resolved: unknown;
+    pending.set(7, {
+      resolve: (r) => {
+        resolved = r;
+      },
+      reject: () => {},
+      sessionId: undefined,
+    });
+
+    (t as unknown as { openConnStream: () => void }).openConnStream();
+    // Let the pump read the body and dispatch.
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(resolved).toMatchObject({ id: 7, result: { ok: true } });
+    expect(pending.has(7)).toBe(false);
+    t.dispose();
+  });
+
+  it('rejects conn-scoped pendings and reopens the stream when GET /acp returns 500 (no silent hang)', async () => {
+    // A non-2xx conn stream must NOT resolve the pump silently: that would
+    // leave connection-scoped pendings hung forever AND leave `connStreamAbort`
+    // non-null so the next request never reopens the stream.
+    let getCalls = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      if (url.endsWith('/acp')) {
+        getCalls++;
+        return new Response('nope', {
+          status: 500,
+          statusText: 'Server Error',
+        });
+      }
+      return jsonResponse(200, { ok: true });
+    }) as unknown as typeof globalThis.fetch;
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+
+    const internals = t as unknown as {
+      pending: Map<
+        number,
+        {
+          resolve: (r: unknown) => void;
+          reject: (e: Error) => void;
+          sessionId?: string;
+        }
+      >;
+      connStreamAbort: AbortController | undefined;
+      openConnStream: () => void;
+      ensureConnStream: () => void;
+    };
+    const connReject = vi.fn();
+    const sessionReject = vi.fn();
+    internals.pending.set(1, {
+      resolve: () => {},
+      reject: connReject,
+      sessionId: undefined,
+    });
+    internals.pending.set(2, {
+      resolve: () => {},
+      reject: sessionReject,
+      sessionId: 'sess-1',
+    });
+
+    internals.openConnStream();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Conn-scoped pending rejected; session-scoped one left for its own stream.
+    expect(connReject).toHaveBeenCalledTimes(1);
+    expect(internals.pending.has(1)).toBe(false);
+    expect(sessionReject).not.toHaveBeenCalled();
+    expect(internals.pending.has(2)).toBe(true);
+
+    // `connStreamAbort` cleared → the next request reopens rather than hanging.
+    expect(internals.connStreamAbort).toBeUndefined();
+    internals.ensureConnStream();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(getCalls).toBe(2);
+
+    t.dispose();
+  });
+
+  it('the conn-stream pump never resolves a SESSION-scoped pending (cross-stream scope guard, mirrors the session readers)', async () => {
+    // doudouOUC: the connection stream carries only conn-scoped replies. A reply
+    // frame whose id collides with a session-scoped pending (a daemon routing
+    // regression) must NOT be cross-delivered here — the same guard the session
+    // readers and the openConnStream error sweep already enforce.
+    const replyFrame = `data: ${JSON.stringify({
+      jsonrpc: '2.0',
+      id: 5,
+      result: { leaked: true },
+    })}\n\n`;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      if (url.endsWith('/acp')) return sseResponse([replyFrame]);
+      return jsonResponse(200, { ok: true });
+    }) as unknown as typeof globalThis.fetch;
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+
+    const pending = (
+      t as unknown as {
+        pending: Map<
+          number,
+          {
+            resolve: (r: unknown) => void;
+            reject: (e: Error) => void;
+            sessionId?: string;
+          }
+        >;
+      }
+    ).pending;
+    const resolve = vi.fn();
+    pending.set(5, { resolve, reject: () => {}, sessionId: 'sess-1' });
+
+    (t as unknown as { openConnStream: () => void }).openConnStream();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Session-scoped pending left untouched for its OWN session stream.
+    expect(resolve).not.toHaveBeenCalled();
+    expect(pending.has(5)).toBe(true);
+    t.dispose();
+  });
+});

@@ -67,6 +67,7 @@ describe('HookSystem', () => {
 
     mockHookRegistry = {
       initialize: vi.fn().mockResolvedValue(undefined),
+      reloadConfiguredHooks: vi.fn().mockResolvedValue(undefined),
       setHookEnabled: vi.fn(),
       getAllHooks: vi.fn().mockReturnValue([]),
       getHooksForEvent: vi.fn().mockReturnValue([]),
@@ -137,6 +138,14 @@ describe('HookSystem', () => {
       await hookSystem.initialize();
 
       expect(mockHookRegistry.initialize).toHaveBeenCalled();
+    });
+  });
+
+  describe('reload', () => {
+    it('should reload configured hooks', async () => {
+      await hookSystem.reload();
+
+      expect(mockHookRegistry.reloadConfiguredHooks).toHaveBeenCalled();
     });
   });
 
@@ -295,6 +304,7 @@ describe('HookSystem', () => {
         true,
         'last message',
         undefined,
+        undefined,
       );
       expect(result).toEqual(mockResult);
     });
@@ -317,7 +327,40 @@ describe('HookSystem', () => {
         false,
         '',
         undefined,
+        undefined,
       );
+    });
+
+    it('should forward context usage to hookEventHandler', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: undefined,
+      };
+      vi.mocked(mockHookEventHandler.fireStopEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const contextUsage = {
+        context_usage: 0.75,
+        context_limit: 200000,
+        input_tokens: 150000,
+      };
+      const result = await hookSystem.fireStopEvent(
+        true,
+        'last message',
+        contextUsage,
+      );
+
+      expect(mockHookEventHandler.fireStopEvent).toHaveBeenCalledWith(
+        true,
+        'last message',
+        contextUsage,
+        undefined,
+      );
+      expect(result).toEqual(mockResult);
     });
 
     it('should return AggregatedHookResult even when no final output', async () => {

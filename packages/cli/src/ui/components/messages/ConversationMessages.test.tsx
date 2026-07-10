@@ -5,7 +5,11 @@
  */
 
 import { render } from 'ink-testing-library';
-import { ThinkMessage, ThinkMessageContent } from './ConversationMessages.js';
+import {
+  ThinkMessage,
+  ThinkMessageContent,
+  toggleKeyHint,
+} from './ConversationMessages.js';
 
 describe('<ThinkMessage />', () => {
   const defaultProps = {
@@ -19,7 +23,7 @@ describe('<ThinkMessage />', () => {
     );
     const output = lastFrame();
     expect(output).toContain('Thinking');
-    expect(output).not.toContain('ctrl+o to expand');
+    expect(output).not.toContain(`${toggleKeyHint} to expand`);
   });
 
   it('should render collapsed line when committed and not expanded', () => {
@@ -28,8 +32,27 @@ describe('<ThinkMessage />', () => {
     );
     const output = lastFrame();
     expect(output).toContain('Thinking');
-    expect(output).toContain('ctrl+o to expand');
+    expect(output).toContain(`${toggleKeyHint} to expand`);
     expect(output).not.toContain('Analyzing the code structure');
+  });
+
+  it('advertises click in the collapsed hint only when clickable (VP mode)', () => {
+    const withoutClick = render(
+      <ThinkMessage {...defaultProps} isPending={false} expanded={false} />,
+    ).lastFrame();
+    expect(withoutClick).not.toContain('click');
+    expect(withoutClick).toContain(`${toggleKeyHint} to expand`);
+
+    const withClick = render(
+      <ThinkMessage
+        {...defaultProps}
+        isPending={false}
+        expanded={false}
+        clickable={true}
+      />,
+    ).lastFrame();
+    expect(withClick).toContain('click');
+    expect(withClick).toContain(`${toggleKeyHint} to expand`);
   });
 
   it('should render full text when committed and expanded', () => {
@@ -45,7 +68,7 @@ describe('<ThinkMessage />', () => {
       <ThinkMessage {...defaultProps} isPending={false} />,
     );
     const output = lastFrame();
-    expect(output).toContain('ctrl+o to expand');
+    expect(output).toContain(`${toggleKeyHint} to expand`);
     expect(output).not.toContain('Analyzing the code structure');
   });
 
@@ -61,7 +84,7 @@ describe('<ThinkMessage />', () => {
     const output = lastFrame();
     expect(output).toContain('Thought for');
     expect(output).toContain('15s');
-    expect(output).toContain('ctrl+o to expand');
+    expect(output).toContain(`${toggleKeyHint} to expand`);
   });
 
   it('should show present-tense duration while pending (streaming)', () => {

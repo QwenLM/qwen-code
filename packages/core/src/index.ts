@@ -33,10 +33,12 @@ export {
   type ModelConfigValidationResult,
   ModelRegistry,
   modelRegistryKey,
+  resolveProviderProtocol,
   type ModelGenerationConfig,
   ModelsConfig,
   type ModelsConfigOptions,
   type ModelProvidersConfig,
+  type ProviderProtocolConfig,
   type ModelSwitchMetadata,
   MODEL_GENERATION_CONFIG_FIELDS,
   type OnModelChangeCallback,
@@ -56,6 +58,7 @@ export * from './output/types.js';
 
 export * from './core/client.js';
 export * from './core/contentGenerator.js';
+export * from './core/reasoning-effort.js';
 export * from './core/coreToolScheduler.js';
 export * from './core/permissionFlow.js';
 export * from './core/permission-helpers.js';
@@ -69,6 +72,7 @@ export * from './core/prompts.js';
 export * from './core/tokenLimits.js';
 export * from './core/toolCallIdUtils.js';
 export * from './core/turn.js';
+export * from './core/turn-interruption.js';
 
 // ============================================================================
 // Tools
@@ -83,6 +87,9 @@ export * from './tools/tools.js';
 // Individual tools — MCP/SDK infrastructure only (tool classes are lazy-loaded)
 export * from './tools/mcp-client.js';
 export * from './tools/mcp-client-manager.js';
+// Shared MCP resource content formatter (used by the `@` injection path and
+// the read_mcp_resource tool).
+export * from './tools/mcp-resource-content.js';
 // pool primitives consumed by acpAgent (daemon
 // pool construction) and downstream daemon status routes.
 export {
@@ -105,6 +112,7 @@ export * from './tools/mcp-tool.js';
 export * from './tools/read-file.js';
 export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
+export * from './tools/client-mcp-registrar.js';
 export * from './tools/modifiable-tool.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
@@ -113,6 +121,8 @@ export {
   applySkillAllowedTools,
 } from './tools/skill-utils.js';
 export { atomicWriteFile } from './utils/atomicFileWrite.js';
+export { nextFireTime, parseCron } from './utils/cronParser.js';
+export * from './services/session-organization-service.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
 // These preserve TypeScript type compatibility for downstream consumers.
@@ -137,6 +147,10 @@ export type { GrepTool, GrepToolParams } from './tools/grep.js';
 export type { LSTool, LSToolParams, FileEntry } from './tools/ls.js';
 export type { LspTool, LspToolParams, LspOperation } from './tools/lsp.js';
 export type {
+  ReadMcpResourceTool,
+  ReadMcpResourceToolParams,
+} from './tools/read-mcp-resource.js';
+export type {
   ShellTool,
   ShellToolParams,
   ShellToolInvocation,
@@ -155,10 +169,27 @@ export type {
 } from './tools/todoWrite.js';
 export type { WebFetchTool, WebFetchToolParams } from './tools/web-fetch.js';
 export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
+export type {
+  ArtifactTool,
+  ArtifactToolParams,
+} from './tools/artifact/artifact-tool.js';
+export type {
+  RecordArtifactTool,
+  RecordArtifactParams,
+} from './tools/record-artifact.js';
+export type {
+  ArtifactPublisher,
+  PublishArtifactInput,
+  PublishedArtifact,
+} from './tools/artifact/publisher.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
+export type {
+  TeamPlanApprovalTool,
+  TeamPlanApprovalParams,
+} from './tools/team-plan-approval.js';
 
 // ============================================================================
 // Providers
@@ -176,15 +207,30 @@ export {
 } from './services/chatCompressionService.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
-export type { DurableCronTask } from './services/cronTasksFile.js';
+export type { DurableCronTask, CronTaskRun } from './services/cronTasksFile.js';
+export {
+  readCronTasks,
+  updateCronTasks,
+  removeCronTasks,
+  getCronFilePath,
+  generateCronTaskId,
+  appendCronRun,
+  MAX_TASK_RUNS,
+} from './services/cronTasksFile.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
 export { decodeBufferWithEncodingInfo } from './utils/fileUtils.js';
 export * from './services/gitWorktreeService.js';
+export { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from './services/loopDetectionService.js';
+export * from './services/visionBridge/vision-bridge-service.js';
+export * from './services/visionBridge/image-part-utils.js';
+export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
+export * from './services/session-artifact-persistence.js';
 export * from './services/sessionService.js';
+export * from './utils/conversation-chain.js';
 export * from './services/sessionTitle.js';
 export * from './services/sleepInhibitor.js';
 // Named exports keep @internal test helpers out of the barrel.
@@ -219,9 +265,24 @@ export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
 export * from './agents/workflow-run-registry.js';
+export * from './agents/workflow-snapshot.js';
+export {
+  listSavedWorkflows,
+  resolveSavedWorkflowScript,
+  saveWorkflowScript,
+  validateWorkflowName,
+  getSavedWorkflowDirs,
+  WORKFLOW_NAME_PATTERN,
+  type SavedWorkflowEntry,
+  type SavedWorkflowSource,
+  type ResolvedSavedWorkflow,
+  type WorkflowSaveResult,
+} from './agents/runtime/workflow-saved.js';
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
+export * from './services/usage-dashboard-service.js';
 export * from './utils/bareMode.js';
+export * from './utils/safe-mode.js';
 export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
@@ -239,6 +300,9 @@ export * from './memory/types.js';
 export * from './memory/paths.js';
 export * from './memory/store.js';
 export * from './memory/const.js';
+export * from './memory/channel-memory.js';
+export * from './memory/remember.js';
+export * from './memory/dream.js';
 // Issue : write helper for hierarchical context files,
 // re-exported so the `qwen serve` daemon can mutate workspace memory
 // via `POST /workspace/memory` without depending on internal paths.
@@ -264,6 +328,7 @@ export * from './ide/types.js';
 // ============================================================================
 
 export * from './lsp/constants.js';
+export * from './lsp/configHash.js';
 export * from './lsp/LspConfigLoader.js';
 export * from './lsp/LspConnectionFactory.js';
 export * from './lsp/LspResponseNormalizer.js';
@@ -310,9 +375,12 @@ export {
   logExtensionDisable,
   logExtensionEnable,
   logIdeConnection,
+  logLoopDetected,
   logModelSlashCommand,
   logPromptSuggestion,
   logSpeculation,
+  logWorkflowKeyword,
+  logWorkflowRun,
 } from './telemetry/loggers.js';
 export {
   AuthEvent,
@@ -322,10 +390,13 @@ export {
   ExtensionUninstallEvent,
   IdeConnectionEvent,
   IdeConnectionType,
+  LoopDetectedEvent,
   LoopType,
   ModelSlashCommandEvent,
   PromptSuggestionEvent,
   SpeculationEvent,
+  WorkflowKeywordEvent,
+  WorkflowRunEvent,
 } from './telemetry/types.js';
 
 // ============================================================================
@@ -335,6 +406,8 @@ export {
 export * from './extension/index.js';
 export * from './prompts/mcp-prompts.js';
 export * from './skills/index.js';
+export * from './skills/bundled/loop/loop-task-file.js';
+export * from './skills/bundled/loop/loop-tick-resolver.js';
 export * from './subagents/index.js';
 export * from './agents/index.js';
 
@@ -355,6 +428,7 @@ export * from './utils/configResolver.js';
 export * from './utils/debugLogger.js';
 export * from './utils/editor.js';
 export * from './utils/environmentContext.js';
+export * from './utils/env.js';
 export * from './utils/errorParsing.js';
 export * from './utils/errors.js';
 export * from './utils/fileUtils.js';
@@ -369,9 +443,15 @@ export * from './utils/formatters.js';
 export * from './utils/generateContentResponseUtilities.js';
 export * from './utils/getFolderStructure.js';
 export * from './utils/gitDiff.js';
+export * from './utils/gitDirect.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
 export * from './utils/ignorePatterns.js';
+export {
+  DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+  QwenIgnoreParser,
+} from './utils/qwenIgnoreParser.js';
+export type { QwenIgnoreFilter } from './utils/qwenIgnoreParser.js';
 export * from './utils/jsonl-utils.js';
 export * from './utils/memoryDiagnostics.js';
 export * from './utils/memoryDiscovery.js';
@@ -401,6 +481,7 @@ export * from './utils/ripgrepUtils.js';
 export {
   detectRuntime,
   getOrCreateSharedDispatcher,
+  isTlsVerificationDisabled,
   redactProxyCredentials,
 } from './utils/runtimeFetchOptions.js';
 export * from './utils/runtimeStatus.js';
@@ -466,6 +547,7 @@ export {
   formatStopHookBlockingCapWarning,
 } from './hooks/stopHookCap.js';
 export { type StopFailureErrorType } from './hooks/types.js';
+export { buildContextUsage } from './hooks/context-usage.js';
 
 // ============================================================================
 // Goals (/goal command runtime)
@@ -480,11 +562,13 @@ export {
   firePreToolUseHook,
   firePostToolUseHook,
   firePostToolUseFailureHook,
+  firePostToolBatchHook,
   type NotificationHookResult,
   type PermissionRequestHookResult,
   type PreToolUseHookResult,
   type PostToolUseHookResult,
   type PostToolUseFailureHookResult,
+  type PostToolBatchHookResult,
   generateToolUseId,
 } from './core/toolHookTriggers.js';
 

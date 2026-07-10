@@ -23,22 +23,29 @@ import { MessageType } from '../types.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
+import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
+import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
 import {
   type GeminiClient,
   SlashCommandStatus,
   ToolConfirmationOutcome,
   makeFakeConfig,
+  MCPServerStatus,
+  updateMCPServerStatus,
+  recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
 
-const { logSlashCommand, debugLoggerMock } = vi.hoisted(() => ({
-  logSlashCommand: vi.fn(),
-  debugLoggerMock: {
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-  },
-}));
+const { logSlashCommand, recordSkillInvocationMock, debugLoggerMock } =
+  vi.hoisted(() => ({
+    logSlashCommand: vi.fn(),
+    recordSkillInvocationMock: vi.fn(),
+    debugLoggerMock: {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    },
+  }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
@@ -46,6 +53,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...original,
     logSlashCommand,
+    recordSkillInvocation: recordSkillInvocationMock,
     createDebugLogger: () => debugLoggerMock,
     getIdeInstaller: vi.fn().mockReturnValue(null),
   };
@@ -60,6 +68,7 @@ vi.mock('node:process', () => {
     exit: mockProcessExit,
     platform: 'sunos',
     cwd: () => '/fake/dir',
+    env: {},
   } as unknown as NodeJS.Process;
   return {
     ...mockProcess,
@@ -102,6 +111,10 @@ vi.mock('../../utils/cleanup.js', () => ({
 
 vi.mock('./useKeypress.js', () => ({
   useKeypress: vi.fn(),
+}));
+
+vi.mock('../../config/extension-runtime-reload.js', () => ({
+  refreshExtensionContentRuntime: vi.fn(async () => undefined),
 }));
 
 function createTestCommand(
@@ -151,6 +164,7 @@ describe('useSlashCommandProcessor', () => {
     handleResume: vi.fn(),
     handleBranch: vi.fn().mockResolvedValue(undefined),
     openDeleteDialog: vi.fn(),
+    openDiffDialog: vi.fn(),
     quit: mockSetQuittingMessages,
     setDebugMessage: vi.fn(),
     dispatchExtensionStateUpdate: vi.fn(),
@@ -161,7 +175,6 @@ describe('useSlashCommandProcessor', () => {
     openMcpDialog: vi.fn(),
     openHooksDialog: vi.fn(),
     openRewindSelector: vi.fn(),
-    openDiffDialog: vi.fn(),
   });
 
   beforeEach(() => {
@@ -175,6 +188,7 @@ describe('useSlashCommandProcessor', () => {
     mockOpenModelDialog.mockClear();
     mockOpenMemoryDialog.mockClear();
     mockFireUserPromptExpansionEvent.mockResolvedValue(undefined);
+    vi.mocked(refreshExtensionContentRuntime).mockResolvedValue(undefined);
     mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
     mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
     mockConfig.getHookSystem = vi.fn().mockReturnValue({
@@ -190,6 +204,7 @@ describe('useSlashCommandProcessor', () => {
     mcpCommands: SlashCommand[] = [],
     setIsProcessing = vi.fn(),
     settings: LoadedSettings = mockSettings,
+    extensionRefreshState?: ExtensionRefreshState,
   ) => {
     mockBuiltinLoadCommands.mockResolvedValue(Object.freeze(builtinCommands));
     mockFileLoadCommands.mockResolvedValue(Object.freeze(fileCommands));
@@ -199,6 +214,7 @@ describe('useSlashCommandProcessor', () => {
       useSlashCommandProcessor(
         mockConfig,
         settings,
+        [], // mock history array
         mockAddItem,
         mockClearItems,
         mockLoadHistory,
@@ -213,6 +229,8 @@ describe('useSlashCommandProcessor', () => {
         true, // isConfigInitialized
         null, // logger
         mockUpdateItem,
+        undefined, // setSessionName
+        extensionRefreshState,
       ),
     );
 
@@ -220,11 +238,55 @@ describe('useSlashCommandProcessor', () => {
   };
 
   describe('Initialization and Command Loading', () => {
-    it('should initialize CommandService with all required loaders', () => {
-      setupProcessorHook();
+    it('should initialize CommandService with all required loaders', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
       expect(BuiltinCommandLoader).toHaveBeenCalledWith(mockConfig);
       expect(FileCommandLoader).toHaveBeenCalledWith(mockConfig);
       expect(McpPromptLoader).toHaveBeenCalledWith(mockConfig);
+    });
+
+    it('rebuilds commands when an MCP server connects (surfaces MCP prompts in /)', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+      const before = vi.mocked(McpPromptLoader).mock.calls.length;
+
+      // A server reaching CONNECTED fires the real status listener the hook
+      // registered; after the debounce it rebuilds the command tree so a
+      // progressively-discovered MCP prompt appears as a /<prompt> command.
+      // Use a fresh server name so the global status registry actually
+      // transitions (undefined -> CONNECTED).
+      act(() => {
+        updateMCPServerStatus('srv-reload-test', MCPServerStatus.CONNECTED);
+      });
+
+      await waitFor(
+        () => {
+          expect(vi.mocked(McpPromptLoader).mock.calls.length).toBeGreaterThan(
+            before,
+          );
+        },
+        { timeout: 2000 },
+      );
+    });
+
+    it('ignores non-connected MCP status changes (no rebuild)', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+      const before = vi.mocked(McpPromptLoader).mock.calls.length;
+
+      act(() => {
+        updateMCPServerStatus('srv-noreload-test', MCPServerStatus.CONNECTING);
+      });
+      // Wait past the 250ms debounce window: CONNECTING must not reload.
+      await new Promise((r) => setTimeout(r, 400));
+      expect(vi.mocked(McpPromptLoader).mock.calls.length).toBe(before);
     });
 
     it('should call loadCommands and populate state after mounting', async () => {
@@ -518,19 +580,213 @@ describe('useSlashCommandProcessor', () => {
       expect(mockOpenModelDialog).toHaveBeenCalled();
     });
 
-    it('should handle "dialog: memory" action', async () => {
+    it('should handle "dialog: voice-model" action', async () => {
       const command = createTestCommand({
+        name: 'voicemodelcmd',
+        action: vi
+          .fn()
+          .mockResolvedValue({ type: 'dialog', dialog: 'voice-model' }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/voicemodelcmd');
+      });
+
+      expect(mockOpenModelDialog).toHaveBeenCalledWith({
+        voiceModelMode: true,
+      });
+    });
+
+    it('should handle "dialog: vision-model" action', async () => {
+      const command = createTestCommand({
+        name: 'visionmodelcmd',
+        action: vi
+          .fn()
+          .mockResolvedValue({ type: 'dialog', dialog: 'vision-model' }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/visionmodelcmd');
+      });
+
+      expect(mockOpenModelDialog).toHaveBeenCalledWith({
+        visionModelMode: true,
+      });
+    });
+
+    it('awaits direct resume session switching before returning handled', async () => {
+      const actions = createMockActions();
+      let resolveResume: (() => void) | undefined;
+      actions.handleResume = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveResume = resolve;
+          }),
+      );
+
+      const resumeCommand = createTestCommand({
+        name: 'resume-direct',
+        action: vi.fn().mockResolvedValue({
+          type: 'dialog',
+          dialog: 'resume',
+          sessionId: 'session-123',
+        }),
+      });
+      mockBuiltinLoadCommands.mockResolvedValue(Object.freeze([resumeCommand]));
+
+      const { result } = renderHook(() =>
+        useSlashCommandProcessor(
+          mockConfig,
+          mockSettings,
+          [],
+          mockAddItem,
+          mockClearItems,
+          mockLoadHistory,
+          vi.fn(),
+          vi.fn(),
+          false,
+          vi.fn(),
+          { current: true },
+          vi.fn(),
+          actions,
+          new Map(),
+          true,
+          null,
+          mockUpdateItem,
+        ),
+      );
+
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let settled = false;
+      const promise = result.current
+        .handleSlashCommand('/resume-direct')
+        .then(() => {
+          settled = true;
+        });
+
+      await waitFor(() => {
+        expect(actions.handleResume).toHaveBeenCalledWith('session-123');
+      });
+      expect(settled).toBe(false);
+
+      resolveResume?.();
+      await act(async () => {
+        await promise;
+      });
+      expect(settled).toBe(true);
+    });
+
+    it('shows info feedback for collapse-on-resume command', async () => {
+      const historyCmd = createTestCommand({
+        name: 'history',
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'info',
+          content:
+            'History will be collapsed by default for future resumed sessions.',
+        }),
+      });
+      const result = setupProcessorHook([historyCmd]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/history collapse-on-resume');
+      });
+
+      // Should have 2 calls: user message + info feedback
+      expect(mockAddItem).toHaveBeenCalledTimes(2);
+      expect(mockAddItem).toHaveBeenNthCalledWith(
+        1,
+        {
+          type: MessageType.USER,
+          text: '/history collapse-on-resume',
+          sentToModel: false,
+        },
+        expect.any(Number),
+      );
+      expect(mockAddItem).toHaveBeenNthCalledWith(
+        2,
+        {
+          type: MessageType.INFO,
+          text: 'History will be collapsed by default for future resumed sessions.',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('expand-now command updates history without info feedback', async () => {
+      const historyCmd = createTestCommand({
+        name: 'history',
+        subCommands: [
+          {
+            name: 'expand-now',
+            description: 'Expand collapsed history',
+            kind: CommandKind.BUILT_IN,
+            action: vi.fn().mockResolvedValue(undefined),
+          },
+        ],
+      });
+      const result = setupProcessorHook([historyCmd]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/history expand-now');
+      });
+
+      // User message added, no info feedback (action returns void)
+      expect(mockAddItem).toHaveBeenCalledTimes(1);
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.USER,
+          text: '/history expand-now',
+          sentToModel: false,
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('opens memory dialog when command returns dialog:memory', async () => {
+      const actions = createMockActions();
+      const memoryCommand = createTestCommand({
         name: 'memorycmd',
         action: vi.fn().mockResolvedValue({ type: 'dialog', dialog: 'memory' }),
       });
-      const result = setupProcessorHook([command]);
+      mockBuiltinLoadCommands.mockResolvedValue(Object.freeze([memoryCommand]));
+
+      const { result } = renderHook(() =>
+        useSlashCommandProcessor(
+          mockConfig,
+          mockSettings,
+          [],
+          mockAddItem,
+          mockClearItems,
+          mockLoadHistory,
+          vi.fn(),
+          vi.fn(),
+          false,
+          vi.fn(),
+          { current: true },
+          vi.fn(),
+          actions,
+          new Map(),
+          true,
+          null,
+          mockUpdateItem,
+        ),
+      );
+
       await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
 
       await act(async () => {
         await result.current.handleSlashCommand('/memorycmd');
       });
 
-      expect(mockOpenMemoryDialog).toHaveBeenCalled();
+      expect(actions.openMemoryDialog).toHaveBeenCalled();
     });
 
     it('should pass interactive execution mode to command actions', async () => {
@@ -1430,6 +1686,7 @@ describe('useSlashCommandProcessor', () => {
         useSlashCommandProcessor(
           mockConfig,
           mockSettings,
+          [], // mock history array
           mockAddItem,
           mockClearItems,
           mockLoadHistory,
@@ -1450,6 +1707,147 @@ describe('useSlashCommandProcessor', () => {
       unmount();
 
       expect(abortSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('auto-refreshes extension content changes after debounce', async () => {
+      const extensionRefreshState = new ExtensionRefreshState();
+      const result = setupProcessorHook(
+        [],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        extensionRefreshState,
+      );
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+
+      act(() => {
+        extensionRefreshState.markExtensionContentChanged('content changed');
+      });
+
+      await waitFor(() => {
+        expect(refreshExtensionContentRuntime).toHaveBeenCalledOnce();
+      });
+      expect(refreshExtensionContentRuntime).toHaveBeenCalledWith({
+        config: mockConfig,
+        reloadCommands: expect.any(Function),
+      });
+    });
+
+    it('shows an error when extension content auto-refresh fails', async () => {
+      vi.mocked(refreshExtensionContentRuntime).mockRejectedValueOnce(
+        new Error('refresh failed'),
+      );
+      const extensionRefreshState = new ExtensionRefreshState();
+      const result = setupProcessorHook(
+        [],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        extensionRefreshState,
+      );
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+
+      act(() => {
+        extensionRefreshState.markExtensionContentChanged('content changed');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          {
+            type: MessageType.ERROR,
+            text: 'Failed to refresh extension content: refresh failed. Run /reload-plugins to apply updates.',
+          },
+          expect.any(Number),
+        );
+      });
+    });
+
+    it('skips content auto-refresh while package reload is needed', async () => {
+      const extensionRefreshState = new ExtensionRefreshState();
+      const result = setupProcessorHook(
+        [],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        extensionRefreshState,
+      );
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+
+      act(() => {
+        extensionRefreshState.markExtensionsChanged('manifest changed');
+        extensionRefreshState.markExtensionContentChanged('content changed');
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 350));
+
+      expect(refreshExtensionContentRuntime).not.toHaveBeenCalled();
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Extensions changed on disk. Run /reload-plugins to apply updates.',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('shows a retry message when extension reload fails', async () => {
+      const extensionRefreshState = new ExtensionRefreshState();
+      const result = setupProcessorHook(
+        [],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        extensionRefreshState,
+      );
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+
+      act(() => {
+        extensionRefreshState.markExtensionsReloadFailed();
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Extension reload did not complete. Run /reload-plugins to try again.',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('cancels pending content auto-refresh when manual reload starts', async () => {
+      const extensionRefreshState = new ExtensionRefreshState();
+      const result = setupProcessorHook(
+        [],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        extensionRefreshState,
+      );
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+
+      act(() => {
+        extensionRefreshState.markExtensionContentChanged('content changed');
+        extensionRefreshState.notifyExtensionsReloadStarted();
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 350));
+
+      expect(refreshExtensionContentRuntime).not.toHaveBeenCalled();
     });
 
     it('should reload commands when SkillManager fires a change event', async () => {
@@ -1481,6 +1879,7 @@ describe('useSlashCommandProcessor', () => {
           useSlashCommandProcessor(
             mockConfig,
             mockSettings,
+            [], // mock history array
             mockAddItem,
             mockClearItems,
             mockLoadHistory,
@@ -1547,6 +1946,7 @@ describe('useSlashCommandProcessor', () => {
           useSlashCommandProcessor(
             mockConfig,
             mockSettings,
+            [], // mock history array
             mockAddItem,
             mockClearItems,
             mockLoadHistory,
@@ -1617,6 +2017,7 @@ describe('useSlashCommandProcessor', () => {
             return useSlashCommandProcessor(
               mockConfig,
               mockSettings,
+              [], // mock history array
               mockAddItem,
               mockClearItems,
               mockLoadHistory,
@@ -1676,6 +2077,7 @@ describe('useSlashCommandProcessor', () => {
           useSlashCommandProcessor(
             mockConfig,
             mockSettings,
+            [], // mock history array
             mockAddItem,
             mockClearItems,
             mockLoadHistory,
@@ -1750,6 +2152,7 @@ describe('useSlashCommandProcessor', () => {
     beforeEach(() => {
       mockCommandAction.mockClear();
       vi.mocked(logSlashCommand).mockClear();
+      vi.mocked(recordSkillInvocation).mockClear();
     });
 
     it('should log a simple slash command', async () => {
@@ -1834,6 +2237,156 @@ describe('useSlashCommandProcessor', () => {
           command: 'logalias',
         }),
       );
+    });
+
+    it('records successful skill slash commands when they submit a prompt', async () => {
+      const skillCmd = createTestCommand(
+        {
+          name: 'review-skill',
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'skill body' }],
+          }),
+        },
+        CommandKind.SKILL,
+      );
+      const result = setupProcessorHook([skillCmd]);
+      await waitFor(() =>
+        expect(result.current.slashCommands.length).toBeGreaterThan(0),
+      );
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/review-skill');
+      });
+
+      expect(recordSkillInvocation).toHaveBeenCalledWith(mockConfig, {
+        skillName: 'review-skill',
+        success: true,
+      });
+    });
+
+    it('records failed skill slash commands when the action throws', async () => {
+      const skillCmd = createTestCommand(
+        {
+          name: 'review-skill',
+          action: vi.fn().mockRejectedValue(new Error('skill failed')),
+        },
+        CommandKind.SKILL,
+      );
+      const result = setupProcessorHook([skillCmd]);
+      await waitFor(() =>
+        expect(result.current.slashCommands.length).toBeGreaterThan(0),
+      );
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/review-skill');
+      });
+
+      expect(recordSkillInvocation).toHaveBeenCalledWith(mockConfig, {
+        skillName: 'review-skill',
+        success: false,
+      });
+    });
+
+    it('records blocked skill slash commands as failures', async () => {
+      mockFireUserPromptExpansionEvent.mockResolvedValue({
+        getBlockingError: () => ({
+          blocked: true,
+          reason: 'Blocked by policy',
+        }),
+        shouldStopExecution: () => false,
+      });
+      const skillCmd = createTestCommand(
+        {
+          name: 'review-skill',
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'skill body' }],
+          }),
+        },
+        CommandKind.SKILL,
+      );
+      const result = setupProcessorHook([skillCmd]);
+      await waitFor(() =>
+        expect(result.current.slashCommands.length).toBeGreaterThan(0),
+      );
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/review-skill');
+      });
+
+      expect(recordSkillInvocation).toHaveBeenCalledWith(mockConfig, {
+        skillName: 'review-skill',
+        success: false,
+      });
+    });
+
+    it('records confirmed skill slash commands only once', async () => {
+      const action = vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: 'confirm_action',
+          prompt: 'Run skill?',
+          originalInvocation: { raw: '/review-skill' },
+        } as ConfirmActionReturn)
+        .mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'skill body' }],
+        });
+      const skillCmd = createTestCommand(
+        {
+          name: 'review-skill',
+          action,
+        },
+        CommandKind.SKILL,
+      );
+      const result = setupProcessorHook([skillCmd]);
+      await waitFor(() =>
+        expect(result.current.slashCommands.length).toBeGreaterThan(0),
+      );
+
+      act(() => {
+        void result.current.handleSlashCommand('/review-skill');
+      });
+      await waitFor(() => {
+        expect(result.current.confirmationRequest).not.toBeNull();
+      });
+
+      await act(async () => {
+        result.current.confirmationRequest?.onConfirm(true);
+      });
+
+      await waitFor(() => {
+        expect(action).toHaveBeenCalledTimes(2);
+      });
+      expect(recordSkillInvocation).toHaveBeenCalledTimes(1);
+      expect(recordSkillInvocation).toHaveBeenCalledWith(mockConfig, {
+        skillName: 'review-skill',
+        success: true,
+      });
+    });
+
+    it('does not record non-skill submit-prompt slash commands as skills', async () => {
+      const fileCmd = createTestCommand(
+        {
+          name: 'filecmd',
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'custom prompt' }],
+          }),
+        },
+        CommandKind.FILE,
+      );
+      const result = setupProcessorHook([], [fileCmd]);
+      await waitFor(() =>
+        expect(result.current.slashCommands.length).toBeGreaterThan(0),
+      );
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/filecmd');
+      });
+
+      expect(recordSkillInvocation).not.toHaveBeenCalled();
     });
 
     it('should not log for unknown commands', async () => {
@@ -1943,6 +2496,281 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(recorder.recordSlashCommand).toHaveBeenCalled();
+    });
+  });
+
+  describe('Stacked Skill Invocations', () => {
+    const createSkillCommand = (name: string, body: string): SlashCommand =>
+      createTestCommand(
+        {
+          name,
+          description: `Skill ${name}`,
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: `SKILL_BODY:${name}:${body}` }],
+          }),
+        },
+        CommandKind.SKILL,
+      );
+
+    it('dispatches a single skill through normal path (not stacked)', async () => {
+      const skillA = createSkillCommand('feat-dev', 'feature workflow');
+      const result = setupProcessorHook([skillA]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let actionResult;
+      await act(async () => {
+        actionResult =
+          await result.current.handleSlashCommand('/feat-dev build X');
+      });
+
+      // Normal dispatch: single skill action was called
+      expect(skillA.action).toHaveBeenCalled();
+      expect(actionResult).toBeDefined();
+    });
+
+    it('combines two stacked skills into a single submit_prompt', async () => {
+      const skillA = createSkillCommand('feat-dev', 'feature workflow');
+      const skillB = createSkillCommand('e2e-testing', 'e2e workflow');
+      const result = setupProcessorHook([skillA, skillB]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand(
+          '/feat-dev /e2e-testing implement X',
+        );
+      });
+
+      expect(actionResult).toEqual({
+        type: 'submit_prompt',
+        content: expect.arrayContaining([
+          { text: 'SKILL_BODY:feat-dev:feature workflow' },
+          { text: 'SKILL_BODY:e2e-testing:e2e workflow' },
+          { text: 'implement X' },
+        ]),
+      });
+    });
+
+    it('calls recordSkillInvocation for each stacked skill', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const skillB = createSkillCommand('bugfix', 'b');
+      const result = setupProcessorHook([skillA, skillB]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+
+      recordSkillInvocationMock.mockClear();
+      await act(async () => {
+        await result.current.handleSlashCommand('/feat-dev /bugfix fix login');
+      });
+
+      const recordedNames = recordSkillInvocationMock.mock.calls.map(
+        (call: unknown[]) => (call[1] as { skillName: string }).skillName,
+      );
+      expect(recordedNames).toContain('feat-dev');
+      expect(recordedNames).toContain('bugfix');
+    });
+
+    it('appends remaining text after all skill bodies', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const skillB = createSkillCommand('review', 'b');
+      const result = setupProcessorHook([skillA, skillB]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand(
+          '/feat-dev /review please review the auth module',
+        );
+      });
+
+      const content = (actionResult as { content: Array<{ text: string }> })
+        .content;
+      const texts = content.map((c) => c.text);
+      // Remaining text should be the last element
+      expect(texts[texts.length - 1]).toBe('please review the auth module');
+    });
+
+    it('shows a warning when stacked skills exceed the maximum', async () => {
+      const skills = Array.from({ length: 6 }, (_, i) =>
+        createSkillCommand(`skill-${i}`, `body-${i}`),
+      );
+      const result = setupProcessorHook(skills);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(6));
+
+      await act(async () => {
+        await result.current.handleSlashCommand(
+          '/skill-0 /skill-1 /skill-2 /skill-3 /skill-4 /skill-5 do it',
+        );
+      });
+
+      // Should have emitted a warning message
+      const warningCalls = mockAddItem.mock.calls.filter(
+        (call: unknown[]) =>
+          (call[0] as { type: number }).type === MessageType.WARNING,
+      );
+      expect(warningCalls.length).toBeGreaterThan(0);
+      expect((warningCalls[0][0] as { text: string }).text).toContain(
+        'Only the first 5',
+      );
+    });
+
+    it('handles stacked skills with no remaining text', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const skillB = createSkillCommand('e2e-testing', 'b');
+      const result = setupProcessorHook([skillA, skillB]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand(
+          '/feat-dev /e2e-testing',
+        );
+      });
+
+      const content = (actionResult as { content: Array<{ text: string }> })
+        .content;
+      const texts = content.map((c) => c.text);
+      expect(texts).toContain('SKILL_BODY:feat-dev:a');
+      expect(texts).toContain('SKILL_BODY:e2e-testing:b');
+      // No remaining text appended
+      expect(texts).toHaveLength(2);
+    });
+
+    it('skips skill commands whose action is undefined', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const skillB = createTestCommand(
+        {
+          name: 'no-action-skill',
+          description: 'Skill without action',
+          kind: CommandKind.SKILL,
+          action: undefined,
+        },
+        CommandKind.SKILL,
+      );
+      const skillC = createSkillCommand('review', 'c');
+      const result = setupProcessorHook([skillA, skillB, skillC]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(3));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand(
+          '/feat-dev /no-action-skill /review do it',
+        );
+      });
+
+      // All three skills should be in the result, but the one without action
+      // simply doesn't contribute content
+      const content = (actionResult as { content: Array<{ text: string }> })
+        .content;
+      const texts = content.map((c) => c.text);
+      expect(texts).toContain('SKILL_BODY:feat-dev:a');
+      expect(texts).toContain('SKILL_BODY:review:c');
+    });
+
+    it('excludes non-submit_prompt results from combined content', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const skillB: SlashCommand = createTestCommand(
+        {
+          name: 'error-skill',
+          description: 'Skill that returns error',
+          action: vi.fn().mockResolvedValue({
+            type: 'message',
+            messageType: 'error',
+            content: 'Something went wrong',
+          }),
+        },
+        CommandKind.SKILL,
+      );
+      const skillC = createSkillCommand('review', 'c');
+      const result = setupProcessorHook([skillA, skillB, skillC]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(3));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand(
+          '/feat-dev /error-skill /review do it',
+        );
+      });
+
+      // Error message should be surfaced via addMessage
+      const errorCalls = mockAddItem.mock.calls.filter(
+        (call: unknown[]) =>
+          (call[0] as { type: number }).type === MessageType.ERROR,
+      );
+      expect(errorCalls.length).toBeGreaterThan(0);
+      expect((errorCalls[0][0] as { text: string }).text).toContain(
+        'Something went wrong',
+      );
+
+      // Combined content should only contain submit_prompt results
+      const content = (actionResult as { content: Array<{ text: string }> })
+        .content;
+      const texts = content.map((c) => c.text);
+      expect(texts).toContain('SKILL_BODY:feat-dev:a');
+      expect(texts).toContain('SKILL_BODY:review:c');
+      expect(texts).not.toContain('Something went wrong');
+    });
+
+    it('records telemetry success=false for non-submit_prompt skill results', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const skillB: SlashCommand = createTestCommand(
+        {
+          name: 'error-skill',
+          description: 'Skill that returns error',
+          action: vi.fn().mockResolvedValue({
+            type: 'message',
+            messageType: 'error',
+            content: 'fail',
+          }),
+        },
+        CommandKind.SKILL,
+      );
+      const result = setupProcessorHook([skillA, skillB]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+
+      recordSkillInvocationMock.mockClear();
+      await act(async () => {
+        await result.current.handleSlashCommand('/feat-dev /error-skill do it');
+      });
+
+      const records = recordSkillInvocationMock.mock.calls.map(
+        (call: unknown[]) => call[1] as { skillName: string; success: boolean },
+      );
+      const featRecord = records.find((r) => r.skillName === 'feat-dev');
+      const errorRecord = records.find((r) => r.skillName === 'error-skill');
+      expect(featRecord?.success).toBe(true);
+      expect(errorRecord?.success).toBe(false);
+    });
+
+    it('propagates modelOverride from first submit_prompt skill', async () => {
+      const skillA: SlashCommand = createTestCommand(
+        {
+          name: 'feat-dev',
+          description: 'Skill with model override',
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'SKILL_BODY:feat-dev' }],
+            modelOverride: 'gemini-2.5-pro',
+          }),
+        },
+        CommandKind.SKILL,
+      );
+      const skillB = createSkillCommand('review', 'b');
+      const result = setupProcessorHook([skillA, skillB]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand(
+          '/feat-dev /review do it',
+        );
+      });
+
+      expect(actionResult).toEqual({
+        type: 'submit_prompt',
+        content: expect.anything(),
+        modelOverride: 'gemini-2.5-pro',
+      });
     });
   });
 });

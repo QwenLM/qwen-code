@@ -30,6 +30,7 @@ import { theme } from '../../semantic-colors.js';
 import { GeminiRespondingSpinner } from '../GeminiRespondingSpinner.js';
 import { agentMessagesToHistoryItems } from './agentHistoryAdapter.js';
 import { AgentHeader } from './AgentHeader.js';
+import { buildThoughtHeadIdMap } from '../../utils/historyUtils.js';
 
 export interface AgentChatContentProps {
   /** The agent's AgentCore — the source of truth for transcript state. */
@@ -198,6 +199,11 @@ export const AgentChatContent = ({
   const committedItems = allItems.slice(0, splitIndex);
   const pendingItems = allItems.slice(splitIndex);
 
+  const thoughtHeadIdByItem = useMemo(
+    () => buildThoughtHeadIdMap(allItems),
+    [allItems],
+  );
+
   const agentWorkingDir = core.runtimeContext.getTargetDir() ?? '';
   // Cache the branch — it won't change during the agent's lifetime and
   // getGitBranch uses synchronous execSync which blocks the render loop.
@@ -232,6 +238,7 @@ export const AgentChatContent = ({
               isPending={false}
               terminalWidth={terminalWidth}
               mainAreaWidth={contentWidth}
+              thoughtHeadId={thoughtHeadIdByItem.get(item)}
             />
           )),
         ]}

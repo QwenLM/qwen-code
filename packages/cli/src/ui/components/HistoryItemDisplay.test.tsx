@@ -15,13 +15,22 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 import { renderWithProviders } from '../../test-utils/render.js';
+import { LoadedSettings } from '../../config/settings.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
-import { CompactModeProvider } from '../contexts/CompactModeContext.js';
+import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
 
 // Mock child components
 vi.mock('./messages/ToolGroupMessage.js', () => ({
   ToolGroupMessage: vi.fn(() => <div />),
 }));
+
+vi.mock('../hooks/useMouseEvents.js', () => ({
+  useMouseEvents: vi.fn(),
+}));
+
+import { useMouseEvents } from '../hooks/useMouseEvents.js';
+
+import { toggleKeyHint } from './messages/ConversationMessages.js';
 
 describe('<HistoryItemDisplay />', () => {
   const mockConfig = {
@@ -71,7 +80,7 @@ describe('<HistoryItemDisplay />', () => {
 
     const output = lastFrame() ?? '';
     expect(output.startsWith('\n')).toBe(true);
-    expect(output).toContain('✦ Hello');
+    expect(output).toContain('◆ Hello');
   });
 
   it('renders tool summaries without a leading spacer row', () => {
@@ -88,6 +97,20 @@ describe('<HistoryItemDisplay />', () => {
     const output = lastFrame() ?? '';
     expect(output.startsWith('\n')).toBe(false);
     expect(output).toContain('Read txt files');
+  });
+
+  it('renders the dim ◎ notice for "vision_notice" type', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: MessageType.VISION_NOTICE,
+      text: 'Converted 1 image(s) to text via vm.',
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay {...baseItem} item={item} />,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('◎');
+    expect(output).toContain('Converted 1 image(s) to text via vm.');
   });
 
   it('renders StatsDisplay for "stats" type', () => {
@@ -158,6 +181,21 @@ describe('<HistoryItemDisplay />', () => {
     );
     expect(lastFrame()).toContain(
       'No tool calls have been made in this session.',
+    );
+  });
+
+  it('renders SkillStatsDisplay for "skill_stats" type', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: 'skill_stats',
+    };
+    const { lastFrame } = renderWithProviders(
+      <SessionStatsProvider>
+        <HistoryItemDisplay {...baseItem} item={item} />
+      </SessionStatsProvider>,
+    );
+    expect(lastFrame()).toContain(
+      'No skill calls have been made in this session.',
     );
   });
 
@@ -336,7 +374,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toContain('●');
   });
 
-  it('renders committed thinking text in full transcript mode', () => {
+  it('renders committed thinking collapsed by default', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'gemini_thought',
@@ -345,9 +383,73 @@ describe('<HistoryItemDisplay />', () => {
     };
 
     const { lastFrame } = renderWithProviders(
-      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
+      <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('Thought for');
+    expect(output).toContain(`${toggleKeyHint} to expand`);
+    expect(output).not.toContain('Inspecting the repository');
+  });
+
+  it('renders committed thinking continuations hidden by default', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought_content',
+      text: 'Continuing the reasoning',
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />,
+    );
+
+    expect(lastFrame()).not.toContain('Continuing the reasoning');
+  });
+
+  it('renders committed thinking expanded when ThoughtExpandedProvider is true', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought',
+      text: 'Inspecting the repository',
+      durationMs: 1200,
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ThoughtExpandedProvider
+        value={{
+          allExpanded: true,
+          expandedHeadIds: new Set<number>(),
+          toggle: () => {},
+        }}
+      >
         <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
-      </CompactModeProvider>,
+      </ThoughtExpandedProvider>,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('Thought for');
+    expect(output).toContain(`${toggleKeyHint} to collapse`);
+    expect(output).toContain('Inspecting the repository');
+  });
+
+  it('fullDetail forces a committed thought expanded even when context/prop are collapsed', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought',
+      text: 'Inspecting the repository',
+      durationMs: 1200,
+    };
+
+    // No ThoughtExpandedProvider (context defaults to false) and thoughtExpanded
+    // is not passed — fullDetail alone must win and show the full text. This is
+    // the transcript's forced-expansion path.
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay
+        item={item}
+        terminalWidth={100}
+        isPending={false}
+        fullDetail
+      />,
     );
 
     const output = lastFrame() ?? '';
@@ -355,55 +457,140 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).toContain('Inspecting the repository');
   });
 
-  it('renders committed thinking continuations in full transcript mode', () => {
+  it('forwards fullDetail to ToolGroupMessage for tool_group items', () => {
+    vi.mocked(ToolGroupMessage).mockClear();
     const item: HistoryItem = {
       id: 1,
-      type: 'gemini_thought_content',
-      text: 'Continuing the reasoning',
+      type: 'tool_group',
+      tools: [
+        {
+          callId: '123',
+          name: 'run_shell_command',
+          description: 'Run a shell command',
+          resultDisplay: 'done',
+          status: ToolCallStatus.Success,
+          confirmationDetails: undefined,
+        },
+      ],
     };
 
-    const { lastFrame } = renderWithProviders(
-      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
-        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
-      </CompactModeProvider>,
+    renderWithProviders(
+      <HistoryItemDisplay
+        item={item}
+        terminalWidth={80}
+        isPending={false}
+        fullDetail
+      />,
     );
 
-    expect(lastFrame()).toContain('Continuing the reasoning');
+    const passedProps = vi.mocked(ToolGroupMessage).mock.calls[0][0];
+    expect(passedProps.fullDetail).toBe(true);
   });
 
-  it('keeps committed thinking collapsed in compact mode', () => {
-    const item: HistoryItem = {
+  describe('showTimestamps', () => {
+    const timestampItem: HistoryItem = {
+      ...baseItem,
+      type: 'gemini',
+      text: 'Hello from assistant',
+      timestamp: new Date('2026-01-15T14:30:45').getTime(),
+    };
+
+    const makeTimestampSettings = () =>
+      new LoadedSettings(
+        { path: '', settings: {}, originalSettings: {} },
+        { path: '', settings: {}, originalSettings: {} },
+        {
+          path: '',
+          settings: { output: { showTimestamps: true } },
+          originalSettings: {},
+        },
+        { path: '', settings: {}, originalSettings: {} },
+        true,
+        new Set(),
+      );
+
+    it('does not render timestamp when showTimestamps is disabled', () => {
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          {...baseItem}
+          item={timestampItem}
+          isPending={false}
+        />,
+      );
+      expect(lastFrame()).not.toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+    });
+
+    it('renders [HH:MM:SS] timestamp when showTimestamps is enabled', () => {
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          {...baseItem}
+          item={timestampItem}
+          isPending={false}
+        />,
+        { settings: makeTimestampSettings() },
+      );
+      expect(lastFrame()).toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+    });
+
+    it('renders timestamp even when isPending is true (streaming)', () => {
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          {...baseItem}
+          item={timestampItem}
+          isPending={true}
+        />,
+        { settings: makeTimestampSettings() },
+      );
+      expect(lastFrame()).toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+    });
+
+    it('does not render timestamp when timestamp field is missing', () => {
+      const noTimestampItem: HistoryItem = {
+        id: 1,
+        type: 'gemini',
+        text: 'Hello',
+      };
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          {...baseItem}
+          item={noTimestampItem}
+          isPending={false}
+        />,
+        { settings: makeTimestampSettings() },
+      );
+      expect(lastFrame()).not.toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+    });
+  });
+
+  describe('thinking-block mouse tracking is VP-gated (non-VP scroll fix)', () => {
+    // A collapsed thinking block arms a click-to-expand mouse handler. The
+    // VP-gating itself lives in useMouseEvents (covered by its own test); here
+    // we pin the contract that the thinking block subscribes WITHOUT
+    // `bypassVpGate`, i.e. it is subject to the gate — so in non-VP it never
+    // turns on SGR mouse tracking and native terminal scrollback survives.
+    // (Alt+T still expands the block in non-VP.)
+    const thoughtItem: HistoryItem = {
       id: 1,
       type: 'gemini_thought',
       text: 'Inspecting the repository',
       durationMs: 1200,
     };
 
-    const { lastFrame } = renderWithProviders(
-      <CompactModeProvider value={{ compactMode: true, compactInline: false }}>
-        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
-      </CompactModeProvider>,
-    );
-
-    const output = lastFrame() ?? '';
-    expect(output).toContain('Thought for');
-    expect(output).toContain('ctrl+o to expand');
-    expect(output).not.toContain('Inspecting the repository');
-  });
-
-  it('keeps committed thinking continuations hidden in compact mode', () => {
-    const item: HistoryItem = {
-      id: 1,
-      type: 'gemini_thought_content',
-      text: 'Continuing the reasoning',
-    };
-
-    const { lastFrame } = renderWithProviders(
-      <CompactModeProvider value={{ compactMode: true, compactInline: false }}>
-        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
-      </CompactModeProvider>,
-    );
-
-    expect(lastFrame()).not.toContain('Continuing the reasoning');
+    it('subscribes the click handler without bypassVpGate (stays VP-gated)', () => {
+      vi.mocked(useMouseEvents).mockClear();
+      renderWithProviders(
+        <HistoryItemDisplay
+          item={thoughtItem}
+          terminalWidth={100}
+          isPending={false}
+        />,
+      );
+      expect(vi.mocked(useMouseEvents)).toHaveBeenCalled();
+      const opts = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1];
+      // Collapsed thought → the handler is "active", but it must NOT bypass the
+      // VP gate, so useMouseEvents only arms it in VP mode.
+      expect(opts?.isActive).toBe(true);
+      expect(opts?.bypassVpGate ?? false).toBe(false);
+    });
   });
 });

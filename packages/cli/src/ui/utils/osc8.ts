@@ -108,6 +108,15 @@ export function isSafeOscScheme(url: string): boolean {
   return SAFE_OSC8_SCHEMES.has(match[1]!.toLowerCase());
 }
 
+function shouldForceHyperlinks(value: string): boolean {
+  if (value.length === 0) return true;
+
+  const trimmed = value.trim();
+  if (!/^[+-]?\d+$/.test(trimmed)) return false;
+
+  return Number(trimmed) !== 0;
+}
+
 interface ParsedVersion {
   major: number;
   minor: number;
@@ -173,8 +182,7 @@ export function supportsHyperlinks(
   // enables, `0` disables.
   const force = env['FORCE_HYPERLINK'];
   if (force !== undefined) {
-    if (force.length === 0) return true;
-    return parseInt(force, 10) !== 0;
+    return shouldForceHyperlinks(force);
   }
 
   if (env['CI']) return false;

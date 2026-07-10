@@ -40,7 +40,10 @@ import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
   checkForExtensionUpdate,
   cloneFromGit,
+  downloadFromArchiveUrl,
   downloadFromGitHubRelease,
+  extractArchiveFile,
+  isSupportedArchivePath,
   parseGitHubRepoForReleases,
 } from './github.js';
 import { downloadFromNpmRegistry } from './npm.js';
@@ -48,10 +51,21 @@ import { redactUrlCredentials } from './redaction.js';
 import type { LoadExtensionContext } from './variableSchema.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
 import {
-  isGeminiExtensionConfig,
-  convertGeminiExtensionPackage,
-} from './gemini-converter.js';
-import { convertClaudePluginPackage } from './claude-converter.js';
+  ExtensionPreferencesStore,
+  type ExtensionScope,
+} from './extensionPreferences.js';
+import {
+  SourceRegistryStore,
+  discoverPlugins,
+  parseExtensionSourceType,
+  type ExtensionSource,
+  type DiscoveredPlugin,
+} from './sourceRegistry.js';
+import {
+  loadMarketplaceConfigFromSource,
+  parseInstallSource,
+} from './marketplace.js';
+import { convertGeminiOrClaudeExtension } from './extension-converter.js';
 import { glob } from 'glob';
 import { createHash } from 'node:crypto';
 import { ExtensionStorage } from './storage.js';
@@ -84,6 +98,7 @@ import {
 import { loadSkillsFromDir } from '../skills/skill-load.js';
 import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { refreshExtensionRuntime } from './extension-runtime-refresh.js';
 
 const debugLogger = createDebugLogger('EXTENSIONS');
 
@@ -201,6 +216,14 @@ export interface ExtensionManagerOptions {
   ) => Promise<string>;
 }
 
+export interface ExtensionMutationEvent {
+  id: number;
+  phase: 'start' | 'end';
+  operation: string;
+}
+
+export type ExtensionMutationListener = (event: ExtensionMutationEvent) => void;
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -281,41 +304,23 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
   }
 }
 
-async function convertGeminiOrClaudeExtension(
-  extensionDir: string,
-  pluginName?: string,
-): Promise<{ extensionDir: string; originSource: ExtensionOriginSource }> {
-  let newExtensionDir = extensionDir;
-  let originSource: ExtensionOriginSource = 'QwenCode';
-  const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
-  if (fs.existsSync(configFilePath)) {
-    newExtensionDir = extensionDir;
-  } else if (isGeminiExtensionConfig(extensionDir)) {
-    newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
-      .convertedDir;
-    originSource = 'Gemini';
-  } else if (pluginName) {
-    newExtensionDir = (
-      await convertClaudePluginPackage(extensionDir, pluginName)
-    ).convertedDir;
-    originSource = 'Claude';
-  }
-  // Claude plugin conversion not yet implemented
-  return { extensionDir: newExtensionDir, originSource };
-}
-
 // ============================================================================
 // ExtensionManager Class
 // ============================================================================
 
 export class ExtensionManager {
   private extensionCache: Map<string, Extension> | null = null;
+  private readonly mutationListeners = new Set<ExtensionMutationListener>();
+  private nextMutationId = 0;
 
   // Enablement configuration (directly implemented)
   private readonly configDir: string;
   private readonly configFilePath: string;
   private readonly enabledExtensionNamesOverride: string[];
   private readonly workspaceDir: string;
+  private readonly preferencesStore: ExtensionPreferencesStore;
+  private readonly sourceRegistryStore: SourceRegistryStore;
+  private discoverCache: DiscoveredPlugin[] | null = null;
 
   private config?: Config;
   private telemetrySettings?: TelemetrySettings;
@@ -337,6 +342,14 @@ export class ExtensionManager {
     this.configFilePath = path.join(
       this.configDir,
       'extension-enablement.json',
+    );
+    this.preferencesStore = new ExtensionPreferencesStore(
+      path.join(this.configDir, 'extension-preferences.json'),
+    );
+    this.sourceRegistryStore = new SourceRegistryStore(
+      // Keep the on-disk filename as marketplaces.json for backward
+      // compatibility with sources added before the source/* rename.
+      path.join(this.configDir, 'marketplaces.json'),
     );
     this.requestSetting = options.requestSetting;
     this.requestChoicePlugin =
@@ -369,6 +382,34 @@ export class ExtensionManager {
     ) => Promise<string>,
   ): void {
     this.requestChoicePlugin = requestChoicePlugin;
+  }
+
+  addMutationListener(listener: ExtensionMutationListener): () => void {
+    this.mutationListeners.add(listener);
+    return () => {
+      this.mutationListeners.delete(listener);
+    };
+  }
+
+  private beginMutation(operation: string): () => void {
+    const id = ++this.nextMutationId;
+    this.emitMutation({ id, phase: 'start', operation });
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      this.emitMutation({ id, phase: 'end', operation });
+    };
+  }
+
+  private emitMutation(event: ExtensionMutationEvent): void {
+    for (const listener of this.mutationListeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        debugLogger.warn('Extension mutation listener failed:', error);
+      }
+    }
   }
 
   // ==========================================================================
@@ -447,13 +488,19 @@ export class ExtensionManager {
     if (!extension) {
       throw new Error(`Extension with name ${name} does not exist.`);
     }
-    const scopePath =
-      scope === SettingScope.Workspace ? currentDir : os.homedir();
-    this.enableByPath(name, true, scopePath);
-    const config = getTelemetryConfig(currentDir, this.telemetrySettings);
-    logExtensionEnable(config, new ExtensionEnableEvent(name, scope));
-    extension.isActive = true;
-    await this.refreshTools();
+
+    const endMutation = this.beginMutation('enableExtension');
+    try {
+      const scopePath =
+        scope === SettingScope.Workspace ? currentDir : os.homedir();
+      this.enableByPath(name, true, scopePath);
+      const config = getTelemetryConfig(currentDir, this.telemetrySettings);
+      logExtensionEnable(config, new ExtensionEnableEvent(name, scope));
+      extension.isActive = true;
+      await this.refreshTools();
+    } finally {
+      endMutation();
+    }
   }
 
   /**
@@ -478,12 +525,18 @@ export class ExtensionManager {
     if (!extension) {
       throw new Error(`Extension with name ${name} does not exist.`);
     }
-    const scopePath =
-      scope === SettingScope.Workspace ? currentDir : os.homedir();
-    this.disableByPath(name, true, scopePath);
-    logExtensionDisable(config, new ExtensionDisableEvent(name, scope));
-    extension.isActive = false;
-    await this.refreshTools();
+
+    const endMutation = this.beginMutation('disableExtension');
+    try {
+      const scopePath =
+        scope === SettingScope.Workspace ? currentDir : os.homedir();
+      this.disableByPath(name, true, scopePath);
+      logExtensionDisable(config, new ExtensionDisableEvent(name, scope));
+      extension.isActive = false;
+      await this.refreshTools();
+    } finally {
+      endMutation();
+    }
   }
 
   /**
@@ -495,6 +548,181 @@ export class ExtensionManager {
       delete config[extensionName];
       this.writeEnablementConfig(config);
     }
+  }
+
+  // ==========================================================================
+  // Favorites & scope preferences (Installed view grouping)
+  // ==========================================================================
+
+  isFavorite(name: string): boolean {
+    return this.preferencesStore.isFavorite(name);
+  }
+
+  getFavorites(): string[] {
+    return this.preferencesStore.getFavorites();
+  }
+
+  /** Toggles favorite state for an extension/MCP server; returns new state. */
+  toggleFavorite(name: string): boolean {
+    return this.preferencesStore.toggleFavorite(name);
+  }
+
+  getExtensionScope(name: string): ExtensionScope | undefined {
+    return this.preferencesStore.getScope(name);
+  }
+
+  getExtensionScopes(): Record<string, ExtensionScope> {
+    return this.preferencesStore.getScopes();
+  }
+
+  setExtensionScope(name: string, scope: ExtensionScope): void {
+    const endMutation = this.beginMutation('setExtensionScope');
+    try {
+      this.preferencesStore.setScope(name, scope);
+    } finally {
+      endMutation();
+    }
+  }
+
+  /** MCP servers individually disabled inside the given extension. */
+  getDisabledMcpServers(extensionName: string): string[] {
+    return this.preferencesStore.getDisabledMcpServers(extensionName);
+  }
+
+  setMcpServerDisabled(
+    extensionName: string,
+    serverName: string,
+    disabled: boolean,
+  ): void {
+    const endMutation = this.beginMutation('setMcpServerDisabled');
+    try {
+      this.preferencesStore.setMcpServerDisabled(
+        extensionName,
+        serverName,
+        disabled,
+      );
+    } finally {
+      endMutation();
+    }
+  }
+
+  // ==========================================================================
+  // Marketplace registry & discovery
+  // ==========================================================================
+
+  getSources(): ExtensionSource[] {
+    return this.sourceRegistryStore.read();
+  }
+
+  /**
+   * Adds a marketplace source. Loads the marketplace config to resolve a
+   * human-readable name (falling back to the raw source). Throws if no
+   * marketplace config can be resolved from the source.
+   */
+  async addSource(source: string): Promise<ExtensionSource> {
+    const trimmed = source.trim();
+    if (!trimmed) {
+      throw new Error('Marketplace source cannot be empty.');
+    }
+    const config = await loadMarketplaceConfigFromSource(trimmed);
+    if (!config) {
+      // A "marketplace" is a Claude-format collection (.claude-plugin/
+      // marketplace.json). A single extension repo (Gemini/Claude/git/npm) is
+      // not a marketplace — guide the user to install it directly instead.
+      let isInstallableExtension = false;
+      try {
+        await parseInstallSource(trimmed);
+        isInstallableExtension = true;
+      } catch {
+        // Not a recognizable install source either.
+      }
+      const redacted = redactUrlCredentials(trimmed);
+      if (isInstallableExtension) {
+        throw new Error(
+          `"${redacted}" looks like a single extension, not a marketplace. ` +
+            `Install it directly with: /extensions install ${redacted}`,
+        );
+      }
+      throw new Error(
+        `No marketplace found at "${redacted}". ` +
+          `Expected a .claude-plugin/marketplace.json.`,
+      );
+    }
+
+    const endMutation = this.beginMutation('addSource');
+    try {
+      const now = new Date().toISOString();
+      const entry: ExtensionSource = {
+        name: config.name || trimmed,
+        source: trimmed,
+        type: parseExtensionSourceType(trimmed),
+        addedAt: now,
+        lastUpdatedAt: now,
+      };
+      this.sourceRegistryStore.add(entry);
+      this.discoverCache = null; // sources changed -> refetch on next discover
+      return entry;
+    } finally {
+      endMutation();
+    }
+  }
+
+  removeSource(name: string): boolean {
+    const endMutation = this.beginMutation('removeSource');
+    try {
+      const removed = this.sourceRegistryStore.remove(name);
+      if (removed) {
+        this.discoverCache = null;
+      }
+      return removed;
+    } finally {
+      endMutation();
+    }
+  }
+
+  /**
+   * Records a fresh "last updated" timestamp for a marketplace and invalidates
+   * the discovery cache so the next discover re-fetches it.
+   */
+  markSourceUpdated(name: string): ExtensionSource | undefined {
+    const entry = this.getSources().find((m) => m.name === name);
+    if (!entry) {
+      return undefined;
+    }
+    const updated: ExtensionSource = {
+      ...entry,
+      lastUpdatedAt: new Date().toISOString(),
+    };
+    this.sourceRegistryStore.add(updated); // add() replaces by name
+    this.discoverCache = null;
+    return updated;
+  }
+
+  loadSource(source: string): Promise<ClaudeMarketplaceConfig | null> {
+    return loadMarketplaceConfigFromSource(source);
+  }
+
+  /**
+   * Discovers all installable plugins across configured sources, marking
+   * which are already installed. The fetched listing is cached for the session;
+   * pass `{ refresh: true }` to force a re-fetch. The cheap `installed` flags are
+   * always recomputed against the current install state.
+   */
+  async discoverPlugins(options?: {
+    refresh?: boolean;
+  }): Promise<DiscoveredPlugin[]> {
+    const installedNames = new Set(
+      this.getLoadedExtensions().map((ext) => ext.name),
+    );
+    if (this.discoverCache && !options?.refresh) {
+      return this.discoverCache.map((plugin) => ({
+        ...plugin,
+        installed: installedNames.has(plugin.name),
+      }));
+    }
+    const result = await discoverPlugins(this.getSources(), installedNames);
+    this.discoverCache = result;
+    return result;
   }
 
   private enableByPath(
@@ -556,7 +784,6 @@ export class ExtensionManager {
    * Refreshes the extension cache from disk.
    */
   async refreshCache(options?: { names?: string[] }): Promise<void> {
-    this.extensionCache = new Map<string, Extension>();
     const requestedNames = options?.names?.filter(Boolean) ?? [];
     let extensions: Extension[];
     if (requestedNames.length > 0) {
@@ -572,9 +799,11 @@ export class ExtensionManager {
         this.workspaceDir,
       );
     }
+    const nextCache = new Map<string, Extension>();
     extensions.forEach((extension) => {
-      this.extensionCache!.set(extension.name, extension);
+      nextCache.set(extension.name, extension);
     });
+    this.extensionCache = nextCache;
   }
 
   getLoadedExtensions(): Extension[] {
@@ -874,7 +1103,10 @@ export class ExtensionManager {
     const isUpdate = !!previousExtensionConfig;
     let newExtensionConfig: ExtensionConfig | null = null;
     let localSourcePath: string | undefined;
+    let tempDir: string | undefined;
+    let convertedSourcePath: string | undefined;
 
+    const endMutation = this.beginMutation('installExtension');
     try {
       if (!this.isWorkspaceTrusted) {
         throw new Error(
@@ -894,8 +1126,6 @@ export class ExtensionManager {
           installMetadata.source,
         );
       }
-
-      let tempDir: string | undefined;
 
       if (
         installMetadata.originSource === 'Claude' &&
@@ -926,16 +1156,36 @@ export class ExtensionManager {
             installMetadata.releaseTag = result.tagName;
           }
         } catch (_error) {
+          // downloadFromGitHubRelease may have written a partial archive or
+          // extracted files into tempDir before failing (e.g. a repo whose
+          // latest release is a source tarball that isn't a valid extension
+          // archive). Reusing that dirty directory makes `git clone` fail with
+          // "destination path '.' already exists and is not an empty directory".
+          // Recreate a clean tempDir before falling back to a plain clone.
+          // See #6334.
+          await fs.promises.rm(tempDir, { recursive: true, force: true });
+          await fs.promises.mkdir(tempDir, { recursive: true });
           await cloneFromGit(installMetadata, tempDir);
           if (installMetadata.type === 'github-release') {
             installMetadata.type = 'git';
           }
         }
         localSourcePath = tempDir;
+      } else if (installMetadata.type === 'archive-url') {
+        tempDir = await ExtensionStorage.createTmpDir();
+        await downloadFromArchiveUrl(installMetadata, tempDir);
+        localSourcePath = tempDir;
       } else if (installMetadata.type === 'npm') {
         tempDir = await ExtensionStorage.createTmpDir();
         const result = await downloadFromNpmRegistry(installMetadata, tempDir);
         installMetadata.releaseTag = result.version;
+        localSourcePath = tempDir;
+      } else if (
+        installMetadata.type === 'local' &&
+        isSupportedArchivePath(installMetadata.source)
+      ) {
+        tempDir = await ExtensionStorage.createTmpDir();
+        await extractArchiveFile(installMetadata.source, tempDir);
         localSourcePath = tempDir;
       } else if (
         installMetadata.type === 'local' ||
@@ -947,12 +1197,16 @@ export class ExtensionManager {
       }
 
       try {
+        const sourceBeforeConversion = localSourcePath;
         const { extensionDir, originSource } =
           await convertGeminiOrClaudeExtension(
-            localSourcePath,
+            sourceBeforeConversion,
             installMetadata.pluginName,
           );
 
+        if (extensionDir !== sourceBeforeConversion) {
+          convertedSourcePath = extensionDir;
+        }
         localSourcePath = extensionDir;
         installMetadata.originSource = originSource;
 
@@ -1127,14 +1381,25 @@ export class ExtensionManager {
               'success',
             ),
           );
-          this.enableExtension(newExtensionConfig.name, SettingScope.User);
+          await this.enableExtension(
+            newExtensionConfig.name,
+            SettingScope.User,
+          );
         }
       } finally {
         if (tempDir) {
           await fs.promises.rm(tempDir, { recursive: true, force: true });
         }
+        if (convertedSourcePath && convertedSourcePath !== tempDir) {
+          await fs.promises.rm(convertedSourcePath, {
+            recursive: true,
+            force: true,
+          });
+        }
         if (
+          localSourcePath &&
           localSourcePath !== tempDir &&
+          localSourcePath !== convertedSourcePath &&
           installMetadata.type !== 'link' &&
           installMetadata.type !== 'local'
         ) {
@@ -1155,6 +1420,15 @@ export class ExtensionManager {
         } catch {
           // Ignore error
         }
+      }
+      if (tempDir) {
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+      }
+      if (convertedSourcePath && convertedSourcePath !== tempDir) {
+        await fs.promises.rm(convertedSourcePath, {
+          recursive: true,
+          force: true,
+        });
       }
       const config = newExtensionConfig ?? previousExtensionConfig;
       const extensionId = config
@@ -1184,6 +1458,8 @@ export class ExtensionManager {
         );
       }
       throw error;
+    } finally {
+      endMutation();
     }
   }
 
@@ -1195,46 +1471,52 @@ export class ExtensionManager {
     isUpdate: boolean,
     cwd?: string,
   ): Promise<void> {
-    const currentDir = cwd ?? this.workspaceDir;
-    const telemetryConfig = getTelemetryConfig(
-      currentDir,
-      this.telemetrySettings,
-    );
-    const installedExtensions = this.getLoadedExtensions();
-    const extension = installedExtensions.find(
-      (installed) =>
-        installed.config.name.toLowerCase() ===
-          extensionIdentifier.toLowerCase() ||
-        installed.installMetadata?.source.toLowerCase() ===
-          extensionIdentifier.toLowerCase(),
-    );
-    if (!extension) {
-      throw new Error(`Extension not found.`);
+    const endMutation = this.beginMutation('uninstallExtension');
+    try {
+      const currentDir = cwd ?? this.workspaceDir;
+      const telemetryConfig = getTelemetryConfig(
+        currentDir,
+        this.telemetrySettings,
+      );
+      const installedExtensions = this.getLoadedExtensions();
+      const extension = installedExtensions.find(
+        (installed) =>
+          installed.config.name.toLowerCase() ===
+            extensionIdentifier.toLowerCase() ||
+          installed.installMetadata?.source.toLowerCase() ===
+            extensionIdentifier.toLowerCase(),
+      );
+      if (!extension) {
+        throw new Error(`Extension not found.`);
+      }
+      const storage = new ExtensionStorage(
+        extension.installMetadata?.type === 'link'
+          ? extension.name
+          : path.basename(extension.path),
+      );
+
+      await fs.promises.rm(storage.getExtensionDir(), {
+        recursive: true,
+        force: true,
+      });
+
+      if (this.extensionCache) {
+        this.extensionCache.delete(extension.name);
+      }
+
+      if (isUpdate) return;
+
+      this.removeEnablementConfig(extension.name);
+      this.preferencesStore.clear(extension.name);
+      await this.refreshTools();
+
+      logExtensionUninstall(
+        telemetryConfig,
+        new ExtensionUninstallEvent(extension.name, 'success'),
+      );
+    } finally {
+      endMutation();
     }
-    const storage = new ExtensionStorage(
-      extension.installMetadata?.type === 'link'
-        ? extension.name
-        : path.basename(extension.path),
-    );
-
-    await fs.promises.rm(storage.getExtensionDir(), {
-      recursive: true,
-      force: true,
-    });
-
-    if (this.extensionCache) {
-      this.extensionCache.delete(extension.name);
-    }
-
-    if (isUpdate) return;
-
-    this.removeEnablementConfig(extension.name);
-    await this.refreshTools();
-
-    logExtensionUninstall(
-      telemetryConfig,
-      new ExtensionUninstallEvent(extension.name, 'success'),
-    );
   }
 
   async performWorkspaceExtensionMigration(
@@ -1305,10 +1587,12 @@ export class ExtensionManager {
       callback(extension.name, ExtensionUpdateState.UP_TO_DATE);
       throw new Error(`Extension is linked so does not need to be updated`);
     }
+    const endMutation = this.beginMutation('updateExtension');
     const originalVersion = extension.version;
+    let tempDir: string | undefined;
 
-    const tempDir = await ExtensionStorage.createTmpDir();
     try {
+      tempDir = await ExtensionStorage.createTmpDir();
       const previousExtensionConfig = this.loadExtensionConfig({
         extensionDir: extension.path,
       });
@@ -1344,10 +1628,15 @@ export class ExtensionManager {
         `Error updating extension, rolling back. ${getErrorMessage(e)}`,
       );
       callback(extension.name, ExtensionUpdateState.ERROR);
-      await copyExtension(tempDir, extension.path);
+      if (tempDir) {
+        await copyExtension(tempDir, extension.path);
+      }
       throw e;
     } finally {
-      await fs.promises.rm(tempDir, { recursive: true, force: true });
+      if (tempDir) {
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+      }
+      endMutation();
     }
   }
 
@@ -1377,54 +1666,8 @@ export class ExtensionManager {
     ).filter((updateInfo) => !!updateInfo);
   }
 
-  async refreshMemory(): Promise<void> {
-    if (!this.config) return;
-    // refresh mcp servers
-    await this.config.getToolRegistry().restartMcpServers();
-    // Refresh skills + subagents in parallel. Both `refreshCache` calls
-    // now resolve only after their async change-listener chain settles
-    // — for skills, that includes `SkillTool.refreshSkills()` rebuilding
-    // the model-facing tool description and updating `geminiClient`'s
-    // tool list. allSettled (rather than Promise.all) so a rejection
-    // from one leg does not cascade — the other leg's result is still
-    // applied, refreshHierarchicalMemory below still runs, and the
-    // `refreshTools` callers (`enableExtension`, etc.) don't unwind
-    // because of an unrelated transient failure.
-    const skillManager = this.config.getSkillManager();
-    const settled = await Promise.allSettled([
-      skillManager?.refreshCache(),
-      this.config.getSubagentManager().refreshCache(),
-    ]);
-    for (const result of settled) {
-      if (result.status === 'rejected') {
-        debugLogger.warn(
-          'refreshMemory: a refreshCache leg failed:',
-          result.reason,
-        );
-      }
-    }
-    // Hierarchical memory refresh is now awaited too — the previous
-    // fire-and-forget defeated the rest of the function's "wait until
-    // refresh is done" contract. Wrap in try/catch so a transient
-    // failure doesn't propagate up to `enableExtension` /
-    // `installExtension` callers, which have already mutated their
-    // `isActive`/`installed` flags by the time refreshMemory is
-    // invoked. A failed memory refresh leaves stale memory but should
-    // not back out the surrounding extension transition.
-    try {
-      await this.config.refreshHierarchicalMemory();
-    } catch (err) {
-      debugLogger.error(
-        'refreshMemory: refreshHierarchicalMemory failed:',
-        err,
-      );
-    }
-  }
-
   async refreshTools(): Promise<void> {
-    if (!this.config) return;
-    // FIXME: restart all mcp servers now, this can be optimized by only restarting changed ones at here
-    await this.refreshMemory();
+    await refreshExtensionRuntime(this.config);
   }
 }
 

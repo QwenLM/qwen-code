@@ -31,6 +31,25 @@ describe('Feishu markdown utilities', () => {
       expect(card.body.elements[0]!.content).toContain('生成中...');
     });
 
+    it('uses a custom running status label', () => {
+      const card = buildCardContent('text', {
+        isStreaming: true,
+        statusLabel: '运行中...',
+      }) as unknown as CardStructure;
+
+      expect(card.body.elements[0]!.content).toContain('运行中...');
+      expect(card.body.elements[0]!.content).not.toContain('生成中...');
+    });
+
+    it('uses a terminal status label without enabling streaming controls', () => {
+      const card = buildCardContent('text', {
+        statusLabel: '已完成',
+      }) as unknown as CardStructure;
+
+      expect(card.body.elements[0]!.content).toContain('已完成');
+      expect(card.body.elements.some((e) => e.tag === 'button')).toBe(false);
+    });
+
     it('adds stop button when showStopButton is true', () => {
       const card = buildCardContent('text', {
         showStopButton: true,
@@ -67,6 +86,22 @@ describe('Feishu markdown utilities', () => {
         (e) => e.tag === 'collapsible_panel',
       );
       expect(panel).toBeDefined();
+    });
+
+    it('keeps terminal status label visible in long collapsible content', () => {
+      const longText = 'a '.repeat(320);
+      const card = buildCardContent(longText, {
+        collapsible: true,
+        collapsibleThreshold: 500,
+        statusLabel: '已完成',
+      }) as unknown as CardStructure;
+      const panel = card.body.elements.find(
+        (e) => e.tag === 'collapsible_panel',
+      );
+
+      expect(panel).toBeDefined();
+      expect(card.body.elements[0]!.content).toContain('已完成');
+      expect(panel?.elements?.[0]?.content).not.toContain('已完成');
     });
 
     it('does not use collapsible for short content', () => {

@@ -18,8 +18,8 @@
  *
  *
  * The bridge package owns the error contract directly. The
- * 7 error classes server.ts imports + 1 each from workspaceAgents.ts
- * and workspaceMemory.ts continue to resolve through the
+ * 7 error classes server.ts imports + 1 each from workspace-agents.ts
+ * and workspace-memory.ts continue to resolve through the
  * httpAcpBridge.ts re-export shim.
  */
 
@@ -61,6 +61,46 @@ export class SessionNotFoundError extends Error {
     super(`No session with id "${sessionId}"` + (extra ? `. ${extra}` : ''));
     this.name = 'SessionNotFoundError';
     this.sessionId = sessionId;
+  }
+}
+
+export class SessionArchivedError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(`Session "${sessionId}" is archived. Unarchive it before loading.`);
+    this.name = 'SessionArchivedError';
+    this.sessionId = sessionId;
+  }
+}
+
+export class SessionConflictError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(
+      `Session "${sessionId}" exists in both active and archived directories. ` +
+        `Delete the session with POST /sessions/delete before loading.`,
+    );
+    this.name = 'SessionConflictError';
+    this.sessionId = sessionId;
+  }
+}
+
+export class SessionArchivingError extends Error {
+  readonly sessionId: string;
+  readonly lockKind: 'exclusive' | 'shared';
+
+  constructor(
+    sessionId: string,
+    lockKind: 'exclusive' | 'shared' = 'exclusive',
+  ) {
+    super(
+      `Session "${sessionId}" is being archived or unarchived; retry later.`,
+    );
+    this.name = 'SessionArchivingError';
+    this.sessionId = sessionId;
+    this.lockKind = lockKind;
   }
 }
 
@@ -119,6 +159,16 @@ export class SessionLimitExceededError extends Error {
   constructor(limit: number) {
     super(`Session limit reached (${limit})`);
     this.name = 'SessionLimitExceededError';
+    this.limit = limit;
+  }
+}
+
+export class TotalSessionLimitExceededError extends Error {
+  readonly limit: number;
+  readonly scope = 'total' as const;
+  constructor(limit: number) {
+    super(`Total session limit reached (${limit})`);
+    this.name = 'TotalSessionLimitExceededError';
     this.limit = limit;
   }
 }
@@ -498,6 +548,17 @@ export class BranchWhilePromptActiveError extends Error {
   constructor(sessionId: string) {
     super(`Cannot branch session ${sessionId}: a prompt is currently active`);
     this.name = 'BranchWhilePromptActiveError';
+    this.sessionId = sessionId;
+  }
+}
+
+export class CdWhilePromptActiveError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(
+      `Cannot change directory for session ${sessionId}: a prompt is currently active`,
+    );
+    this.name = 'CdWhilePromptActiveError';
     this.sessionId = sessionId;
   }
 }
