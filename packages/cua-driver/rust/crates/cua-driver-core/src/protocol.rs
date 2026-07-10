@@ -203,6 +203,12 @@ fn agent_instructions() -> String {
 
     let (coord_term, coord_note) = coordinate_terms(crate::coord_norm::default_normalized());
 
+    let click_hint = if crate::coord_norm::default_normalized() {
+        "issue a coordinate click or move_cursor first for a visibly gliding demo/recording."
+    } else {
+        "issue a pixel click or move_cursor first for a visibly gliding demo/recording."
+    };
+
     format!(
         r#"cua-driver: cross-platform background computer-use automation.
 
@@ -216,7 +222,7 @@ Workflow per turn:
 4. click/type_text/press_key using element_index from step 3 (+ your `session`)
 5. get_window_state(pid, window_id) again → verify the action landed
 
-Agent cursor: a per-SESSION overlay cursor visualises where a run is acting without moving the real pointer. It is shown only for a DECLARED session (pass `session`), is color-coded by the session id, and is removed by end_session or the idle-TTL. The same id over MCP, the CLI, or the raw socket drives the same cursor. set_agent_cursor_* tools hide/show/customise it. Note: a pure accessibility-action (element_index) click snaps the cursor with a brief pulse on its first action rather than a long glide, so it can be easy to miss — issue a pixel click or move_cursor first for a visibly gliding demo/recording.
+Agent cursor: a per-SESSION overlay cursor visualises where a run is acting without moving the real pointer. It is shown only for a DECLARED session (pass `session`), is color-coded by the session id, and is removed by end_session or the idle-TTL. The same id over MCP, the CLI, or the raw socket drives the same cursor. set_agent_cursor_* tools hide/show/customise it. Note: a pure accessibility-action (element_index) click snaps the cursor with a brief pulse on its first action rather than a long glide, so it can be easy to miss — {click_hint}
 
 If a `cua-driver` skill is loaded in your harness (Claude Code / Codex / OpenClaw / OpenCode dirs), prefer its detailed workflow — SKILL.md plus {platform_skill_pointer}. Install with `cua-driver skills install` if not yet present."#
     )

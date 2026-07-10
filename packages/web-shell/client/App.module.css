@@ -609,7 +609,7 @@
 
 .bottomPanels {
   position: absolute;
-  top: -50px;
+  bottom: calc(100% + var(--web-shell-bottom-panel-gap, 6px));
   right: 0;
   left: 0;
   z-index: 3;
@@ -638,7 +638,7 @@
 
 .scrollToBottomLayer {
   position: absolute;
-  top: -44px;
+  bottom: calc(100% + 10px);
   right: 0;
   left: 0;
   z-index: 3;
@@ -648,7 +648,10 @@
 }
 
 .scrollToBottomLayerWithTodos {
-  top: -94px;
+  bottom: calc(
+    100% + var(--web-shell-bottom-panel-height, 0px) +
+      var(--web-shell-bottom-panel-gap, 6px) + 8px
+  );
 }
 
 .scrollToBottomButton {

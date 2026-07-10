@@ -20,7 +20,10 @@ import type {
   BridgeEvent,
   SessionReplaySnapshot,
 } from '@qwen-code/acp-bridge/eventBus';
-import { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
+import {
+  SessionArtifactAuthorizationError,
+  SessionArtifactValidationError,
+} from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   CancelSentinelCollisionError,
   InvalidClientIdError,
@@ -398,6 +401,9 @@ class FakeBridge {
       }
     | undefined;
   lastArtifactListSessionId: string | undefined;
+  lastArtifactListContext:
+    | Parameters<HttpAcpBridge['getSessionArtifacts']>[1]
+    | undefined;
   lastRemovedArtifact:
     | {
         sessionId: string;
@@ -405,8 +411,12 @@ class FakeBridge {
         context: Parameters<HttpAcpBridge['removeSessionArtifact']>[2];
       }
     | undefined;
-  async getSessionArtifacts(sessionId: string) {
+  async getSessionArtifacts(
+    sessionId: string,
+    context: Parameters<HttpAcpBridge['getSessionArtifacts']>[1],
+  ) {
     this.lastArtifactListSessionId = sessionId;
+    this.lastArtifactListContext = context;
     return {
       v: 1,
       sessionId,
@@ -6039,6 +6049,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         },
       });
       expect(bridge.lastArtifactListSessionId).toBe('sess-1');
+      expect(bridge.lastArtifactListContext).toEqual({
+        clientId: 'client-1',
+        fromLoopback: true,
+      });
     });
 
     it('_qwen/session/artifacts/add forwards only public artifact fields', async () => {
@@ -6063,6 +6077,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           storage: 'external_url',
           url: 'https://example.test/lineage',
           metadata: { table: 'fact_orders' },
+          retention: 'ephemeral',
+          clientRetained: false,
           source: 'tool',
           trustedPublisher: true,
           clientId: 'forged-client',
@@ -6081,6 +6097,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         storage: 'external_url',
         url: 'https://example.test/lineage',
         metadata: { table: 'fact_orders' },
+        retention: 'ephemeral',
+        clientRetained: false,
       });
       const artifact = bridge.lastAddedArtifact?.artifact as
         | Record<string, unknown>
@@ -6091,6 +6109,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(artifact).not.toHaveProperty('clientId');
       expect(artifact).not.toHaveProperty('toolName');
       expect(artifact).not.toHaveProperty('hookEventName');
+      expect(bridge.lastAddedArtifact?.context).toEqual({
+        clientId: 'client-1',
+        fromLoopback: true,
+      });
     });
 
     it('_qwen/session/artifacts/add maps artifact validation errors to invalid params', async () => {
@@ -6144,7 +6166,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         jsonrpc: '2.0',
         id: 59,
         method: '_qwen/session/artifacts/remove',
-        params: { sessionId: 'sess-1', artifactId: 'artifact-1' },
+        params: {
+          sessionId: 'sess-1',
+          artifactId: 'artifact-1',
+        },
       });
       const frames = await takeFrames(await streamRes, 2);
       expect(frames[1]).toMatchObject({
@@ -6163,6 +6188,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(bridge.lastRemovedArtifact).toMatchObject({
         sessionId: 'sess-1',
         artifactId: 'artifact-1',
+        context: {
+          clientId: 'client-1',
+          fromLoopback: true,
+        },
       });
     });
 
@@ -6191,6 +6220,46 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         },
       });
       expect(bridge.lastRemovedArtifact).toBeUndefined();
+    });
+
+    it('_qwen/session/artifacts/remove maps artifact authorization errors', async () => {
+      bridge.removeSessionArtifact = async () => {
+        throw new SessionArtifactAuthorizationError(
+          'sess-1',
+          'artifact-1',
+          'client-owner',
+          'client-other',
+        );
+      };
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 61,
+        method: '_qwen/session/artifacts/remove',
+        params: { sessionId: 'sess-1', artifactId: 'artifact-1' },
+      });
+
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32600,
+          message: 'artifact artifact-1 is owned by a different client',
+          data: {
+            errorKind: 'artifact_forbidden',
+            sessionId: 'sess-1',
+            artifactId: 'artifact-1',
+          },
+        },
+      });
     });
 
     it('_qwen/session/artifacts/add holds the archive gate while mutating', async () => {
@@ -6275,7 +6344,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           artifactId,
           context,
         ) => {
-          bridge.lastRemovedArtifact = { sessionId, artifactId, context };
+          bridge.lastRemovedArtifact = {
+            sessionId,
+            artifactId,
+            context,
+          };
           removeStarted();
           await removeReleasedPromise;
           return {
