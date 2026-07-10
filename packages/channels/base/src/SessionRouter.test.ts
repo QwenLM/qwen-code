@@ -214,6 +214,12 @@ describe('SessionRouter', () => {
       expect(bridge.newSession).toHaveBeenCalledWith('/default');
     });
 
+    it('uses defaultCwd when cwd is empty', async () => {
+      const router = new SessionRouter(bridge, '/default');
+      await router.resolve('ch', 'alice', 'chat1', undefined, '');
+      expect(bridge.newSession).toHaveBeenCalledWith('/default');
+    });
+
     it('deduplicates concurrent session creation for the same route', async () => {
       let resolveNewSession!: (sessionId: string) => void;
       const newSession = vi.fn(
@@ -234,6 +240,31 @@ describe('SessionRouter', () => {
       resolveNewSession('session-1');
 
       await expect(Promise.all([first, second])).resolves.toEqual([
+        'session-1',
+        'session-1',
+      ]);
+      expect(newSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('reserves a route before synchronously entering the bridge', async () => {
+      let calls = 0;
+      let reentered = false;
+      let nested!: Promise<string>;
+      const router = new SessionRouter(mockBridge(), '/default');
+      const newSession = vi.fn(() => {
+        const sessionId = `session-${++calls}`;
+        if (!reentered) {
+          reentered = true;
+          nested = router.resolve('ch', 'alice', 'chat1');
+        }
+        return sessionId;
+      });
+      router.setBridge({ ...mockBridge(), newSession });
+
+      const first = router.resolve('ch', 'alice', 'chat1');
+      await Promise.resolve();
+
+      await expect(Promise.all([first, nested])).resolves.toEqual([
         'session-1',
         'session-1',
       ]);
@@ -964,6 +995,186 @@ describe('SessionRouter', () => {
       await router.resolve('ch', 'alice', 'chat1');
       expect(newBridge.newSession).toHaveBeenCalled();
       expect(bridge.newSession).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('lazy recovery', () => {
+    function createLazyRouter(persistPath: string, customBridge = bridge) {
+      return new SessionRouter(customBridge, '/tmp', 'user', persistPath, {
+        recoveryMode: 'lazy',
+      });
+    }
+
+    it('restores route metadata without loading daemon sessions', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      const router = createLazyRouter(persistPath);
+
+      expect(router.restoreRoutes()).toEqual({ restored: 1, dropped: 0 });
+      expect(bridge.loadSession).not.toHaveBeenCalled();
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('old-session');
+    });
+
+    it('loads a dormant route once and then reuses the live binding', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      const router = createLazyRouter(persistPath);
+      router.restoreRoutes();
+
+      await expect(router.resolve('ch', 'alice', 'chat1')).resolves.toBe(
+        'old-session',
+      );
+      await expect(router.resolve('ch', 'alice', 'chat1')).resolves.toBe(
+        'old-session',
+      );
+      expect(bridge.loadSession).toHaveBeenCalledTimes(1);
+      expect(bridge.newSession).not.toHaveBeenCalled();
+    });
+
+    it('coalesces concurrent loads for one dormant route', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      let finishLoad!: (value: string) => void;
+      const lazyBridge = {
+        ...mockBridge(),
+        loadSession: vi.fn(
+          () =>
+            new Promise<string>((resolve) => {
+              finishLoad = resolve;
+            }),
+        ),
+      } satisfies ChannelAgentBridge;
+      const router = createLazyRouter(persistPath, lazyBridge);
+      router.restoreRoutes();
+
+      const first = router.resolve('ch', 'alice', 'chat1');
+      const second = router.resolve('ch', 'alice', 'chat1');
+      await Promise.resolve();
+      finishLoad('old-session');
+
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        'old-session',
+        'old-session',
+      ]);
+      expect(lazyBridge.loadSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('replaces a route only after fallback creation succeeds', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      const lazyBridge = {
+        ...mockBridge(),
+        loadSession: vi.fn().mockRejectedValue(new Error('gone')),
+        newSession: vi.fn().mockResolvedValue('replacement-session'),
+      } satisfies ChannelAgentBridge;
+      const router = createLazyRouter(persistPath, lazyBridge);
+      router.restoreRoutes();
+
+      await expect(router.resolve('ch', 'alice', 'chat1')).resolves.toBe(
+        'replacement-session',
+      );
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({
+        'ch:alice:chat1': expect.objectContaining({
+          sessionId: 'replacement-session',
+        }),
+      });
+    });
+
+    it('retains the dormant route when load and fallback creation both fail', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      const lazyBridge = {
+        ...mockBridge(),
+        loadSession: vi.fn().mockRejectedValue(new Error('temporarily gone')),
+        newSession: vi.fn().mockRejectedValue(new Error('at capacity')),
+      } satisfies ChannelAgentBridge;
+      const router = createLazyRouter(persistPath, lazyBridge);
+      router.restoreRoutes();
+
+      await expect(router.resolve('ch', 'alice', 'chat1')).rejects.toThrow(
+        'at capacity',
+      );
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('old-session');
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({
+        'ch:alice:chat1': expect.objectContaining({ sessionId: 'old-session' }),
+      });
+    });
+
+    it('marks a dead lazy session dormant and reloads it on next resolve', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      const router = createLazyRouter(persistPath);
+      router.restoreRoutes();
+      await router.resolve('ch', 'alice', 'chat1');
+
+      expect(router.handleSessionDied('old-session')).toBe(true);
+      expect(router.hasSession('ch', 'alice', 'chat1')).toBe(true);
+      await router.resolve('ch', 'alice', 'chat1');
+
+      expect(bridge.loadSession).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not eagerly load route counts above the daemon live-session cap', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      const entries = Object.fromEntries(
+        Array.from({ length: 25 }, (_, index) => [
+          `ch:user-${index}:chat-${index}`,
+          {
+            sessionId: `old-${index}`,
+            target: {
+              channelName: 'ch',
+              senderId: `user-${index}`,
+              chatId: `chat-${index}`,
+            },
+            cwd: '/tmp',
+          },
+        ]),
+      );
+      writeFileSync(persistPath, JSON.stringify(entries));
+      const router = createLazyRouter(persistPath);
+
+      expect(router.restoreRoutes()).toEqual({ restored: 25, dropped: 0 });
+      expect(bridge.loadSession).not.toHaveBeenCalled();
+    });
+
+    it('clears a dormant route destructively', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      const router = createLazyRouter(persistPath);
+      router.restoreRoutes();
+
+      expect(router.removeSession('ch', 'alice', 'chat1')).toEqual([
+        'old-session',
+      ]);
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+      await expect(router.resolve('ch', 'alice', 'chat1')).resolves.toBe(
+        'session-1',
+      );
+      expect(bridge.loadSession).not.toHaveBeenCalled();
+    });
+
+    it('keeps eager session-death behavior as the default', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      const sessionId = await router.resolve('ch', 'alice', 'chat1');
+
+      expect(router.handleSessionDied(sessionId)).toBe(true);
+      expect(router.hasSession('ch', 'alice', 'chat1')).toBe(false);
     });
   });
 });

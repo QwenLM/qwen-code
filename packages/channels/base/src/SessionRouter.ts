@@ -21,12 +21,19 @@ interface ResolveOptions {
   routingThreadId?: string;
 }
 
+export type SessionRecoveryMode = 'eager' | 'lazy';
+
+export interface SessionRouterOptions {
+  recoveryMode?: SessionRecoveryMode;
+}
+
 export class SessionRouter {
   private toSession: Map<string, string> = new Map(); // routing key → session ID
   private toTarget: Map<string, SessionTarget> = new Map(); // session ID → target
   private toCwd: Map<string, string> = new Map(); // session ID → cwd
   private creatingSessions: Map<string, Promise<string>> = new Map();
   private sessionLoadWindows: Set<SessionLoadWindow> = new Set();
+  private readonly liveSessionIds = new Set<string>();
 
   private bridge: ChannelAgentBridge;
   private defaultCwd: string;
@@ -34,17 +41,20 @@ export class SessionRouter {
   private channelScopes: Map<string, SessionScope> = new Map();
   private channelApprovalModes: Map<string, string> = new Map();
   private persistPath: string | undefined;
+  private readonly recoveryMode: SessionRecoveryMode;
 
   constructor(
     bridge: ChannelAgentBridge,
     defaultCwd: string,
     scope: SessionScope = 'user',
     persistPath?: string,
+    options: SessionRouterOptions = {},
   ) {
     this.bridge = bridge;
     this.defaultCwd = defaultCwd;
     this.defaultScope = scope;
     this.persistPath = persistPath;
+    this.recoveryMode = options.recoveryMode ?? 'eager';
   }
 
   /** Replace the bridge instance (used after crash recovery restart). */
@@ -108,10 +118,18 @@ export class SessionRouter {
       chatId,
       options?.routingThreadId ?? threadId,
     );
-    let failedCreateWaits = 0;
+    const input = {
+      channelName,
+      senderId,
+      chatId,
+      threadId,
+      cwd: cwd || this.defaultCwd,
+      isGroup,
+    };
+    let failedWaits = 0;
     for (;;) {
       const existing = this.toSession.get(key);
-      if (existing) {
+      if (existing && this.isLive(existing)) {
         this.promoteTargetToGroup(existing, isGroup);
         return existing;
       }
@@ -122,53 +140,145 @@ export class SessionRouter {
           const sessionId = await creating;
           this.promoteTargetToGroup(sessionId, isGroup);
           return sessionId;
-        } catch (err) {
+        } catch (error) {
           if (this.creatingSessions.get(key) === creating) {
             this.creatingSessions.delete(key);
           }
-          failedCreateWaits++;
-          if (failedCreateWaits > 3) {
-            throw err;
-          }
+          failedWaits++;
+          if (failedWaits > 3) throw error;
           continue;
         }
       }
 
-      // Register the in-flight route before starting newSession(), because a
-      // bridge can emit sessionDied synchronously while creating the session.
-      const created = Promise.resolve().then(async () => {
-        const sessionCwd = cwd || this.defaultCwd;
-        const loadWindow = this.beginSessionLoad();
-        try {
-          const sessionId = await this.createLiveSession(
-            sessionCwd,
-            loadWindow,
-            key,
-            this.sessionOptions(channelName),
-          );
-          this.toSession.set(key, sessionId);
-          this.toTarget.set(sessionId, {
-            channelName,
-            senderId,
-            chatId,
-            threadId,
-            isGroup,
-          });
-          this.toCwd.set(sessionId, sessionCwd);
-          this.persist();
-          return sessionId;
-        } finally {
-          this.endSessionLoad(loadWindow);
-        }
-      });
-      this.creatingSessions.set(key, created);
+      const operation = Promise.resolve().then(() =>
+        existing
+          ? this.loadOrReplaceSession(key, existing, input)
+          : this.createAndStoreSession(key, input),
+      );
+      this.creatingSessions.set(key, operation);
       try {
-        return await created;
+        const sessionId = await operation;
+        this.promoteTargetToGroup(sessionId, isGroup);
+        return sessionId;
       } finally {
-        if (this.creatingSessions.get(key) === created) {
+        if (this.creatingSessions.get(key) === operation) {
           this.creatingSessions.delete(key);
         }
       }
+    }
+  }
+
+  private isLive(sessionId: string): boolean {
+    return this.recoveryMode === 'eager' || this.liveSessionIds.has(sessionId);
+  }
+
+  private async createAndStoreSession(
+    key: string,
+    input: {
+      channelName: string;
+      senderId: string;
+      chatId: string;
+      threadId?: string;
+      cwd: string;
+      isGroup?: boolean;
+    },
+  ): Promise<string> {
+    const loadWindow = this.beginSessionLoad();
+    try {
+      const sessionId = await this.createLiveSession(
+        input.cwd,
+        loadWindow,
+        key,
+        this.sessionOptions(input.channelName),
+      );
+      this.toSession.set(key, sessionId);
+      this.toTarget.set(sessionId, {
+        channelName: input.channelName,
+        senderId: input.senderId,
+        chatId: input.chatId,
+        threadId: input.threadId,
+        isGroup: input.isGroup,
+      });
+      this.toCwd.set(sessionId, input.cwd);
+      this.liveSessionIds.add(sessionId);
+      this.persist();
+      return sessionId;
+    } finally {
+      this.endSessionLoad(loadWindow);
+    }
+  }
+
+  private async loadOrReplaceSession(
+    key: string,
+    savedSessionId: string,
+    input: {
+      channelName: string;
+      senderId: string;
+      chatId: string;
+      threadId?: string;
+      cwd: string;
+      isGroup?: boolean;
+    },
+  ): Promise<string> {
+    const savedCwd = this.toCwd.get(savedSessionId) ?? input.cwd;
+    const loadWindow = this.beginSessionLoad();
+    try {
+      try {
+        const loadedSessionId = await this.bridge.loadSession(
+          savedSessionId,
+          savedCwd,
+          this.sessionOptions(input.channelName),
+        );
+        if (
+          typeof loadedSessionId !== 'string' ||
+          loadedSessionId.length === 0 ||
+          loadWindow.delete(loadedSessionId)
+        ) {
+          throw new Error('Invalid or dead restored session ID');
+        }
+        if (loadedSessionId !== savedSessionId) {
+          const target = this.toTarget.get(savedSessionId);
+          this.deleteByKey(key);
+          this.toSession.set(key, loadedSessionId);
+          if (target) this.toTarget.set(loadedSessionId, target);
+          this.toCwd.set(loadedSessionId, savedCwd);
+          this.persist();
+        }
+        this.liveSessionIds.add(loadedSessionId);
+        return loadedSessionId;
+      } catch (loadError) {
+        try {
+          const replacement = await this.createLiveSession(
+            input.cwd,
+            loadWindow,
+            key,
+            this.sessionOptions(input.channelName),
+          );
+          this.deleteByKey(key);
+          this.toSession.set(key, replacement);
+          this.toTarget.set(replacement, {
+            channelName: input.channelName,
+            senderId: input.senderId,
+            chatId: input.chatId,
+            threadId: input.threadId,
+            isGroup: input.isGroup,
+          });
+          this.toCwd.set(replacement, input.cwd);
+          this.liveSessionIds.add(replacement);
+          this.persist();
+          process.stderr.write(
+            `[SessionRouter] Replaced unavailable session ${sanitizeLogText(savedSessionId, 128)} for key ${sanitizeLogText(key, 256)} after load failed: ${sanitizeLogText(loadError instanceof Error ? loadError.message : String(loadError), 512)}\n`,
+          );
+          return replacement;
+        } catch (createError) {
+          process.stderr.write(
+            `[SessionRouter] Failed to load session ${sanitizeLogText(savedSessionId, 128)} for key ${sanitizeLogText(key, 256)} (${sanitizeLogText(loadError instanceof Error ? loadError.message : String(loadError), 512)}) and failed to create a replacement (${sanitizeLogText(createError instanceof Error ? createError.message : String(createError), 512)})\n`,
+          );
+          throw createError;
+        }
+      }
+    } finally {
+      this.endSessionLoad(loadWindow);
     }
   }
 
@@ -263,6 +373,7 @@ export class SessionRouter {
     if (this.toCwd.delete(sessionId)) {
       removed = true;
     }
+    this.liveSessionIds.delete(sessionId);
     if (!removed && this.sessionLoadWindows.size > 0) {
       for (const loadWindow of this.sessionLoadWindows) {
         loadWindow.add(sessionId);
@@ -274,12 +385,25 @@ export class SessionRouter {
     return removed;
   }
 
+  handleSessionDied(sessionId: string): boolean {
+    if (this.recoveryMode === 'eager') {
+      return this.removeSessionId(sessionId);
+    }
+    const known = this.toTarget.has(sessionId);
+    this.liveSessionIds.delete(sessionId);
+    for (const loadWindow of this.sessionLoadWindows) {
+      loadWindow.add(sessionId);
+    }
+    return known;
+  }
+
   private deleteByKey(key: string): string | null {
     const sessionId = this.toSession.get(key);
     if (!sessionId) return null;
     this.toSession.delete(key);
     this.toTarget.delete(sessionId);
     this.toCwd.delete(sessionId);
+    this.liveSessionIds.delete(sessionId);
     return sessionId;
   }
 
@@ -308,6 +432,21 @@ export class SessionRouter {
       }
     }
     return entries;
+  }
+
+  restoreRoutes(): { restored: number; dropped: number } {
+    const persisted = this.readPersistedEntries();
+    if (!persisted) return { restored: 0, dropped: 0 };
+    this.dispose();
+    let restored = 0;
+    for (const [key, entry] of Object.entries(persisted.entries)) {
+      this.toSession.set(key, entry.sessionId);
+      this.toTarget.set(entry.sessionId, entry.target);
+      this.toCwd.set(entry.sessionId, entry.cwd);
+      restored++;
+    }
+    if (persisted.dropped > 0) this.persist();
+    return { restored, dropped: persisted.dropped };
   }
 
   /**
@@ -403,13 +542,18 @@ export class SessionRouter {
     return { restored, failed };
   }
 
-  /** Clear in-memory state and delete persist file. Used on clean shutdown. */
-  clearAll(): void {
+  dispose(): void {
     this.toSession.clear();
     this.toTarget.clear();
     this.toCwd.clear();
     this.creatingSessions.clear();
     this.sessionLoadWindows.clear();
+    this.liveSessionIds.clear();
+  }
+
+  /** Clear in-memory state and delete persist file. Used on clean shutdown. */
+  clearAll(): void {
+    this.dispose();
     if (this.persistPath && existsSync(this.persistPath)) {
       try {
         unlinkSync(this.persistPath);
@@ -417,6 +561,62 @@ export class SessionRouter {
         // best-effort
       }
     }
+  }
+
+  private readPersistedEntries():
+    | { entries: Record<string, PersistedEntry>; dropped: number }
+    | undefined {
+    const persistPath = this.persistPath;
+    if (!persistPath || !existsSync(persistPath)) return undefined;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(persistPath, 'utf-8'));
+    } catch (error) {
+      process.stderr.write(
+        `[SessionRouter] Corrupted persist file at ${sanitizeLogText(persistPath, 1024)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 512)}\n`,
+      );
+      return undefined;
+    }
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      process.stderr.write(
+        `[SessionRouter] Invalid route store at ${sanitizeLogText(persistPath, 1024)}: expected an object\n`,
+      );
+      return undefined;
+    }
+
+    const entries: Record<string, PersistedEntry> = {};
+    let dropped = 0;
+    for (const [key, value] of Object.entries(parsed)) {
+      if (this.isPersistedEntry(value)) entries[key] = value;
+      else dropped++;
+    }
+    return { entries, dropped };
+  }
+
+  private isPersistedEntry(value: unknown): value is PersistedEntry {
+    if (typeof value !== 'object' || value === null) return false;
+    const entry = value as Record<string, unknown>;
+    const target = entry['target'];
+    if (typeof target !== 'object' || target === null) return false;
+    const typedTarget = target as Record<string, unknown>;
+    return (
+      typeof entry['sessionId'] === 'string' &&
+      entry['sessionId'].length > 0 &&
+      typeof entry['cwd'] === 'string' &&
+      entry['cwd'].length > 0 &&
+      typeof typedTarget['channelName'] === 'string' &&
+      typeof typedTarget['senderId'] === 'string' &&
+      typeof typedTarget['chatId'] === 'string' &&
+      (typedTarget['threadId'] === undefined ||
+        typeof typedTarget['threadId'] === 'string') &&
+      (typedTarget['isGroup'] === undefined ||
+        typeof typedTarget['isGroup'] === 'boolean')
+    );
   }
 
   private persist(): void {
