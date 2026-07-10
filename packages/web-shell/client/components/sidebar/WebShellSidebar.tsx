@@ -2516,7 +2516,9 @@ export function WebShellSidebar({
         )}
         {!collapsed && workspaces.length <= 1 && (
           <button
+            type="button"
             className={styles.addWorkspaceButton}
+            title={t('sidebar.addWorkspace')}
             onClick={() => setShowAddWorkspaceDialog(true)}
           >
             + {t('sidebar.addWorkspace')}
