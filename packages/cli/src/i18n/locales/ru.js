@@ -86,7 +86,7 @@ export default {
   'to search history': 'поиск в истории',
   'to paste images': 'вставить изображения',
   'for external editor': 'внешний редактор',
-  'to toggle compact mode': 'переключить компактный режим',
+  'to view transcript': 'показать транскрипт',
 
   // ============================================================================
   // Поля системной информации
@@ -251,6 +251,42 @@ export default {
   'Delete {{name}}': 'Удалить {{name}}',
   'Unknown Step': 'Неизвестный шаг',
   'Esc to close': 'Esc для закрытия',
+  Transcript: 'Транскрипт',
+  'to close': 'закрыть',
+  'to scroll': 'прокрутить',
+  'Failed to render transcript.': 'Не удалось отобразить транскрипт.',
+  'Read {{count}} file': 'Прочитано файлов: {{count}}',
+  'Read {{count}} files': 'Прочитано файлов: {{count}}',
+  'Reading {{count}} file': 'Чтение файлов: {{count}}',
+  'Reading {{count}} files': 'Чтение файлов: {{count}}',
+  'Edited {{count}} file': 'Изменено файлов: {{count}}',
+  'Edited {{count}} files': 'Изменено файлов: {{count}}',
+  'Editing {{count}} file': 'Изменение файлов: {{count}}',
+  'Editing {{count}} files': 'Изменение файлов: {{count}}',
+  'Wrote {{count}} file': 'Записано файлов: {{count}}',
+  'Wrote {{count}} files': 'Записано файлов: {{count}}',
+  'Writing {{count}} file': 'Запись файлов: {{count}}',
+  'Writing {{count}} files': 'Запись файлов: {{count}}',
+  'Searched {{count}} pattern': 'Найдено шаблонов: {{count}}',
+  'Searched {{count}} patterns': 'Найдено шаблонов: {{count}}',
+  'Searching {{count}} pattern': 'Поиск шаблонов: {{count}}',
+  'Searching {{count}} patterns': 'Поиск шаблонов: {{count}}',
+  'Listed {{count}} directory': 'Показано каталогов: {{count}}',
+  'Listed {{count}} directories': 'Показано каталогов: {{count}}',
+  'Listing {{count}} directory': 'Просмотр каталогов: {{count}}',
+  'Listing {{count}} directories': 'Просмотр каталогов: {{count}}',
+  'Ran {{count}} command': 'Выполнено команд: {{count}}',
+  'Ran {{count}} commands': 'Выполнено команд: {{count}}',
+  'Running {{count}} command': 'Выполнение команд: {{count}}',
+  'Running {{count}} commands': 'Выполнение команд: {{count}}',
+  'Ran {{count}} agent': 'Запущено агентов: {{count}}',
+  'Ran {{count}} agents': 'Запущено агентов: {{count}}',
+  'Running {{count}} agent': 'Запуск агентов: {{count}}',
+  'Running {{count}} agents': 'Запуск агентов: {{count}}',
+  'Used {{count}} tool': 'Использовано инструментов: {{count}}',
+  'Used {{count}} tools': 'Использовано инструментов: {{count}}',
+  'Using {{count}} tool': 'Использование инструментов: {{count}}',
+  'Using {{count}} tools': 'Использование инструментов: {{count}}',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter для выбора, ↑↓ для навигации, Esc для закрытия',
   'Esc to go back': 'Esc для возврата',
@@ -1659,8 +1695,6 @@ export default {
     'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Попробуйте /insight, чтобы получить персонализированные выводы из истории чатов.',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Нажмите Ctrl+O для переключения компактного режима — скрыть вывод инструментов и рассуждения.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Добавьте файл QWEN.md, чтобы предоставить Qwen Code постоянный контекст проекта.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1871,10 +1905,6 @@ export default {
     'Raw-режим недоступен. Пожалуйста, запустите в интерактивном терминале.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Скрывать вывод инструментов и процесс рассуждений для более чистого вида (переключить с помощью Ctrl+O).',
-  'Press Ctrl+O to show full tool output':
-    'Нажмите Ctrl+O для показа полного вывода инструментов',
   'Switch to plan mode or exit plan mode':
     'Переключиться в режим плана или выйти из режима плана',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
