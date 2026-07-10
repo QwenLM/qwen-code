@@ -66,7 +66,7 @@ function buildIdleStatusBody(
 }
 
 /**
- * POST /rc/session/:id/idle-suggest-toggle — set a session's idle-suggestion
+ * POST /session/:id/idle-suggest-toggle — set a session's idle-suggestion
  * override (`add-idle-suggestions` spec: "Per-session toggle", write scope). Body
  * `{ enabled: boolean }`. `false` disables idle suggestions for this session;
  * `true` reverts it to the global default (it can NARROW but never widen past the
@@ -113,7 +113,7 @@ export function createIdleToggleRoute(
 }
 
 /**
- * GET /rc/session/:id/idle-suggest-toggle — report a session's EFFECTIVE idle
+ * GET /session/:id/idle-suggest-toggle — report a session's EFFECTIVE idle
  * state (`add-idle-suggestions` spec: "`/suggest status` reports state"). Returns
  * the same body as the POST route. (The spec's `idleAfterSec` is omitted by
  * design — this fork detects idle via the pump's active-prompt edge, not a

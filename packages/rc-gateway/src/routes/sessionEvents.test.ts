@@ -42,7 +42,7 @@ async function mountGateway(
 ): Promise<string> {
   const app = express();
   app.get(
-    '/rc/session/:id/events',
+    '/session/:id/events',
     createSessionEventsRoute(daemon, new ConnectionRegistry(), audit),
   );
   const server: Server = await new Promise((resolve) => {
@@ -80,7 +80,7 @@ describe('session-events proxy', () => {
     stub = await startStubDaemon();
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const url = await mountGateway(daemon);
-    const res = await fetch(`${url}/rc/session/sess-1/events`);
+    const res = await fetch(`${url}/session/sess-1/events`);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/event-stream');
     const frames = await readFrames(res);
@@ -97,7 +97,7 @@ describe('session-events proxy', () => {
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const app = express();
     app.get(
-      '/rc/session/:id/events',
+      '/session/:id/events',
       createSessionEventsRoute(
         daemon,
         new ConnectionRegistry(),
@@ -111,7 +111,7 @@ describe('session-events proxy', () => {
     gateway = server;
     const { port } = server.address() as AddressInfo;
 
-    const resP = fetch(`http://127.0.0.1:${port}/rc/session/sess-1/events`);
+    const resP = fetch(`http://127.0.0.1:${port}/session/sess-1/events`);
     // Wait for the relay to register its tick listener, then emit one.
     const start = Date.now();
     while (broadcaster.listenerCount('sess-1') === 0) {
@@ -157,7 +157,7 @@ describe('session-events proxy', () => {
     });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const url = await mountGateway(daemon);
-    const res = await fetch(`${url}/rc/session/sess-1/events`);
+    const res = await fetch(`${url}/session/sess-1/events`);
     const frames = await readFrames(res);
     const parsed = frames.map((f) => JSON.parse(f.data));
     // Non-permission frame: no bridgeHints added.
@@ -185,7 +185,7 @@ describe('session-events proxy', () => {
         next();
       });
       app.get(
-        '/rc/session/:id/events',
+        '/session/:id/events',
         createSessionEventsRoute(daemon, new ConnectionRegistry(), audit),
       );
       const s: Server = await new Promise((resolve) => {
@@ -199,7 +199,7 @@ describe('session-events proxy', () => {
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
     const url = await mountWithClient(daemon, [BRIDGE, SESSION_READ], audit);
-    await readFrames(await fetch(`${url}/rc/session/sess-1/events`));
+    await readFrames(await fetch(`${url}/session/sess-1/events`));
     const attached = audit.calls.find((c) => c.action === 'session_attached');
     const detached = audit.calls.find((c) => c.action === 'session_detached');
     expect(attached?.detail).toEqual({ kind: 'bridge' });
@@ -210,7 +210,7 @@ describe('session-events proxy', () => {
     stub = await startStubDaemon();
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const url = await mountGateway(daemon);
-    await fetch(`${url}/rc/session/sess-1/events`, {
+    await fetch(`${url}/session/sess-1/events`, {
       headers: { 'Last-Event-ID': '5' },
     });
     expect(stub.lastEventIdHeader).toBe('5');
@@ -220,7 +220,7 @@ describe('session-events proxy', () => {
     stub = await startStubDaemon({ eventsStatus: 500 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const url = await mountGateway(daemon);
-    const res = await fetch(`${url}/rc/session/sess-1/events`);
+    const res = await fetch(`${url}/session/sess-1/events`);
     expect(res.status).toBe(502);
   });
 
@@ -230,7 +230,7 @@ describe('session-events proxy', () => {
     const url = await mountGateway(daemon);
 
     const ac = new AbortController();
-    const res = await fetch(`${url}/rc/session/sess-1/events`, {
+    const res = await fetch(`${url}/session/sess-1/events`, {
       signal: ac.signal,
     });
     // Read the first chunk so the stream is established, then disconnect.
@@ -254,7 +254,7 @@ describe('session-events proxy', () => {
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
     const url = await mountGateway(daemon, audit);
-    const res = await fetch(`${url}/rc/session/sess-1/events`);
+    const res = await fetch(`${url}/session/sess-1/events`);
     await res.text();
     const deadline = Date.now() + 2000;
     while (
@@ -292,7 +292,7 @@ describe('session-events proxy', () => {
     const app = express();
     app.use(bearerResolve(store, audit));
     app.get(
-      '/rc/session/:id/events',
+      '/session/:id/events',
       createSessionEventsRoute(daemon, new ConnectionRegistry(), audit),
     );
     const server: Server = await new Promise((resolve) => {
@@ -300,12 +300,9 @@ describe('session-events proxy', () => {
     });
     gateway = server;
     const { port } = server.address() as AddressInfo;
-    const res = await fetch(
-      `http://127.0.0.1:${port}/rc/session/sess-1/events`,
-      {
-        headers: { Authorization: `Bearer ${share.token}` },
-      },
-    );
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-1/events`, {
+      headers: { Authorization: `Bearer ${share.token}` },
+    });
     await res.text();
     const deadline = Date.now() + 2000;
     while (

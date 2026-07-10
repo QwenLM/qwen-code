@@ -42,8 +42,7 @@ import {
   createAddCorsOriginRoute,
   createRemoveCorsOriginRoute,
 } from './routes/cors.js';
-import type {
-  CorsAllowlist} from './cors.js';
+import type { CorsAllowlist } from './cors.js';
 import {
   allowlistFromRecords,
   evaluatePreflight,
@@ -252,7 +251,7 @@ export interface GatewayApp {
   ownerEvents: OwnerEventBus;
   /**
    * Per-session idle-suggestion overrides backing POST
-   * /rc/session/:id/idle-suggest-toggle. Exposed so the boot wiring (cli.ts) can
+   * /session/:id/idle-suggest-toggle. Exposed so the boot wiring (cli.ts) can
    * feed the idle handler's `getSessionEnabled` from the same store the route
    * writes to.
    */
@@ -468,8 +467,11 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       createNativePushRouter(deps.apnsStore, audit),
     );
   }
+  // Transparent-proxy topology: the gateway claims the BARE /session/:id/*
+  // namespace so a remote client's URL is the same whether it talks to the
+  // daemon directly or goes through the gateway.
   app.get(
-    '/rc/session/:id/events',
+    '/session/:id/events',
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createSessionEventsRoute(
@@ -480,7 +482,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     ),
   );
   app.post(
-    '/rc/session/:id/permission/:requestId',
+    '/session/:id/permission/:requestId',
     requireScope(APPROVE, audit),
     recordActivity(workingDevice),
     enforceSessionLock(audit),
@@ -489,7 +491,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     createPermissionVoteRoute(deps.daemon, audit),
   );
   app.post(
-    '/rc/session/:id/prompt',
+    '/session/:id/prompt',
     requireScope(WRITE, audit),
     recordActivity(workingDevice),
     enforceSessionLock(audit),
@@ -513,18 +515,23 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // GET /rc/capabilities — always mounted (mDNS reports here even when cost
   // tracking is off). costTracking sub-block is present only when a usage store
   // is wired, so it never claims enabled:true while disabled.
-  app.get(
-    '/rc/capabilities',
-    createCapabilityRoute({
+  // GET /capabilities — bare-namespace alias for the transparent-proxy topology
+  // so a remote client can discover the gateway's remoteControl capabilities at
+  // the same path regardless of whether it speaks directly to the daemon or to
+  // the gateway (which merges the daemon's own capabilities with remoteControl).
+  {
+    const capabilityRoute = createCapabilityRoute({
       costTracking: deps.usageReader
         ? { currencyLabel: deps.costCurrencyLabel ?? (() => 'USD') }
         : undefined,
       mdnsStatus: deps.mdnsStatus,
       nativeShells: deps.nativeShellsCapability,
-    }),
-  );
+    });
+    app.get('/rc/capabilities', capabilityRoute);
+    app.get('/capabilities', capabilityRoute);
+  }
   app.post(
-    '/rc/session/:id/fork',
+    '/session/:id/fork',
     requireScope(WRITE, audit),
     recordActivity(workingDevice),
     enforceSessionLock(audit),
@@ -546,7 +553,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // marking the device working here would wrongly suppress a real permission push.
   const idleStatusResolver = deps.idleStatus ?? (() => undefined);
   app.post(
-    '/rc/session/:id/idle-suggest-toggle',
+    '/session/:id/idle-suggest-toggle',
     requireScope(WRITE, audit),
     enforceSessionLock(audit),
     createIdleToggleRoute(idleToggles, idleStatusResolver, audit),
@@ -554,7 +561,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // GET the same path reports EFFECTIVE idle state (`/suggest status`). SESSION_READ
   // (a read) + session-lock so a confined share token sees only its own session.
   app.get(
-    '/rc/session/:id/idle-suggest-toggle',
+    '/session/:id/idle-suggest-toggle',
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createIdleStatusRoute(idleToggles, idleStatusResolver),
@@ -616,7 +623,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // Read-only fork lineage chain. OWNER-scoped (NOT session-locked): the chain
   // enumerates ancestor session ids, which a confined share token must not see.
   app.get(
-    '/rc/session/:id/lineage',
+    '/session/:id/lineage',
     requireScope(OWNER, audit),
     createLineageRoute(async () => {
       try {
@@ -641,8 +648,23 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       }
     }, audit),
   );
+  // GET /workspace/:cwd/sessions — bare-namespace proxy for the transparent-proxy
+  // topology. The daemon exposes this path; the gateway re-exposes it (OWNER-gated)
+  // so remote clients can enumerate sessions at the same URL shape they would use
+  // against the daemon directly.
+  app.get(
+    '/workspace/:cwd/sessions',
+    requireScope(OWNER, audit),
+    createSessionListRoute(async () => {
+      try {
+        return (await deps.daemon.capabilities()).workspaceCwd;
+      } catch {
+        return undefined;
+      }
+    }, audit),
+  );
   app.post(
-    '/rc/session/:id/command/:name',
+    '/session/:id/command/:name',
     requireScope(WRITE, audit),
     recordActivity(workingDevice),
     enforceSessionLock(audit),

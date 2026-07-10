@@ -42,7 +42,7 @@ function mount(resolver: IdleStatusResolver = ON) {
   const app = express();
   app.use(express.json());
   app.post(
-    '/rc/session/:id/idle-suggest-toggle',
+    '/session/:id/idle-suggest-toggle',
     createIdleToggleRoute(toggles, resolver, audit),
   );
   return new Promise<void>((resolve) => {
@@ -54,7 +54,7 @@ function mount(resolver: IdleStatusResolver = ON) {
 }
 
 async function post(id: string, body: unknown) {
-  const res = await fetch(`${base}/rc/session/${id}/idle-suggest-toggle`, {
+  const res = await fetch(`${base}/session/${id}/idle-suggest-toggle`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -136,7 +136,7 @@ describe('GET /rc/session/:id/idle-suggest-toggle (status)', () => {
     toggles2 = new IdleSessionToggles();
     const app = express();
     app.get(
-      '/rc/session/:id/idle-suggest-toggle',
+      '/session/:id/idle-suggest-toggle',
       createIdleStatusRoute(toggles2, resolver),
     );
     return new Promise<void>((resolve) => {
@@ -153,9 +153,7 @@ describe('GET /rc/session/:id/idle-suggest-toggle (status)', () => {
       ),
   );
   async function get(id: string) {
-    const res = await fetch(
-      `${statusBase}/rc/session/${id}/idle-suggest-toggle`,
-    );
+    const res = await fetch(`${statusBase}/session/${id}/idle-suggest-toggle`);
     return { status: res.status, json: await res.json() };
   }
 

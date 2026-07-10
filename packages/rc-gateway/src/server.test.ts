@@ -156,7 +156,7 @@ describe('gateway app', () => {
     };
     expect(scopes).toEqual([SESSION_READ]);
 
-    const events = await fetch(`${url}/rc/session/sess-1/events`, {
+    const events = await fetch(`${url}/session/sess-1/events`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(events.status).toBe(200);
@@ -183,7 +183,7 @@ describe('gateway app', () => {
     expect([...scopes].sort()).toEqual(
       [BRIDGE, SESSION_READ, APPROVE, WRITE].sort(),
     );
-    const events = await fetch(`${url}/rc/session/sess-1/events`, {
+    const events = await fetch(`${url}/session/sess-1/events`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(events.status).toBe(200); // session:read satisfied by the bundle
@@ -201,7 +201,7 @@ describe('gateway app', () => {
 
   it('401s the events route without a token', async () => {
     const { url } = await boot();
-    const res = await fetch(`${url}/rc/session/sess-1/events`);
+    const res = await fetch(`${url}/session/sess-1/events`);
     expect(res.status).toBe(401);
   });
 
@@ -214,7 +214,7 @@ describe('gateway app', () => {
       body: JSON.stringify({ code, label: 'weak' }),
     });
     const { token } = (await redeem.json()) as { token: string };
-    const res = await fetch(`${url}/rc/session/sess-1/events`, {
+    const res = await fetch(`${url}/session/sess-1/events`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(res.status).toBe(403);
@@ -240,7 +240,7 @@ describe('gateway app', () => {
     const victim = (await victimRedeem.json()) as { id: string; token: string };
 
     const ac = new AbortController();
-    const stream = await fetch(`${url}/rc/session/sess-1/events`, {
+    const stream = await fetch(`${url}/session/sess-1/events`, {
       headers: { Authorization: `Bearer ${victim.token}` },
       signal: ac.signal,
     });
@@ -268,7 +268,7 @@ describe('gateway app', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code, label: 'owner' }),
     });
-    await fetch(`${url}/rc/session/sess-1/events`, {
+    await fetch(`${url}/session/sess-1/events`, {
       headers: { Authorization: 'Bearer not-a-token' },
     });
 
@@ -541,7 +541,7 @@ describe('gateway app', () => {
     expect(mint.status).toBe(200);
     const approveToken = ((await mint.json()) as { token: string }).token;
 
-    const vote = await fetch(`${url}/rc/session/sess-1/permission/req-1`, {
+    const vote = await fetch(`${url}/session/sess-1/permission/req-1`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -580,7 +580,7 @@ describe('gateway app', () => {
 
     // Votes on its locked session → passes requireScope(APPROVE)+enforceSessionLock
     // and reaches the daemon (stub answers 200).
-    const ok = await fetch(`${url}/rc/session/sess-1/permission/req-1`, {
+    const ok = await fetch(`${url}/session/sess-1/permission/req-1`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -591,7 +591,7 @@ describe('gateway app', () => {
     expect(ok.status).toBe(200);
 
     // Votes on a DIFFERENT session → 403 session_locked (the lock backstop).
-    const wrong = await fetch(`${url}/rc/session/sess-2/permission/req-1`, {
+    const wrong = await fetch(`${url}/session/sess-2/permission/req-1`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -615,7 +615,7 @@ describe('gateway app', () => {
     });
     const writeToken = ((await redeem.json()) as { token: string }).token;
 
-    const res = await fetch(`${url}/rc/session/s1/prompt`, {
+    const res = await fetch(`${url}/session/s1/prompt`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -637,7 +637,7 @@ describe('gateway app', () => {
     });
     const bridgeToken = ((await redeem.json()) as { token: string }).token;
 
-    const res = await fetch(`${url}/rc/session/s1/prompt`, {
+    const res = await fetch(`${url}/session/s1/prompt`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -758,7 +758,7 @@ describe('gateway app', () => {
     });
     const writeToken = ((await redeem.json()) as { token: string }).token;
 
-    const res = await fetch(`${url}/rc/session/s1/prompt`, {
+    const res = await fetch(`${url}/session/s1/prompt`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -786,7 +786,7 @@ describe('gateway app', () => {
     const token = ((await redeem.json()) as { token: string }).token;
 
     const res = await fetch(
-      `${url}/rc/session/11111111111111111111111111111111/fork`,
+      `${url}/session/11111111111111111111111111111111/fork`,
       {
         method: 'POST',
         headers: {
@@ -812,7 +812,7 @@ describe('gateway app', () => {
     // A syntactically-valid but nonexistent parent id under the stub's
     // /stub/workspace chats dir → 404 parent_transcript_not_found.
     const res = await fetch(
-      `${url}/rc/session/22222222222222222222222222222222/fork`,
+      `${url}/session/22222222222222222222222222222222/fork`,
       {
         method: 'POST',
         headers: {
@@ -836,7 +836,7 @@ describe('gateway app', () => {
     });
     const token = ((await redeem.json()) as { token: string }).token;
 
-    const res = await fetch(`${url}/rc/session/s1/prompt`, {
+    const res = await fetch(`${url}/session/s1/prompt`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -860,7 +860,7 @@ describe('gateway app', () => {
     });
     const readToken = ((await redeem.json()) as { token: string }).token;
 
-    const res = await fetch(`${url}/rc/session/s1/prompt`, {
+    const res = await fetch(`${url}/session/s1/prompt`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1069,13 +1069,13 @@ describe('gateway app', () => {
     expect(share.url).toBe('/ui/share/' + share.token);
 
     // The share token reaches its own locked session (passes the lock — not 403).
-    const ok = await fetch(`${url}/rc/session/s1/events`, {
+    const ok = await fetch(`${url}/session/s1/events`, {
       headers: { Authorization: `Bearer ${share.token}` },
     });
     expect(ok.status).not.toBe(403);
 
     // The share token on a DIFFERENT session → 403 session_locked.
-    const wrong = await fetch(`${url}/rc/session/s2/events`, {
+    const wrong = await fetch(`${url}/session/s2/events`, {
       headers: { Authorization: `Bearer ${share.token}` },
     });
     expect(wrong.status).toBe(403);
@@ -1084,7 +1084,7 @@ describe('gateway app', () => {
     );
 
     // The share token on the prompt route (its own session) → 403: no write scope.
-    const prompt = await fetch(`${url}/rc/session/s1/prompt`, {
+    const prompt = await fetch(`${url}/session/s1/prompt`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1225,7 +1225,7 @@ describe('gateway app', () => {
     expect(res.status).toBe(403);
   });
 
-  it('404s POST /rc/session/:id/command/:name for an unknown command (route wired)', async () => {
+  it('404s POST /session/:id/command/:name for an unknown command (route wired)', async () => {
     const { url, pairing } = await boot();
     const { code } = pairing.mint([SESSION_READ, WRITE]);
     const redeem = await fetch(`${url}/rc/pair/redeem`, {
@@ -1234,7 +1234,7 @@ describe('gateway app', () => {
       body: JSON.stringify({ code, label: 'writer' }),
     });
     const token = ((await redeem.json()) as { token: string }).token;
-    const res = await fetch(`${url}/rc/session/s1/command/nope`, {
+    const res = await fetch(`${url}/session/s1/command/nope`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1248,7 +1248,7 @@ describe('gateway app', () => {
     );
   });
 
-  it('403s POST /rc/session/:id/command/:name for a session:read-only token', async () => {
+  it('403s POST /session/:id/command/:name for a session:read-only token', async () => {
     const { url, pairing } = await boot();
     const { code } = pairing.mint([SESSION_READ]); // no write
     const redeem = await fetch(`${url}/rc/pair/redeem`, {
@@ -1257,7 +1257,7 @@ describe('gateway app', () => {
       body: JSON.stringify({ code, label: 'reader' }),
     });
     const token = ((await redeem.json()) as { token: string }).token;
-    const res = await fetch(`${url}/rc/session/s1/command/whatever`, {
+    const res = await fetch(`${url}/session/s1/command/whatever`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

@@ -85,7 +85,7 @@ async function mount(opts: MountOpts): Promise<string> {
     next();
   });
   app.post(
-    '/rc/session/:id/fork',
+    '/session/:id/fork',
     createForkRoute(
       opts.daemon as never,
       async () => ('cwd' in opts ? opts.cwd : CWD),
@@ -105,7 +105,7 @@ async function postFork(
   body: unknown,
   id = PARENT_ID,
 ): Promise<Response> {
-  return fetch(`${url}/rc/session/${id}/fork`, {
+  return fetch(`${url}/session/${id}/fork`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

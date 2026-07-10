@@ -226,7 +226,7 @@ describe('auth middleware', () => {
     const req2 = {
       ...req,
       params: { id: 's2' },
-      path: '/rc/session/s2/events',
+      path: '/session/s2/events',
     } as unknown as Request;
     enforceSessionLock(audit)(req2, fakeRes(), () => {});
     const locked = audit.calls.find(
@@ -264,7 +264,7 @@ describe('auth middleware', () => {
     const req = {
       rcClient: { id: 'x', scopes: [SESSION_READ], sessionLockId: 's1' },
       params: { id: 's1' },
-      path: '/rc/session/s1/events',
+      path: '/session/s1/events',
     } as unknown as Request;
     const res = fakeRes();
     let called = false;
@@ -279,7 +279,7 @@ describe('auth middleware', () => {
     const req = {
       rcClient: { id: 'x', scopes: [SESSION_READ], sessionLockId: 's1' },
       params: { id: 's2' },
-      path: '/rc/session/s2/events',
+      path: '/session/s2/events',
     } as unknown as Request;
     const res = fakeRes();
     let called = false;
@@ -293,7 +293,7 @@ describe('auth middleware', () => {
     expect(audit.calls[0]).toMatchObject({
       action: 'scope_denied',
       actorTokenId: 'x',
-      detail: { reason: 'session_locked', path: '/rc/session/s2/events' },
+      detail: { reason: 'session_locked', path: '/session/s2/events' },
     });
   });
 
@@ -301,7 +301,7 @@ describe('auth middleware', () => {
     const req = {
       rcClient: { id: 'x', scopes: [SESSION_READ] },
       params: { id: 's2' },
-      path: '/rc/session/s2/events',
+      path: '/session/s2/events',
     } as unknown as Request;
     const res = fakeRes();
     let called = false;

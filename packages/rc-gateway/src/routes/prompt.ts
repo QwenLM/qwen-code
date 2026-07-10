@@ -9,7 +9,7 @@ import type { DaemonClient, PromptContentBlock } from '@qwen-code/sdk';
 import type { AuditRecorder } from '../auditLog.js';
 
 /**
- * POST /rc/session/:id/prompt — proxy the SDK's daemon.prompt(). Accepts either
+ * POST /session/:id/prompt — proxy the SDK's daemon.prompt(). Accepts either
  * `{ prompt: string }` (turned into a single text block) or
  * `{ blocks: PromptContentBlock[] }` (forwarded verbatim). Long-lived: awaits
  * the daemon's turn and returns its stopReason. A client disconnect aborts the

@@ -38,7 +38,7 @@ async function mount(
     req.rcClient = { id: 'tok1', scopes: ['write'] };
     next();
   });
-  app.post('/rc/session/:id/prompt', createPromptRoute(daemon, audit));
+  app.post('/session/:id/prompt', createPromptRoute(daemon, audit));
   const s: Server = await new Promise((resolve) => {
     const sv = app.listen(0, '127.0.0.1', () => resolve(sv));
   });
@@ -52,7 +52,7 @@ async function postPrompt(
   body: unknown,
   sessionId = 'sess-1',
 ): Promise<Response> {
-  return fetch(`${url}/rc/session/${sessionId}/prompt`, {
+  return fetch(`${url}/session/${sessionId}/prompt`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

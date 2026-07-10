@@ -33,7 +33,7 @@ export interface ForkRouteDeps {
 }
 
 /**
- * POST /rc/session/:id/fork — fork a settled session into a brand-new
+ * POST /session/:id/fork — fork a settled session into a brand-new
  * daemon-hosted session that inherits the parent's full on-disk transcript.
  *
  * Replicates core `SessionService.forkSession` from OUTSIDE the daemon: read

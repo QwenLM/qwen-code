@@ -14,7 +14,7 @@ import { computeBridgeHints } from '../bridges/hints.js';
 import { BRIDGE } from '../scopes.js';
 
 /**
- * GET /rc/session/:id/events — relay the daemon's SSE stream downstream,
+ * GET /session/:id/events — relay the daemon's SSE stream downstream,
  * preserving event ids and forwarding Last-Event-ID. Aborts the upstream
  * subscription when the client disconnects OR when the caller's token is
  * revoked (the registry fires the same abort controller). Audits attach/detach.

@@ -259,7 +259,7 @@ export function assembleListing(entries: SessionEntry[]): SessionListItem[] {
 /**
  * Scan a workspace chats dir into a fork-lineage listing. Mirrors the lineage
  * route's source of truth (each transcript's first-record
- * `forkedFrom.sessionId`), so `/rc/sessions` and `/rc/session/:id/lineage`
+ * `forkedFrom.sessionId`), so `/rc/sessions` and `/session/:id/lineage`
  * agree. A missing chats dir (ENOENT) is an empty listing, not an error.
  *
  * Filenames are filtered to syntactically valid `<id>.jsonl` (the same

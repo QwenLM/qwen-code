@@ -42,7 +42,7 @@ beforeEach(() => {
     cap(req);
     res.status(200).json({ id: req.body.id, registered: true });
   });
-  app.post('/rc/session/:id/prompt', (req, res) => {
+  app.post('/session/:id/prompt', (req, res) => {
     cap(req);
     if (rateLimitNext) {
       res.set('retry-after', '7');
@@ -51,7 +51,7 @@ beforeEach(() => {
     }
     res.status(200).json({ stopReason: 'end_turn' });
   });
-  app.post('/rc/session/:id/permission/:requestId', (req, res) => {
+  app.post('/session/:id/permission/:requestId', (req, res) => {
     cap(req);
     res.status(200).json({ ok: true });
   });
@@ -69,7 +69,7 @@ beforeEach(() => {
     }
     res.status(400).json({ error: 'Invalid or expired invite token' });
   });
-  app.get('/rc/session/:id/events', (req, res) => {
+  app.get('/session/:id/events', (req, res) => {
     lastEventIdHeader = req.header('last-event-id');
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     res.write(
@@ -112,7 +112,7 @@ describe('BridgeClient (loopback contract)', () => {
     expect(r.ok).toBe(true);
     expect(captured[0]).toMatchObject({
       method: 'POST',
-      path: '/rc/session/s1/prompt',
+      path: '/session/s1/prompt',
       auth: 'Bearer qwk_test',
       subActor: 'telegram:alice',
       body: { prompt: 'do it' },
@@ -122,7 +122,7 @@ describe('BridgeClient (loopback contract)', () => {
   it('vote POSTs the permission route with outcome + sub-actor', async () => {
     await client().vote('s1', 'r1', 'allow_once', 'telegram:alice', 'opt-a');
     expect(captured[0]).toMatchObject({
-      path: '/rc/session/s1/permission/r1',
+      path: '/session/s1/permission/r1',
       subActor: 'telegram:alice',
       body: { outcome: 'allow_once', optionId: 'opt-a' },
     });
