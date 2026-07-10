@@ -25,7 +25,10 @@ import type { BridgeEvent, EventBus } from './eventBus.js';
 // so a rename can't silently break the protocol.
 import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
 import { MID_TURN_QUEUE_DRAIN_METHOD } from './bridgeTypes.js';
-import type { MidTurnQueueEntry } from './bridgeTypes.js';
+import type {
+  BridgePendingInteraction,
+  MidTurnQueueEntry,
+} from './bridgeTypes.js';
 import { SERVE_CONTROL_EXT_METHODS } from './status.js';
 import type {
   ClientMcpMessageSender,
@@ -89,6 +92,90 @@ function isFsErrorShape(err: unknown): err is FsErrorShape {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function pendingInteractionFromRequest(
+  requestId: string,
+  params: RequestPermissionRequest,
+): BridgePendingInteraction {
+  const toolCall = params.toolCall as unknown as Record<string, unknown>;
+  const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
+  const rawInput = toolCall['rawInput'];
+  const options = (Array.isArray(params.options) ? params.options : []).map(
+    (option) => ({
+      optionId: String((option as { optionId?: unknown }).optionId ?? ''),
+      ...(typeof (option as { name?: unknown }).name === 'string'
+        ? { label: (option as { name: string }).name }
+        : {}),
+      ...(typeof (option as { kind?: unknown }).kind === 'string'
+        ? { kind: (option as { kind: string }).kind }
+        : {}),
+    }),
+  );
+  const isUserQuestion = meta?.['qwenInteractionKind'] === 'user_question';
+
+  if (isUserQuestion) {
+    const rawQuestions = Array.isArray(meta?.['qwenQuestions'])
+      ? meta['qwenQuestions']
+      : isRecord(rawInput) && Array.isArray(rawInput['questions'])
+        ? rawInput['questions']
+        : [];
+    return {
+      requestId,
+      kind: 'user_question',
+      createdAt: new Date().toISOString(),
+      ...(typeof toolCall['title'] === 'string'
+        ? { title: toolCall['title'] }
+        : {}),
+      questions: rawQuestions.flatMap((question, index) =>
+        isRecord(question) ? [{ ...question, answerKey: String(index) }] : [],
+      ),
+      options,
+    };
+  }
+
+  return {
+    requestId,
+    kind: 'permission',
+    createdAt: new Date().toISOString(),
+    action: {
+      ...(typeof toolCall['kind'] === 'string'
+        ? { type: toolCall['kind'] }
+        : {}),
+      ...(typeof toolCall['title'] === 'string'
+        ? { title: toolCall['title'] }
+        : {}),
+      ...(toolCall['content'] !== undefined
+        ? { content: toolCall['content'] }
+        : {}),
+      ...(toolCall['locations'] !== undefined
+        ? { locations: toolCall['locations'] }
+        : {}),
+      ...(rawInput !== undefined ? { input: rawInput } : {}),
+    },
+    options,
+  };
+}
+
+function fallbackPendingPermissionInteraction(
+  requestId: string,
+  options: RequestPermissionRequest['options'],
+): BridgePendingInteraction {
+  return {
+    requestId,
+    kind: 'permission',
+    createdAt: new Date().toISOString(),
+    action: {},
+    options: options.map((option) => ({
+      optionId: String((option as { optionId?: unknown }).optionId ?? ''),
+      ...(typeof (option as { name?: unknown }).name === 'string'
+        ? { label: (option as { name: string }).name }
+        : {}),
+      ...(typeof (option as { kind?: unknown }).kind === 'string'
+        ? { kind: (option as { kind: string }).kind }
+        : {}),
+    })),
+  };
 }
 
 function artifactPayloadFields(
@@ -354,8 +441,8 @@ function sliceLineRange(
  * structurally satisfies this interface, so no explicit conversion
  * is required.
  *
- * Only four fields cross the boundary: `sessionId`, `events`,
- * `pendingPermissionIds`, `activePromptOriginatorClientId`. New fields
+ * Only five fields cross the boundary: `sessionId`, `events`,
+ * `pendingPermissionIds`, `pendingInteractions`, `activePromptOriginatorClientId`. New fields
  * BridgeClient grows must be added here too (and the factory's
  * `SessionEntry` is required to provide them — TS enforces the
  * structural match at the callback signature).
@@ -365,6 +452,8 @@ export interface BridgeClientSessionEntry {
   events: EventBus;
   artifacts: SessionArtifactStore;
   pendingPermissionIds: Set<string>;
+  /** Pollable pending human interactions, keyed by permission request id. */
+  pendingInteractions: Map<string, BridgePendingInteraction>;
   /**
    * Mid-turn user messages queued by the browser, drained here when the ACP
    * child calls the `craft/drainMidTurnQueue` ext-method. Owned by the full
@@ -542,10 +631,9 @@ export class BridgeClient implements Client {
     // this prompt. The mediator validates the voter's `optionId`
     // against this set so a malicious client can't forge an option
     // (e.g. `ProceedAlways*`) the agent intentionally hid.
+    const options = Array.isArray(params.options) ? params.options : [];
     const allowedOptionIds = new Set(
-      params.options.map((o: { optionId?: unknown }) =>
-        String(o.optionId ?? ''),
-      ),
+      options.map((o: { optionId?: unknown }) => String(o.optionId ?? '')),
     );
     allowedOptionIds.delete('');
 
@@ -573,7 +661,7 @@ export class BridgeClient implements Client {
         requestId,
         sessionId: entry.sessionId,
         toolCall: params.toolCall,
-        options: params.options,
+        options,
       },
       ...(entry.activePromptOriginatorClientId
         ? { originatorClientId: entry.activePromptOriginatorClientId }
@@ -585,7 +673,22 @@ export class BridgeClient implements Client {
     // path doesn't need to roll back. The mediator's
     // `forgetSession` is the only thing that drains this index (via
     // the bridge's `cancelPendingForSession`).
+    let interaction: BridgePendingInteraction | undefined;
+    try {
+      interaction = pendingInteractionFromRequest(requestId, {
+        ...params,
+        options,
+      });
+    } catch (error) {
+      writeStderrLine(
+        `qwen serve: failed to snapshot pending interaction ${requestId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      interaction = fallbackPendingPermissionInteraction(requestId, options);
+    }
     entry.pendingPermissionIds.add(requestId);
+    if (interaction) entry.pendingInteractions.set(requestId, interaction);
     try {
       const record: PermissionRequestRecord = {
         requestId,
@@ -601,6 +704,7 @@ export class BridgeClient implements Client {
       return resolutionToAcpResponse(resolution);
     } finally {
       entry.pendingPermissionIds.delete(requestId);
+      entry.pendingInteractions.delete(requestId);
     }
   }
 

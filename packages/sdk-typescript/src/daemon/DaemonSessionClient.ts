@@ -29,6 +29,7 @@ import type {
   DaemonSessionContextUsageStatus,
   DaemonSessionLspStatus,
   DaemonSessionRecapResult,
+  DaemonSessionSummary,
   DaemonShellCommandResult,
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
@@ -546,6 +547,10 @@ export class DaemonSessionClient {
 
   async context(): Promise<DaemonSessionContextStatus> {
     return await this.client.sessionContext(this.sessionId, this.clientId);
+  }
+
+  async status(): Promise<DaemonSessionSummary> {
+    return await this.client.sessionStatus(this.sessionId, this.clientId);
   }
 
   async contextUsage(

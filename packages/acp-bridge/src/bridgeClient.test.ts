@@ -36,6 +36,7 @@ import { pathToFileURL } from 'node:url';
 import type {
   ReadTextFileRequest,
   ReadTextFileResponse,
+  RequestPermissionRequest,
   SessionNotification,
   WriteTextFileRequest,
   WriteTextFileResponse,
@@ -53,7 +54,10 @@ import {
   MAX_SUB_SESSION_PROMPT_CHARS,
 } from './bridgeOptions.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
-import type { MidTurnQueueEntry } from './bridgeTypes.js';
+import type {
+  BridgePendingInteraction,
+  MidTurnQueueEntry,
+} from './bridgeTypes.js';
 import type { ClientMcpMessageSender } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
@@ -1803,6 +1807,183 @@ describe('BridgeClient — requestPermission pre-publish collision guard', () =>
     expect(publish).not.toHaveBeenCalled();
     // And the cap-index was never touched (only added AFTER publish).
     expect(fakeEntry.pendingPermissionIds.size).toBe(0);
+  });
+});
+
+describe('BridgeClient — pending interaction classification', () => {
+  it('tracks a render-ready permission action until it resolves', async () => {
+    const pendingInteractions = new Map<string, BridgePendingInteraction>();
+    let resolveRequest:
+      | ((value: { kind: 'cancelled'; reason: 'agent_cancelled' }) => void)
+      | undefined;
+    const entry = {
+      sessionId: 'sess:permission',
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      activePromptOriginatorClientId: undefined,
+    };
+    const client = new BridgeClient(
+      ((sessionId: string) =>
+        sessionId === entry.sessionId ? entry : undefined) as never,
+      (() => undefined) as never,
+      {
+        request: () =>
+          new Promise((resolve) => {
+            resolveRequest = resolve as typeof resolveRequest;
+          }),
+      } as never,
+      0,
+      Infinity,
+    );
+
+    const request = client.requestPermission({
+      sessionId: entry.sessionId,
+      toolCall: {
+        toolCallId: 'shell-1',
+        title: 'Run cleanup command',
+        kind: 'execute',
+        content: [{ type: 'content', content: { type: 'text', text: 'rm' } }],
+        locations: [{ path: '/workspace' }],
+        rawInput: { command: 'rm -rf build-cache' },
+      },
+      options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(pendingInteractions.size).toBe(1);
+    });
+    expect([...pendingInteractions.values()]).toEqual([
+      expect.objectContaining({
+        kind: 'permission',
+        action: expect.objectContaining({
+          type: 'execute',
+          title: 'Run cleanup command',
+          input: { command: 'rm -rf build-cache' },
+        }),
+        options: [expect.objectContaining({ optionId: 'allow' })],
+      }),
+    ]);
+
+    resolveRequest!({ kind: 'cancelled', reason: 'agent_cancelled' });
+    await request;
+    expect(pendingInteractions.size).toBe(0);
+  });
+
+  it('tracks and releases ask_user_question details by request id', async () => {
+    const pendingInteractions = new Map<string, BridgePendingInteraction>();
+    let resolveRequest:
+      | ((value: { kind: 'cancelled'; reason: 'agent_cancelled' }) => void)
+      | undefined;
+    const entry = {
+      sessionId: 'sess:question',
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      activePromptOriginatorClientId: undefined,
+    };
+    const client = new BridgeClient(
+      ((sessionId: string) =>
+        sessionId === entry.sessionId ? entry : undefined) as never,
+      (() => undefined) as never,
+      {
+        request: () =>
+          new Promise((resolve) => {
+            resolveRequest = resolve as typeof resolveRequest;
+          }),
+      } as never,
+      0,
+      Infinity,
+    );
+
+    const request = client.requestPermission({
+      sessionId: entry.sessionId,
+      toolCall: {
+        toolCallId: 'ask-1',
+        title: 'Need an answer',
+        _meta: {
+          qwenInteractionKind: 'user_question',
+          qwenQuestions: [
+            {
+              header: 'Direction',
+              question: 'Which implementation should be used?',
+              options: [{ label: 'Polling' }, { label: 'SSE' }],
+            },
+          ],
+        },
+      },
+      options: [{ optionId: 'answer', name: 'Answer', kind: 'allow_once' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(pendingInteractions.size).toBe(1);
+    });
+    expect([...pendingInteractions.values()]).toEqual([
+      expect.objectContaining({
+        kind: 'user_question',
+        title: 'Need an answer',
+        questions: [
+          expect.objectContaining({
+            question: 'Which implementation should be used?',
+            answerKey: '0',
+          }),
+        ],
+        options: [expect.objectContaining({ optionId: 'answer' })],
+      }),
+    ]);
+
+    resolveRequest!({ kind: 'cancelled', reason: 'agent_cancelled' });
+    await request;
+    expect(pendingInteractions.size).toBe(0);
+    expect(entry.pendingPermissionIds.size).toBe(0);
+  });
+
+  it('keeps a generic permission snapshot when detail normalization fails', async () => {
+    const pendingInteractions = new Map<string, BridgePendingInteraction>();
+    let resolveRequest:
+      | ((value: { kind: 'cancelled'; reason: 'agent_cancelled' }) => void)
+      | undefined;
+    const entry = {
+      sessionId: 'sess:fallback',
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      activePromptOriginatorClientId: undefined,
+    };
+    const client = new BridgeClient(
+      ((sessionId: string) =>
+        sessionId === entry.sessionId ? entry : undefined) as never,
+      (() => undefined) as never,
+      {
+        request: () =>
+          new Promise((resolve) => {
+            resolveRequest = resolve as typeof resolveRequest;
+          }),
+      } as never,
+      0,
+      Infinity,
+    );
+
+    const request = client.requestPermission({
+      sessionId: entry.sessionId,
+      toolCall: null as unknown as RequestPermissionRequest['toolCall'],
+      options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(pendingInteractions.size).toBe(1);
+    });
+    expect([...pendingInteractions.values()]).toEqual([
+      expect.objectContaining({
+        kind: 'permission',
+        action: {},
+        options: [expect.objectContaining({ optionId: 'allow' })],
+      }),
+    ]);
+
+    resolveRequest!({ kind: 'cancelled', reason: 'agent_cancelled' });
+    await request;
+    expect(pendingInteractions.size).toBe(0);
   });
 });
 

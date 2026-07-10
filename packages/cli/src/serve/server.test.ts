@@ -7130,6 +7130,58 @@ describe('createServeApp', () => {
       expect(bridge.listCalls).toEqual([WS_BOUND]);
     });
 
+    it('returns runtime state and pending interaction details', async () => {
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: 's-pending',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: true,
+            isWaitingForPermission: true,
+            pendingInteractionCount: 1,
+            hasTurnError: true,
+            turnError: { message: 'internal path: /private/workspace' },
+            pendingInteractions: [
+              {
+                requestId: 'request-1',
+                kind: 'permission',
+                createdAt: '2026-05-17T12:00:01.000Z',
+                action: { input: { command: 'secret command' } },
+                options: [],
+              },
+            ],
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+
+      const res = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toEqual([
+        expect.objectContaining({
+          sessionId: 's-pending',
+          isWaitingForPermission: true,
+          pendingInteractionCount: 1,
+          turnError: { message: 'internal path: /private/workspace' },
+          pendingInteractions: [
+            expect.objectContaining({
+              requestId: 'request-1',
+              action: { input: { command: 'secret command' } },
+            }),
+          ],
+        }),
+      ]);
+    });
+
     it('supports plural /workspaces/:workspace/sessions for non-primary live sessions', async () => {
       const primaryBridge = fakeBridge();
       const secondaryBridge = fakeBridge({
@@ -8339,6 +8391,42 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect('displayName' in res.body).toBe(false);
+    });
+
+    it('200 includes pending interaction details for a single session', async () => {
+      const summary: BridgeSessionSummary = {
+        sessionId: 's-pending',
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: true,
+        isWaitingForUserQuestion: true,
+        pendingInteractionCount: 1,
+        pendingInteractions: [
+          {
+            requestId: 'question-1',
+            kind: 'user_question',
+            createdAt: '2026-05-17T12:00:01.000Z',
+            title: 'Choose a direction',
+            questions: [{ question: 'Which path?' }],
+            options: [{ optionId: 'answer', label: 'Answer' }],
+          },
+        ],
+      };
+      const bridge = fakeBridge({ summaryImpl: () => summary });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-pending/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.pendingInteractions).toEqual(summary.pendingInteractions);
+      expect(res.body.pendingInteractionCount).toBe(1);
     });
 
     it('404 when the session id is unknown to the daemon', async () => {

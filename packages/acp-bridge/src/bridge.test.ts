@@ -5715,6 +5715,27 @@ describe('createAcpSessionBridge', () => {
       expect(payload.sessionId).toBe(session.sessionId);
       expect(payload.options.map((o) => o.optionId)).toEqual(['allow', 'deny']);
       expect(bridge.pendingPermissionCount).toBe(1);
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        isWaitingForPermission: true,
+        isWaitingForUserQuestion: false,
+        pendingInteractionCount: 1,
+        pendingInteractions: [
+          expect.objectContaining({
+            requestId: payload.requestId,
+            kind: 'permission',
+          }),
+        ],
+      });
+      expect(bridge.listWorkspaceSessions(WS_A)).toEqual([
+        expect.objectContaining({
+          sessionId: session.sessionId,
+          isWaitingForPermission: true,
+          pendingInteractionCount: 1,
+          pendingInteractions: [
+            expect.objectContaining({ requestId: payload.requestId }),
+          ],
+        }),
+      ]);
 
       // Vote.
       const accepted = bridge.respondToPermission(payload.requestId, {
@@ -5729,6 +5750,15 @@ describe('createAcpSessionBridge', () => {
       expect(response.outcome.outcome).toBe('selected');
       expect(response.outcome.optionId).toBe('allow');
       expect(bridge.pendingPermissionCount).toBe(0);
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+        pendingInteractionCount: 0,
+        pendingInteractions: [],
+      });
+      expect(
+        bridge.listWorkspaceSessions(WS_A)[0]!.pendingInteractions,
+      ).toEqual([]);
 
       subAbort.abort();
       await bridge.shutdown();
@@ -5811,6 +5841,19 @@ describe('createAcpSessionBridge', () => {
         toolCall: {
           toolCallId: 'tc-ask-scoped',
           title: 'AskUserQuestion: Ask user 1 question',
+          _meta: {
+            qwenInteractionKind: 'user_question',
+            qwenQuestions: [
+              {
+                header: 'Direction',
+                question: 'Which implementation should be used?',
+                options: [
+                  { label: 'Polling', description: 'Poll for updates.' },
+                  { label: 'SSE', description: 'Subscribe to updates.' },
+                ],
+              },
+            ],
+          },
         },
         options: [
           { optionId: 'proceed_once', name: 'Submit', kind: 'allow_once' },
@@ -5822,11 +5865,32 @@ describe('createAcpSessionBridge', () => {
       const next = await it.next();
       expect(next.done).toBe(false);
       const payload = next.value!.data as { requestId: string };
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: true,
+        pendingInteractionCount: 1,
+        pendingInteractions: [
+          expect.objectContaining({
+            requestId: payload.requestId,
+            kind: 'user_question',
+            questions: [
+              expect.objectContaining({
+                answerKey: '0',
+                question: 'Which implementation should be used?',
+              }),
+            ],
+          }),
+        ],
+      });
+      expect(bridge.listWorkspaceSessions(WS_A)[0]).toMatchObject({
+        isWaitingForUserQuestion: true,
+        pendingInteractionCount: 1,
+      });
 
       const responseWithAnswers = {
         outcome: { outcome: 'selected', optionId: 'proceed_once' },
         answers: {
-          name: 'Alice',
+          '0': 'Polling',
         },
         ignored: 'not forwarded',
       } satisfies RequestPermissionResponse & {
@@ -5845,10 +5909,16 @@ describe('createAcpSessionBridge', () => {
       expect(response).toMatchObject({
         outcome: { outcome: 'selected', optionId: 'proceed_once' },
         answers: {
-          name: 'Alice',
+          '0': 'Polling',
         },
       });
       expect(response).not.toHaveProperty('ignored');
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+        pendingInteractionCount: 0,
+        pendingInteractions: [],
+      });
 
       subAbort.abort();
       await bridge.shutdown();
@@ -10930,6 +11000,67 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('enriched listWorkspaceSessions', () => {
+    it('retains a turn error until the next prompt begins', async () => {
+      let promptCount = 0;
+      let releaseSecondPrompt: ((value: PromptResponse) => void) | undefined;
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            promptImpl: () => {
+              promptCount += 1;
+              if (promptCount === 1) {
+                throw Object.assign(new Error('model unavailable'), {
+                  code: 'model_error',
+                });
+              }
+              return new Promise<PromptResponse>((resolve) => {
+                releaseSecondPrompt = resolve;
+              });
+            },
+          }).channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'fail' }],
+        }),
+      ).rejects.toThrow();
+
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        hasActivePrompt: false,
+        hasTurnError: true,
+        turnError: { message: expect.any(String) },
+      });
+      const listSummary = bridge.listWorkspaceSessions(WS_A)[0]!;
+      expect(listSummary).toMatchObject({
+        hasTurnError: true,
+        turnError: { message: expect.any(String) },
+      });
+      expect(listSummary.pendingInteractions).toEqual([]);
+
+      const successor = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'recover' }],
+      });
+      await vi.waitFor(() => {
+        expect(releaseSecondPrompt).toBeDefined();
+      });
+
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        hasActivePrompt: true,
+        hasTurnError: false,
+      });
+      expect(
+        bridge.getSessionSummary(session.sessionId).turnError,
+      ).toBeUndefined();
+
+      releaseSecondPrompt!({ stopReason: 'end_turn' });
+      await successor;
+      await bridge.shutdown();
+    });
+
     it('reports active prompt state when attaching to an existing session', async () => {
       let finishPrompt: ((value: PromptResponse) => void) | undefined;
       const bridge = makeBridge({
