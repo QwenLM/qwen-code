@@ -332,11 +332,12 @@ export class DingtalkChannel extends ChannelBase {
     const title = extractTitle(text);
 
     for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i]!;
       const body = {
         msgtype: 'markdown',
         markdown: {
           title: i === 0 ? title : `${title} (cont.)`,
-          text: chunks[i]!,
+          text: i === 0 && atUserId ? `@${atUserId}\n\n${chunk}` : chunk,
         },
         ...(i === 0 && atUserId ? { at: { atUserIds: [atUserId] } } : {}),
       };

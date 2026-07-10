@@ -1309,7 +1309,7 @@ describe('DingtalkChannel reply mentions', () => {
       JSON.parse(String((fetchSpy.mock.calls[0]![1] as RequestInit).body)),
     ).toMatchObject({
       msgtype: 'markdown',
-      markdown: { text: 'hello' },
+      markdown: { text: '@staff-1\n\nhello' },
       at: { atUserIds: ['staff-1'] },
     });
   });
