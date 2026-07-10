@@ -414,6 +414,17 @@ export class TopLevelProtocolTagStreamFilter {
       }
 
       if (this.literalTag) {
+        // A '<' always begins a fresh tag candidate. Without this, an
+        // unmatched '<' in prose (e.g. "3 < 5") keeps us scanning for the next
+        // '>' — which is the one closing the protocol tag itself, causing the
+        // protocol tag to leak (in a summary) or the answer to be swallowed
+        // (in an analysis block).
+        if (char === '<') {
+          this.literalTag = false;
+          this.literalSummaryOpeningLastChar = undefined;
+          this.tagCandidate = char;
+          continue;
+        }
         if (this.analysisDepth === 0) out += char;
         if (this.literalSummaryOpeningLastChar && !/\s/.test(char)) {
           this.literalSummaryOpeningLastChar = char;

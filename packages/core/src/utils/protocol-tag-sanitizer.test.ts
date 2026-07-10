@@ -245,4 +245,46 @@ describe('protocol tag sanitizer', () => {
 
     expect(filter.accept(input) + filter.flush()).toBe('see <analysis> here');
   });
+
+  it('does not leak </summary> when the summary body has an unmatched "<"', () => {
+    const filter = new TopLevelProtocolTagStreamFilter();
+    const input =
+      '<analysis>ok</analysis><summary>Because 3 < 5, pick the smaller.</summary>';
+
+    expect(filter.accept(input) + filter.flush()).toBe(
+      'Because 3 < 5, pick the smaller.',
+    );
+  });
+
+  it('does not drop the visible answer when the analysis body has an unmatched "<"', () => {
+    const filter = new TopLevelProtocolTagStreamFilter();
+    const input = '<analysis>3 < 5 so proceed</analysis>Here are your 3 files.';
+
+    expect(filter.accept(input) + filter.flush()).toBe(
+      'Here are your 3 files.',
+    );
+  });
+
+  it('keeps unmatched "<" prose aligned between streaming and batch sanitizers', () => {
+    const inputs = [
+      '<analysis>ok</analysis><summary>Because 3 < 5, pick the smaller.</summary>',
+      '<analysis>3 < 5 so proceed</analysis>Here are your 3 files.',
+      '<summary>cmd < input.txt then x</summary>',
+      '<summary>if (x<3) return</summary>',
+      '<analysis>a < b and c < d</analysis><summary>ans</summary>',
+    ];
+
+    for (const input of inputs) {
+      const batch = stripAnalysisSummaryProtocolTags(input);
+
+      const whole = new TopLevelProtocolTagStreamFilter();
+      expect((whole.accept(input) + whole.flush()).trim()).toBe(batch);
+
+      const perChar = new TopLevelProtocolTagStreamFilter();
+      let out = '';
+      for (const char of input) out += perChar.accept(char);
+      out += perChar.flush();
+      expect(out.trim()).toBe(batch);
+    }
+  });
 });
