@@ -169,14 +169,7 @@ export const goalCommand: SlashCommand = {
       return;
     }
 
-    // ── Branch 3: length cap ─────────────────────────────────────────────
-    if (q.length > MAX_GOAL_LENGTH) {
-      return errorMessage(
-        `Goal condition is limited to ${MAX_GOAL_LENGTH} characters (got ${q.length}).`,
-      );
-    }
-
-    // ── Branch 4: gates ──────────────────────────────────────────────────
+    // ── Branch 3: gates ──────────────────────────────────────────────────
     if (!config.isTrustedFolder()) {
       return errorMessage(
         '/goal is only available in trusted workspaces. Trust this folder via `/trust` and try again.',
@@ -193,7 +186,7 @@ export const goalCommand: SlashCommand = {
       );
     }
 
-    // ── Branch 5: register hook + emit set card + kick off first turn ────
+    // ── Branch 4: register hook + emit set card + kick off first turn ────
     let registered;
     try {
       registered = registerGoalHook({

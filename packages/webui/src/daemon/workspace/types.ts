@@ -171,6 +171,10 @@ export interface DaemonScheduledTaskRun {
    * daemon's `CronTaskRun.sessionId` so run-attribution isn't silently dropped
    * on the client (not surfaced in the UI yet). */
   sessionId?: string;
+  /** The fire was delivered but its prompt never ran: the task's precondition
+   * did not release it. Absent = the fire was dispatched. Without this a
+   * withheld fire is indistinguishable from a real run in the history. */
+  withheld?: boolean;
 }
 
 export interface DaemonScheduledTask {
@@ -195,6 +199,11 @@ export interface DaemonScheduledTask {
    * records the anchor (bound) session — the sub-session id is not surfaced
    * here. */
   runMode: 'shared' | 'isolated';
+  /** Precondition guarding each fire of an isolated task: the bound session runs
+   * it as a normal turn first and only dispatches `prompt` into a sub-session on
+   * a YES verdict. Null when the task fires unconditionally, and always null for
+   * a `'shared'` task (the field only gates the isolated dispatch). */
+  condition: string | null;
   /** Bounded, newest-last history of recent fires. Empty for tasks that have
    * not fired (and, by nature, for one-shots — they are deleted on fire). */
   runs: DaemonScheduledTaskRun[];
@@ -212,6 +221,9 @@ export interface DaemonCreateScheduledTaskRequest {
   /** Defaults to `'shared'` (the #6389 single-session model). `'isolated'`
    * spawns a fresh session per fire. */
   runMode?: 'shared' | 'isolated';
+  /** Precondition for the isolated dispatch. Omit or null for none. Rejected
+   * with `condition_requires_isolated` unless `runMode` is `'isolated'`. */
+  condition?: string | null;
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are
@@ -223,6 +235,10 @@ export interface DaemonUpdateScheduledTaskRequest {
   recurring?: boolean;
   enabled?: boolean;
   runMode?: 'shared' | 'isolated';
+  /** `condition: null` (or '') clears the precondition. The COMBINED post-patch
+   * state is validated, so switching a guarded task to `runMode: 'shared'`
+   * without also clearing the condition is rejected. */
+  condition?: string | null;
 }
 
 /**

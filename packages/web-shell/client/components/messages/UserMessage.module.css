@@ -63,6 +63,102 @@
   word-break: break-word;
 }
 
+.messageTag {
+  position: relative;
+  display: inline-flex;
+  max-width: min(44ch, 100%);
+  min-height: 20px;
+  align-items: center;
+  margin: 0 0.25ch;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--secondary);
+  color: var(--foreground);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  line-height: 1.2;
+  vertical-align: baseline;
+}
+
+.messageTagTooltip {
+  position: absolute;
+  z-index: calc(var(--web-shell-tooltip-z-index, 1000) + 1);
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 160px;
+  max-width: min(320px, 80vw);
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 12px;
+  line-height: 1.5;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 120ms ease 0ms,
+    visibility 0ms linear 120ms;
+  visibility: hidden;
+  white-space: normal;
+}
+
+.messageTag:hover .messageTagTooltip,
+.messageTag:focus-within .messageTagTooltip {
+  opacity: 1;
+  transition:
+    opacity 120ms ease 450ms,
+    visibility 0ms linear 450ms;
+  visibility: visible;
+}
+
+.messageTagClickable {
+  cursor: pointer;
+}
+
+.messageTagClickable:hover,
+.messageTagClickable:focus-visible {
+  border-color: var(--chat-editor-accent-color, var(--foreground));
+  outline: none;
+}
+
+.messageTagIcon {
+  display: block;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  margin-left: 7px;
+  background: currentColor;
+  mask: var(--user-message-tag-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--user-message-tag-icon-url) center / contain no-repeat;
+}
+
+.messageTagLabel,
+.messageTagValue {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.messageTagLabel {
+  padding: 3px 0 3px 7px;
+  color: var(--agent-blue-500);
+}
+
+.messageTagIcon + .messageTagLabel {
+  padding-left: 0.5ch;
+}
+
+.messageTagValue {
+  max-width: 32ch;
+  padding: 3px 0 3px 0.5ch;
+  color: var(--foreground, #e4e4e4);
+  opacity: 1;
+}
+
 .chatContentCollapsed {
   max-height: 400px;
   overflow: hidden;
