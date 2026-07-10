@@ -44,6 +44,8 @@ import { createChildAbortController } from '../../utils/abortController.js';
 import {
   tokenLimit,
   hasExplicitOutputLimit,
+  defaultOutputCeiling,
+  reconcileMaxTokens,
   parsePositiveIntegerEnvValue,
 } from '../tokenLimits.js';
 
@@ -517,7 +519,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // the body actually carries a `cache_control: { …, scope: 'global' }`
     // entry. The converter emits those entries on the system text block
     // and the last tool entry when `useGlobalCacheScope` is true (gated
-    // on `enableCacheControl !== false` AND Anthropic-native baseURL).
+    // on `enableCacheControl !== false` AND (Anthropic-native baseURL OR `forceGlobalCacheScope`)).
     // Scan the assembled request body for that field rather than
     // re-deriving the gate here, so:
     //   1. The beta and the body-side field share a single source of
@@ -539,8 +541,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
   /**
    * Whether to ATTACH the body-side `scope: 'global'` field on
-   * `cache_control` entries this request. Requires both
-   * `enableCacheControl !== false` AND an Anthropic-native baseURL.
+   * `cache_control` entries this request. Requires
+   * `enableCacheControl !== false` AND either an Anthropic-native baseURL
+   * OR `forceGlobalCacheScope` (opt-in for proxy providers that forward
+   * the `prompt-caching-scope-2026-01-05` beta; see issue #6642).
    * Computed per request: `Config.handleModelChange()` hot-updates
    * `enableCacheControl` in-place on the qwen-oauth path (without
    * recreating the ContentGenerator); non-qwen-oauth providers refresh
@@ -557,9 +561,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
    * to attach scope to, beta correctly suppressed).
    */
   private useGlobalCacheScope(): boolean {
+    if (this.contentGeneratorConfig.enableCacheControl === false) {
+      return false;
+    }
     return (
-      this.contentGeneratorConfig.enableCacheControl !== false &&
-      isAnthropicNativeBaseUrl(this.contentGeneratorConfig)
+      isAnthropicNativeBaseUrl(this.contentGeneratorConfig) ||
+      this.contentGeneratorConfig.forceGlobalCacheScope === true
     );
   }
 
@@ -656,9 +663,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // ContentGenerator. (Non-qwen-oauth providers refresh via generator
     // recreation, so `baseUrl` is captured fresh at construct time, not
     // mutated mid-session — defensive per-request reads on both fields
-    // cover both paths.) `useGlobalCacheScope` is a strict subset of
-    // `enableCacheControl` (true only when caching is on AND the resolved
-    // baseURL is Anthropic-native) and governs whether the body's
+    // cover both paths.) `useGlobalCacheScope` requires
+    // `enableCacheControl` (true only when caching is on AND either the resolved
+    // baseURL is Anthropic-native OR `forceGlobalCacheScope` is set) and governs whether the body's
     // `cache_control` entries carry `scope: 'global'`. The matching
     // `prompt-caching-scope-2026-01-05` beta isn't passed through this
     // sample — `buildPerRequestHeaders` instead scans the assembled body
@@ -720,8 +727,20 @@ export class AnthropicContentGenerator implements ContentGenerator {
       return configValue !== undefined ? configValue : requestValue;
     };
 
-    // Apply output token limit logic consistent with OpenAI providers
-    const userMaxTokens = getParam<number>('max_tokens', 'maxOutputTokens');
+    // Apply output token limit logic consistent with OpenAI providers.
+    // A config-level max_tokens is a ceiling, not an exemption from the
+    // window clamp: when the request also carries a (clamped)
+    // maxOutputTokens, the smaller of the two goes on the wire so
+    // `prompt + max_tokens ≤ window` holds for samplingParams users too.
+    const configMaxTokens = configSamplingParams?.max_tokens as
+      | number
+      | undefined
+      | null;
+    const requestMaxTokens = requestConfig.maxOutputTokens;
+    const userMaxTokens =
+      reconcileMaxTokens(configMaxTokens, requestMaxTokens) ??
+      configMaxTokens ??
+      requestMaxTokens;
     const modelId = this.contentGeneratorConfig.model;
     const modelLimit = tokenLimit(modelId, 'output');
     const isKnownModel = hasExplicitOutputLimit(modelId);
@@ -732,7 +751,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
         ? Math.min(userMaxTokens, modelLimit)
         : userMaxTokens;
     } else {
-      // No explicit user config — check env var, then use the model limit.
+      // No explicit user config — check env var, then use the model limit
+      // clipped to the flat output ceiling.
       const envMaxTokens = parsePositiveIntegerEnvValue(
         process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
       );
@@ -741,7 +761,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
           ? Math.min(envMaxTokens, modelLimit)
           : envMaxTokens;
       } else {
-        maxTokens = modelLimit;
+        maxTokens = defaultOutputCeiling(modelId);
       }
     }
 
