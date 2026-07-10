@@ -33,17 +33,19 @@ jobs:
               'COLLABORATOR',
             ]);
             const highRiskExtension =
-              /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|sh|bat|ps1|node|dylib|so)(?:$|[\s)"'\]>?#/&;.,!:%])/i;
+              /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|bat|ps1|node|dylib)(?:$|[\s)"'\]>?#&;,:!%])/i;
             const linkPattern =
               /https?:\/\/[^\s"'<>\]]+|\[[^\]]+\]\((?:[^()\s]|\([^()\s]*\))+\)/gi;
+            const errorMessage = (error) =>
+              `${error?.status ? `${error.status} ` : ''}${error?.message ?? error}`;
             const highRiskTarget = (url) => {
-              let target = url;
+              let target = url.split('/').pop() || url;
               if (!/^https?:\/\//i.test(url)) {
                 return target;
               }
               try {
                 const parsedUrl = new URL(url);
-                target = parsedUrl.pathname;
+                target = parsedUrl.pathname.split('/').pop() || '';
               } catch {
                 return target;
               }
@@ -58,6 +60,8 @@ jobs:
 
             const { comment, sender } = context.payload;
             const association = comment.author_association ?? '';
+            const action = context.payload.action ?? '';
+            const commentAuthor = comment.user?.login ?? 'ghost';
             const body = comment.body ?? '';
             const scanBody = body
               .replace(/```[\s\S]*?```/g, '')
@@ -66,7 +70,10 @@ jobs:
 
             if (
               trustedAssociations.has(association) ||
-              sender?.type === 'Bot'
+              sender?.type === 'Bot' ||
+              (action === 'edited' &&
+                sender?.login &&
+                sender.login !== commentAuthor)
             ) {
               core.info(`Trusted author (${association || sender?.type}); skipping.`);
               return;
@@ -108,7 +115,7 @@ jobs:
               }
             } catch (error) {
               core.warning(
-                `Failed to delete suspicious comment ${comment.id}: ${error}`,
+                `Failed to delete suspicious comment ${comment.id}: ${errorMessage(error)}`,
               );
             }
 
@@ -121,7 +128,7 @@ jobs:
                     { data: 'Value', header: true },
                   ],
                   ['Event', eventName],
-                  ['Author', comment.user.login],
+                  ['Author', commentAuthor],
                   ['Association', association || 'none'],
                   ['Comment ID', String(comment.id)],
                   ['Reason', reasons.join(', ')],
@@ -130,6 +137,6 @@ jobs:
                 .write();
             } catch (error) {
               core.warning(
-                `Failed to write suspicious comment summary: ${error}`,
+                `Failed to write suspicious comment summary: ${errorMessage(error)}`,
               );
             }

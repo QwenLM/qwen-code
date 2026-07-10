@@ -21,7 +21,7 @@ describe('comment attachment guard workflow', () => {
   );
 
   it('treats common URL punctuation after a risky extension as a match boundary', () => {
-    expect(workflow).toContain('>?#/&;.,!:%]');
+    expect(workflow).toContain('>?#&;,:!%]');
   });
 
   it('checks markdown link URLs instead of display text', () => {
@@ -33,7 +33,18 @@ describe('comment attachment guard workflow', () => {
 
   it('checks URL paths instead of country-code TLD hosts', () => {
     expect(workflow).toContain('const parsedUrl = new URL(url);');
-    expect(workflow).toContain('target = parsedUrl.pathname;');
+    expect(workflow).toContain(
+      "target = parsedUrl.pathname.split('/').pop() || '';",
+    );
+    expect(workflow).not.toContain('|sh|');
+    expect(workflow).not.toContain('|so)');
+  });
+
+  it('skips comments edited by a different user', () => {
+    expect(workflow).toContain("const action = context.payload.action ?? '';");
+    expect(workflow).toContain("comment.user?.login ?? 'ghost'");
+    expect(workflow).toContain("action === 'edited'");
+    expect(workflow).toContain('sender.login !== commentAuthor');
   });
 
   it('does not scan fenced code blocks or inline code spans', () => {
