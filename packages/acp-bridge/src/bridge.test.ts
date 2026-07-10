@@ -1030,6 +1030,27 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('maps a missing transcript session (resourceNotFound) to SessionNotFoundError', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw RequestError.resourceNotFound('session:missing-transcript');
+        }
+        throw new Error(`unexpected extMethod ${method}`);
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    await expect(
+      bridge.getSessionTranscriptPage({ sessionId: 'missing-transcript' }),
+    ).rejects.toMatchObject({
+      name: 'SessionNotFoundError',
+      sessionId: 'missing-transcript',
+    });
+
+    await bridge.shutdown();
+  });
+
   it('rejects malformed workspace memory dream responses', async () => {
     const handles: ChannelHandle[] = [];
     const bridge = makeBridge({

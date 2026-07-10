@@ -415,12 +415,13 @@ export function registerSessionRoutes(
       workspaceId: runtime.workspaceId,
       workspaceCwd: runtime.workspaceCwd,
     });
-    res.status(403).json({
-      error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
-      code: 'untrusted_workspace',
+    // Reuse the shared responder so the untrusted-workspace response format and
+    // message stay consistent across every session route; the route-specific
+    // context is preserved via the extra fields and the logging above.
+    sendUntrustedWorkspaceResponse(res, {
       sessionId,
-      workspaceId: runtime.workspaceId,
       workspaceCwd: runtime.workspaceCwd,
+      workspaceId: runtime.workspaceId,
     });
   };
 

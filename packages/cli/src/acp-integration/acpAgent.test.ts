@@ -6834,6 +6834,55 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('resets replay state to defaults when the cursor replay field is not an object', async () => {
+    const settings = makeCoreSettings();
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...makeInnerConfig(),
+      getToolRegistry: vi.fn(() => undefined),
+    } as unknown as Config);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage: vi.fn().mockResolvedValue({
+            sessionId: VALID_SESSION_ID,
+            records: [],
+            // A cursor from an older or corrupted daemon can carry a non-object
+            // replay field; parsing must fall back to empty replay state rather
+            // than crash transcript paging.
+            replay: 'garbage',
+            hasMore: false,
+            startTime: 'start',
+            lastUpdated: 'end',
+          }),
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      sessionId: VALID_SESSION_ID,
+    });
+
+    expect(mockHistoryReplayPage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cumulativeUsage: {
+          apiTimeMs: 0,
+          cachedTokens: 0,
+          candidateTokens: 0,
+          promptTokens: 0,
+        },
+      }),
+      [],
+      expect.objectContaining({ pendingToolCalls: [] }),
+    );
+    expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('malformed pending tool calls'),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/providers extension methods list and connect model providers', async () => {
     const settings = makeSessionSettings();
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);

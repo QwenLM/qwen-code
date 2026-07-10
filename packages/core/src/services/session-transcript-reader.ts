@@ -126,6 +126,12 @@ const SESSION_TRANSCRIPT_SESSION_ID_PATTERN = /^[0-9a-fA-F-]{32,36}$/;
 const debugLogger = createDebugLogger('SESSION_TRANSCRIPT');
 
 const indexCache = new Map<string, CacheEntry>();
+// Per-workspace HMAC signing keys are cached for the daemon's lifetime (keyed by
+// key-file path). Rotating a key file externally therefore requires a daemon
+// restart to take effect — the only in-process invalidation is the corrupt
+// (wrong-length) key replacement in readCursorHmacKey. This is acceptable: the
+// key protects cursor integrity across workspaces, not against a local adversary
+// who can already read the key file next to the transcripts it signs.
 const cursorHmacKeys = new Map<string, Buffer>();
 let indexCacheMaxBytesForTest: number | undefined;
 

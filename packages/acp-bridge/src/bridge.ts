@@ -5174,6 +5174,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ),
         );
         return response as unknown as BridgeSessionTranscriptPage;
+      } catch (err) {
+        // A missing transcript file (ENOENT without a cursor) surfaces from the
+        // child as a raw resourceNotFound JSON-RPC error. Translate it to
+        // SessionNotFoundError so the route maps it to HTTP 404 — mirroring the
+        // load/resume path above — instead of falling through to a 500.
+        if (isAcpSessionResourceNotFound(err, req.sessionId)) {
+          throw new SessionNotFoundError(req.sessionId);
+        }
+        throw err;
       } finally {
         if (hasNoChannelWork(info)) {
           await startIdleTimer(info, 'session transcript');
