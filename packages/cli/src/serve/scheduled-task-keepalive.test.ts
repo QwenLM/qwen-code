@@ -134,6 +134,107 @@ describe('scheduled-task keepalive', () => {
     expect(loads).toEqual([]); // no revive attempted for any disabled session
   });
 
+  it('does not heartbeat or revive a bound legacy `condition` task (never pinned)', async () => {
+    // A legacy precondition task fails closed — the scheduler can never fire it,
+    // so keepalive must not pin its session resident (no heartbeat) nor revive
+    // it. The `condition` field predates the current DurableCronTask shape, so it
+    // is attached off-type to model a task written by a pre-removal version.
+    await updateCronTasks(workspace, () => [
+      task({ id: 'live', sessionId: 'sess-live' }),
+      task({
+        id: 'legacy',
+        sessionId: 'sess-legacy',
+        condition: 'files_changed',
+      } as unknown as Partial<DurableCronTask>),
+    ]);
+    const guarded = {
+      recordHeartbeat: (id: string) => {
+        if (id !== 'sess-live') {
+          throw new Error(`unexpected heartbeat for legacy session ${id}`);
+        }
+        beats.push(id);
+      },
+      loadSession: async (req: { sessionId: string }) => {
+        loads.push(req.sessionId);
+      },
+      spawnOrAttach: async () => {
+        throw new Error('not mocked');
+      },
+      closeSession: async () => {},
+      updateSessionMetadata: () => {
+        throw new Error('not mocked');
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: guarded,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(beats).toEqual(['sess-live']); // only the fireable task's session
+    expect(loads).toEqual([]); // no revive attempted for the legacy task
+  });
+
+  it('does not bind an unbound legacy `condition` task', async () => {
+    await updateCronTasks(workspace, () => [
+      task({
+        id: 'legacy-unbound',
+        prompt: 'guarded',
+        condition: 'files_changed',
+      } as unknown as Partial<DurableCronTask>),
+    ]);
+    let spawnCount = 0;
+    const noSpawn = {
+      ...bridge,
+      spawnOrAttach: async () => {
+        spawnCount++;
+        return { sessionId: 'should-not-spawn' };
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: noSpawn,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(spawnCount).toBe(0);
+    const tasks = await readCronTasks(workspace);
+    expect(tasks[0]!.sessionId).toBeUndefined(); // still unbound
+  });
+
+  it('does not rename a bound legacy `condition` task', async () => {
+    await updateCronTasks(workspace, () => [
+      task({
+        id: 'legacy-bound',
+        sessionId: 'legacy-sess',
+        prompt: 'guarded',
+        condition: 'files_changed',
+      } as unknown as Partial<DurableCronTask>),
+    ]);
+    const names: Array<[string, { displayName?: string }]> = [];
+    const naming = {
+      ...bridge,
+      recordHeartbeat: () => {
+        // Legacy tasks are excluded from the bound set, so no heartbeat should
+        // be attempted for this session in the first place.
+        throw new Error('unexpected heartbeat for legacy session');
+      },
+      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
+        names.push([id, m]);
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: naming,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(names).toEqual([]); // legacy task never gets the ⏰ rename
+  });
+
   it('heartbeats nothing (and does not throw) when there are no tasks', async () => {
     const ka = startScheduledTaskKeepalive({
       bridge,

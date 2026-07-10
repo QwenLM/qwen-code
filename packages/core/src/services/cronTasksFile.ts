@@ -45,14 +45,13 @@ export interface CronTaskRun {
    */
   sessionId?: string;
   /**
-   * Set when this fire was delivered but its prompt never ran, because the
-   * task's precondition did not release it. The scheduler books the run the
-   * moment it fires — before the bound session has evaluated anything — so
-   * without this a withheld fire and a dispatched one are the same record, and
-   * a management UI reports "ran at 02:00" for a task that deliberately did
-   * nothing. Stamped afterwards by the evaluating session
-   * ({@link markCronRunWithheld}). Absent means the fire was dispatched, or
-   * predates the field.
+   * READ-ONLY backward-compatibility field. A pre-removal version stamped this
+   * on a fire whose precondition withheld the prompt (it was booked as a run
+   * but nothing executed). The isolated/precondition machinery is gone, so this
+   * is never written anymore — but stored history still carries it, and dropping
+   * it would misreport a deliberately-skipped fire as an ordinary successful
+   * run. Preserved through read/validation/passthrough so the UI keeps its
+   * "skipped" marker on legacy entries. Absent = a real dispatched run.
    */
   withheld?: boolean;
 }
@@ -99,31 +98,6 @@ export interface DurableCronTask {
    */
   sessionId?: string;
   /**
-   * How each scheduled fire runs. Absent or `'shared'` = the #6389 model: the
-   * task fires inside its single bound {@link sessionId} session and every run
-   * accumulates in that one transcript. `'isolated'` = the owning session
-   * dispatches each fire straight into a FRESH sub-session (its own clean
-   * context and transcript) and never runs the prompt inline. Absent defaults to
-   * `'shared'` so tool-created and legacy tasks are unchanged. The scheduler
-   * treats both modes identically — it only carries the field to `onFire`, which
-   * is where the routing happens.
-   */
-  runMode?: 'shared' | 'isolated';
-  /**
-   * Optional PRECONDITION guarding each fire of an `isolated` task. When set,
-   * the bound session first runs this text as its own cron turn (a normal model
-   * turn, with tools, under the workspace's approval mode) and only dispatches
-   * {@link prompt} into a fresh sub-session when that turn's verdict is YES. Any
-   * other outcome — NO, an unparseable answer, a tool-loop error, a cancelled or
-   * timed-out turn — skips the fire (fail-closed).
-   *
-   * Only meaningful with `runMode: 'isolated'`; the REST route rejects a
-   * condition on a `'shared'` task, and the scheduler/session consult the field
-   * only on the isolated path. Absent = fire unconditionally, which is what
-   * every tool-created and pre-existing task keeps doing.
-   */
-  condition?: string;
-  /**
    * Bounded, newest-last history of recent fires (capped at MAX_TASK_RUNS).
    * Absent on tool-created tasks and on any task that has not fired yet.
    * Appended at the scheduler's persist sites via {@link appendCronRun}.
@@ -147,6 +121,38 @@ export function appendCronRun(
   return next.length > MAX_TASK_RUNS
     ? next.slice(next.length - MAX_TASK_RUNS)
     : next;
+}
+
+/**
+ * True for a task written by a pre-removal version as an `isolated` task with a
+ * `condition` precondition. The field is no longer part of {@link
+ * DurableCronTask} (validation accepts it as an unknown key), so it is read off
+ * the raw object. A blank/absent condition is not a gate.
+ *
+ * The isolated run mode and its preconditions were removed; such a task can no
+ * longer be evaluated. Every consumer — the scheduler, the REST list view, and
+ * the manual `/run` endpoint — uses this to FAIL CLOSED (skip / block / reject)
+ * so a removed safety gate ("only run when X") can never silently degrade into
+ * "always run" on any path. The user re-creates the task if they still want it.
+ */
+export function taskHasLegacyCondition(task: DurableCronTask): boolean {
+  const condition = (task as unknown as Record<string, unknown>)['condition'];
+  return typeof condition === 'string' && condition.length > 0;
+}
+
+/**
+ * True for a task written by a pre-removal version with `runMode: 'isolated'`
+ * (with or without a precondition). The field is no longer part of {@link
+ * DurableCronTask}, so it is read off the raw object.
+ *
+ * Unlike a legacy precondition (which is a safety gate → fail closed), a bare
+ * isolated task has no gate: it can still run, just no longer in a fresh
+ * per-run session — it now accumulates history in its bound session. So the
+ * scheduler still fires it, but logs a one-time notice so an operator who
+ * relied on the clean-slate isolation is not left wondering why runs now differ.
+ */
+export function taskHasLegacyRunMode(task: DurableCronTask): boolean {
+  return (task as unknown as Record<string, unknown>)['runMode'] === 'isolated';
 }
 
 /**
@@ -404,46 +410,11 @@ function isValidRuns(value: unknown): value is CronTaskRun[] {
       (run['kind'] === undefined || typeof run['kind'] === 'string') &&
       (run['sessionId'] === undefined ||
         typeof run['sessionId'] === 'string') &&
+      // Read-only legacy compat: validate so a stored `withheld` marker isn't
+      // rejected on read (it is never written anymore).
       (run['withheld'] === undefined || typeof run['withheld'] === 'boolean')
     );
   });
-}
-
-/**
- * Stamps the run recorded for `at` on task `taskId` as withheld — the fire was
- * delivered, but its precondition did not release the prompt.
- *
- * Matched on the exact fire timestamp rather than "the newest run": the
- * scheduler stamps `runs[].at` from the very `lastFiredAt` it hands to `onFire`,
- * so the evaluating session knows precisely which record is its own, and a
- * concurrent fire of the same task cannot be mislabelled.
- *
- * Best-effort and idempotent. A no-op when the task, the run, or the field is
- * already gone/set — the scheduler persists the run asynchronously, and losing
- * a cosmetic marker must never fail a fire. Callers should not await it on any
- * path that gates behaviour.
- */
-export async function markCronRunWithheld(
-  projectRoot: string,
-  taskId: string,
-  at: number,
-): Promise<boolean> {
-  let marked = false;
-  await updateCronTasks(projectRoot, (tasks) => {
-    const index = tasks.findIndex((t) => t.id === taskId);
-    if (index === -1) return tasks;
-    const task = tasks[index]!;
-    const runs = task.runs;
-    if (!Array.isArray(runs)) return tasks;
-    const runIndex = runs.findIndex((r) => r.at === at);
-    if (runIndex === -1 || runs[runIndex]!.withheld === true) return tasks;
-    marked = true;
-    const nextRuns = runs.map((run, i) =>
-      i === runIndex ? { ...run, withheld: true } : run,
-    );
-    return tasks.map((t, i) => (i === index ? { ...t, runs: nextRuns } : t));
-  });
-  return marked;
 }
 
 function isValidTask(value: unknown): value is DurableCronTask {
@@ -469,18 +440,6 @@ function isValidTask(value: unknown): value is DurableCronTask {
     // would treat it as unbound, so a "bound" task would silently run unbound.
     (obj['sessionId'] === undefined ||
       (typeof obj['sessionId'] === 'string' && obj['sessionId'].length > 0)) &&
-    // Absent = 'shared'. Any string other than the two known modes routes
-    // through fix-or-delete rather than being silently treated as 'shared',
-    // so a typo can't quietly disable per-run isolation.
-    (obj['runMode'] === undefined ||
-      obj['runMode'] === 'shared' ||
-      obj['runMode'] === 'isolated') &&
-    // A precondition must be a NON-EMPTY string: the fire path gates on a
-    // truthy `condition`, so an empty one would validate here and then be
-    // silently ignored — a task the user believes is guarded would fire
-    // unconditionally. Absent is the only way to say "no precondition".
-    (obj['condition'] === undefined ||
-      (typeof obj['condition'] === 'string' && obj['condition'].length > 0)) &&
     (obj['runs'] === undefined || isValidRuns(obj['runs']))
   );
 }

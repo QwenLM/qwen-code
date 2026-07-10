@@ -396,6 +396,8 @@ export type {
   DaemonSessionArchiveState,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,
+  DaemonSessionTranscriptPage,
+  DaemonSessionTranscriptPageOptions,
   DaemonAuthProviderId,
   DaemonAuthProviderBaseUrlOption,
   DaemonAuthProviderCatalog,

@@ -154,6 +154,7 @@ import {
   createSingleWorkspaceRegistry,
   createWorkspaceSessionOwnerIndex,
   type WorkspaceRegistry,
+  type WorkspaceRuntime,
   type WorkspaceRuntimeEnvMetadata,
 } from './workspace-registry.js';
 import {
@@ -164,6 +165,7 @@ import {
   registerWorkspaceLifecycleRoutes,
   registerWorkspaceQualifiedLifecycleRoutes,
 } from './routes/workspace-lifecycle.js';
+import { registerWorkspaceManagementRoutes } from './routes/workspace-management.js';
 import {
   registerWorkspaceMcpControlRoutes,
   registerWorkspaceQualifiedMcpControlRoutes,
@@ -400,6 +402,7 @@ export interface ServeAppDeps {
    */
   clientMcpSenderRegistry?: ClientMcpSenderRegistry;
   workspaceRegistry?: WorkspaceRegistry;
+  createWorkspaceRuntime?: (cwd: string) => Promise<WorkspaceRuntime>;
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
@@ -1059,6 +1062,14 @@ export function createServeApp(
     workspaceRegistry,
     mutate,
     safeBody,
+  });
+
+  // Dynamic workspace registration.
+  registerWorkspaceManagementRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    createWorkspaceRuntime: deps.createWorkspaceRuntime,
   });
 
   const broadcastSettingsChanged = (

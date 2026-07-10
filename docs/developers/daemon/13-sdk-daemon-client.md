@@ -342,6 +342,8 @@ async function resilientSubscribe(session: DaemonSessionClient) {
 
 On reconnect the daemon replays events with `id > lastSeenEventId` from its bounded ring (default 8000 events). If the gap exceeds the ring, a `state_resync_required` frame signals the client to call `loadSession` and rebuild from the current bounded replay snapshot window. That snapshot may begin with `history_truncated`; treat it as an operator-visible status marker, not as another resync request.
 
+`history_truncated.fullTranscriptAvailable` is a boolean capability flag. When it is `true`, callers can page the full active persisted replay with `DaemonClient.getSessionTranscriptPage(sessionId, { cursor, limit })`; when it is `false`, clients should keep rendering the bounded replay normally.
+
 ### Seeding `lastEventId` at Construction
 
 Callers that persist the cursor across process restarts can seed it:
