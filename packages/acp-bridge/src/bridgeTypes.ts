@@ -82,6 +82,14 @@ export interface BridgeSpawnRequest {
    * omitted, the bridge-wide default applies.
    */
   sessionScope?: 'single' | 'thread';
+  /**
+   * Id of the session that spawned this one (a `create_sub_session` caller).
+   * Recorded as the new session's immutable parent lineage, only when a fresh
+   * session is created — an attach never adopts a parent. Absent for a
+   * top-level session that no other session spawned.
+   */
+  parentSessionId?: string;
+  approvalMode?: ApprovalMode;
 }
 
 export interface BridgeSession {
@@ -99,6 +107,15 @@ export interface BridgeSession {
   createdAt?: string;
   /** True while the live session has an in-flight prompt. */
   hasActivePrompt?: boolean;
+  /**
+   * Only present when this spawn carried a `parentSessionId`. `true` iff the
+   * parent lineage was durably written to the child's transcript (survives a
+   * daemon restart); `false` means the link is live-only and will disappear
+   * from the persisted session list on restart. Lets `create_sub_session` / the
+   * SDK distinguish a durably linked child from a degraded one instead of
+   * treating every spawn as an equally successful link.
+   */
+  parentSessionPersisted?: boolean;
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -110,6 +127,15 @@ export interface BridgeRestoreSessionRequest {
   clientId?: string;
   /** Internal replay transport for `session/load`; defaults to bulk response. */
   historyReplay?: 'stream' | 'response';
+  approvalMode?: ApprovalMode;
+  /**
+   * Persisted parent lineage recovered from the transcript by the caller (the
+   * serve layer reads it before restore). Re-seeds the restored live entry so a
+   * restored sub-session's `getSessionSummary`/status still reports its parent
+   * after a daemon restart — the entry is otherwise created without it. Absent
+   * for a top-level session.
+   */
+  parentSessionId?: string;
 }
 
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
@@ -147,6 +173,24 @@ export interface BridgeRestoredSession extends BridgeSession {
   liveJournal?: BridgeEvent[];
   /** High-water mark event ID — client uses this as initial SSE cursor. */
   lastEventId?: number;
+}
+
+export interface BridgeSessionTranscriptPageRequest {
+  sessionId: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface BridgeSessionTranscriptPage {
+  v: 1;
+  sessionId: string;
+  events: BridgeEvent[];
+  nextCursor?: string;
+  hasMore: boolean;
+  startTime?: string;
+  lastUpdated?: string;
+  partial?: true;
+  replayError?: string;
 }
 
 export interface BridgeBranchSessionRequest {
@@ -271,6 +315,10 @@ export interface BridgeSessionSummary {
   createdAt: string;
   updatedAt?: string;
   displayName?: string;
+  /** Id of the session that spawned this one (via `create_sub_session`), or
+   * absent for a top-level session. Lets a UI link a sub-session back to its
+   * parent. Immutable — set when the session is created. */
+  parentSessionId?: string;
   clientCount: number;
   hasActivePrompt: boolean;
   /** True while a non-question permission request awaits a response. */
@@ -832,6 +880,15 @@ export interface AcpSessionBridge {
 
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
+
+  /**
+   * Read a page of persisted transcript replay events through the ACP child.
+   * This is workspace-scoped and read-only: implementations must not attach a
+   * session client, seed the EventBus, or create a live SessionEntry.
+   */
+  getSessionTranscriptPage(
+    req: BridgeSessionTranscriptPageRequest,
+  ): Promise<BridgeSessionTranscriptPage>;
 
   /** Cancel a background task in a live session. */
   cancelSessionTask(
