@@ -5,6 +5,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../../agents/runtime/agent-core.js';
@@ -40,8 +42,8 @@ import {
   FORK_PLACEHOLDER_RESULT,
   buildForkedMessages,
   buildChildMessage,
+  buildPinnedWorktreeNotice,
   buildWorktreeNotice,
-  isInForkExecution,
   isForkSubagentEnabled,
   runInForkContext,
 } from './fork-subagent.js';
@@ -53,9 +55,11 @@ import {
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import {
-  getCurrentAgentDepth,
+  childLaunchDepth,
   getCurrentAgentId,
+  isTopLevelSession,
   runWithAgentContext,
+  spawnBlockReason,
 } from '../../agents/runtime/agent-context.js';
 import { trace, context as otelContext } from '@opentelemetry/api';
 import {
@@ -89,7 +93,11 @@ import {
   formatStopHookBlockingCapWarning,
 } from '../../hooks/stopHookCap.js';
 import { toModelVisibleSubagentResult } from '../../agents/subagent-result.js';
-import { ApprovalMode, Config } from '../../config/config.js';
+import {
+  ApprovalMode,
+  Config,
+  normalizeMaxSubagentDepth,
+} from '../../config/config.js';
 import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
 import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-plan-tool-policy.js';
@@ -101,6 +109,7 @@ import {
   writeAgentMeta,
   type AgentPersistedCliFlags,
 } from '../../agents/agent-transcript.js';
+import type { BackgroundSlotReservation } from '../../agents/background-tasks.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
 
 // Memoize git branch per cwd for the agent-launch path. `getGitBranch`
@@ -204,9 +213,138 @@ export interface AgentParams {
    *   are returned in the agent's result.
    */
   isolation?: 'worktree';
+  /**
+   * Pins the sub-agent's working directory to an EXISTING, caller-owned
+   * git worktree of the current repo (absolute, or relative to the
+   * parent's cwd). Unlike `isolation:'worktree'`, the harness does NOT
+   * create or clean up the directory — the caller owns its lifecycle
+   * (e.g. `/review`'s `fetch-pr` provisions the PR worktree and `cleanup`
+   * removes it). Every "where am I?" surface on the sub-agent's Config is
+   * rebound to this path so its cwd-relative file/shell operations and its
+   * search tools resolve inside the worktree rather than the parent tree.
+   * (This is a cwd pin, not a filesystem sandbox — absolute paths can still
+   * reach outside, same as `isolation:'worktree'`.) Must resolve to a
+   * worktree registered against this repository, and must live inside it —
+   * pinning rebinds the child's workspace boundary. Mutually exclusive with
+   * `isolation`.
+   */
+  working_dir?: string;
 }
 
 const debugLogger = createDebugLogger('AGENT');
+
+/**
+ * Resolves and validates an `AgentParams.working_dir`: an EXISTING,
+ * caller-owned git worktree that a sub-agent should be pinned to (e.g. the
+ * PR-review worktree `/review`'s `fetch-pr` provisions). Unlike
+ * `isolation:'worktree'`, the harness neither creates nor tears down this
+ * directory — it only rebinds the child Config's cwd surfaces to it.
+ *
+ * Two checks stop a bad path from aiming the sub-agent somewhere it should not
+ * be:
+ *
+ * - It must resolve INSIDE the repository (canonical comparison), because
+ *   pinning rebinds the child's `WorkspaceContext` wholesale.
+ * - It must be a REGISTERED linked worktree of this repository, enforced by
+ *   `isRegisteredLinkedWorktree`: git's own registry entry for the path must
+ *   point back at it, and it must not be the primary working tree. That
+ *   rejects arbitrary directories, sibling `git init`s, plain sub-directories
+ *   (including a stale registry record whose directory was recreated),
+ *   other repositories' worktrees, and a directory carrying a copied `.git`
+ *   file.
+ *
+ * `getRegisteredWorktreeBranch` is consulted only for a best-effort branch
+ * label; it is deliberately NOT a gate, since it returns null for a legitimate
+ * detached-HEAD worktree.
+ *
+ * @returns the resolved absolute path + branch, or `{ error }` with a
+ *   user-facing reason.
+ */
+async function resolveExternalWorktreeDir(
+  config: Config,
+  workingDir: string,
+): Promise<
+  | { path: string; branch: string; slug: string; repoRoot: string }
+  | { error: string }
+> {
+  const parentCwd = config.getTargetDir();
+  const resolvedPath = path.resolve(parentCwd, workingDir);
+
+  const probe = new GitWorktreeService(parentCwd);
+  const gitCheck = await probe.checkGitAvailable();
+  if (!gitCheck.available) {
+    return {
+      error: `Cannot use working_dir: ${gitCheck.error ?? 'git is not available'}.`,
+    };
+  }
+  // Mirror the isolation:'worktree' preflight. Without it, a non-repo parent
+  // dir yields the confusing "not a registered git worktree" error below
+  // (getRepoTopLevel() → null, validation then fails) instead of naming the
+  // real cause.
+  if (!(await probe.isGitRepository())) {
+    return {
+      error: `Cannot use working_dir: ${parentCwd} is not a git repository.`,
+    };
+  }
+  // Anchor at the repo top-level so the common-dir comparison inside
+  // getRegisteredWorktreeBranch is against the repository, not a monorepo
+  // subdirectory the parent happened to launch from.
+  const repoRoot = (await probe.getRepoTopLevel()) ?? parentCwd;
+  const wtService =
+    repoRoot === parentCwd ? probe : new GitWorktreeService(repoRoot);
+
+  // Containment. A registered worktree may live anywhere on disk, but pinning
+  // rebinds the child's WorkspaceContext wholesale, so a model-supplied path
+  // must not silently move the file tools' boundary outside the repository.
+  // (`isolation: 'worktree'` has this property implicitly — it always
+  // provisions under `<projectRoot>/.qwen/worktrees/`.) Compare canonical
+  // paths so a symlink cannot straddle the boundary.
+  const realRepoRoot = await fs.realpath(repoRoot).catch(() => repoRoot);
+  const realResolved = await fs
+    .realpath(resolvedPath)
+    .catch(() => resolvedPath);
+  const relToRepo = path.relative(realRepoRoot, realResolved);
+  if (relToRepo.startsWith('..') || path.isAbsolute(relToRepo)) {
+    return {
+      error:
+        `working_dir "${resolvedPath}" resolves outside this repository ` +
+        `(${realRepoRoot}). Pass a worktree that lives inside the repository.`,
+    };
+  }
+
+  // The single authoritative gate: the path must be a REGISTERED linked
+  // worktree of this repository — git's own registry entry for it points back
+  // at exactly this path, and it is not the primary working tree. That one
+  // check rejects the main tree, a plain sub-directory (including a stale
+  // registry record whose directory was recreated), a worktree belonging to
+  // another repo, and a hand-crafted directory carrying a copied `.git` file.
+  if (!(await wtService.isRegisteredLinkedWorktree(resolvedPath))) {
+    // Fails closed (returns false) on a git error too, so the cause is either
+    // "not a registered linked worktree" (main tree / unregistered) or "its
+    // git metadata could not be read" — name both rather than assert one.
+    return {
+      error:
+        `working_dir "${resolvedPath}" is not a registered linked worktree of ` +
+        `this repository (it is the main working tree, is absent from \`git ` +
+        `worktree list\`, or its git metadata could not be read) — pinning a ` +
+        `sub-agent there would not isolate it. Pass a worktree created via ` +
+        `\`git worktree add\`.`,
+    };
+  }
+  // Best-effort branch label only — never a gate. A detached-HEAD worktree
+  // (`git worktree add --detach`, or a checkout of a bare commit) is a
+  // legitimate configuration with no branch, and `getRegisteredWorktreeBranch`
+  // returns null for it. `branch` is unused for caller-owned worktrees anyway
+  // (cleanup short-circuits on `externallyManaged`); it is carried only for
+  // parity with the isolation path.
+  const info = await wtService.getRegisteredWorktreeBranch(resolvedPath);
+  return {
+    path: resolvedPath,
+    branch: info?.branch ?? '',
+    slug: path.basename(resolvedPath),
+    repoRoot,
+  };
+}
 
 const TEAM_AGENT_NAME_PROPERTY = {
   type: 'string',
@@ -437,6 +575,15 @@ function applyPersistedCliFlagOverrides(
   if (flags.maxToolCalls !== undefined) {
     ov.getMaxToolCalls = () => flags.maxToolCalls;
   }
+  if (flags.maxSubagentDepth !== undefined) {
+    // Re-normalize across the serialization boundary: this codebase only
+    // ever persists a normalized 1-100 integer, but the sidecar is a plain
+    // JSON file — a malformed or hand-edited copy (out-of-range numbers,
+    // `1e309` → Infinity, or a literal null) must not bypass the nesting
+    // cap for resumed agents. Same semantics as the Config constructor.
+    const maxSubagentDepth = normalizeMaxSubagentDepth(flags.maxSubagentDepth);
+    ov.getMaxSubagentDepth = () => maxSubagentDepth;
+  }
 }
 
 function capturePersistedCliFlags(
@@ -452,6 +599,7 @@ function capturePersistedCliFlags(
     model: config.getModel(),
     maxSessionTurns: config.getMaxSessionTurns(),
     maxToolCalls: config.getMaxToolCalls(),
+    maxSubagentDepth: config.getMaxSubagentDepth(),
   };
 }
 
@@ -613,7 +761,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         run_in_background: {
           type: 'boolean',
           description:
-            'Set to true to run this agent in the background. You will be notified when it completes.',
+            'Set to true to run this agent in the background. You will be notified when it completes. Top-level session only: from within a sub-agent the task runs in the foreground and returns its result inline.',
         },
         ...(config.isAgentTeamEnabled()
           ? {
@@ -626,6 +774,11 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           enum: ['worktree'],
           description:
             "Isolation mode. 'worktree' creates a temporary git worktree under <projectRoot>/.qwen/worktrees/agent-<7hex> so the agent works on an isolated copy of the repo. The worktree is auto-removed if the agent makes no changes; otherwise the worktree path and branch are returned in the result.",
+        },
+        working_dir: {
+          type: 'string',
+          description:
+            "Pin the sub-agent's working directory to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. The sub-agent's cwd-relative file and shell operations resolve inside this directory, and search tools (grep, glob) default to it as their root. This is a cwd pin, not a filesystem sandbox — file, shell, and search tools can still be pointed outside via an explicit absolute path. Must be a worktree already registered against the current repository, and must live inside it. Mutually exclusive with 'isolation'.",
         },
       },
       required: ['description', 'prompt'],
@@ -887,6 +1040,39 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       }
     }
 
+    if (params.working_dir !== undefined) {
+      if (
+        typeof params.working_dir !== 'string' ||
+        params.working_dir.trim().length === 0
+      ) {
+        return 'Parameter "working_dir" must be a non-empty string when set.';
+      }
+      // A caller-owned worktree has no lifecycle coupling to a background
+      // agent: nothing stops the caller from removing the worktree while a
+      // detached agent is still running in it (ENOENT on its own cwd). The
+      // isolation:'worktree' path is safe in background because the tool owns
+      // and reaps the worktree; working_dir does not.
+      if (params.run_in_background === true) {
+        return 'Parameters "working_dir" and "run_in_background" are incompatible: the caller owns the worktree lifecycle and could remove it while a background agent is still running.';
+      }
+      // A worktree pin and a fresh-worktree isolation are contradictory —
+      // one reuses a caller-owned directory, the other provisions and
+      // reaps its own. Reject the ambiguous combination up front.
+      if (params.isolation !== undefined) {
+        return 'Parameters "working_dir" and "isolation" are mutually exclusive.';
+      }
+      // Same rationale as isolation: a fork shares the parent's
+      // conversation context and working tree, so it cannot be rebound to
+      // a different directory; and the pin is only meaningful for an
+      // explicit subagent_type.
+      if (
+        !params.subagent_type ||
+        params.subagent_type.toLowerCase() === FORK_SUBAGENT_TYPE
+      ) {
+        return 'Parameter "working_dir" requires an explicit subagent_type (and cannot be "fork").';
+      }
+    }
+
     if (params.plan_mode_required !== undefined) {
       if (typeof params.plan_mode_required !== 'boolean') {
         return 'Parameter "plan_mode_required" must be a boolean when set.';
@@ -920,6 +1106,11 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     // command for the same reason.
     return {
       subagent_type: params.subagent_type,
+      // Include working_dir: it rebinds the child's cwd to another registered
+      // worktree, which the AUTO-mode classifier must be able to see — a
+      // launch that looks benign from subagent_type + prompt alone could be
+      // pinning the child to a different tree.
+      working_dir: params.working_dir,
       prompt: params.prompt ?? '',
     };
   }
@@ -1516,18 +1707,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         ? undefined
         : trace.getSpan(otelContext.active())?.spanContext();
     // Capture parent identity BEFORE we enter the child's runWithAgentContext
-    // frame inside `body`. The parent's depth is `getCurrentAgentDepth()` (0
-    // outside any frame, N inside frame at depth N); the subagent itself
-    // lives one level deeper, hence the +1 — but only when a parent frame
-    // exists. Without a parent the subagent is top-level (depth 0). The
-    // `getCurrentAgentId() !== null` test discriminates "no frame" from
-    // "frame at depth 0", which `getCurrentAgentDepth()` alone cannot.
-    // Review wenshao @ #4410.
+    // frame inside `body` — childLaunchDepth() reads the invoker's frame, not
+    // the child's. Review wenshao @ #4410.
     const parentAgentId = getCurrentAgentId();
     const span = startSubagentSpan({
       ...spec,
       parentAgentId: parentAgentId ?? undefined,
-      depth: parentAgentId !== null ? getCurrentAgentDepth() + 1 : 0,
+      depth: childLaunchDepth(),
       invokingRequestId: this.callId,
       sessionId: this.config.getSessionId(),
       invokerSpanContext,
@@ -1755,6 +1941,40 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     }
   }
 
+  /**
+   * Failure ToolResult for a spawn blocked by an execute()-entry guard
+   * (nesting depth limit, fork containment). Keeps the two guards' result
+   * shape in lockstep.
+   */
+  private buildSpawnBlockedResult(
+    llmContent: string,
+    terminateReason: string,
+  ): ToolResult {
+    return {
+      llmContent,
+      // `error` marks the call failed in the scheduler, so tool-usage stats
+      // record a failure — a blocked spawn must not count as a spawned
+      // sub-agent (the scrollback summary derives its sub-agent count from
+      // the AgentTool's success count). This deliberately routes the denial
+      // through the scheduler's failure path (error-formatted model
+      // response, failure-path hooks): a blocked spawn IS a failed tool call.
+      // The failure path sends ONLY `error.message` to the model and the
+      // scrollback (`llmContent` is discarded there), so the message must be
+      // the full guidance text — the terse `terminateReason` would strip the
+      // "do the task yourself instead" instruction and invite retry loops.
+      error: { message: llmContent },
+      returnDisplay: {
+        type: 'task_execution' as const,
+        subagentName:
+          this.params.subagent_type ?? DEFAULT_BUILTIN_SUBAGENT_TYPE,
+        taskDescription: this.params.description,
+        taskPrompt: this.params.prompt,
+        status: 'failed' as const,
+        terminateReason,
+      },
+    };
+  }
+
   async execute(
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
@@ -1788,13 +2008,81 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // A name only means "spawn a teammate" while a team is active. Older
     // prompts may still pass it without a team; treat that as a normal
     // one-shot agent instead of failing the whole task.
-    if (this.params.name && !isTeammate()) {
+    //
+    // isTopLevelSession() restricts teammate spawning to the top-level
+    // session. Nested sub-agents now carry the AgentTool, so without this a
+    // sub-agent could pass `name` and reach executeTeammate, bypassing both
+    // the v1 "teammates do not nest" rule and the depth guard below. A nested
+    // sub-agent's `name` falls through to the normal path.
+    if (this.params.name && !isTeammate() && isTopLevelSession()) {
       if (!this.config.getTeamManager()) {
         debugLogger.debug(
           `[AgentTool] Ignoring teammate name "${this.params.name}" because no team is active.`,
         );
+      } else if (this.params.working_dir !== undefined) {
+        // A teammate spawns via TeamManager with cwd = getCwd() and returns
+        // before the working_dir rebind below is reached, so the pin would be
+        // silently ignored and the teammate would run in the parent working
+        // tree. Refuse rather than give a false sense of isolation. (Same
+        // lifecycle rationale as run_in_background: a persistent teammate has
+        // no coupling to a caller-owned worktree.)
+        return this.buildSpawnBlockedResult(
+          'Error: "working_dir" is not supported for a named teammate — a teammate runs in the parent working tree, so the worktree pin would be silently ignored. Drop "name" to pin a one-shot sub-agent to the worktree, or drop "working_dir".',
+          'working_dir is incompatible with a named teammate',
+        );
       } else {
         return this.executeTeammate(this.params.name, signal, updateOutput);
+      }
+    } else if (this.params.name && !isTeammate()) {
+      // Nested sub-agent passing `name`: the parameter is dropped and a
+      // regular one-shot agent spawns at the next level. Log it — the
+      // silent fall-through is otherwise invisible to operators debugging
+      // why an expected teammate never appeared.
+      debugLogger.debug(
+        `[AgentTool] Ignoring teammate name "${this.params.name}" from a nested sub-agent; spawning a regular sub-agent instead.`,
+      );
+    }
+
+    // ─── Spawn guards ─────────────────────────────────────────────
+    // Authoritative runtime backstop for the shared spawn exclusion policy
+    // (spawnBlockReason — the same predicate prepareTools() uses to hide the
+    // AgentTool, so the two layers cannot drift). A well-behaved model never
+    // reaches here, but wildcard/fallback tool lists and hallucinated calls
+    // make the runtime check load-bearing: depth bounds nesting, teammates
+    // do not nest in v1, and forks must never spawn (the fork contract is
+    // context-sharing, not isolation — blocking ALL agent calls here, before
+    // the fork branch below, subsumes the recursive-fork case). Teammate
+    // spawns via `name` returned in the team-routing branch above, which
+    // requires !isTeammate().
+    const maxSubagentDepth = this.config.getMaxSubagentDepth();
+    const spawnBlocked = spawnBlockReason(maxSubagentDepth);
+    if (spawnBlocked !== null) {
+      debugLogger.debug(
+        `[AgentTool] Spawn blocked (${spawnBlocked}): childLevel=${childLaunchDepth() + 1} max=${maxSubagentDepth} type=${this.params.subagent_type ?? DEFAULT_BUILTIN_SUBAGENT_TYPE}`,
+      );
+      switch (spawnBlocked) {
+        case 'depth':
+          return this.buildSpawnBlockedResult(
+            `Error: sub-agent nesting depth limit reached ` +
+              `(max ${maxSubagentDepth} level${maxSubagentDepth === 1 ? '' : 's'}). ` +
+              `Complete this task directly with your own tools instead of ` +
+              `spawning another sub-agent.`,
+            `Nesting depth limit reached (max ${maxSubagentDepth})`,
+          );
+        case 'teammate':
+          return this.buildSpawnBlockedResult(
+            'Error: Teammates cannot spawn sub-agents. Complete this task directly with your own tools, or coordinate through send_message.',
+            'Sub-agent spawning is not allowed from a teammate context',
+          );
+        case 'fork':
+          return this.buildSpawnBlockedResult(
+            'Error: Cannot spawn sub-agents from within a fork. Please execute tasks directly.',
+            'Sub-agent spawning is not allowed inside a fork',
+          );
+        default: {
+          const exhaustive: never = spawnBlocked;
+          throw new Error(`Unhandled spawn block reason: ${exhaustive}`);
+        }
       }
     }
 
@@ -1810,6 +2098,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       path: string;
       branch: string;
       repoRoot: string;
+      /**
+       * True when `path` is a caller-owned worktree supplied via
+       * `working_dir` (not provisioned by this tool). Teardown is the
+       * caller's responsibility, so `cleanupWorktreeIsolation` must NOT
+       * remove or "preserve"-report it.
+       */
+      externallyManaged?: boolean;
     } | null = null;
 
     const cleanupWorktreeIsolation = async (): Promise<{
@@ -1826,6 +2121,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // removed and `hasWorktreeChanges()` would fail-closed and
       // produce a bogus `[worktree preserved: <missing path>]` suffix.
       worktreeIsolation = null;
+      // A caller-owned worktree (supplied via `working_dir`) is never
+      // removed or preserved by this tool — its provider owns the
+      // lifecycle. Rebind-only: skip all teardown. Every teardown call
+      // site funnels through this helper, so this one guard covers them
+      // all.
+      if (isolation.externallyManaged) return {};
       const wtService = new GitWorktreeService(isolation.repoRoot);
       // The two checks have no data dependency on each other and each
       // spawns its own `git` invocation. Run them concurrently so
@@ -1935,6 +2236,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // or `createAgentHeadless` throw). Assigned only after the override
     // is created; stays a no-op for any earlier failure.
     let restoreParentPM: () => void = () => {};
+    let backgroundSlotReservation: BackgroundSlotReservation | undefined;
+    let backgroundSlotReservationConsumed = false;
+    const releaseBackgroundSlotReservation = () => {
+      if (backgroundSlotReservation && !backgroundSlotReservationConsumed) {
+        this.config
+          .getBackgroundTaskRegistry()
+          .releaseBackgroundSlot(backgroundSlotReservation);
+        backgroundSlotReservation = undefined;
+      }
+    };
 
     try {
       // Forking is explicit: `subagent_type: "fork"` selects a fork, and only
@@ -1946,7 +2257,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const requestedType = this.params.subagent_type;
       const isForkRequested =
         requestedType?.toLowerCase() === FORK_SUBAGENT_TYPE;
-      const isFork = isForkRequested && isForkSubagentEnabled(this.config);
+      const isFork =
+        isForkRequested &&
+        isForkSubagentEnabled(this.config) &&
+        // v1: fork is a top-level-only capability. A sub-agent — which may now
+        // carry the AgentTool via nesting — that requests a fork falls back to
+        // the awaitable general-purpose sub-agent (via effectiveSubagentType
+        // below) instead of opening a nested fork. Fork nesting is deferred
+        // past v1.
+        isTopLevelSession();
       const effectiveSubagentType = isFork
         ? undefined
         : isForkRequested
@@ -1954,29 +2273,19 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // fall back to the awaitable general-purpose subagent.
             DEFAULT_BUILTIN_SUBAGENT_TYPE
           : (requestedType ?? DEFAULT_BUILTIN_SUBAGENT_TYPE);
+      if (isForkRequested && !isFork) {
+        debugLogger.debug(
+          `[AgentTool] Fork request downgraded to a regular sub-agent (${
+            isTopLevelSession()
+              ? 'forking unavailable in this session'
+              : 'forks do not nest'
+          }).`,
+        );
+      }
       let subagentConfig: SubagentConfig;
 
       if (isFork) {
         subagentConfig = FORK_AGENT;
-
-        // Recursive-fork guard. A fork child's reasoning loop runs inside
-        // an AsyncLocalStorage frame set by `runInForkContext`; when its
-        // model calls the `agent` tool, this check fires before any history
-        // or config is touched.
-        if (isInForkExecution()) {
-          return {
-            llmContent:
-              'Error: Cannot create a fork from within an existing fork child. Please execute tasks directly.',
-            returnDisplay: {
-              type: 'task_execution' as const,
-              subagentName: FORK_AGENT.name,
-              taskDescription: this.params.description,
-              taskPrompt: this.params.prompt,
-              status: 'failed' as const,
-              terminateReason: 'Recursive forking is not allowed',
-            },
-          };
-        }
       } else {
         const loadedConfig = await this.subagentManager.loadSubagent(
           effectiveSubagentType!,
@@ -2012,34 +2321,67 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
 
       // OR the tool parameter with the agent definition's background flag.
-      const shouldRunInBackground =
+      //
+      // Background delegation is top-level-only in v1, mirroring the fork
+      // downgrade above: a nested launcher would be handed a completion
+      // contract it cannot honor — the success guidance names send_message
+      // and task_stop (both excluded from sub-agent toolsets), and
+      // BackgroundTaskRegistry's single session-level notification callback
+      // would inject the child's completion into the top-level conversation
+      // while the launcher (typically finished by then) never hears back.
+      // Downgrade to an awaited foreground run instead of orphaning the
+      // child's results.
+      const backgroundRequested =
         this.params.run_in_background === true ||
         subagentConfig.background === true;
+      const shouldRunInBackground = backgroundRequested && isTopLevelSession();
+      if (this.params.working_dir !== undefined && shouldRunInBackground) {
+        // A caller-owned worktree has no lifecycle coupling to a backgrounded
+        // agent — the caller could reap the worktree while the detached agent
+        // is still running in it. validateToolParams rejects an explicit
+        // run_in_background up front; this covers the other route into the
+        // background: a subagent config with `background: true`. Guarding on
+        // the resolved shouldRunInBackground catches both and avoids
+        // over-rejecting a nested call that downgrades to the foreground.
+        return this.buildSpawnBlockedResult(
+          'Error: "working_dir" cannot be used with a background agent — the caller owns the worktree and could remove it while the detached agent is still running there. Run this agent in the foreground, or drop "working_dir".',
+          'working_dir is incompatible with a background agent',
+        );
+      }
+      if (backgroundRequested && !shouldRunInBackground) {
+        debugLogger.debug(
+          `[AgentTool] Background request downgraded to a foreground run for a nested sub-agent (type=${subagentConfig.name}).`,
+        );
+      }
 
-      // Preflight: fast-fail before expensive worktree/subagent setup.
-      // This is not redundant with registry.register() below — that call
-      // remains the authoritative race guard, but by then the launch path
-      // has already run hooks and created a child agent.
-      if (shouldRunInBackground) {
-        try {
-          this.config
-            .getBackgroundTaskRegistry()
-            .assertCanStartBackgroundAgent();
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
+      if (!isFork && shouldRunInBackground) {
+        const registry = this.config.getBackgroundTaskRegistry();
+        backgroundSlotReservation = registry.tryReserveBackgroundSlot();
+        if (!backgroundSlotReservation) {
+          const queuedCount = registry.getQueuedCount();
+          const queueText =
+            queuedCount === 0
+              ? 'no agents ahead'
+              : queuedCount === 1
+                ? '1 already queued'
+                : `${queuedCount} already queued`;
           this.updateDisplay(
             {
-              status: 'failed',
-              terminateReason: errorMessage,
+              status: 'running',
+              terminateReason: `Waiting for a sub-agent slot (${queueText}).`,
             },
             updateOutput,
           );
-          return {
-            llmContent: errorMessage,
-            returnDisplay: this.currentDisplay!,
-          };
+          backgroundSlotReservation =
+            await registry.waitForBackgroundSlot(signal);
         }
+        this.updateDisplay(
+          {
+            status: 'running',
+            terminateReason: undefined,
+          },
+          updateOutput,
+        );
       }
 
       // ── Optional worktree isolation (Phase 1: provision) ──────────
@@ -2052,6 +2394,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // tree and the cleanup helper would then see a "clean" worktree
       // and remove it — destroying any evidence of the leak.
       const failWorktreeProvisioning = (reason: string): ToolResult => {
+        releaseBackgroundSlotReservation();
         debugLogger.warn(`[Agent] worktree isolation failed: ${reason}`);
         this.currentDisplay = {
           ...this.currentDisplay!,
@@ -2064,7 +2407,27 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
       };
 
-      if (this.params.isolation === 'worktree') {
+      if (this.params.working_dir !== undefined) {
+        // Pin the sub-agent to a caller-owned, pre-existing worktree
+        // instead of provisioning a fresh one. The rebind block below
+        // (guarded by `worktreeIsolation`) points every cwd surface at
+        // this path; `externallyManaged` tells the cleanup helper to
+        // leave the directory alone.
+        const resolved = await resolveExternalWorktreeDir(
+          this.config,
+          this.params.working_dir,
+        );
+        if ('error' in resolved) {
+          return failWorktreeProvisioning(resolved.error);
+        }
+        worktreeIsolation = {
+          slug: resolved.slug,
+          path: resolved.path,
+          branch: resolved.branch,
+          repoRoot: resolved.repoRoot,
+          externallyManaged: true,
+        };
+      } else if (this.params.isolation === 'worktree') {
         const cwd = this.config.getTargetDir();
         // Refuse nested isolation. If the parent itself is already
         // running inside a worktree (cwd contains `.qwen/worktrees/`),
@@ -2249,7 +2612,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const agentIdSuffix = this.callId ?? randomUUID().slice(0, 8);
       const hookOpts = {
         agentId: `${subagentConfig.name}-${agentIdSuffix}`,
-        agentType: this.params.subagent_type || subagentConfig.name,
+        // Resolved config name, not the raw requested type: a fork request
+        // that fell back to the awaitable path (nested / non-interactive)
+        // must report the agent that actually runs — hooks, spans, task
+        // rows, and the meta sidecar all read this field.
+        agentType: subagentConfig.name,
         resolvedMode,
         signal,
         updateOutput,
@@ -2296,10 +2663,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // was running from `packages/core/`. Round-5 review caught this:
       // the model's mental map is the parent's cwd, not the repo root.
       if (worktreeIsolation) {
-        const notice = buildWorktreeNotice(
-          this.config.getTargetDir(),
-          worktreeIsolation.path,
-        );
+        // A caller-owned worktree (working_dir) is the code the agent was asked
+        // to work on, not a provisioned copy of the parent's tree, so it gets a
+        // narrower notice. The isolation notice's "translate the parent's
+        // paths" / "re-read what the parent changed" guidance would contradict
+        // the caller's own instructions (e.g. /review tells its agents not to
+        // `cd` or prefix absolute paths).
+        const notice = worktreeIsolation.externallyManaged
+          ? buildPinnedWorktreeNotice(worktreeIsolation.path)
+          : buildWorktreeNotice(
+              this.config.getTargetDir(),
+              worktreeIsolation.path,
+            );
         taskPrompt = `${notice}\n\n${taskPrompt}`;
       }
 
@@ -2417,22 +2792,35 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // foreground call below for the full rationale. Keeping the
           // order symmetric here guards the background path against the
           // same orphaned-meta hazard if register() throws.
-          registry.register({
-            agentId: hookOpts.agentId,
-            description: this.params.description,
-            subagentType: subagentConfig.name,
-            isBackgrounded: true,
-            status: 'running',
-            startTime: Date.now(),
-            abortController: bgAbortController,
-            toolUseId: this.callId,
-            prompt: this.params.prompt,
-            outputFile: jsonlPath,
-            metaPath,
-          });
+          const registerOptions = backgroundSlotReservation
+            ? { slotReservation: backgroundSlotReservation }
+            : {};
+          registry.register(
+            {
+              agentId: hookOpts.agentId,
+              description: this.params.description,
+              subagentType: subagentConfig.name,
+              isBackgrounded: true,
+              status: 'running',
+              startTime: Date.now(),
+              abortController: bgAbortController,
+              toolUseId: this.callId,
+              prompt: this.params.prompt,
+              outputFile: jsonlPath,
+              metaPath,
+              // Nested-agent lineage (mirrors the meta sidecar); register()
+              // resolves the parent's display name from parentAgentId.
+              parentAgentId: getCurrentAgentId(),
+              depth: childLaunchDepth(),
+            },
+            registerOptions,
+          );
+          backgroundSlotReservationConsumed = true;
+          backgroundSlotReservation = undefined;
         } catch (error) {
           const errorMessage =
             error instanceof Error ? error.message : String(error);
+          releaseBackgroundSlotReservation();
           bgAbortController.abort();
 
           if (hookSystem && subagentStartHookCompleted) {
@@ -2526,6 +2914,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
           resumeCount: 0,
+          // Persisted so resume restores the original nesting level; see
+          // childLaunchDepth() for the rationale.
+          depth: childLaunchDepth(),
         });
 
         // Subscribe to the subagent's tool-call event stream so the
@@ -3070,6 +3461,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           toolUseId: this.callId,
           outputFile: fgJsonlPath,
           metaPath: fgMetaPath,
+          // Nested-agent lineage (mirrors the meta sidecar); register()
+          // resolves the parent's display name from parentAgentId.
+          parentAgentId: getCurrentAgentId(),
+          depth: childLaunchDepth(),
         });
         writeAgentMeta(fgMetaPath, {
           agentId: hookOpts.agentId,
@@ -3088,6 +3483,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
           resumeCount: 0,
+          // Persisted so resume restores the original nesting level; see
+          // childLaunchDepth() for the rationale.
+          depth: childLaunchDepth(),
         });
 
         const stopHookWarning = await runFramed();
@@ -3177,6 +3575,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // this in finally guarantees we clean up on success, failure,
         // cancel, AND any unexpected throw inside runFramed.
         registry.unregisterForeground(hookOpts.agentId);
+        releaseBackgroundSlotReservation();
         // Release the per-subagent ToolRegistry so any AgentTool /
         // SkillTool the model instantiated during execution disposes
         // its change-listeners on shared SubagentManager / SkillManager.
@@ -3202,6 +3601,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         restoreParentPM();
       }
     } catch (error) {
+      releaseBackgroundSlotReservation();
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.error(`[AgentTool] Error running subagent: ${errorMessage}`);

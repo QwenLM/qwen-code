@@ -522,6 +522,39 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ).toMatchObject([{ type: 'user.text.delta', text: 'hello' }]);
   });
 
+  it('preserves user message metadata on transcript blocks', () => {
+    const events = normalizeDaemonEvent({
+      id: 23,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'scheduled prompt' },
+          _meta: { source: 'cron' },
+        },
+      },
+    } as const);
+
+    expect(events).toMatchObject([
+      {
+        type: 'user.text.delta',
+        text: 'scheduled prompt',
+        meta: { source: 'cron' },
+      },
+    ]);
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      events,
+    );
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'user',
+      text: 'scheduled prompt',
+      meta: { source: 'cron' },
+    });
+  });
+
   it('carries user shell command metadata into user shell transcript blocks', () => {
     let state = createDaemonTranscriptState({ now: 1 });
     const commandEvents = normalizeDaemonEvent({
@@ -1161,6 +1194,103 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(event && 'text' in event ? event.text : '').not.toContain(
       'secret-token',
     );
+  });
+
+  it('preserves structured model stream interruption turn errors', () => {
+    expect(
+      normalizeDaemonEvent({
+        id: 44,
+        v: 1,
+        type: 'turn_error',
+        data: {
+          sessionId: 'session-1',
+          message: 'terminated',
+          code: '-32603',
+          errorKind: 'model_stream_interrupted',
+          promptId: 'prompt-1',
+        },
+      }),
+    ).toMatchObject([
+      {
+        type: 'error',
+        source: 'turn_error',
+        recoverable: true,
+        code: '-32603',
+        errorKind: 'model_stream_interrupted',
+        promptId: 'prompt-1',
+        text: 'terminated',
+      },
+    ]);
+  });
+
+  it('keeps structured model stream interruption on transcript blocks', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 100 }),
+      normalizeDaemonEvent({
+        id: 46,
+        v: 1,
+        type: 'turn_error',
+        data: {
+          sessionId: 'session-1',
+          message: 'terminated',
+          code: '-32603',
+          errorKind: 'model_stream_interrupted',
+          promptId: 'prompt-1',
+        },
+      }),
+      { now: 101 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'error',
+        source: 'turn_error',
+        text: 'terminated',
+        code: '-32603',
+        errorKind: 'model_stream_interrupted',
+        promptId: 'prompt-1',
+      },
+    ]);
+  });
+
+  it('keeps older daemon terminated turn error text unchanged', () => {
+    expect(
+      normalizeDaemonEvent({
+        id: 45,
+        v: 1,
+        type: 'turn_error',
+        data: {
+          sessionId: 'session-1',
+          message: 'terminated',
+        },
+      }),
+    ).toMatchObject([
+      {
+        type: 'error',
+        source: 'turn_error',
+        text: 'terminated',
+      },
+    ]);
+  });
+
+  it('drops unrecognized errorKind from turn error events', () => {
+    const [event] = normalizeDaemonEvent({
+      id: 47,
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session-1',
+        message: 'some error',
+        errorKind: 'some_future_kind',
+      },
+    });
+
+    expect(event).toMatchObject({
+      type: 'error',
+      source: 'turn_error',
+      text: 'some error',
+    });
+    expect(event).not.toHaveProperty('errorKind');
   });
 
   it('normalizes daemon lifecycle and control events', () => {
@@ -2255,6 +2385,33 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it('normalizes settings_reloaded as a settings refresh signal', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('settings_reloaded', {
+        env: { updatedKeys: ['OPENAI_API_KEY'], removedKeys: [] },
+        changedKeys: ['env', 'hooks'],
+        childReloaded: true,
+        sessionsRefreshed: ['session-1'],
+        sessionsSkipped: [],
+      }),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.settings.changed',
+        key: 'settings_reloaded',
+        scope: 'workspace',
+        value: expect.objectContaining({
+          childReloaded: true,
+          sessionsRefreshed: ['session-1'],
+        }) as unknown,
+      }),
+    ]);
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ type: 'debug' }),
+    );
+  });
+
   it('normalizes workspace_initialized actions', () => {
     const events = normalizeDaemonEvent(
       envelopeOf('workspace_initialized', { path: '/w', action: 'created' }),
@@ -3106,6 +3263,68 @@ describe('daemon UI reducer state machine (PR-E)', () => {
       },
     ]);
     expect(JSON.stringify(state.blocks)).not.toContain('stale delta');
+  });
+
+  it('projects history truncation as status without entering resync', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'history_truncated',
+      data: {
+        reason: 'replay_window_exceeded',
+        truncatedEvents: 4,
+        retainedEvents: 2,
+        maxBytes: 512,
+        truncatedTurns: 2,
+        fullTranscriptAvailable: false,
+      },
+    } as never);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'status',
+        source: 'history_truncated',
+        text: expect.stringContaining('History truncated') as string,
+      }),
+    ]);
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      events,
+      { now: 2 },
+    );
+
+    expect(state.awaitingResync).toBe(false);
+    expect(state.resyncRequiredCount).toBe(0);
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'status',
+        text: expect.stringContaining('History truncated') as string,
+      },
+    ]);
+    expect(daemonUiEventToTerminalText(events[0])).toContain(
+      'History truncated',
+    );
+  });
+
+  it('routes malformed history truncation payloads to debug', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'history_truncated',
+      data: {
+        reason: 'replay_window_exceeded',
+        truncatedEvents: '4',
+        retainedEvents: 2,
+        maxBytes: 512,
+        fullTranscriptAvailable: false,
+      },
+    } as never);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        text: 'history_truncated: malformed history_truncated payload',
+      }),
+    ]);
   });
 
   it('mirrors approval mode from session.approval_mode.changed event', async () => {

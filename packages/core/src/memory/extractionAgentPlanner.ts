@@ -61,6 +61,7 @@ export interface AutoMemoryExtractionExecutionResult {
   /** True when at least one file inside the user-level memory root was written/edited. */
   touchedUserScope: boolean;
   systemMessage?: string;
+  hasToolActivity: boolean;
 }
 
 /**
@@ -270,7 +271,7 @@ export async function runAutoMemoryExtractionByAgent(
     ),
     systemPrompt: EXTRACTION_AGENT_SYSTEM_PROMPT,
     maxTurns: 5,
-    maxTimeMinutes: 2,
+    maxTimeMinutes: config.getMemoryAgentTimeoutMinutes() ?? 2,
     tools: [
       ToolNames.READ_FILE,
       ToolNames.GREP,
@@ -291,12 +292,13 @@ export async function runAutoMemoryExtractionByAgent(
   }
 
   const { topics, touchedProjectScope, touchedUserScope } =
-    touchedTopicsFromFilePaths(result.filesTouched, projectRoot);
+    touchedTopicsFromFilePaths(result.filesWritten ?? [], projectRoot);
 
   return {
     touchedTopics: topics,
     touchedProjectScope,
     touchedUserScope,
+    hasToolActivity: result.filesTouched.length > 0,
     systemMessage:
       topics.length > 0
         ? `Managed auto-memory updated: ${topics.map((t) => `${t}.md`).join(', ')}`

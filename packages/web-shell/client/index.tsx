@@ -99,7 +99,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
 /** Alias for consumers who prefer a standalone naming style. */
 export const StandaloneWebShell = WebShellWithProviders;
 
-export type { WebShellProps, WebShellSidebarOptions } from './App';
+export type { WebShellApi, WebShellProps, WebShellSidebarOptions } from './App';
 export type { ToastTone } from './components/ToastHost';
 export type { WebShellLanguage } from './i18n';
 export type {
@@ -108,12 +108,15 @@ export type {
 } from './utils/commandDisplay';
 export type { ComposerToolbarAction } from './components/ChatEditor';
 export type {
+  CodeBlockRenderer,
   MarkdownContentSource,
   MarkdownTableMode,
   MarkdownRenderContext,
   ToolHeaderExtraRenderer,
   ToolHeaderExtraRenderInfo,
   ToolHeaderKind,
+  UserMessageContentRenderer,
+  UserMessageContentRenderInfo,
   ComposerToolbarStartRenderer,
   ComposerToolbarRightRenderer,
   WebShellComposerToolbarRenderInfo,
@@ -121,6 +124,25 @@ export type {
   WebShellComposerToolbarRightRenderInfo,
   WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
+  WebShellBottomStatusItem,
+  WebShellCodeBlockRenderInfo,
   WebShellMarkdownCustomization,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
+export {
+  ECHARTS_FULLDATA_LANGUAGE,
+  EchartsFullDataBlock,
+  createEchartsFullDataRenderer,
+} from './components/messages/EchartsFullDataBlock';
+export type {
+  DatasetCell,
+  EchartsFullDataBlockProps,
+  EchartsFullDataOption,
+  EchartsFullDataRefMeta,
+  EchartsFullDataRefResolver,
+  EchartsFullDataResolvedDataset,
+  EchartsFullDataRendererOptions,
+  EchartsInstance,
+  EchartsRuntime,
+  EchartsRuntimeLoader,
+} from './components/messages/EchartsFullDataBlock';

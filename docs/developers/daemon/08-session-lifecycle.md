@@ -100,7 +100,7 @@ sequenceDiagram
 
 ### Load / resume
 
-`POST /session/:id/load` — replays full ACP history (`session/load` notifications fire before the response returns).
+`POST /session/:id/load` — restores a persisted session and returns the current bounded replay snapshot window (`session/load` notifications or response-mode replay are seeded before the response returns).
 `POST /session/:id/resume` — restores without replay (`connection.unstable_resumeSession`, exposed under the stable `session_resume` daemon capability; `unstable_session_resume` remains a deprecated alias).
 
 Both:
@@ -242,7 +242,10 @@ within this session only; it is not a cross-session activity aggregate.
 ### Session Tasks (`session_tasks` capability tag)
 
 `GET /session/:id/tasks` returns a background-task snapshot for agent tasks,
-shell tasks, monitor tasks, and their lifecycle states.
+shell tasks, monitor tasks, and their lifecycle states. Agent entries spawned
+by another sub-agent carry optional lineage fields (`parentAgentId`,
+`parentName`, `depth`) so clients can render nested sub-agents as a tree; see
+the payload example in `qwen-serve-protocol.md`.
 
 ### Session LSP Status (`session_lsp` capability tag)
 
@@ -256,11 +259,19 @@ not as a transport error.
 
 `POST /session/:id/load` now returns a `BridgeRestoredSession` that can include
 `compactedReplay?: BridgeEvent[]`, `liveJournal?: BridgeEvent[]`, and
-`lastEventId?: number`. `compactedReplay` is produced by
+`lastEventId?: number`. These fields are the daemon's bounded in-memory replay
+window for a live session, not a full transcript API. The default window cap is
+4 MiB per live session (`--compacted-replay-max-bytes`), and boot rejects
+invalid caps; the hard ceiling is 256 MiB. `compactedReplay` is produced by
 `TurnBoundaryCompactionEngine`: at turn boundaries it folds consecutive text /
 thought blocks, collapses tool-call sequences to their final state, discards
 transient signals, and produces O(turns) replay logs instead of O(tokens) logs
-(typically a 25-30x reduction).
+(typically a 25-30x reduction). When older replay entries have been dropped
+from that byte window, `compactedReplay[0]` is a synthetic id-less
+`history_truncated` marker with `{reason: 'replay_window_exceeded',
+truncatedEvents, retainedEvents, maxBytes, truncatedTurns?,
+fullTranscriptAvailable: false}`. Clients should render it as status and apply
+the retained replay normally; it must not trigger a resync loop.
 
 ### ACP Child Preheat
 

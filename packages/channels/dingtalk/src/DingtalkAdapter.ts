@@ -479,13 +479,13 @@ export class DingtalkChannel extends ChannelBase {
     msgId: string,
     conversationId: string,
   ): Promise<void> {
-    const token = this.getAccessToken();
-    if (!token) return;
-
     const robotCode = this.config.clientId;
     if (!robotCode || !msgId || !conversationId) return;
-
     try {
+      const token = this.config.clientSecret
+        ? await this.getProactiveToken()
+        : this.getAccessToken();
+      if (!token) return;
       const resp = await fetch(`${EMOTION_API}/${endpoint}`, {
         method: 'POST',
         headers: {
@@ -507,7 +507,7 @@ export class DingtalkChannel extends ChannelBase {
         }),
       });
       if (!resp.ok) {
-        const detail = await resp.text().catch(() => '');
+        const detail = sanitizeLogText(await resp.text().catch(() => ''), 500);
         process.stderr.write(
           `[DingTalk:${this.name}] emotion/${endpoint} failed: ${resp.status} ${detail}\n`,
         );
@@ -892,6 +892,7 @@ export class DingtalkChannel extends ChannelBase {
         typeof downstream.data === 'string'
           ? JSON.parse(downstream.data)
           : (downstream.data as DingTalkMessageData);
+      this.logDebugPayload('DingTalk', data);
       const dataMsgId = typeof data.msgId === 'string' ? data.msgId : undefined;
       const headerMsgId =
         typeof downstream.headers.messageId === 'string'
@@ -976,7 +977,7 @@ export class DingtalkChannel extends ChannelBase {
 
       // Strip first @mention (the bot) from text, keep other @mentions intact
       if (isMentioned) {
-        cleanText = cleanText.replace(/@\S+/, '').trim();
+        cleanText = cleanText.replace(/@[^\s\p{Cf}]+/u, '').trim();
       }
 
       // Extract quoted message context

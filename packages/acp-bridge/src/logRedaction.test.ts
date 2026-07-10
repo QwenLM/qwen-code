@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { redactLogCredentials } from './logRedaction.js';
+import { createStderrForwarder } from './spawnChannel.js';
 
 const R = '<redacted>';
 
@@ -86,6 +87,11 @@ describe('redactLogCredentials', () => {
 
   it('redacts Slack bot tokens', () => {
     const token = 'xoxb-' + '1'.repeat(20);
+    expect(redactLogCredentials(token)).toBe(R);
+  });
+
+  it('redacts Slack user access tokens', () => {
+    const token = 'xoxp-' + '1'.repeat(20);
     expect(redactLogCredentials(token)).toBe(R);
   });
 
@@ -236,8 +242,7 @@ describe('redactLogCredentials', () => {
 });
 
 describe('createStderrForwarder redaction integration', () => {
-  it('redacts credentials flushed via onEnd (partial line without newline)', async () => {
-    const { createStderrForwarder } = await import('./spawnChannel.js');
+  it('redacts credentials flushed via onEnd (partial line without newline)', () => {
     const captured: Array<{ line: string; level?: string }> = [];
     const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     const forwarder = createStderrForwarder({

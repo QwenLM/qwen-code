@@ -16,12 +16,15 @@ import { ExtensionStorage } from './storage.js';
 import { QWEN_DIR } from '../config/storage.js';
 import {
   ExtensionManager,
+  ExtensionUpdateState,
   SettingScope,
   type ExtensionManagerOptions,
+  type Extension,
   validateName,
   getExtensionId,
   hashValue,
   type ExtensionConfig,
+  type ExtensionMutationEvent,
 } from './extensionManager.js';
 import type { MCPServerConfig, ExtensionInstallMetadata } from '../index.js';
 
@@ -198,6 +201,96 @@ describe('extension tests', () => {
       });
     });
 
+    it('should emit mutation lifecycle events around install', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'local-extension.zip');
+      fs.writeFileSync(archivePath, 'not used by mocked extractor');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'local-archive-extension');
+        },
+      );
+
+      const manager = createExtensionManager();
+      const events: ExtensionMutationEvent[] = [];
+      manager.addMutationListener((event) => events.push(event));
+      await manager.refreshCache();
+
+      await manager.installExtension(
+        {
+          source: archivePath,
+          type: 'local',
+        },
+        async () => {},
+      );
+
+      expect(events).toEqual([
+        { id: 1, phase: 'start', operation: 'installExtension' },
+        { id: 2, phase: 'start', operation: 'enableExtension' },
+        { id: 2, phase: 'end', operation: 'enableExtension' },
+        { id: 1, phase: 'end', operation: 'installExtension' },
+      ]);
+    });
+
+    it('should not reuse a dirty tempDir when falling back from GitHub release to git clone', async () => {
+      // Regression for #6334: downloadFromGitHubRelease can dirty tempDir
+      // (partial archive download / extraction) before failing. The fallback
+      // git clone must receive a clean directory, or `git clone` errors with
+      // "destination path '.' already exists and is not an empty directory".
+      vi.spyOn(ExtensionStorage, 'createTmpDir').mockImplementation(async () =>
+        fs.mkdtempSync(path.join(tempHomeDir, 'tracked-extension-')),
+      );
+      const { downloadFromGitHubRelease } = await import('./github.js');
+      const downloadMock = vi.mocked(downloadFromGitHubRelease);
+      downloadMock.mockImplementation(
+        async (_meta: ExtensionInstallMetadata, destination: string) => {
+          // Simulate a partial download that dirties tempDir before failing.
+          fs.mkdirSync(destination, { recursive: true });
+          fs.writeFileSync(path.join(destination, 'partial.tar.gz'), 'partial');
+          throw new Error('Mocked GitHub release download failure');
+        },
+      );
+
+      let cloneRanOnCleanDir = false;
+      mockGit.clone.mockImplementation(
+        async (_url: string, _target: string) => {
+          // cloneFromGit runs `git clone <url> ./` inside the tempDir it passed to
+          // simpleGit(). Real git fails on a non-empty directory; mirror that so
+          // the test fails (with the bug) if tempDir is not cleaned up first.
+          const dir = mockGit.path();
+          const isEmpty = fs.readdirSync(dir).length === 0;
+          cloneRanOnCleanDir = isEmpty;
+          if (!isEmpty) {
+            throw new Error(
+              "destination path '.' already exists and is not an empty directory.",
+            );
+          }
+          writeExtractedExtension(dir, 'git-extension');
+          return undefined;
+        },
+      );
+      mockGit.getRemotes.mockResolvedValue([{ name: 'origin' }]);
+      mockGit.fetch.mockResolvedValue(undefined);
+      mockGit.checkout.mockResolvedValue(undefined);
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          source: 'https://github.com/owner/repo',
+          type: 'git',
+        },
+        async () => {},
+      );
+
+      expect(downloadMock).toHaveBeenCalled();
+      // The fallback clone must run on a clean tempDir; without the cleanup it
+      // would throw "destination path '.' already exists and is not an empty
+      // directory" and installExtension would reject before reaching here.
+      expect(cloneRanOnCleanDir).toBe(true);
+      expect(extension.name).toBe('git-extension');
+    });
+
     it('should clean up converted temp dir for local archive installs', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'gemini-extension.zip');
       fs.writeFileSync(archivePath, 'not used by mocked extractor');
@@ -334,6 +427,33 @@ describe('extension tests', () => {
 
       expect(tempDir).toBeDefined();
       expect(fs.existsSync(tempDir!)).toBe(false);
+    });
+  });
+
+  describe('uninstallExtension', () => {
+    it('should emit mutation lifecycle events around uninstall', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+        installMetadata: {
+          type: 'local',
+          source: tempWorkspaceDir,
+          originSource: 'QwenCode',
+        },
+      });
+
+      const manager = createExtensionManager();
+      const events: ExtensionMutationEvent[] = [];
+      manager.addMutationListener((event) => events.push(event));
+      await manager.refreshCache();
+
+      await manager.uninstallExtension('my-extension', false);
+
+      expect(events).toEqual([
+        { id: 1, phase: 'start', operation: 'uninstallExtension' },
+        { id: 1, phase: 'end', operation: 'uninstallExtension' },
+      ]);
     });
   });
 
@@ -518,6 +638,32 @@ describe('extension tests', () => {
       expect(extensions[0].name).toBe('ext2');
     });
 
+    it('keeps the previous cache when refreshCache fails before replacement', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'stable-ext',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      expect(manager.getLoadedExtensions().map((ext) => ext.name)).toEqual([
+        'stable-ext',
+      ]);
+
+      const internals = manager as unknown as {
+        loadExtensionsFromExtensionsDir: () => Promise<Extension[]>;
+      };
+      internals.loadExtensionsFromExtensionsDir = vi
+        .fn()
+        .mockRejectedValue(new Error('refresh failed'));
+
+      await expect(manager.refreshCache()).rejects.toThrow('refresh failed');
+      expect(manager.getLoadedExtensions().map((ext) => ext.name)).toEqual([
+        'stable-ext',
+      ]);
+    });
+
     describe('command discovery', () => {
       it('should discover .md command files', async () => {
         const extDir = createExtension({
@@ -690,6 +836,50 @@ describe('extension tests', () => {
   });
 
   describe('enableExtension / disableExtension', () => {
+    it('should emit mutation lifecycle events around extension changes', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager();
+      const events: ExtensionMutationEvent[] = [];
+      manager.addMutationListener((event) => events.push(event));
+      await manager.refreshCache();
+
+      await manager.disableExtension('my-extension', SettingScope.User);
+
+      expect(events).toEqual([
+        { id: 1, phase: 'start', operation: 'disableExtension' },
+        { id: 1, phase: 'end', operation: 'disableExtension' },
+      ]);
+    });
+
+    it('should not emit mutation lifecycle events when validation fails', async () => {
+      const manager = createExtensionManager();
+      const events: ExtensionMutationEvent[] = [];
+      manager.addMutationListener((event) => events.push(event));
+
+      await expect(
+        manager.disableExtension('missing-extension', SettingScope.User),
+      ).rejects.toThrow(
+        'Extension with name missing-extension does not exist.',
+      );
+
+      await expect(
+        manager.enableExtension('missing-extension', SettingScope.User),
+      ).rejects.toThrow(
+        'Extension with name missing-extension does not exist.',
+      );
+
+      await expect(manager.addSource('   ')).rejects.toThrow(
+        'Marketplace source cannot be empty.',
+      );
+
+      expect(events).toEqual([]);
+    });
+
     it('should disable an extension at the user scope', async () => {
       createExtension({
         extensionsDir: userExtensionsDir,
@@ -786,6 +976,75 @@ describe('extension tests', () => {
 
       await manager.enableExtension('ext1', SettingScope.Workspace);
       expect(manager.isEnabled('ext1', tempWorkspaceDir)).toBe(true);
+    });
+  });
+
+  describe('preference-only operations', () => {
+    it('should not emit mutation lifecycle events for preference changes', () => {
+      const manager = createExtensionManager();
+      const events: ExtensionMutationEvent[] = [];
+      manager.addMutationListener((event) => events.push(event));
+
+      expect(manager.toggleFavorite('my-extension')).toBe(true);
+      fs.writeFileSync(
+        path.join(userExtensionsDir, 'marketplaces.json'),
+        JSON.stringify([
+          {
+            name: 'marketplace',
+            source: 'owner/repo',
+            type: 'github',
+            addedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ]),
+      );
+      expect(manager.markSourceUpdated('marketplace')).toMatchObject({
+        name: 'marketplace',
+      });
+
+      expect(events).toEqual([]);
+    });
+  });
+
+  describe('updateExtension', () => {
+    it('should end mutation lifecycle events when temp directory creation fails', async () => {
+      const extensionPath = createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+        installMetadata: {
+          type: 'local',
+          source: tempWorkspaceDir,
+          originSource: 'QwenCode',
+        },
+      });
+      const manager = createExtensionManager();
+      const events: ExtensionMutationEvent[] = [];
+      const callback = vi.fn();
+      manager.addMutationListener((event) => events.push(event));
+      await manager.refreshCache();
+      const extension = manager
+        .getLoadedExtensions()
+        .find((entry) => entry.path === extensionPath);
+      vi.spyOn(ExtensionStorage, 'createTmpDir').mockRejectedValueOnce(
+        new Error('disk full'),
+      );
+
+      await expect(
+        manager.updateExtension(
+          extension!,
+          ExtensionUpdateState.UPDATE_AVAILABLE,
+          callback,
+        ),
+      ).rejects.toThrow('disk full');
+
+      expect(events).toEqual([
+        { id: 1, phase: 'start', operation: 'updateExtension' },
+        { id: 1, phase: 'end', operation: 'updateExtension' },
+      ]);
+      expect(callback).toHaveBeenCalledWith(
+        'my-extension',
+        ExtensionUpdateState.ERROR,
+      );
     });
   });
 
@@ -980,31 +1239,35 @@ describe('extension tests', () => {
       expect(serverConfig.env!['MISSING_VAR']).toBe('$UNDEFINED_ENV_VAR');
       expect(serverConfig.env!['MISSING_VAR_BRACES']).toBe('${ALSO_UNDEFINED}');
     });
-    describe('refreshTools and refreshMemory', () => {
+    describe('refreshTools', () => {
       it('refreshTools should return early if config is not set', async () => {
         const manager = createExtensionManager();
         // Should not throw when config is undefined
         await expect(manager.refreshTools()).resolves.not.toThrow();
       });
 
-      it('refreshTools should always call refreshMemory', async () => {
+      it('refreshTools should call all refresh methods', async () => {
         const mockRefreshCache = vi.fn();
-        const mockRestartMcpServers = vi.fn();
+        const mockReinitializeMcpServers = vi.fn();
+        const mockReloadHooks = vi.fn();
         const mockRefreshHierarchicalMemory = vi.fn();
+        const mockSettingsMcpServers = { server: { command: 'cmd' } };
 
         const mockConfig = {
           getGeminiClient: () => ({
             isInitialized: () => false,
             setTools: vi.fn(),
           }),
-          getToolRegistry: () => ({
-            restartMcpServers: mockRestartMcpServers,
-          }),
+          getSettingsMcpServers: () => mockSettingsMcpServers,
+          reinitializeMcpServers: mockReinitializeMcpServers,
           getSkillManager: () => ({
             refreshCache: mockRefreshCache,
           }),
           getSubagentManager: () => ({
             refreshCache: mockRefreshCache,
+          }),
+          getHookSystem: () => ({
+            reload: mockReloadHooks,
           }),
           refreshHierarchicalMemory: mockRefreshHierarchicalMemory,
         };
@@ -1015,47 +1278,12 @@ describe('extension tests', () => {
 
         await manager.refreshTools();
 
-        // refreshMemory should be called which includes these
-        expect(mockRestartMcpServers).toHaveBeenCalledOnce();
+        expect(mockReinitializeMcpServers).toHaveBeenCalledOnce();
+        expect(mockReinitializeMcpServers).toHaveBeenCalledWith(
+          mockSettingsMcpServers,
+        );
         expect(mockRefreshCache).toHaveBeenCalledTimes(2); // skillManager and subagentManager
-        expect(mockRefreshHierarchicalMemory).toHaveBeenCalledOnce();
-      });
-
-      it('refreshMemory should return early if config is not set', async () => {
-        const manager = createExtensionManager();
-
-        // Should not throw when config is undefined
-        await expect(manager.refreshMemory()).resolves.not.toThrow();
-      });
-
-      it('refreshMemory should call all refresh methods', async () => {
-        const mockSkillRefreshCache = vi.fn();
-        const mockSubagentRefreshCache = vi.fn();
-        const mockRestartMcpServers = vi.fn();
-        const mockRefreshHierarchicalMemory = vi.fn();
-
-        const mockConfig = {
-          getToolRegistry: () => ({
-            restartMcpServers: mockRestartMcpServers,
-          }),
-          getSkillManager: () => ({
-            refreshCache: mockSkillRefreshCache,
-          }),
-          getSubagentManager: () => ({
-            refreshCache: mockSubagentRefreshCache,
-          }),
-          refreshHierarchicalMemory: mockRefreshHierarchicalMemory,
-        };
-
-        const manager = createExtensionManager();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (manager as any).config = mockConfig;
-
-        await manager.refreshMemory();
-
-        expect(mockRestartMcpServers).toHaveBeenCalledOnce();
-        expect(mockSkillRefreshCache).toHaveBeenCalledOnce();
-        expect(mockSubagentRefreshCache).toHaveBeenCalledOnce();
+        expect(mockReloadHooks).toHaveBeenCalledOnce();
         expect(mockRefreshHierarchicalMemory).toHaveBeenCalledOnce();
       });
     });

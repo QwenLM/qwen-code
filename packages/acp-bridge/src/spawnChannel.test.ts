@@ -69,11 +69,15 @@ describe('createSpawnChannelFactory env policy', () => {
   const originalArgv1 = process.argv[1];
   let originalSimple: string | undefined;
   let originalServerToken: string | undefined;
+  let originalCliEntry: string | undefined;
+  let originalRuntimeOnlyForTest: string | undefined;
 
   beforeEach(() => {
     mockSpawn.mockReset();
     originalSimple = process.env['QWEN_CODE_SIMPLE'];
     originalServerToken = process.env['QWEN_SERVER_TOKEN'];
+    originalCliEntry = process.env['QWEN_CLI_ENTRY'];
+    originalRuntimeOnlyForTest = process.env['RUNTIME_ONLY_FOR_TEST'];
     process.argv[1] = '/tmp/qwen.js';
     process.env['QWEN_CODE_SIMPLE'] = '1';
     process.env['QWEN_SERVER_TOKEN'] = 'secret';
@@ -90,6 +94,16 @@ describe('createSpawnChannelFactory env policy', () => {
       delete process.env['QWEN_SERVER_TOKEN'];
     } else {
       process.env['QWEN_SERVER_TOKEN'] = originalServerToken;
+    }
+    if (originalCliEntry === undefined) {
+      delete process.env['QWEN_CLI_ENTRY'];
+    } else {
+      process.env['QWEN_CLI_ENTRY'] = originalCliEntry;
+    }
+    if (originalRuntimeOnlyForTest === undefined) {
+      delete process.env['RUNTIME_ONLY_FOR_TEST'];
+    } else {
+      process.env['RUNTIME_ONLY_FOR_TEST'] = originalRuntimeOnlyForTest;
     }
   });
 
@@ -120,6 +134,66 @@ describe('createSpawnChannelFactory env policy', () => {
 
     const args = mockSpawn.mock.calls[0]?.[1] as string[] | undefined;
     expect(args?.slice(-2)).toEqual(['--acp', '--experimental-lsp']);
+  });
+
+  it('builds child env and cli entry from sourceEnv when provided', async () => {
+    mockSpawn.mockReturnValue(createFakeChildProcess());
+    process.env['QWEN_CLI_ENTRY'] = '/process/qwen.js';
+    process.env['RUNTIME_ONLY_FOR_TEST'] = 'from-process';
+
+    const factory = createSpawnChannelFactory({
+      sourceEnv: {
+        QWEN_CLI_ENTRY: '/runtime/qwen.js',
+        RUNTIME_ONLY_FOR_TEST: 'from-runtime',
+        QWEN_SERVER_TOKEN: 'runtime-secret',
+      },
+    });
+    await factory('/tmp/project');
+
+    const args = mockSpawn.mock.calls[0]?.[1] as string[] | undefined;
+    const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
+      | { env?: NodeJS.ProcessEnv }
+      | undefined;
+    expect(args).toContain('/runtime/qwen.js');
+    expect(args).not.toContain('/process/qwen.js');
+    expect(spawnOptions?.env?.['RUNTIME_ONLY_FOR_TEST']).toBe('from-runtime');
+    expect(spawnOptions?.env).not.toHaveProperty('QWEN_SERVER_TOKEN');
+  });
+
+  it('threads NDJSON pipe hooks through daemon-side spawned channels', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const onMessageSent = vi.fn();
+    const onMessageReceived = vi.fn();
+    const factory = createSpawnChannelFactory({
+      pipeHooks: { onMessageSent, onMessageReceived },
+    });
+    const channel = await factory('/tmp/project');
+    const writer = channel.stream.writable.getWriter();
+    const reader = channel.stream.readable.getReader();
+
+    await writer.write({ jsonrpc: '2.0', method: 'daemon-to-child' });
+    (child.stdout as PassThrough).write(
+      `${JSON.stringify({ jsonrpc: '2.0', method: 'child-to-daemon' })}\n`,
+    );
+    await expect(reader.read()).resolves.toMatchObject({
+      value: { jsonrpc: '2.0', method: 'child-to-daemon' },
+      done: false,
+    });
+
+    expect(onMessageSent).toHaveBeenCalledWith(
+      Buffer.byteLength(
+        JSON.stringify({ jsonrpc: '2.0', method: 'daemon-to-child' }),
+      ),
+    );
+    expect(onMessageReceived).toHaveBeenCalledWith(
+      Buffer.byteLength(
+        JSON.stringify({ jsonrpc: '2.0', method: 'child-to-daemon' }),
+      ),
+    );
+
+    reader.releaseLock();
+    writer.releaseLock();
   });
 });
 

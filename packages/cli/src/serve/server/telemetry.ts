@@ -53,6 +53,30 @@ export function resolveDaemonTelemetryRoute(
       sessionId: sessionMetadata[1],
     };
   }
+  const sessionArtifacts = path.match(/^\/session\/([^/]+)\/artifacts$/);
+  if (sessionArtifacts?.[1]) {
+    if (req.method === 'GET') {
+      return {
+        route: 'GET /session/:id/artifacts',
+        sessionId: sessionArtifacts[1],
+      };
+    }
+    if (req.method === 'POST') {
+      return {
+        route: 'POST /session/:id/artifacts',
+        sessionId: sessionArtifacts[1],
+      };
+    }
+  }
+  const sessionArtifact = path.match(
+    /^\/session\/([^/]+)\/artifacts\/([^/]+)$/,
+  );
+  if (sessionArtifact?.[1] && req.method === 'DELETE') {
+    return {
+      route: 'DELETE /session/:id/artifacts/:artifactId',
+      sessionId: sessionArtifact[1],
+    };
+  }
   const sessionPermission = path.match(
     /^\/session\/([^/]+)\/permission\/([^/]+)$/,
   );
@@ -89,6 +113,112 @@ export function resolveDaemonTelemetryRoute(
   }
   if (req.method === 'GET' && /^\/workspace\/[^/]+\/sessions$/.test(path)) {
     return { route: 'GET /workspace/:id/sessions' };
+  }
+  if (req.method === 'GET' && /^\/workspaces\/[^/]+\/sessions$/.test(path)) {
+    return { route: 'GET /workspace/:id/sessions' };
+  }
+  const pluralWorkspacePrefix = /^\/workspaces\/[^/]+/;
+  if (pluralWorkspacePrefix.test(path)) {
+    const suffix = path.replace(pluralWorkspacePrefix, '/workspace');
+    if (req.method === 'GET') {
+      if (
+        suffix === '/workspace/mcp' ||
+        suffix === '/workspace/skills' ||
+        suffix === '/workspace/tools' ||
+        suffix === '/workspace/providers' ||
+        suffix === '/workspace/env' ||
+        suffix === '/workspace/preflight' ||
+        suffix === '/workspace/hooks' ||
+        suffix === '/workspace/settings' ||
+        suffix === '/workspace/permissions' ||
+        suffix === '/workspace/trust' ||
+        suffix === '/workspace/memory' ||
+        suffix === '/workspace/agents'
+      ) {
+        return { route: `GET ${suffix}` };
+      }
+      if (/^\/workspace\/agents\/[^/]+$/.test(suffix)) {
+        return { route: 'GET /workspace/agents/:agentType' };
+      }
+      if (suffix === '/workspace/file') return { route: 'GET /file' };
+      if (suffix === '/workspace/file/bytes') {
+        return { route: 'GET /file/bytes' };
+      }
+      if (suffix === '/workspace/stat') return { route: 'GET /stat' };
+      if (suffix === '/workspace/list') return { route: 'GET /list' };
+      if (suffix === '/workspace/glob') return { route: 'GET /glob' };
+      if (/^\/workspace\/mcp\/[^/]+\/tools$/.test(suffix)) {
+        return { route: 'GET /workspace/mcp/:server/tools' };
+      }
+      if (/^\/workspace\/mcp\/[^/]+\/resources$/.test(suffix)) {
+        return { route: 'GET /workspace/mcp/:server/resources' };
+      }
+    }
+    if (req.method === 'POST') {
+      if (
+        suffix === '/workspace/settings' ||
+        suffix === '/workspace/permissions' ||
+        suffix === '/workspace/trust/request' ||
+        suffix === '/workspace/init' ||
+        suffix === '/workspace/reload' ||
+        suffix === '/workspace/file/write' ||
+        suffix === '/workspace/file/edit' ||
+        suffix === '/workspace/mcp/servers' ||
+        suffix === '/workspace/memory' ||
+        suffix === '/workspace/agents' ||
+        suffix === '/workspace/sessions/delete' ||
+        suffix === '/workspace/sessions/archive' ||
+        suffix === '/workspace/sessions/unarchive' ||
+        suffix === '/workspace/session-groups'
+      ) {
+        return { route: `POST ${suffix}` };
+      }
+      if (/^\/workspace\/tools\/[^/]+\/enable$/.test(suffix)) {
+        return { route: 'POST /workspace/tools/:name/enable' };
+      }
+      if (/^\/workspace\/mcp\/[^/]+\/restart$/.test(suffix)) {
+        return { route: 'POST /workspace/mcp/:server/restart' };
+      }
+      if (/^\/workspace\/agents\/[^/]+$/.test(suffix)) {
+        return { route: 'POST /workspace/agents/:agentType' };
+      }
+      if (
+        /^\/workspace\/mcp\/[^/]+\/(enable|disable|authenticate|clear-auth)$/.test(
+          suffix,
+        )
+      ) {
+        return {
+          route: `POST /workspace/mcp/:server/${suffix.split('/').at(-1)}`,
+        };
+      }
+    }
+    if (
+      req.method === 'DELETE' &&
+      /^\/workspace\/mcp\/servers\/[^/]+$/.test(suffix)
+    ) {
+      return { route: 'DELETE /workspace/mcp/servers/:name' };
+    }
+    if (
+      req.method === 'DELETE' &&
+      /^\/workspace\/agents\/[^/]+$/.test(suffix)
+    ) {
+      return { route: 'DELETE /workspace/agents/:agentType' };
+    }
+    if (suffix === '/workspace/session-groups' && req.method === 'GET') {
+      return { route: 'GET /workspace/session-groups' };
+    }
+    if (
+      /^\/workspace\/session-groups\/[^/]+$/.test(suffix) &&
+      req.method === 'PATCH'
+    ) {
+      return { route: 'PATCH /workspace/session-groups/:groupId' };
+    }
+    if (
+      /^\/workspace\/session-groups\/[^/]+$/.test(suffix) &&
+      req.method === 'DELETE'
+    ) {
+      return { route: 'DELETE /workspace/session-groups/:groupId' };
+    }
   }
   if (req.method === 'POST' && path === '/workspace/init') {
     return { route: 'POST /workspace/init' };
@@ -148,15 +278,31 @@ export function resolveDaemonTelemetryRoute(
 }
 
 export function daemonTelemetryMiddleware(
-  boundWorkspace: string,
+  resolveWorkspaceCwd: (req: Request) => string,
+  // Optional in-process sink for the Daemon Status dashboard's time-series
+  // charts. Fed the same (durationMs, statusCode) already computed for OTel,
+  // so it adds no extra measurement — just a second consumer. Only known
+  // routes (those `resolveDaemonTelemetryRoute` matches) are counted, matching
+  // the OTel counter's scope, so the "requests" line reflects daemon API
+  // traffic rather than static-asset or unrouted noise.
+  recordRequest?: (durationMs: number, statusCode: number) => void,
 ): (req: Request, res: Response, next: NextFunction) => void {
-  const workspaceHash = hashDaemonWorkspace(boundWorkspace);
+  const workspaceHashByCwd = new Map<string, string>();
+  const resolveWorkspaceHash = (workspaceCwd: string): string => {
+    const existing = workspaceHashByCwd.get(workspaceCwd);
+    if (existing !== undefined) return existing;
+    const workspaceHash = hashDaemonWorkspace(workspaceCwd);
+    workspaceHashByCwd.set(workspaceCwd, workspaceHash);
+    return workspaceHash;
+  };
+
   return (req, res, next) => {
     const route = resolveDaemonTelemetryRoute(req);
     if (!route) {
       next();
       return;
     }
+    const workspaceHash = resolveWorkspaceHash(resolveWorkspaceCwd(req));
     const rawClientId = req.get(CLIENT_ID_HEADER);
     const clientId =
       rawClientId !== undefined &&
@@ -184,11 +330,15 @@ export function daemonTelemetryMiddleware(
             if (done) return;
             done = true;
             recordDaemonHttpResponse(span, res.statusCode);
-            recordDaemonHttpRequest(
-              Date.now() - startMs,
-              route.route,
-              res.statusCode,
-            );
+            const durationMs = Date.now() - startMs;
+            recordDaemonHttpRequest(durationMs, route.route, res.statusCode);
+            // Exclude the dashboard's own status poll from the metrics-ring
+            // request rate/latency, or the Requests chart shows a baseline of
+            // ≥1/window with no external traffic (the dashboard counting itself)
+            // — misleading an operator investigating load. OTel still counts it.
+            if (route.route !== 'GET /daemon/status') {
+              recordRequest?.(durationMs, res.statusCode);
+            }
             resolve();
           };
           res.once('finish', finish);

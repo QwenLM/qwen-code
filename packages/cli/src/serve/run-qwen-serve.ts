@@ -9,7 +9,8 @@ import * as fs from 'node:fs';
 import type { Server } from 'node:http';
 import * as https from 'node:https';
 import * as path from 'node:path';
-import { performance } from 'node:perf_hooks';
+import * as os from 'node:os';
+import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import express, {
   type Application,
   type NextFunction,
@@ -18,13 +19,19 @@ import express, {
   type Response,
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
+import {
+  DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
+  normalizeCompactedReplayMaxBytes,
+} from '@qwen-code/acp-bridge/replayWindowLimits';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
 import {
   loadServeFastPathSettings,
   preResolveServeFastPathHomeEnvOverrides,
   type ServeFastPathSettings,
 } from './fast-path-settings.js';
+import { resolveWorkspaceInputs } from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
@@ -34,6 +41,10 @@ import type {
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
+// Dynamic-imported below (not at module scope) so the serve fast-path bundle
+// closure check doesn't trace create-sub-session's transitive deps through
+// the run-qwen-serve chunk. The launcher is only needed after listen().
+import { PathMutexRegistry } from './fs/path-mutex-registry.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
@@ -67,6 +78,10 @@ import {
   type ServeOptions,
 } from './types.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from './workspace-registry.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
@@ -77,9 +92,12 @@ import {
   parseDaemonStatusDetail,
   positiveFiniteOrNull,
   type DaemonStatusIssue,
+  type DaemonPerfSnapshot,
   type DaemonStartupSnapshot,
   type DaemonStatusResponse,
 } from './daemon-status.js';
+import { DaemonMetricsRing, computeCpuPercent } from './daemon-metrics-ring.js';
+import { createLargePipeFrameObserver } from './large-pipe-frame-observer.js';
 import type {
   ChannelWorkerSupervisor,
   CreateChannelWorkerSupervisorOptions,
@@ -92,6 +110,7 @@ import {
 } from '../utils/startupProfiler.js';
 import type { ServiceInfo } from '../commands/channel/pidfile.js';
 import { findCliEntryPath } from '../commands/channel/cli-entry-path.js';
+import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 
 // Reverse MCP channel; enabled only by explicit option or env opt-in.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
@@ -101,6 +120,39 @@ const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
+
+function daemonPipeDirection(
+  direction: NdJsonMessageObservation['direction'],
+): 'inbound' | 'outbound' {
+  switch (direction) {
+    case 'sent':
+      return 'outbound';
+    case 'received':
+      return 'inbound';
+    default: {
+      const exhaustive: never = direction;
+      return exhaustive;
+    }
+  }
+}
+
+// Daemon Status metrics ring: seal one bucket every SAMPLE_MS and retain
+// CAPACITY of them (5s × 180 ≈ 15 min of history), matching the dashboard's
+// own 5s poll so each poll surfaces roughly one fresh bucket.
+const DAEMON_METRICS_SAMPLE_MS = 5_000;
+const DAEMON_METRICS_CAPACITY = 180;
+
+// `process.cpuUsage()` can throw in restricted containers that lack the
+// syscall; return null so the sampler can skip the delta (and leave its
+// baseline untouched) rather than treating a failed read as zero usage —
+// which would turn the next successful read's since-start total into a spike.
+function safeCpuUsage(): NodeJS.CpuUsage | null {
+  try {
+    return process.cpuUsage();
+  } catch {
+    return null;
+  }
+}
 const DEFAULT_RUNTIME_STARTUP_TIMEOUT_MS = 120_000;
 // Let the first /health response flush before evaluating the runtime graph.
 const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
@@ -114,6 +166,11 @@ const DEFAULT_EVENT_RING_SIZE = 8000;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 const WORKSPACE_SETTING_SCOPE =
   'Workspace' as import('../config/settings.js').SettingScope;
+
+type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
+  token?: string;
+  workspace?: string | string[];
+};
 type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
 
@@ -128,11 +185,25 @@ function isNonNegativeIntegerOrInfinity(value: number): boolean {
   );
 }
 
+function deriveDefaultMaxTotalSessions(
+  maxSessionsPerWorkspace: number | undefined,
+  workspaceCount: number,
+): number | undefined {
+  if (workspaceCount <= 1) return undefined;
+  const perWorkspace = maxSessionsPerWorkspace ?? DEFAULT_MAX_SESSIONS;
+  if (perWorkspace === 0 || perWorkspace === Number.POSITIVE_INFINITY) {
+    return undefined;
+  }
+  return perWorkspace * workspaceCount;
+}
+
 function isNonNegativeIntegerMs(value: number): boolean {
   return Number.isFinite(value) && Number.isInteger(value) && value >= 0;
 }
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
+
+const MAX_PORT_ATTEMPTS = 10;
 
 function assertTimerDelayInRange(name: string, value: number): void {
   if (value > MAX_TIMEOUT_MS) {
@@ -390,6 +461,12 @@ export function extractContextFilename(value: unknown): string | undefined {
   return undefined;
 }
 
+function sessionArtifactsPersistenceAvailableFromSettings(
+  settings: { general?: { chatRecording?: unknown } } | undefined,
+): boolean {
+  return settings?.general?.chatRecording !== false;
+}
+
 /**
  * Per-workspace promise chain that serializes settings read-modify-write
  * cycles inside this process.
@@ -442,6 +519,7 @@ export interface RunHandle {
 type CoreRuntime = typeof import('@qwen-code/qwen-code-core');
 type ProviderConfig = NonNullable<ReturnType<CoreRuntime['findProviderById']>>;
 type SettingsRuntime = typeof import('../config/settings.js');
+type EnvironmentRuntime = typeof import('../config/environment.js');
 type LoadedSettingsAdapterRuntime =
   typeof import('../config/loadedSettingsAdapter.js');
 type TrustedFoldersRuntime = typeof import('../config/trustedFolders.js');
@@ -492,6 +570,9 @@ function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
   return {
     async start() {},
     async stop() {},
+    async restart() {
+      return { ...snapshot, channels: [] };
+    },
     killAllSync() {},
     snapshot: () => ({ ...snapshot, channels: [] }),
   };
@@ -662,21 +743,25 @@ async function resolveDaemonLogBaseDirForRun(input: {
 let settingsRuntimePromise:
   | Promise<{
       settings: SettingsRuntime;
+      environment: EnvironmentRuntime;
       loadedSettingsAdapter: LoadedSettingsAdapterRuntime;
       trustedFolders: TrustedFoldersRuntime;
     }>
   | undefined;
 function loadSettingsRuntimeModules(): Promise<{
   settings: SettingsRuntime;
+  environment: EnvironmentRuntime;
   loadedSettingsAdapter: LoadedSettingsAdapterRuntime;
   trustedFolders: TrustedFoldersRuntime;
 }> {
   settingsRuntimePromise ??= Promise.all([
     import('../config/settings.js'),
+    import('../config/environment.js'),
     import('../config/loadedSettingsAdapter.js'),
     import('../config/trustedFolders.js'),
-  ]).then(([settings, loadedSettingsAdapter, trustedFolders]) => ({
+  ]).then(([settings, environment, loadedSettingsAdapter, trustedFolders]) => ({
     settings,
+    environment,
     loadedSettingsAdapter,
     trustedFolders,
   }));
@@ -693,6 +778,8 @@ async function loadServeRuntimeModules() {
     daemonStatusProviderModule,
     workspaceProvidersStatusModule,
     workspaceSkillsStatusModule,
+    totalSessionAdmissionModule,
+    workspaceRegistryModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -702,10 +789,14 @@ async function loadServeRuntimeModules() {
     import('./daemon-status-provider.js'),
     import('./workspace-providers-status.js'),
     import('./workspace-skills-status.js'),
+    import('./total-session-admission.js'),
+    import('./workspace-registry.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
     getActiveSseCount: serverModule.getActiveSseCount,
+    resolveBoundWorkspacesFromIdeEnv:
+      serverModule.resolveBoundWorkspacesFromIdeEnv,
     resolveBridgeFsFactory: serverModule.resolveBridgeFsFactory,
     createAcpSessionBridge: bridgeModule.createAcpSessionBridge,
     createSpawnChannelFactory: spawnChannelModule.createSpawnChannelFactory,
@@ -718,6 +809,11 @@ async function loadServeRuntimeModules() {
       workspaceProvidersStatusModule.createWorkspaceProvidersStatusProvider,
     createWorkspaceSkillsStatusProvider:
       workspaceSkillsStatusModule.createWorkspaceSkillsStatusProvider,
+    createTotalSessionAdmissionController:
+      totalSessionAdmissionModule.createTotalSessionAdmissionController,
+    createWorkspaceRegistry: workspaceRegistryModule.createWorkspaceRegistry,
+    createWorkspaceSessionOwnerIndex:
+      workspaceRegistryModule.createWorkspaceSessionOwnerIndex,
   };
 }
 
@@ -750,6 +846,7 @@ function sessionIdleTimeoutMs(value: number | undefined): number {
 function currentServeFeaturesForRunQwenServe(
   opts: ServeOptions,
   sessionShellCommandEnabled: boolean,
+  sessionArtifactsPersistenceAvailable: boolean,
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
     requireAuth: opts.requireAuth === true,
@@ -764,12 +861,18 @@ function currentServeFeaturesForRunQwenServe(
       : {}),
     persistSettingAvailable: true,
     sessionShellCommandEnabled,
+    sessionArtifactsPersistenceAvailable,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
+    channelReloadAvailable: opts.channelSelection !== undefined,
     // Advertise the same WS feature flags as the runtime path (serve-features.ts)
     // so the bootstrap `/capabilities` window doesn't briefly under-report them.
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
+    browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
+      opts,
+      process.env,
+    ),
   });
 }
 
@@ -778,6 +881,7 @@ function createBootstrapCapabilities(input: {
   boundWorkspace: string;
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
+  sessionArtifactsPersistenceAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
 }): CapabilitiesEnvelope {
   return {
@@ -790,6 +894,7 @@ function createBootstrapCapabilities(input: {
     features: currentServeFeaturesForRunQwenServe(
       input.opts,
       input.sessionShellCommandEnabled,
+      input.sessionArtifactsPersistenceAvailable,
     ),
     modelServices: [],
     workspaceCwd: input.boundWorkspace,
@@ -965,7 +1070,9 @@ function createBootstrapServeApp(input: {
   daemonLog: DaemonLogger;
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
+  sessionArtifactsPersistenceAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
+  multiWorkspaceCapabilitiesRequireRuntime: boolean;
   getRuntimeError: () => string | undefined;
   getChannelWorkerSnapshot: () => ReturnType<
     ChannelWorkerSupervisor['snapshot']
@@ -980,7 +1087,9 @@ function createBootstrapServeApp(input: {
     daemonLog,
     qwenCodeVersion,
     sessionShellCommandEnabled,
+    sessionArtifactsPersistenceAvailable,
     permissionPolicy,
+    multiWorkspaceCapabilitiesRequireRuntime,
     getRuntimeError,
     getChannelWorkerSnapshot,
     onHealthServed,
@@ -1023,12 +1132,28 @@ function createBootstrapServeApp(input: {
   }
 
   app.get(BOOTSTRAP_CAPABILITIES_PATH, (_req: Request, res: Response): void => {
+    if (multiWorkspaceCapabilitiesRequireRuntime) {
+      const runtimeError = getRuntimeError();
+      if (runtimeError === undefined) {
+        res.setHeader('Retry-After', '1');
+      }
+      res.status(503).json({
+        error: runtimeError
+          ? 'Daemon runtime failed to start'
+          : 'Daemon runtime is still starting',
+        code: runtimeError
+          ? 'daemon_runtime_failed'
+          : 'daemon_runtime_starting',
+      });
+      return;
+    }
     res.status(200).json(
       createBootstrapCapabilities({
         opts,
         boundWorkspace,
         qwenCodeVersion,
         sessionShellCommandEnabled,
+        sessionArtifactsPersistenceAvailable,
         permissionPolicy,
       }),
     );
@@ -1091,11 +1216,14 @@ function createBootstrapServeApp(input: {
       },
       limits: {
         maxSessions: advertisedMaxSessions(opts.maxSessions),
+        maxTotalSessions: positiveFiniteOrNull(opts.maxTotalSessions),
         maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
           opts.maxPendingPromptsPerSession,
         ),
         listenerMaxConnections: listenerMaxConnections(opts.maxConnections),
         eventRingSize: opts.eventRingSize ?? DEFAULT_EVENT_RING_SIZE,
+        compactedReplayMaxBytes:
+          opts.compactedReplayMaxBytes ?? DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
         promptDeadlineMs: positiveFiniteOrNull(opts.promptDeadlineMs),
         writerIdleTimeoutMs: positiveFiniteOrNull(opts.writerIdleTimeoutMs),
         channelIdleTimeoutMs: channelIdleTimeoutMs(opts.channelIdleTimeoutMs),
@@ -1107,6 +1235,7 @@ function createBootstrapServeApp(input: {
         features: currentServeFeaturesForRunQwenServe(
           opts,
           sessionShellCommandEnabled,
+          sessionArtifactsPersistenceAvailable,
         ),
       },
       runtime: {
@@ -1138,6 +1267,13 @@ function createBootstrapServeApp(input: {
             mutation: 0,
             read: 0,
           },
+        },
+        activity: {
+          activePrompts: 0,
+          pendingPrompts: 0,
+          queuedPrompts: 0,
+          lastActivityAt: null,
+          idleSinceMs: null,
         },
         process: process.memoryUsage(),
       },
@@ -1273,7 +1409,7 @@ function runSynchronousRequestGate(
  * hard rule, not a warning, per the threat model in the design issue.
  */
 export async function runQwenServe(
-  optsIn: Omit<ServeOptions, 'token'> & { token?: string },
+  optsIn: RunQwenServeOptions,
   deps: RunQwenServeDeps = {},
 ): Promise<RunHandle> {
   const runStartedAt = performance.now();
@@ -1291,6 +1427,9 @@ export async function runQwenServe(
     },
   };
   preResolveServeFastPathHomeEnvOverrides();
+  const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
+    ...process.env,
+  });
 
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
   // token.txt)` keeps the file's trailing `\n` in the env value, so the
@@ -1333,11 +1472,14 @@ export async function runQwenServe(
   const chromeExtensionOriginAllowed = hasChromeExtensionOrigin(
     optsIn.allowOrigins,
   );
+  const rawWorkspaces = resolveWorkspaceInputs(optsIn.workspace);
+  const rawWorkspace = rawWorkspaces[0]!;
   const opts: ServeOptions = {
     ...optsIn,
     token,
     promptDeadlineMs,
     writerIdleTimeoutMs,
+    workspace: rawWorkspace,
     clientMcpOverWs:
       optsIn.clientMcpOverWs ??
       (!envFlagDisabled(clientMcpOverWsEnv) &&
@@ -1570,50 +1712,102 @@ export async function runQwenServe(
     );
   }
 
-  // Resolve the bound workspace (1 daemon = 1 workspace).
-  // Explicit `--workspace` wins; otherwise default to process.cwd().
-  // `POST /session` with a mismatched `cwd` is rejected by the bridge
-  // with `WorkspaceMismatchError`. Multi-workspace deployments use
-  // multiple daemon processes, not intra-daemon routing.
-  //
-  // Boot-loud validation: absolute path, exists, is a directory.
-  const rawWorkspace = opts.workspace ?? process.cwd();
-  if (!path.isAbsolute(rawWorkspace)) {
-    throw new Error(
-      `Invalid --workspace "${rawWorkspace}": must be an absolute path.`,
-    );
-  }
-  try {
-    const stats = fs.statSync(rawWorkspace);
-    if (!stats.isDirectory()) {
+  const validateAndCanonicalizeWorkspace = (workspace: string): string => {
+    if (!path.isAbsolute(workspace)) {
       throw new Error(
-        `Invalid --workspace "${rawWorkspace}": exists but is not a directory.`,
+        `Invalid --workspace "${workspace}": must be an absolute path.`,
       );
     }
-  } catch (err) {
-    if (err && typeof err === 'object' && 'code' in err) {
-      const code = (err as { code?: unknown }).code;
-      if (code === 'ENOENT') {
+    try {
+      const stats = fs.statSync(workspace);
+      if (!stats.isDirectory()) {
         throw new Error(
-          `Invalid --workspace "${rawWorkspace}": directory does not exist.`,
+          `Invalid --workspace "${workspace}": exists but is not a directory.`,
         );
       }
-      // EACCES / EPERM: the path exists but the current user can't
-      // stat it (typical for SIP-protected paths on macOS, root-owned
-      // dirs the daemon's user can't traverse, etc.). The raw Node
-      // SystemError has the path AND the syscall but no operator-
-      // facing breadcrumb that this came from `--workspace`. Wrap
-      // both codes so the boot failure points at the flag the
-      // operator actually set.
-      if (code === 'EACCES' || code === 'EPERM') {
+    } catch (err) {
+      if (err && typeof err === 'object' && 'code' in err) {
+        const code = (err as { code?: unknown }).code;
+        if (code === 'ENOENT') {
+          throw new Error(
+            `Invalid --workspace "${workspace}": directory does not exist.`,
+          );
+        }
+        // EACCES / EPERM: the path exists but the current user can't
+        // stat it (typical for SIP-protected paths on macOS, root-owned
+        // dirs the daemon's user can't traverse, etc.). The raw Node
+        // SystemError has the path AND the syscall but no operator-
+        // facing breadcrumb that this came from `--workspace`. Wrap
+        // both codes so the boot failure points at the flag the
+        // operator actually set.
+        if (code === 'EACCES' || code === 'EPERM') {
+          throw new Error(
+            `Invalid --workspace "${workspace}": permission denied ` +
+              `(${String(code)}). The path exists but cannot be stat'd ` +
+              `by the current user.`,
+          );
+        }
+      }
+      throw err;
+    }
+    return canonicalizeWorkspace(workspace);
+  };
+
+  // Resolve the bound workspace list. The first explicit workspace remains the
+  // primary workspace for legacy APIs; later workspaces are sessions-only
+  // runtimes.
+  const workspaceInputs = rawWorkspaces.map((workspace) => ({
+    raw: workspace,
+    cwd: validateAndCanonicalizeWorkspace(workspace),
+  }));
+  const boundWorkspace = workspaceInputs[0]!.cwd;
+
+  // Keep duplicate/nested rejection after realpath canonicalization so symlink
+  // aliases cannot create two runtimes for one physical workspace.
+  const seenCanonicalWorkspaces = new Set<string>();
+  for (const workspace of workspaceInputs) {
+    if (seenCanonicalWorkspaces.has(workspace.cwd)) {
+      throw new Error(
+        `Duplicate --workspace value resolves to ${JSON.stringify(
+          workspace.cwd,
+        )}.`,
+      );
+    }
+    seenCanonicalWorkspaces.add(workspace.cwd);
+  }
+  for (let i = 0; i < workspaceInputs.length; i++) {
+    for (let j = i + 1; j < workspaceInputs.length; j++) {
+      const first = workspaceInputs[i]!.cwd;
+      const second = workspaceInputs[j]!.cwd;
+      const firstRel = path.relative(first, second);
+      const secondRel = path.relative(second, first);
+      if (
+        firstRel &&
+        !firstRel.startsWith('..') &&
+        !path.isAbsolute(firstRel)
+      ) {
         throw new Error(
-          `Invalid --workspace "${rawWorkspace}": permission denied ` +
-            `(${String(code)}). The path exists but cannot be stat'd ` +
-            `by the current user.`,
+          `Nested --workspace values are not supported: ` +
+            `${JSON.stringify(second)} is inside ${JSON.stringify(first)}.`,
+        );
+      }
+      if (
+        secondRel &&
+        !secondRel.startsWith('..') &&
+        !path.isAbsolute(secondRel)
+      ) {
+        throw new Error(
+          `Nested --workspace values are not supported: ` +
+            `${JSON.stringify(first)} is inside ${JSON.stringify(second)}.`,
         );
       }
     }
-    throw err;
+  }
+  if (workspaceInputs.length > 1 && deps.bridge) {
+    throw new Error(
+      'Injected bridge dependencies are only supported with a single workspace; ' +
+        'multiple --workspace values require runQwenServe to construct one bridge per workspace.',
+    );
   }
   // Canonicalize ONCE here so `/capabilities` and the POST /session
   // fallback (both via server.ts) AND the bridge agree on the same
@@ -1622,7 +1816,6 @@ export async function runQwenServe(
   // filesystems the bridge's `realpathSync.native` form diverges from
   // server.ts's raw `opts.workspace` and clients see one path on
   // `/capabilities` but another on `POST /session` responses.
-  const boundWorkspace = canonicalizeWorkspace(rawWorkspace);
 
   // Read a lightweight settings summary once at boot for startup-time fields
   // used before the full runtime settings loader is allowed onto the hot path.
@@ -1630,9 +1823,12 @@ export async function runQwenServe(
   let permissionPolicy: PermissionPolicy | undefined;
   let permissionConsensusQuorum: number | undefined;
   let bootSettings: ServeFastPathSettings | undefined;
+  let sessionArtifactsPersistenceAvailable = true;
   try {
     bootSettings =
       deps.bootSettings ?? loadServeFastPathSettings(boundWorkspace);
+    sessionArtifactsPersistenceAvailable =
+      sessionArtifactsPersistenceAvailableFromSettings(bootSettings);
     contextFilenameForInit = extractContextFilename(
       bootSettings.context?.fileName,
     );
@@ -1715,6 +1911,14 @@ export async function runQwenServe(
       );
     }
   }
+  if (opts.maxTotalSessions !== undefined) {
+    if (!isNonNegativeIntegerOrInfinity(opts.maxTotalSessions)) {
+      throw new TypeError(
+        `Invalid maxTotalSessions: ${opts.maxTotalSessions}. Must be a non-negative integer ` +
+          `(0 / Infinity = unlimited).`,
+      );
+    }
+  }
   if (opts.maxPendingPromptsPerSession !== undefined) {
     if (!isNonNegativeIntegerOrInfinity(opts.maxPendingPromptsPerSession)) {
       throw new TypeError(
@@ -1733,6 +1937,9 @@ export async function runQwenServe(
           `Must be a positive integer in [1, ${MAX_EVENT_RING_SIZE}].`,
       );
     }
+  }
+  if (opts.compactedReplayMaxBytes !== undefined) {
+    normalizeCompactedReplayMaxBytes(opts.compactedReplayMaxBytes);
   }
   if (opts.writerIdleTimeoutMs !== undefined) {
     if (!isPositiveIntegerMs(opts.writerIdleTimeoutMs)) {
@@ -1782,6 +1989,10 @@ export async function runQwenServe(
       );
     }
   }
+  opts.maxTotalSessions ??= deriveDefaultMaxTotalSessions(
+    opts.maxSessions,
+    workspaceInputs.length,
+  );
   // Per-handle env overrides: `undefined` value means "scrub this
   // var from the child env" — important when a different daemon
   // in the same process set the var globally previously. Always
@@ -1858,6 +2069,14 @@ export async function runQwenServe(
   let runtimeApp: Application | undefined;
   let runtimeAppForCleanup: Application | undefined;
   let bridgeRef: AcpSessionBridge | undefined = deps.bridge;
+  const internalRuntimeBridgesForCleanup: AcpSessionBridge[] = [];
+  let daemonEventLoopMonitor:
+    | ReturnType<CoreRuntime['startEventLoopLagMonitor']>
+    | undefined;
+  // Daemon Status metrics-ring sampler: a fixed-cadence timer that seals a
+  // bucket plus the window-scoped event-loop histogram it resets each seal.
+  // Torn down together with the event-loop monitor on runtime restart/stop.
+  let daemonMetricsSampler: { dispose(): void } | undefined;
   let runtimeStartupError: string | undefined;
   let runtimeStarting: Promise<void> | undefined;
   let markRuntimeReady!: () => void;
@@ -1872,9 +2091,16 @@ export async function runQwenServe(
     markRuntimeFailed = reject;
   });
   void runtimeReady.catch(() => {});
+  const disposeDaemonEventLoopMonitor = (): void => {
+    daemonEventLoopMonitor?.dispose();
+    daemonEventLoopMonitor = undefined;
+    daemonMetricsSampler?.dispose();
+    daemonMetricsSampler = undefined;
+  };
   let channelWorker: ChannelWorkerSupervisor =
     createDisabledChannelWorkerSupervisor();
   const getChannelWorkerSnapshot = () => channelWorker.snapshot();
+  const reloadChannelWorker = () => channelWorker.restart();
   const writeChannelWorkerPidfile = (
     snapshot = channelWorker.snapshot(),
     options: { clearWorkerPid?: boolean } = {},
@@ -1903,6 +2129,19 @@ export async function runQwenServe(
       () => bridgeRef,
       () => runtimeStartupError,
     );
+  const shutdownBridges = new WeakSet<AcpSessionBridge>();
+  const getRuntimeBridgesForCleanup = (): AcpSessionBridge[] => {
+    const appForCleanup = runtimeApp ?? runtimeAppForCleanup;
+    const registry = appForCleanup?.locals?.['workspaceRegistry'] as
+      | WorkspaceRegistry
+      | undefined;
+    const bridges = [
+      ...(registry ? registry.list().map((runtime) => runtime.bridge) : []),
+      ...(bridgeRef ? [bridgeRef] : []),
+      ...internalRuntimeBridgesForCleanup,
+    ];
+    return [...new Set(bridges)];
+  };
 
   const buildRuntime = async (): Promise<{
     app: Application;
@@ -1946,6 +2185,64 @@ export async function runQwenServe(
         { workspace: boundWorkspace },
       );
     }
+    const runtimeEnvSnapshot = runtimeBootSettings
+      ? settingsRuntime.environment.buildRuntimeEnvironment(
+          runtimeBootSettings.merged,
+          boundWorkspace,
+          daemonRuntimeBaseEnv,
+        )
+      : {
+          effectiveEnv: { ...daemonRuntimeBaseEnv },
+          overlayKeys: Object.freeze([] as string[]),
+          envFilePaths: Object.freeze([] as string[]),
+          envFileReadFailed: false,
+          envFileReadFailures: Object.freeze([]),
+        };
+    const logRuntimeEnvFileReadFailures = (
+      workspace: string,
+      snapshot: {
+        readonly envFileReadFailed: boolean;
+        readonly envFileReadFailures?: ReadonlyArray<{
+          readonly path: string;
+          readonly error: string;
+        }>;
+      },
+    ): void => {
+      if (!snapshot.envFileReadFailed) return;
+      const failedFiles = snapshot.envFileReadFailures ?? [];
+      daemonLog.warn('one or more runtime env files could not be read', {
+        workspace,
+        ...(failedFiles.length > 0 ? { failedFiles } : {}),
+      });
+    };
+    logRuntimeEnvFileReadFailures(boundWorkspace, runtimeEnvSnapshot);
+    const runtimeEffectiveEnv: NodeJS.ProcessEnv = {
+      ...runtimeEnvSnapshot.effectiveEnv,
+    };
+    const replaceRuntimeEffectiveEnv = (
+      nextEnv: Readonly<NodeJS.ProcessEnv>,
+    ): void => {
+      for (const key of Object.keys(runtimeEffectiveEnv)) {
+        delete runtimeEffectiveEnv[key];
+      }
+      Object.assign(runtimeEffectiveEnv, nextEnv);
+    };
+    const primaryRuntimeEnv: {
+      mode: 'runtime-overlay';
+      overlayKeys: string[];
+      envFilePaths: string[];
+      effectiveEnv: NodeJS.ProcessEnv;
+      envFileReadFailed: boolean;
+      envFileReadFailures: Array<{ path: string; error: string }>;
+      fallbackReason?: string;
+    } = {
+      mode: 'runtime-overlay' as const,
+      overlayKeys: [...runtimeEnvSnapshot.overlayKeys],
+      effectiveEnv: runtimeEffectiveEnv,
+      envFilePaths: [...runtimeEnvSnapshot.envFilePaths],
+      envFileReadFailed: runtimeEnvSnapshot.envFileReadFailed,
+      envFileReadFailures: [...runtimeEnvSnapshot.envFileReadFailures],
+    };
     const daemonWorkspaceHash = core.hashDaemonWorkspace(boundWorkspace);
     let daemonTelemetrySettings: TelemetrySettings;
     try {
@@ -1965,7 +2262,7 @@ export async function runQwenServe(
       createDaemonTelemetryRuntimeConfig(
         daemonTelemetrySettings,
         resolvedCliVersion,
-        `daemon:${daemonWorkspaceHash}:${process.pid}`,
+        `daemon:${process.pid}`,
         {
           otlpEndpoint: core.DEFAULT_OTLP_ENDPOINT,
           telemetryTarget: core.DEFAULT_TELEMETRY_TARGET,
@@ -1973,43 +2270,120 @@ export async function runQwenServe(
       ),
     );
     core.initializeDaemonMetrics();
-    const daemonTelemetry = core.createDaemonBridgeTelemetry();
-    daemonTelemetry.metrics = {
-      sessionLifecycle(action) {
-        core.recordDaemonSessionLifecycle(action);
-        core.emitDaemonLog(
-          `Session ${action}.`,
-          {
-            'qwen-code.workspace.hash': daemonWorkspaceHash,
-          },
-          {
-            eventName: `qwen-code.daemon.session.${action}`,
-          },
-        );
+    daemonEventLoopMonitor?.dispose();
+    daemonEventLoopMonitor = core.startEventLoopLagMonitor({
+      onNewMaxStall: (maxMs) => {
+        daemonLog.warn('daemon event loop stall detected', { maxMs });
       },
-      channelLifecycle(action, expected) {
-        core.recordDaemonChannelLifecycle(action, expected);
-        core.emitDaemonLog(
-          action === 'spawn'
-            ? 'ACP channel spawned.'
-            : `ACP channel exited (expected=${expected ?? true}).`,
-          {
-            ...(action === 'exit'
-              ? { 'qwen-code.daemon.channel.expected': expected ?? true }
-              : {}),
-          },
-          {
-            eventName: `qwen-code.daemon.channel.${action}`,
-            ...(expected === false && action === 'exit'
-              ? { severityNumber: 13 }
-              : {}),
-          },
-        );
-      },
-      promptQueueWait: core.recordDaemonPromptQueueWait,
-      promptDuration: core.recordDaemonPromptDuration,
-      cancelled: core.recordDaemonCancel,
+    });
+    const currentDaemonEventLoopMonitor = daemonEventLoopMonitor;
+    core.registerDaemonEventLoopLagGauge(() =>
+      currentDaemonEventLoopMonitor.snapshot(),
+    );
+    // Daemon Status metrics ring (time-series charts). Bounded so ~15 min of
+    // per-interval history survives dialog close / page reload — the point of
+    // doing this in the daemon rather than accumulating in the browser. Fed from
+    // the telemetry middleware (request rate/latency), the bridge telemetry
+    // hooks (queue-wait/duration, token burn, LLM round-trip), the pipe recorder
+    // (IPC bytes), and the sampler's gauge reads (CPU / memory / connections /
+    // pending prompts / event-loop lag). Declared before `recordPipeMessage` so
+    // that recorder can fold pipe bytes straight in.
+    const metricsRing = new DaemonMetricsRing({
+      capacity: DAEMON_METRICS_CAPACITY,
+    });
+    const pipeStats: DaemonPerfSnapshot['pipe'] = {
+      inbound: { count: 0, totalBytes: 0, maxBytes: 0 },
+      outbound: { count: 0, totalBytes: 0, maxBytes: 0 },
     };
+    const promptQueueWaitStats = {
+      count: 0,
+      totalMs: 0,
+      maxMs: 0,
+      lastMs: null as number | null,
+    };
+    const recordPipeMessage = (
+      direction: keyof DaemonPerfSnapshot['pipe'],
+      bytes: number,
+    ): void => {
+      const stats = pipeStats[direction];
+      stats.count += 1;
+      stats.totalBytes += bytes;
+      stats.maxBytes = Math.max(stats.maxBytes, bytes);
+      core.recordDaemonPipeMessage(direction, bytes);
+      metricsRing.recordPipe(direction, bytes);
+    };
+    const observeLargePipeFrame = createLargePipeFrameObserver({
+      daemonLog,
+      emitTelemetryLog: core.emitDaemonLog,
+    });
+    const recordPromptQueueWait = (durationMs: number): void => {
+      promptQueueWaitStats.count += 1;
+      promptQueueWaitStats.totalMs += durationMs;
+      promptQueueWaitStats.maxMs = Math.max(
+        promptQueueWaitStats.maxMs,
+        durationMs,
+      );
+      promptQueueWaitStats.lastMs = durationMs;
+      core.recordDaemonPromptQueueWait(durationMs);
+    };
+    const createRuntimeBridgeTelemetry = (workspaceHash: string) => {
+      const telemetry = core.createDaemonBridgeTelemetry();
+      telemetry.metrics = {
+        sessionLifecycle(action) {
+          core.recordDaemonSessionLifecycle(action);
+          core.emitDaemonLog(
+            `Session ${action}.`,
+            {
+              'qwen-code.workspace.hash': workspaceHash,
+            },
+            {
+              eventName: `qwen-code.daemon.session.${action}`,
+            },
+          );
+        },
+        channelLifecycle(action, expected) {
+          core.recordDaemonChannelLifecycle(action, expected);
+          core.emitDaemonLog(
+            action === 'spawn'
+              ? 'ACP channel spawned.'
+              : `ACP channel exited (expected=${expected ?? true}).`,
+            {
+              ...(action === 'exit'
+                ? { 'qwen-code.daemon.channel.expected': expected ?? true }
+                : {}),
+            },
+            {
+              eventName: `qwen-code.daemon.channel.${action}`,
+              ...(expected === false && action === 'exit'
+                ? { severityNumber: 13 }
+                : {}),
+            },
+          );
+        },
+        promptQueueWait(durationMs) {
+          recordPromptQueueWait(durationMs);
+          metricsRing.recordPromptQueueWait(durationMs);
+        },
+        promptDuration(durationMs) {
+          core.recordDaemonPromptDuration(durationMs);
+          metricsRing.recordPromptDuration(durationMs);
+        },
+        cancelled: core.recordDaemonCancel,
+        // Per-round model token usage + LLM round-trip time sniffed off
+        // `agent_message_chunk._meta` (`usage` + `durationMs`) at the bridge's
+        // single session/update fan-in. Increments (not cumulative), so the ring
+        // sums tokens per window (token-burn chart) and pools the round-trip times
+        // for the LLM-latency percentiles.
+        tokenUsage(inputTokens, outputTokens, durationMs) {
+          metricsRing.recordTokens(inputTokens, outputTokens);
+          if (typeof durationMs === 'number') {
+            metricsRing.recordLlmDuration(durationMs);
+          }
+        },
+      };
+      return telemetry;
+    };
+    const daemonTelemetry = createRuntimeBridgeTelemetry(daemonWorkspaceHash);
     // Allocate the audit ring + publisher in the daemon host (here)
     // rather than inside the bridge factory, because the ring is the
     // seam for exposing `GET /workspace/permission/audit` in the future.
@@ -2019,22 +2393,81 @@ export async function runQwenServe(
     });
     const customIgnoreFiles =
       runtimeBootSettings?.merged.context?.fileFiltering?.customIgnoreFiles;
-    const fsFactory = runtime.resolveBridgeFsFactory({
+    const boundWorkspaces = runtime.resolveBoundWorkspacesFromIdeEnv(
       boundWorkspace,
+      undefined,
+      (workspace: string, index: number) => {
+        if (index === 0) return true;
+        if (!runtimeBootSettings) {
+          daemonLog.warn(
+            'excluding secondary workspace root because trust settings are unavailable',
+            { workspace },
+          );
+          return false;
+        }
+        const trustedSecondary =
+          settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
+            runtimeBootSettings.merged,
+            workspace,
+          ).effective.state === 'trusted';
+        if (!trustedSecondary) {
+          daemonLog.warn(
+            'excluding untrusted secondary workspace root from file-system access',
+            { workspace },
+          );
+        }
+        return trustedSecondary;
+      },
+    );
+    daemonLog.info('daemon workspace roots initialized', {
+      primary: boundWorkspaces[0],
+      secondary: boundWorkspaces.slice(1),
+      ideEnvPresent: !!process.env['QWEN_CODE_IDE_WORKSPACE_PATH'],
+    });
+    const sharedPathLocks = new PathMutexRegistry();
+    const fsFactory = runtime.resolveBridgeFsFactory({
+      // Secondary roots share a write-capable factory only after their own
+      // folder trust check passes; untrusted secondary roots stay outside.
+      boundWorkspaces,
       injected: deps.fsFactory,
       trusted: trustedWorkspace,
       emit: deps.fsAuditEmit,
+      pathLocks: sharedPathLocks,
+      ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
+    });
+    const routeFsFactory = runtime.resolveBridgeFsFactory({
+      // REST routes still return primary-relative paths, so keep their
+      // filesystem boundary primary-only until responses carry root IDs.
+      boundWorkspaces: [boundWorkspace],
+      trusted: trustedWorkspace,
+      emit: deps.fsAuditEmit,
+      pathLocks: sharedPathLocks,
       ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
     });
     const channelFactory = runtime.createSpawnChannelFactory({
+      sourceEnv: runtimeEffectiveEnv,
       onDiagnosticLine: diagnosticSink,
+      pipeHooks: {
+        onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
+        onMessageReceived: (bytes) => recordPipeMessage('inbound', bytes),
+        onMessageObserved: ({ direction, bytes, message }) =>
+          observeLargePipeFrame({
+            direction: daemonPipeDirection(direction),
+            bytes,
+            message,
+          }),
+      },
       ...(opts.experimentalLsp === true
         ? { extraArgs: ['--experimental-lsp'] }
         : {}),
     });
-    const statusProvider = runtime.createDaemonStatusProvider();
+    const statusProvider = runtime.createDaemonStatusProvider({
+      env: runtimeEffectiveEnv,
+    });
     const workspaceProvidersStatusProvider =
-      runtime.createWorkspaceProvidersStatusProvider();
+      runtime.createWorkspaceProvidersStatusProvider({
+        env: runtimeEffectiveEnv,
+      });
     const workspaceSkillsStatusProvider =
       runtime.createWorkspaceSkillsStatusProvider();
     // Reverse tool channel (issue #5626, Phase 2). ONE sender registry shared
@@ -2043,6 +2476,19 @@ export async function runQwenServe(
     // (which registers a per-connection `ClientMcpRegistrar`'s sender on
     // `mcp_register`). Inert unless `opts.clientMcpOverWs` is on.
     const clientMcpSenderRegistry = new ClientMcpSenderRegistry();
+    const runtimeBridges: AcpSessionBridge[] = [];
+    const totalSessionAdmission = runtime.createTotalSessionAdmissionController(
+      {
+        maxTotalSessions: opts.maxTotalSessions,
+        getBridges: () =>
+          runtimeBridges.length > 0
+            ? runtimeBridges
+            : bridgeRef
+              ? [bridgeRef]
+              : [],
+      },
+    );
+    const sessionOwnerIndex = runtime.createWorkspaceSessionOwnerIndex();
     const persistDisabledToolsFn = (
       workspace: string,
       toolName: string,
@@ -2115,18 +2561,38 @@ export async function runQwenServe(
           );
         }
       });
+    // `create_sub_session` tool: spawn a fresh top-level sub-session on request
+    // from a child's agent turn and (for 'first-turn') return its result.
+    // Dynamic-imported (not at module scope) so the serve fast-path bundle
+    // closure check doesn't trace create-sub-session's transitive deps.
+    const { createSubSessionLauncher } = await import(
+      './create-sub-session.js'
+    );
+    // Late-binds the bridge (constructed just below) via `() => bridgeRef`. Only
+    // wired on the daemon-created bridge — an injected `deps.bridge` (embed/test)
+    // brings its own options.
+    const subSessionLauncher = createSubSessionLauncher({
+      getBridge: () => bridgeRef,
+      boundWorkspace,
+    });
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
         // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
+        onCreateSubSession: subSessionLauncher.launch,
         maxSessions: opts.maxSessions,
+        freshSessionAdmission: totalSessionAdmission.admit,
+        sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
         ...(opts.maxPendingPromptsPerSession !== undefined
           ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
           : {}),
         ...(opts.eventRingSize !== undefined
           ? { eventRingSize: opts.eventRingSize }
+          : {}),
+        ...(opts.compactedReplayMaxBytes !== undefined
+          ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
           : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
@@ -2161,7 +2627,9 @@ export async function runQwenServe(
       });
     if (!deps.bridge) {
       bridgeRef = bridge;
+      internalRuntimeBridgesForCleanup.push(bridge);
     }
+    runtimeBridges.push(bridge);
     const workspaceService = runtime.createDaemonWorkspaceService({
       boundWorkspace,
       contextFilename: contextFilenameForInit ?? 'QWEN.md',
@@ -2172,15 +2640,70 @@ export async function runQwenServe(
       persistDisabledTools: persistDisabledToolsFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
+      preheatAcpChild: () => bridge.preheat(),
       reloadDaemonEnv: (workspace) =>
         withSettingsLock(workspace, async () => {
           const fresh = settingsRuntime.settings.loadSettings(workspace, {
             skipLoadEnvironment: true,
           });
-          return settingsRuntime.settings.reloadEnvironment(
+          const result = settingsRuntime.settings.reloadEnvironment(
             fresh.merged,
             workspace,
           );
+          let refreshedRuntimeEnv: ReturnType<
+            EnvironmentRuntime['buildRuntimeEnvironment']
+          >;
+          let fallbackReason: string | undefined;
+          try {
+            refreshedRuntimeEnv =
+              settingsRuntime.environment.buildRuntimeEnvironment(
+                fresh.merged,
+                workspace,
+                daemonRuntimeBaseEnv,
+              );
+          } catch (err) {
+            fallbackReason = err instanceof Error ? err.message : String(err);
+            daemonLog.warn(
+              'failed to rebuild runtime env snapshot after daemon env reload; preserving previous runtime env',
+              {
+                error: fallbackReason,
+              },
+            );
+            refreshedRuntimeEnv = {
+              effectiveEnv: { ...runtimeEffectiveEnv },
+              overlayKeys: [...primaryRuntimeEnv.overlayKeys],
+              envFilePaths: [...primaryRuntimeEnv.envFilePaths],
+              envFileReadFailed: primaryRuntimeEnv.envFileReadFailed ?? false,
+              envFileReadFailures: [
+                ...(primaryRuntimeEnv.envFileReadFailures ?? []),
+              ],
+            };
+          }
+          logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
+          replaceRuntimeEffectiveEnv(refreshedRuntimeEnv.effectiveEnv);
+          if (fallbackReason) {
+            primaryRuntimeEnv.fallbackReason = fallbackReason;
+          } else {
+            delete primaryRuntimeEnv.fallbackReason;
+          }
+          primaryRuntimeEnv.envFileReadFailed =
+            refreshedRuntimeEnv.envFileReadFailed;
+          primaryRuntimeEnv.envFileReadFailures.splice(
+            0,
+            primaryRuntimeEnv.envFileReadFailures.length,
+            ...refreshedRuntimeEnv.envFileReadFailures,
+          );
+          primaryRuntimeEnv.overlayKeys.splice(
+            0,
+            primaryRuntimeEnv.overlayKeys.length,
+            ...refreshedRuntimeEnv.overlayKeys,
+          );
+          primaryRuntimeEnv.envFilePaths.splice(
+            0,
+            primaryRuntimeEnv.envFilePaths.length,
+            ...refreshedRuntimeEnv.envFilePaths,
+          );
+          return result;
         }),
       queryWorkspaceStatus: (method, idle) =>
         bridge.queryWorkspaceStatus(method, idle),
@@ -2191,21 +2714,495 @@ export async function runQwenServe(
       publishWorkspaceEvent: (event) => bridge.publishWorkspaceEvent(event),
     });
 
+    const workspaceRuntimes: WorkspaceRuntime[] = [
+      {
+        workspaceId: daemonWorkspaceHash,
+        workspaceCwd: boundWorkspace,
+        primary: true,
+        trusted: trustedWorkspace,
+        env: primaryRuntimeEnv,
+        bridge,
+        workspaceService,
+        routeFileSystemFactory: routeFsFactory,
+        clientMcpSenderRegistry,
+      },
+    ];
+
+    const createRuntimeEnvMetadata = (
+      workspace: string,
+      settings: ReturnType<SettingsRuntime['loadSettings']> | undefined,
+    ): {
+      metadata: {
+        mode: 'runtime-overlay';
+        overlayKeys: string[];
+        envFilePaths: string[];
+        effectiveEnv: NodeJS.ProcessEnv;
+        envFileReadFailed: boolean;
+        envFileReadFailures: Array<{ path: string; error: string }>;
+        fallbackReason?: string;
+      };
+      effectiveEnv: NodeJS.ProcessEnv;
+      replace: (nextEnv: Readonly<NodeJS.ProcessEnv>) => void;
+    } => {
+      const snapshot = settings
+        ? settingsRuntime.environment.buildRuntimeEnvironment(
+            settings.merged,
+            workspace,
+            daemonRuntimeBaseEnv,
+          )
+        : {
+            effectiveEnv: { ...daemonRuntimeBaseEnv },
+            overlayKeys: Object.freeze([] as string[]),
+            envFilePaths: Object.freeze([] as string[]),
+            envFileReadFailed: false,
+            envFileReadFailures: Object.freeze([]),
+          };
+      logRuntimeEnvFileReadFailures(workspace, snapshot);
+      const effectiveEnv: NodeJS.ProcessEnv = { ...snapshot.effectiveEnv };
+      const metadata: {
+        mode: 'runtime-overlay';
+        overlayKeys: string[];
+        envFilePaths: string[];
+        effectiveEnv: NodeJS.ProcessEnv;
+        envFileReadFailed: boolean;
+        envFileReadFailures: Array<{ path: string; error: string }>;
+        fallbackReason?: string;
+      } = {
+        mode: 'runtime-overlay',
+        overlayKeys: [...snapshot.overlayKeys],
+        effectiveEnv,
+        envFilePaths: [...snapshot.envFilePaths],
+        envFileReadFailed: snapshot.envFileReadFailed,
+        envFileReadFailures: [...snapshot.envFileReadFailures],
+      };
+      return {
+        metadata,
+        effectiveEnv,
+        replace(nextEnv) {
+          for (const key of Object.keys(effectiveEnv)) {
+            delete effectiveEnv[key];
+          }
+          Object.assign(effectiveEnv, nextEnv);
+        },
+      };
+    };
+
+    // Collects stop() callbacks from every per-workspace sub-session launcher
+    // (primary + secondaries). Called during shutdown so no new sub-sessions
+    // are admitted while bridges are being torn down.
+    const subSessionStoppers: Array<() => void> = [];
+
+    for (const workspaceInput of workspaceInputs.slice(1)) {
+      let secondarySettings:
+        | ReturnType<SettingsRuntime['loadSettings']>
+        | undefined;
+      try {
+        secondarySettings = settingsRuntime.settings.loadSettings(
+          workspaceInput.cwd,
+        );
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: could not read full settings for secondary workspace ` +
+            `${workspaceInput.cwd} (${err instanceof Error ? err.message : String(err)}); ` +
+            `falling back to defaults.`,
+        );
+      }
+      const secondaryTrusted = secondarySettings
+        ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
+            secondarySettings.merged,
+            workspaceInput.cwd,
+          ).effective.state === 'trusted'
+        : false;
+      if (!secondaryTrusted) {
+        daemonLog.warn('secondary workspace is not trusted', {
+          workspace: workspaceInput.cwd,
+          trustSettingsAvailable: secondarySettings !== undefined,
+        });
+      }
+      const secondaryEnv = createRuntimeEnvMetadata(
+        workspaceInput.cwd,
+        secondarySettings,
+      );
+      const secondaryWorkspaceHash = core.hashDaemonWorkspace(
+        workspaceInput.cwd,
+      );
+      const secondaryStatusProvider = runtime.createDaemonStatusProvider({
+        env: secondaryEnv.effectiveEnv,
+      });
+      const secondaryBridgeFsFactory = runtime.resolveBridgeFsFactory({
+        boundWorkspaces: [workspaceInput.cwd],
+        trusted: secondaryTrusted,
+        emit: deps.fsAuditEmit,
+        pathLocks: sharedPathLocks,
+        ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
+      });
+      const secondaryChannelFactory = runtime.createSpawnChannelFactory({
+        sourceEnv: secondaryEnv.effectiveEnv,
+        onDiagnosticLine: diagnosticSink,
+        pipeHooks: {
+          onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
+          onMessageReceived: (bytes) => recordPipeMessage('inbound', bytes),
+          onMessageObserved: ({ direction, bytes, message }) =>
+            observeLargePipeFrame({
+              direction: daemonPipeDirection(direction),
+              bytes,
+              message,
+            }),
+        },
+        ...(opts.experimentalLsp === true
+          ? { extraArgs: ['--experimental-lsp'] }
+          : {}),
+      });
+      const secondaryClientMcpSenderRegistry = new ClientMcpSenderRegistry();
+      // Wire sub-session support for the secondary workspace too — without
+      // this, isolated scheduled tasks and create_sub_session calls from
+      // sessions bound to a secondary workspace hit methodNotFound.
+      // eslint-disable-next-line prefer-const -- assigned once after bridge creation; `let` required because the launcher closure captures it before the assignment.
+      let secondaryBridgeRef:
+        | ReturnType<typeof runtime.createAcpSessionBridge>
+        | undefined;
+      const secondarySubSessionLauncher = createSubSessionLauncher({
+        getBridge: () => secondaryBridgeRef,
+        boundWorkspace: workspaceInput.cwd,
+      });
+      const secondaryBridge = runtime.createAcpSessionBridge({
+        clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
+        onCreateSubSession: secondarySubSessionLauncher.launch,
+        maxSessions: opts.maxSessions,
+        freshSessionAdmission: totalSessionAdmission.admit,
+        sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
+        ...(opts.maxPendingPromptsPerSession !== undefined
+          ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
+          : {}),
+        ...(opts.eventRingSize !== undefined
+          ? { eventRingSize: opts.eventRingSize }
+          : {}),
+        ...(opts.compactedReplayMaxBytes !== undefined
+          ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
+          : {}),
+        ...(opts.channelIdleTimeoutMs !== undefined
+          ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
+          : {}),
+        ...(opts.sessionReapIntervalMs !== undefined
+          ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
+          : {}),
+        ...(opts.sessionIdleTimeoutMs !== undefined
+          ? { sessionIdleTimeoutMs: opts.sessionIdleTimeoutMs }
+          : {}),
+        ...(opts.permissionResponseTimeoutMs !== undefined
+          ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
+          : {}),
+        boundWorkspace: workspaceInput.cwd,
+        sessionShellCommandEnabled,
+        childEnvOverrides,
+        channelFactory: secondaryChannelFactory,
+        onDiagnosticLine: diagnosticSink,
+        telemetry: createRuntimeBridgeTelemetry(secondaryWorkspaceHash),
+        ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+        ...(permissionConsensusQuorum !== undefined
+          ? {
+              permissionConsensusQuorum,
+            }
+          : {}),
+        permissionAudit: permissionAuditPublisher,
+        statusProvider: secondaryStatusProvider,
+        fileSystem: createBridgeFileSystemAdapter(secondaryBridgeFsFactory),
+        persistApprovalMode: (workspace, mode) =>
+          withSettingsLock(workspace, async () => {
+            const fresh = settingsRuntime.settings.loadSettings(workspace);
+            fresh.setValue(WORKSPACE_SETTING_SCOPE, 'tools.approvalMode', mode);
+          }),
+      });
+      secondaryBridgeRef = secondaryBridge;
+      runtimeBridges.push(secondaryBridge);
+      internalRuntimeBridgesForCleanup.push(secondaryBridge);
+      subSessionStoppers.push(secondarySubSessionLauncher.stop);
+      const secondaryWorkspaceService = runtime.createDaemonWorkspaceService({
+        boundWorkspace: workspaceInput.cwd,
+        contextFilename: contextFilenameForInit ?? 'QWEN.md',
+        statusProvider: secondaryStatusProvider,
+        workspaceProvidersStatusProvider:
+          runtime.createWorkspaceProvidersStatusProvider({
+            env: secondaryEnv.effectiveEnv,
+          }),
+        workspaceSkillsStatusProvider:
+          runtime.createWorkspaceSkillsStatusProvider(),
+        isChannelLive: () => secondaryBridge.isChannelLive(),
+        preheatAcpChild: () => secondaryBridge.preheat(),
+        persistDisabledTools: persistDisabledToolsFn,
+        persistSetting: persistSettingFn,
+        persistSettings: persistSettingsFn,
+        reloadDaemonEnv: (workspace) =>
+          withSettingsLock(workspace, async () => {
+            const fresh = settingsRuntime.settings.loadSettings(workspace, {
+              skipLoadEnvironment: true,
+            });
+            const result = settingsRuntime.settings.reloadEnvironment(
+              fresh.merged,
+              workspace,
+            );
+            try {
+              const refreshedRuntimeEnv =
+                settingsRuntime.environment.buildRuntimeEnvironment(
+                  fresh.merged,
+                  workspace,
+                  daemonRuntimeBaseEnv,
+                );
+              logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
+              secondaryEnv.replace(refreshedRuntimeEnv.effectiveEnv);
+              secondaryEnv.metadata.envFileReadFailed =
+                refreshedRuntimeEnv.envFileReadFailed;
+              secondaryEnv.metadata.envFileReadFailures.splice(
+                0,
+                secondaryEnv.metadata.envFileReadFailures.length,
+                ...refreshedRuntimeEnv.envFileReadFailures,
+              );
+              secondaryEnv.metadata.overlayKeys.splice(
+                0,
+                secondaryEnv.metadata.overlayKeys.length,
+                ...refreshedRuntimeEnv.overlayKeys,
+              );
+              secondaryEnv.metadata.envFilePaths.splice(
+                0,
+                secondaryEnv.metadata.envFilePaths.length,
+                ...refreshedRuntimeEnv.envFilePaths,
+              );
+              delete secondaryEnv.metadata.fallbackReason;
+            } catch (err) {
+              secondaryEnv.metadata.fallbackReason =
+                err instanceof Error ? err.message : String(err);
+              daemonLog.warn(
+                'failed to rebuild secondary runtime env snapshot after daemon env reload; preserving previous runtime env',
+                {
+                  workspace,
+                  error: secondaryEnv.metadata.fallbackReason,
+                },
+              );
+            }
+            return result;
+          }),
+        queryWorkspaceStatus: (method, idle) =>
+          secondaryBridge.queryWorkspaceStatus(method, idle),
+        invokeWorkspaceCommand: (method, params, invokeOpts) =>
+          secondaryBridge.invokeWorkspaceCommand(method, params, invokeOpts),
+        refreshExtensionsForAllSessions: () =>
+          secondaryBridge.refreshExtensionsForAllSessions(),
+        publishWorkspaceEvent: (event) =>
+          secondaryBridge.publishWorkspaceEvent(event),
+      });
+      workspaceRuntimes.push({
+        workspaceId: secondaryWorkspaceHash,
+        workspaceCwd: workspaceInput.cwd,
+        primary: false,
+        trusted: secondaryTrusted,
+        env: secondaryEnv.metadata,
+        bridge: secondaryBridge,
+        workspaceService: secondaryWorkspaceService,
+        routeFileSystemFactory: secondaryBridgeFsFactory,
+        clientMcpSenderRegistry: secondaryClientMcpSenderRegistry,
+      });
+    }
+
+    const workspaceRegistry: WorkspaceRegistry =
+      runtime.createWorkspaceRegistry(workspaceRuntimes, {
+        sessionOwnerIndex,
+      });
+
     core.registerDaemonGaugeCallbacks({
-      sessionCount: () => bridge.sessionCount,
+      sessionCount: () =>
+        workspaceRegistry
+          .list()
+          .reduce((sum, item) => sum + item.bridge.sessionCount, 0),
       sseCount: () => runtime.getActiveSseCount(),
       heapUsed: () => process.memoryUsage().heapUsed,
     });
 
+    // Start the metrics-ring sampler now that `bridge` exists: seal a bucket
+    // every DAEMON_METRICS_SAMPLE_MS, reading memory / active sessions+prompts
+    // and a window-scoped event-loop lag p99 (its own histogram, reset each
+    // seal so the charted lag is per-interval, not the since-start average the
+    // shared monitor reports). `unref()` so sampling never keeps the process
+    // alive; torn down by `disposeDaemonEventLoopMonitor`.
+    // Retire any prior sampler before building a new one so a runtime rebuild
+    // (buildRuntime re-entry) can't leak the old interval + histogram —
+    // symmetric with the `daemonEventLoopMonitor?.dispose()` above.
+    daemonMetricsSampler?.dispose();
+    const metricsLoopDelay = monitorEventLoopDelay({ resolution: 20 });
+    metricsLoopDelay.enable();
+    // Delta state for the cumulative counters. CPU% = delta CPU-µs over delta
+    // wall-ms, normalized by core count (same formula as memoryPressureMonitor);
+    // clamped to [0,100] to absorb non-monotonic cpuUsage on some VMs and
+    // CPU-bursting. Rate-limit rejects are diffed against the prior total.
+    const cpuCoreCount = os.availableParallelism?.() ?? os.cpus().length ?? 1;
+    let prevCpu = safeCpuUsage();
+    let prevCpuAt = Date.now();
+    // undefined until the first tick sets the baseline, so the first sealed
+    // window reports 0 rejects instead of the entire since-start backlog as a
+    // y-axis-flattening spike.
+    let prevRateRejected: number | undefined;
+    const metricsSamplerTimer = setInterval(() => {
+      const nowMs = Date.now();
+      // Read the window lag BEFORE the try: a tick that throws is exactly when
+      // the daemon is overloaded and lag is most diagnostic, so the catch path
+      // must chart the real accumulated lag, not a misleading 0.
+      const eventLoopLagP99Ms = metricsLoopDelay.percentile(99) / 1_000_000;
+      try {
+        const mem = process.memoryUsage();
+        // CPU%: computeCpuPercent returns 0 (and we leave the baseline
+        // untouched) when cpuUsage() throws, so a transient failure can't turn
+        // the next successful read's since-start total into one giant spike.
+        const cpu = safeCpuUsage();
+        const cpuPercent = computeCpuPercent(
+          prevCpu,
+          cpu,
+          nowMs - prevCpuAt,
+          cpuCoreCount,
+        );
+        if (cpu) {
+          prevCpu = cpu;
+          prevCpuAt = nowMs;
+        }
+        // Connections + rate limiter live on `app` (the createServeApp const
+        // just below); read lazily — the first tick is ≥5s out, so the forward
+        // reference is assigned by call time. Guard with `?.` (ACP HTTP and the
+        // limiter are both toggleable).
+        const acp = (
+          app.locals?.['acpHandle'] as AcpHttpHandle | undefined
+        )?.registry.getSnapshot();
+        const hits = getRateLimiter(app)?.getHitCounts();
+        const rejectedTotal = hits
+          ? hits.prompt + hits.mutation + hits.read
+          : 0;
+        const rateLimitRejected =
+          prevRateRejected === undefined
+            ? 0
+            : Math.max(0, rejectedTotal - prevRateRejected);
+        prevRateRejected = rejectedTotal;
+        // ACP child resource: read this tick's cached snapshot synchronously
+        // and kick an async refresh for the next tick, keeping the sampler
+        // sync. Optional-chained: an injected bridge (RunQwenServeDeps.bridge)
+        // built against the older contract may not implement these hooks.
+        const child = bridge.getChildResourceSnapshot?.();
+        // Only poll the child's resources when someone is watching: the
+        // staleness guard already drops the reading to 0 when idle, so gating
+        // avoids a 5s RPC round-trip (pipe + child CPU) for a chart nobody has
+        // open.
+        if (runtime.getActiveSseCount() > 0 || (acp?.wsStreams ?? 0) > 0) {
+          void bridge.refreshChildResource?.();
+        }
+        metricsRing.sample(nowMs, {
+          cpuPercent,
+          rssBytes: mem.rss,
+          heapUsedBytes: mem.heapUsed,
+          activeSessions: workspaceRegistry
+            .list()
+            .reduce((sum, item) => sum + item.bridge.sessionCount, 0),
+          activePrompts: workspaceRegistry
+            .list()
+            .reduce(
+              (sum, item) => sum + (item.bridge.activePromptCount ?? 0),
+              0,
+            ),
+          queuedPrompts: workspaceRegistry
+            .list()
+            .reduce(
+              (sum, item) => sum + (item.bridge.pendingPromptTotal ?? 0),
+              0,
+            ),
+          eventLoopLagP99Ms,
+          sseConnections: runtime.getActiveSseCount(),
+          wsConnections: acp?.wsStreams ?? 0,
+          acpConnections: acp?.connectionCount ?? 0,
+          rateLimitRejected,
+          childCpuPercent: child?.cpuPercent ?? 0,
+          childRssBytes: child?.rssBytes ?? 0,
+        });
+      } catch (err) {
+        // A gauge getter threw (e.g. process.memoryUsage() in a restricted
+        // container, or a bridge getter mid-teardown). Never let it surface as
+        // an uncaughtException that takes down the daemon; seal a zeroed bucket
+        // so the timeline stays contiguous rather than silently gapping.
+        daemonLog.warn(
+          `metrics sampler tick failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        try {
+          metricsRing.sample(nowMs, {
+            cpuPercent: 0,
+            rssBytes: 0,
+            heapUsedBytes: 0,
+            activeSessions: 0,
+            activePrompts: 0,
+            queuedPrompts: 0,
+            eventLoopLagP99Ms,
+            sseConnections: 0,
+            wsConnections: 0,
+            acpConnections: 0,
+            rateLimitRejected: 0,
+            childCpuPercent: 0,
+            childRssBytes: 0,
+          });
+        } catch {
+          // The ring is pure data; a throw here is unexpected, but never let
+          // the fallback path crash the timer either.
+        }
+      } finally {
+        // Reset the window histogram AFTER sampling (or after a failed tick) so
+        // a thrown tick can't permanently discard event-loop lag — which would
+        // otherwise leave the chart reading a healthy 0ms while the daemon was
+        // actually stalling.
+        metricsLoopDelay.reset();
+      }
+    }, DAEMON_METRICS_SAMPLE_MS);
+    metricsSamplerTimer.unref();
+    daemonMetricsSampler = {
+      dispose(): void {
+        clearInterval(metricsSamplerTimer);
+        metricsLoopDelay.disable();
+      },
+    };
+
     const app = runtime.createServeApp(opts, () => actualPort, {
+      workspaceRegistry,
       bridge,
       webShellDir,
       boundWorkspace,
       qwenCodeVersion: resolvedCliVersion,
       startup,
-      fsFactory,
+      // The real long-running daemon keeps scheduled-task sessions resident
+      // (keepalive) and reloads them on boot (rehydration). Off by default so
+      // direct createServeApp embeds/tests don't spawn sessions.
+      manageScheduledTaskSessions: true,
+      fsFactory: routeFsFactory,
+      primaryWorkspaceTrusted: trustedWorkspace,
+      primaryRuntimeEnv,
       daemonLog,
       getChannelWorkerSnapshot,
+      // Gate both the `channel_reload` capability and the reload route on the
+      // presence of this dep, so it is advertised only when a channel worker
+      // exists to reload.
+      ...(opts.channelSelection ? { reloadChannelWorker } : {}),
+      getPerfSnapshot: () => ({
+        eventLoop: currentDaemonEventLoopMonitor.snapshot(),
+        promptQueueWait: {
+          count: promptQueueWaitStats.count,
+          meanMs:
+            promptQueueWaitStats.count === 0
+              ? 0
+              : promptQueueWaitStats.totalMs / promptQueueWaitStats.count,
+          maxMs: promptQueueWaitStats.maxMs,
+          lastMs: promptQueueWaitStats.lastMs,
+        },
+        pipe: {
+          inbound: { ...pipeStats.inbound },
+          outbound: { ...pipeStats.outbound },
+        },
+      }),
+      getMetricsSeries: () => metricsRing.snapshot(),
+      getTotalSessionAdmissionSnapshot: totalSessionAdmission.snapshot,
+      recordDaemonRequest: (durationMs, statusCode) =>
+        metricsRing.recordRequest(durationMs, statusCode),
       workspace: workspaceService,
       // Reverse tool channel (#5626): the SAME registry wired into `bridge` above,
       // so the WS provider and the child-answering bridge share one sender map.
@@ -2213,6 +3210,10 @@ export async function runQwenServe(
       persistDisabledTools: persistDisabledToolsFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
+      sessionArtifactsPersistenceAvailable:
+        sessionArtifactsPersistenceAvailableFromSettings(
+          runtimeBootSettings?.merged,
+        ),
       installAuthProvider: (req) =>
         withSettingsLock(
           boundWorkspace,
@@ -2258,6 +3259,14 @@ export async function runQwenServe(
           },
         ),
     });
+    // Park the sub-session launcher's stop on app.locals so the close handler
+    // can flip it off before tearing down the bridge it spawns into (symmetric
+    // with stopScheduledTaskKeepalive). Defensive: a launch during drain would
+    // otherwise just fail its spawnOrAttach against the shutting-down bridge.
+    (
+      app.locals as { subSessionStoppers?: Array<() => void> }
+    ).subSessionStoppers = subSessionStoppers;
+    subSessionStoppers.push(subSessionLauncher.stop);
     return { app, bridge };
   };
 
@@ -2282,7 +3291,9 @@ export async function runQwenServe(
     daemonLog,
     qwenCodeVersion: cliVersion,
     sessionShellCommandEnabled,
+    sessionArtifactsPersistenceAvailable,
     permissionPolicy,
+    multiWorkspaceCapabilitiesRequireRuntime: workspaceInputs.length > 1,
     getRuntimeError: () => runtimeStartupError,
     getChannelWorkerSnapshot,
     onHealthServed: deferRuntimeUntilFirstHealth
@@ -2361,7 +3372,7 @@ export async function runQwenServe(
         performance.now() - runStartedAt,
       );
       profileCheckpoint('serve_listener_ready');
-      finalizeStartupProfile(daemonLog.getDaemonId() || 'serve');
+      finalizeStartupProfile(`serve-${process.pid}`);
 
       // Listener-level connection cap, set inside the listen callback
       // because Node only exposes the underlying `Server` after
@@ -2532,6 +3543,8 @@ export async function runQwenServe(
         bridge: AcpSessionBridge | undefined,
       ): Promise<void> => {
         if (!bridge || deps.bridge) return;
+        if (shutdownBridges.has(bridge)) return;
+        shutdownBridges.add(bridge);
         try {
           await bridge.shutdown();
         } catch (shutdownErr) {
@@ -2576,8 +3589,14 @@ export async function runQwenServe(
         writeStderrLine(`qwen serve: runtime startup failed: ${message}`);
         daemonLog.error('runtime startup failed', error);
         await stopChannelWorkerAfterFailedStartup();
+        disposeDaemonEventLoopMonitor();
         removeCurrentServePidfile();
-        await shutdownBridgeAfterFailedStartup(bridgeForCleanup ?? bridgeRef);
+        const bridgesForCleanup = bridgeForCleanup
+          ? [bridgeForCleanup, ...getRuntimeBridgesForCleanup()]
+          : getRuntimeBridgesForCleanup();
+        for (const bridge of [...new Set(bridgesForCleanup)]) {
+          await shutdownBridgeAfterFailedStartup(bridge);
+        }
         markRuntimeFailed(error);
       };
       const armRuntimeStartupTimer = (): void => {
@@ -2707,7 +3726,9 @@ export async function runQwenServe(
           daemonLog.warn(`received ${signal} during drain — forcing exit`);
           try {
             channelWorker.killAllSync();
-            bridgeRef?.killAllSync();
+            for (const runtimeBridge of getRuntimeBridgesForCleanup()) {
+              runtimeBridge.killAllSync();
+            }
             removeCurrentServePidfile();
           } catch (err) {
             daemonLog.error(
@@ -2752,6 +3773,22 @@ export async function runQwenServe(
           if (closePromise) return closePromise;
           closePromise = new Promise<void>((res, rej) => {
             shuttingDown = true;
+            // Stop the scheduled-task keepalive timer before tearing down the
+            // bridge it heartbeats. It's already unref()'d so it can't hold the
+            // process open, but stopping it here keeps it from firing against a
+            // disposed bridge (matters for embedders that don't process.exit).
+            (
+              app.locals as { stopScheduledTaskKeepalive?: () => void }
+            ).stopScheduledTaskKeepalive?.();
+            // Same rationale for the create_sub_session launchers: stop accepting
+            // new sub-session spawns before the bridges are torn down. Calls
+            // every workspace's launcher stop (primary + secondaries).
+            const stoppers = (
+              app.locals as { subSessionStoppers?: Array<() => void> }
+            ).subSessionStoppers;
+            if (stoppers) {
+              for (const stop of stoppers) stop();
+            }
             clearRuntimeStartAfterHealthTimer();
             clearRuntimeStartFallbackTimer();
             cancelDeferredRuntimeStartup();
@@ -2884,6 +3921,7 @@ export async function runQwenServe(
                   rl.setDraining(true);
                   rl.dispose();
                 }
+                disposeDaemonEventLoopMonitor();
                 // The worker owns daemon-backed sessions; disconnect it before
                 // tearing down the ACP bridge it is attached to.
                 await channelWorker.stop().catch((err) => {
@@ -2893,8 +3931,9 @@ export async function runQwenServe(
                   );
                 });
                 removeCurrentServePidfile();
-                const bridgeForShutdown = bridgeRef;
-                if (bridgeForShutdown) {
+                for (const bridgeForShutdown of getRuntimeBridgesForCleanup()) {
+                  if (shutdownBridges.has(bridgeForShutdown)) continue;
+                  shutdownBridges.add(bridgeForShutdown);
                   await bridgeForShutdown.shutdown().catch((err) => {
                     daemonLog.error(
                       'bridge shutdown error',
@@ -2959,11 +3998,11 @@ export async function runQwenServe(
       process.on('uncaughtExceptionMonitor', onUncaughtExceptionMonitor);
 
       // Swap the boot-error listener for a runtime-error one
-      // before resolving. `server.once('error', reject)` at the
-      // bottom only catches errors BEFORE listening; post-listen
-      // errors (EMFILE after FD exhaustion, runtime errors on the
-      // listener) would be unhandled and crash the daemon. Use a
-      // persistent listener that logs to stderr instead.
+      // before resolving. `tryListen`'s `server.once('error', ...)`
+      // only catches errors BEFORE listening; post-listen errors
+      // (EMFILE after FD exhaustion, runtime errors on the listener)
+      // would be unhandled and crash the daemon. Use a persistent
+      // listener that logs to stderr instead.
       server.removeAllListeners('error');
       server.on('error', (err) => {
         daemonLog.error('server error', err instanceof Error ? err : null);
@@ -3010,8 +4049,8 @@ export async function runQwenServe(
       }
     };
     let server: Server;
+    let httpsServer: https.Server | undefined;
     if (tlsOptions) {
-      let httpsServer: https.Server;
       try {
         httpsServer = https.createServer(tlsOptions, app);
       } catch (err) {
@@ -3028,13 +4067,53 @@ export async function runQwenServe(
         );
         return;
       }
-      server = httpsServer.listen(opts.port, listenHostname, onListening);
-    } else {
-      server = app.listen(opts.port, listenHostname, onListening);
     }
-    server.once('error', (err) => {
-      removeCurrentServePidfile();
-      reject(err);
-    });
+
+    const tryListen = (attemptPort: number, attempt: number): void => {
+      try {
+        if (httpsServer) {
+          // server.listen(port, host, cb) registers `cb` as a one-time
+          // `listening` listener. On failed attempts (EADDRINUSE),
+          // `listening` never fires so the listener accumulates. Clear
+          // stale listeners before each retry.
+          httpsServer.removeAllListeners('listening');
+          server = httpsServer.listen(attemptPort, listenHostname, onListening);
+        } else {
+          server = app.listen(attemptPort, listenHostname, onListening);
+        }
+      } catch (err) {
+        // Synchronous listen failure (e.g. invalid address) — not
+        // recoverable via port bump.
+        removeCurrentServePidfile();
+        reject(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
+
+      server.once('error', (err: NodeJS.ErrnoException) => {
+        server.close();
+        const nextPort = attemptPort + 1;
+        if (
+          err.code === 'EADDRINUSE' &&
+          opts.port !== 0 &&
+          nextPort <= 65535 &&
+          attempt < MAX_PORT_ATTEMPTS - 1
+        ) {
+          writeStderrLine(
+            `qwen serve: port ${attemptPort} is in use, trying ${nextPort}...`,
+          );
+          tryListen(nextPort, attempt + 1);
+        } else {
+          if (err.code === 'EADDRINUSE' && attempt > 0) {
+            writeStderrLine(
+              `qwen serve: all ports ${opts.port}–${attemptPort} are in use`,
+            );
+          }
+          removeCurrentServePidfile();
+          reject(err);
+        }
+      });
+    };
+
+    tryListen(opts.port, 0);
   });
 }

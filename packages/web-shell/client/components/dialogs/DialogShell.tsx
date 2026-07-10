@@ -16,6 +16,9 @@ interface DialogShellProps {
   title: string;
   subtitle?: string;
   size?: DialogSize;
+  /** Show a header toggle that expands the panel to (near) the full viewport.
+   *  For content-heavy dialogs like Daemon Status; off by default. */
+  allowFullscreen?: boolean;
   onClose: () => void;
   children: ReactNode;
 }
@@ -64,10 +67,12 @@ export function DialogShell({
   title,
   subtitle,
   size = 'md',
+  allowFullscreen = false,
   onClose,
   children,
 }: DialogShellProps) {
   const { t } = useI18n();
+  const [fullscreen, setFullscreen] = useState(false);
   const theme = useTheme();
   const themeClass =
     theme === WebShellThemeId.Light ? styles.themeLight : styles.themeDark;
@@ -224,17 +229,53 @@ export function DialogShell({
       <DialogShellIdContext.Provider value={shellIdRef.current}>
         <section
           ref={panelRef}
-          className={`${styles.panel} ${sizeClass[size]}`}
+          className={`${styles.panel} ${
+            fullscreen ? styles.panelFullscreen : sizeClass[size]
+          }`}
           role="dialog"
           aria-modal="true"
           aria-label={title}
           tabIndex={-1}
+          data-web-shell-dialog
+          data-web-shell-dialog-title={title}
         >
           <header className={styles.header}>
             <div className={styles.titleWrap}>
               <div className={styles.title}>{title}</div>
               {subtitle && <div className={styles.subtitle}>{subtitle}</div>}
             </div>
+            {allowFullscreen && (
+              <button
+                type="button"
+                className={styles.iconButton}
+                onClick={() => setFullscreen((v) => !v)}
+                aria-label={t(
+                  fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+                )}
+                aria-pressed={fullscreen}
+                title={t(
+                  fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+                )}
+              >
+                <svg
+                  viewBox="0 0 16 16"
+                  width="14"
+                  height="14"
+                  aria-hidden="true"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  {fullscreen ? (
+                    <path d="M6 2v4H2M14 6h-4V2M6 14v-4H2M14 10h-4v4" />
+                  ) : (
+                    <path d="M2 6V2h4M10 2h4v4M2 10v4h4M10 14h4v-4" />
+                  )}
+                </svg>
+              </button>
+            )}
             <button
               type="button"
               className={styles.close}
@@ -244,7 +285,12 @@ export function DialogShell({
               data-dialog-close
             />
           </header>
-          <div className={styles.body}>{children}</div>
+          <div
+            className={styles.body}
+            data-dialog-fullscreen={fullscreen ? '' : undefined}
+          >
+            {children}
+          </div>
         </section>
       </DialogShellIdContext.Provider>
     </div>

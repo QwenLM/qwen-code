@@ -125,6 +125,21 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
+  it('preserves user source metadata', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'scheduled prompt', 1, false, {
+        meta: { source: 'cron' },
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      id: 'user-1',
+      role: 'user',
+      content: 'scheduled prompt',
+      source: 'cron',
+    });
+  });
+
   it('hides background task notifications by metadata', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock(
@@ -2162,6 +2177,131 @@ describe('transcriptBlocksToDaemonMessages', () => {
         timestamp: 1,
       },
     ]);
+  });
+
+  it('renders model stream interruption errors from structured errorKind labels', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        {
+          id: 'err-1',
+          kind: 'error' as const,
+          source: 'turn_error' as const,
+          errorKind: 'model_stream_interrupted' as const,
+          text: 'terminated',
+          data: { diagnosticId: 'abc' },
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      {
+        labels: {
+          modelStreamInterrupted: 'Localized stream interruption.',
+        },
+      },
+    );
+
+    expect(messages).toEqual([
+      {
+        id: 'err-1',
+        role: 'system',
+        content: 'Localized stream interruption.',
+        variant: 'error',
+        retryable: true,
+        source: 'turn_error',
+        data: {
+          diagnosticId: 'abc',
+          errorKind: 'model_stream_interrupted',
+        },
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('upgrades older daemon terminated turn errors to localized text', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        {
+          id: 'err-1',
+          kind: 'error' as const,
+          source: 'turn_error' as const,
+          text: 'terminated',
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      {
+        labels: {
+          modelStreamInterrupted: 'Localized stream interruption.',
+        },
+      },
+    );
+
+    expect(messages[0]).toMatchObject({
+      content: 'Localized stream interruption.',
+      retryable: true,
+      source: 'turn_error',
+    });
+  });
+
+  it('does not add data solely for structured errorKind labels', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        {
+          id: 'err-1',
+          kind: 'error' as const,
+          source: 'turn_error' as const,
+          errorKind: 'model_stream_interrupted' as const,
+          text: 'terminated',
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      {
+        labels: {
+          modelStreamInterrupted: 'Localized stream interruption.',
+        },
+      },
+    );
+
+    expect(messages[0]).toMatchObject({
+      content: 'Localized stream interruption.',
+      retryable: true,
+      source: 'turn_error',
+    });
+    expect(messages[0]).not.toHaveProperty('data');
+  });
+
+  it('preserves non-object error data when adding structured errorKind', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        {
+          id: 'err-1',
+          kind: 'error' as const,
+          source: 'turn_error' as const,
+          errorKind: 'model_stream_interrupted' as const,
+          text: 'terminated',
+          data: 'diagnostic text',
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      {
+        labels: {
+          modelStreamInterrupted: 'Localized stream interruption.',
+        },
+      },
+    );
+
+    expect(messages[0]).toMatchObject({
+      data: {
+        value: 'diagnostic text',
+        errorKind: 'model_stream_interrupted',
+      },
+    });
   });
 
   it('converts debug blocks to system messages with info variant', () => {

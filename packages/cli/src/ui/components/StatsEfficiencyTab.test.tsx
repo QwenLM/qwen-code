@@ -55,6 +55,7 @@ const makeData = (): StatsData => ({
     },
     tools: { totalCalls: 0, totalSuccess: 0, totalFail: 0, topTools: [] },
     files: { linesAdded: 0, linesRemoved: 0 },
+    skills: { totalCalls: 0, topSkills: [] },
     projects: [],
   },
   heatmap: {},

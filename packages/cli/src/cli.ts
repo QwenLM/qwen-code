@@ -32,6 +32,7 @@ export const TOP_LEVEL_COMMANDS = [
     'Run Qwen Code as a local HTTP daemon (Stage 1 experimental: --http-bridge)',
   ],
   ['sessions <command>', 'Manage Qwen Code sessions'],
+  ['update', 'Check for Qwen Code updates and install if available'],
 ] as const;
 
 export const MCP_COMMANDS = [
@@ -45,6 +46,14 @@ export const MCP_COMMANDS = [
 
 const TOP_LEVEL_HELP_OPTIONS = [
   ['model', { alias: 'm', type: 'string', description: 'Model' }],
+  [
+    'fallback-model',
+    {
+      type: 'array',
+      description:
+        'Fallback model(s) for capacity errors, repeatable or comma-separated (max 3)',
+    },
+  ],
   [
     'prompt',
     {
@@ -109,6 +118,7 @@ const TOP_LEVEL_HELP_OPTIONS = [
 const VALUE_FLAGS = new Set([
   '--model',
   '-m',
+  '--fallback-model',
   '--prompt',
   '-p',
   '--prompt-interactive',

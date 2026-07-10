@@ -38,6 +38,7 @@ export const ToolNames = {
   CRON_LIST: 'cron_list',
   CRON_DELETE: 'cron_delete',
   LOOP_WAKEUP: 'loop_wakeup',
+  CREATE_SUB_SESSION: 'create_sub_session',
   TASK_STOP: 'task_stop',
   TASK_CREATE: 'task_create',
   TASK_UPDATE: 'task_update',
@@ -61,6 +62,7 @@ export const ToolNames = {
   // `get_app_state` / `perform_secondary_action` that no longer exist.
   WORKFLOW: 'workflow',
   ARTIFACT: 'artifact',
+  RECORD_ARTIFACT: 'record_artifact',
 } as const;
 
 /**
@@ -89,6 +91,7 @@ export const ToolDisplayNames = {
   CRON_LIST: 'CronList',
   CRON_DELETE: 'CronDelete',
   LOOP_WAKEUP: 'LoopWakeup',
+  CREATE_SUB_SESSION: 'CreateSubSession',
   TASK_STOP: 'TaskStop',
   TASK_CREATE: 'TaskCreate',
   TASK_UPDATE: 'TaskUpdate',
@@ -107,6 +110,7 @@ export const ToolDisplayNames = {
   // computer_use__* display names are not enumerated here (see ToolNames).
   WORKFLOW: 'Workflow',
   ARTIFACT: 'Artifact',
+  RECORD_ARTIFACT: 'RecordArtifact',
 } as const;
 
 // Migration from old tool names to new tool names

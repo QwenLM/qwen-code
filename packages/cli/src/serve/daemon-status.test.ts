@@ -15,6 +15,7 @@ import { DeviceFlowRegistry } from './auth/device-flow.js';
 import {
   buildDaemonStatusResponse,
   type BuildDaemonStatusOptions,
+  type DaemonMetricsBucket,
 } from './daemon-status.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
@@ -27,6 +28,7 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
     maxSessions: 20,
     maxPendingPromptsPerSession: 5,
     eventRingSize: 8000,
+    compactedReplayMaxBytes: 4 * 1024 * 1024,
     channelIdleTimeoutMs: 0,
     sessionIdleTimeoutMs: 1_800_000,
   },
@@ -42,6 +44,118 @@ afterEach(() => {
 });
 
 describe('buildDaemonStatusResponse', () => {
+  it('includes maxTotalSessions in daemon status limits', async () => {
+    const options = makeOptions();
+    options.opts.maxTotalSessions = 50;
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.limits.maxTotalSessions).toBe(50);
+  });
+
+  it('warns when total session capacity is high and reports in-flight admission', async () => {
+    const options = makeOptions({
+      totalAdmissionInFlight: 1,
+      bridgeSnapshot: {
+        ...BASE_BRIDGE_SNAPSHOT,
+        sessionCount: 7,
+      },
+    });
+    options.opts.maxTotalSessions = 10;
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.sessions).toMatchObject({
+      active: 7,
+      admissionInFlight: 1,
+    });
+    expect(response).toMatchObject({
+      status: 'warning',
+      issues: expect.arrayContaining([
+        expect.objectContaining({ code: 'total_session_capacity_high' }),
+      ]),
+    });
+  });
+
+  it('uses total admission live count for total session capacity warnings', async () => {
+    const options = makeOptions({
+      totalAdmissionLiveCount: 8,
+      totalAdmissionInFlight: 1,
+      bridgeSnapshot: {
+        ...BASE_BRIDGE_SNAPSHOT,
+        sessionCount: 1,
+      },
+    });
+    options.opts.maxTotalSessions = 10;
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.sessions).toMatchObject({
+      active: 1,
+      admissionInFlight: 1,
+    });
+    expect(response).toMatchObject({
+      status: 'warning',
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'total_session_capacity_high',
+          message: 'Total active and in-flight sessions are at 9/10.',
+        }),
+      ]),
+    });
+  });
+
+  it('reuses the primary bridge snapshot when a workspace registry is installed', async () => {
+    const primarySnapshot = vi.fn(() => ({
+      ...BASE_BRIDGE_SNAPSHOT,
+      sessionCount: 1,
+    }));
+    const secondarySnapshot = vi.fn(() => ({
+      ...BASE_BRIDGE_SNAPSHOT,
+      sessionCount: 2,
+    }));
+    const primaryBridge = {
+      getDaemonStatusSnapshot: primarySnapshot,
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const secondaryBridge = {
+      getDaemonStatusSnapshot: secondarySnapshot,
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const options = makeOptions();
+    options.bridge = primaryBridge;
+    options.workspaceRegistry = {
+      primary: {
+        workspaceId: 'primary',
+        workspaceCwd: BASE_WORKSPACE,
+        primary: true,
+        trusted: true,
+        bridge: primaryBridge,
+      },
+      list: () => [
+        {
+          workspaceId: 'primary',
+          workspaceCwd: BASE_WORKSPACE,
+          primary: true,
+          trusted: true,
+          bridge: primaryBridge,
+        },
+        {
+          workspaceId: 'secondary',
+          workspaceCwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+          bridge: secondaryBridge,
+        },
+      ],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(primarySnapshot).toHaveBeenCalledTimes(1);
+    expect(secondarySnapshot).toHaveBeenCalledTimes(1);
+    expect(response.runtime.sessions.active).toBe(3);
+  });
+
   it('reports every runtime issue code from daemon counters', async () => {
     const response = await buildDaemonStatusResponse(
       'summary',
@@ -78,6 +192,20 @@ describe('buildDaemonStatusResponse', () => {
         expect.objectContaining({ code: 'rate_limit_hits' }),
       ]),
     });
+  });
+
+  it('embeds runtime.metrics.series when getMetricsSeries is provided, and omits it otherwise', async () => {
+    const base = makeOptions({});
+    const withSeries = await buildDaemonStatusResponse('summary', {
+      ...base,
+      getMetricsSeries: () => [{ t: 1 } as DaemonMetricsBucket],
+    });
+    expect(withSeries.runtime.metrics?.series).toHaveLength(1);
+
+    // Omitting the provider leaves no `metrics` key — backward compatible with
+    // older clients that don't expect it.
+    const without = await buildDaemonStatusResponse('summary', base);
+    expect(without.runtime.metrics).toBeUndefined();
   });
 
   it('reports permanently failed channel worker snapshots as errors', async () => {
@@ -307,6 +435,37 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('summarizes MCP server health in workspace.mcp.summary', async () => {
+    const response = await buildDaemonStatusResponse(
+      'full',
+      makeOptions({
+        mcpStatus: {
+          v: 1,
+          workspaceCwd: BASE_WORKSPACE,
+          initialized: true,
+          servers: [
+            { name: 'a', mcpStatus: 'connected', disabled: false },
+            { name: 'b', mcpStatus: 'connected', disabled: false },
+            {
+              name: 'c',
+              mcpStatus: 'disconnected',
+              status: 'error',
+              disabled: false,
+            },
+            { name: 'd', disabled: true },
+          ],
+        },
+      }),
+    );
+    const mcpSummary = response.full?.workspace?.['mcp']?.summary;
+    expect(mcpSummary).toMatchObject({
+      serversCount: 4,
+      serversConnected: 2,
+      serversErrored: 1,
+      serversDisabled: 1,
+    });
+  });
+
   it('marks a timed-out full workspace section unavailable', async () => {
     vi.useFakeTimers();
 
@@ -370,6 +529,258 @@ describe('buildDaemonStatusResponse', () => {
       },
     });
   });
+
+  it('includes additive daemon performance data when provided', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        perfSnapshot: {
+          eventLoop: { meanMs: 1, p50Ms: 2, p99Ms: 3, maxMs: 4 },
+          promptQueueWait: { count: 2, meanMs: 15, maxMs: 25, lastMs: 5 },
+          pipe: {
+            inbound: { count: 5, totalBytes: 600, maxBytes: 300 },
+            outbound: { count: 7, totalBytes: 800, maxBytes: 400 },
+          },
+        },
+      }),
+    );
+
+    expect(response.runtime.perf).toEqual({
+      eventLoop: { meanMs: 1, p50Ms: 2, p99Ms: 3, maxMs: 4 },
+      promptQueueWait: { count: 2, meanMs: 15, maxMs: 25, lastMs: 5 },
+      pipe: {
+        inbound: { count: 5, totalBytes: 600, maxBytes: 300 },
+        outbound: { count: 7, totalBytes: 800, maxBytes: 400 },
+      },
+    });
+  });
+
+  it('omits daemon performance data when no provider is injected', async () => {
+    const response = await buildDaemonStatusResponse('summary', makeOptions());
+
+    expect(response.runtime).not.toHaveProperty('perf');
+  });
+
+  it('includes activity fields in runtime', async () => {
+    vi.useFakeTimers({ now: 1719990005000 });
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        activePromptCount: 3,
+        lastActivityAt: 1719990000000,
+      }),
+    );
+    expect(response.runtime.activity).toEqual({
+      activePrompts: 3,
+      pendingPrompts: 0,
+      queuedPrompts: 0,
+      lastActivityAt: '2024-07-03T07:00:00.000Z',
+      idleSinceMs: 5000,
+    });
+  });
+
+  it('summarizes pending and queued prompts across sessions without warning', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        activePromptCount: 1,
+        bridgeSnapshot: {
+          ...BASE_BRIDGE_SNAPSHOT,
+          sessionCount: 2,
+          sessions: [
+            {
+              sessionId: 's1',
+              workspaceCwd: BASE_WORKSPACE,
+              createdAt: '2026-07-01T00:00:00.000Z',
+              clientCount: 2,
+              subscriberCount: 2,
+              attachCount: 2,
+              pendingPromptCount: 3,
+              pendingPermissionCount: 0,
+              hasActivePrompt: true,
+              lastEventId: 10,
+            },
+            {
+              sessionId: 's2',
+              workspaceCwd: BASE_WORKSPACE,
+              createdAt: '2026-07-01T00:01:00.000Z',
+              clientCount: 1,
+              subscriberCount: 1,
+              attachCount: 1,
+              pendingPromptCount: 0,
+              pendingPermissionCount: 0,
+              hasActivePrompt: false,
+              lastEventId: 0,
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(response.runtime.activity).toMatchObject({
+      activePrompts: 1,
+      pendingPrompts: 3,
+      queuedPrompts: 2,
+    });
+    expect(response.status).toBe('ok');
+  });
+
+  it('uses bridge queued prompt total when available', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        pendingPromptTotal: 0,
+        bridgeSnapshot: {
+          ...BASE_BRIDGE_SNAPSHOT,
+          sessions: [
+            {
+              sessionId: 's1',
+              workspaceCwd: BASE_WORKSPACE,
+              createdAt: '2026-07-01T00:00:00.000Z',
+              clientCount: 1,
+              subscriberCount: 1,
+              attachCount: 1,
+              pendingPromptCount: 1,
+              pendingPermissionCount: 0,
+              hasActivePrompt: false,
+              lastEventId: 1,
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(response.runtime.activity).toMatchObject({
+      pendingPrompts: 1,
+      queuedPrompts: 0,
+    });
+  });
+
+  it('derives queued prompts per runtime when pendingPromptTotal is unavailable', async () => {
+    const primarySnapshot = {
+      ...BASE_BRIDGE_SNAPSHOT,
+      sessionCount: 1,
+      sessions: [
+        {
+          sessionId: 'primary',
+          workspaceCwd: BASE_WORKSPACE,
+          createdAt: '2026-07-01T00:00:00.000Z',
+          clientCount: 1,
+          subscriberCount: 1,
+          attachCount: 1,
+          pendingPromptCount: 3,
+          pendingPermissionCount: 0,
+          hasActivePrompt: true,
+          lastEventId: 1,
+        },
+      ],
+    };
+    const secondarySnapshot = {
+      ...BASE_BRIDGE_SNAPSHOT,
+      sessionCount: 1,
+      sessions: [
+        {
+          sessionId: 'secondary',
+          workspaceCwd: '/work/secondary',
+          createdAt: '2026-07-01T00:00:00.000Z',
+          clientCount: 1,
+          subscriberCount: 1,
+          attachCount: 1,
+          pendingPromptCount: 2,
+          pendingPermissionCount: 0,
+          hasActivePrompt: false,
+          lastEventId: 1,
+        },
+      ],
+    };
+    const primaryBridge = {
+      getDaemonStatusSnapshot: () => primarySnapshot,
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const secondaryBridge = {
+      getDaemonStatusSnapshot: () => secondarySnapshot,
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const options = makeOptions();
+    options.bridge = primaryBridge;
+    options.workspaceRegistry = {
+      primary: {
+        workspaceId: 'primary',
+        workspaceCwd: BASE_WORKSPACE,
+        primary: true,
+        trusted: true,
+        bridge: primaryBridge,
+      },
+      list: () => [
+        {
+          workspaceId: 'primary',
+          workspaceCwd: BASE_WORKSPACE,
+          primary: true,
+          trusted: true,
+          bridge: primaryBridge,
+        },
+        {
+          workspaceId: 'secondary',
+          workspaceCwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+          bridge: secondaryBridge,
+        },
+      ],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.activity).toMatchObject({
+      pendingPrompts: 5,
+      queuedPrompts: 4,
+    });
+  });
+
+  it('does not report negative queued prompts from inconsistent snapshots', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        activePromptCount: 1,
+        bridgeSnapshot: {
+          ...BASE_BRIDGE_SNAPSHOT,
+          sessions: [
+            {
+              sessionId: 's1',
+              workspaceCwd: BASE_WORKSPACE,
+              createdAt: '2026-07-01T00:00:00.000Z',
+              clientCount: 1,
+              subscriberCount: 1,
+              attachCount: 1,
+              pendingPromptCount: 0,
+              pendingPermissionCount: 0,
+              hasActivePrompt: true,
+              lastEventId: 1,
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(response.runtime.activity).toMatchObject({
+      pendingPrompts: 0,
+      queuedPrompts: 0,
+    });
+  });
+
+  it('reports null activity when daemon has never been active', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({ activePromptCount: 0, lastActivityAt: null }),
+    );
+    expect(response.runtime.activity).toEqual({
+      activePrompts: 0,
+      pendingPrompts: 0,
+      queuedPrompts: 0,
+      lastActivityAt: null,
+      idleSinceMs: null,
+    });
+  });
 });
 
 interface MakeOptionsInput {
@@ -382,6 +793,24 @@ interface MakeOptionsInput {
   hooksStatus?: unknown;
   extensionsStatus?: unknown;
   channelWorkerSnapshot?: ChannelWorkerSnapshot;
+  perfSnapshot?: {
+    eventLoop: { meanMs: number; p50Ms: number; p99Ms: number; maxMs: number };
+    promptQueueWait: {
+      count: number;
+      meanMs: number;
+      maxMs: number;
+      lastMs: number | null;
+    };
+    pipe: {
+      inbound: { count: number; totalBytes: number; maxBytes: number };
+      outbound: { count: number; totalBytes: number; maxBytes: number };
+    };
+  };
+  activePromptCount?: number;
+  pendingPromptTotal?: number;
+  lastActivityAt?: number | null;
+  totalAdmissionLiveCount?: number;
+  totalAdmissionInFlight?: number;
 }
 
 function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
@@ -395,6 +824,9 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
     getDaemonStatusSnapshot: () => input.bridgeSnapshot ?? BASE_BRIDGE_SNAPSHOT,
     getWorkspaceToolsStatus: async () =>
       input.toolsStatus ?? okStatus({ tools: [] }),
+    activePromptCount: input.activePromptCount ?? 0,
+    pendingPromptTotal: input.pendingPromptTotal,
+    lastActivityAt: input.lastActivityAt ?? null,
   } as unknown as AcpSessionBridge;
   const workspace = {
     getWorkspaceMcpStatus: async () =>
@@ -439,6 +871,19 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
     ...(input.channelWorkerSnapshot
       ? { getChannelWorkerSnapshot: () => input.channelWorkerSnapshot! }
       : {}),
+    ...(input.perfSnapshot
+      ? { getPerfSnapshot: () => input.perfSnapshot! }
+      : {}),
+    ...(input.totalAdmissionInFlight === undefined
+      ? {}
+      : {
+          getTotalSessionAdmissionSnapshot: () => ({
+            liveCount:
+              input.totalAdmissionLiveCount ??
+              (input.bridgeSnapshot ?? BASE_BRIDGE_SNAPSHOT).sessionCount,
+            inFlight: input.totalAdmissionInFlight!,
+          }),
+        }),
   };
 }
 

@@ -39,6 +39,10 @@ describe('reviewCommand', () => {
     ]);
   });
 
+  it('does not register the removed `post-suggestions` subcommand', () => {
+    expect(registeredSubcommands()).not.toContain('post-suggestions');
+  });
+
   it('does not register the removed `deterministic` subcommand', () => {
     expect(registeredSubcommands()).not.toContain('deterministic');
   });

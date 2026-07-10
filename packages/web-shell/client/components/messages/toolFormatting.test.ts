@@ -5,6 +5,7 @@ import {
   getAgentCurrentToolHint,
   getToolDescription,
   getToolResultSummary,
+  getToolSummaryDescription,
   localizeToolDisplayName,
   TOOL_DISPLAY_NAMES,
 } from './toolFormatting';
@@ -264,6 +265,52 @@ describe('toolFormatting', () => {
     ).toBe('cat ~/.qwen/settings.json (查看 ~/.qwen/settings.json 文件内容)');
   });
 
+  it('uses semantic shell descriptions for summaries', () => {
+    const shellTool = tool({
+      toolName: 'run_shell_command',
+      title:
+        'Shell: dataworks-infra workspace list [timeout: 30000ms] (查询用户工作空间列表)',
+      args: {
+        command: 'dataworks-infra workspace list',
+        description: '查询用户工作空间列表',
+        timeout: 30000,
+      },
+    });
+
+    expect(getToolSummaryDescription(shellTool)).toBe('查询用户工作空间列表');
+    expect(getToolDescription(shellTool)).toBe(
+      'dataworks-infra workspace list [timeout: 30000ms] (查询用户工作空间列表)',
+    );
+  });
+
+  it('falls back to shell commands in summaries without timeout metadata', () => {
+    expect(
+      getToolSummaryDescription(
+        tool({
+          toolName: 'run_shell_command',
+          args: {
+            command: 'npm test',
+            timeout: 1000,
+          },
+        }),
+      ),
+    ).toBe('npm test');
+  });
+
+  it('describes skill calls from raw input', () => {
+    expect(
+      getToolDescription(
+        tool({
+          toolName: 'skill',
+          args: {
+            skill: 'qc-helper',
+            args: 'weather in Hangzhou next 5 days',
+          },
+        }),
+      ),
+    ).toBe('qc-helper');
+  });
+
   it('summarizes read_file rawOutput by line count', () => {
     expect(
       getToolResultSummary(
@@ -305,9 +352,15 @@ describe('toolFormatting', () => {
     it('keeps proper tool names / acronyms in English', () => {
       const t = getTranslator('zh-CN');
       expect(localizeToolDisplayName('agent', t)).toBe('Agent');
-      expect(localizeToolDisplayName('grep_search', t)).toBe('Grep');
       expect(localizeToolDisplayName('glob', t)).toBe('Glob');
       expect(localizeToolDisplayName('lsp', t)).toBe('LSP');
+    });
+
+    it('localizes grep tool aliases in Chinese', () => {
+      const t = getTranslator('zh-CN');
+      expect(localizeToolDisplayName('grep', t)).toBe('搜索内容');
+      expect(localizeToolDisplayName('grep_search', t)).toBe('搜索内容');
+      expect(localizeToolDisplayName('search', t)).toBe('搜索内容');
     });
 
     it('falls back to the English display name when the locale has no entry', () => {
@@ -325,7 +378,7 @@ describe('toolFormatting', () => {
     it('has a zh translation for every tool in the display-name map', () => {
       const tZh = getTranslator('zh-CN');
       // Tools intentionally shown in English (proper names / acronyms).
-      const keepEnglish = new Set(['agent', 'grep_search', 'glob', 'search']);
+      const keepEnglish = new Set(['agent', 'glob']);
       const untranslated = Object.keys(TOOL_DISPLAY_NAMES).filter(
         (wire) =>
           !keepEnglish.has(wire) &&

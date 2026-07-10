@@ -1,3 +1,8 @@
+import type {
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+} from '@agentclientprotocol/sdk';
+
 export interface AvailableCommand {
   name: string;
   description: string;
@@ -18,15 +23,52 @@ export interface ToolCallEvent {
   rawInput?: Record<string, unknown>;
 }
 
+export interface ChannelLoopToolCreateInput {
+  cron: string;
+  prompt: string;
+  recurring?: boolean;
+}
+
+export interface ChannelLoopToolResult {
+  text: string;
+  isError?: boolean;
+}
+
+export interface ChannelLoopToolHandler {
+  canHandle?(sessionId: string): boolean;
+  create(
+    sessionId: string,
+    input: ChannelLoopToolCreateInput,
+  ): Promise<string | ChannelLoopToolResult>;
+  list(sessionId: string): Promise<string | ChannelLoopToolResult>;
+  cancel(
+    sessionId: string,
+    id: string,
+  ): Promise<string | ChannelLoopToolResult>;
+}
+
 export interface SessionDiedEvent {
   sessionId: string;
   reason?: string;
+}
+
+export interface PermissionRequestEvent {
+  requestId: string;
+  sessionId: string;
+  request: RequestPermissionRequest;
+}
+
+export interface PermissionResolvedEvent {
+  requestId: string;
+  outcome?: RequestPermissionResponse['outcome'];
 }
 
 interface ChannelAgentBridgeEventMap {
   sessionDied: [SessionDiedEvent];
   textChunk: [sessionId: string, chunk: string];
   toolCall: [ToolCallEvent];
+  permissionRequest: [PermissionRequestEvent];
+  permissionResolved: [PermissionResolvedEvent];
 }
 
 export interface BridgeSessionInfo {
@@ -54,10 +96,15 @@ export interface ChannelAgentBridge {
     options?: { imageBase64?: string; imageMimeType?: string },
   ): Promise<string>;
   cancelSession(sessionId: string): Promise<void>;
+  respondToPermission?(
+    requestId: string,
+    response: RequestPermissionResponse,
+  ): Promise<boolean>;
   shellCommand?(
     sessionId: string,
     command: string,
     signal?: AbortSignal,
   ): Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
   listSessions?(): BridgeSessionInfo[];
+  registerChannelLoopToolHandler?(handler: ChannelLoopToolHandler): void;
 }

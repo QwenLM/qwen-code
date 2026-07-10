@@ -30,7 +30,7 @@ interface MessageItemProps {
   onBranchSession?: () => void;
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
-  shellOutputMaxLines: number;
+  isLocateFlashing?: boolean;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -44,13 +44,18 @@ export const MessageItem = memo(function MessageItem({
   onBranchSession,
   showAssistantActions = false,
   showAssistantBranch = false,
-  shellOutputMaxLines,
+  isLocateFlashing = false,
 }: MessageItemProps) {
+  const { t } = useI18n();
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
         return (
-          <UserMessage content={message.content} images={message.images} />
+          <UserMessage
+            content={message.content}
+            images={message.images}
+            isLocateFlashing={isLocateFlashing}
+          />
         );
       case 'assistant':
         return (
@@ -61,6 +66,7 @@ export const MessageItem = memo(function MessageItem({
             onBranchSession={onBranchSession}
             showFooterActions={showAssistantActions}
             showBranchAction={showAssistantBranch}
+            isLocateFlashing={isLocateFlashing}
           />
         );
       case 'thinking':
@@ -69,6 +75,7 @@ export const MessageItem = memo(function MessageItem({
             content={message.content}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
+            isLocateFlashing={isLocateFlashing}
           />
         );
       case 'tool_group':
@@ -77,11 +84,17 @@ export const MessageItem = memo(function MessageItem({
             tools={message.tools}
             pendingApproval={pendingApproval}
             workspaceCwd={workspaceCwd}
-            shellOutputMaxLines={shellOutputMaxLines}
+            isLocateFlashing={isLocateFlashing}
           />
         );
       case 'plan':
-        return <PlanMessage id={message.id} todos={message.todos} />;
+        return (
+          <PlanMessage
+            id={message.id}
+            todos={message.todos}
+            isLocateFlashing={isLocateFlashing}
+          />
+        );
       case 'system':
         return (
           <SystemMessage
@@ -154,7 +167,20 @@ export const MessageItem = memo(function MessageItem({
   // standalone.css disables selection on UI chrome (native-app feel); this
   // attribute opts the message subtree back in, including descendants
   // (Markdown body, code blocks, tool panels, sub-messages).
-  const selectableSafeBody = <div data-user-selectable="true">{safeBody}</div>;
+  //
+  // `display: contents` keeps this wrapper out of layout: several parents
+  // (e.g. MessageTimestamp's chat row) are flex containers whose items used
+  // to be the message body itself. A plain div here becomes the flex item
+  // instead and shrinks to its content width, squeezing user chat bubbles
+  // (whose max-width: 80% then resolves against the shrunken wrapper) so
+  // even short messages wrap mid-word. The user-select re-enable rule
+  // matches `[data-user-selectable] *`, so the boxless wrapper does not
+  // affect it.
+  const selectableSafeBody = (
+    <div data-user-selectable="true" style={{ display: 'contents' }}>
+      {safeBody}
+    </div>
+  );
 
   if (message.role === 'assistant') {
     if (showAssistantActions) {
@@ -179,7 +205,7 @@ export const MessageItem = memo(function MessageItem({
       timestamp={message.timestamp}
       chatMode={message.role === 'user'}
       copyText={message.role === 'user' ? message.content : undefined}
-      copyTitle="Copy"
+      copyTitle={t('common.copy')}
     >
       {selectableSafeBody}
     </MessageTimestamp>
@@ -226,7 +252,7 @@ function areMessageItemPropsEqual(
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
-  if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
+  if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
   return areMessagesEqual(prev.message, next.message);
 }
 

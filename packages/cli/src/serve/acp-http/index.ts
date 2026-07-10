@@ -47,6 +47,10 @@ import {
   type CdpOutboundFrame,
 } from '../cdp-tunnel/cdp-reverse-link.js';
 import { attachCdpClient } from '../cdp-tunnel/cdp-ws.js';
+import {
+  QWEN_CDP_MCP_COMMAND_ENV,
+  resolveCdpMcpCommand,
+} from '../cdp-mcp-command.js';
 import { safeWsSend } from './safe-ws-send.js';
 
 export const ACP_CONNECTION_HEADER = 'acp-connection-id';
@@ -63,8 +67,6 @@ const CDP_PATH = '/cdp';
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
 const CHROME_DEVTOOLS_MCP_SERVER_NAME = 'chrome-devtools';
-/** Stdio MCP adapter command used by the optional CDP browser automation bridge. */
-const CDP_MCP_COMMAND_ENV = 'QWEN_CDP_MCP_COMMAND';
 const RUNTIME_MCP_RETRY_DELAY_MS = 250;
 const RUNTIME_MCP_RETRY_ATTEMPTS = 20;
 
@@ -100,10 +102,10 @@ function buildChromeDevToolsMcpRuntimeConfig(
   ) {
     return undefined;
   }
-  const command = process.env[CDP_MCP_COMMAND_ENV]?.trim();
+  const command = resolveCdpMcpCommand(process.env);
   if (!command) {
     writeStderrLine(
-      `qwen serve: set ${CDP_MCP_COMMAND_ENV} to enable browser automation MCP (chrome-devtools-mcp is no longer bundled)`,
+      `qwen serve: set ${QWEN_CDP_MCP_COMMAND_ENV} to enable browser automation MCP (no adapter is bundled)`,
     );
     return undefined;
   }
@@ -188,11 +190,13 @@ const WS_READ_METHODS = new Set([
   '_qwen/session/context_usage',
   '_qwen/session/tasks',
   '_qwen/session/lsp',
+  '_qwen/session/artifacts',
   '_qwen/workspace/mcp',
   '_qwen/workspace/skills',
   '_qwen/workspace/providers',
   '_qwen/workspace/env',
   '_qwen/workspace/preflight',
+  '_qwen/workspace/session_groups/list',
   '_qwen/workspace/trust',
   '_qwen/workspace/permissions',
   '_qwen/workspace/voice',
@@ -203,6 +207,8 @@ const WS_READ_METHODS = new Set([
   '_qwen/workspace/agents/get',
   '_qwen/workspace/memory',
   '_qwen/workspace/memory/remember/get',
+  '_qwen/workspace/memory/forget/get',
+  '_qwen/workspace/memory/dream/get',
   '_qwen/workspace/auth/status',
   '_qwen/workspace/auth/device_flow/get',
   '_qwen/file/read',

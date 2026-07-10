@@ -1,25 +1,25 @@
-# cua-driver-rs installer (Windows) — download the latest cua-driver-rs
+# qwen-cua-driver installer (Windows) — download the latest qwen-cua-driver
 # release zip from GitHub Releases and wire it up via a chain of
 # directory junctions, so future upgrades / rollbacks retarget a
 # junction instead of overwriting files. Sudo-free, no Developer Mode
 # required, no admin elevation.
 #
 # Usage (one-liner — recommended):
-#   irm https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.ps1 | iex
 #
 # Pin a version:
 #   $env:CUA_DRIVER_RS_VERSION = "0.2.0"
-#   irm https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.ps1 | iex
 #
 # Layout on disk (three tiers, two directory junctions):
 #
 #   <visibleBinDir>            [directory junction → currentDir]
-#     = %LOCALAPPDATA%\Programs\Cua\cua-driver\bin
+#     = %LOCALAPPDATA%\Programs\Qwen\qwen-cua-driver\bin
 #   <currentDir>               [directory junction → release dir]
-#     = %USERPROFILE%\.cua-driver\packages\current
+#     = %USERPROFILE%\.qwen-cua-driver\packages\current
 #   <release dir>              [real directory, immutable per version]
-#     = %USERPROFILE%\.cua-driver\packages\releases\<version>-<target>
-#         cua-driver.exe
+#     = %USERPROFILE%\.qwen-cua-driver\packages\releases\<version>-<target>
+#         qwen-cua-driver.exe
 #
 # Path layout renamed v0.2.14: `Programs\trycua\cua-driver-rs\` →
 # `Programs\Cua\cua-driver\` and `.cua-driver-rs\` → `.cua-driver\`. The
@@ -41,9 +41,9 @@
 # Env overrides:
 #   $env:CUA_DRIVER_RS_VERSION       pin a specific release (e.g. "0.2.0")
 #   $env:CUA_DRIVER_RS_INSTALL_DIR   override the visible PATH-entry dir
-#                                    (default %LOCALAPPDATA%\Programs\Cua\cua-driver\bin)
+#                                    (default %LOCALAPPDATA%\Programs\Qwen\qwen-cua-driver\bin)
 #   $env:CUA_DRIVER_RS_HOME          override the package home
-#                                    (default %USERPROFILE%\.cua-driver)
+#                                    (default %USERPROFILE%\.qwen-cua-driver)
 #   $env:CUA_DRIVER_RS_KEEP_VERSIONS keep the N most recent per-version
 #                                    release dirs after install; older ones
 #                                    are deleted (default 5; set 0 to
@@ -54,7 +54,7 @@
 # Params:
 #   -Release    release tag to install ("latest" or a bare version like "0.2.0").
 #               Overridden by $env:CUA_DRIVER_RS_VERSION when set.
-#   -AutoStart  register a Scheduled Task that runs `cua-driver serve` at
+#   -AutoStart  register a Scheduled Task that runs `qwen-cua-driver serve` at
 #               every logon (Windows-native equivalent of macOS LaunchAgent).
 #               The task runs with LogonType=Interactive so it lands in
 #               Session 1+ with an attached desktop — required for the
@@ -65,20 +65,20 @@
 #   -NoPathUpdate
 #               skip the auto-append of $VisibleBinDir to the User PATH.
 #               Default off — the installer auto-adds the bin dir so
-#               `cua-driver --version` works in new shells without manual
+#               `qwen-cua-driver --version` works in new shells without manual
 #               `[Environment]::SetEnvironmentVariable` gymnastics. Pass
 #               this when you manage PATH out-of-band (chezmoi, a dotfiles
 #               repo, group policy). Idempotent either way: if the dir is
 #               already on PATH, nothing changes.
 #
-# Windows installer for the cross-platform cua-driver Rust implementation.
+# Windows installer for the cross-platform qwen-cua-driver Rust implementation.
 
 [CmdletBinding()]
 param(
     [string]$Release = "latest",
-    # Default-on: cua-driver-serve is what makes the agent flow work
+    # Default-on: qwen-cua-driver-serve is what makes the agent flow work
     # across logon / reboot. Without the scheduled task the user has
-    # to remember to run `cua-driver autostart kick` every time, and
+    # to remember to run `qwen-cua-driver autostart kick` every time, and
     # MCP-style flows go silently in-process. Opt out with
     # `-AutoStart:$false` or `-NoAutoStart` for CI / sandbox installs
     # that specifically don't want a scheduled task registered.
@@ -97,9 +97,9 @@ $ErrorActionPreference = "Stop"
 # nowhere on purpose: this script is a one-shot, the user can re-set it.
 $ProgressPreference = "SilentlyContinue"
 
-$Repo       = "trycua/cua"
+$Repo       = "QwenLM/qwen-code"
 $TagPrefix  = "cua-driver-rs-v"
-$BinaryName = "cua-driver.exe"
+$BinaryName = "qwen-cua-driver.exe"
 
 # Baked-version constant — kept in lock-step with the latest published
 # cua-driver-rs-v* release tag by the CD workflow's bake-version step
@@ -114,7 +114,7 @@ $BinaryName = "cua-driver.exe"
 # where the baked line hasn't been updated yet.
 #
 # ~~~ BAKED_VERSION: auto-updated by CD workflow after each release — do not edit ~~~
-$Script:CuaDriverRsBakedVersion = "0.6.7"
+$Script:CuaDriverRsBakedVersion = "0.7.1"
 # ~~~ END_BAKED_VERSION ~~~
 
 # ---------- Path resolution ------------------------------------------------
@@ -123,13 +123,13 @@ if ($env:CUA_DRIVER_RS_INSTALL_DIR) {
     $VisibleBinDir = $env:CUA_DRIVER_RS_INSTALL_DIR
 } else {
     # Path layout renamed v0.2.14: `Programs\trycua\cua-driver-rs\` →
-    # `Programs\Cua\cua-driver\`. The Rust port IS the canonical Windows
+    # `Programs\Qwen\qwen-cua-driver\`. The Rust port IS the canonical Windows
     # driver now (no more `-rs` suffix needed in user-facing paths), and
     # `trycua` is the GitHub org prefix that doesn't belong in
     # %LOCALAPPDATA% — vendor folders there are conventionally PascalCase
     # company names. The env var name keeps the `_RS_` infix so existing
     # automation pinning a custom install dir doesn't break silently.
-    $VisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\Cua\cua-driver\bin"
+    $VisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\Qwen\qwen-cua-driver\bin"
 }
 
 # Legacy install paths from v0.2.13 and earlier. The uninstall path checks
@@ -144,7 +144,7 @@ if ($env:CUA_DRIVER_RS_HOME) {
     # Same rename: `.cua-driver-rs/` → `.cua-driver/`. The `-rs` suffix
     # was the Rust-port-vs-Swift-driver disambiguator while the Swift one
     # still existed for Windows; it doesn't anymore.
-    $HomeDir = Join-Path $env:USERPROFILE ".cua-driver"
+    $HomeDir = Join-Path $env:USERPROFILE ".qwen-cua-driver"
 }
 
 $LegacyHomeDir = Join-Path $env:USERPROFILE ".cua-driver-rs"
@@ -212,8 +212,8 @@ function Get-TargetTriple {
         "Arm64" { return "aarch64-pc-windows-msvc" }
         default {
             Write-ErrorStep "unsupported Windows architecture: $arch"
-            Write-ErrorStep "  cua-driver-rs ships prebuilts for: x86_64 (AMD64) and arm64 (ARM64)."
-            Write-ErrorStep "  Please file an issue at https://github.com/trycua/cua/issues with the output of"
+            Write-ErrorStep "  qwen-cua-driver ships prebuilts for: x86_64 (AMD64) and arm64 (ARM64)."
+            Write-ErrorStep "  Please file an issue at https://github.com/QwenLM/qwen-code/issues with the output of"
             Write-ErrorStep "  'echo `$env:PROCESSOR_ARCHITECTURE'."
             exit 1
         }
@@ -524,7 +524,7 @@ function Ensure-Junction([string]$linkPath, [string]$targetPath) {
 
 # ---------- Auto-start Scheduled Task (Windows LaunchAgent equivalent) ---
 
-# Thin wrapper that delegates to `cua-driver autostart enable`. The binary
+# Thin wrapper that delegates to `qwen-cua-driver autostart enable`. The binary
 # itself owns the platform-specific registration logic so the install
 # scripts and the runtime stay in lock-step — when the verb's behavior
 # changes, this script picks it up automatically with no edit needed.
@@ -589,7 +589,7 @@ function Import-CuaDriverInstallModuleBootstrap {
 }
 Import-CuaDriverInstallModuleBootstrap `
     -LocalDir $PSScriptRoot `
-    -Url "https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/_install-common.psm1"
+    -Url "https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/_install-common.psm1"
 
 function Register-CuaDriverAutostart {
     param([Parameter(Mandatory = $true)][string]$InstalledBinary)
@@ -599,7 +599,7 @@ function Register-CuaDriverAutostart {
     }
 
     # The autostart task is registered with RunLevel=Highest so the daemon runs
-    # at the user's elevated/admin token. This is what lets cua-driver drive
+    # at the user's elevated/admin token. This is what lets qwen-cua-driver drive
     # UWP / AppContainer apps (Calculator, modern Settings, Photos) — at the
     # default Medium IL token, the cross-AppContainer UIA RPC truncates the
     # tree to ~1 element (see issue 1602 / 1601). Registering a RunLevel=Highest
@@ -610,7 +610,7 @@ function Register-CuaDriverAutostart {
     if (Test-IsElevated) {
         & $InstalledBinary autostart enable
         if ($LASTEXITCODE -ne 0) {
-            throw "cua-driver autostart enable failed (exit $LASTEXITCODE)"
+            throw "qwen-cua-driver autostart enable failed (exit $LASTEXITCODE)"
         }
         return
     }
@@ -621,13 +621,13 @@ function Register-CuaDriverAutostart {
     Write-Host "The task itself runs silently at every logon afterwards." -ForegroundColor Yellow
     Write-Host ""
 
-    $elevCmd = "& `"$InstalledBinary`" autostart enable; `$ec = `$LASTEXITCODE; if (`$ec -ne 0) { Read-Host 'cua-driver autostart enable failed; press Enter to close' }; exit `$ec"
+    $elevCmd = "& `"$InstalledBinary`" autostart enable; `$ec = `$LASTEXITCODE; if (`$ec -ne 0) { Read-Host 'qwen-cua-driver autostart enable failed; press Enter to close' }; exit `$ec"
     try {
         $proc = Start-Process -FilePath "powershell.exe" `
             -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-Command",$elevCmd `
             -Verb RunAs -Wait -PassThru -ErrorAction Stop
         if ($proc.ExitCode -ne 0) {
-            throw "cua-driver autostart enable failed in elevated session (exit $($proc.ExitCode))"
+            throw "qwen-cua-driver autostart enable failed in elevated session (exit $($proc.ExitCode))"
         }
     } catch {
         throw "elevation cancelled or failed: $($_.Exception.Message). Re-run install.ps1 -AutoStart from an elevated PowerShell to retry."
@@ -707,7 +707,7 @@ function Acquire-InstallLock {
         }
         catch [System.IO.IOException] {
             if (-not $announced) {
-                Write-Step "another cua-driver-rs install is already in progress (lock at $($Script:LockFilePath)); waiting..."
+                Write-Step "another qwen-cua-driver install is already in progress (lock at $($Script:LockFilePath)); waiting..."
                 $announced = $true
             }
             Start-Sleep -Seconds $Script:LockPollIntervalSeconds
@@ -922,7 +922,7 @@ function Get-ReleaseAsset([string]$version, [string]$archLabel, [string]$destDir
     Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
 
     # Directory zip from the CD workflow expands to
-    # cua-driver-rs-<v>-<arch>\cua-driver.exe (+ LICENSE).
+    # cua-driver-rs-<v>-<arch>\qwen-cua-driver.exe (+ LICENSE).
     $stage = "cua-driver-rs-$version-$archLabel"
     $stageDir = Join-Path $extractDir $stage
     if (-not (Test-Path -LiteralPath (Join-Path $stageDir $BinaryName))) {
@@ -935,7 +935,7 @@ function Get-ReleaseAsset([string]$version, [string]$archLabel, [string]$destDir
 
 # ---------- Main -----------------------------------------------------------
 
-Write-Step "cua-driver-rs installer (Windows)"
+Write-Step "qwen-cua-driver installer (Windows)"
 Write-Step "  install dir : $VisibleBinDir"
 Write-Step "  package home: $HomeDir"
 
@@ -977,16 +977,16 @@ function Remove-LegacyInstall {
     try {
         # Ends the running task instance. Returns non-zero when the task
         # isn't running or doesn't exist, both of which we swallow.
-        & schtasks.exe /End /TN "cua-driver-serve" 2>$null | Out-Null
+        & schtasks.exe /End /TN "qwen-cua-driver-serve" 2>$null | Out-Null
         Start-Sleep -Milliseconds 250
         # Force-kill via taskkill — handles High-IL processes that
         # Stop-Process can't touch from a Medium-IL caller.
-        & taskkill.exe /F /IM "cua-driver.exe" /T 2>$null | Out-Null
+        & taskkill.exe /F /IM "qwen-cua-driver.exe" /T 2>$null | Out-Null
         & taskkill.exe /F /IM "cua-driver-uia.exe" /T 2>$null | Out-Null
     } finally {
         $ErrorActionPreference = $prevEAP
     }
-    $procs = Get-Process -Name "cua-driver","cua-driver-uia" -ErrorAction SilentlyContinue
+    $procs = Get-Process -Name "qwen-cua-driver","cua-driver-uia" -ErrorAction SilentlyContinue
     if ($procs) {
         foreach ($p in $procs) {
             try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
@@ -1000,7 +1000,7 @@ function Remove-LegacyInstall {
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & schtasks.exe /Delete /TN "cua-driver-serve" /F 2>$null | Out-Null
+        & schtasks.exe /Delete /TN "qwen-cua-driver-serve" /F 2>$null | Out-Null
     } finally {
         $ErrorActionPreference = $prevEAP
     }
@@ -1084,7 +1084,7 @@ if (Test-Path -LiteralPath (Join-Path $versionedDir $BinaryName)) {
 }
 
 if (-not $skipDownload) {
-    $tmpRoot = Join-Path (Get-CuaDriverTempDir) ("cua-driver-rs-install-" + [Guid]::NewGuid().ToString("N"))
+    $tmpRoot = Join-Path (Get-CuaDriverTempDir) ("qwen-cua-driver-install-" + [Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
     try {
         $stageDir = Get-ReleaseAsset $version $archLabel $tmpRoot
@@ -1093,7 +1093,7 @@ if (-not $skipDownload) {
         Write-Step "installed $versionedDir\$BinaryName (version $version, target $target)"
         # Optional sibling: the uiAccess'd worker (cua-driver-uia.exe). Started
         # shipping with cua-driver-rs-v0.2.8; absent in earlier releases. Copy
-        # it when present so `cua-driver autostart enable` can register the
+        # it when present so `qwen-cua-driver autostart enable` can register the
         # second ShellExecute-based scheduled task. See #1602.
         $uiaStage = Join-Path $stageDir 'cua-driver-uia.exe'
         if (Test-Path -LiteralPath $uiaStage) {
@@ -1121,7 +1121,7 @@ Invoke-OldReleasesGc -releasesDir $ReleasesDir -currentDir $CurrentDir -target $
 
 # ---------- Fire-and-forget install telemetry ping ------------------------
 #
-# Same shape as the Linux install.sh path: invoke `cua-driver telemetry
+# Same shape as the Linux install.sh path: invoke `qwen-cua-driver telemetry
 # install-event` once per install. The binary itself guards against
 # double-counting via ~\.cua-driver-rs\.installation_recorded.
 $installedBinary = Join-Path $VisibleBinDir $BinaryName
@@ -1137,7 +1137,7 @@ if (Test-Path -LiteralPath $installedBinary) {
 
 # ---------- PATH update (User scope, idempotent, fallback to manual) ------
 #
-# We append $VisibleBinDir to the User-scope PATH so `cua-driver` resolves
+# We append $VisibleBinDir to the User-scope PATH so `qwen-cua-driver` resolves
 # in any newly-spawned shell. User scope (not Machine) keeps the installer
 # non-admin — Machine scope would require elevation. The write doesn't
 # affect the calling shell's $env:Path; the post-install message tells the
@@ -1174,7 +1174,7 @@ function Add-UserPathEntry([string]$dir) {
     }
     [Environment]::SetEnvironmentVariable("Path", $newValue, "User")
 
-    # Also update the CURRENT process's $env:Path so `cua-driver` resolves
+    # Also update the CURRENT process's $env:Path so `qwen-cua-driver` resolves
     # immediately in the same shell — the SetEnvironmentVariable('User') call
     # above only writes to the registry; existing processes have their
     # $env:Path cached at launch time and don't see the update otherwise.
@@ -1199,11 +1199,11 @@ function Write-ManualPathInstructions([string]$dir) {
 }
 
 Write-Host ""
-Write-Host "cua-driver-rs $version installed."
+Write-Host "qwen-cua-driver $version installed."
 Write-Host ""
 $onPath = Test-OnUserPath $VisibleBinDir
 if ($onPath) {
-    Write-Host "$VisibleBinDir is on your user PATH -- cua-driver should resolve in any new shell."
+    Write-Host "$VisibleBinDir is on your user PATH -- qwen-cua-driver should resolve in any new shell."
     Write-Host ""
 }
 elseif ($NoPathUpdate) {
@@ -1214,7 +1214,8 @@ else {
     try {
         Add-UserPathEntry $VisibleBinDir
         Write-Host "Added $VisibleBinDir to your User PATH." -ForegroundColor Green
-        Write-Host '  cua-driver resolves immediately in THIS shell and in any new shell.'
+        Write-Host '  qwen-cua-driver resolves immediately in THIS shell and in any new shell.'
+        Write-Host '  NOTE: Restart your terminal or IDE for the PATH update to take effect.' -ForegroundColor Yellow
         Write-Host '  Opt out next time with: install.ps1 -NoPathUpdate'
         Write-Host ""
     }
@@ -1224,16 +1225,16 @@ else {
     }
 }
 
-# Kill any cua-driver / cua-driver-uia process still running off the
+# Kill any qwen-cua-driver / cua-driver-uia process still running off the
 # OLD binary, so the next time the daemon is invoked (autostart kick,
-# manual `cua-driver mcp`, MCP client startup) it picks up the freshly-
+# manual `qwen-cua-driver mcp`, MCP client startup) it picks up the freshly-
 # installed code. Without this, in-memory daemons keep serving old
 # behaviour - which surfaces as "the bug I just patched is still
 # there" because the user's in-memory code is pre-fix. Best-effort:
 # High-IL daemons from the RunLevel=Highest autostart task survive a
 # Medium-IL kill and get reported via Show-CuaDriverDaemonSurvivors.
 Write-Host ""
-Write-Host "Stopping any previous cua-driver processes (best-effort; High-IL needs admin)..." -ForegroundColor Cyan
+Write-Host "Stopping any previous qwen-cua-driver processes (best-effort; High-IL needs admin)..." -ForegroundColor Cyan
 # Repair- handles the wedged-daemon case: detect stale (process alive
 # but pipe dead), prompt the user, and on consent self-elevate via
 # UAC to kill the High-IL pids + restart the scheduled task. On UAC
@@ -1243,19 +1244,19 @@ $null = Repair-CuaDriverStaleDaemon
 
 if ($AutoStart) {
     Write-Host ""
-    Write-Host "Registering auto-start (cua-driver autostart enable)..." -ForegroundColor Cyan
+    Write-Host "Registering auto-start (qwen-cua-driver autostart enable)..." -ForegroundColor Cyan
     try {
         Register-CuaDriverAutostart -InstalledBinary $installedBinary
-        Write-Host "  cua-driver serve will auto-start at every interactive logon (RunLevel=Highest)." -ForegroundColor Green
+        Write-Host "  qwen-cua-driver serve will auto-start at every interactive logon (RunLevel=Highest)." -ForegroundColor Green
     }
     catch {
         Write-Host "  Failed: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host '  Install otherwise succeeded; from an elevated shell run: cua-driver autostart enable'
+        Write-Host '  Install otherwise succeeded; from an elevated shell run: qwen-cua-driver autostart enable'
         Write-Host "  In THIS shell (if already elevated), use: $installedBinary autostart enable"
         Write-Host ""
     }
 } else {
-    # No -AutoStart, but if a `cua-driver-serve` task is already
+    # No -AutoStart, but if a `qwen-cua-driver-serve` task is already
     # registered, re-register it against the fresh binary. Otherwise
     # the task <Command> still points at the previous release dir + an
     # older binary that may be missing the hidden-console wrapper (#1654)
@@ -1263,21 +1264,21 @@ if ($AutoStart) {
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & schtasks.exe /Query /TN "cua-driver-serve" 2>$null | Out-Null
+        & schtasks.exe /Query /TN "qwen-cua-driver-serve" 2>$null | Out-Null
         $hasTask = ($LASTEXITCODE -eq 0)
     } finally {
         $ErrorActionPreference = $prevEAP
     }
     if ($hasTask) {
         Write-Host ""
-        Write-Host "Existing 'cua-driver-serve' autostart task detected - re-registering against the fresh binary..." -ForegroundColor Cyan
+        Write-Host "Existing 'qwen-cua-driver-serve' autostart task detected - re-registering against the fresh binary..." -ForegroundColor Cyan
         try {
             Register-CuaDriverAutostart -InstalledBinary $installedBinary
             Write-Host "  Re-registered. Task action now uses this build's hidden-console wrapper." -ForegroundColor Green
         }
         catch {
             Write-Host "  Failed to re-register: $($_.Exception.Message)" -ForegroundColor Red
-            Write-Host "  The existing task still points at the previous binary. Run 'cua-driver autostart enable' from an elevated shell to update."
+            Write-Host "  The existing task still points at the previous binary. Run 'qwen-cua-driver autostart enable' from an elevated shell to update."
         }
     }
 }
@@ -1287,7 +1288,7 @@ if ($AutoStart) {
 # install-local.sh) never drift. The .txt holds the OS-agnostic bulk
 # (Try-it / skill pack / MCP setup / docs link) with {{BINARY}}
 # placeholders; OS-specific bits (autostart) stay inline below.
-$HintsUrl = "https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/post-install-hints.txt"
+$HintsUrl = "https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/post-install-hints.txt"
 try {
     $hintsRaw = (Invoke-WebRequest -Uri $HintsUrl -UseBasicParsing -TimeoutSec 10).Content
     Write-Host ($hintsRaw -replace '\{\{BINARY\}\}', $installedBinary)
@@ -1296,22 +1297,22 @@ catch {
     # Network fetch failed — print one-line essentials so users always
     # get enough to recover.
     Write-Host "Next steps: $installedBinary --version  |  $installedBinary mcp-config  |  $installedBinary skills install"
-    Write-Host "Docs: https://github.com/trycua/cua/tree/main/libs/cua-driver/rust"
+    Write-Host "Docs: https://github.com/QwenLM/qwen-code/tree/main/packages/cua-driver/rust"
 }
 
 # Windows-specific autostart hint (kept inline; OS-natural location).
 Write-Host ""
 if ($AutoStart) {
-    Write-Host "Auto-start: 'cua-driver-serve' is registered at RunLevel=Highest." -ForegroundColor Cyan
-    Write-Host "  cua-driver autostart status    (inspect)" -ForegroundColor Cyan
-    Write-Host "  cua-driver autostart disable   (remove)" -ForegroundColor Cyan
-    Write-Host "  cua-driver autostart kick      (start now without re-logging)" -ForegroundColor Cyan
+    Write-Host "Auto-start: 'qwen-cua-driver-serve' is registered at RunLevel=Highest." -ForegroundColor Cyan
+    Write-Host "  qwen-cua-driver autostart status    (inspect)" -ForegroundColor Cyan
+    Write-Host "  qwen-cua-driver autostart disable   (remove)" -ForegroundColor Cyan
+    Write-Host "  qwen-cua-driver autostart kick      (start now without re-logging)" -ForegroundColor Cyan
 } else {
     Write-Host "Auto-start at logon (NOT enabled - re-run without -NoAutoStart to register, or:):" -ForegroundColor Cyan
-    Write-Host "  cua-driver autostart enable    (Scheduled Task at RunLevel=Highest)" -ForegroundColor Cyan
-    Write-Host "  cua-driver autostart kick      (start now without re-logging)" -ForegroundColor Cyan
-    Write-Host "  cua-driver autostart status    (inspect)" -ForegroundColor Cyan
-    Write-Host "  cua-driver autostart disable   (remove)" -ForegroundColor Cyan
+    Write-Host "  qwen-cua-driver autostart enable    (Scheduled Task at RunLevel=Highest)" -ForegroundColor Cyan
+    Write-Host "  qwen-cua-driver autostart kick      (start now without re-logging)" -ForegroundColor Cyan
+    Write-Host "  qwen-cua-driver autostart status    (inspect)" -ForegroundColor Cyan
+    Write-Host "  qwen-cua-driver autostart disable   (remove)" -ForegroundColor Cyan
 }
 }
 finally {

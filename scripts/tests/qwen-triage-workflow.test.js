@@ -60,6 +60,16 @@ describe('qwen-triage tmux workflow', () => {
     );
   });
 
+  it('requires open issues or PRs for comment-triggered triage', () => {
+    const authorizeJob = job('authorize');
+    const triageJob = job('triage');
+    const tmuxJob = job('tmux-testing');
+
+    expect(authorizeJob).toContain("github.event.issue.state == 'open'");
+    expect(triageJob).toContain("github.event.issue.state == 'open'");
+    expect(tmuxJob).toContain("github.event.issue.state == 'open'");
+  });
+
   it('escapes embedded tmux artifacts without bash pattern replacement ampersands', () => {
     const postStep = step('Post tmux result comment');
 
@@ -100,6 +110,18 @@ describe('qwen-triage tmux workflow', () => {
     expect(cleanStep).toContain('rm -f /tmp/stage-*.md');
     expect(cleanStep).toContain('echo "stale agent state cleaned"');
     expect(runStep).toContain("QWEN_HOME: '${{ runner.temp }}/qwen-home'");
+  });
+
+  it('passes triage output through env before bash reads it', () => {
+    const checkStep = step('Check triage response');
+
+    expect(checkStep).toContain(
+      "RESPONSE: '${{ steps.triage.outputs.summary }}'",
+    );
+    expect(checkStep).not.toContain(
+      'RESPONSE="${{ steps.triage.outputs.summary }}"',
+    );
+    expect(checkStep).toContain('if [[ -z "${RESPONSE}"');
   });
 
   it('reports timeout and infra-error without claiming the flow was exercised', () => {
