@@ -1553,6 +1553,7 @@ export class DaemonClient {
     options?: {
       pageSize?: number;
       archiveState?: DaemonSessionArchiveState;
+      parentSessionId?: string;
     },
   ): Promise<DaemonSessionSummary[]> {
     const page = await this.listWorkspaceSessionsPage(workspaceCwd, options);
@@ -1588,6 +1589,9 @@ export class DaemonClient {
     }
     if (options?.group !== undefined) {
       query.set('group', options.group);
+    }
+    if (options?.parentSessionId !== undefined) {
+      query.set('parentSessionId', options.parentSessionId);
     }
     return await this.jsonRequest<DaemonSessionListPage>(
       `/workspace/${urlEncode(workspaceCwd)}/sessions?${query.toString()}`,
@@ -3590,6 +3594,9 @@ export class WorkspaceDaemonClient {
     }
     if (options?.view !== undefined) query.set('view', options.view);
     if (options?.group !== undefined) query.set('group', options.group);
+    if (options?.parentSessionId !== undefined) {
+      query.set('parentSessionId', options.parentSessionId);
+    }
     return this.get(
       `/sessions?${query.toString()}`,
       'GET /workspaces/:workspace/sessions',

@@ -2122,6 +2122,119 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('sessionParent rejects a missing session id', async () => {
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionParent, {
+        parentSessionId: 'parent-A',
+      }),
+    ).rejects.toThrowError(/Invalid or missing sessionId/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionParent rejects a missing or empty parent session id', async () => {
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionParent, {
+        sessionId: 'session-A',
+      }),
+    ).rejects.toThrowError(/Invalid or missing parentSessionId/);
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionParent, {
+        sessionId: 'session-A',
+        parentSessionId: '',
+      }),
+    ).rejects.toThrowError(/Invalid or missing parentSessionId/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionParent records the parent lineage via an awaited durable write', async () => {
+    const sessionId = 'session-A';
+    const recording = {
+      flush: vi.fn().mockResolvedValue(undefined),
+      recordParentSession: vi.fn().mockReturnValue(true),
+    };
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionParent, {
+        sessionId,
+        parentSessionId: 'parent-A',
+      }),
+    ).resolves.toEqual({
+      sessionId,
+      parentSessionId: 'parent-A',
+      persisted: true,
+    });
+
+    // `recordParentSession` awaits the durable write internally, so the handler
+    // no longer issues a separate `flush()`.
+    expect(recording.recordParentSession).toHaveBeenCalledWith('parent-A');
+    expect(recording.flush).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionParent reports persisted:false when chat recording is unavailable', async () => {
+    const sessionId = 'session-A';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(undefined);
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionParent, {
+        sessionId,
+        parentSessionId: 'parent-A',
+      }),
+    ).resolves.toEqual({
+      sessionId,
+      parentSessionId: 'parent-A',
+      persisted: false,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionParent reports persisted:false when recordParentSession returns false', async () => {
+    const sessionId = 'session-A';
+    const recording = {
+      flush: vi.fn().mockResolvedValue(undefined),
+      recordParentSession: vi.fn().mockReturnValue(false),
+    };
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionParent, {
+        sessionId,
+        parentSessionId: 'parent-A',
+      }),
+    ).resolves.toEqual({
+      sessionId,
+      parentSessionId: 'parent-A',
+      persisted: false,
+    });
+
+    expect(recording.recordParentSession).toHaveBeenCalledWith('parent-A');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('status ext methods expose workspace snapshots without secrets', async () => {
     vi.mocked(getMCPDiscoveryState).mockReturnValue(
       MCPDiscoveryState.COMPLETED,

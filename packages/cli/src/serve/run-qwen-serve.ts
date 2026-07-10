@@ -2988,8 +2988,8 @@ export async function runQwenServe(
       });
       const secondaryClientMcpSenderRegistry = new ClientMcpSenderRegistry();
       // Wire sub-session support for the secondary workspace too — without
-      // this, isolated scheduled tasks and create_sub_session calls from
-      // sessions bound to a secondary workspace hit methodNotFound.
+      // this, create_sub_session calls from sessions bound to a secondary
+      // workspace hit methodNotFound.
       // eslint-disable-next-line prefer-const -- assigned once after bridge creation; `let` required because the launcher closure captures it before the assignment.
       let secondaryBridgeRef:
         | ReturnType<typeof runtime.createAcpSessionBridge>

@@ -1015,6 +1015,12 @@ export function registerSessionRoutes(
           [sessionId],
           async () => {
             await assertSessionLoadable(workspaceCwd, sessionId);
+            // Recover the persisted parent lineage so the restored live entry
+            // reports it (the bridge otherwise creates the entry without it, and
+            // status calls would show a restored sub-session as top-level).
+            const parentSessionId = await new SessionService(
+              workspaceCwd,
+            ).readParentSessionId(sessionId);
             return action === 'load'
               ? await runtime.bridge.loadSession({
                   sessionId,
@@ -1022,12 +1028,14 @@ export function registerSessionRoutes(
                   historyReplay: 'response',
                   ...(clientId !== undefined ? { clientId } : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
+                  ...(parentSessionId !== undefined ? { parentSessionId } : {}),
                 })
               : await runtime.bridge.resumeSession({
                   sessionId,
                   workspaceCwd,
                   ...(clientId !== undefined ? { clientId } : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
+                  ...(parentSessionId !== undefined ? { parentSessionId } : {}),
                 });
           },
         );
@@ -2297,20 +2305,47 @@ export function registerSessionRoutes(
           }
           archiveState = rawArchiveState;
         }
+        const rawParentSessionId = req.query['parentSessionId'];
+        let parentSessionId: string | undefined;
+        if (rawParentSessionId !== undefined) {
+          if (
+            typeof rawParentSessionId !== 'string' ||
+            rawParentSessionId.length === 0
+          ) {
+            res.status(400).json({
+              error: '`parentSessionId` must be a non-empty string',
+              code: 'invalid_parent_session_id',
+            });
+            return;
+          }
+          if (view === 'organized') {
+            res.status(400).json({
+              error: '`parentSessionId` is not supported with `view=organized`',
+              code: 'invalid_parent_session_filter',
+            });
+            return;
+          }
+          parentSessionId = rawParentSessionId;
+        }
         const options = {
           ...(cursor !== undefined ? { cursor } : {}),
           ...(size !== undefined ? { size } : {}),
           ...(archiveState !== undefined ? { archiveState } : {}),
           ...(view !== undefined ? { view } : {}),
           ...(group !== undefined ? { group } : {}),
+          ...(parentSessionId !== undefined ? { parentSessionId } : {}),
         };
         // Organized/archived views always need the persisted store: organized
         // cursors are opaque (non-numeric) and archived-only workspaces have no
         // active persisted sessions, so the live-only fallback would drop them.
+        // A parentSessionId filter joins them: it gathers the whole workspace
+        // (persisted + live) to filter completely and paginates with an opaque
+        // activity cursor, so the numeric-cursor live fallback can't serve it.
         const usePersisted =
           runtime.primary ||
           view === 'organized' ||
           archiveState === 'archived' ||
+          parentSessionId !== undefined ||
           (cursor !== undefined && cursor !== ''
             ? isNumericSessionCursor(cursor)
             : await hasActivePersistedSessions(key));
