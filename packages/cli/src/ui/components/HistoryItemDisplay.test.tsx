@@ -18,6 +18,7 @@ import { renderWithProviders } from '../../test-utils/render.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
+import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 
 // Mock child components
 vi.mock('./messages/ToolGroupMessage.js', () => ({
@@ -591,6 +592,22 @@ describe('<HistoryItemDisplay />', () => {
       // VP gate, so useMouseEvents only arms it in VP mode.
       expect(opts?.isActive).toBe(true);
       expect(opts?.bypassVpGate ?? false).toBe(false);
+    });
+
+    it('shows the click hint when raw settings are unset but UIState is in VP mode', () => {
+      const { lastFrame } = renderWithProviders(
+        <UIStateContext.Provider
+          value={{ useTerminalBuffer: true } as unknown as UIState}
+        >
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+          />
+        </UIStateContext.Provider>,
+      );
+
+      expect(lastFrame()).toContain(`click or ${toggleKeyHint} to expand`);
     });
   });
 });

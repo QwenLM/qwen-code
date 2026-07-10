@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { memo, useMemo, useRef, useCallback } from 'react';
+import { memo, useMemo, useRef, useCallback, useContext } from 'react';
 import type { DOMElement } from 'ink';
 import {
   escapeAnsiCtrlCodes,
@@ -60,6 +60,7 @@ import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useSettings } from '../contexts/SettingsContext.js';
+import { UIStateContext } from '../contexts/UIStateContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
@@ -124,7 +125,9 @@ const ClickableThinkMessage: React.FC<{
   // via Alt+T. Advertise "click" in the collapsed hint only in VP, where the
   // click actually does something.
   const settings = useSettings();
-  const clickable = !!settings.merged.ui?.useTerminalBuffer;
+  const uiState = useContext(UIStateContext);
+  const clickable =
+    uiState?.useTerminalBuffer ?? !!settings.merged.ui?.useTerminalBuffer;
   const isActive = !isPending;
 
   useMouseEvents(

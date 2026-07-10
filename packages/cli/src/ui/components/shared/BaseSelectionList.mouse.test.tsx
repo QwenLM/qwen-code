@@ -88,7 +88,7 @@ describe('BaseSelectionList with mouse enabled (integration)', () => {
     const output = frames.join('\n');
     expect(output).toContain('Alpha');
     expect(output).toContain('Beta');
-    expect(output).toContain(ENABLE_ANY);
+    expect(enabledAnyWritten()).toBe(true);
   });
 
   it('does not mount the mouse layer when ui.useTerminalBuffer is off', () => {
