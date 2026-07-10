@@ -65,7 +65,33 @@ export interface IdleSuggestionDeps {
    * start transcript egress on a workstation whose operator hasn't opted in).
    */
   getSessionEnabled?: (sessionId: string) => boolean | undefined;
+  /**
+   * Suggestions TTL in seconds: the `expiresAt` field of the published frame is
+   * set to `now + suggestionsTtlSec * 1000`. Default: 1800 (30 minutes).
+   */
+  suggestionsTtlSec?: number;
 }
+
+/** The handle returned by {@link createIdleSuggestionHandler}. */
+export interface IdleSuggestionHandle {
+  /**
+   * The pump's `onSessionIdle` callback: fire-and-forget, synchronous, never
+   * throws. Cancels any in-flight suggestion generation for the session first
+   * (to avoid publishing a stale frame for a session that is already active again)
+   * then kicks off a new round.
+   */
+  onSessionIdle: (sessionId: string, workspaceCwd: string) => void;
+  /**
+   * Cancel any in-flight suggestion generation for `sessionId`. Call this when a
+   * NEW prompt starts for the session (the `hasActivePrompt` false→true edge) so
+   * we never publish suggestions that are stale relative to an ongoing prompt.
+   * Safe to call with an unknown / already-cancelled session id (no-op).
+   */
+  cancelForSession: (sessionId: string) => void;
+}
+
+/** Default TTL for the `expiresAt` field: 30 minutes. */
+const DEFAULT_SUGGESTIONS_TTL_SEC = 1800;
 
 /**
  * Build the pump's `onSessionIdle` handler: when a session's active prompt
@@ -75,20 +101,42 @@ export interface IdleSuggestionDeps {
  * bus. NEVER touches the daemon session (option B: no synthetic prompt, no
  * transcript pollution, no viewer noise).
  *
- * The returned function is SYNCHRONOUS and fire-and-forget: it kicks off the async
- * work and returns immediately so it never blocks the pump's reconcile tick, and
- * the whole async body is self-catching so a model/IO failure degrades to silence
- * (no frame) and can never throw into `runLoop`. Empty tail or empty parse → no
- * frame (the UI shows nothing rather than an empty chip row).
+ * The returned `onSessionIdle` is SYNCHRONOUS and fire-and-forget: it kicks off
+ * the async work and returns immediately so it never blocks the pump's reconcile
+ * tick. The whole async body is self-catching so a model/IO failure degrades to
+ * silence (no frame) and can never throw into `runLoop`. Empty tail or empty parse
+ * → no frame (the UI shows nothing rather than an empty chip row).
+ *
+ * AbortController: a per-session `AbortController` is created for each fired
+ * round and stored in `inFlight`. `cancelForSession` (called when a new prompt
+ * starts) aborts the controller immediately, so the model call is cancelled and
+ * no stale frame is published. A new idle edge creates a fresh controller.
+ *
+ * SSE payload fields (spec-alignment):
+ *  - `expiresAt`: ISO-8601 timestamp = `now + suggestionsTtlSec * 1000`.
+ *  - `rateLimitState`: `{ remaining, max }` snapshotted after consuming a budget
+ *    slot (or from the full cap when no limiter is wired).
  */
 export function createIdleSuggestionHandler(
   deps: IdleSuggestionDeps,
-): (sessionId: string, workspaceCwd: string) => void {
+): IdleSuggestionHandle {
   const resolveDir = deps.resolveDir ?? ((cwd: string) => resolveChatsDir(cwd));
   const readTurns = deps.readTurns ?? readRecentTurns;
   const now = deps.now ?? Date.now;
+  const ttlSec = deps.suggestionsTtlSec ?? DEFAULT_SUGGESTIONS_TTL_SEC;
 
-  return (sessionId: string, workspaceCwd: string): void => {
+  /** Per-session in-flight AbortController — cancelled on prompt start. */
+  const inFlight = new Map<string, AbortController>();
+
+  function cancelForSession(sessionId: string): void {
+    const ctrl = inFlight.get(sessionId);
+    if (ctrl) {
+      ctrl.abort();
+      inFlight.delete(sessionId);
+    }
+  }
+
+  function onSessionIdle(sessionId: string, workspaceCwd: string): void {
     // Per-session opt-out (`/suggest off`): an explicit `false` disables this
     // session regardless of the global default. Checked first so a disabled
     // session has ZERO side effects. An override of `true`/undefined falls
@@ -101,6 +149,14 @@ export function createIdleSuggestionHandler(
     // gated via idle.yaml; the toggle only narrows).
     if (!deps.getConfig().enabled) return;
     if (!workspaceCwd) return; // no resolvable chats dir → nothing to read.
+
+    // Cancel any previous in-flight generation (prompt may have restarted and
+    // we got a new idle edge before the old model call resolved).
+    cancelForSession(sessionId);
+
+    const ctrl = new AbortController();
+    inFlight.set(sessionId, ctrl);
+
     void (async () => {
       try {
         const chatsDir = resolveDir(workspaceCwd);
@@ -108,17 +164,20 @@ export function createIdleSuggestionHandler(
         // so the hourly budget is spent on genuine model calls, not empty-tail
         // idle edges.
         const turns = await readTurns(chatsDir, sessionId);
+        if (ctrl.signal.aborted) return;
         if (turns.length === 0) return;
         // Per-session rate limit (token-bucket ≈ rolling hour). Cap is read live
         // from config so a hot-reload of maxSuggestionsPerHour takes effect on the
         // next check. tryConsume is atomic, so two rapid edges can't double-spend
         // a single token. Empty bucket → skip + a DEDUPED audit (firstDrop).
         const cfg = deps.getConfig();
+        let remaining = cfg.maxSuggestionsPerHour;
         if (deps.limiter) {
+          const nowMs = now();
           const { allowed, firstDrop } = deps.limiter.tryConsume(
             sessionId,
             cfg.maxSuggestionsPerHour,
-            now(),
+            nowMs,
           );
           if (!allowed) {
             if (firstDrop) {
@@ -129,15 +188,32 @@ export function createIdleSuggestionHandler(
             }
             return;
           }
+          // Snapshot remaining AFTER consuming the slot.
+          remaining = deps.limiter.remaining(
+            sessionId,
+            cfg.maxSuggestionsPerHour,
+            nowMs,
+          );
         }
+        if (ctrl.signal.aborted) return;
         const suggestions = await generateSuggestions({
           turns,
           chat: deps.chat,
           max: cfg.maxSuggestions,
+          signal: ctrl.signal,
           timeoutMs: deps.timeoutMs,
         });
+        if (ctrl.signal.aborted) return;
         if (suggestions.length === 0) return;
-        deps.bus.publish({ type: 'idle_suggestions', sessionId, suggestions });
+        const nowMs = now();
+        const expiresAt = new Date(nowMs + ttlSec * 1000).toISOString();
+        deps.bus.publish({
+          type: 'idle_suggestions',
+          sessionId,
+          suggestions,
+          expiresAt,
+          rateLimitState: { remaining, max: cfg.maxSuggestionsPerHour },
+        });
         // Count-only: never the suggestion text or any transcript content.
         void deps.audit?.record({
           action: 'idle_suggested',
@@ -146,7 +222,15 @@ export function createIdleSuggestionHandler(
         });
       } catch {
         // Enrichment: any failure degrades to silence, never throws into the pump.
+      } finally {
+        // Remove our controller only if it's still the current one (another call
+        // may have already replaced it with a newer controller).
+        if (inFlight.get(sessionId) === ctrl) {
+          inFlight.delete(sessionId);
+        }
       }
     })();
-  };
+  }
+
+  return { onSessionIdle, cancelForSession };
 }

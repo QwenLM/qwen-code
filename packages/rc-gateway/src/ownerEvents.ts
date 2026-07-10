@@ -7,6 +7,45 @@
 import type { AuditRecord } from './auditLog.js';
 
 /**
+ * A `routing_decision` event emitted for every routing-rule evaluation so
+ * an operator can observe which rules fired (or passed) in real time.
+ *
+ * Emitted by the notifier for every event it evaluates, before any send, so
+ * observing it is non-intrusive and happens even when the event is dropped.
+ * Carries only metadata — NO session content, NO tool args.
+ */
+export interface RoutingDecisionEvent {
+  type: 'routing_decision';
+  /** Event kind being evaluated (e.g. `'permission.required'`). */
+  kind: string;
+  /** Session name if known. */
+  sessionName?: string;
+  /**
+   * `'drop'` when a rule matched and suppressed the fan-out; `'pass'` when no
+   * rule matched and the event proceeds to the normal delivery path.
+   */
+  decision: 'drop' | 'pass';
+  /** Id of the first matching drop rule (present when `decision='drop'`). */
+  ruleId?: string;
+  /** Timestamp (ISO-8601) of the evaluation. */
+  evaluatedAt: string;
+}
+
+/**
+ * Rate-limit state carried in `idle_suggestions` SSE frames so the UI can show
+ * an accurate "X of Y remaining this hour" indicator without a round-trip.
+ */
+export interface IdleRateLimitState {
+  /** How many more suggestion firings are allowed in the current rolling hour. */
+  remaining: number;
+  /**
+   * Absolute cap read from config at fire time (so the UI can render
+   * "2 of 5 remaining" even before any reset has occurred).
+   */
+  max: number;
+}
+
+/**
  * A frame broadcast on the owner-level event stream. A discriminated union so
  * producers can add variants without breaking consumers (clients switch on
  * `type` and ignore unknown frames). The `/rc/events` route JSON-stringifies the
@@ -17,10 +56,24 @@ import type { AuditRecord } from './auditLog.js';
  *    session's active prompt finishes (proposal `add-idle-suggestions`, slice 2).
  *    `suggestions` is a small list of short imperative strings — NEVER transcript
  *    text, only the model's distilled next-step phrases.
+ *    `expiresAt` is an ISO-8601 timestamp after which the client SHOULD dismiss
+ *    the suggestions (default TTL: 30 minutes from the firing instant).
+ *    `rateLimitState` carries the per-session rolling-hour budget so the UI can
+ *    show an accurate "N remaining" indicator without a round-trip.
+ *  - `routing_decision`: emitted for every routing evaluation before fan-out.
  */
 export type OwnerEvent =
   | { type: 'audit'; record: AuditRecord }
-  | { type: 'idle_suggestions'; sessionId: string; suggestions: string[] };
+  | {
+      type: 'idle_suggestions';
+      sessionId: string;
+      suggestions: string[];
+      /** ISO-8601 expiry for client-side auto-dismiss (30 min from fire time). */
+      expiresAt: string;
+      /** Rolling-hour budget snapshot taken immediately after consuming a slot. */
+      rateLimitState: IdleRateLimitState;
+    }
+  | RoutingDecisionEvent;
 
 export type OwnerEventHandler = (event: OwnerEvent) => void;
 

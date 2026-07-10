@@ -836,7 +836,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     | ((sessionId: string, workspaceCwd: string) => void)
     | undefined;
   if (suggestCfg) {
-    onSessionIdle = createIdleSuggestionHandler({
+    const idleHandle = createIdleSuggestionHandler({
       chat: createChatTransport(suggestCfg),
       bus: ownerEvents,
       audit,
@@ -846,6 +846,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       // global egress gate above).
       getSessionEnabled: (id) => idleToggles.get(id),
     });
+    onSessionIdle = idleHandle.onSessionIdle;
     // eslint-disable-next-line no-console
     console.log(
       idleConfig.enabled
