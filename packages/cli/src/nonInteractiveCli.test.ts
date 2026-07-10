@@ -3493,6 +3493,46 @@ describe('runNonInteractive', () => {
     expect(predicate({ prompt: 'regular cron job' } as CronJob)).toBe(false);
   });
 
+  it('skips a guarded scheduled task instead of firing it unconditionally', async () => {
+    // Only the ACP/daemon session evaluates a precondition. Running the prompt
+    // here would fire a guarded task with its guard ignored — the exact outcome
+    // the precondition exists to prevent. Fail closed, and still release the
+    // headless hold-open so the run does not hang.
+    setupMetricsMock();
+    const scheduler = new CronScheduler();
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    vi.spyOn(scheduler, 'start').mockImplementation((onFire) => {
+      onFire({
+        id: 'guarded-1',
+        prompt: 'nightly report',
+        condition: 'only when the release flag is set',
+      } as CronJob);
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'ok' },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+
+    await runNonInteractive(mockConfig, mockSettings, 'test', 'p-cron-guarded');
+
+    // The user's own prompt ran; the guarded cron prompt never reached the model.
+    const cronCalls = mockGeminiClient.sendMessageStream.mock.calls.filter(
+      (call) => call[3]?.type === SendMessageType.Cron,
+    );
+    expect(cronCalls).toHaveLength(0);
+    expect(
+      mockGeminiClient.sendMessageStream.mock.calls.some((call) =>
+        JSON.stringify(call[0]).includes('nightly report'),
+      ),
+    ).toBe(false);
+  });
+
   describe('--json-schema structured output', () => {
     // Helper: walk an emitted event and extract the first tool_use_id when
     // it represents a tool_result block. Returns undefined for any other
