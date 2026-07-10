@@ -551,21 +551,27 @@ export class SessionService {
   }
 
   /**
-   * Reads the `parent_session` record's `parentSessionId` off a transcript,
-   * or undefined when the session has no parent. Written once near the start of
-   * the file, so the shared tail-then-head scan finds it in the head window.
-   * Reuses the same scratch buffer as the title read on the listing pass.
+   * Extracts the `parent_session` record's `parentSessionId` from records
+   * ALREADY read for the listing (the first {@link MAX_PROMPT_SCAN_LINES}), or
+   * undefined when the session has no parent. The record is written once right
+   * after the sub-session is created — before any prompt — so it is reliably
+   * within that window. No extra file open, unlike the title (which re-anchors
+   * at EOF and needs its own tail-then-head scan).
    */
-  private readParentSessionIdFromFile(
-    filePath: string,
-    scratchBuffer?: Buffer,
+  private extractParentSessionIdFromRecords(
+    records: ChatRecord[],
   ): string | undefined {
-    return readLastJsonStringFieldSync(
-      filePath,
-      'parentSessionId',
-      '"subtype":"parent_session"',
-      scratchBuffer,
-    );
+    for (const record of records) {
+      if (record.type === 'system' && record.subtype === 'parent_session') {
+        const payload = record.systemPayload as
+          | { parentSessionId?: unknown }
+          | undefined;
+        if (typeof payload?.parentSessionId === 'string') {
+          return payload.parentSessionId;
+        }
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -873,10 +879,7 @@ export class SessionService {
       const prompt = this.extractFirstPromptFromRecords(records);
 
       const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
-      const parentSessionId = this.readParentSessionIdFromFile(
-        filePath,
-        tailBuffer,
-      );
+      const parentSessionId = this.extractParentSessionIdFromRecords(records);
       items.push({
         sessionId: firstRecord.sessionId,
         cwd: firstRecord.cwd,

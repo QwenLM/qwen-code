@@ -131,6 +131,21 @@ export function taskHasLegacyCondition(task: DurableCronTask): boolean {
 }
 
 /**
+ * True for a task written by a pre-removal version with `runMode: 'isolated'`
+ * (with or without a precondition). The field is no longer part of {@link
+ * DurableCronTask}, so it is read off the raw object.
+ *
+ * Unlike a legacy precondition (which is a safety gate → fail closed), a bare
+ * isolated task has no gate: it can still run, just no longer in a fresh
+ * per-run session — it now accumulates history in its bound session. So the
+ * scheduler still fires it, but logs a one-time notice so an operator who
+ * relied on the clean-slate isolation is not left wondering why runs now differ.
+ */
+export function taskHasLegacyRunMode(task: DurableCronTask): boolean {
+  return (task as unknown as Record<string, unknown>)['runMode'] === 'isolated';
+}
+
+/**
  * Generates an 8-character base36 id for a durable task. Shared by the
  * scheduler (`CronScheduler`) and the daemon's scheduled-tasks route so
  * route-created and tool-created tasks use one id scheme — changing it here

@@ -119,6 +119,26 @@ describe('ChatRecordingService - recordParentSession', () => {
     expect(writtenRecord.timestamp).toBeDefined();
   });
 
+  it('is idempotent for a repeated parent session id (no second record)', async () => {
+    // The lineage is immutable and written once. A bridge retry (the write
+    // landed but its response was lost) calls this again with the SAME id — it
+    // must report success without appending a duplicate parent_session record.
+    const first = chatRecordingService.recordParentSession('parent-abc');
+    const second = chatRecordingService.recordParentSession('parent-abc');
+    await chatRecordingService.flush();
+
+    expect(first).toBe(true);
+    expect(second).toBe(true);
+    // Only the first call ever wrote — the second short-circuited.
+    expect(jsonl.writeLine).toHaveBeenCalledOnce();
+
+    const parentRecords = vi
+      .mocked(jsonl.writeLine)
+      .mock.calls.map((c) => c[1] as ChatRecord)
+      .filter((r) => r.subtype === 'parent_session');
+    expect(parentRecords).toHaveLength(1);
+  });
+
   it('maintains the parent chain when recorded after other records', async () => {
     chatRecordingService.recordUserMessage([{ text: 'hello' }]);
     chatRecordingService.recordParentSession('parent-abc');

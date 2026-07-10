@@ -236,6 +236,33 @@ function toSummary(item: {
   };
 }
 
+/**
+ * Merges a live session's summary onto its persisted counterpart for a session
+ * that exists in both. The persisted record owns identity/immutable facts
+ * (`createdAt`, `parentSessionId` lineage) while the live entry owns volatile
+ * state (`clientCount`, `hasActivePrompt`, a fresher `displayName`/`updatedAt`).
+ * Shared by all three list paths (default, organized, by-parent) so the merge
+ * rule lives in one place.
+ */
+function mergeLiveSessionSummary(
+  existing: BridgeSessionSummary,
+  live: BridgeSessionSummary,
+): BridgeSessionSummary {
+  return {
+    ...existing,
+    ...live,
+    createdAt: existing.createdAt,
+    displayName: live.displayName ?? existing.displayName,
+    // Immutable lineage; the persisted transcript is authoritative, and a live
+    // entry only carries it when spawned this run.
+    parentSessionId: existing.parentSessionId ?? live.parentSessionId,
+    updatedAt: live.updatedAt ?? existing.updatedAt,
+    clientCount: live.clientCount,
+    hasActivePrompt: live.hasActivePrompt,
+    isArchived: false,
+  };
+}
+
 async function listAllPersistedSummaries(
   sessionService: SessionService,
   archiveState: SessionArchiveState,
@@ -402,20 +429,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
           bySessionId.set(
             live.sessionId,
             applyOrganization(
-              {
-                ...existing,
-                ...live,
-                createdAt: existing.createdAt,
-                displayName: live.displayName ?? existing.displayName,
-                // Immutable lineage; the persisted transcript is authoritative,
-                // and a live entry only carries it when spawned this run.
-                parentSessionId:
-                  existing.parentSessionId ?? live.parentSessionId,
-                updatedAt: live.updatedAt ?? existing.updatedAt,
-                clientCount: live.clientCount,
-                hasActivePrompt: live.hasActivePrompt,
-                isArchived: false,
-              },
+              mergeLiveSessionSummary(existing, live),
               organization,
             ),
           );
@@ -522,17 +536,10 @@ async function listWorkspaceSessionsByParentForResponse(
       for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
         const existing = bySessionId.get(live.sessionId);
         if (existing) {
-          bySessionId.set(live.sessionId, {
-            ...existing,
-            ...live,
-            createdAt: existing.createdAt,
-            displayName: live.displayName ?? existing.displayName,
-            parentSessionId: existing.parentSessionId ?? live.parentSessionId,
-            updatedAt: live.updatedAt ?? existing.updatedAt,
-            clientCount: live.clientCount,
-            hasActivePrompt: live.hasActivePrompt,
-            isArchived: false,
-          });
+          bySessionId.set(
+            live.sessionId,
+            mergeLiveSessionSummary(existing, live),
+          );
         } else if (!(await sessionService.sessionExists(live.sessionId))) {
           bySessionId.set(live.sessionId, {
             ...live,
@@ -656,17 +663,7 @@ export async function listWorkspaceSessionsForResponse(
   for (const live of liveSessions) {
     const existing = bySessionId.get(live.sessionId);
     if (existing) {
-      bySessionId.set(live.sessionId, {
-        ...existing,
-        ...live,
-        createdAt: existing.createdAt,
-        displayName: live.displayName ?? existing.displayName,
-        parentSessionId: existing.parentSessionId ?? live.parentSessionId,
-        updatedAt: live.updatedAt ?? existing.updatedAt,
-        clientCount: live.clientCount,
-        hasActivePrompt: live.hasActivePrompt,
-        isArchived: false,
-      });
+      bySessionId.set(live.sessionId, mergeLiveSessionSummary(existing, live));
     } else if (
       isFirstPage &&
       !(await sessionService.sessionExists(live.sessionId))

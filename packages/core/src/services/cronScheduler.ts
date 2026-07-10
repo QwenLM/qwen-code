@@ -22,6 +22,7 @@ import {
   readCronTasks,
   removeCronTasks,
   taskHasLegacyCondition,
+  taskHasLegacyRunMode,
   updateCronTasks,
 } from './cronTasksFile.js';
 import { tryAcquireLock, releaseLock } from './cronTasksLock.js';
@@ -262,6 +263,9 @@ export class CronScheduler {
   // precondition) already reported as skipped, so the fail-closed remediation
   // breadcrumb is logged once per task rather than on every file reload.
   private warnedLegacyConditionIds = new Set<string>();
+  // Ids of bare `runMode: 'isolated'` legacy tasks already warned about — they
+  // still run (no safety gate), so this is a one-time behavior-change notice.
+  private warnedLegacyRunModeIds = new Set<string>();
   // Durable ids whose lastFiredAt persist is in flight after a fire — the tick
   // (on-time) OR a catch-up delivery. A reload racing that async write reads the
   // stale disk stamp, so it must not re-detect and re-fire the same slot. Only
@@ -736,6 +740,20 @@ export class CronScheduler {
           );
         }
         return false;
+      }
+      // A bare `runMode: 'isolated'` task (no precondition) has no safety gate,
+      // so it still fires — but no longer in a fresh per-run session; it now
+      // accumulates history in its bound session. It runs, but warn once so an
+      // operator who relied on the clean slate knows why runs now differ.
+      if (taskHasLegacyRunMode(t) && !this.warnedLegacyRunModeIds.has(t.id)) {
+        this.warnedLegacyRunModeIds.add(t.id);
+        // eslint-disable-next-line no-console -- operator-facing behavior-change breadcrumb
+        console.warn(
+          `CronScheduler: scheduled task ${t.id} was created with the removed ` +
+            `'isolated' run mode; it now runs in its bound session (history ` +
+            `accumulates across runs). Recreate it and call create_sub_session ` +
+            `from the prompt for per-run isolation.`,
+        );
       }
       return true;
     });

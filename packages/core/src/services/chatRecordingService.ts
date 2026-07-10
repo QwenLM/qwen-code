@@ -536,6 +536,10 @@ export class ChatRecordingService {
    * (safe default) without rewriting the persisted record.
    */
   private currentTitleSource: TitleSource | undefined;
+  /** Parent session id once recorded, so {@link recordParentSession} is
+   * idempotent — a bridge retry (after a failed response) must not append a
+   * second `parent_session` record for the same immutable lineage. */
+  private currentParentSessionId: string | undefined;
   /**
    * How many auto-title attempts have been made this process.
    *
@@ -1389,6 +1393,10 @@ export class ChatRecordingService {
    * @returns true if the record was written successfully, false on I/O error.
    */
   recordParentSession(parentSessionId: string): boolean {
+    // Idempotent: the lineage is immutable and written once. A bridge retry
+    // (the write succeeded but its response was lost) must not append a second
+    // record — the session would then carry two `parent_session` entries.
+    if (this.currentParentSessionId === parentSessionId) return true;
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -1397,6 +1405,7 @@ export class ChatRecordingService {
         systemPayload: { parentSessionId },
       };
       this.appendRecord(record);
+      this.currentParentSessionId = parentSessionId;
       return true;
     } catch (error) {
       debugLogger.error('Error saving parent session record:', error);

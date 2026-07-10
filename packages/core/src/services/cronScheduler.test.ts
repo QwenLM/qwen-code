@@ -1100,6 +1100,54 @@ describe('CronScheduler', () => {
         warnSpy.mockRestore();
       }
     });
+
+    it('still fires a bare legacy runMode:isolated task (no condition), warning once', async () => {
+      // A pre-removal task written with `runMode: 'isolated'` and NO
+      // precondition. Unlike a legacy-condition task (a safety gate → fail
+      // closed), this one has no gate: it STILL fires — just no longer in a
+      // fresh per-run session (history now accumulates in its bound session).
+      // The scheduler installs and fires it, but logs a one-time behavior-change
+      // notice. `runMode` is gone from DurableCronTask, so cast past it to seed
+      // the on-disk shape an old version wrote.
+      const onFire = vi.fn();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await writeCronTasks(tmpDir, [
+          {
+            ...seed({ id: 'legacy-runmode', cron: '* * * * *' }),
+            runMode: 'isolated',
+          } as unknown as DurableCronTask,
+        ]);
+
+        const runModeWarns = () =>
+          warnSpy.mock.calls.filter(
+            (c) =>
+              /isolated/.test(String(c[0])) &&
+              /create_sub_session/.test(String(c[0])),
+          );
+
+        await scheduler.enableDurable('session-1');
+        // Unlike a legacy-condition task, this one IS installed…
+        expect(scheduler.list().map((j) => j.id)).toContain('legacy-runmode');
+        // …and the first load logs the one-time behavior-change breadcrumb.
+        expect(runModeWarns()).toHaveLength(1);
+        expect(String(runModeWarns()[0]![0])).toContain('legacy-runmode');
+
+        scheduler.start(onFire);
+        // A minute the every-minute cron matches (past any jitter).
+        scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+        const firedIds = onFire.mock.calls.map((c) => (c[0] as CronJob).id);
+        expect(firedIds).toContain('legacy-runmode');
+
+        // Re-loading the same file must NOT re-warn for an already-reported id.
+        await (
+          scheduler as unknown as { loadFileTasks(b: boolean): Promise<void> }
+        ).loadFileTasks(true);
+        expect(runModeWarns()).toHaveLength(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
   });
 
   describe('durable ownership', () => {
