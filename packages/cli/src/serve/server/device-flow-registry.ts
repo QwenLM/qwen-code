@@ -21,6 +21,7 @@ interface SetupDeviceFlowRegistryDeps {
   bridge: AcpSessionBridge;
   registry?: DeviceFlowRegistry;
   providers?: DeviceFlowProvider[];
+  resolveEventBridges?: () => AcpSessionBridge[];
 }
 
 export interface ServeDeviceFlowRuntime {
@@ -32,6 +33,12 @@ export function createDeviceFlowRegistry(deps: {
   bridge: AcpSessionBridge;
   registry?: DeviceFlowRegistry;
   providers?: DeviceFlowProvider[];
+  /**
+   * Phase 4: the set of bridges each device-flow event should fan out to
+   * (primary + trusted secondary runtimes), resolved lazily on every publish.
+   * Defaults to the single `bridge` when omitted, preserving prior behavior.
+   */
+  resolveEventBridges?: () => AcpSessionBridge[];
 }): ServeDeviceFlowRuntime {
   const deviceFlowProviderMap = new Map<
     DeviceFlowProviderId,
@@ -46,11 +53,25 @@ export function createDeviceFlowRegistry(deps: {
 
   const deviceFlowEventSink: DeviceFlowEventSink = {
     publish(emission, originatorClientId) {
-      deps.bridge.publishWorkspaceEvent({
-        type: `auth_device_flow_${emission.type}`,
-        data: emission.data,
-        ...(originatorClientId ? { originatorClientId } : {}),
-      });
+      // Phase 4: fan out to every trusted runtime's bridge (primary + trusted
+      // secondaries) so a workspace-qualified ACP client sees its own flow's
+      // events. The registry stays a daemon singleton; only delivery is
+      // multiplexed. Best-effort per the DeviceFlowEventSink contract: one
+      // bridge failing must not block the others or the registry state machine.
+      const bridges = deps.resolveEventBridges
+        ? deps.resolveEventBridges()
+        : [deps.bridge];
+      for (const bridge of bridges) {
+        try {
+          bridge.publishWorkspaceEvent({
+            type: `auth_device_flow_${emission.type}`,
+            data: emission.data,
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        } catch {
+          // Swallow per-bridge delivery failures; fan-out is best-effort.
+        }
+      }
     },
   };
   const deviceFlowRegistry =
@@ -112,6 +133,7 @@ export function setupDeviceFlowRegistry(
     bridge: deps.bridge,
     registry: deps.registry,
     providers: deps.providers,
+    resolveEventBridges: deps.resolveEventBridges,
   });
   setDeviceFlowRegistry(deps.app, runtime.deviceFlowRegistry);
   return runtime;

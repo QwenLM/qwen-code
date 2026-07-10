@@ -9,7 +9,6 @@ import {
   type AcpSessionBridge,
 } from './acp-session-bridge.js';
 import type { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
-import type { DeviceFlowRegistry } from './auth/device-flow.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
 
@@ -36,13 +35,6 @@ export interface WorkspaceRuntime {
   readonly workspaceService: DaemonWorkspaceService;
   readonly routeFileSystemFactory: WorkspaceFileSystemFactory;
   readonly clientMcpSenderRegistry: ClientMcpSenderRegistry;
-  /**
-   * Phase 4 (issue #6378): per-runtime OAuth device-flow registry. Optional so
-   * existing single-workspace construction and tests are unaffected; populated
-   * for non-primary runtimes so their ACP `auth/device_flow` calls target their
-   * own bridge instead of the primary app-global registry.
-   */
-  readonly deviceFlowRegistry?: DeviceFlowRegistry;
 }
 
 export type WorkspaceSessionOwnerResolution =

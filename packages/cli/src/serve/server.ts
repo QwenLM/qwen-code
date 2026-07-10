@@ -629,6 +629,20 @@ export function createServeApp(
       bridge,
       registry: deps.deviceFlowRegistry,
       providers: deps.deviceFlowProviders,
+      // Phase 4: fan device-flow events out to the primary and every trusted
+      // secondary runtime bridge, so workspace-qualified ACP clients receive
+      // their own flow's events. Resolved lazily: the registry is created
+      // before the workspace registry exists, but by the time a flow emits,
+      // `app.locals` holds the populated registry.
+      resolveEventBridges: () => {
+        const reg = (app.locals as { workspaceRegistry?: WorkspaceRegistry })
+          .workspaceRegistry;
+        if (!reg) return [bridge];
+        return reg
+          .list()
+          .filter((rt) => rt.primary || rt.trusted)
+          .map((rt) => rt.bridge);
+      },
     });
 
   const { daemonLog } = deps;

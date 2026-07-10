@@ -73,6 +73,67 @@ const PLURAL_ACP_WS_PREFIX = '/workspaces/';
 const PLURAL_ACP_WS_SUFFIX = '/acp';
 
 /**
+ * Extract the raw (undecoded, un-normalized) pathname from a request-target.
+ * Unlike `new URL(target).pathname`, this does NOT collapse `.`/`..` segments
+ * or resolve percent-encoding, so a traversal like `/workspaces/%2e%2e/acp`
+ * cannot be normalized into `/acp` and silently bound to the primary mount.
+ */
+function rawRequestPathname(reqUrl: string | undefined): string {
+  const target = reqUrl ?? '/';
+  const qIdx = target.indexOf('?');
+  const hIdx = target.indexOf('#');
+  let end = target.length;
+  if (qIdx >= 0) end = Math.min(end, qIdx);
+  if (hIdx >= 0) end = Math.min(end, hIdx);
+  return target.slice(0, end);
+}
+
+/**
+ * Match `/workspaces/<selector>/acp` (with an optional single trailing slash)
+ * against a RAW request-target pathname and return the still-encoded selector,
+ * or null when the shape does not match. Rejects empty selectors, extra path
+ * segments (slash/backslash), and dot-segment traversal shapes -- including
+ * percent-encoded variants -- so decoding afterwards can never reintroduce a
+ * `/` or `..` that bypassed classification.
+ */
+function pluralAcpRawSelector(rawPath: string): string | null {
+  let p = rawPath;
+  if (p.endsWith(`${PLURAL_ACP_WS_SUFFIX}/`)) {
+    p = p.slice(0, -1);
+  }
+  if (
+    !p.startsWith(PLURAL_ACP_WS_PREFIX) ||
+    !p.endsWith(PLURAL_ACP_WS_SUFFIX) ||
+    p.length <= PLURAL_ACP_WS_PREFIX.length + PLURAL_ACP_WS_SUFFIX.length
+  ) {
+    return null;
+  }
+  const selector = p.slice(
+    PLURAL_ACP_WS_PREFIX.length,
+    p.length - PLURAL_ACP_WS_SUFFIX.length,
+  );
+  if (
+    selector.length === 0 ||
+    selector.includes('/') ||
+    selector.includes('\\')
+  ) {
+    return null;
+  }
+  const lower = selector.toLowerCase();
+  if (
+    lower === '.' ||
+    lower === '..' ||
+    lower === '%2e' ||
+    lower === '%2e%2e' ||
+    lower === '.%2e' ||
+    lower === '%2e.'
+  ) {
+    return null;
+  }
+  return selector;
+}
+
+/**
  * `clientInfo.name` an extension must send on `/acp` to claim the CDP bridge.
  * Cross-package protocol constant — kept in sync with `CDP_BRIDGE_CLIENT_NAME`
  * in `packages/chrome-extension/src/background/service-worker.ts` (the two
@@ -982,7 +1043,12 @@ export function mountAcpHttp(
       rt.workspaceService,
       new WorkspaceRememberTaskLane(rt.bridge),
       rt.routeFileSystemFactory,
-      rt.deviceFlowRegistry,
+      // Phase 4: secondary mounts share the daemon-global device-flow registry
+      // (single instance per daemon; OAuth credentials are global state). The
+      // registry's event sink fans out to each trusted bridge, so a secondary
+      // ACP client's device_flow calls resolve against a real registry and its
+      // events reach that workspace's bridge -- without a per-runtime registry.
+      opts.deviceFlowRegistry,
       opts.sessionShellCommandEnabled === true,
       secondaryRegistry,
       opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
@@ -1117,50 +1183,30 @@ export function mountAcpHttp(
           `qwen serve: WebSocket upgrade rejected (${reason}) from ${rawAddr}`,
         );
       };
-      let url: URL;
-      try {
-        url = new URL(
-          req.url ?? '/',
-          `http://${req.headers.host ?? 'localhost'}`,
-        );
-      } catch {
-        logReject('invalid-url');
-        socket.destroy();
-        return;
-      }
       // `/cdp` is the Plan C CDP-tunnel endpoint (issue #5626): a loopback
       // puppeteer client connects to drive a real tab. It reuses the SAME
       // loopback / host-allowlist / auth / CSRF checks below, then upgrades into
       // the CDP glue instead of the ACP handshake. Off unless opted in.
+      // Phase 4 security: classify the upgrade path from the RAW request-target
+      // rather than `url.pathname`. WHATWG URL normalizes dot-segments, so
+      // `/workspaces/%2e%2e/acp` would collapse to `/acp` and silently bind to
+      // the primary mount. `rawRequestPathname` keeps it un-normalized and
+      // `pluralAcpRawSelector` rejects traversal / backslash / empty selectors.
+      const rawPath = rawRequestPathname(req.url);
       const isCdpPath =
         opts.cdpTunnelOverWs === true &&
         opts.cdpTunnelRegistry !== undefined &&
-        url.pathname === CDP_PATH;
+        rawPath === CDP_PATH;
       const extraRoute = opts.extraWsRoutes?.find(
-        (route) => route.path === url.pathname,
+        (route) => route.path === rawPath,
       );
-      // Phase 4: `/workspaces/<selector>/acp` is a valid upgrade path shape when
-      // the daemon has a workspace registry. Actual workspace resolution/trust
-      // runs after the shared security checks below.
-      const isPluralAcpShape =
-        opts.workspaceRegistry !== undefined &&
-        url.pathname.startsWith(PLURAL_ACP_WS_PREFIX) &&
-        url.pathname.endsWith(PLURAL_ACP_WS_SUFFIX) &&
-        url.pathname.length >
-          PLURAL_ACP_WS_PREFIX.length + PLURAL_ACP_WS_SUFFIX.length &&
-        !url.pathname
-          .slice(
-            PLURAL_ACP_WS_PREFIX.length,
-            url.pathname.length - PLURAL_ACP_WS_SUFFIX.length,
-          )
-          .includes('/');
-      if (
-        url.pathname !== path &&
-        !isCdpPath &&
-        !extraRoute &&
-        !isPluralAcpShape
-      ) {
-        logReject(`unknown-path ${url.pathname}`);
+      const pluralRawSelector =
+        opts.workspaceRegistry !== undefined
+          ? pluralAcpRawSelector(rawPath)
+          : null;
+      const isPluralAcpShape = pluralRawSelector !== null;
+      if (rawPath !== path && !isCdpPath && !extraRoute && !isPluralAcpShape) {
+        logReject(`unknown-path ${rawPath}`);
         socket.destroy();
         return;
       }
@@ -1270,12 +1316,17 @@ export function mountAcpHttp(
       // after them, and the raw URL is decoded here (WS bypasses Express).
       let activeMount = primaryMount;
       if (isPluralAcpShape) {
-        const selector = decodeURIComponent(
-          url.pathname.slice(
-            PLURAL_ACP_WS_PREFIX.length,
-            url.pathname.length - PLURAL_ACP_WS_SUFFIX.length,
-          ),
-        );
+        let selector: string;
+        try {
+          // Decode only after the shape/traversal checks passed, so decoding
+          // cannot reintroduce a `/` or `..` that bypassed classification.
+          selector = decodeURIComponent(pluralRawSelector!);
+        } catch {
+          logReject('workspace-selector-decode-error');
+          socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+          socket.destroy();
+          return;
+        }
         const wsRegistry = opts.workspaceRegistry;
         const rt = wsRegistry
           ? (wsRegistry.getByWorkspaceId(selector) ??
