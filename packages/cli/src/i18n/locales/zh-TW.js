@@ -190,6 +190,7 @@ export default {
   'toolDisplayName.CronList': '定時任務清單',
   'toolDisplayName.CronDelete': '刪除定時任務',
   'toolDisplayName.LoopWakeup': '循環喚醒',
+  'toolDisplayName.CreateSubSession': '建立子會話',
   'toolDisplayName.TaskCreate': '建立任務',
   'toolDisplayName.TaskUpdate': '更新任務',
   'toolDisplayName.TaskList': '任務列表',
@@ -251,7 +252,7 @@ export default {
   'to search history': '搜索歷史',
   'to paste images': '粘貼圖片',
   'for external editor': '外部編輯器',
-  'to toggle compact mode': '切換緊湊模式',
+  'to view transcript': '檢視完整記錄',
   'Jump through words in the input': '在輸入中按單詞跳轉',
   'Close dialogs, cancel requests, or quit application':
     '關閉對話框、取消請求或退出應用程序',
@@ -444,6 +445,42 @@ export default {
   'Delete {{name}}': '刪除 {{name}}',
   'Unknown Step': '未知步驟',
   'Esc to close': '按 Esc 關閉',
+  Transcript: '完整記錄',
+  'to close': '關閉',
+  'to scroll': '捲動',
+  'Failed to render transcript.': '無法呈現完整記錄。',
+  'Read {{count}} file': '讀取了 {{count}} 個檔案',
+  'Read {{count}} files': '讀取了 {{count}} 個檔案',
+  'Reading {{count}} file': '正在讀取 {{count}} 個檔案',
+  'Reading {{count}} files': '正在讀取 {{count}} 個檔案',
+  'Edited {{count}} file': '編輯了 {{count}} 個檔案',
+  'Edited {{count}} files': '編輯了 {{count}} 個檔案',
+  'Editing {{count}} file': '正在編輯 {{count}} 個檔案',
+  'Editing {{count}} files': '正在編輯 {{count}} 個檔案',
+  'Wrote {{count}} file': '寫入了 {{count}} 個檔案',
+  'Wrote {{count}} files': '寫入了 {{count}} 個檔案',
+  'Writing {{count}} file': '正在寫入 {{count}} 個檔案',
+  'Writing {{count}} files': '正在寫入 {{count}} 個檔案',
+  'Searched {{count}} pattern': '搜尋了 {{count}} 個模式',
+  'Searched {{count}} patterns': '搜尋了 {{count}} 個模式',
+  'Searching {{count}} pattern': '正在搜尋 {{count}} 個模式',
+  'Searching {{count}} patterns': '正在搜尋 {{count}} 個模式',
+  'Listed {{count}} directory': '列出了 {{count}} 個目錄',
+  'Listed {{count}} directories': '列出了 {{count}} 個目錄',
+  'Listing {{count}} directory': '正在列出 {{count}} 個目錄',
+  'Listing {{count}} directories': '正在列出 {{count}} 個目錄',
+  'Ran {{count}} command': '執行了 {{count}} 個命令',
+  'Ran {{count}} commands': '執行了 {{count}} 個命令',
+  'Running {{count}} command': '正在執行 {{count}} 個命令',
+  'Running {{count}} commands': '正在執行 {{count}} 個命令',
+  'Ran {{count}} agent': '執行了 {{count}} 個代理',
+  'Ran {{count}} agents': '執行了 {{count}} 個代理',
+  'Running {{count}} agent': '正在執行 {{count}} 個代理',
+  'Running {{count}} agents': '正在執行 {{count}} 個代理',
+  'Used {{count}} tool': '使用了 {{count}} 個工具',
+  'Used {{count}} tools': '使用了 {{count}} 個工具',
+  'Using {{count}} tool': '正在使用 {{count}} 個工具',
+  'Using {{count}} tools': '正在使用 {{count}} 個工具',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter 選擇，↑↓ 導航，Esc 關閉',
   'Esc to go back': '按 Esc 返回',
@@ -1627,8 +1664,6 @@ export default {
     '按 Tab 或輸入 /approval-mode 可快速切換權限模式。',
   'Try /insight to generate personalized insights from your chat history.':
     '試試 /insight，從聊天記錄中生成個性化洞察。',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    '按 Ctrl+O 切換緊湊模式 ── 隱藏工具輸出和思考過程，界面更簡潔。',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     '添加 QWEN.md 檔案，為 Qwen Code 提供持久的項目上下文。',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1919,9 +1954,6 @@ export default {
     '原始模式不可用。請在交互式終端中運行。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭頭導航，Enter 選擇，Ctrl+C 退出)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    '緊湊模式下隱藏工具輸出和思考過程，界面更簡潔（Ctrl+O 切換）。',
-  'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看詳細工具調用結果',
   'Switch to plan mode or exit plan mode': '切換到計劃模式或退出計劃模式',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
     '設定具備推理能力的模型思考的強度（{{tiers}}）；依各供應商進行映射與鉗制。',
@@ -2146,6 +2178,50 @@ export default {
   ' (not in model registry)': '（不在模型註冊表中）',
   'start server': '啟動伺服器',
   'No compression needed.': '無需壓縮。',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    '檢查 Qwen Code 更新並安裝（如果可用）',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Qwen Code 有可用更新！{{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Qwen Code 有新版本可用！{{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} 已是最新！',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    '檢查更新失敗。請檢查網路或 registry 設定。',
+  'Unable to check for updates: {{reason}}': '無法檢查更新：{{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    '更新成功！新版本將在下次執行時生效。',
+  'Update downloaded. It will be applied after you exit this session.':
+    '更新已下載。將在結束目前工作階段後套用。',
+  'Update failed: {{error}}': '更新失敗：{{error}}',
+  'Downloading update...': '正在下載更新...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    '更新成功！請重新啟動 Qwen Code 以使用新版本。重新啟動前切換模型提供商可能無法正常運作。',
+  'Automatic update failed. Please try updating manually.':
+    '自動更新失敗。請嘗試手動更新。',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    '自動更新失敗：{{error}}。請重新執行安裝程式以手動更新。',
+  'Running from a local git clone. Please update with "git pull".':
+    '正在從本機 Git 複製執行。請使用 "git pull" 更新。',
+  'Running via npx, update not applicable.': '正在透過 npx 執行，更新不適用。',
+  'Running via pnpx, update not applicable.':
+    '正在透過 pnpx 執行，更新不適用。',
+  'Running via bunx, update not applicable.':
+    '正在透過 bunx 執行，更新不適用。',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    '透過 Homebrew 安裝。請使用 "brew upgrade" 更新。',
+  "Locally installed. Please update via your project's package.json.":
+    '本機安裝。請透過專案的 package.json 更新。',
+  'Update requires sudo. Please run:': '更新需要 sudo。請執行：',
+  'Standalone install detected. Attempting to automatically update now...':
+    '偵測到獨立安裝。正在嘗試自動更新...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    '偵測到獨立安裝。請重新執行獨立安裝程式以更新：',
+  'Run the following to update:': '執行以下命令進行更新：',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    '無法自動更新此獨立安裝。請從以下位址重新安裝：',
+  'Manual update required. Please reinstall Qwen Code.':
+    '需要手動更新。請重新安裝 Qwen Code。',
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     '⚠️ 歷史記錄缺口：此處之前的會話記錄已遺失（儲存中斷），且無法找回。',
 
@@ -2178,4 +2254,17 @@ export default {
     '擴充內容重新整理失敗。執行 /reload-plugins 來套用更新。',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     '擴充重新載入未完成。執行 /reload-plugins 重試。',
+  'Precondition check': '前置條件檢查',
+  'Precondition not met — this scheduled run was skipped.':
+    '前置條件不滿足 —— 已略過本次定時執行。',
+  'The precondition check was cancelled — this scheduled run was skipped.':
+    '前置條件檢查已取消 —— 已略過本次定時執行。',
+  'The precondition check was interrupted — this scheduled run was skipped.':
+    '前置條件檢查被中斷 —— 已略過本次定時執行。',
+  'The precondition check failed — this scheduled run was skipped.':
+    '前置條件檢查失敗 —— 已略過本次定時執行。',
+  'Running this scheduled task in a new session: {{link}}':
+    '正在新會話中執行該定時任務：{{link}}',
+  'This scheduled run could not be started: {{error}}':
+    '本次定時執行無法啟動：{{error}}',
 };

@@ -359,7 +359,26 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result!.mapping.method).toBe('_qwen/session/artifacts/remove');
     expect(
       result!.mapping.extractParams(result!.segments, undefined, 'DELETE'),
-    ).toEqual({ sessionId: 's8', artifactId: 'art 1' });
+    ).toEqual({
+      sessionId: 's8',
+      artifactId: 'art 1',
+    });
+    expect(
+      result!.mapping.extractParams(
+        result!.segments,
+        {
+          clientId: 'client-a',
+          sessionId: 'body-session',
+          artifactId: 'body-artifact',
+          deleteContent: true,
+        },
+        'DELETE',
+      ),
+    ).toEqual({
+      sessionId: 's8',
+      artifactId: 'art 1',
+      clientId: 'client-a',
+    });
   });
 
   it('POST /session/:id/recap maps to _qwen/session/recap', () => {

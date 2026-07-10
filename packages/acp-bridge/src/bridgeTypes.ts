@@ -62,6 +62,7 @@ export interface RewindResponse {
   targetTurnIndex: number;
   filesChanged: string[];
   filesFailed: string[];
+  warnings?: string[];
 }
 
 export interface BridgeSpawnRequest {
@@ -81,6 +82,7 @@ export interface BridgeSpawnRequest {
    * omitted, the bridge-wide default applies.
    */
   sessionScope?: 'single' | 'thread';
+  approvalMode?: ApprovalMode;
 }
 
 export interface BridgeSession {
@@ -107,8 +109,9 @@ export interface BridgeRestoreSessionRequest {
   workspaceCwd: string;
   /** Optional echo of a daemon-issued client id for this session. */
   clientId?: string;
-  /** Internal replay transport for `session/load`; defaults to ACP streaming. */
+  /** Internal replay transport for `session/load`; defaults to bulk response. */
   historyReplay?: 'stream' | 'response';
+  approvalMode?: ApprovalMode;
 }
 
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
@@ -123,11 +126,19 @@ export interface BridgeLoadReplayEnvelope {
   replayError?: string;
 }
 
-export type BridgeSessionState = LoadSessionResponse | ResumeSessionResponse;
+export type BridgeSessionState = (
+  | LoadSessionResponse
+  | ResumeSessionResponse
+) & {
+  artifactSnapshot?: unknown;
+  artifactSnapshotUnavailable?: unknown;
+};
 
 export interface BridgeRestoredSession extends BridgeSession {
   /** ACP state returned by `session/load` / `session/resume`. */
   state: BridgeSessionState;
+  /** Artifact restore warnings surfaced during session load/resume. */
+  artifactWarnings?: string[];
   /** True when response-mode history replay aborted after emitting a prefix. */
   partial?: true;
   /** Agent-provided replay failure detail when `partial` is true. */
@@ -207,7 +218,55 @@ export interface BridgeWorkspaceMemoryDreamResult {
   dedupedEntries: number;
 }
 
-/** Sparse summary used by `GET /workspace/:id/sessions`. */
+/**
+ * Wire-format mirror of `DaemonPendingInteraction*` in
+ * `packages/sdk-typescript/src/daemon/types.ts`; keep fields synchronized.
+ * Pending interaction details are exposed by live session status endpoints.
+ */
+export interface BridgePendingInteractionOption {
+  optionId: string;
+  label?: string;
+  kind?: string;
+}
+
+export interface BridgePendingPermissionInteraction {
+  requestId: string;
+  kind: 'permission';
+  createdAt: string;
+  action: {
+    type?: string;
+    title?: string;
+    content?: unknown;
+    locations?: unknown;
+    input?: unknown;
+  };
+  options: BridgePendingInteractionOption[];
+}
+
+export interface BridgePendingUserQuestion {
+  /** Key to use in `PermissionResponse.answers` when voting. */
+  answerKey: string;
+  header?: string;
+  question?: string;
+  options?: Array<{ label?: string; description?: string }>;
+  multiSelect?: boolean;
+  [key: string]: unknown;
+}
+
+export interface BridgePendingUserQuestionInteraction {
+  requestId: string;
+  kind: 'user_question';
+  createdAt: string;
+  title?: string;
+  questions: BridgePendingUserQuestion[];
+  options: BridgePendingInteractionOption[];
+}
+
+export type BridgePendingInteraction =
+  | BridgePendingPermissionInteraction
+  | BridgePendingUserQuestionInteraction;
+
+/** Wire-format mirror of the SDK's `DaemonSessionSummary`; keep fields synchronized. */
 export interface BridgeSessionSummary {
   sessionId: string;
   workspaceCwd: string;
@@ -216,6 +275,25 @@ export interface BridgeSessionSummary {
   displayName?: string;
   clientCount: number;
   hasActivePrompt: boolean;
+  /** True while a non-question permission request awaits a response. */
+  isWaitingForPermission?: boolean;
+  /** True while an ask_user_question request awaits a response. */
+  isWaitingForUserQuestion?: boolean;
+  /** Number of permission or user-question interactions awaiting a response. */
+  pendingInteractionCount?: number;
+  /** True when the most recently completed turn failed. */
+  hasTurnError?: boolean;
+  /** Present for live sessions in status and workspace-list responses. */
+  turnError?: {
+    message: string;
+    code?: string;
+    errorKind?: string;
+  };
+  /**
+   * Pending approvals/questions that can be resolved through the vote API.
+   * Present for live sessions in status and workspace-list responses.
+   */
+  pendingInteractions?: BridgePendingInteraction[];
   isArchived?: boolean;
   isPinned?: boolean;
   pinnedAt?: string;
@@ -571,7 +649,10 @@ export interface AcpSessionBridge {
    * List the structured artifacts registered for a live session. Throws
    * `SessionNotFoundError` when the id is unknown.
    */
-  getSessionArtifacts(sessionId: string): Promise<SessionArtifactsEnvelope>;
+  getSessionArtifacts(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionArtifactsEnvelope>;
 
   /**
    * Register a client-supplied artifact for the session. Client artifacts use

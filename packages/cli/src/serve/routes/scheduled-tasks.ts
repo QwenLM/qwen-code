@@ -47,6 +47,12 @@ const MAX_SCHEDULED_TASKS = MAX_JOBS;
 const MAX_PROMPT_LENGTH = 100_000;
 const MAX_NAME_LENGTH = 200;
 const MAX_CRON_LENGTH = 200;
+// A precondition is a short judgment instruction ("has anything landed on main
+// since yesterday?"), not a second prompt — the task's work belongs in `prompt`,
+// which the sub-session runs with a clean context. Capped well below
+// MAX_PROMPT_LENGTH: the condition is re-sent to the model on EVERY fire, in the
+// bound session, whether or not the task ends up running.
+const MAX_CONDITION_LENGTH = 10_000;
 
 /**
  * The slice of the session bridge this route needs: mint a task's dedicated
@@ -125,6 +131,8 @@ interface ScheduledTaskView {
   lastFiredAt: number | null;
   nextRunAt: number | null;
   sessionId: string | null;
+  runMode: 'shared' | 'isolated';
+  condition: string | null;
   runs: CronTaskRun[];
 }
 
@@ -159,6 +167,17 @@ function toView(task: DurableCronTask): ScheduledTaskView {
     sessionId:
       typeof task.sessionId === 'string' && task.sessionId.length > 0
         ? task.sessionId
+        : null,
+    // Absent runMode normalizes to 'shared' so the client never special-cases
+    // undefined (tool-created / legacy tasks omit it).
+    runMode: task.runMode === 'isolated' ? 'isolated' : 'shared',
+    // Absent (or stranded on a task that was switched back to 'shared') reads
+    // as "no precondition" — the same thing the fire path sees.
+    condition:
+      task.runMode === 'isolated' &&
+      typeof task.condition === 'string' &&
+      task.condition.length > 0
+        ? task.condition
         : null,
     // Absent runs (tool-created / never-fired) normalizes to [] so the client
     // never special-cases undefined.
@@ -297,8 +316,45 @@ export function registerScheduledTasksRoutes(
       });
       return;
     }
+    if (
+      body['runMode'] !== undefined &&
+      body['runMode'] !== 'shared' &&
+      body['runMode'] !== 'isolated'
+    ) {
+      res.status(400).json({
+        error: "`runMode` must be 'shared' or 'isolated'",
+        code: 'invalid_run_mode',
+      });
+      return;
+    }
     const recurring = body['recurring'] !== false;
     const enabled = body['enabled'] !== false;
+    const runMode = body['runMode'] === 'isolated' ? 'isolated' : 'shared';
+
+    const conditionResult = parseConditionField(body['condition']);
+    if (conditionResult.error) {
+      res
+        .status(400)
+        .json({ error: conditionResult.error, code: 'invalid_condition' });
+      return;
+    }
+    const condition = conditionResult.value;
+    if (condition !== undefined && runMode !== 'isolated') {
+      res.status(400).json(CONDITION_REQUIRES_ISOLATED);
+      return;
+    }
+    // A precondition is evaluated in the task's OWN session, and that is the
+    // whole contract: the check turn lands in a transcript nobody else writes
+    // to, and it is that transcript which records why a fire was withheld.
+    // Without a bridge there is no session to bind, so the check would instead
+    // be injected into whichever session happens to hold the shared durable
+    // lock — someone's live conversation. Refuse rather than silently relocate
+    // it. (`bridge` absent is a minimal embedding, not a user error, so the
+    // message says what is missing.)
+    if (condition !== undefined && !bridge) {
+      res.status(400).json(CONDITION_REQUIRES_BOUND_SESSION);
+      return;
+    }
 
     // Mint the task's dedicated session up front. The task is BOUND to it and
     // fires only inside it — its transcript becomes the task's run history, and
@@ -372,6 +428,9 @@ export function registerScheduledTasksRoutes(
       enabled,
       ...(boundSessionId !== undefined ? { sessionId: boundSessionId } : {}),
       ...(nameResult.value !== undefined ? { name: nameResult.value } : {}),
+      // Omit when 'shared' so tool-created / default tasks stay byte-identical.
+      ...(runMode === 'isolated' ? { runMode } : {}),
+      ...(condition !== undefined ? { condition } : {}),
     };
 
     // Best-effort teardown of the just-minted session when the create can't be
@@ -500,8 +559,37 @@ export function registerScheduledTasksRoutes(
       }
       patch.enabled = body['enabled'];
     }
+    if ('runMode' in body) {
+      if (body['runMode'] !== 'shared' && body['runMode'] !== 'isolated') {
+        res.status(400).json({
+          error: "`runMode` must be 'shared' or 'isolated'",
+          code: 'invalid_run_mode',
+        });
+        return;
+      }
+      // Switching mode only changes fire behavior; the child scheduler picks up
+      // the new runMode on its next file-watch reload (via durableTaskToJob). No
+      // anchor re-seat needed — the schedule itself is unchanged. Setting to
+      // 'shared' explicitly clears the field (same on-disk representation as
+      // legacy / default tasks — absent means 'shared').
+      patch.runMode = body['runMode'] === 'isolated' ? 'isolated' : undefined;
+    }
+    let clearCondition = false;
+    if ('condition' in body) {
+      const result = parseConditionField(body['condition']);
+      if (result.error) {
+        res
+          .status(400)
+          .json({ error: result.error, code: 'invalid_condition' });
+        return;
+      }
+      if (result.value === undefined) clearCondition = true;
+      else patch.condition = result.value;
+    }
+    // Whether this request has any say over the condition/runMode pairing.
+    const touchesGuard = 'condition' in body || 'runMode' in body;
 
-    if (Object.keys(patch).length === 0 && !clearName) {
+    if (Object.keys(patch).length === 0 && !clearName && !clearCondition) {
       res.status(400).json({
         error: 'No updatable fields provided',
         code: 'empty_patch',
@@ -512,6 +600,8 @@ export function registerScheduledTasksRoutes(
     let found = false;
     let updated: DurableCronTask | undefined;
     let blockedByArchive = false;
+    let conditionModeConflict = false;
+    let conditionNeedsBoundSession = false;
     try {
       await updateCronTasks(boundWorkspace, (tasks) => {
         const idx = tasks.findIndex((t) => t.id === id);
@@ -533,6 +623,40 @@ export function registerScheduledTasksRoutes(
         // `name: null/""` clears the field rather than storing an empty name,
         // so toView reports it as unnamed and isValidTask never sees a "".
         if (clearName) delete next.name;
+        if (clearCondition) delete next.condition;
+        // Judge the COMBINED state, not the patch alone: a condition can strand
+        // itself on a shared task from either side — by adding a condition to a
+        // shared task, or by switching a guarded isolated task back to shared
+        // without dropping its condition. Both are rejected rather than silently
+        // discarding the condition (data loss) or storing one that nothing will
+        // ever consult (a task the user thinks is guarded, firing on every
+        // tick). The Web Shell sends both fields on every save, so its "switch
+        // to shared" carries `condition: null` and never trips this.
+        //
+        // Gated on the request actually TOUCHING one of the two fields. Only a
+        // hand-edited tasks file can already be stranded (`isValidTask` accepts
+        // the shape; no writer produces it), and a task in that state must stay
+        // editable — a blanket check would 400 its enable/disable toggle, with
+        // an error about a field the request never mentioned.
+        if (
+          touchesGuard &&
+          next.condition !== undefined &&
+          next.runMode !== 'isolated'
+        ) {
+          conditionModeConflict = true;
+          return tasks; // no write
+        }
+        // Same invariant as create: a condition-bearing task must own the
+        // session its check runs in. `cron_create` mints unbound tasks, and a
+        // PATCH is the only way one of those could acquire a condition.
+        if (
+          touchesGuard &&
+          next.condition !== undefined &&
+          !(typeof next.sessionId === 'string' && next.sessionId.length > 0)
+        ) {
+          conditionNeedsBoundSession = true;
+          return tasks; // no write
+        }
         // Re-seat the task's schedule anchor to "now" whenever an edit would
         // otherwise let the scheduler retroactively fire an already-past slot.
         const justReEnabled =
@@ -597,6 +721,14 @@ export function registerScheduledTasksRoutes(
           'This task was disabled by archiving its session; unarchive the session to re-enable it.',
         code: 'task_session_archived',
       });
+      return;
+    }
+    if (conditionModeConflict) {
+      res.status(400).json(CONDITION_REQUIRES_ISOLATED);
+      return;
+    }
+    if (conditionNeedsBoundSession) {
+      res.status(400).json(CONDITION_REQUIRES_BOUND_SESSION);
       return;
     }
     if (!found || !updated) {
@@ -779,3 +911,49 @@ function parseNameField(raw: unknown): { value?: string; error?: string } {
   }
   return { value: trimmed };
 }
+
+/**
+ * Parses the optional `condition` field the same way `parseNameField` handles
+ * `name`:
+ *  - absent / null / whitespace-only → `{ value: undefined }` (no precondition,
+ *    and on PATCH: clear the existing one)
+ *  - a non-empty string within the cap → `{ value: trimmed }`
+ *  - anything else → `{ error }`
+ *
+ * Trimming to `undefined` rather than `''` is load-bearing: `isValidTask`
+ * rejects an empty-string condition precisely because the fire path's truthy
+ * check would silently ignore it.
+ */
+function parseConditionField(raw: unknown): { value?: string; error?: string } {
+  if (raw === undefined || raw === null) return { value: undefined };
+  if (typeof raw !== 'string') {
+    return { error: '`condition` must be a string' };
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return { value: undefined };
+  if (trimmed.length > MAX_CONDITION_LENGTH) {
+    return {
+      error: `\`condition\` exceeds ${MAX_CONDITION_LENGTH}-character limit`,
+    };
+  }
+  return { value: trimmed };
+}
+
+/** Rejected on both create and update: a precondition only gates the isolated
+ * dispatch, so on a `'shared'` task it would be stored, shown, and never
+ * consulted. Fail the request instead of silently dropping the user's text. */
+const CONDITION_REQUIRES_ISOLATED = {
+  error: "`condition` is only supported when `runMode` is 'isolated'",
+  code: 'condition_requires_isolated',
+} as const;
+
+/** A precondition is evaluated in the task's own bound session. A task with no
+ * `sessionId` (tool-created via `cron_create`, or created while no session
+ * bridge was available) fires through the shared per-project durable owner, so
+ * its check would run inside an unrelated session. Rejected on both create and
+ * update rather than quietly relocating the check. */
+const CONDITION_REQUIRES_BOUND_SESSION = {
+  error:
+    '`condition` requires a task bound to its own session; this task has none',
+  code: 'condition_requires_bound_session',
+} as const;

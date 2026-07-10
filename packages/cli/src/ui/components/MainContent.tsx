@@ -7,6 +7,7 @@
 import { Box, Static, type DOMElement, useBoxMetrics } from 'ink';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
+import { isHistoryItemVisibleAfterRestore } from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
@@ -19,7 +20,7 @@ import {
   countMarkdownSourceBlocks,
   type MarkdownSourceCopyIndexOffsets,
 } from '../utils/MarkdownDisplay.js';
-import { buildThinkingFullTextMap } from '../utils/historyUtils.js';
+import { buildThoughtHeadIdMap } from '../utils/historyUtils.js';
 import { ScrollableList, SCROLL_TO_ITEM_END } from './shared/ScrollableList.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
@@ -92,6 +93,7 @@ const virtualIsStaticItem = (item: HistoryItem) => item.id > 0;
 export const MainContent = () => {
   const { version } = useAppContext();
   const uiState = useUIState();
+  const showScrollbar = uiState.showScrollbar ?? true;
   const {
     pendingHistoryItems,
     terminalWidth,
@@ -103,7 +105,7 @@ export const MainContent = () => {
 
   // Filter out items whose display is suppressed (e.g. /history collapse).
   const visibleHistory = useMemo(
-    () => uiState.history.filter((item) => !item.display?.suppressOnRestore),
+    () => uiState.history.filter(isHistoryItemVisibleAfterRestore),
     [uiState.history],
   );
 
@@ -276,12 +278,12 @@ export const MainContent = () => {
     return map;
   }, [historyItemsWithSourceCopyOffsets]);
 
-  const thinkingFullTextByItem = useMemo(
-    () => buildThinkingFullTextMap(visibleHistory),
+  const thoughtHeadIdByItem = useMemo(
+    () => buildThoughtHeadIdMap(visibleHistory),
     [visibleHistory],
   );
-  const thinkingFullTextByItemRef = useRef(thinkingFullTextByItem);
-  thinkingFullTextByItemRef.current = thinkingFullTextByItem;
+  const thoughtHeadIdByItemRef = useRef(thoughtHeadIdByItem);
+  thoughtHeadIdByItemRef.current = thoughtHeadIdByItem;
 
   const pendingSourceCopyOffsetsByIndex = useMemo(
     () =>
@@ -359,7 +361,7 @@ export const MainContent = () => {
           isPending={false}
           commands={uiState.slashCommands}
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-          thinkingFullText={thinkingFullTextByItemRef.current.get(item)}
+          thoughtHeadId={thoughtHeadIdByItemRef.current.get(item)}
         />
       );
     },
@@ -398,6 +400,7 @@ export const MainContent = () => {
             initialScrollIndex={SCROLL_TO_ITEM_END}
             isStaticItem={virtualIsStaticItem}
             containerHeight={scrollContainerHeight}
+            showScrollbar={showScrollbar}
           />
           <ShowMoreLines constrainHeight={uiState.constrainHeight} />
         </OverflowProvider>
@@ -430,7 +433,7 @@ export const MainContent = () => {
                 isPending={false}
                 commands={uiState.slashCommands}
                 sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-                thinkingFullText={thinkingFullTextByItem.get(h)}
+                thoughtHeadId={thoughtHeadIdByItem.get(h)}
               />
             ),
           ),

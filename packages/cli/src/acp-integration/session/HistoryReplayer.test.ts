@@ -679,6 +679,25 @@ describe('HistoryReplayer', () => {
       });
     });
 
+    it('should replay structured artifacts from stored tool results', async () => {
+      const record = createToolResultRecord('read_file', 'File contents here');
+      const artifacts = [
+        {
+          title: 'Replay artifact',
+          url: 'https://example.com/replayed',
+        },
+      ];
+      record.toolCallResult!.artifacts = artifacts;
+
+      await replayer.replay([record]);
+
+      expect(sentUpdates()[0]).toMatchObject({
+        _meta: {
+          artifacts,
+        },
+      });
+    });
+
     it('should emit failed status for tool results with errors', async () => {
       const records = [createToolResultRecord('failing_tool', undefined, true)];
 

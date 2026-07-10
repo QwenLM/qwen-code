@@ -199,6 +199,7 @@ export default {
   'toolDisplayName.CronList': 'toolDisplayName.CronList',
   'toolDisplayName.CronDelete': 'toolDisplayName.CronDelete',
   'toolDisplayName.LoopWakeup': 'toolDisplayName.LoopWakeup',
+  'toolDisplayName.CreateSubSession': 'toolDisplayName.CreateSubSession',
   'toolDisplayName.TaskCreate': 'toolDisplayName.TaskCreate',
   'toolDisplayName.TaskUpdate': 'toolDisplayName.TaskUpdate',
   'toolDisplayName.TaskList': 'toolDisplayName.TaskList',
@@ -266,7 +267,7 @@ export default {
   'to search history': 'to search history',
   'to paste images': 'to paste images',
   'for external editor': 'for external editor',
-  'to toggle compact mode': 'to toggle compact mode',
+  'to view transcript': 'to view transcript',
   'Jump through words in the input': 'Jump through words in the input',
   'Close dialogs, cancel requests, or quit application':
     'Close dialogs, cancel requests, or quit application',
@@ -486,6 +487,42 @@ export default {
   'Delete {{name}}': 'Delete {{name}}',
   'Unknown Step': 'Unknown Step',
   'Esc to close': 'Esc to close',
+  Transcript: 'Transcript',
+  'to close': 'to close',
+  'to scroll': 'to scroll',
+  'Failed to render transcript.': 'Failed to render transcript.',
+  'Read {{count}} file': 'Read {{count}} file',
+  'Read {{count}} files': 'Read {{count}} files',
+  'Reading {{count}} file': 'Reading {{count}} file',
+  'Reading {{count}} files': 'Reading {{count}} files',
+  'Edited {{count}} file': 'Edited {{count}} file',
+  'Edited {{count}} files': 'Edited {{count}} files',
+  'Editing {{count}} file': 'Editing {{count}} file',
+  'Editing {{count}} files': 'Editing {{count}} files',
+  'Wrote {{count}} file': 'Wrote {{count}} file',
+  'Wrote {{count}} files': 'Wrote {{count}} files',
+  'Writing {{count}} file': 'Writing {{count}} file',
+  'Writing {{count}} files': 'Writing {{count}} files',
+  'Searched {{count}} pattern': 'Searched {{count}} pattern',
+  'Searched {{count}} patterns': 'Searched {{count}} patterns',
+  'Searching {{count}} pattern': 'Searching {{count}} pattern',
+  'Searching {{count}} patterns': 'Searching {{count}} patterns',
+  'Listed {{count}} directory': 'Listed {{count}} directory',
+  'Listed {{count}} directories': 'Listed {{count}} directories',
+  'Listing {{count}} directory': 'Listing {{count}} directory',
+  'Listing {{count}} directories': 'Listing {{count}} directories',
+  'Ran {{count}} command': 'Ran {{count}} command',
+  'Ran {{count}} commands': 'Ran {{count}} commands',
+  'Running {{count}} command': 'Running {{count}} command',
+  'Running {{count}} commands': 'Running {{count}} commands',
+  'Ran {{count}} agent': 'Ran {{count}} agent',
+  'Ran {{count}} agents': 'Ran {{count}} agents',
+  'Running {{count}} agent': 'Running {{count}} agent',
+  'Running {{count}} agents': 'Running {{count}} agents',
+  'Used {{count}} tool': 'Used {{count}} tool',
+  'Used {{count}} tools': 'Used {{count}} tools',
+  'Using {{count}} tool': 'Using {{count}} tool',
+  'Using {{count}} tools': 'Using {{count}} tools',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter to select, ↑↓ to navigate, Esc to close',
   'Esc to go back': 'Esc to go back',
@@ -1865,8 +1902,6 @@ export default {
     'You can switch permission mode quickly with Tab or /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Try /insight to generate personalized insights from your chat history.',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Add a QWEN.md file to give Qwen Code persistent project context.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -2379,10 +2414,6 @@ export default {
     'Raw mode not available. Please run in an interactive terminal.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
-  'Press Ctrl+O to show full tool output':
-    'Press Ctrl+O to show full tool output',
   'Switch to plan mode or exit plan mode':
     'Switch to plan mode or exit plan mode',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
@@ -2553,6 +2584,54 @@ export default {
   reqs: 'reqs',
   in: 'in',
   out: 'out',
+
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Check for Qwen Code updates and install if available',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Qwen Code update available! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'A new version of Qwen Code is available! {{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!':
+    'Qwen Code {{version}} is up to date!',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'Failed to check for updates. Please check your network or registry configuration.',
+  'Unable to check for updates: {{reason}}':
+    'Unable to check for updates: {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    'Update successful! The new version will be used on your next run.',
+  'Update downloaded. It will be applied after you exit this session.':
+    'Update downloaded. It will be applied after you exit this session.',
+  'Update failed: {{error}}': 'Update failed: {{error}}',
+  'Downloading update...': 'Downloading update...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.',
+  'Automatic update failed. Please try updating manually.':
+    'Automatic update failed. Please try updating manually.',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Automatic update failed: {{error}}. Re-run the installer to update manually.',
+  'Running from a local git clone. Please update with "git pull".':
+    'Running from a local git clone. Please update with "git pull".',
+  'Running via npx, update not applicable.':
+    'Running via npx, update not applicable.',
+  'Running via pnpx, update not applicable.':
+    'Running via pnpx, update not applicable.',
+  'Running via bunx, update not applicable.':
+    'Running via bunx, update not applicable.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Installed via Homebrew. Please update with "brew upgrade".',
+  "Locally installed. Please update via your project's package.json.":
+    "Locally installed. Please update via your project's package.json.",
+  'Update requires sudo. Please run:': 'Update requires sudo. Please run:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'Standalone install detected. Attempting to automatically update now...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'Standalone install detected. Please rerun the standalone installer to update:',
+  'Run the following to update:': 'Run the following to update:',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'Unable to auto-update this standalone installation. Please reinstall from:',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Manual update required. Please reinstall Qwen Code.',
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.',
 
@@ -2585,4 +2664,17 @@ export default {
     'Failed to refresh extension content. Run /reload-plugins to apply updates.',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Precondition check': 'Precondition check',
+  'Precondition not met — this scheduled run was skipped.':
+    'Precondition not met — this scheduled run was skipped.',
+  'The precondition check was cancelled — this scheduled run was skipped.':
+    'The precondition check was cancelled — this scheduled run was skipped.',
+  'The precondition check was interrupted — this scheduled run was skipped.':
+    'The precondition check was interrupted — this scheduled run was skipped.',
+  'The precondition check failed — this scheduled run was skipped.':
+    'The precondition check failed — this scheduled run was skipped.',
+  'Running this scheduled task in a new session: {{link}}':
+    'Running this scheduled task in a new session: {{link}}',
+  'This scheduled run could not be started: {{error}}':
+    'This scheduled run could not be started: {{error}}',
 };

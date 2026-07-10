@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { X509Certificate } from 'node:crypto';
+import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs';
 import type { Server } from 'node:http';
 import * as https from 'node:https';
@@ -41,6 +41,9 @@ import type {
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
+// Dynamic-imported below (not at module scope) so the serve fast-path bundle
+// closure check doesn't trace create-sub-session's transitive deps through
+// the run-qwen-serve chunk. The launcher is only needed after listen().
 import { PathMutexRegistry } from './fs/path-mutex-registry.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
@@ -100,13 +103,14 @@ import type {
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
 import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
+import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import { channelSelectionNames } from './channel-selection.js';
 import {
   finalizeStartupProfile,
   profileCheckpoint,
 } from '../utils/startupProfiler.js';
 import type { ServiceInfo } from '../commands/channel/pidfile.js';
-import { findCliEntryPath } from '../commands/channel/cli-entry-path.js';
+import { sanitizeLogText } from '@qwen-code/channel-base';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 
 // Reverse MCP channel; enabled only by explicit option or env opt-in.
@@ -170,6 +174,10 @@ type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
 };
 type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
+type ChannelWebhookConfigRuntime = {
+  loadChannelsConfig: typeof import('../commands/channel/runtime.js').loadChannelsConfig;
+  parseChannelWebhookConfig: typeof import('../commands/channel/config-utils.js').parseChannelWebhookConfig;
+};
 
 function isPositiveIntegerMs(value: number): boolean {
   return Number.isFinite(value) && Number.isInteger(value) && value > 0;
@@ -458,6 +466,12 @@ export function extractContextFilename(value: unknown): string | undefined {
   return undefined;
 }
 
+function sessionArtifactsPersistenceAvailableFromSettings(
+  settings: { general?: { chatRecording?: unknown } } | undefined,
+): boolean {
+  return settings?.general?.chatRecording !== false;
+}
+
 /**
  * Per-workspace promise chain that serializes settings read-modify-write
  * cycles inside this process.
@@ -533,6 +547,7 @@ type ChannelWorkerRuntime = {
     opts: CreateChannelWorkerSupervisorOptions,
   ): ChannelWorkerSupervisor;
   channelServicePidfile: ChannelServicePidfile;
+  findCliEntryPath(): string;
 };
 
 let channelWorkerRuntimePromise: Promise<ChannelWorkerRuntime> | undefined;
@@ -540,10 +555,12 @@ async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
   channelWorkerRuntimePromise ??= Promise.all([
     import('./channel-worker-supervisor.js'),
     import('../commands/channel/pidfile.js'),
+    import('../commands/channel/cli-entry-path.js'),
   ])
-    .then(([supervisor, pidfile]) => ({
+    .then(([supervisor, pidfile, cliEntryPath]) => ({
       createChannelWorkerSupervisor: supervisor.createChannelWorkerSupervisor,
       channelServicePidfile: pidfile,
+      findCliEntryPath: cliEntryPath.findCliEntryPath,
     }))
     .catch((err: unknown) => {
       channelWorkerRuntimePromise = undefined;
@@ -552,7 +569,7 @@ async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
   return channelWorkerRuntimePromise;
 }
 
-function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
+export function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
   const snapshot = {
     enabled: false,
     state: 'disabled' as const,
@@ -561,8 +578,17 @@ function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
   return {
     async start() {},
     async stop() {},
+    async restart() {
+      return { ...snapshot, channels: [] };
+    },
     killAllSync() {},
     snapshot: () => ({ ...snapshot, channels: [] }),
+    async enqueueWebhookTask() {
+      throw new ChannelWebhookEnqueueError(
+        'channel_worker_unavailable',
+        'Channel worker is not running.',
+      );
+    },
   };
 }
 
@@ -756,6 +782,25 @@ function loadSettingsRuntimeModules(): Promise<{
   return settingsRuntimePromise;
 }
 
+let channelWebhookConfigRuntimePromise:
+  | Promise<ChannelWebhookConfigRuntime>
+  | undefined;
+function loadChannelWebhookConfigRuntime(): Promise<ChannelWebhookConfigRuntime> {
+  channelWebhookConfigRuntimePromise ??= Promise.all([
+    import('../commands/channel/runtime.js'),
+    import('../commands/channel/config-utils.js'),
+  ])
+    .then(([channelRuntime, configUtils]) => ({
+      loadChannelsConfig: channelRuntime.loadChannelsConfig,
+      parseChannelWebhookConfig: configUtils.parseChannelWebhookConfig,
+    }))
+    .catch((err: unknown) => {
+      channelWebhookConfigRuntimePromise = undefined;
+      throw err;
+    });
+  return channelWebhookConfigRuntimePromise;
+}
+
 async function loadServeRuntimeModules() {
   const [
     serverModule,
@@ -834,6 +879,8 @@ function sessionIdleTimeoutMs(value: number | undefined): number {
 function currentServeFeaturesForRunQwenServe(
   opts: ServeOptions,
   sessionShellCommandEnabled: boolean,
+  sessionArtifactsPersistenceAvailable: boolean,
+  env: Readonly<Record<string, string | undefined>>,
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
     requireAuth: opts.requireAuth === true,
@@ -848,16 +895,15 @@ function currentServeFeaturesForRunQwenServe(
       : {}),
     persistSettingAvailable: true,
     sessionShellCommandEnabled,
+    sessionArtifactsPersistenceAvailable,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
+    channelReloadAvailable: opts.channelSelection !== undefined,
     // Advertise the same WS feature flags as the runtime path (serve-features.ts)
     // so the bootstrap `/capabilities` window doesn't briefly under-report them.
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
-    browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
-      opts,
-      process.env,
-    ),
+    browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts, env),
   });
 }
 
@@ -866,7 +912,9 @@ function createBootstrapCapabilities(input: {
   boundWorkspace: string;
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
+  sessionArtifactsPersistenceAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
+  env: Readonly<Record<string, string | undefined>>;
 }): CapabilitiesEnvelope {
   return {
     v: CAPABILITIES_SCHEMA_VERSION,
@@ -878,6 +926,8 @@ function createBootstrapCapabilities(input: {
     features: currentServeFeaturesForRunQwenServe(
       input.opts,
       input.sessionShellCommandEnabled,
+      input.sessionArtifactsPersistenceAvailable,
+      input.env,
     ),
     modelServices: [],
     workspaceCwd: input.boundWorkspace,
@@ -1053,6 +1103,7 @@ function createBootstrapServeApp(input: {
   daemonLog: DaemonLogger;
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
+  sessionArtifactsPersistenceAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   multiWorkspaceCapabilitiesRequireRuntime: boolean;
   getRuntimeError: () => string | undefined;
@@ -1069,6 +1120,7 @@ function createBootstrapServeApp(input: {
     daemonLog,
     qwenCodeVersion,
     sessionShellCommandEnabled,
+    sessionArtifactsPersistenceAvailable,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime,
     getRuntimeError,
@@ -1134,7 +1186,9 @@ function createBootstrapServeApp(input: {
         boundWorkspace,
         qwenCodeVersion,
         sessionShellCommandEnabled,
+        sessionArtifactsPersistenceAvailable,
         permissionPolicy,
+        env: process.env,
       }),
     );
   });
@@ -1215,6 +1269,8 @@ function createBootstrapServeApp(input: {
         features: currentServeFeaturesForRunQwenServe(
           opts,
           sessionShellCommandEnabled,
+          sessionArtifactsPersistenceAvailable,
+          process.env,
         ),
       },
       runtime: {
@@ -1295,6 +1351,7 @@ function createDelegatingServeApp(
     startRuntime?: () => void;
     runtimeReady?: Promise<void>;
     authenticateDeferredRuntimeRequest?: RequestHandler;
+    authenticateDeferredChannelWebhookRequest?: RequestHandler;
   } = {},
 ): Application {
   const app = express();
@@ -1309,16 +1366,15 @@ function createDelegatingServeApp(
         options.startRuntime &&
         options.runtimeReady
       ) {
-        if (
-          options.authenticateDeferredRuntimeRequest &&
-          !runSynchronousRequestGate(
-            options.authenticateDeferredRuntimeRequest,
-            req,
-            res,
-            next,
-          )
-        ) {
-          return;
+        const webhookRequest = isChannelWebhookRequest(req);
+        const authGate = webhookRequest
+          ? (options.authenticateDeferredChannelWebhookRequest ??
+            options.authenticateDeferredRuntimeRequest)
+          : options.authenticateDeferredRuntimeRequest;
+        if (authGate) {
+          if (!runSynchronousRequestGate(authGate, req, res, next)) {
+            return;
+          }
         }
         options.startRuntime();
         try {
@@ -1346,6 +1402,104 @@ function isBootstrapServeRoute(req: Request): boolean {
       ? req.path.slice(0, -1)
       : req.path;
   return BOOTSTRAP_SERVE_PATHS.has(path);
+}
+
+function isChannelWebhookRequest(req: Request): boolean {
+  return (
+    req.method === 'POST' &&
+    /^\/channels\/[^/]+\/webhooks\/[^/]+\/?$/u.test(req.path)
+  );
+}
+
+function createDeferredChannelWebhookAuth(
+  workspace: string,
+  runtime: ChannelWebhookConfigRuntime,
+  daemonLog: Pick<DaemonLogger, 'warn'>,
+): RequestHandler {
+  return (req, res, next) => {
+    const match = /^\/channels\/([^/]+)\/webhooks\/([^/]+)\/?$/u.exec(req.path);
+    const channelName = decodeDeferredWebhookPathSegment(match?.[1]);
+    const source = decodeDeferredWebhookPathSegment(match?.[2]);
+    if (!channelName || !source) {
+      daemonLog.warn('deferred webhook auth failed', {
+        channelName: channelName ?? 'unknown',
+        source: source ?? 'unknown',
+        reason: 'invalid webhook path',
+      });
+      res.status(401).json({ error: 'Invalid webhook secret' });
+      return;
+    }
+
+    const secret = readDeferredWebhookSecret(
+      runtime,
+      workspace,
+      channelName,
+      source,
+    );
+    if (!matchesWebhookSecret(req.get('x-qwen-webhook-secret'), secret)) {
+      daemonLog.warn('deferred webhook auth failed', {
+        channelName,
+        source,
+        reason: secret ? 'secret mismatch' : 'source not configured',
+      });
+      res.status(401).json({ error: 'Invalid webhook secret' });
+      return;
+    }
+
+    next();
+  };
+}
+
+function decodeDeferredWebhookPathSegment(
+  segment: string | undefined,
+): string | undefined {
+  if (segment === undefined) return undefined;
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return undefined;
+  }
+}
+
+function readDeferredWebhookSecret(
+  runtime: ChannelWebhookConfigRuntime,
+  workspace: string,
+  channelName: string,
+  source: string,
+): string | undefined {
+  try {
+    const rawConfig = runtime.loadChannelsConfig(workspace)[channelName];
+    if (typeof rawConfig !== 'object' || rawConfig === null) {
+      return undefined;
+    }
+    return runtime.parseChannelWebhookConfig(
+      channelName,
+      rawConfig as Record<string, unknown>,
+    )?.sources[source]?.secret;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    writeStderrLine(
+      `[webhook-secret] failed to read deferred webhook secret for ${sanitizeLogText(channelName, 128)}/${sanitizeLogText(source, 128)}: ${sanitizeLogText(reason, 512)}`,
+    );
+    return undefined;
+  }
+}
+
+function matchesWebhookSecret(
+  candidate: string | undefined,
+  expected: string | undefined,
+): boolean {
+  if (
+    typeof candidate !== 'string' ||
+    typeof expected !== 'string' ||
+    expected.length === 0
+  ) {
+    return false;
+  }
+
+  const expectedDigest = createHash('sha256').update(expected).digest();
+  const candidateDigest = createHash('sha256').update(candidate).digest();
+  return timingSafeEqual(expectedDigest, candidateDigest);
 }
 
 function isCorsPreflightRequest(req: Request): boolean {
@@ -1802,9 +1956,12 @@ export async function runQwenServe(
   let permissionPolicy: PermissionPolicy | undefined;
   let permissionConsensusQuorum: number | undefined;
   let bootSettings: ServeFastPathSettings | undefined;
+  let sessionArtifactsPersistenceAvailable = true;
   try {
     bootSettings =
       deps.bootSettings ?? loadServeFastPathSettings(boundWorkspace);
+    sessionArtifactsPersistenceAvailable =
+      sessionArtifactsPersistenceAvailableFromSettings(bootSettings);
     contextFilenameForInit = extractContextFilename(
       bootSettings.context?.fileName,
     );
@@ -2076,6 +2233,7 @@ export async function runQwenServe(
   let channelWorker: ChannelWorkerSupervisor =
     createDisabledChannelWorkerSupervisor();
   const getChannelWorkerSnapshot = () => channelWorker.snapshot();
+  const reloadChannelWorker = () => channelWorker.restart();
   const writeChannelWorkerPidfile = (
     snapshot = channelWorker.snapshot(),
     options: { clearWorkerPid?: boolean } = {},
@@ -2536,12 +2694,27 @@ export async function runQwenServe(
           );
         }
       });
+    // `create_sub_session` tool: spawn a fresh top-level sub-session on request
+    // from a child's agent turn and (for 'first-turn') return its result.
+    // Dynamic-imported (not at module scope) so the serve fast-path bundle
+    // closure check doesn't trace create-sub-session's transitive deps.
+    const { createSubSessionLauncher } = await import(
+      './create-sub-session.js'
+    );
+    // Late-binds the bridge (constructed just below) via `() => bridgeRef`. Only
+    // wired on the daemon-created bridge — an injected `deps.bridge` (embed/test)
+    // brings its own options.
+    const subSessionLauncher = createSubSessionLauncher({
+      getBridge: () => bridgeRef,
+      boundWorkspace,
+    });
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
         // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
+        onCreateSubSession: subSessionLauncher.launch,
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
@@ -2747,6 +2920,11 @@ export async function runQwenServe(
       };
     };
 
+    // Collects stop() callbacks from every per-workspace sub-session launcher
+    // (primary + secondaries). Called during shutdown so no new sub-sessions
+    // are admitted while bridges are being torn down.
+    const subSessionStoppers: Array<() => void> = [];
+
     for (const workspaceInput of workspaceInputs.slice(1)) {
       let secondarySettings:
         | ReturnType<SettingsRuntime['loadSettings']>
@@ -2809,8 +2987,20 @@ export async function runQwenServe(
           : {}),
       });
       const secondaryClientMcpSenderRegistry = new ClientMcpSenderRegistry();
+      // Wire sub-session support for the secondary workspace too — without
+      // this, isolated scheduled tasks and create_sub_session calls from
+      // sessions bound to a secondary workspace hit methodNotFound.
+      // eslint-disable-next-line prefer-const -- assigned once after bridge creation; `let` required because the launcher closure captures it before the assignment.
+      let secondaryBridgeRef:
+        | ReturnType<typeof runtime.createAcpSessionBridge>
+        | undefined;
+      const secondarySubSessionLauncher = createSubSessionLauncher({
+        getBridge: () => secondaryBridgeRef,
+        boundWorkspace: workspaceInput.cwd,
+      });
       const secondaryBridge = runtime.createAcpSessionBridge({
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
+        onCreateSubSession: secondarySubSessionLauncher.launch,
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
@@ -2856,8 +3046,10 @@ export async function runQwenServe(
             fresh.setValue(WORKSPACE_SETTING_SCOPE, 'tools.approvalMode', mode);
           }),
       });
+      secondaryBridgeRef = secondaryBridge;
       runtimeBridges.push(secondaryBridge);
       internalRuntimeBridgesForCleanup.push(secondaryBridge);
+      subSessionStoppers.push(secondarySubSessionLauncher.stop);
       const secondaryWorkspaceService = runtime.createDaemonWorkspaceService({
         boundWorkspace: workspaceInput.cwd,
         contextFilename: contextFilenameForInit ?? 'QWEN.md',
@@ -3120,6 +3312,12 @@ export async function runQwenServe(
       primaryRuntimeEnv,
       daemonLog,
       getChannelWorkerSnapshot,
+      enqueueChannelWebhookTask: (task) =>
+        channelWorker.enqueueWebhookTask(task),
+      // Gate both the `channel_reload` capability and the reload route on the
+      // presence of this dep, so it is advertised only when a channel worker
+      // exists to reload.
+      ...(opts.channelSelection ? { reloadChannelWorker } : {}),
       getPerfSnapshot: () => ({
         eventLoop: currentDaemonEventLoopMonitor.snapshot(),
         promptQueueWait: {
@@ -3147,6 +3345,10 @@ export async function runQwenServe(
       persistDisabledTools: persistDisabledToolsFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
+      sessionArtifactsPersistenceAvailable:
+        sessionArtifactsPersistenceAvailableFromSettings(
+          runtimeBootSettings?.merged,
+        ),
       installAuthProvider: (req) =>
         withSettingsLock(
           boundWorkspace,
@@ -3192,6 +3394,14 @@ export async function runQwenServe(
           },
         ),
     });
+    // Park the sub-session launcher's stop on app.locals so the close handler
+    // can flip it off before tearing down the bridge it spawns into (symmetric
+    // with stopScheduledTaskKeepalive). Defensive: a launch during drain would
+    // otherwise just fail its spawnOrAttach against the shutting-down bridge.
+    (
+      app.locals as { subSessionStoppers?: Array<() => void> }
+    ).subSessionStoppers = subSessionStoppers;
+    subSessionStoppers.push(subSessionLauncher.stop);
     return { app, bridge };
   };
 
@@ -3216,6 +3426,7 @@ export async function runQwenServe(
     daemonLog,
     qwenCodeVersion: cliVersion,
     sessionShellCommandEnabled,
+    sessionArtifactsPersistenceAvailable,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime: workspaceInputs.length > 1,
     getRuntimeError: () => runtimeStartupError,
@@ -3224,6 +3435,13 @@ export async function runQwenServe(
       ? () => startRuntimeAfterHealth?.()
       : undefined,
   });
+  const deferredChannelWebhookAuth = deferRuntimeUntilFirstHealth
+    ? createDeferredChannelWebhookAuth(
+        boundWorkspace,
+        await loadChannelWebhookConfigRuntime(),
+        daemonLog,
+      )
+    : undefined;
   const app =
     runtimeApp ??
     createDelegatingServeApp(bootstrapApp, () => runtimeApp, {
@@ -3231,6 +3449,7 @@ export async function runQwenServe(
       startRuntime: () => startRuntimeForRequest?.(),
       runtimeReady,
       authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
+      authenticateDeferredChannelWebhookRequest: deferredChannelWebhookAuth,
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
@@ -3332,7 +3551,8 @@ export async function runQwenServe(
           const createSupervisor =
             deps.channelWorkerSupervisorFactory ??
             channelRuntime?.createChannelWorkerSupervisor;
-          if (!createSupervisor) {
+          const findCliEntryPath = channelRuntime?.findCliEntryPath;
+          if (!createSupervisor || !findCliEntryPath) {
             throw new Error(
               'Channel worker supervisor runtime is not available.',
             );
@@ -3704,6 +3924,15 @@ export async function runQwenServe(
             (
               app.locals as { stopScheduledTaskKeepalive?: () => void }
             ).stopScheduledTaskKeepalive?.();
+            // Same rationale for the create_sub_session launchers: stop accepting
+            // new sub-session spawns before the bridges are torn down. Calls
+            // every workspace's launcher stop (primary + secondaries).
+            const stoppers = (
+              app.locals as { subSessionStoppers?: Array<() => void> }
+            ).subSessionStoppers;
+            if (stoppers) {
+              for (const stop of stoppers) stop();
+            }
             clearRuntimeStartAfterHealthTimer();
             clearRuntimeStartFallbackTimer();
             cancelDeferredRuntimeStartup();

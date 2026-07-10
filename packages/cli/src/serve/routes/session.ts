@@ -63,6 +63,10 @@ import {
 } from '../server/session-export.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import { requireSessionRuntime } from './session-runtime.js';
+import {
+  resolveWorkspaceRuntimeFromParam,
+  sendUntrustedWorkspaceResponse,
+} from '../workspace-route-runtime.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -79,6 +83,19 @@ interface RegisterSessionRoutesDeps {
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
   languageCodes: string[];
+}
+
+function requireSessionArtifactClientId(
+  clientId: string | undefined,
+  res: Response,
+): clientId is string {
+  if (clientId !== undefined) return true;
+  res.status(403).json({
+    error: 'Session artifact access requires a session-bound client id',
+    code: 'client_id_required',
+    errorKind: 'client_id_required',
+  });
+  return false;
 }
 
 function sendArtifactValidationError(res: Response, err: unknown): boolean {
@@ -114,6 +131,28 @@ function sendSessionOrganizationError(res: Response, err: unknown): boolean {
     ...(err.field !== undefined ? { field: err.field } : {}),
   });
   return true;
+}
+
+function parseOptionalApprovalMode(
+  body: Record<string, unknown>,
+  res: Response,
+): ApprovalMode | undefined | null {
+  const rawApprovalMode = body['approvalMode'];
+  if (rawApprovalMode === undefined) {
+    return undefined;
+  }
+  if (
+    typeof rawApprovalMode !== 'string' ||
+    !APPROVAL_MODES.includes(rawApprovalMode as ApprovalMode)
+  ) {
+    res.status(400).json({
+      error: '`approvalMode` must be a known approval mode when provided',
+      code: 'invalid_approval_mode',
+      allowed: APPROVAL_MODES,
+    });
+    return null;
+  }
+  return rawApprovalMode as ApprovalMode;
 }
 
 export function registerSessionRoutes(
@@ -210,10 +249,9 @@ export function registerSessionRoutes(
         workspaceId: runtime.workspaceId,
         workspaceCwd: runtime.workspaceCwd,
       });
-      res.status(403).json({
-        error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
-        code: 'untrusted_workspace',
+      sendUntrustedWorkspaceResponse(res, {
         workspaceCwd: runtime.workspaceCwd,
+        workspaceId: runtime.workspaceId,
       });
       return undefined;
     }
@@ -270,6 +308,29 @@ export function registerSessionRoutes(
       parsed >= 0 &&
       parsed <= Number.MAX_SAFE_INTEGER
     );
+  };
+
+  const requireTrustedRuntimeForWorkspaceRoute = (
+    req: Request,
+    res: Response,
+    route: string,
+  ): WorkspaceRuntime | null => {
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      workspaceRegistry,
+      req,
+      res,
+      'workspace',
+    );
+    if (runtime === null) return null;
+    if (!runtime.trusted) {
+      logSessionRoutingFailure(route, 'untrusted_workspace', {
+        workspaceId: runtime.workspaceId,
+        workspaceCwd: runtime.workspaceCwd,
+      });
+      sendUntrustedWorkspaceResponse(res);
+      return null;
+    }
+    return runtime;
   };
 
   const sendAmbiguousSessionOwner = (
@@ -401,9 +462,7 @@ export function registerSessionRoutes(
         workspaceId: runtime.workspaceId,
         workspaceCwd: runtime.workspaceCwd,
       });
-      res.status(403).json({
-        error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
-        code: 'untrusted_workspace',
+      sendUntrustedWorkspaceResponse(res, {
         workspaceCwd: runtime.workspaceCwd,
         workspaceId: runtime.workspaceId,
       });
@@ -549,12 +608,7 @@ export function registerSessionRoutes(
     }
     const key = canonicalizeWorkspace(workspaceCwd);
     if (key !== boundWorkspace) {
-      res.status(400).json({
-        error: `Workspace mismatch: daemon is bound to "${boundWorkspace}"`,
-        code: 'workspace_mismatch',
-        boundWorkspace,
-        requestedWorkspace: key,
-      });
+      sendWorkspaceMismatch(res, key);
       return null;
     }
     return key;
@@ -610,6 +664,8 @@ export function registerSessionRoutes(
       }
       sessionScope = rawSessionScope;
     }
+    const approvalMode = parseOptionalApprovalMode(body, res);
+    if (approvalMode === null) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
@@ -618,6 +674,7 @@ export function registerSessionRoutes(
         modelServiceId,
         ...(clientId !== undefined ? { clientId } : {}),
         ...(sessionScope !== undefined ? { sessionScope } : {}),
+        ...(approvalMode !== undefined ? { approvalMode } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
@@ -722,6 +779,11 @@ export function registerSessionRoutes(
         runtime,
       );
       if (!releaseRestoreOwner) return;
+      const approvalMode = parseOptionalApprovalMode(body, res);
+      if (approvalMode === null) {
+        releaseRestoreOwner();
+        return;
+      }
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) {
         releaseRestoreOwner();
@@ -738,11 +800,13 @@ export function registerSessionRoutes(
                   workspaceCwd,
                   historyReplay: 'response',
                   ...(clientId !== undefined ? { clientId } : {}),
+                  ...(approvalMode !== undefined ? { approvalMode } : {}),
                 })
               : await runtime.bridge.resumeSession({
                   sessionId,
                   workspaceCwd,
                   ...(clientId !== undefined ? { clientId } : {}),
+                  ...(approvalMode !== undefined ? { approvalMode } : {}),
                 });
           },
         );
@@ -1042,10 +1106,17 @@ export function registerSessionRoutes(
     '/session/:id/artifacts',
     withOwnerReadSession(
       'GET /session/:id/artifacts',
-      async (_req, res, sessionId, runtime) => {
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
         res
           .status(200)
-          .json(await runtime.bridge.getSessionArtifacts(sessionId));
+          .json(
+            await runtime.bridge.getSessionArtifacts(
+              sessionId,
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
       },
     ),
   );
@@ -1058,6 +1129,7 @@ export function registerSessionRoutes(
       async (req, res, sessionId) => {
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        if (!requireSessionArtifactClientId(clientId, res)) return;
         try {
           const body = safeBody(req);
           const artifact: SessionArtifactInput = {
@@ -1075,12 +1147,14 @@ export function registerSessionRoutes(
             mimeType: body['mimeType'] as SessionArtifactInput['mimeType'],
             sizeBytes: body['sizeBytes'] as SessionArtifactInput['sizeBytes'],
             metadata: body['metadata'] as SessionArtifactInput['metadata'],
+            retention: body['retention'] as SessionArtifactInput['retention'],
+            clientRetained: body[
+              'clientRetained'
+            ] as SessionArtifactInput['clientRetained'],
           };
-          const result = await bridge.addSessionArtifact(
-            sessionId,
-            artifact,
-            clientId !== undefined ? { clientId } : undefined,
-          );
+          const result = await bridge.addSessionArtifact(sessionId, artifact, {
+            clientId,
+          });
           res.status(200).json(result);
         } catch (err) {
           if (sendArtifactValidationError(res, err)) return;
@@ -1102,6 +1176,7 @@ export function registerSessionRoutes(
         const artifactId = req.params['artifactId'];
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        if (!requireSessionArtifactClientId(clientId, res)) return;
         if (!artifactId) {
           res.status(400).json({
             v: 1,
@@ -1117,10 +1192,11 @@ export function registerSessionRoutes(
           const result = await bridge.removeSessionArtifact(
             sessionId,
             artifactId,
-            clientId !== undefined ? { clientId } : undefined,
+            { clientId },
           );
           res.status(200).json(result);
         } catch (err) {
+          if (sendArtifactValidationError(res, err)) return;
           sendBridgeError(res, err, {
             route: 'DELETE /session/:id/artifacts/:artifactId',
             sessionId,
@@ -1507,6 +1583,98 @@ export function registerSessionRoutes(
     }
   });
 
+  app.post(
+    '/workspaces/:workspace/sessions/delete',
+    mutate(),
+    async (req, res) => {
+      const route = 'POST /workspaces/:workspace/sessions/delete';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      const uniqueIds = parseSessionIdsBody(req, res);
+      if (uniqueIds === undefined) return;
+      try {
+        const service = new SessionService(runtime.workspaceCwd);
+        const result = await deleteDaemonSessions({
+          sessionIds: uniqueIds,
+          service,
+          bridge: runtime.bridge,
+          coordinator: archiveCoordinator,
+          onError: ({ phase, sessionId, error }) => {
+            writeStderrLine(
+              `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
+            );
+          },
+        });
+        res.status(200).json(result);
+      } catch (err) {
+        sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
+  app.post(
+    '/workspaces/:workspace/sessions/archive',
+    mutate(),
+    async (req, res) => {
+      const route = 'POST /workspaces/:workspace/sessions/archive';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      const uniqueIds = parseSessionIdsBody(req, res);
+      if (uniqueIds === undefined) return;
+      const service = new SessionService(runtime.workspaceCwd, {
+        onWarning: logSessionArchiveWarning,
+      });
+      try {
+        const result = await archiveDaemonSessions({
+          sessionIds: uniqueIds,
+          service,
+          bridge: runtime.bridge,
+          coordinator: archiveCoordinator,
+        });
+        res.status(200).json({
+          archived: result.archived,
+          alreadyArchived: result.alreadyArchived,
+          notFound: result.notFound,
+          errors: serializeSessionErrors(result.errors),
+        });
+      } catch (err) {
+        sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
+  app.post(
+    '/workspaces/:workspace/sessions/unarchive',
+    mutate(),
+    async (req, res) => {
+      const route = 'POST /workspaces/:workspace/sessions/unarchive';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      const uniqueIds = parseSessionIdsBody(req, res);
+      if (uniqueIds === undefined) return;
+      const service = new SessionService(runtime.workspaceCwd, {
+        onWarning: logSessionArchiveWarning,
+      });
+      try {
+        const result = await unarchiveDaemonSessions({
+          sessionIds: uniqueIds,
+          service,
+          coordinator: archiveCoordinator,
+        });
+        res.status(200).json({
+          unarchived: result.unarchived,
+          alreadyActive: result.alreadyActive,
+          notFound: result.notFound,
+          errors: serializeSessionErrors(result.errors),
+        });
+      } catch (err) {
+        sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
   app.patch(
     '/session/:id/metadata',
     mutate({ strict: true }),
@@ -1705,6 +1873,95 @@ export function registerSessionRoutes(
     },
   );
 
+  app.get('/workspaces/:workspace/session-groups', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/session-groups';
+    const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+    if (!runtime) return;
+    try {
+      res
+        .status(200)
+        .json(
+          await createSessionOrganizationService(
+            runtime.workspaceCwd,
+          ).listGroups(),
+        );
+    } catch (err) {
+      sendBridgeError(res, err, { route });
+    }
+  });
+
+  app.post(
+    '/workspaces/:workspace/session-groups',
+    mutate(),
+    async (req, res) => {
+      const route = 'POST /workspaces/:workspace/session-groups';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      const body = safeBody(req);
+      try {
+        const group = await createSessionOrganizationService(
+          runtime.workspaceCwd,
+        ).createGroup({
+          name: body['name'] as string,
+          color: body['color'] as SessionGroupColor,
+        });
+        res.status(201).json({ group });
+      } catch (err) {
+        if (sendSessionOrganizationError(res, err)) return;
+        sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
+  app.patch(
+    '/workspaces/:workspace/session-groups/:groupId',
+    mutate(),
+    async (req, res) => {
+      const route = 'PATCH /workspaces/:workspace/session-groups/:groupId';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      const body = safeBody(req);
+      try {
+        const group = await createSessionOrganizationService(
+          runtime.workspaceCwd,
+        ).updateGroup(req.params['groupId'] ?? '', {
+          ...(Object.prototype.hasOwnProperty.call(body, 'name')
+            ? { name: body['name'] as string }
+            : {}),
+          ...(Object.prototype.hasOwnProperty.call(body, 'color')
+            ? { color: body['color'] as SessionGroupColor }
+            : {}),
+          ...(Object.prototype.hasOwnProperty.call(body, 'order')
+            ? { order: body['order'] as number }
+            : {}),
+        });
+        res.status(200).json({ group });
+      } catch (err) {
+        if (sendSessionOrganizationError(res, err)) return;
+        sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
+  app.delete(
+    '/workspaces/:workspace/session-groups/:groupId',
+    mutate(),
+    async (req, res) => {
+      const route = 'DELETE /workspaces/:workspace/session-groups/:groupId';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      try {
+        const deleted = await createSessionOrganizationService(
+          runtime.workspaceCwd,
+        ).deleteGroup(req.params['groupId'] ?? '');
+        res.status(200).json({ deleted });
+      } catch (err) {
+        if (sendSessionOrganizationError(res, err)) return;
+        sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
   const listWorkspaceSessionsHandler =
     (paramName: string): RequestHandler =>
     async (req, res) => {
@@ -1715,19 +1972,26 @@ export function registerSessionRoutes(
       // Express decodes URL-encoded path params automatically; clients pass
       // the absolute workspace cwd encoded (e.g.
       // GET /workspace/%2Fwork%2Fa/sessions).
-      const runtime = resolveRuntimeFromWorkspaceParam(req, res, paramName);
+      const runtime =
+        paramName === 'workspace'
+          ? resolveWorkspaceRuntimeFromParam(
+              workspaceRegistry,
+              req,
+              res,
+              'workspace',
+            )
+          : resolveRuntimeFromWorkspaceParam(req, res, paramName);
       if (runtime === null) return;
-      if (!runtime.primary && !runtime.trusted) {
+      if (
+        paramName === 'workspace'
+          ? !runtime.trusted
+          : !runtime.primary && !runtime.trusted
+      ) {
         logSessionRoutingFailure(route, 'untrusted_workspace', {
           workspaceId: runtime.workspaceId,
           workspaceCwd: runtime.workspaceCwd,
         });
-        res.status(403).json({
-          error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
-          code: 'untrusted_workspace',
-          workspaceCwd: runtime.workspaceCwd,
-          workspaceId: runtime.workspaceId,
-        });
+        sendUntrustedWorkspaceResponse(res);
         return;
       }
       const key = runtime.workspaceCwd;
@@ -1775,14 +2039,6 @@ export function registerSessionRoutes(
           }
           archiveState = rawArchiveState;
         }
-        if (!runtime.primary && (archiveState === 'archived' || view)) {
-          res.status(400).json({
-            error:
-              'Non-primary workspace session listing only supports active recent view in this phase.',
-            code: 'non_primary_session_list_option_not_supported',
-          });
-          return;
-        }
         const options = {
           ...(cursor !== undefined ? { cursor } : {}),
           ...(size !== undefined ? { size } : {}),
@@ -1790,11 +2046,28 @@ export function registerSessionRoutes(
           ...(view !== undefined ? { view } : {}),
           ...(group !== undefined ? { group } : {}),
         };
+        // Organized/archived views always need the persisted store: organized
+        // cursors are opaque (non-numeric) and archived-only workspaces have no
+        // active persisted sessions, so the live-only fallback would drop them.
         const usePersisted =
           runtime.primary ||
+          view === 'organized' ||
+          archiveState === 'archived' ||
           (cursor !== undefined && cursor !== ''
             ? isNumericSessionCursor(cursor)
             : await hasActivePersistedSessions(key));
+        // The live path only reads cursor/size; persisted-only options
+        // (organized view or archived state) would be silently dropped there.
+        // usePersisted already routes those to the persisted path — assert it so
+        // a future option added to validation but not to that gate fails loudly.
+        if (
+          !usePersisted &&
+          (view !== undefined || archiveState === 'archived')
+        ) {
+          throw new Error(
+            'session list live path received persisted-only options',
+          );
+        }
         const result = usePersisted
           ? await listWorkspaceSessionsForResponse(runtime.bridge, key, options)
           : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
@@ -1818,7 +2091,15 @@ export function registerSessionRoutes(
         writeStderrLine(
           `qwen serve: failed to list sessions for workspace ${safeLogValue(
             key,
-          )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
+          )} (options=${safeLogValue(
+            JSON.stringify({
+              view: req.query['view'],
+              archiveState: req.query['archiveState'],
+              group: req.query['group'],
+            }),
+          )}): ${safeLogValue(
+            err instanceof Error ? err.message : String(err),
+          )}`,
         );
         res.status(500).json({
           error: 'Failed to list sessions',

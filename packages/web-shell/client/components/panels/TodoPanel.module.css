@@ -45,6 +45,41 @@
   color: var(--muted-foreground);
 }
 
+.statusSegmentWrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.separator {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, var(--muted-foreground) 72%, transparent);
+}
+
+.statusSegment,
+.statusSegmentButton {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusSegmentButton {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.statusSegmentButton:hover,
+.statusSegmentButton:focus-visible {
+  color: var(--foreground);
+  outline: none;
+}
+
 .fullText {
   display: inline;
 }

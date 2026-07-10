@@ -25,6 +25,35 @@ import {
 } from './scheduledTasksSchedule';
 import styles from './ScheduledTasksDialog.module.css';
 
+/** Wrap a prompt for "Run now" on an isolated task — instructs the model to
+ * dispatch via `create_sub_session` rather than running inline.
+ *
+ * A manual run does NOT evaluate the task's precondition, and deliberately so.
+ * The verdict is only observable inside the session that computes it: the client
+ * enqueues a prompt and `onRunPrompt` resolves at ADMISSION, long before the
+ * model decides anything. A client-side guard could therefore never learn its
+ * own outcome — it would record a `manual` run for work that was withheld, and
+ * for a one-shot it would consume (delete) the task before the verdict existed.
+ * So "Run now" means run now: the guard belongs to the scheduler, and a human
+ * clicking the button is overriding it on purpose.
+ *
+ * Only the MANUAL run relays through the model. A scheduled fire evaluates the
+ * condition as its own cron turn and dispatches daemon-side
+ * (`Session.#dispatchIsolatedCronFire`) because it is unattended:
+ * `create_sub_session` asks for permission, and nobody would be there to answer.
+ * A manual run is attended by definition — the user is looking at this dialog —
+ * so the tool's permission gate can do its job. */
+function wrapIsolatedRunPrompt(prompt: string): string {
+  return (
+    'This scheduled task is configured to run in an ISOLATED session. Use the ' +
+    '`create_sub_session` tool with completion "sent" to run the task below in ' +
+    'a fresh sub-session — do NOT perform the task yourself in this session. ' +
+    'After dispatching it, reply with a one-line confirmation.\n\n' +
+    '--- Task ---\n' +
+    prompt
+  );
+}
+
 /** Localized absolute timestamp, resilient to a bad epoch value. */
 function safeLocaleString(ms: number): string {
   try {
@@ -34,7 +63,9 @@ function safeLocaleString(ms: number): string {
   }
 }
 
-/** Formats one run-history entry: localized timestamp + a kind tag. */
+/** Formats one run-history entry: localized timestamp + a kind tag, plus a
+ * "skipped" tag when the task's precondition withheld the fire — otherwise a
+ * guarded task that deliberately did nothing reads as a clean run. */
 function describeRun(run: DaemonScheduledTaskRun, t: TranslateFn): string {
   const kind =
     run.kind === 'catch-up'
@@ -42,7 +73,10 @@ function describeRun(run: DaemonScheduledTaskRun, t: TranslateFn): string {
       : run.kind === 'manual'
         ? ` · ${t('scheduledTasks.runKind.manual')}`
         : '';
-  return `${safeLocaleString(run.at)}${kind}`;
+  const withheld = run.withheld
+    ? ` · ${t('scheduledTasks.runKind.withheld')}`
+    : '';
+  return `${safeLocaleString(run.at)}${kind}${withheld}`;
 }
 
 interface ScheduledTasksDialogProps {
@@ -108,6 +142,15 @@ export function ScheduledTasksDialog({
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
   const [builder, setBuilder] = useState<BuilderState>(DEFAULT_BUILDER);
+  // 'shared' = run in the one bound session (runs accumulate); 'isolated' =
+  // spawn a fresh session per fire. Defaults to shared for back-compat.
+  const [runMode, setRunMode] = useState<'shared' | 'isolated'>('shared');
+  // Precondition for an isolated task: the bound session evaluates it on every
+  // fire and only then spawns the sub-session. Empty = fire unconditionally.
+  // Kept in state even while `runMode` is 'shared' (the field is hidden, not
+  // discarded) so toggling the picker back and forth doesn't lose what was
+  // typed; `handleSubmit` is what drops it.
+  const [condition, setCondition] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -199,6 +242,8 @@ export function ScheduledTasksDialog({
     setName('');
     setPrompt('');
     setBuilder(DEFAULT_BUILDER);
+    setRunMode('shared');
+    setCondition('');
     setFormError(null);
     setShowForm(false);
     setEditingId(null);
@@ -209,6 +254,8 @@ export function ScheduledTasksDialog({
     setName('');
     setPrompt('');
     setBuilder(DEFAULT_BUILDER);
+    setRunMode('shared');
+    setCondition('');
     setFormError(null);
     setShowForm(true);
   }, []);
@@ -220,6 +267,8 @@ export function ScheduledTasksDialog({
     // Reverse the cron back onto the pickers; an expression the pickers can't
     // represent lands in the `custom` field, never silently rewritten.
     setBuilder(parseCronToBuilder(task.cron));
+    setRunMode(task.runMode ?? 'shared');
+    setCondition(task.condition ?? '');
     setFormError(null);
     setShowForm(true);
   }, []);
@@ -236,15 +285,23 @@ export function ScheduledTasksDialog({
     }
     setSubmitting(true);
     setFormError(null);
+    // A precondition only gates the isolated dispatch, and the daemon rejects
+    // one on a shared task. Send null (not the hidden field's stale text) so
+    // switching a guarded task to shared clears it in the same request.
+    const conditionField =
+      runMode === 'isolated' ? condition.trim() || null : null;
     try {
       if (editingId) {
         // Update only the editable fields; `recurring`/`enabled` are omitted so
         // the PATCH leaves them unchanged (recurring isn't in this form, and
-        // enabled is driven by the card toggle). Empty name clears it.
+        // enabled is driven by the card toggle). Empty name clears it. runMode
+        // is sent so the picker can switch a task between shared and isolated.
         await actions.updateScheduledTask(editingId, {
           cron,
           prompt: prompt.trim(),
           name: name.trim() || null,
+          runMode,
+          condition: conditionField,
         });
       } else {
         await actions.createScheduledTask({
@@ -253,6 +310,8 @@ export function ScheduledTasksDialog({
           name: name.trim() || null,
           recurring: true,
           enabled: true,
+          runMode,
+          condition: conditionField,
         });
       }
       if (!mountedRef.current) return;
@@ -264,7 +323,18 @@ export function ScheduledTasksDialog({
     } finally {
       if (mountedRef.current) setSubmitting(false);
     }
-  }, [actions, builder, editingId, name, prompt, reload, resetForm, t]);
+  }, [
+    actions,
+    builder,
+    condition,
+    editingId,
+    name,
+    prompt,
+    runMode,
+    reload,
+    resetForm,
+    t,
+  ]);
 
   const handleToggle = useCallback(
     async (task: DaemonScheduledTask) => {
@@ -310,8 +380,14 @@ export function ScheduledTasksDialog({
           // Recurring: enqueue FIRST (onRunPrompt resolves at admission, rejects
           // if the session can't be opened), record AFTER — so a failed enqueue
           // leaves no false "ran" entry. A record failure is surfaced but the
-          // history still catches up on the next refresh.
-          await onRunPrompt(fresh.prompt, fresh.sessionId);
+          // history still catches up on the next refresh. For isolated tasks,
+          // wrap the prompt so the model dispatches via create_sub_session.
+          // The precondition is NOT evaluated here — see wrapIsolatedRunPrompt.
+          const runPrompt =
+            fresh.runMode === 'isolated'
+              ? wrapIsolatedRunPrompt(fresh.prompt)
+              : fresh.prompt;
+          await onRunPrompt(runPrompt, fresh.sessionId);
           try {
             await actions.runScheduledTask(fresh.id);
             await reload();
@@ -328,7 +404,11 @@ export function ScheduledTasksDialog({
           await actions.runScheduledTask(fresh.id);
           await reload();
           try {
-            await onRunPrompt(fresh.prompt, fresh.sessionId);
+            const runPrompt =
+              fresh.runMode === 'isolated'
+                ? wrapIsolatedRunPrompt(fresh.prompt)
+                : fresh.prompt;
+            await onRunPrompt(runPrompt, fresh.sessionId);
           } catch (err) {
             onError(err, t('scheduledTasks.error.oneShotConsumedButFailed'));
             return;
@@ -437,6 +517,50 @@ export function ScheduledTasksDialog({
                 onChange={(e) => setPrompt(e.target.value)}
               />
             </label>
+
+            <div className={styles.field}>
+              <span className={styles.fieldLabel}>
+                {t('scheduledTasks.runMode')}
+              </span>
+              <div className={styles.radioGroup} role="radiogroup">
+                {(['shared', 'isolated'] as const).map((mode) => (
+                  <label key={mode} className={styles.radioOption}>
+                    <input
+                      type="radio"
+                      name="runMode"
+                      value={mode}
+                      checked={runMode === mode}
+                      onChange={() => setRunMode(mode)}
+                    />
+                    <span>{t(`scheduledTasks.runMode.${mode}`)}</span>
+                  </label>
+                ))}
+              </div>
+              <span className={styles.fieldHint}>
+                {t(`scheduledTasks.runMode.${runMode}.hint`)}
+              </span>
+            </div>
+
+            {/* Isolated-only: the precondition gates the sub-session dispatch,
+                and the daemon rejects one on a shared task. */}
+            {runMode === 'isolated' && (
+              <label className={styles.field}>
+                <span className={styles.fieldLabel}>
+                  {t('scheduledTasks.condition')}
+                </span>
+                <textarea
+                  className={styles.textarea}
+                  value={condition}
+                  rows={3}
+                  maxLength={10_000}
+                  placeholder={t('scheduledTasks.conditionPlaceholder')}
+                  onChange={(e) => setCondition(e.target.value)}
+                />
+                <span className={styles.fieldHint}>
+                  {t('scheduledTasks.condition.hint')}
+                </span>
+              </label>
+            )}
 
             <div className={styles.scheduleRow}>
               <label className={styles.field}>
@@ -640,7 +764,11 @@ export function ScheduledTasksDialog({
                     className={styles.iconAction}
                     onClick={() => void handleRunNow(task)}
                     disabled={!task.enabled || runningTaskId !== null}
-                    title={t('scheduledTasks.runNow')}
+                    title={
+                      task.condition
+                        ? t('scheduledTasks.runNowIgnoresCondition')
+                        : t('scheduledTasks.runNow')
+                    }
                     aria-label={t('scheduledTasks.runNow')}
                   >
                     ▶
@@ -671,6 +799,19 @@ export function ScheduledTasksDialog({
               {task.name && (
                 <div className={styles.cardPrompt} title={task.prompt}>
                   {task.prompt}
+                </div>
+              )}
+
+              {task.condition && (
+                <div
+                  className={styles.cardCondition}
+                  title={task.condition}
+                  data-testid="scheduled-task-condition"
+                >
+                  <span className={styles.cardConditionLabel}>
+                    {t('scheduledTasks.condition.cardPrefix')}
+                  </span>
+                  {task.condition}
                 </div>
               )}
 
@@ -708,7 +849,9 @@ export function ScheduledTasksDialog({
                 {task.sessionId && onOpenSession ? (
                   // The task's bound session IS its run history — open its
                   // transcript. Always shown (empty state included) so the
-                  // history is discoverable even before the first run.
+                  // history is discoverable even before the first run. For an
+                  // isolated task this transcript shows the model dispatching
+                  // each run into a fresh sub-session.
                   <button
                     type="button"
                     className={styles.runsToggle}

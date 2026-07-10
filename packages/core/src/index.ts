@@ -215,6 +215,7 @@ export {
   getCronFilePath,
   generateCronTaskId,
   appendCronRun,
+  markCronRunWithheld,
   MAX_TASK_RUNS,
 } from './services/cronTasksFile.js';
 export * from './services/fileDiscoveryService.js';
@@ -228,6 +229,7 @@ export * from './services/visionBridge/vision-bridge-service.js';
 export * from './services/visionBridge/image-part-utils.js';
 export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
+export * from './services/session-artifact-persistence.js';
 export * from './services/sessionService.js';
 export * from './utils/conversation-chain.js';
 export * from './services/sessionTitle.js';

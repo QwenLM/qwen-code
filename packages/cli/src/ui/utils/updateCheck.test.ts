@@ -5,7 +5,7 @@
  */
 
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { checkForUpdates } from './updateCheck.js';
+import { checkForUpdates, checkForUpdatesDetailed } from './updateCheck.js';
 
 const getPackageJson = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/package.js', () => ({
@@ -120,6 +120,100 @@ describe('checkForUpdates', () => {
 
     const result = await checkForUpdates();
     expect(result).toBeNull();
+  });
+
+  it('should return a detailed skipped result in DEV mode', async () => {
+    process.env['DEV'] = 'true';
+
+    const result = await checkForUpdatesDetailed();
+
+    expect(result).toEqual({ status: 'skipped', reason: 'development mode' });
+    expect(getPackageJson).not.toHaveBeenCalled();
+    expect(updateNotifier).not.toHaveBeenCalled();
+  });
+
+  it('should return a detailed skipped result if package metadata is missing', async () => {
+    getPackageJson.mockResolvedValue(null);
+
+    const result = await checkForUpdatesDetailed();
+
+    expect(result).toEqual({
+      status: 'skipped',
+      reason: 'package metadata unavailable',
+    });
+  });
+
+  it('should return a detailed up-to-date result when there is no update', async () => {
+    getPackageJson.mockResolvedValue({
+      name: 'test-package',
+      version: '1.0.0',
+    });
+    updateNotifier.mockReturnValue({
+      fetchInfo: vi.fn().mockResolvedValue(null),
+    });
+
+    const result = await checkForUpdatesDetailed();
+
+    expect(result).toEqual({ status: 'up-to-date', currentVersion: '1.0.0' });
+  });
+
+  it('should return a detailed error result if fetchInfo rejects', async () => {
+    const error = new Error('Timeout');
+    getPackageJson.mockResolvedValue({
+      name: 'test-package',
+      version: '1.0.0',
+    });
+    updateNotifier.mockReturnValue({
+      fetchInfo: vi.fn().mockRejectedValue(error),
+    });
+
+    const result = await checkForUpdatesDetailed();
+
+    expect(result).toEqual({
+      status: 'error',
+      error,
+      currentVersion: '1.0.0',
+    });
+  });
+
+  it('should return a detailed update result when a newer version is available', async () => {
+    getPackageJson.mockResolvedValue({
+      name: 'test-package',
+      version: '1.0.0',
+    });
+    updateNotifier.mockReturnValue({
+      fetchInfo: vi
+        .fn()
+        .mockResolvedValue({ current: '1.0.0', latest: '1.1.0' }),
+    });
+
+    const result = await checkForUpdatesDetailed();
+
+    expect(result).toEqual({
+      status: 'update',
+      info: {
+        message: 'Qwen Code update available! 1.0.0 → 1.1.0',
+        update: { current: '1.0.0', latest: '1.1.0' },
+      },
+    });
+  });
+
+  it('should pass a non-optional package version to update-notifier', async () => {
+    getPackageJson.mockResolvedValue({
+      name: 'test-package',
+      version: '1.0.0',
+    });
+    updateNotifier.mockReturnValue({
+      fetchInfo: vi.fn().mockResolvedValue(null),
+    });
+
+    await checkForUpdatesDetailed();
+
+    expect(updateNotifier).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pkg: { name: 'test-package', version: '1.0.0' },
+      }),
+    );
   });
 
   it('should handle errors gracefully', async () => {
