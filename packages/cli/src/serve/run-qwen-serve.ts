@@ -3294,10 +3294,52 @@ export async function runQwenServe(
             const fresh = settingsRuntime.settings.loadSettings(workspace, {
               skipLoadEnvironment: true,
             });
-            return settingsRuntime.settings.reloadEnvironment(
+            const result = settingsRuntime.settings.reloadEnvironment(
               fresh.merged,
               workspace,
             );
+            // Mirror the startup secondary-workspace path: rebuild the runtime
+            // env snapshot and update the metadata so `.env` changes actually
+            // propagate to child processes spawned by this workspace's bridge.
+            try {
+              const refreshedRuntimeEnv =
+                settingsRuntime.environment.buildRuntimeEnvironment(
+                  fresh.merged,
+                  workspace,
+                  daemonRuntimeBaseEnv,
+                );
+              logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
+              wsEnv.replace(refreshedRuntimeEnv.effectiveEnv);
+              wsEnv.metadata.envFileReadFailed =
+                refreshedRuntimeEnv.envFileReadFailed;
+              wsEnv.metadata.envFileReadFailures.splice(
+                0,
+                wsEnv.metadata.envFileReadFailures.length,
+                ...refreshedRuntimeEnv.envFileReadFailures,
+              );
+              wsEnv.metadata.overlayKeys.splice(
+                0,
+                wsEnv.metadata.overlayKeys.length,
+                ...refreshedRuntimeEnv.overlayKeys,
+              );
+              wsEnv.metadata.envFilePaths.splice(
+                0,
+                wsEnv.metadata.envFilePaths.length,
+                ...refreshedRuntimeEnv.envFilePaths,
+              );
+              delete wsEnv.metadata.fallbackReason;
+            } catch (err) {
+              wsEnv.metadata.fallbackReason =
+                err instanceof Error ? err.message : String(err);
+              daemonLog.warn(
+                'failed to rebuild dynamic runtime env snapshot after daemon env reload; preserving previous runtime env',
+                {
+                  workspace,
+                  error: wsEnv.metadata.fallbackReason,
+                },
+              );
+            }
+            return result;
           }),
         queryWorkspaceStatus: (method, idle) =>
           wsBridge.queryWorkspaceStatus(method, idle),
