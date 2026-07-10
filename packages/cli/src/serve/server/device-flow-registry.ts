@@ -120,11 +120,11 @@ export function createDeviceFlowRegistry(deps: {
 }
 
 /**
- * Set up the primary (app-global) device-flow registry: builds the registry via
- * {@link createDeviceFlowRegistry} and exposes it on `app.locals` for the legacy
- * REST auth routes. Non-primary runtimes call {@link createDeviceFlowRegistry}
- * directly so their device-flow state stays bound to their own bridge without
- * touching `app.locals`.
+ * Set up the daemon-global device-flow registry: builds the registry via
+ * {@link createDeviceFlowRegistry} and exposes it on `app.locals` for the REST
+ * auth routes. Secondary ACP mounts share this single registry (OAuth
+ * credentials are process-global); auth-flow events fan out best-effort to every
+ * trusted runtime's bridge via `resolveEventBridges`.
  */
 export function setupDeviceFlowRegistry(
   deps: SetupDeviceFlowRegistryDeps,

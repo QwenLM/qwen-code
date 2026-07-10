@@ -325,6 +325,10 @@ export async function buildDaemonStatusResponse(
     null,
   );
   const acpSnapshot = input.acpHandle?.registry.getSnapshot();
+  // Aggregate across all mounts (primary + trusted secondaries) so the transport
+  // summary matches the metrics sampler; the per-connection diagnostics and the
+  // connection cap below stay primary-scoped.
+  const acpAggregate = input.acpHandle?.getSnapshot();
   const rateLimitHits = input.rateLimiter?.getHitCounts() ?? zeroRateHits();
   let pendingPrompts = 0;
   let derivedQueuedPrompts = 0;
@@ -458,12 +462,12 @@ export async function buildDaemonStatusResponse(
         restSseActive: input.getRestSseActive(),
         acp: {
           enabled: acpSnapshot !== undefined,
-          connections: acpSnapshot?.connectionCount ?? 0,
-          connectionStreams: acpSnapshot?.connectionStreams ?? 0,
-          sessionStreams: acpSnapshot?.sessionStreams ?? 0,
-          sseStreams: acpSnapshot?.sseStreams ?? 0,
-          wsStreams: acpSnapshot?.wsStreams ?? 0,
-          pendingClientRequests: acpSnapshot?.pendingClientRequests ?? 0,
+          connections: acpAggregate?.connectionCount ?? 0,
+          connectionStreams: acpAggregate?.connectionStreams ?? 0,
+          sessionStreams: acpAggregate?.sessionStreams ?? 0,
+          sseStreams: acpAggregate?.sseStreams ?? 0,
+          wsStreams: acpAggregate?.wsStreams ?? 0,
+          pendingClientRequests: acpAggregate?.pendingClientRequests ?? 0,
         },
       },
       rateLimit: {

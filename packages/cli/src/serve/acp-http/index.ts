@@ -457,7 +457,11 @@ export interface AcpHttpMountSnapshot {
 /** Aggregate ACP HTTP observability across every mounted runtime. */
 export interface AcpHttpSnapshot {
   connectionCount: number;
+  connectionStreams: number;
+  sessionStreams: number;
+  sseStreams: number;
   wsStreams: number;
+  pendingClientRequests: number;
   mounts: AcpHttpMountSnapshot[];
 }
 
@@ -1929,28 +1933,42 @@ export function mountAcpHttp(
     },
     registry,
     getSnapshot: () => {
-      const primarySnap = registry.getSnapshot();
-      const mounts: AcpHttpMountSnapshot[] = [
+      const perMount = [
         {
-          workspaceId: null,
+          workspaceId: null as string | null,
           primary: true,
-          connectionCount: primarySnap.connectionCount,
-          wsStreams: primarySnap.wsStreams,
+          snap: registry.getSnapshot(),
         },
       ];
       for (const [workspaceId, mount] of secondaryMounts) {
-        const snap = mount.registry.getSnapshot();
-        mounts.push({
+        perMount.push({
           workspaceId,
           primary: false,
-          connectionCount: snap.connectionCount,
-          wsStreams: snap.wsStreams,
+          snap: mount.registry.getSnapshot(),
         });
       }
       return {
-        connectionCount: mounts.reduce((n, m) => n + m.connectionCount, 0),
-        wsStreams: mounts.reduce((n, m) => n + m.wsStreams, 0),
-        mounts,
+        connectionCount: perMount.reduce(
+          (n, m) => n + m.snap.connectionCount,
+          0,
+        ),
+        connectionStreams: perMount.reduce(
+          (n, m) => n + m.snap.connectionStreams,
+          0,
+        ),
+        sessionStreams: perMount.reduce((n, m) => n + m.snap.sessionStreams, 0),
+        sseStreams: perMount.reduce((n, m) => n + m.snap.sseStreams, 0),
+        wsStreams: perMount.reduce((n, m) => n + m.snap.wsStreams, 0),
+        pendingClientRequests: perMount.reduce(
+          (n, m) => n + m.snap.pendingClientRequests,
+          0,
+        ),
+        mounts: perMount.map((m) => ({
+          workspaceId: m.workspaceId,
+          primary: m.primary,
+          connectionCount: m.snap.connectionCount,
+          wsStreams: m.snap.wsStreams,
+        })),
       };
     },
     attachServer(server: import('node:http').Server) {

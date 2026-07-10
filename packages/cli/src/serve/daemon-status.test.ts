@@ -856,6 +856,22 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
       ? {
           acpHandle: {
             registry: { getSnapshot: () => input.acpSnapshot },
+            getSnapshot: () => ({
+              connectionCount: input.acpSnapshot!.connectionCount,
+              connectionStreams: input.acpSnapshot!.connectionStreams,
+              sessionStreams: input.acpSnapshot!.sessionStreams,
+              sseStreams: input.acpSnapshot!.sseStreams,
+              wsStreams: input.acpSnapshot!.wsStreams,
+              pendingClientRequests: input.acpSnapshot!.pendingClientRequests,
+              mounts: [
+                {
+                  workspaceId: null,
+                  primary: true,
+                  connectionCount: input.acpSnapshot!.connectionCount,
+                  wsStreams: input.acpSnapshot!.wsStreams,
+                },
+              ],
+            }),
           } as unknown as AcpHttpHandle,
         }
       : {}),
