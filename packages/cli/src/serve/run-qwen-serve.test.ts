@@ -4224,6 +4224,106 @@ describe('runQwenServe channel worker supervisor', () => {
     } satisfies Partial<ChannelWebhookEnqueueError>);
   });
 
+  it('forwards webhook tasks through the channel worker group', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-webhook-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    worker.enqueueWebhookTask.mockResolvedValueOnce({ accepted: true });
+    const originalCreateServeApp = serverModule.createServeApp;
+    let capturedDeps:
+      | Parameters<typeof serverModule.createServeApp>[2]
+      | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      capturedDeps = args[2];
+      return originalCreateServeApp(...args);
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+    const task = {
+      channelName: 'telegram',
+      source: 'github-ci',
+      eventType: 'check_failed',
+      targetRef: 'default',
+      title: 'CI failed',
+      payload: { runId: 123 },
+    };
+
+    try {
+      await handle.runtimeReady;
+      expect(capturedDeps?.enqueueChannelWebhookTask).toEqual(
+        expect.any(Function),
+      );
+      await expect(
+        capturedDeps!.enqueueChannelWebhookTask!(task),
+      ).resolves.toEqual({ accepted: true });
+      expect(worker.enqueueWebhookTask).toHaveBeenCalledWith(task);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps webhook enqueue available when no worker is selected', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-webhook-disabled-')),
+    );
+    const originalCreateServeApp = serverModule.createServeApp;
+    let capturedDeps:
+      | Parameters<typeof serverModule.createServeApp>[2]
+      | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      capturedDeps = args[2];
+      return originalCreateServeApp(...args);
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      { bridge: makeFakeBridge() },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(capturedDeps?.enqueueChannelWebhookTask).toEqual(
+        expect.any(Function),
+      );
+      await expect(
+        capturedDeps!.enqueueChannelWebhookTask!({
+          channelName: 'telegram',
+          source: 'github-ci',
+          eventType: 'check_failed',
+          targetRef: 'default',
+          title: 'CI failed',
+          payload: { runId: 123 },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_worker_unavailable' });
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('closes the listener when worker startup fails after resolveOnListen', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-fail-')),
@@ -4386,6 +4486,27 @@ describe('runQwenServe channel worker supervisor', () => {
     fs.mkdirSync(secondary);
     const primaryCwd = canonicalizeWorkspace(primary);
     const secondaryCwd = canonicalizeWorkspace(secondary);
+    const secondaryChannelConfig = {
+      type: 'feishu',
+      webhooks: {
+        sources: {
+          'github-ci': {
+            secret: 'secondary-secret',
+            targets: {
+              default: {
+                chatId: 'group-1',
+                senderId: 'webhook:github-ci',
+              },
+            },
+          },
+        },
+      },
+    };
+    fs.mkdirSync(path.join(secondary, '.qwen'));
+    fs.writeFileSync(
+      path.join(secondary, '.qwen', 'settings.json'),
+      JSON.stringify({ channels: { feishu: secondaryChannelConfig } }),
+    );
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
@@ -4398,7 +4519,7 @@ describe('runQwenServe channel worker supervisor', () => {
           merged: {
             channels:
               workspaceCwd === secondaryCwd
-                ? { feishu: { type: 'feishu' } }
+                ? { feishu: secondaryChannelConfig }
                 : { telegram: { type: 'telegram' } },
           },
         } as unknown as ReturnType<typeof settingsRuntime.loadSettings>;
@@ -4416,6 +4537,7 @@ describe('runQwenServe channel worker supervisor', () => {
       string,
       CreateChannelWorkerSupervisorOptions
     >();
+    const webhookEnqueues = new Map<string, ReturnType<typeof vi.fn>>();
     const supervisorFactory = vi.fn(
       (options: CreateChannelWorkerSupervisorOptions) => {
         const pid = options.workspace === primaryCwd ? 1234 : 5678;
@@ -4428,6 +4550,10 @@ describe('runQwenServe channel worker supervisor', () => {
           channels: [...channels],
         });
         workerOptions.set(options.workspace, options);
+        const enqueueWebhookTask = vi.fn(async () => ({
+          accepted: true as const,
+        }));
+        webhookEnqueues.set(options.workspace, enqueueWebhookTask);
         return {
           start: vi.fn(async () => {
             options.onReady?.(snapshots.get(options.workspace)!);
@@ -4436,7 +4562,7 @@ describe('runQwenServe channel worker supervisor', () => {
           restart: vi.fn(async () => snapshots.get(options.workspace)!),
           killAllSync: vi.fn(),
           snapshot: vi.fn(() => snapshots.get(options.workspace)!),
-          enqueueWebhookTask: vi.fn().mockRejectedValue(new Error('unused')),
+          enqueueWebhookTask,
         };
       },
     );
@@ -4460,10 +4586,29 @@ describe('runQwenServe channel worker supervisor', () => {
         daemonLogBaseDir: path.join(tmpDir, 'debug'),
         channelWorkerSupervisorFactory: supervisorFactory,
         channelServicePidfile: pidfile,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
       },
     );
 
     try {
+      const webhookResponse = await fetch(
+        `${handle.url}/channels/feishu/webhooks/github-ci`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-qwen-webhook-secret': 'secondary-secret',
+          },
+          body: JSON.stringify({
+            eventType: 'check_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          }),
+        },
+      );
+      expect(webhookResponse.status).toBe(202);
+      expect(await webhookResponse.json()).toEqual({ accepted: true });
       await handle.runtimeReady;
       expect(supervisorFactory).toHaveBeenCalledTimes(2);
       expect(workerOptions.get(primaryCwd)).toMatchObject({
@@ -4473,6 +4618,15 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(workerOptions.get(secondaryCwd)).toMatchObject({
         workspace: secondaryCwd,
         selection: { mode: 'names', names: ['feishu'] },
+      });
+      expect(webhookEnqueues.get(primaryCwd)).not.toHaveBeenCalled();
+      expect(webhookEnqueues.get(secondaryCwd)).toHaveBeenCalledWith({
+        channelName: 'feishu',
+        source: 'github-ci',
+        eventType: 'check_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        payload: {},
       });
       expect(pidfile.writeServeServiceInfo).toHaveBeenLastCalledWith({
         channels: ['telegram', 'feishu'],

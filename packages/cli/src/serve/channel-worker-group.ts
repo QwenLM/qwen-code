@@ -11,6 +11,7 @@ import type {
   ChannelWorkerSupervisor,
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
+import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
 
@@ -34,6 +35,7 @@ export interface ChannelWorkerGroup {
   snapshots(): ChannelWorkerGroupSnapshot[];
   /** Primary workspace snapshot, backing the legacy single-worker fields. */
   primarySnapshot(): ChannelWorkerSnapshot;
+  enqueueWebhookTask: ChannelWorkerSupervisor['enqueueWebhookTask'];
 }
 
 export interface ChannelWorkerGroupSharedOptions {
@@ -74,6 +76,8 @@ export function createChannelWorkerGroup(
   opts: CreateChannelWorkerGroupOptions,
 ): ChannelWorkerGroup {
   const entries: ChannelWorkerGroupEntry[] = [];
+  const entriesByChannel = new Map<string, ChannelWorkerGroupEntry>();
+  let allEntry: ChannelWorkerGroupEntry | undefined;
   for (const group of opts.groups) {
     const runtime = opts.registry.getByWorkspaceCwd(group.workspaceCwd);
     if (!runtime) {
@@ -133,7 +137,15 @@ export function createChannelWorkerGroup(
         ? { onLog: (entry) => opts.onLog!({ ...entry, workspaceCwd }) }
         : {}),
     });
-    entries.push({ workspaceId, workspaceCwd, primary, supervisor });
+    const entry = { workspaceId, workspaceCwd, primary, supervisor };
+    entries.push(entry);
+    if (group.selection.mode === 'all') {
+      allEntry = entry;
+    } else {
+      for (const channel of group.selection.names) {
+        entriesByChannel.set(channel, entry);
+      }
+    }
   }
 
   const primaryEntry = entries.find((entry) => entry.primary);
@@ -226,6 +238,16 @@ export function createChannelWorkerGroup(
     },
     primarySnapshot() {
       return primaryEntry?.supervisor.snapshot() ?? { ...DISABLED_SNAPSHOT };
+    },
+    async enqueueWebhookTask(task) {
+      const entry = entriesByChannel.get(task.channelName) ?? allEntry;
+      if (!entry) {
+        throw new ChannelWebhookEnqueueError(
+          'channel_worker_unavailable',
+          `No channel worker owns channel "${task.channelName}".`,
+        );
+      }
+      return entry.supervisor.enqueueWebhookTask(task);
     },
   };
 }

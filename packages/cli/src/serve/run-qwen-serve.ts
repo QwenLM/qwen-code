@@ -1435,7 +1435,7 @@ function isChannelWebhookRequest(req: Request): boolean {
 }
 
 function createDeferredChannelWebhookAuth(
-  workspace: string,
+  resolveWorkspace: (channelName: string) => string,
   runtime: ChannelWebhookConfigRuntime,
   daemonLog: Pick<DaemonLogger, 'warn'>,
 ): RequestHandler {
@@ -1455,7 +1455,7 @@ function createDeferredChannelWebhookAuth(
 
     const secret = readDeferredWebhookSecret(
       runtime,
-      workspace,
+      resolveWorkspace(channelName),
       channelName,
       source,
     );
@@ -2255,6 +2255,22 @@ export async function runQwenServe(
   };
   let channelWorkerGroup: ChannelWorkerGroup | undefined;
   let channelWorkspaceGroups: readonly ChannelWorkspaceGroup[] | undefined;
+  const getChannelWebhookConfigSources = () => {
+    if (workspaceInputs.length <= 1 || !opts.channelSelection) {
+      return [{ workspaceCwd: boundWorkspace }];
+    }
+    return (channelWorkspaceGroups ?? []).map((group) => ({
+      workspaceCwd: group.workspaceCwd,
+      ...(group.selection.mode === 'names'
+        ? { channelNames: group.selection.names }
+        : {}),
+    }));
+  };
+  const resolveChannelWebhookWorkspace = (channelName: string): string =>
+    getChannelWebhookConfigSources().find(
+      (source) =>
+        !source.channelNames || source.channelNames.includes(channelName),
+    )?.workspaceCwd ?? boundWorkspace;
   let closeServerAfterChannelWorkerStartupFailure = false;
   let runtimeFailureListenerClose: Promise<void> | undefined;
   const getChannelWorkerSnapshot = (): ChannelWorkerSnapshot =>
@@ -3587,6 +3603,16 @@ export async function runQwenServe(
       daemonLog,
       getChannelWorkerSnapshot,
       getChannelWorkerSnapshots,
+      channelWebhookConfigSources: getChannelWebhookConfigSources(),
+      enqueueChannelWebhookTask: async (task) => {
+        if (!channelWorkerGroup) {
+          throw new ChannelWebhookEnqueueError(
+            'channel_worker_unavailable',
+            'Channel worker is not running.',
+          );
+        }
+        return channelWorkerGroup.enqueueWebhookTask(task);
+      },
       // Gate both the `channel_reload` capability and the reload route on the
       // presence of this dep, so it is advertised only when a channel worker
       // exists to reload.
@@ -3711,7 +3737,7 @@ export async function runQwenServe(
   });
   const deferredChannelWebhookAuth = deferRuntimeUntilFirstHealth
     ? createDeferredChannelWebhookAuth(
-        boundWorkspace,
+        resolveChannelWebhookWorkspace,
         await loadChannelWebhookConfigRuntime(),
         daemonLog,
       )

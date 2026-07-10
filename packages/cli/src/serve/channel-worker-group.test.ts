@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import type { ChannelWebhookTask } from '@qwen-code/channel-base';
 import { createChannelWorkerGroup } from './channel-worker-group.js';
 import type {
   ChannelWorkerSnapshot,
@@ -43,6 +44,7 @@ function fakeRegistry(runtimes: WorkspaceRuntime[]): WorkspaceRegistry {
   return {
     primary: runtimes.find((runtime) => runtime.primary)!,
     list: () => runtimes,
+    add: vi.fn(),
     getByWorkspaceCwd: (cwd) =>
       runtimes.find((runtime) => runtime.workspaceCwd === cwd),
     getByWorkspaceId: (id) =>
@@ -73,6 +75,7 @@ interface RecordedSupervisor {
     stop: ReturnType<typeof vi.fn>;
     restart: ReturnType<typeof vi.fn>;
     killAllSync: ReturnType<typeof vi.fn>;
+    enqueueWebhookTask: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -101,7 +104,92 @@ const shared = {
   daemonToken: 'tok',
 };
 
+const webhookTask: ChannelWebhookTask = {
+  channelName: 'b',
+  source: 'github-ci',
+  eventType: 'check_failed',
+  targetRef: 'default',
+  title: 'CI failed',
+  payload: { runId: 123 },
+};
+
 describe('createChannelWorkerGroup', () => {
+  it('routes webhook tasks to the supervisor that owns the channel', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    recorded[1]!.supervisor.enqueueWebhookTask.mockResolvedValueOnce({
+      accepted: true,
+    });
+
+    await expect(group.enqueueWebhookTask(webhookTask)).resolves.toEqual({
+      accepted: true,
+    });
+    expect(recorded[0]!.supervisor.enqueueWebhookTask).not.toHaveBeenCalled();
+    expect(recorded[1]!.supervisor.enqueueWebhookTask).toHaveBeenCalledWith(
+      webhookTask,
+    );
+  });
+
+  it('routes --channel all webhook tasks to the primary supervisor', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [{ workspaceCwd: PRIMARY, selection: { mode: 'all' } }],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    recorded[0]!.supervisor.enqueueWebhookTask.mockResolvedValueOnce({
+      accepted: true,
+    });
+
+    await expect(group.enqueueWebhookTask(webhookTask)).resolves.toEqual({
+      accepted: true,
+    });
+    expect(recorded[0]!.supervisor.enqueueWebhookTask).toHaveBeenCalledWith(
+      webhookTask,
+    );
+  });
+
+  it('rejects webhook tasks that have no owning worker', async () => {
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+
+    await expect(group.enqueueWebhookTask(webhookTask)).rejects.toMatchObject({
+      code: 'channel_worker_unavailable',
+    });
+    expect(recorded[0]!.supervisor.enqueueWebhookTask).not.toHaveBeenCalled();
+  });
+
   it('builds one supervisor per group with the runtime env overlay', () => {
     const registry = fakeRegistry([
       fakeRuntime(PRIMARY, true, { A: 'primary' }),
