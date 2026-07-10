@@ -27,11 +27,15 @@ describe('Interactive protocol tag filtering', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'retries HTTP failures before filtering tagged stream output',
+    'retries HTTP 200 streams containing only hidden protocol text',
     async () => {
       fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
         if (requestIndex < 2) {
-          throw new Error(`retryable fake failure ${requestIndex + 1}`);
+          return {
+            contentChunks: [
+              `<analysis>hidden failed attempt ${requestIndex + 1}</analysis>`,
+            ],
+          };
         }
 
         return {

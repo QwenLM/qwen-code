@@ -3405,6 +3405,7 @@ export class GeminiChat {
 
     try {
       for await (const chunk of streamResponse) {
+        let protocolTextWasSuppressed = false;
         // Use ||= to avoid later usage-only chunks (no candidates) overwriting
         // a finishReason that was already seen in an earlier chunk.
         hasFinishReason ||=
@@ -3412,9 +3413,10 @@ export class GeminiChat {
           false;
 
         if (isValidResponse(chunk)) {
-          const content = chunk.candidates?.[0]?.content;
+          const candidate = chunk.candidates?.[0];
+          const content = candidate?.content;
+          const finishReason = candidate?.finishReason;
           if (content?.parts) {
-            const finishReason = chunk.candidates?.[0]?.finishReason;
             const sanitizedParts: Part[] = [];
             for (const part of content.parts) {
               if (typeof part.text === 'string' && !part.thought) {
@@ -3422,6 +3424,7 @@ export class GeminiChat {
                 if (text) {
                   sanitizedParts.push({ ...part, text });
                 } else {
+                  protocolTextWasSuppressed ||= part.text.length > 0;
                   const { text: _text, ...rest } = part;
                   const hasNonTextData = Object.entries(rest).some(
                     ([key, value]) => key !== 'thought' && value !== undefined,
@@ -3450,6 +3453,12 @@ export class GeminiChat {
 
             // Collect all parts for recording
             allModelParts.push(...content.parts);
+          } else if (finishReason && finishReason !== FinishReason.MAX_TOKENS) {
+            const text = protocolTagFilter.flush();
+            if (text && candidate) {
+              candidate.content = { role: 'model', parts: [{ text }] };
+              allModelParts.push({ text });
+            }
           }
         }
 
@@ -3530,7 +3539,12 @@ export class GeminiChat {
           Boolean(chunk.candidates?.[0]?.finishReason) &&
           !hasToolCall &&
           !allModelParts.some((part) => part.text?.trim());
-        if (!suppressEmptyTerminalChunk) {
+        const suppressEmptyProtocolChunk =
+          protocolTextWasSuppressed &&
+          !chunk.usageMetadata &&
+          !chunk.candidates?.[0]?.finishReason &&
+          !chunk.candidates?.[0]?.content?.parts?.length;
+        if (!suppressEmptyTerminalChunk && !suppressEmptyProtocolChunk) {
           yield chunk;
         }
       }
@@ -3580,6 +3594,27 @@ export class GeminiChat {
       .map((part) => part.text)
       .join('')
       .trim();
+
+    // Validate normally completed streams before recording them. A failed
+    // attempt may be retried, so persisting it here would make resumed history
+    // diverge from the in-memory history that deliberately drops the attempt.
+    const hasAnyContent = contentText || thoughtText;
+    if (
+      streamError === null &&
+      !hasToolCall &&
+      (!hasFinishReason || !hasAnyContent)
+    ) {
+      if (!hasFinishReason) {
+        throw new InvalidStreamError(
+          'Model stream ended without a finish reason.',
+          'NO_FINISH_REASON',
+        );
+      }
+      throw new InvalidStreamError(
+        'Model stream ended with empty response text.',
+        'NO_RESPONSE_TEXT',
+      );
+    }
 
     // Record assistant turn with raw Content and metadata. Gate matches
     // the in-memory `this.history.push` decision below so chat-recording
@@ -3697,31 +3732,6 @@ export class GeminiChat {
         );
       }
       throw streamError;
-    }
-
-    // Stream validation logic: A stream is considered successful if:
-    // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
-    // 2. There's a finish reason AND we have non-empty response text or thought text
-    //
-    // We throw an error only when there's no tool call AND:
-    // - No finish reason, OR
-    // - Empty response text (e.g., no actual content and no thoughts)
-    //
-    // Note: Thoughts-only responses are valid for models that use thinking modes
-    // These models may send only reasoning content without explicit text output.
-    const hasAnyContent = contentText || thoughtText;
-    if (!hasToolCall && (!hasFinishReason || !hasAnyContent)) {
-      if (!hasFinishReason) {
-        throw new InvalidStreamError(
-          'Model stream ended without a finish reason.',
-          'NO_FINISH_REASON',
-        );
-      } else {
-        throw new InvalidStreamError(
-          'Model stream ended with empty response text.',
-          'NO_RESPONSE_TEXT',
-        );
-      }
     }
 
     this.history.push({

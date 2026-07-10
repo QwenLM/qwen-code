@@ -36,9 +36,9 @@ import {
   composePostCompactHistory,
   countToolResponseImages,
   postProcessSummary,
-  stripCompressionProtocolTags,
   type SubagentSnapshot,
 } from './postCompactAttachments.js';
+import { stripAnalysisSummaryProtocolTags } from '../utils/protocol-tag-sanitizer.js';
 
 const debugLogger = createDebugLogger('COMPRESSION');
 
@@ -558,7 +558,7 @@ export class ChatCompressionService {
     // amnesia with green metrics. Treat strip-to-empty as an empty summary
     // so it takes the COMPRESSION_FAILED_EMPTY_SUMMARY path (NOOP) instead.
     const isSummaryEmpty =
-      !summary || stripCompressionProtocolTags(summary).trim().length === 0;
+      !summary || stripAnalysisSummaryProtocolTags(summary).trim().length === 0;
     const compressionUsageMetadata = summaryResult.usage;
     const compressionInputTokenCount =
       compressionUsageMetadata?.promptTokenCount;
@@ -853,7 +853,7 @@ export class ChatCompressionService {
           .getHookSystem()
           ?.firePostCompactEvent(
             postCompactTrigger,
-            stripCompressionProtocolTags(summary),
+            stripAnalysisSummaryProtocolTags(summary),
             signal,
           );
       } catch (err) {

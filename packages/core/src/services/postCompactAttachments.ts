@@ -487,12 +487,8 @@ export function buildImageRestorationBlock(
 const RESUME_TRAILER =
   'Resume the prior task using the summary above. Continue from the last in-flight step; do not acknowledge the summary, do not re-introduce, do not greet the user again.';
 
-export function stripCompressionProtocolTags(rawSummary: string): string {
-  return stripAnalysisSummaryProtocolTags(rawSummary);
-}
-
 export function postProcessSummary(rawSummary: string): string {
-  const stripped = stripCompressionProtocolTags(rawSummary);
+  const stripped = stripAnalysisSummaryProtocolTags(rawSummary);
   // Defensive sentinel only. Callers gate on `isSummaryEmpty`, which now
   // checks the STRIPPED summary — so a response that strips to nothing is
   // treated as an empty summary upstream (COMPRESSION_FAILED_EMPTY_SUMMARY)

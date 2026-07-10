@@ -461,6 +461,7 @@ export class Turn {
         },
         this.prompt_id,
       );
+
       for await (const streamEvent of responseStream) {
         if (signal?.aborted) {
           yield { type: GeminiEventType.UserCancelled };

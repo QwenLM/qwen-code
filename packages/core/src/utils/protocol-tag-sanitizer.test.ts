@@ -59,4 +59,33 @@ describe('protocol tag sanitizer', () => {
       filter.accept('<analysis/><summary>visible</summary>') + filter.flush(),
     ).toBe('visible');
   });
+
+  it('recovers a summary after an unclosed analysis block', () => {
+    const filter = new TopLevelProtocolTagStreamFilter();
+
+    expect(filter.accept('<analysis>hidden<sum')).toBe('');
+    expect(filter.accept('mary>visible</summary>')).toBe('');
+    expect(filter.flush()).toBe('visible');
+  });
+
+  it('keeps a nested summary hidden when the analysis block later closes', () => {
+    const filter = new TopLevelProtocolTagStreamFilter();
+
+    expect(
+      filter.accept(
+        '<analysis>hidden<summary>nested</summary></analysis>' +
+          '<summary>visible</summary>',
+      ) + filter.flush(),
+    ).toBe('visible');
+  });
+
+  it('clears malformed recovery state on reset', () => {
+    const filter = new TopLevelProtocolTagStreamFilter();
+
+    expect(filter.accept('<analysis>hidden<summary>stale')).toBe('');
+    filter.reset();
+    expect(filter.accept('<summary>fresh</summary>') + filter.flush()).toBe(
+      'fresh',
+    );
+  });
 });

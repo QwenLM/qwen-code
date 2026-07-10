@@ -194,6 +194,9 @@ export class TopLevelProtocolTagStreamFilter {
   private literalTag = false;
   private analysisDepth = 0;
   private outputStarted = false;
+  private recoveryBuffer: string | undefined;
+  private recoveryAnalysisDepth = 0;
+  private recoverySummaryOpened = false;
 
   accept(text: string): string {
     if (this.mode === 'passthrough') return text;
@@ -235,8 +238,12 @@ export class TopLevelProtocolTagStreamFilter {
       this.analysisDepth === 0
         ? this.tagCandidate
         : '';
+    const recovered =
+      this.recoveryBuffer && this.recoverySummaryOpened
+        ? stripAnalysisSummaryProtocolTags(this.recoveryBuffer)
+        : '';
     this.resetToPassthrough();
-    return out;
+    return out + recovered;
   }
 
   reset(): void {
@@ -247,12 +254,17 @@ export class TopLevelProtocolTagStreamFilter {
     this.literalTag = false;
     this.analysisDepth = 0;
     this.outputStarted = false;
+    this.recoveryBuffer = undefined;
+    this.recoveryAnalysisDepth = 0;
+    this.recoverySummaryOpened = false;
   }
 
   private acceptProtocolText(text: string): string {
     let out = '';
 
     for (const char of text) {
+      if (this.recoveryBuffer !== undefined) this.recoveryBuffer += char;
+
       if (this.protocolTag) {
         if (char === '>') {
           this.finishProtocolTag(this.protocolTag);
@@ -274,6 +286,15 @@ export class TopLevelProtocolTagStreamFilter {
         const classification = classifyTagStart(this.tagCandidate);
         if (classification.type === 'possible') continue;
         if (classification.type === 'protocol') {
+          if (
+            classification.name === 'summary' &&
+            !classification.closing &&
+            this.analysisDepth > 0 &&
+            this.recoveryBuffer === undefined
+          ) {
+            this.recoveryBuffer = this.tagCandidate;
+            this.recoveryAnalysisDepth = this.analysisDepth;
+          }
           this.protocolTag = {
             ...classification,
             lastChar: char === '>' ? '' : char,
@@ -310,11 +331,23 @@ export class TopLevelProtocolTagStreamFilter {
     if (tag.name === 'analysis') {
       if (tag.closing) {
         this.analysisDepth = Math.max(0, this.analysisDepth - 1);
+        if (
+          this.recoveryBuffer !== undefined &&
+          this.analysisDepth < this.recoveryAnalysisDepth
+        ) {
+          this.recoveryBuffer = undefined;
+          this.recoveryAnalysisDepth = 0;
+          this.recoverySummaryOpened = false;
+        }
       } else if (!selfClosing) {
         this.analysisDepth += 1;
       }
-    } else if (!tag.closing && this.analysisDepth === 0) {
-      this.outputStarted = true;
+    } else if (!tag.closing) {
+      if (this.analysisDepth === 0) {
+        this.outputStarted = true;
+      } else if (this.recoveryBuffer !== undefined) {
+        this.recoverySummaryOpened = true;
+      }
     }
   }
 
@@ -324,5 +357,8 @@ export class TopLevelProtocolTagStreamFilter {
     this.tagCandidate = '';
     this.protocolTag = undefined;
     this.literalTag = false;
+    this.recoveryBuffer = undefined;
+    this.recoveryAnalysisDepth = 0;
+    this.recoverySummaryOpened = false;
   }
 }
