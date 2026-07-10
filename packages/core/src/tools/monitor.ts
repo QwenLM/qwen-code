@@ -369,7 +369,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
           QWEN_CODE: '1',
           TERM: 'dumb', // no color codes for streaming
           ...getShellPagerEnv(this.config.getShellExecutionConfig().pager, {
-            includeGitPager: true,
+            includeGitPager: false,
             platform: os.platform(),
           }),
           ...getShellContextEnvVars(),

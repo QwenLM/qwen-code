@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
-import type { PartUnion } from '@google/genai';
+import type { Part, PartListUnion } from '@google/genai';
 import mime from 'mime/lite';
 import {
   iconvDecode,
@@ -18,9 +18,10 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import { BINARY_EXTENSIONS } from './ignorePatterns.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
-import { getErrorMessage, isNodeError } from './errors.js';
+import { getErrorMessage, isAbortError, isNodeError } from './errors.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
+import type { PDFRenderedImage } from './pdf.js';
 import {
   buildLargePDFGuidance,
   buildPDFTextTooLargeGuidance,
@@ -32,9 +33,16 @@ import {
   PDF_MAX_PAGES_PER_READ,
   PDF_TEXT_EXTRACTION_UNAVAILABLE_MESSAGE,
   PDF_TEXT_RESULT_MAX_TOKENS,
+  renderPDFPagesToImages,
   shouldRequirePDFPageRange,
 } from './pdf.js';
+import { VISION_BRIDGE_MAX_IMAGES } from '../services/visionBridge/vision-bridge-constants.js';
 import { readNotebookWithMetadata } from './notebook.js';
+import { readTextRange } from './read-text-range.js';
+import {
+  DEFAULT_RANGE_READ_BYTES,
+  TEXT_RANGE_FAST_PATH_MAX_SIZE,
+} from './text-range-constants.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
 
@@ -273,9 +281,13 @@ function bomEncodingToName(bomEncoding: UnicodeEncoding): string {
  */
 export async function readFileWithEncodingInfo(
   filePath: string,
+  signal?: AbortSignal,
 ): Promise<FileReadResult> {
   // Read the file once; detect BOM and decode from the single buffer.
-  const full = await fs.promises.readFile(filePath);
+  const full = await fs.promises.readFile(
+    filePath,
+    signal === undefined ? undefined : { signal },
+  );
   return decodeBufferWithEncodingInfo(full);
 }
 
@@ -299,14 +311,42 @@ export async function readFileWithLineAndLimit(params: {
   path: string;
   limit: number;
   line?: number;
+  maxOutputBytes?: number;
+  signal?: AbortSignal;
+  stats?: import('node:fs').Stats;
 }): Promise<{
   content: string;
   bom?: boolean;
   encoding?: string;
   originalLineCount: number;
+  originalLineCountExact?: boolean;
+  lineEnding?: 'crlf' | 'lf';
+  truncatedByBytes?: boolean;
 }> {
-  const { path: filePath, limit, line } = params;
-  const { content, encoding, bom } = await readFileWithEncodingInfo(filePath);
+  const { path: filePath, limit, line, maxOutputBytes, signal } = params;
+  const stats = params.stats ?? (await fs.promises.stat(filePath));
+  if (
+    (line !== undefined && line > 0) ||
+    Number.isFinite(limit) ||
+    maxOutputBytes !== undefined
+  ) {
+    return readTextRange({
+      path: filePath,
+      offset: line || 0,
+      limit,
+      maxOutputBytes: normalizeRangeReadByteLimit(maxOutputBytes),
+      stats,
+      ...(signal !== undefined ? { signal } : {}),
+    });
+  }
+
+  signal?.throwIfAborted();
+
+  const { content, encoding, bom } = await readFileWithEncodingInfo(
+    filePath,
+    signal,
+  );
+  signal?.throwIfAborted();
   const lines = content.split('\n');
   const originalLineCount = lines.length;
   const startLine = line || 0;
@@ -321,6 +361,7 @@ export async function readFileWithLineAndLimit(params: {
     bom,
     encoding,
     originalLineCount,
+    originalLineCountExact: true,
   };
 }
 
@@ -824,11 +865,15 @@ export async function detectFileType(filePath: string): Promise<FileType> {
 }
 
 export interface ProcessedFileReadResult {
-  llmContent: PartUnion; // string for text, Part for image/pdf/unreadable binary
+  // string for text; a single Part for image / native-PDF / unreadable binary;
+  // an array of image Parts when a PDF is rendered page-by-page (vision
+  // fallback / bridge transcription).
+  llmContent: PartListUnion;
   returnDisplay: string;
   error?: string; // Optional error message for the LLM if file processing failed
   errorType?: ToolErrorType; // Structured error type
   originalLineCount?: number; // For text files, the total number of lines in the original file
+  originalLineCountExact?: boolean; // False when a large range read stopped before EOF
   isTruncated?: boolean; // Indicates if displayed content was truncated
   linesShown?: [number, number]; // For text files [startLine, endLine] (1-based for display)
   /**
@@ -867,6 +912,7 @@ export interface ProcessSingleFileContentOptions {
    * sets this after deciding the vision bridge should handle the image.
    */
   preserveUnsupportedImage?: boolean;
+  signal?: AbortSignal;
   /**
    * Large full-PDF text fallback returns a tool error by default. `@`-attached
    * PDFs use `reference` so the model gets guidance without a failed read.
@@ -945,10 +991,12 @@ export async function processSingleFileContent(
     limit,
     pages,
     preserveUnsupportedImage = false,
+    signal,
     largePdfBehavior = 'error',
   } = options;
   const rootDirectory = config.getTargetDir();
   try {
+    signal?.throwIfAborted();
     let stats: import('node:fs').Stats;
     try {
       // Async stat doubles as the existence check — ENOENT is handled below
@@ -1001,6 +1049,23 @@ export async function processSingleFileContent(
     // getContentGeneratorConfig still work for non-media file types.
     const modalities: InputModalities =
       config.getContentGeneratorConfig?.()?.modalities ?? {};
+
+    // Vision-capable main model, explicit read (not `@`-reference): when text
+    // extraction overflows or fails, render pages to images for the model
+    // itself. Deliberately keyed on `modalities.image` (not `!modalities.pdf`)
+    // so an image+pdf model's dense `pages` read can still be rescued; the
+    // native whole-PDF base64 branch runs earlier and is unaffected.
+    const willRenderPdfImages =
+      fileType === 'pdf' &&
+      !!modalities.image &&
+      largePdfBehavior !== 'reference';
+    // Text-only main model on a bridge-capable `@` path: a scanned / no-text
+    // PDF is rendered to a few pages so the existing vision bridge can
+    // transcribe them. Only fires when text extraction genuinely fails (see
+    // the switch below); text-bearing PDFs stay text-first and fall to
+    // reference.
+    const renderForBridge =
+      fileType === 'pdf' && !modalities.image && preserveUnsupportedImage;
 
     const fileSizeInMB = stats.size / (1024 * 1024);
     const normalizedPages = pages?.trim();
@@ -1070,10 +1135,17 @@ export async function processSingleFileContent(
     if (willExtractPdfText && !pageRange) {
       const pageCount = await getPDFPageCount(filePath);
       const requirement = shouldRequirePDFPageRange(pageCount, stats.size);
+      // A vision render can hold up to PDF_MAX_PAGES_PER_READ pages, so only
+      // require an explicit range past that ceiling; the text path keeps the
+      // tighter full-text limit. Below the ceiling we fall through and let the
+      // switch try text first, rendering only on overflow/failure.
+      const rangeRequired = willRenderPdfImages
+        ? requirement.effectivePageCount > PDF_MAX_PAGES_PER_READ
+        : requirement.required;
       debugLogger.debug(
-        `PDF full-text fallback gate: file=${relativePathForDisplay}, sizeMB=${fileSizeInMB.toFixed(2)}, pageCount=${pageCount ?? 'unknown'}, required=${requirement.required}, effectivePageCount=${requirement.effectivePageCount}, hadPdfInfo=${requirement.hadPdfInfo}, behavior=${largePdfBehavior}`,
+        `PDF full-text fallback gate: file=${relativePathForDisplay}, sizeMB=${fileSizeInMB.toFixed(2)}, pageCount=${pageCount ?? 'unknown'}, required=${requirement.required}, rangeRequired=${rangeRequired}, effectivePageCount=${requirement.effectivePageCount}, hadPdfInfo=${requirement.hadPdfInfo}, behavior=${largePdfBehavior}`,
       );
-      if (requirement.required) {
+      if (rangeRequired) {
         if (largePdfBehavior === 'error' && !(await isPdftotextAvailable())) {
           return {
             llmContent: `[Cannot extract text from PDF: "${displayName}". ${PDF_TEXT_EXTRACTION_UNAVAILABLE_MESSAGE}]`,
@@ -1101,7 +1173,7 @@ export async function processSingleFileContent(
         };
       }
     }
-    if (fileSizeInMB > 9.9 && !willExtractPdfText) {
+    if (fileSizeInMB > 9.9 && !willExtractPdfText && fileType !== 'text') {
       return {
         llmContent: 'File size exceeds the 10MB limit.',
         returnDisplay: 'File size exceeds the 10MB limit.',
@@ -1182,11 +1254,25 @@ export async function processSingleFileContent(
             path: filePath,
             limit: limit ?? config.getTruncateToolOutputLines(),
             line: offset,
+            maxOutputBytes: getRangeReadByteLimit(config),
+            stats,
+            ...(signal !== undefined ? { signal } : {}),
           });
-        const originalLineCount =
-          _meta?.originalLineCount ?? (await countFileLines(filePath));
         const selectedLines = content.split('\n').map((line) => line.trimEnd());
         const startLine = offset || 0;
+        const selectedLineCount =
+          content.length === 0 ? 0 : selectedLines.length;
+        const hasOriginalLineCount = _meta?.originalLineCount !== undefined;
+        const originalLineCount =
+          _meta?.originalLineCount ??
+          (stats.size >= TEXT_RANGE_FAST_PATH_MAX_SIZE
+            ? startLine + selectedLineCount
+            : await countFileLines(filePath));
+        const originalLineCountExact =
+          _meta?.originalLineCountExact === false
+            ? false
+            : hasOriginalLineCount ||
+              stats.size < TEXT_RANGE_FAST_PATH_MAX_SIZE;
         const configCharLimit = config.getTruncateToolOutputThreshold();
 
         // Apply character limit truncation
@@ -1227,17 +1313,38 @@ export async function processSingleFileContent(
           linesIncluded = selectedLines.length;
         }
 
+        if (_meta?.truncatedByBytes === true) {
+          const marker = '... [truncated]';
+          if (!llmContent.endsWith(marker)) {
+            const prefix = Number.isFinite(configCharLimit)
+              ? llmContent.slice(
+                  0,
+                  Math.max(configCharLimit - marker.length - 1, 0),
+                )
+              : llmContent;
+            const separator =
+              prefix.length === 0 || prefix.endsWith('\n') ? '' : '\n';
+            llmContent = prefix + separator + marker;
+          }
+          contentLengthTruncated = true;
+        }
+
         const actualEndLine = startLine + linesIncluded;
         const contentRangeTruncated =
-          startLine > 0 || actualEndLine < originalLineCount;
+          startLine > 0 ||
+          !originalLineCountExact ||
+          actualEndLine < originalLineCount;
         const isTruncated = contentRangeTruncated || contentLengthTruncated;
+        const lineCountLabel = originalLineCountExact
+          ? `${originalLineCount}`
+          : `at least ${originalLineCount}`;
 
         // By default, return nothing to streamline the common case of a successful read_file.
         let returnDisplay = '';
         if (isTruncated) {
           returnDisplay = `Read lines ${
             startLine + 1
-          }-${actualEndLine} of ${originalLineCount} from ${relativePathForDisplay}`;
+          }-${actualEndLine} of ${lineCountLabel} from ${relativePathForDisplay}`;
           if (contentLengthTruncated) {
             returnDisplay += ' (truncated)';
           }
@@ -1248,6 +1355,7 @@ export async function processSingleFileContent(
           returnDisplay,
           isTruncated,
           originalLineCount,
+          originalLineCountExact,
           linesShown: [startLine + 1, actualEndLine],
           stats,
         };
@@ -1307,46 +1415,149 @@ export async function processSingleFileContent(
           };
         }
 
-        // Extract text via pdftotext (for pages parameter, or models without PDF support)
+        // Text-first: extract via pdftotext (for a pages parameter, or models
+        // without native PDF support). Only when the text overflows the token
+        // budget or extraction fails (scanned / no text layer) do we fall back
+        // to rendering pages as images.
         const pdfResult = await extractPDFText(filePath, pageRange);
         if (pdfResult.success) {
           const estimatedTokens = estimatePDFTextOutputTokens(pdfResult.text);
-          if (estimatedTokens > PDF_TEXT_RESULT_MAX_TOKENS) {
-            debugLogger.debug(
-              `PDF text extraction output exceeds token limit: file=${relativePathForDisplay}, pages=${normalizedPages ?? 'all'}, estimatedTokens=${estimatedTokens}, limit=${PDF_TEXT_RESULT_MAX_TOKENS}`,
-            );
-            const guidance = buildPDFTextTooLargeGuidance(
-              displayName,
-              estimatedTokens,
-              normalizedPages,
-            );
-            if (!pageRange && largePdfBehavior === 'reference') {
-              return {
-                llmContent: guidance,
-                returnDisplay: `Referenced large PDF: ${relativePathForDisplay}`,
-                stats,
-              };
-            }
+          if (estimatedTokens <= PDF_TEXT_RESULT_MAX_TOKENS) {
+            const pagesLabel = normalizedPages
+              ? ` (pages ${normalizedPages})`
+              : '';
             return {
-              llmContent: guidance,
-              returnDisplay: `PDF text too large: ${relativePathForDisplay}`,
-              error: guidance,
-              errorType: ToolErrorType.FILE_TOO_LARGE,
+              llmContent: pdfResult.text,
+              returnDisplay: `Read pdf as text${pagesLabel}: ${relativePathForDisplay}`,
               stats,
             };
           }
+        }
 
-          const pagesLabel = normalizedPages
-            ? ` (pages ${normalizedPages})`
-            : '';
+        // Extraction overflowed (dense text) or failed (scanned / no text
+        // layer). Both converge here, resolved by the ordered, mutually
+        // exclusive fallbacks below. Tag each rendered page with its source
+        // page number so the model / bridge can cite pages.
+        const toImageParts = (
+          images: PDFRenderedImage[],
+          startPage: number,
+        ): Part[] =>
+          images.map((image, index) => ({
+            inlineData: {
+              data: image.data,
+              mimeType: image.mimeType,
+              displayName: `${displayName} (page ${startPage + index})`,
+            },
+          }));
+
+        // (1) Render to the vision main model itself (explicit read). With no
+        //     page range, render from the start up to the per-read ceiling.
+        if (willRenderPdfImages) {
+          const startPage = pageRange?.firstPage ?? 1;
+          const render = await renderPDFPagesToImages(
+            filePath,
+            pageRange ?? { firstPage: 1, lastPage: PDF_MAX_PAGES_PER_READ },
+          );
+          if (render.success) {
+            const parts = toImageParts(render.images, startPage);
+            // Never drop pages silently. Two ways a no-page-range read can be
+            // partial: the byte cap kicked in, or the render filled the page
+            // ceiling (the page count was unknown/underestimated upstream, so
+            // more pages may follow).
+            if (render.bytesTruncated) {
+              parts.push({
+                text: `[Rendered the first ${render.images.length} page(s) of "${displayName}"; later pages were omitted to stay within size limits. Use the 'pages' parameter to read a specific range.]`,
+              });
+            } else if (
+              !pageRange &&
+              render.images.length >= PDF_MAX_PAGES_PER_READ
+            ) {
+              parts.push({
+                text: `[Rendered the first ${render.images.length} page(s) (the per-read maximum) of "${displayName}". If the document has more pages, use the 'pages' parameter to read a later range.]`,
+              });
+            }
+            return {
+              llmContent: parts,
+              returnDisplay: `Read pdf as ${render.images.length} image(s): ${relativePathForDisplay}`,
+              stats,
+            };
+          }
+          // Render unavailable/failed — fall through to the text-based
+          // guidance / error below so the user still gets an actionable
+          // message (e.g. install poppler-utils).
+          debugLogger.debug(
+            `PDF image render failed, falling back to text outcome: file=${relativePathForDisplay}, error=${render.error}`,
+          );
+        }
+
+        // (2) Render to the vision bridge for a text-only main model — but only
+        //     for scanned / no-text PDFs. Text-bearing PDFs stay text-first and
+        //     fall through to reference. This must precede the reference branch:
+        //     the `@` path sets both `reference` and the preserve flag, so
+        //     checking reference first would starve the bridge.
+        if (renderForBridge && pdfResult.success === false) {
+          const render = await renderPDFPagesToImages(filePath, {
+            firstPage: 1,
+            lastPage: VISION_BRIDGE_MAX_IMAGES,
+          });
+          if (render.success) {
+            const parts = toImageParts(render.images, 1);
+            const pageCount = await getPDFPageCount(filePath);
+            // Never drop pages silently: a known page count above what we
+            // rendered, or (when the count is unknown) a render that filled the
+            // page cap, both mean pages may be missing.
+            const mayHaveMore =
+              pageCount !== null
+                ? pageCount > render.images.length
+                : render.images.length >= VISION_BRIDGE_MAX_IMAGES;
+            if (mayHaveMore || render.bytesTruncated) {
+              const total = pageCount !== null ? ` of ${pageCount}` : '';
+              parts.push({
+                text: `[Rendered the first ${render.images.length}${total} page(s) of "${displayName}" for transcription; later pages were not included.]`,
+              });
+            }
+            return {
+              llmContent: parts,
+              returnDisplay: `Rendered ${render.images.length} page(s) for transcription: ${relativePathForDisplay}`,
+              stats,
+            };
+          }
+          debugLogger.debug(
+            `PDF bridge render failed, falling back to text outcome: file=${relativePathForDisplay}, error=${render.error}`,
+          );
+        }
+
+        if (pdfResult.success) {
+          // Overflowed text: guidance to narrow the range.
+          const guidance = buildPDFTextTooLargeGuidance(
+            displayName,
+            estimatePDFTextOutputTokens(pdfResult.text),
+            normalizedPages,
+          );
+          debugLogger.debug(
+            `PDF text extraction output exceeds token limit: file=${relativePathForDisplay}, pages=${normalizedPages ?? 'all'}, limit=${PDF_TEXT_RESULT_MAX_TOKENS}`,
+          );
+          // (3) Reference (no pages, `@`-attached): guidance without a failed read.
+          if (!pageRange && largePdfBehavior === 'reference') {
+            return {
+              llmContent: guidance,
+              returnDisplay: `Referenced large PDF: ${relativePathForDisplay}`,
+              stats,
+            };
+          }
+          // (4) Text fallback: surface the too-large guidance as an error.
           return {
-            llmContent: pdfResult.text,
-            returnDisplay: `Read pdf as text${pagesLabel}: ${relativePathForDisplay}`,
+            llmContent: guidance,
+            returnDisplay: `PDF text too large: ${relativePathForDisplay}`,
+            error: guidance,
+            errorType: ToolErrorType.FILE_TOO_LARGE,
             stats,
           };
         }
 
-        // pdftotext failed or not available — return helpful error
+        // pdftotext failed or not available and no render path handled it —
+        // return a helpful error (scanned PDF on a text-only model without an
+        // available bridge, or poppler entirely missing).
         return {
           llmContent: `[Cannot extract text from PDF: "${displayName}". ${pdfResult.error}]`,
           returnDisplay: `Failed to read pdf: ${relativePathForDisplay}`,
@@ -1385,6 +1596,9 @@ export async function processSingleFileContent(
       }
     }
   } catch (error) {
+    if (signal?.aborted || isAbortError(error)) {
+      throw error;
+    }
     const errorMessage = getErrorMessage(error);
     const displayPath = path
       .relative(rootDirectory, filePath)
@@ -1396,6 +1610,28 @@ export async function processSingleFileContent(
       errorType: ToolErrorType.READ_CONTENT_FAILURE,
     };
   }
+}
+
+function getRangeReadByteLimit(config: Config): number {
+  const charLimit = config.getTruncateToolOutputThreshold();
+  if (charLimit === Number.POSITIVE_INFINITY) {
+    return Number.POSITIVE_INFINITY;
+  }
+  if (!Number.isFinite(charLimit)) {
+    return DEFAULT_RANGE_READ_BYTES;
+  }
+  // Leave enough byte headroom for UTF-8 text so the character budget remains
+  // the primary truncation control for normal source/log content.
+  return Math.max(DEFAULT_RANGE_READ_BYTES, Math.floor(charLimit) * 4);
+}
+
+function normalizeRangeReadByteLimit(maxOutputBytes: number | undefined) {
+  if (maxOutputBytes === Number.POSITIVE_INFINITY) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return typeof maxOutputBytes === 'number' && Number.isFinite(maxOutputBytes)
+    ? maxOutputBytes
+    : DEFAULT_RANGE_READ_BYTES;
 }
 
 export async function fileExists(filePath: string): Promise<boolean> {

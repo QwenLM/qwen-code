@@ -172,11 +172,13 @@ export class FeishuChannel extends ChannelBase {
   private buildHandlerMap(): Record<string, (data: unknown) => unknown> {
     return {
       'im.message.receive_v1': (data: unknown) => {
+        this.logDebugPayload('Feishu', data);
         this.onMessage(data as FeishuMessageEvent);
         return {};
       },
       'card.action.trigger': (data: unknown) => {
         const payload = data as Record<string, unknown>;
+        this.logDebugPayload('Feishu', payload);
         const stopped = this.onCardAction(payload);
         if (stopped) {
           return { toast: { type: 'info', content: '已停止' } };

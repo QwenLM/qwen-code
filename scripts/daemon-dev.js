@@ -7,6 +7,7 @@
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import http from 'node:http';
+import net from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { platform } from 'node:os';
@@ -24,6 +25,7 @@ const serveOptionNames = new Set([
   '--max-connections',
   '--require-auth',
   '--event-ring-size',
+  '--compacted-replay-max-bytes',
 ]);
 
 function readOption(name) {
@@ -84,6 +86,42 @@ function daemonUrl(hostname, port) {
       ? `[${hostname}]`
       : hostname;
   return `http://${host}:${port}`;
+}
+
+const MAX_PORT_ATTEMPTS = 10;
+
+function findAvailablePort(host, startPort) {
+  return new Promise((resolveFind, rejectFind) => {
+    let attempt = 0;
+    const tryNext = () => {
+      const port = startPort + attempt;
+      if (port > 65535 || attempt >= MAX_PORT_ATTEMPTS) {
+        rejectFind(
+          new Error(
+            `No available port found in range ${startPort}–${Math.min(startPort + MAX_PORT_ATTEMPTS - 1, 65535)}`,
+          ),
+        );
+        return;
+      }
+      const probe = net.createServer();
+      probe.once('error', (err) => {
+        probe.close();
+        if (err.code === 'EADDRINUSE') {
+          console.log(
+            `[daemon-dev] port ${port} is in use, trying ${port + 1}...`,
+          );
+          attempt++;
+          tryNext();
+        } else {
+          rejectFind(err);
+        }
+      });
+      probe.listen(port, host, () => {
+        probe.close(() => resolveFind(port));
+      });
+    };
+    tryNext();
+  });
 }
 
 function spawnDevProcess(label, command, commandArgs, options) {
@@ -199,15 +237,28 @@ try {
   process.exit(1);
 }
 
-const port = readOption('--port') || '4170';
-if (port === '0') {
+const hostname = readOption('--hostname') || '127.0.0.1';
+const rawPort = readOption('--port') || '4170';
+const startPort = parseInt(rawPort, 10);
+if (!Number.isInteger(startPort) || startPort < 0 || startPort > 65535) {
+  console.error(
+    `daemon-dev: --port must be an integer 0–65535, got "${rawPort}".`,
+  );
+  process.exit(1);
+}
+if (startPort === 0) {
   console.error(
     'daemon-dev: --port 0 is not supported; the launcher needs a fixed port to poll for health.',
   );
   process.exit(1);
 }
-
-const hostname = readOption('--hostname') || '127.0.0.1';
+const probeHostname =
+  hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+const port = hasOption('--port')
+  ? String(startPort)
+  : String(await findAvailablePort(probeHostname, startPort));
 const token =
   readOption('--token') ||
   process.env.QWEN_SERVER_TOKEN ||
@@ -215,6 +266,7 @@ const token =
 const workspace = resolve(readOption('--workspace') || process.cwd());
 
 const serveArgs = serveArgsFromLauncherArgs();
+if (!hasOption('--port')) serveArgs.push('--port', port);
 if (!hasOption('--workspace')) serveArgs.push('--workspace', workspace);
 
 const tsxLoaderUrl = pathToFileURL(

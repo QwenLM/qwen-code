@@ -90,6 +90,11 @@ export class HookSystem {
     debugLogger.debug('Hook system initialized successfully');
   }
 
+  async reload(): Promise<void> {
+    await this.hookRegistry.reloadConfiguredHooks();
+    debugLogger.debug('Hook system reloaded successfully');
+  }
+
   /**
    * Set the messages provider for automatic conversation history passing
    * to function hooks during execution
