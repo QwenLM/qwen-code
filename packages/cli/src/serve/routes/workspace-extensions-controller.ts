@@ -34,6 +34,14 @@ const EXTENSION_MUTATION_TIMEOUT_MS = 10 * 60_000;
  * Wraps a promise with a timeout that rejects if the underlying work does not
  * settle in time. Shared by the controller (mutation queue) and the route
  * handlers (update-check / refresh).
+ *
+ * Non-cancellation semantics: on timeout the returned promise rejects, but the
+ * underlying operation is NOT aborted and keeps running to completion in the
+ * background. Inside `runQueuedExtensionMutation` a timed-out mutation is
+ * recorded as `failed` even though the on-disk install/uninstall may still
+ * settle, and the per-workspace queue stays occupied until the underlying work
+ * finishes. Cancelling the underlying operation (e.g. via `AbortController`)
+ * is tracked as a follow-up.
  */
 export const withExtensionTimeout = async <T>(
   promise: Promise<T>,
@@ -271,7 +279,9 @@ export function createExtensionsController(
         extensionsStatusCache = undefined;
         workspace.invalidateWorkspaceSkillsStatus();
         try {
-          const result = await bridge.refreshExtensionsForAllSessions(event);
+          const result = await bridge.refreshExtensionsForAllSessions(
+            redactExtensionOperationResult(event),
+          );
           updateExtensionOperation(operationId, {
             status: 'succeeded',
             result: {
@@ -300,7 +310,7 @@ export function createExtensionsController(
           });
           try {
             bridge.broadcastExtensionsChanged({
-              ...event,
+              ...redactExtensionOperationResult(event),
               refreshed: 0,
               failed: 1,
               error: message.slice(0, 500),
