@@ -33,9 +33,13 @@ describe('comment attachment guard workflow', () => {
 
   it('checks URL paths instead of country-code TLD hosts', () => {
     expect(workflow).toContain('const parsedUrl = new URL(url);');
-    expect(workflow).toContain(
-      '${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}',
-    );
+    expect(workflow).toContain('target = parsedUrl.pathname;');
+  });
+
+  it('does not scan fenced code blocks or inline code spans', () => {
+    expect(workflow).toContain("replace(/```[\\s\\S]*?```/g, '')");
+    expect(workflow).toContain("replace(/`[^`]*`/g, '')");
+    expect(workflow).toContain('const linkSnippets = scanBody.match');
   });
 
   it('does not throw on malformed URL-like links', () => {
@@ -59,8 +63,11 @@ describe('comment attachment guard workflow', () => {
     expect(workflow).toContain('Failed to write suspicious comment summary');
   });
 
-  it('only reports a removed suspicious comment after deletion succeeds', () => {
+  it('records whether deleting the suspicious comment succeeded', () => {
     expect(workflow).toContain('let deleted = false;');
-    expect(workflow).toContain('if (!deleted) {');
+    expect(workflow).toContain(
+      "['Action', deleted ? 'removed' : 'delete failed']",
+    );
+    expect(workflow).toContain(".addHeading('Suspicious attachment detected')");
   });
 });

@@ -43,7 +43,7 @@ jobs:
               }
               try {
                 const parsedUrl = new URL(url);
-                target = `${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`;
+                target = parsedUrl.pathname;
               } catch {
                 return target;
               }
@@ -57,6 +57,9 @@ jobs:
             const { comment, sender } = context.payload;
             const association = comment.author_association ?? '';
             const body = comment.body ?? '';
+            const scanBody = body
+              .replace(/```[\s\S]*?```/g, '')
+              .replace(/`[^`]*`/g, '');
             const eventName = context.eventName;
 
             if (
@@ -68,7 +71,7 @@ jobs:
             }
 
             const reasons = [];
-            const linkSnippets = body.match(linkPattern) ?? [];
+            const linkSnippets = scanBody.match(linkPattern) ?? [];
             const hasHighRiskLink = linkSnippets.some((snippet) => {
               const mdMatch = snippet.match(/^\[[^\]]+\]\((.+)\)$/);
               const url = mdMatch ? mdMatch[1] : snippet;
@@ -107,13 +110,9 @@ jobs:
               );
             }
 
-            if (!deleted) {
-              return;
-            }
-
             try {
               await core.summary
-                .addHeading('Suspicious attachment comment removed')
+                .addHeading('Suspicious attachment detected')
                 .addTable([
                   [
                     { data: 'Field', header: true },
@@ -124,6 +123,7 @@ jobs:
                   ['Association', association || 'none'],
                   ['Comment ID', String(comment.id)],
                   ['Reason', reasons.join(', ')],
+                  ['Action', deleted ? 'removed' : 'delete failed'],
                 ])
                 .write();
             } catch (error) {
