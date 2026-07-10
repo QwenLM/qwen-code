@@ -35,6 +35,8 @@ const MAX_RECONNECT_DELAY_MS = 30_000;
 export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
   private running = false;
   private generation = 0;
+  private hasStarted = false;
+  private startingGeneration?: number;
   private activeClient: T;
   private readyTimer?: ReturnType<typeof setTimeout>;
   private resolveReadyDelay?: () => void;
@@ -44,9 +46,11 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
   private healthTimer?: ReturnType<typeof setInterval>;
   private healthFailures = 0;
   private reconnectTask?: Promise<void>;
+  private reconnectGeneration?: number;
   private socketCleanup?: () => void;
   private retryTimer?: ReturnType<typeof setTimeout>;
   private resolveRetryDelay?: () => void;
+  private readonly cancelConnectionAttempts = new Set<() => void>();
 
   constructor(private readonly options: DingtalkConnectionManagerOptions<T>) {
     this.activeClient = options.initialClient;
@@ -56,21 +60,32 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
     if (this.running) {
       return;
     }
+    const client = this.hasStarted
+      ? this.options.createClient()
+      : this.activeClient;
+    this.hasStarted = true;
+    this.activeClient = client;
     this.running = true;
     const generation = ++this.generation;
+    this.startingGeneration = generation;
     try {
-      await this.activeClient.connect();
-      await this.waitUntilReady(this.activeClient, generation);
-      this.options.onClientChanged(this.activeClient);
-      this.startMonitoring(this.activeClient);
+      await this.connectClient(client, generation);
+      this.options.onClientChanged(client);
+      this.startMonitoring(client);
     } catch (error) {
       if (this.running && generation === this.generation) {
+        this.safeDisconnect(client, 'startup client');
         this.running = false;
         this.generation++;
+        this.stopMonitoring();
         this.cancelReadyDelay();
-        this.activeClient.disconnect();
+        this.cancelRetryDelay();
       }
       throw error;
+    } finally {
+      if (this.startingGeneration === generation) {
+        this.startingGeneration = undefined;
+      }
     }
   }
 
@@ -83,12 +98,28 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
   }
 
   requestReconnect(client: T, reason: string): void {
-    if (!this.running || client !== this.activeClient || this.reconnectTask) {
+    const generation = this.generation;
+    if (
+      !this.running ||
+      client !== this.activeClient ||
+      this.startingGeneration === generation ||
+      (this.reconnectTask && this.reconnectGeneration === generation)
+    ) {
       return;
     }
-    this.reconnectTask = this.reconnect(reason).finally(() => {
-      this.reconnectTask = undefined;
-    });
+    const task = this.reconnect(reason, generation);
+    this.reconnectTask = task;
+    this.reconnectGeneration = generation;
+    void task
+      .catch((error: unknown) => {
+        this.options.log(`reconnect failed: ${String(error)}`);
+      })
+      .finally(() => {
+        if (this.reconnectTask === task) {
+          this.reconnectTask = undefined;
+          this.reconnectGeneration = undefined;
+        }
+      });
   }
 
   stop(): void {
@@ -97,15 +128,22 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
     }
     this.running = false;
     this.generation++;
+    this.startingGeneration = undefined;
+    this.reconnectTask = undefined;
+    this.reconnectGeneration = undefined;
     this.stopMonitoring();
     this.cancelReadyDelay();
     this.cancelRetryDelay();
-    this.activeClient.disconnect();
+    for (const cancel of this.cancelConnectionAttempts) {
+      cancel();
+    }
+    this.cancelConnectionAttempts.clear();
+    this.safeDisconnect(this.activeClient, 'active client');
   }
 
   private startMonitoring(client: T): void {
     this.stopMonitoring();
-    this.activitySinceHeartbeat = false;
+    this.activitySinceHeartbeat = true;
     this.heartbeatMisses = 0;
     this.healthFailures = 0;
 
@@ -182,34 +220,28 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
     this.socketCleanup = undefined;
   }
 
-  private async reconnect(reason: string): Promise<void> {
-    const generation = this.generation;
+  private async reconnect(reason: string, generation: number): Promise<void> {
     const previousClient = this.activeClient;
     let retryDelay = INITIAL_RECONNECT_DELAY_MS;
     while (this.running && generation === this.generation) {
       let replacement: T | undefined;
       try {
         replacement = this.options.createClient();
-        await replacement.connect();
-        await this.waitUntilReady(replacement, generation);
+        await this.connectClient(replacement, generation);
         if (!this.running || generation !== this.generation) {
-          replacement.disconnect();
+          this.safeDisconnect(replacement, 'stale replacement client');
           return;
         }
         this.activeClient = replacement;
         this.stopMonitoring();
         this.options.onClientChanged(replacement);
         this.startMonitoring(replacement);
-        try {
-          previousClient.disconnect();
-        } catch (error) {
-          this.options.log(
-            `failed to disconnect replaced client: ${String(error)}`,
-          );
-        }
+        this.safeDisconnect(previousClient, 'replaced client');
         return;
       } catch (error) {
-        replacement?.disconnect();
+        if (replacement) {
+          this.safeDisconnect(replacement, 'failed replacement client');
+        }
         if (!this.running || generation !== this.generation) {
           return;
         }
@@ -217,6 +249,57 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
         await this.waitForRetry(retryDelay);
         retryDelay = Math.min(retryDelay * 2, MAX_RECONNECT_DELAY_MS);
       }
+    }
+  }
+
+  private async connectClient(client: T, generation: number): Promise<void> {
+    const deadline = Date.now() + CONNECT_TIMEOUT_MS;
+    let abortAttempt = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let rejectAttempt!: (error: Error) => void;
+    const attemptEnded = new Promise<never>((_resolve, reject) => {
+      rejectAttempt = reject;
+      timeout = setTimeout(() => {
+        abortAttempt = true;
+        reject(new Error('Timed out connecting to DingTalk Stream.'));
+      }, CONNECT_TIMEOUT_MS);
+    });
+    const cancel = () => {
+      abortAttempt = true;
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = undefined;
+      }
+      rejectAttempt(new Error('DingTalk connection manager stopped.'));
+    };
+    this.cancelConnectionAttempts.add(cancel);
+
+    const connect = client.connect();
+    try {
+      await Promise.race([connect, attemptEnded]);
+    } catch (error) {
+      if (abortAttempt) {
+        void connect.then(
+          () => this.safeDisconnect(client, 'late connection client'),
+          () => undefined,
+        );
+      }
+      throw error;
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      this.cancelConnectionAttempts.delete(cancel);
+    }
+
+    await this.waitUntilReady(client, generation, deadline);
+  }
+
+  private safeDisconnect(client: T, context: string): void {
+    try {
+      client.disconnect();
+    } catch (error) {
+      this.options.log(`failed to disconnect ${context}: ${String(error)}`);
     }
   }
 
@@ -231,8 +314,11 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
     });
   }
 
-  private async waitUntilReady(client: T, generation: number): Promise<void> {
-    const deadline = Date.now() + CONNECT_TIMEOUT_MS;
+  private async waitUntilReady(
+    client: T,
+    generation: number,
+    deadline: number,
+  ): Promise<void> {
     while (this.running && generation === this.generation) {
       if (
         client.connected &&
@@ -242,7 +328,7 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
         return;
       }
       if (Date.now() >= deadline) {
-        throw new Error('Timed out waiting for DingTalk Stream registration.');
+        throw new Error('Timed out connecting to DingTalk Stream.');
       }
       await this.waitForReadyPoll();
     }

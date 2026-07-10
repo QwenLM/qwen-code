@@ -12,6 +12,7 @@ type LifecycleBase = Omit<
 
 const dingtalkSdkMock = vi.hoisted(() => ({
   instances: [] as unknown[],
+  nextConnect: undefined as (() => Promise<void>) | undefined,
   rawLog: vi.fn(),
 }));
 
@@ -51,7 +52,11 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => ({
       },
     );
     send = vi.fn();
-    connect = vi.fn();
+    connect = vi.fn(() => {
+      const connect = dingtalkSdkMock.nextConnect;
+      dingtalkSdkMock.nextConnect = undefined;
+      return connect?.() ?? Promise.resolve();
+    });
 
     onSystem = vi.fn();
     onEvent = vi.fn();
@@ -198,6 +203,8 @@ it('keeps callbacks and ACKs bound to the client that received them', async () =
   const channel = createChannel();
   const firstClient = mockClientAt(firstIndex);
   await channel.connect();
+  const replacementConnect = deferredPromise<void>();
+  dingtalkSdkMock.nextConnect = () => replacementConnect.promise;
 
   firstClient.onDownStream(
     JSON.stringify({
@@ -209,7 +216,6 @@ it('keeps callbacks and ACKs bound to the client that received them', async () =
 
   await vi.waitFor(() => {
     expect(dingtalkSdkMock.instances.length).toBe(firstIndex + 2);
-    expect(firstClient.disconnect).toHaveBeenCalledOnce();
   });
   const replacement = mockClientAt(firstIndex + 1);
 
@@ -217,6 +223,10 @@ it('keeps callbacks and ACKs bound to the client that received them', async () =
     headers: { messageId: 'old-message' },
     data: '{}',
   } as DWClientDownStream);
+  replacementConnect.resolve();
+  await vi.waitFor(() => {
+    expect(firstClient.disconnect).toHaveBeenCalledOnce();
+  });
   replacement.callback?.({
     headers: { messageId: 'new-message' },
     data: '{}',
