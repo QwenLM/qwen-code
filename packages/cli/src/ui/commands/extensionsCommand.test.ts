@@ -239,6 +239,33 @@ describe('extensionsCommand', () => {
       expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
     });
 
+    it('shows a warning and reloads commands after a committed install warning', async () => {
+      mockParseInstallSource.mockResolvedValue({
+        type: 'git',
+        source: 'https://github.com/test/extension',
+      });
+      mockInstallExtension.mockRejectedValue(
+        Object.assign(
+          new Error('Extension committed but could not be reloaded.'),
+          {
+            code: 'extension_committed_with_warnings',
+            committed: true,
+          },
+        ),
+      );
+
+      await installAction(mockContext, 'https://github.com/test/extension');
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.WARNING,
+          text: 'Extension was installed but could not be reloaded: Extension committed but could not be reloaded.',
+        },
+        expect.any(Number),
+      );
+      expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
+    });
+
     it('should redact URL credentials in install progress messages', async () => {
       mockParseInstallSource.mockResolvedValue({
         type: 'git',

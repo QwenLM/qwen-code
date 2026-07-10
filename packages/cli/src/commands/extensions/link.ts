@@ -5,7 +5,10 @@
  */
 
 import type { CommandModule } from 'yargs';
-import { type ExtensionInstallMetadata } from '@qwen-code/qwen-code-core';
+import {
+  isExtensionCommittedWithWarningsError,
+  type ExtensionInstallMetadata,
+} from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -42,6 +45,7 @@ export async function handleLink(args: InstallArgs) {
     );
   } catch (error) {
     writeStderrLine(getErrorMessage(error));
+    if (isExtensionCommittedWithWarningsError(error)) return;
     process.exit(1);
   }
 }

@@ -261,6 +261,37 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('stops request parsing after rejecting an invalid extension id', async () => {
+    const h = await makeHarness();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const globalResponse = await auth(
+        request(h.app)
+          .put('/extensions/not-an-extension-id/activation')
+          .send({ state: 'invalid' }),
+      );
+      const workspaceResponse = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/not-an-extension-id/activation`,
+          )
+          .send({ state: 'invalid' }),
+      );
+
+      expect(globalResponse.body).toMatchObject({
+        code: 'invalid_extension_id',
+      });
+      expect(workspaceResponse.body).toMatchObject({
+        code: 'invalid_extension_id',
+      });
+      expect(stderr).not.toHaveBeenCalledWith(
+        expect.stringContaining('Cannot set headers after they are sent'),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('returns the selected workspace projection, including when untrusted', async () => {
     const h = await makeHarness({ secondaryTrusted: false });
     mockExtensionManager();
@@ -317,6 +348,70 @@ describe('extension management v2 REST', () => {
       expect(
         h.primary.bridge.refreshExtensionsForAllSessions,
       ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('returns the effective activation after clearing a workspace override', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    try {
+      const started = await auth(
+        request(h.app).delete(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/${extensionId}/activation`,
+        ),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded',
+        result: { status: 'disabled', name: 'demo' },
+      });
+      expect(
+        ExtensionManager.prototype.getExtensionActivation,
+      ).toHaveBeenCalledWith(extensionId, h.secondary.workspaceCwd);
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a post-commit failure as succeeded with warnings', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionActivation,
+    ).mockRejectedValueOnce(new Error('activation read failed'));
+    vi.mocked(
+      h.primary.workspaceService.invalidateWorkspaceSkillsStatus,
+    ).mockImplementationOnce(() => {
+      throw new Error('status invalidation failed');
+    });
+    try {
+      const started = await auth(
+        request(h.app).delete(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/${extensionId}/activation`,
+        ),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded_with_warnings',
+        warnings: [
+          expect.objectContaining({
+            error: expect.stringMatching(/activation read failed/),
+          }),
+          expect.objectContaining({
+            code: 'status_invalidation_failed',
+            error: 'status invalidation failed',
+          }),
+        ],
+      });
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -466,6 +561,50 @@ describe('extension management v2 REST', () => {
       expect(
         h.secondary.bridge.refreshExtensionsForAllSessions,
       ).toHaveBeenCalledOnce();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('validates uninstall clients before reading extension state', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    try {
+      const response = await request(h.app)
+        .delete(`/extensions/${extensionId}`)
+        .set('Host', host())
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'invalid client id');
+
+      expect(response.status).toBe(400);
+      expect(response.body).toMatchObject({ code: 'invalid_client_id' });
+      expect(ExtensionManager.prototype.refreshCache).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('routes uninstall lookup failures through the bridge error handler', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.mocked(ExtensionManager.prototype.refreshCache).mockRejectedValueOnce(
+      new Error('extension lookup failed'),
+    );
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const response = await auth(
+        request(h.app).delete(`/extensions/${extensionId}`),
+      );
+
+      expect(response.status).toBe(500);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'bridge error (DELETE /extensions/:extensionId)',
+        ),
+      );
+      expect(stderr).not.toHaveBeenCalledWith(
+        expect.stringContaining('unhandled error'),
+      );
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }

@@ -314,14 +314,13 @@ export function createExtensionsController(
     unfinishedOperationCount += 1;
     void (async () => {
       let deadline: ReturnType<typeof setTimeout> | undefined;
+      let committedGeneration: number | undefined;
+      const commitWarnings: NonNullable<ExtensionOperationStatus['warnings']> =
+        [];
       try {
         const extensionManager = options.manager ?? createExtensionManager();
         const deadlineController = new AbortController();
         let deadlineStarted = false;
-        let committedGeneration: number | undefined;
-        const commitWarnings: NonNullable<
-          ExtensionOperationStatus['warnings']
-        > = [];
         const startDeadline = () => {
           if (deadlineStarted) return;
           deadlineStarted = true;
@@ -582,6 +581,60 @@ export function createExtensionsController(
           typeof (err as { code?: unknown }).code === 'string'
             ? (err as { code: string }).code
             : undefined;
+        if (committedGeneration !== undefined) {
+          extensionsStatusCache = undefined;
+          const error =
+            `Commit succeeded but post-commit work failed: ${message}`.slice(
+              0,
+              500,
+            );
+          const warnings: NonNullable<ExtensionOperationStatus['warnings']> = [
+            ...commitWarnings,
+            {
+              workspaceCwd: boundWorkspace,
+              code: 'post_commit_failed',
+              error,
+            },
+          ];
+          try {
+            workspace.invalidateWorkspaceSkillsStatus();
+          } catch (invalidationError) {
+            warnings.push({
+              workspaceCwd: boundWorkspace,
+              code: 'status_invalidation_failed',
+              error: redactUrlCredentials(
+                invalidationError instanceof Error
+                  ? invalidationError.message
+                  : String(invalidationError),
+              ).slice(0, 500),
+            });
+          }
+          updateExtensionOperation(operationId, {
+            status: 'succeeded_with_warnings',
+            warnings,
+          });
+          try {
+            bridge.broadcastExtensionsChanged({
+              ...(failureContext.source
+                ? { source: redactUrlCredentials(failureContext.source) }
+                : {}),
+              ...(failureContext.name ? { name: failureContext.name } : {}),
+              refreshed: 0,
+              failed: 1,
+              error,
+            });
+          } catch {
+            // The operation record remains authoritative for this warning.
+          }
+          try {
+            writeStderrLine(
+              `qwen serve: [${boundWorkspace}] extensions ${operation}: ${error}`,
+            );
+          } catch {
+            // Keep queued background work from surfacing as unhandledRejection.
+          }
+          return;
+        }
         updateExtensionOperation(operationId, {
           status: 'failed',
           error: message.slice(0, 500),

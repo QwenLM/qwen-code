@@ -175,6 +175,22 @@ export interface ExtensionUpdateInfo {
   updatedVersion: string;
 }
 
+export interface ExtensionCommittedWithWarningsError extends Error {
+  code: 'extension_committed_with_warnings';
+  committed: true;
+}
+
+export function isExtensionCommittedWithWarningsError(
+  error: unknown,
+): error is ExtensionCommittedWithWarningsError {
+  return (
+    error instanceof Error &&
+    (error as Partial<ExtensionCommittedWithWarningsError>).code ===
+      'extension_committed_with_warnings' &&
+    (error as Partial<ExtensionCommittedWithWarningsError>).committed === true
+  );
+}
+
 export interface ExtensionUpdateStatus {
   status: ExtensionUpdateState;
   processed: boolean;
@@ -684,12 +700,17 @@ export class ExtensionManager {
     activation: ExtensionActivation,
   ): Promise<ExtensionStoreSnapshot> {
     const extension = this.findExtensionById(extensionId);
-    const snapshot = await this.extensionStore.setDefaultActivation(
-      { id: extension.id, name: extension.name },
-      activation,
-    );
-    this.applyStoreActivation(snapshot);
-    return snapshot;
+    const endMutation = this.beginMutation('setExtensionDefaultActivation');
+    try {
+      const snapshot = await this.extensionStore.setDefaultActivation(
+        { id: extension.id, name: extension.name },
+        activation,
+      );
+      this.applyStoreActivation(snapshot);
+      return snapshot;
+    } finally {
+      endMutation();
+    }
   }
 
   async setExtensionActivationScope(
@@ -697,12 +718,17 @@ export class ExtensionManager {
     activation: InitialExtensionActivation,
   ): Promise<ExtensionStoreSnapshot> {
     const extension = this.findExtensionById(extensionId);
-    const snapshot = await this.extensionStore.setActivationScope(
-      { id: extension.id, name: extension.name },
-      activation,
-    );
-    this.applyStoreActivation(snapshot);
-    return snapshot;
+    const endMutation = this.beginMutation('setExtensionActivationScope');
+    try {
+      const snapshot = await this.extensionStore.setActivationScope(
+        { id: extension.id, name: extension.name },
+        activation,
+      );
+      this.applyStoreActivation(snapshot);
+      return snapshot;
+    } finally {
+      endMutation();
+    }
   }
 
   async setExtensionWorkspaceActivation(
@@ -711,13 +737,18 @@ export class ExtensionManager {
     activation: ExtensionActivation,
   ): Promise<ExtensionStoreSnapshot> {
     const extension = this.findExtensionById(extensionId);
-    const snapshot = await this.extensionStore.setWorkspaceActivation(
-      { id: extension.id, name: extension.name },
-      workspacePath,
-      activation,
-    );
-    this.applyStoreActivation(snapshot);
-    return snapshot;
+    const endMutation = this.beginMutation('setExtensionWorkspaceActivation');
+    try {
+      const snapshot = await this.extensionStore.setWorkspaceActivation(
+        { id: extension.id, name: extension.name },
+        workspacePath,
+        activation,
+      );
+      this.applyStoreActivation(snapshot);
+      return snapshot;
+    } finally {
+      endMutation();
+    }
   }
 
   async clearExtensionWorkspaceActivation(
@@ -725,12 +756,17 @@ export class ExtensionManager {
     workspacePath: string,
   ): Promise<ExtensionStoreSnapshot> {
     const extension = this.findExtensionById(extensionId);
-    const snapshot = await this.extensionStore.clearWorkspaceActivation(
-      { id: extension.id, name: extension.name },
-      workspacePath,
-    );
-    this.applyStoreActivation(snapshot);
-    return snapshot;
+    const endMutation = this.beginMutation('clearExtensionWorkspaceActivation');
+    try {
+      const snapshot = await this.extensionStore.clearWorkspaceActivation(
+        { id: extension.id, name: extension.name },
+        workspacePath,
+      );
+      this.applyStoreActivation(snapshot);
+      return snapshot;
+    } finally {
+      endMutation();
+    }
   }
 
   private findExtensionById(extensionId: string): Extension {
@@ -1299,7 +1335,7 @@ export class ExtensionManager {
         if (!committed.extension) {
           const error = new Error(
             `Extension "${prepared.identity.name}" committed but could not be reloaded.`,
-          ) as Error & { code: string; committed: true };
+          ) as ExtensionCommittedWithWarningsError;
           error.code = 'extension_committed_with_warnings';
           error.committed = true;
           throw error;
@@ -1726,6 +1762,9 @@ export class ExtensionManager {
           stagingDirectory: stagingPath,
           destinationDirectory: destinationPath,
           ...(!isUpdate ? { initialActivation } : {}),
+          ...(expectedArtifactGeneration === undefined
+            ? {}
+            : { expectedArtifactGeneration }),
         });
         stagingPath = undefined;
 
@@ -1905,6 +1944,8 @@ export class ExtensionManager {
         this.extensionCache?.set(extension.name, extension);
         this.applyStoreActivation(snapshot);
       } catch (error) {
+        this.extensionCache?.delete(prepared.identity.name);
+        this.applyStoreActivation(snapshot);
         warnings.push({
           code: 'extension_reload_failed',
           error: getErrorMessage(error),
@@ -2082,7 +2123,8 @@ export class ExtensionManager {
           requestConsent,
           requestSetting,
         );
-      } catch (_) {
+      } catch (error) {
+        if (isExtensionCommittedWithWarningsError(error)) continue;
         failedInstallNames.push(extension.config.name);
       }
     }
@@ -2156,12 +2198,12 @@ export class ExtensionManager {
         false,
       );
       if (!committed.extension) {
-        const error = new Error(
-          `Extension "${extension.name}" committed but could not be reloaded.`,
-        ) as Error & { code: string; committed: true };
-        error.code = 'extension_committed_with_warnings';
-        error.committed = true;
-        throw error;
+        callback(extension.name, ExtensionUpdateState.UPDATED_NEEDS_RESTART);
+        return {
+          name: extension.name,
+          originalVersion,
+          updatedVersion: committed.version,
+        };
       }
       const updatedVersion = committed.extension.version;
       callback(

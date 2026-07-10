@@ -28,6 +28,7 @@ import {
   type PreparedExtensionMutation,
 } from './extensionManager.js';
 import type { MCPServerConfig, ExtensionInstallMetadata } from '../index.js';
+import { ExtensionStore } from './extension-store.js';
 
 const mockGit = {
   clone: vi.fn(),
@@ -1025,6 +1026,77 @@ describe('extension tests', () => {
       });
     });
 
+    it('emits mutation lifecycle events for V2 activation changes', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+      });
+      const manager = createExtensionManager();
+      const events: ExtensionMutationEvent[] = [];
+      manager.addMutationListener((event) => events.push(event));
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+
+      await manager.setExtensionDefaultActivation(extension.id, 'disabled');
+      await manager.setExtensionActivationScope(extension.id, {
+        scope: 'workspace',
+        workspacePath: tempWorkspaceDir,
+      });
+      await manager.setExtensionWorkspaceActivation(
+        extension.id,
+        tempWorkspaceDir,
+        'disabled',
+      );
+      await manager.clearExtensionWorkspaceActivation(
+        extension.id,
+        tempWorkspaceDir,
+      );
+
+      expect(events).toEqual([
+        {
+          id: 1,
+          phase: 'start',
+          operation: 'setExtensionDefaultActivation',
+        },
+        {
+          id: 1,
+          phase: 'end',
+          operation: 'setExtensionDefaultActivation',
+        },
+        {
+          id: 2,
+          phase: 'start',
+          operation: 'setExtensionActivationScope',
+        },
+        {
+          id: 2,
+          phase: 'end',
+          operation: 'setExtensionActivationScope',
+        },
+        {
+          id: 3,
+          phase: 'start',
+          operation: 'setExtensionWorkspaceActivation',
+        },
+        {
+          id: 3,
+          phase: 'end',
+          operation: 'setExtensionWorkspaceActivation',
+        },
+        {
+          id: 4,
+          phase: 'start',
+          operation: 'clearExtensionWorkspaceActivation',
+        },
+        {
+          id: 4,
+          phase: 'end',
+          operation: 'clearExtensionWorkspaceActivation',
+        },
+      ]);
+    });
+
     it('keeps the V2 state in sync after a legacy scope mutation', async () => {
       createExtension({
         extensionsDir: userExtensionsDir,
@@ -1280,6 +1352,112 @@ describe('extension tests', () => {
   });
 
   describe('updateExtension', () => {
+    it('rejects a stale direct update after the artifact changes', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'direct-update.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      const writeExtension = (destination: string, version: string) => {
+        fs.mkdirSync(destination, { recursive: true });
+        fs.writeFileSync(
+          path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'my-extension', version }),
+        );
+      };
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtension(destination, '1.0.0');
+        },
+      );
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const metadata = { type: 'local' as const, source: archivePath };
+      const installed = await manager.installExtension(
+        metadata,
+        async () => {},
+      );
+      const concurrentStore = new ExtensionStore();
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtension(destination, '2.0.0');
+          const before = await concurrentStore.readSnapshot();
+          const staging = await concurrentStore.createStagingDirectory();
+          writeExtension(staging, 'concurrent');
+          await concurrentStore.commitArtifact({
+            operation: 'update',
+            identity: { id: installed.id, name: installed.name },
+            stagingDirectory: staging,
+            destinationDirectory: installed.path,
+            expectedArtifactGeneration:
+              before.extensions[installed.id]!.artifactGeneration,
+          });
+        },
+      );
+
+      await expect(
+        manager.installExtension(
+          metadata,
+          async () => {},
+          undefined,
+          tempWorkspaceDir,
+          installed.config,
+        ),
+      ).rejects.toMatchObject({ code: 'extension_conflict' });
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(installed.path, EXTENSIONS_CONFIG_FILENAME),
+            'utf8',
+          ),
+        ),
+      ).toMatchObject({ version: 'concurrent' });
+    });
+
+    it('reports a committed update reload failure as needing restart', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'reload-failure.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+        installMetadata: {
+          type: 'local',
+          source: archivePath,
+          originSource: 'QwenCode',
+        },
+      });
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          fs.mkdirSync(destination, { recursive: true });
+          fs.writeFileSync(
+            path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+            JSON.stringify({ name: 'my-extension', version: '2.0.0' }),
+          );
+        },
+      );
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+      vi.spyOn(manager, 'loadExtension').mockResolvedValue(null);
+      const callback = vi.fn();
+
+      await expect(
+        manager.updateExtension(
+          extension,
+          ExtensionUpdateState.UPDATE_AVAILABLE,
+          callback,
+        ),
+      ).resolves.toEqual({
+        name: 'my-extension',
+        originalVersion: '1.0.0',
+        updatedVersion: '2.0.0',
+      });
+
+      expect(callback).toHaveBeenLastCalledWith(
+        'my-extension',
+        ExtensionUpdateState.UPDATED_NEEDS_RESTART,
+      );
+      expect(manager.getLoadedExtensions()).toEqual([]);
+    });
+
     it('should end mutation lifecycle events when temp directory creation fails', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'update.zip');
       fs.writeFileSync(archivePath, 'archive');

@@ -19,6 +19,7 @@ import {
   parseInstallSource,
   redactUrlCredentials,
   createDebugLogger,
+  isExtensionCommittedWithWarningsError,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../../../utils/errors.js';
 import type { StatusMessage } from '../ExtensionsManagerDialog.js';
@@ -214,6 +215,7 @@ export const DiscoverTab = ({
       setInstalling(true);
       let installed = 0;
       const errors: string[] = [];
+      const warnings: string[] = [];
       for (const plugin of targets) {
         let ext;
         try {
@@ -229,6 +231,13 @@ export const DiscoverTab = ({
               : { scope: 'workspace', workspacePath: process.cwd() },
           );
         } catch (error) {
+          if (isExtensionCommittedWithWarningsError(error)) {
+            installed++;
+            warnings.push(
+              `${plugin.name}: ${redactUrlCredentials(getErrorMessage(error))}`,
+            );
+            continue;
+          }
           errors.push(
             `${plugin.name}: ${redactUrlCredentials(getErrorMessage(error))}`,
           );
@@ -251,10 +260,19 @@ export const DiscoverTab = ({
       setSelectedKeys(new Set());
       if (errors.length === 0) {
         onStatus({
-          type: 'success',
-          text: t('Installed {{count}} extension(s).', {
-            count: String(installed),
-          }),
+          type: warnings.length === 0 ? 'success' : 'info',
+          text:
+            warnings.length === 0
+              ? t('Installed {{count}} extension(s).', {
+                  count: String(installed),
+                })
+              : t(
+                  'Installed {{count}} extension(s) with warnings: {{detail}}',
+                  {
+                    count: String(installed),
+                    detail: warnings.join('; '),
+                  },
+                ),
         });
       } else {
         onStatus({
@@ -262,7 +280,7 @@ export const DiscoverTab = ({
           text: t('Installed {{ok}}, failed {{fail}}: {{detail}}', {
             ok: String(installed),
             fail: String(errors.length),
-            detail: errors.join('; '),
+            detail: [...warnings, ...errors].join('; '),
           }),
         });
       }

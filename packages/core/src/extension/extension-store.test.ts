@@ -313,6 +313,36 @@ describe('ExtensionStore', () => {
     expect(imported.extensions[id]?.legacyPathRules).toEqual(['!/workspace/*']);
   });
 
+  it('preserves artifact generation across a sequential downgrade write', async () => {
+    const store = makeStore();
+    const identity = { id: 'e3'.repeat(32), name: 'demo' };
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'version'), 'one');
+    const installed = await store.commitArtifact({
+      operation: 'install',
+      identity,
+      stagingDirectory: staging,
+      destinationDirectory: path.join(extensionsDir, identity.name),
+      initialActivation: { scope: 'user' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({ demo: { overrides: ['!/workspace/*'] } }),
+    );
+
+    const imported = await store.ensureInitialized([identity]);
+
+    expect(imported.extensions[identity.id]?.artifactGeneration).toBe(
+      installed.extensions[identity.id]?.artifactGeneration,
+    );
+    expect(imported.extensions[identity.id]).toMatchObject({
+      defaultActivation: 'enabled',
+      workspaceOverrides: {},
+      legacyPathRules: ['!/workspace/*'],
+    });
+  });
+
   it('fails closed when the V2 state is corrupt', async () => {
     await fsp.mkdir(storeDir, { recursive: true });
     await fsp.writeFile(path.join(storeDir, 'state.json'), '{not-json');
@@ -597,6 +627,49 @@ describe('ExtensionStore', () => {
 
     await store.ensureInitialized([identity]);
 
+    expect(await fsp.readFile(path.join(destination, 'version'), 'utf8')).toBe(
+      'old',
+    );
+    expect(fs.existsSync(journal)).toBe(false);
+  });
+
+  it('recovers an artifact-swapped transaction before reading a snapshot', async () => {
+    const store = makeStore();
+    const identity = { id: 'c2'.repeat(32), name: 'demo' };
+    const initial = await store.ensureInitialized([identity]);
+    const targetSnapshot = structuredClone(initial);
+    targetSnapshot.generation = 1;
+    const transactionId = 'recover-before-read';
+    const destination = path.join(extensionsDir, 'demo');
+    const backup = path.join(storeDir, 'rollback', transactionId);
+    const journal = path.join(
+      storeDir,
+      'transactions',
+      `${transactionId}.json`,
+    );
+    await fsp.mkdir(destination);
+    await fsp.writeFile(path.join(destination, 'version'), 'new');
+    await fsp.mkdir(backup);
+    await fsp.writeFile(path.join(backup, 'version'), 'old');
+    await fsp.writeFile(
+      journal,
+      JSON.stringify({
+        version: 1,
+        transactionId,
+        operation: 'update',
+        phase: 'artifact_swapped',
+        destinationDirectory: destination,
+        stagingDirectory: path.join(storeDir, 'staging', transactionId),
+        backupDirectory: backup,
+        previousGeneration: 0,
+        targetGeneration: 1,
+        targetSnapshot,
+      }),
+    );
+
+    const snapshot = await store.readSnapshot();
+
+    expect(snapshot.generation).toBe(0);
     expect(await fsp.readFile(path.join(destination, 'version'), 'utf8')).toBe(
       'old',
     );

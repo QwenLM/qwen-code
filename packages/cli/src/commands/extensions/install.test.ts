@@ -26,6 +26,11 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     setExtensionScope: mockSetExtensionScope,
   })),
   parseInstallSource: mockParseInstallSource,
+  isExtensionCommittedWithWarningsError: (error: unknown) =>
+    error instanceof Error &&
+    (error as Error & { code?: string; committed?: boolean }).code ===
+      'extension_committed_with_warnings' &&
+    (error as Error & { committed?: boolean }).committed === true,
 }));
 
 vi.mock('./consent.js', () => ({
@@ -289,6 +294,34 @@ describe('handleInstall', () => {
       'Install extension failed',
     );
     expect(processSpy).toHaveBeenCalledWith(1);
+
+    processSpy.mockRestore();
+  });
+
+  it('does not report a committed install warning as a failed install', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+    mockParseInstallSource.mockResolvedValue({
+      type: 'git',
+      url: 'git@some-url',
+    });
+    mockInstallExtension.mockRejectedValue(
+      Object.assign(
+        new Error('Extension committed but could not be reloaded.'),
+        {
+          code: 'extension_committed_with_warnings',
+          committed: true,
+        },
+      ),
+    );
+
+    await handleInstall({ source: 'git@some-url' });
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'Extension committed but could not be reloaded.',
+    );
+    expect(processSpy).not.toHaveBeenCalled();
 
     processSpy.mockRestore();
   });

@@ -938,8 +938,9 @@ export function registerWorkspaceExtensionRoutes(
     mutate({ strict: true }),
     async (req, res) => {
       const extensionId = parseExtensionId(req, res);
+      if (!extensionId) return;
       const state = parseActivationState(req, res);
-      if (!extensionId || !state) return;
+      if (!state) return;
       const manager = primaryController.createExtensionManager(
         boundWorkspace,
         true,
@@ -1244,36 +1245,51 @@ export function registerWorkspaceExtensionRoutes(
     async (req, res) => {
       const extensionId = parseExtensionId(req, res);
       if (!extensionId) return;
-      const manager = primaryController.createExtensionManager(
-        boundWorkspace,
-        true,
-      );
-      await manager.refreshCache();
-      const extension = extensionById(manager, extensionId);
-      if (!extension) {
-        res.status(204).end();
+      const route = 'DELETE /extensions/:extensionId';
+      if (
+        !primaryController.validateExtensionMutationClient(req, res, route, {
+          requireClientId: false,
+        })
+      ) {
         return;
       }
-      sendOperation(
-        req,
-        res,
-        'DELETE /extensions/:extensionId',
-        manager,
-        'uninstall',
-        { name: extension.name },
-        async (extensionManager, _signal, context) => {
-          await context!.commit(
-            async () =>
-              await extensionManager.uninstallExtension(extension.name, false),
-          );
-          return { status: 'uninstalled', name: extension.name };
-        },
-        {
-          ...(workspaceRegistry
-            ? { refreshRuntimes: workspaceRegistry.list() }
-            : {}),
-        },
-      );
+      try {
+        const manager = primaryController.createExtensionManager(
+          boundWorkspace,
+          true,
+        );
+        await manager.refreshCache();
+        const extension = extensionById(manager, extensionId);
+        if (!extension) {
+          res.status(204).end();
+          return;
+        }
+        sendOperation(
+          req,
+          res,
+          route,
+          manager,
+          'uninstall',
+          { name: extension.name },
+          async (extensionManager, _signal, context) => {
+            await context!.commit(
+              async () =>
+                await extensionManager.uninstallExtension(
+                  extension.name,
+                  false,
+                ),
+            );
+            return { status: 'uninstalled', name: extension.name };
+          },
+          {
+            ...(workspaceRegistry
+              ? { refreshRuntimes: workspaceRegistry.list() }
+              : {}),
+          },
+        );
+      } catch (error) {
+        sendBridgeError(res, error, { route });
+      }
     },
   );
 
@@ -1333,8 +1349,9 @@ export function registerWorkspaceExtensionRoutes(
         const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
         if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
         const extensionId = parseExtensionId(req, res);
+        if (!extensionId) return;
         const state = parseActivationState(req, res);
-        if (!extensionId || !state) return;
+        if (!state) return;
         const manager = primaryController.createExtensionManager(
           runtime.workspaceCwd,
           true,
@@ -1400,7 +1417,11 @@ export function registerWorkspaceExtensionRoutes(
                   runtime.workspaceCwd,
                 ),
             );
-            return { status: 'enabled', name: extension.name };
+            const activation = await extensionManager.getExtensionActivation(
+              extensionId,
+              runtime.workspaceCwd,
+            );
+            return { status: activation.effective, name: extension.name };
           },
           { refreshRuntimes: [runtime] },
         );

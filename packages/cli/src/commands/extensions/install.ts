@@ -8,6 +8,7 @@ import type { CommandModule } from 'yargs';
 
 import {
   ExtensionManager,
+  isExtensionCommittedWithWarningsError,
   parseInstallSource,
   type ExtensionScope,
 } from '@qwen-code/qwen-code-core';
@@ -123,6 +124,7 @@ export async function handleInstall(args: InstallArgs) {
     );
   } catch (error) {
     writeStderrLine(getErrorMessage(error));
+    if (isExtensionCommittedWithWarningsError(error)) return;
     process.exit(1);
   }
 }

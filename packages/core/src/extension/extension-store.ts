@@ -272,8 +272,11 @@ export class ExtensionStore {
         for (const identity of extensions) {
           assertIdentity(identity);
           const rules = legacy[identity.name]?.overrides ?? [];
+          const artifactGeneration =
+            existing.extensions[identity.id]?.artifactGeneration;
           existing.extensions[identity.id] = {
             name: identity.name,
+            ...(artifactGeneration === undefined ? {} : { artifactGeneration }),
             defaultActivation: 'enabled',
             workspaceOverrides: {},
             ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
@@ -502,16 +505,11 @@ export class ExtensionStore {
   }
 
   async readSnapshot(): Promise<ExtensionStoreSnapshot> {
-    const snapshot = await this.readSnapshotUnlocked();
-    if (!snapshot) {
-      return {
-        version: 2,
-        generation: 0,
-        legacyProjectionHash: projectionHash({}),
-        extensions: {},
-      };
-    }
-    return snapshot;
+    return await this.withLock(async () => {
+      const snapshot = await this.readSnapshotUnlocked();
+      if (!snapshot) return this.emptySnapshot();
+      return snapshot;
+    });
   }
 
   getActivation(

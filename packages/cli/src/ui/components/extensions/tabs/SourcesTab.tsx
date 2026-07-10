@@ -20,6 +20,7 @@ import {
   parseInstallSource,
   redactUrlCredentials,
   createDebugLogger,
+  isExtensionCommittedWithWarningsError,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../../../utils/errors.js';
 import { stripUnsafeCharacters } from '../../../utils/textUtils.js';
@@ -211,6 +212,16 @@ export const SourcesTab = ({
       onChanged();
       goToList();
     } catch (error) {
+      if (isExtensionCommittedWithWarningsError(error)) {
+        onStatus({
+          type: 'info',
+          text: redactUrlCredentials(getErrorMessage(error)),
+        });
+        await load();
+        onChanged();
+        goToList();
+        return;
+      }
       onStatus({
         type: 'error',
         text: redactUrlCredentials(getErrorMessage(error)),
