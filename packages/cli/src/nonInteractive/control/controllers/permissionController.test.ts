@@ -97,6 +97,89 @@ describe('PermissionController', () => {
     });
   });
 
+  it('routes ask_user_question answers from updatedInput into the confirmation payload', async () => {
+    const context = createContext(120_000);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    const answers = { '0': 'PostgreSQL', '1': 'REST' };
+    vi.spyOn(controller, 'sendControlRequest').mockResolvedValue({
+      subtype: 'success',
+      request_id: 'request-answers',
+      response: {
+        behavior: 'allow',
+        updatedInput: { questions: [], answers },
+      },
+    });
+    const onConfirm = vi.fn();
+
+    controller.getToolCallUpdateCallback()([
+      {
+        status: 'awaiting_approval',
+        request: {
+          callId: 'tool-call-answers',
+          name: 'ask_user_question',
+          args: { questions: [] },
+        },
+        confirmationDetails: {
+          type: 'ask_user_question',
+          title: 'Please answer',
+          onConfirm,
+        },
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        expect.objectContaining({ answers }),
+      );
+    });
+  });
+
+  it('omits answers from the payload when updatedInput has none', async () => {
+    const context = createContext(120_000);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    vi.spyOn(controller, 'sendControlRequest').mockResolvedValue({
+      subtype: 'success',
+      request_id: 'request-no-answers',
+      response: {
+        behavior: 'allow',
+        updatedInput: { command: 'ls -a' },
+      },
+    });
+    const onConfirm = vi.fn();
+
+    controller.getToolCallUpdateCallback()([
+      {
+        status: 'awaiting_approval',
+        request: {
+          callId: 'tool-call-no-answers',
+          name: 'run_shell_command',
+          args: { command: 'ls' },
+        },
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Run command',
+          onConfirm,
+        },
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { updatedInput: { command: 'ls -a' } },
+      );
+    });
+  });
+
   it('uses default timeout when SDK canUseTool timeout is undefined', async () => {
     const context = createContext(); // undefined timeout
     const controller = new PermissionController(

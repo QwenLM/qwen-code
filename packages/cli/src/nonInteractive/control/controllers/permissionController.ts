@@ -555,14 +555,45 @@ export class PermissionController extends BaseController {
       const behavior = String(payload['behavior'] || '').toLowerCase();
 
       if (behavior === 'allow') {
-        // Handle updated input if provided
+        // Handle updated input if provided. The SDK's `can_use_tool`
+        // callback returns `updatedInput` — the (possibly sanitised)
+        // tool args the host wants executed. For most tools this simply
+        // overrides `request.args`. For `ask_user_question` the host also
+        // uses this channel to deliver the user's answers: it returns
+        // `{ ...originalInput, answers }`, and those answers must reach the
+        // tool via the confirmation payload (`payload.answers`) — the tool
+        // reads answers from there, not from `request.args`.
         const updatedInput = payload['updatedInput'];
-        if (updatedInput && typeof updatedInput === 'object') {
-          toolCall.request.args = updatedInput as Record<string, unknown>;
+        let confirmationPayload: ToolConfirmationPayload | undefined;
+        if (
+          updatedInput &&
+          typeof updatedInput === 'object' &&
+          !Array.isArray(updatedInput)
+        ) {
+          const updatedInputObj = updatedInput as Record<string, unknown>;
+          toolCall.request.args = updatedInputObj;
+
+          const answers = updatedInputObj['answers'];
+          confirmationPayload = {
+            updatedInput: updatedInputObj,
+            ...(answers &&
+            typeof answers === 'object' &&
+            !Array.isArray(answers)
+              ? { answers: answers as Record<string, string> }
+              : {}),
+          };
         }
-        await toolCall.confirmationDetails.onConfirm(
-          ToolConfirmationOutcome.ProceedOnce,
-        );
+
+        if (confirmationPayload) {
+          await toolCall.confirmationDetails.onConfirm(
+            ToolConfirmationOutcome.ProceedOnce,
+            confirmationPayload,
+          );
+        } else {
+          await toolCall.confirmationDetails.onConfirm(
+            ToolConfirmationOutcome.ProceedOnce,
+          );
+        }
       } else {
         // Extract cancel message from response if available
         const cancelMessage =
