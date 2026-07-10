@@ -7,7 +7,11 @@
 import type { BridgeClient, BridgeEvent } from '../client.js';
 import type { TelegramBotApi } from './botApi.js';
 import type { TelegramChatStore } from './chatStore.js';
-import { handleUpdate, type DispatchDeps } from './dispatch.js';
+import {
+  handleUpdate,
+  type DispatchDeps,
+  type SentPermissionMessage,
+} from './dispatch.js';
 import { renderPermissionRequest } from './render.js';
 import { runHeartbeatLoop, heartbeatIntervalMsOf } from '../heartbeat.js';
 import type { CursorStore } from '../cursorStore.js';
@@ -60,6 +64,16 @@ export class TelegramBridge {
    * frame and flushed to the store when `cursors` is configured.
    */
   private readonly lastEventId = new Map<string, number>();
+  /**
+   * requestId → list of sent messages (chatId + messageId + original text) so
+   * that `permission_resolved` events can edit the messages in place.
+   */
+  private readonly sentRequests = new Map<string, SentPermissionMessage[]>();
+  /**
+   * Set of requestIds that have been resolved — used by dispatch to short-circuit
+   * late callback_query taps without hitting the daemon.
+   */
+  private readonly resolvedRequests = new Set<string>();
   private readonly log: (msg: string) => void;
 
   constructor(cfg: TelegramBridgeConfig) {
@@ -74,6 +88,8 @@ export class TelegramBridge {
       chats: this.cfg.chats,
       bridgeId: TELEGRAM_BRIDGE_ID,
       bans: this.bans,
+      sentRequests: this.sentRequests,
+      resolvedRequests: this.resolvedRequests,
     };
   }
 
@@ -85,8 +101,8 @@ export class TelegramBridge {
       supportsActions: true, // inline keyboard buttons
       supportsMarkdown: 'limited', // MarkdownV2 (constrained, escaped)
       supportsThreads: false, // no thread support
-      supportsEdits: false, // permission_request is not edited on resolve
-      maxMessageBytes: 4096,
+      supportsEdits: true, // editMessageText clears keyboard on resolve
+      maxMessageChars: 4096,
     });
   }
 
@@ -166,17 +182,64 @@ export class TelegramBridge {
 
   /**
    * Outbound: turn a session event into a Telegram message. Only
-   * permission_request is rendered (the actionable surface); other frames are
-   * ignored to keep chat quiet. Fire-and-forget sends (a failed send must not
-   * break the SSE loop). Exposed for unit testing the render→send path.
+   * `permission_request` and `permission_resolved` are acted on; other frames
+   * are ignored to keep chat quiet. Fire-and-forget sends (a failed send must
+   * not break the SSE loop). Exposed for unit testing the render→send path.
    */
   deliverEvent(sessionId: string, ev: BridgeEvent): void {
-    if (ev.type !== 'permission_request') return;
-    const msg = renderPermissionRequest(ev.data, { baseUrl: this.cfg.baseUrl });
+    if (ev.type === 'permission_request') {
+      void this.deliverPermissionRequest(sessionId, ev.data);
+    } else if (ev.type === 'permission_resolved') {
+      void this.deliverPermissionResolved(ev.data);
+    }
+  }
+
+  private async deliverPermissionRequest(
+    sessionId: string,
+    data: unknown,
+  ): Promise<void> {
+    const msg = renderPermissionRequest(data, { baseUrl: this.cfg.baseUrl });
+    const d = (data ?? {}) as Record<string, unknown>;
+    const requestId = typeof d['requestId'] === 'string' ? d['requestId'] : '';
     for (const chatId of this.cfg.chats.chatsFor(sessionId)) {
-      void this.cfg.botApi.sendMessage(chatId, msg.text, {
+      const result = await this.cfg.botApi.sendMessage(chatId, msg.text, {
         inlineKeyboard: msg.inlineKeyboard,
       });
+      // Record the sent message so permission_resolved can edit it in place.
+      if (requestId && result.ok) {
+        const msgId =
+          typeof (result.result as Record<string, unknown> | undefined)?.[
+            'message_id'
+          ] === 'number'
+            ? ((result.result as Record<string, unknown>)[
+                'message_id'
+              ] as number)
+            : 0;
+        if (msgId) {
+          const existing = this.sentRequests.get(requestId) ?? [];
+          existing.push({ chatId, messageId: msgId, text: msg.text });
+          this.sentRequests.set(requestId, existing);
+        }
+      }
+    }
+  }
+
+  private async deliverPermissionResolved(data: unknown): Promise<void> {
+    const d = (data ?? {}) as Record<string, unknown>;
+    const requestId = typeof d['requestId'] === 'string' ? d['requestId'] : '';
+    const outcome =
+      typeof d['outcome'] === 'string' ? d['outcome'] : 'resolved';
+    if (requestId) this.resolvedRequests.add(requestId);
+    const targets = requestId ? this.sentRequests.get(requestId) : undefined;
+    if (!targets) return;
+    this.sentRequests.delete(requestId);
+    for (const t of targets) {
+      await this.cfg.botApi.editMessageText(
+        t.chatId,
+        t.messageId,
+        `${t.text}\n\nResolved: ${outcome}`,
+        { inlineKeyboard: [] },
+      );
     }
   }
 }

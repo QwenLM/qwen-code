@@ -9,11 +9,20 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TelegramChatStore } from './chatStore.js';
-import { handleUpdate, type DispatchDeps } from './dispatch.js';
+import {
+  handleUpdate,
+  type DispatchDeps,
+  type SentPermissionMessage,
+} from './dispatch.js';
 import type { WriteResult } from '../client.js';
 
 interface SentMsg {
   chatId: number;
+  text: string;
+}
+interface EditedMsg {
+  chatId: number;
+  messageId: number;
   text: string;
 }
 interface Ack {
@@ -21,8 +30,15 @@ interface Ack {
   text?: string;
 }
 
-function fakeDeps(chats: TelegramChatStore) {
+function fakeDeps(
+  chats: TelegramChatStore,
+  opts: {
+    sentRequests?: Map<string, SentPermissionMessage[]>;
+    resolvedRequests?: Set<string>;
+  } = {},
+) {
   const sent: SentMsg[] = [];
+  const edited: EditedMsg[] = [];
   const acks: Ack[] = [];
   const prompts: Array<{
     sessionId: string;
@@ -40,6 +56,8 @@ function fakeDeps(chats: TelegramChatStore) {
     chats,
     bridgeId: 'telegram',
     bans: new Set<string>(),
+    sentRequests: opts.sentRequests,
+    resolvedRequests: opts.resolvedRequests,
     bridge: {
       redeemInvite: async (bridgeId, token) => {
         redeems.push({ bridgeId, token });
@@ -66,6 +84,10 @@ function fakeDeps(chats: TelegramChatStore) {
         sent.push({ chatId, text });
         return { ok: true, status: 200 };
       },
+      editMessageText: async (chatId, messageId, text) => {
+        edited.push({ chatId, messageId, text });
+        return { ok: true, status: 200 };
+      },
       answerCallbackQuery: async (id, text) => {
         acks.push({ id, text });
         return { ok: true, status: 200 };
@@ -75,6 +97,7 @@ function fakeDeps(chats: TelegramChatStore) {
   return {
     deps,
     sent,
+    edited,
     acks,
     prompts,
     votes,
@@ -261,5 +284,25 @@ describe('handleUpdate — callbacks', () => {
     );
     expect(h.votes).toHaveLength(0);
     expect(h.acks[0].id).toBe('cbq2');
+  });
+
+  it('a late tap on an already-resolved request acks "Already resolved" without voting', async () => {
+    await chats.bind(5, 'sess-x');
+    const resolvedRequests = new Set<string>(['req_done']);
+    const h = fakeDeps(chats, { resolvedRequests });
+    await handleUpdate(
+      {
+        update_id: 8,
+        callback_query: {
+          id: 'cbq3',
+          from: { id: 67890 },
+          message: { message_id: 42, chat: { id: 5 } },
+          data: 'vote:approve:req_done',
+        },
+      },
+      h.deps,
+    );
+    expect(h.votes).toHaveLength(0);
+    expect(h.acks[0]).toEqual({ id: 'cbq3', text: 'Already resolved' });
   });
 });

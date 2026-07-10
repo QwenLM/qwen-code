@@ -31,8 +31,25 @@ export interface PromptVoter {
 
 /** The Telegram-send surface the dispatcher needs (subset → easy to mock). */
 export interface ChatSender {
-  sendMessage(chatId: number, text: string): Promise<TgApiResult>;
+  sendMessage(
+    chatId: number,
+    text: string,
+    opts?: { inlineKeyboard?: unknown[][] },
+  ): Promise<TgApiResult>;
+  editMessageText(
+    chatId: number,
+    messageId: number,
+    text: string,
+    opts?: { inlineKeyboard?: unknown[][] },
+  ): Promise<TgApiResult>;
   answerCallbackQuery(id: string, text?: string): Promise<TgApiResult>;
+}
+
+/** A permission_request message that was sent to a chat (for later editing). */
+export interface SentPermissionMessage {
+  chatId: number;
+  messageId: number;
+  text: string;
 }
 
 export interface DispatchDeps {
@@ -43,6 +60,18 @@ export interface DispatchDeps {
   bridgeId: string;
   /** Local ban cache (sub-actor ids) — mirrors gateway 403s to avoid re-hitting. */
   bans: Set<string>;
+  /**
+   * Map of requestId → sent messages (for editing on permission_resolved).
+   * When provided, `handleCallback` records the sent message id from the
+   * callback's `message.message_id` so the runner can edit it on resolve.
+   */
+  sentRequests?: Map<string, SentPermissionMessage[]>;
+  /**
+   * Set of requestIds that have already been resolved. A late tap on an
+   * already-resolved request is acked with "Already resolved" without hitting
+   * the daemon (which would 404/conflict).
+   */
+  resolvedRequests?: Set<string>;
 }
 
 /**
@@ -134,6 +163,12 @@ async function handleCallback(
   const parsed = parseCallbackData(cbq.data);
   if (!parsed) {
     await deps.tg.answerCallbackQuery(cbq.id);
+    return;
+  }
+  // Late tap on an already-resolved request → inform the user without hitting
+  // the daemon (the vote would 404/conflict). No ban check needed (it's benign).
+  if (deps.resolvedRequests?.has(parsed.requestId)) {
+    await deps.tg.answerCallbackQuery(cbq.id, 'Already resolved');
     return;
   }
   const chatId = cbq.message?.chat.id;

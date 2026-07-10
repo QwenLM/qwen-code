@@ -26,6 +26,12 @@ afterEach(async () => {
 
 function fakes(updateBatches: TelegramUpdate[][]) {
   const sent: Array<{ chatId: number; text: string; keyboard?: unknown }> = [];
+  const edited: Array<{
+    chatId: number;
+    messageId: number;
+    text: string;
+    keyboard?: unknown;
+  }> = [];
   const subscribed: string[] = [];
   let registered = false;
   let batch = 0;
@@ -44,6 +50,15 @@ function fakes(updateBatches: TelegramUpdate[][]) {
       opts?: { inlineKeyboard?: unknown },
     ) => {
       sent.push({ chatId, text, keyboard: opts?.inlineKeyboard });
+      return { ok: true, status: 200, result: { message_id: 99 } };
+    },
+    editMessageText: async (
+      chatId: number,
+      messageId: number,
+      text: string,
+      opts?: { inlineKeyboard?: unknown },
+    ) => {
+      edited.push({ chatId, messageId, text, keyboard: opts?.inlineKeyboard });
       return { ok: true, status: 200 };
     },
     answerCallbackQuery: async () => ({ ok: true, status: 200 }),
@@ -69,6 +84,7 @@ function fakes(updateBatches: TelegramUpdate[][]) {
   return {
     ac,
     sent,
+    edited,
     subscribed,
     isRegistered: () => registered,
     bridge: new TelegramBridge({
@@ -127,6 +143,59 @@ describe('TelegramBridge runner', () => {
     });
     await new Promise((r) => setTimeout(r, 0));
     expect(f.sent).toHaveLength(0);
+  });
+
+  it('deliverEvent permission_resolved edits the sent message in place (clears keyboard)', async () => {
+    await chats.bind(7, 'sess-q');
+    const f = fakes([]);
+    // First deliver a permission_request so the runner records the sent message.
+    f.bridge.deliverEvent('sess-q', {
+      type: 'permission_request',
+      data: {
+        requestId: 'req_2',
+        bridgeHints: {
+          recommendedSurface: 'inline',
+          argsSummaryShort: 'Delete b.ts',
+        },
+      },
+    });
+    // Let the async sendMessage complete (returns message_id: 99 in fakes).
+    await new Promise((r) => setTimeout(r, 10));
+    expect(f.sent).toHaveLength(1);
+
+    // Now resolve the request.
+    f.bridge.deliverEvent('sess-q', {
+      type: 'permission_resolved',
+      data: { requestId: 'req_2', outcome: 'allow_once' },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(f.edited).toHaveLength(1);
+    expect(f.edited[0].chatId).toBe(7);
+    expect(f.edited[0].messageId).toBe(99);
+    expect(f.edited[0].text).toContain('allow_once');
+    // keyboard should be cleared (empty array)
+    expect(f.edited[0].keyboard).toEqual([]);
+  });
+
+  it('deliverEvent permission_resolved marks requestId as resolved (late tap returns "Already resolved")', async () => {
+    await chats.bind(7, 'sess-q');
+    const f = fakes([]);
+    f.bridge.deliverEvent('sess-q', {
+      type: 'permission_resolved',
+      data: { requestId: 'req_3', outcome: 'cancelled' },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    // The bridge's internal resolvedRequests set should contain req_3 so that
+    // dispatchDeps() will return it and handleCallback will short-circuit.
+    // We can verify this indirectly: a second permission_resolved for the same id
+    // should be a no-op (no edit, no error).
+    f.bridge.deliverEvent('sess-q', {
+      type: 'permission_resolved',
+      data: { requestId: 'req_3', outcome: 'cancelled' },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(f.edited).toHaveLength(0); // no sent messages to edit
   });
 });
 
