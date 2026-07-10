@@ -348,6 +348,9 @@ export function createSubSessionLauncher(
       const sub = await bridge.spawnOrAttach({
         workspaceCwd: boundWorkspace,
         sessionScope: 'thread', // force a fresh top-level session, never attach
+        // Record the caller as the sub-session's parent so the UI can link it
+        // back. Persisted into the sub-session's transcript at spawn time.
+        parentSessionId: info.callerSessionId,
         ...(info.model ? { modelServiceId: info.model } : {}),
       });
       spawnedSessionId = sub.sessionId;
@@ -461,7 +464,12 @@ export function createSubSessionLauncher(
             releaseOnce();
           }
         })();
-        return { sessionId };
+        return {
+          sessionId,
+          ...(sub.parentSessionPersisted !== undefined
+            ? { parentSessionPersisted: sub.parentSessionPersisted }
+            : {}),
+        };
       }
 
       // first-turn: hold the slot synchronously until the turn completes.
@@ -492,7 +500,14 @@ export function createSubSessionLauncher(
           firstTurn,
           turnError,
         ]);
-        return { sessionId, result, stopReason };
+        return {
+          sessionId,
+          result,
+          stopReason,
+          ...(sub.parentSessionPersisted !== undefined
+            ? { parentSessionPersisted: sub.parentSessionPersisted }
+            : {}),
+        };
       } finally {
         releaseOnce();
       }

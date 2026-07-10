@@ -11,6 +11,12 @@ There are two current host modes:
 
 In daemon-managed mode, each channel maps inbound chat traffic to daemon sessions under a configurable `SessionScope` (`user`, `thread`, or `single`). The adapter delegates to `DaemonChannelBridge`, which delegates to the SDK's `DaemonSessionClient` (see [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)). Channel workers remain primary-workspace only in Phase 2a, so every selected channel's `cwd` must resolve to the daemon primary workspace.
 
+### Webhook-triggered channel tasks
+
+Webhook-triggered tasks are hosted by `qwen serve` and executed inside the daemon-managed channel worker. The HTTP route validates the source and forwards a `ChannelWebhookTask` to the worker over IPC. The worker calls `ChannelBase.runWebhookTask()`, so adapters do not implement webhook parsing.
+
+Adapters still participate through proactive send support: `supportsProactiveSend()` tells the host whether a channel can send without an inbound message, `supportsProactiveTarget()` handles delivery limits for specific target shapes, and `pushProactive()` carries the outbound content.
+
 ## Responsibilities
 
 - Receive inbound messages from the channel's native transport (DingTalk WebSocket stream, WeChat HTTP long-poll, Telegram Bot long-poll, Feishu WebSocket or HTTP webhook).

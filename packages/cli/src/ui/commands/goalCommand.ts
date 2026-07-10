@@ -34,8 +34,6 @@ const CLEAR_KEYWORDS = new Set([
   'cancel',
 ]);
 
-const MAX_GOAL_LENGTH = 4000;
-
 // Keep the surrounding `"…"` quote structure intact: collapse newlines so the
 // condition stays on one line, and downgrade embedded double-quotes to single
 // quotes so they don't visually close the wrapping quote.
@@ -165,14 +163,7 @@ export const goalCommand: SlashCommand = {
       return;
     }
 
-    // ── Branch 3: length cap ─────────────────────────────────────────────
-    if (q.length > MAX_GOAL_LENGTH) {
-      return errorMessage(
-        `Goal condition is limited to ${MAX_GOAL_LENGTH} characters (got ${q.length}).`,
-      );
-    }
-
-    // ── Branch 4: gates ──────────────────────────────────────────────────
+    // ── Branch 3: gates ──────────────────────────────────────────────────
     if (!config.isTrustedFolder()) {
       return errorMessage(
         '/goal is only available in trusted workspaces. Trust this folder via `/trust` and try again.',
@@ -189,7 +180,7 @@ export const goalCommand: SlashCommand = {
       );
     }
 
-    // ── Branch 5: register hook + emit set card + kick off first turn ────
+    // ── Branch 4: register hook + emit set card + kick off first turn ────
     let registered;
     try {
       registered = registerGoalHook({

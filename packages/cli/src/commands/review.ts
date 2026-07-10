@@ -10,6 +10,7 @@
 
 import type { Argv, CommandModule } from 'yargs';
 import { fetchPrCommand } from './review/fetch-pr.js';
+import { planDiffCommand } from './review/plan-diff.js';
 import { prContextCommand } from './review/pr-context.js';
 import { loadRulesCommand } from './review/load-rules.js';
 import { presubmitCommand } from './review/presubmit.js';
@@ -22,6 +23,7 @@ export const reviewCommand: CommandModule = {
   builder: (yargs: Argv) =>
     yargs
       .command(fetchPrCommand)
+      .command(planDiffCommand)
       .command(prContextCommand)
       .command(loadRulesCommand)
       .command(presubmitCommand)

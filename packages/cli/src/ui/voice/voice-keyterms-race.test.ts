@@ -4,12 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from '../../config/settings.js';
-import { buildVoiceKeyterms } from './voice-keyterms.js';
 
 const raceState = vi.hoisted(() => ({
   target: '',
@@ -73,6 +72,11 @@ function makeSettings(workspaceDir: string): LoadedSettings {
 
 describe('buildVoiceKeyterms race checks', () => {
   let workspaceDir = '';
+  let buildVoiceKeyterms: typeof import('./voice-keyterms.js').buildVoiceKeyterms;
+
+  beforeAll(async () => {
+    ({ buildVoiceKeyterms } = await import('./voice-keyterms.js'));
+  }, 20_000);
 
   afterEach(() => {
     raceState.target = '';
@@ -112,14 +116,14 @@ describe('buildVoiceKeyterms race checks', () => {
     fs.utimesSync(target, new Date(0), new Date(0));
 
     raceState.target = fs.realpathSync(target);
-    raceState.replacementText = 'EvilTerm\n';
+    raceState.replacementText = 'EvilTermWithDifferentSize\n';
     raceState.enabled = true;
     raceState.mode = 'overwrite';
 
     const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
 
     expect(raceState.swapped).toBe(true);
-    expect(terms).not.toContain('EvilTerm');
+    expect(terms).not.toContain('EvilTermWithDifferentSize');
     expect(terms).toContain('TypeScript'); // globals only
   });
 

@@ -329,8 +329,12 @@ export interface DaemonSessionActions {
   /**
    * Create a daemon session and update local session state. Callers that need
    * transcript/event streaming must follow with `attachSession()`.
+   *
+   * `options.workspaceCwd` targets a specific registered workspace runtime for
+   * this call only (multi-workspace daemons). Omit it to keep the provider's
+   * active workspace / primary fallback.
    */
-  createSession(): Promise<DaemonSession>;
+  createSession(options?: { workspaceCwd?: string }): Promise<DaemonSession>;
   attachSession(): Promise<void>;
   clearSession(): Promise<void>;
   newSession(): Promise<void>;
