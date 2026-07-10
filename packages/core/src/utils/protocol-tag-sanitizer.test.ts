@@ -142,4 +142,28 @@ describe('protocol tag sanitizer', () => {
 
     expect(stripAnalysisSummaryProtocolTags(input)).toBe('visible');
   });
+
+  it('drops an unclosed analysis tail from visible text', () => {
+    expect(
+      stripAnalysisSummaryProtocolTags('<summary>actual<analysis>scratch'),
+    ).toBe('actual');
+  });
+
+  it('preserves literal summary tags inside visible summary content', () => {
+    const input =
+      '<analysis>hidden</analysis>' +
+      '<summary><details><summary>Title</summary><p>Body</p></details></summary>';
+
+    expect(stripAnalysisSummaryProtocolTags(input)).toBe(
+      '<details><summary>Title</summary><p>Body</p></details>',
+    );
+  });
+
+  it('keeps only the recovered summary from an unclosed analysis block', () => {
+    const input = '<analysis>hidden<summary>visible</summary>still hidden';
+    const filter = new TopLevelProtocolTagStreamFilter();
+
+    expect(stripAnalysisSummaryProtocolTags(input)).toBe('visible');
+    expect(filter.accept(input) + filter.flush()).toBe('visible');
+  });
 });

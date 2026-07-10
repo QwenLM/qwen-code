@@ -65,9 +65,7 @@ function stripClosedAnalysisBlocks(text: string): string {
 
     const closeEnd = findAnalysisCloseEnd(text, end);
     if (closeEnd === -1) {
-      result += text.slice(index, end);
-      index = end;
-      continue;
+      return result + text.slice(index, start);
     }
 
     result += text.slice(index, start) + ' ';
@@ -76,16 +74,37 @@ function stripClosedAnalysisBlocks(text: string): string {
 }
 
 function stripVisibleTags(text: string): string {
-  return stripClosedAnalysisBlocks(text).replace(
-    /<\/?summary(?=[\s/>])[^>]*>/gi,
-    (tag, offset: number, source: string) => {
-      const before = source[offset - 1];
-      const after = source[offset + tag.length];
-      return before && after && !/\s/.test(before) && !/\s/.test(after)
-        ? ' '
-        : '';
-    },
-  );
+  const tagPattern = /<\/?summary(?=[\s/>])[^>]*>/gi;
+  const stripped = stripClosedAnalysisBlocks(text);
+  let result = '';
+  let index = 0;
+  let summaryDepth = 0;
+
+  while (true) {
+    tagPattern.lastIndex = index;
+    const match = tagPattern.exec(stripped);
+    if (!match) {
+      return result + stripped.slice(index);
+    }
+
+    const tag = match[0].toLowerCase();
+    const start = match.index;
+    const end = start + match[0].length;
+
+    result += stripped.slice(index, start);
+    if (tag.startsWith('<summary')) {
+      if (summaryDepth > 0) result += match[0];
+      summaryDepth += 1;
+    } else if (summaryDepth > 1) {
+      result += match[0];
+      summaryDepth -= 1;
+    } else if (summaryDepth === 1) {
+      summaryDepth = 0;
+    } else {
+      result += match[0];
+    }
+    index = end;
+  }
 }
 
 function stripAnalysisOutsideSummary(text: string): string {
@@ -93,6 +112,7 @@ function stripAnalysisOutsideSummary(text: string): string {
   let result = '';
   let index = 0;
   let summaryDepth = 0;
+  let recoveringUnclosedAnalysis = false;
 
   while (true) {
     tagPattern.lastIndex = index;
@@ -111,6 +131,9 @@ function stripAnalysisOutsideSummary(text: string): string {
         summaryDepth += 1;
       } else if (tag.startsWith('</summary')) {
         summaryDepth -= 1;
+        if (summaryDepth === 0 && recoveringUnclosedAnalysis) {
+          return result;
+        }
       }
       index = end;
       continue;
@@ -141,7 +164,12 @@ function stripAnalysisOutsideSummary(text: string): string {
     } else {
       const rest = text.slice(end);
       const summaryIndex = rest.search(/<summary(?=[\s/>])[^>]*>/i);
-      index = summaryIndex === -1 ? text.length : end + summaryIndex;
+      if (summaryIndex === -1) {
+        index = text.length;
+      } else {
+        recoveringUnclosedAnalysis = true;
+        index = end + summaryIndex;
+      }
     }
   }
 }
@@ -202,6 +230,8 @@ export class TopLevelProtocolTagStreamFilter {
   private recoveryBuffer: string | undefined;
   private recoveryAnalysisDepth = 0;
   private recoverySummaryOpened = false;
+  private recoverySummaryDepth = 0;
+  private recoveryComplete = false;
 
   accept(text: string): string {
     if (this.mode === 'passthrough') return text;
@@ -262,13 +292,17 @@ export class TopLevelProtocolTagStreamFilter {
     this.recoveryBuffer = undefined;
     this.recoveryAnalysisDepth = 0;
     this.recoverySummaryOpened = false;
+    this.recoverySummaryDepth = 0;
+    this.recoveryComplete = false;
   }
 
   private acceptProtocolText(text: string): string {
     let out = '';
 
     for (const char of text) {
-      if (this.recoveryBuffer !== undefined) this.recoveryBuffer += char;
+      if (this.recoveryBuffer !== undefined && !this.recoveryComplete) {
+        this.recoveryBuffer += char;
+      }
 
       if (this.protocolTag) {
         if (char === '>') {
@@ -343,15 +377,27 @@ export class TopLevelProtocolTagStreamFilter {
           this.recoveryBuffer = undefined;
           this.recoveryAnalysisDepth = 0;
           this.recoverySummaryOpened = false;
+          this.recoverySummaryDepth = 0;
+          this.recoveryComplete = false;
         }
       } else if (!selfClosing) {
         this.analysisDepth += 1;
       }
-    } else if (!tag.closing) {
+    } else if (tag.closing) {
+      if (
+        this.recoveryBuffer !== undefined &&
+        !this.recoveryComplete &&
+        this.recoverySummaryDepth > 0
+      ) {
+        this.recoverySummaryDepth -= 1;
+        this.recoveryComplete = this.recoverySummaryDepth === 0;
+      }
+    } else {
       if (this.analysisDepth === 0) {
         this.outputStarted = true;
       } else if (this.recoveryBuffer !== undefined) {
         this.recoverySummaryOpened = true;
+        this.recoverySummaryDepth += 1;
       }
     }
   }
@@ -365,5 +411,7 @@ export class TopLevelProtocolTagStreamFilter {
     this.recoveryBuffer = undefined;
     this.recoveryAnalysisDepth = 0;
     this.recoverySummaryOpened = false;
+    this.recoverySummaryDepth = 0;
+    this.recoveryComplete = false;
   }
 }

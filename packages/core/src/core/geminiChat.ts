@@ -3433,9 +3433,14 @@ export class GeminiChat {
                     );
                   }
                   protocolTextWasSuppressed ||= part.text.length > 0;
-                  const { text: _text, ...rest } = part;
+                  const {
+                    text: _text,
+                    thought: _thought,
+                    thoughtSignature: _thoughtSignature,
+                    ...rest
+                  } = part;
                   const hasNonTextData = Object.entries(rest).some(
-                    ([key, value]) => key !== 'thought' && value !== undefined,
+                    ([, value]) => value !== undefined,
                   );
                   if (hasNonTextData) sanitizedParts.push(rest);
                 }
@@ -3549,7 +3554,6 @@ export class GeminiChat {
           !allModelParts.some((part) => part.text?.trim());
         const suppressEmptyProtocolChunk =
           protocolTextWasSuppressed &&
-          !chunk.usageMetadata &&
           !chunk.candidates?.[0]?.finishReason &&
           !chunk.candidates?.[0]?.content?.parts?.length;
         if (!suppressEmptyTerminalChunk && !suppressEmptyProtocolChunk) {
