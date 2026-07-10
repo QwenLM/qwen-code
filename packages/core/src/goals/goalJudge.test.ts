@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { judgeGoal, JUDGE_RESULT_SCHEMA_KEYS } from './goalJudge.js';
+import type { JudgeResult } from './goalJudge.js';
 
 const reportErrorMock = vi.hoisted(() => vi.fn());
 vi.mock('../utils/errorReporting.js', () => ({
@@ -61,6 +62,15 @@ describe('judgeGoal', () => {
     reportErrorMock.mockResolvedValue(undefined);
   });
 
+  it('keeps the exported legacy result type source-compatible', () => {
+    const legacyResult: JudgeResult = {
+      ok: false,
+      reason: 'still running',
+    };
+
+    expect(legacyResult).toEqual({ ok: false, reason: 'still running' });
+  });
+
   it('parses a clean ok=true JSON reply', async () => {
     const client = makeMockClient({
       reply: '{"ok": true, "reason": "tests passing"}',
@@ -73,8 +83,35 @@ describe('judgeGoal', () => {
       signal: new AbortController().signal,
     });
 
-    expect(verdict).toEqual({ kind: 'met', reason: 'tests passing' });
+    expect(verdict).toEqual({
+      kind: 'met',
+      ok: true,
+      reason: 'tests passing',
+    });
     expect(client.generateContent.mock.calls[0][3]).toBe('fast-judge');
+  });
+
+  it('preserves the legacy result fields alongside the outcome kind', async () => {
+    const client = makeMockClient({
+      reply: '{"ok": false, "reason": "still running"}',
+    });
+    const config = makeConfig({ client });
+
+    const verdict = await judgeGoal(config, {
+      condition: 'tests pass',
+      lastAssistantText: 'compiled',
+      signal: new AbortController().signal,
+    });
+
+    expect({
+      ok: verdict.ok,
+      reason: verdict.reason,
+      impossible: verdict.impossible,
+    }).toEqual({
+      ok: false,
+      reason: 'still running',
+      impossible: undefined,
+    });
   });
 
   it('parses ok=false and forwards the reason verbatim', async () => {
@@ -89,6 +126,7 @@ describe('judgeGoal', () => {
     });
     expect(verdict).toEqual({
       kind: 'not_met',
+      ok: false,
       reason: 'missing unit test for auth',
     });
   });
@@ -107,7 +145,9 @@ describe('judgeGoal', () => {
 
     expect(verdict).toEqual({
       kind: 'impossible',
+      ok: false,
       reason: 'required remote is unavailable',
+      impossible: true,
     });
   });
 
@@ -122,7 +162,11 @@ describe('judgeGoal', () => {
       signal: new AbortController().signal,
     });
 
-    expect(verdict).toEqual({ kind: 'met', reason: 'tests passed' });
+    expect(verdict).toEqual({
+      kind: 'met',
+      ok: true,
+      reason: 'tests passed',
+    });
   });
 
   it('returns an error for a non-boolean impossible value', async () => {

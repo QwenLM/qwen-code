@@ -70,7 +70,12 @@ async function judgeGoalWithTimeout(
             `Goal judge exceeded ${GOAL_JUDGE_TIMEOUT_MS}ms; pausing goal loop`,
           );
           judgeController.abort();
-          resolve({ kind: 'error', message: GOAL_JUDGE_TIMEOUT_MESSAGE });
+          resolve({
+            kind: 'error',
+            ok: false,
+            reason: GOAL_JUDGE_TIMEOUT_MESSAGE,
+            message: GOAL_JUDGE_TIMEOUT_MESSAGE,
+          });
         }, GOAL_JUDGE_TIMEOUT_MS);
       }),
     ]);

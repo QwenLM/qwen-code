@@ -11,7 +11,7 @@ import {
   type StopInput,
 } from '../hooks/types.js';
 import type { Config } from '../config/config.js';
-import type { JudgeResult } from './goalJudge.js';
+import type { GoalJudgeOutcome } from './goalJudge.js';
 import {
   __resetActiveGoalStoreForTests,
   getActiveGoal,
@@ -278,7 +278,7 @@ describe('createGoalStopHookCallback', () => {
       tokensAtStart: 0,
       hookId: 'old-hook',
     });
-    let resolveJudge!: (value: JudgeResult) => void;
+    let resolveJudge!: (value: GoalJudgeOutcome) => void;
     judgeMock.mockReturnValue(
       new Promise((resolve) => {
         resolveJudge = resolve;
@@ -298,7 +298,7 @@ describe('createGoalStopHookCallback', () => {
       tokensAtStart: 0,
       hookId: 'new-hook',
     });
-    resolveJudge({ kind: 'met', reason: 'old goal done' });
+    resolveJudge({ kind: 'met', ok: true, reason: 'old goal done' });
 
     await expect(pending).resolves.toEqual({ continue: true });
     expect(getActiveGoal('sess-1')).toMatchObject({
@@ -315,7 +315,7 @@ describe('createGoalStopHookCallback', () => {
       tokensAtStart: 0,
       hookId: 'old-hook',
     });
-    let resolveJudge!: (value: JudgeResult) => void;
+    let resolveJudge!: (value: GoalJudgeOutcome) => void;
     judgeMock.mockReturnValue(
       new Promise((resolve) => {
         resolveJudge = resolve;
@@ -336,7 +336,7 @@ describe('createGoalStopHookCallback', () => {
       tokensAtStart: 0,
       hookId: 'new-hook',
     });
-    resolveJudge({ kind: 'met', reason: 'old goal done' });
+    resolveJudge({ kind: 'met', ok: true, reason: 'old goal done' });
 
     await expect(pending).resolves.toEqual({ continue: true });
     expect(getActiveGoal('sess-1')).toMatchObject({

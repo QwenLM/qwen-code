@@ -54,11 +54,23 @@ interface JudgeWireResult {
   impossible?: boolean;
 }
 
-export type JudgeResult =
-  | { kind: 'met'; reason: string }
-  | { kind: 'not_met'; reason: string }
-  | { kind: 'impossible'; reason: string }
-  | { kind: 'error'; message: string };
+export interface JudgeResult {
+  ok: boolean;
+  reason: string;
+  impossible?: boolean;
+}
+
+export type GoalJudgeOutcome =
+  | { kind: 'met'; ok: true; reason: string; impossible?: false }
+  | { kind: 'not_met'; ok: false; reason: string; impossible?: false }
+  | { kind: 'impossible'; ok: false; reason: string; impossible: true }
+  | {
+      kind: 'error';
+      ok: false;
+      reason: string;
+      impossible?: false;
+      message: string;
+    };
 
 export const JUDGE_RESULT_SCHEMA_KEYS = [
   'ok',
@@ -96,7 +108,18 @@ const RESPONSE_SCHEMA: Schema & { additionalProperties: boolean } = {
 
 const JUDGE_ERROR_MESSAGE =
   'Goal judge unavailable; the automatic /goal loop paused. The goal remains active.';
+const JUDGE_REASON_FALLBACK =
+  'Goal judge unavailable; continue working toward the goal and run `/goal clear` to stop early.';
 const MAX_REASON_LEN = 240;
+
+function judgeErrorResult(): GoalJudgeOutcome {
+  return {
+    kind: 'error',
+    ok: false,
+    reason: JUDGE_REASON_FALLBACK,
+    message: JUDGE_ERROR_MESSAGE,
+  };
+}
 
 function reportGoalJudgeFailure(error: unknown, stage: string): void {
   void reportError(
@@ -138,10 +161,10 @@ export async function judgeGoal(
     lastAssistantText: string;
     signal: AbortSignal;
   },
-): Promise<JudgeResult> {
+): Promise<GoalJudgeOutcome> {
   const condition = args.condition.trim();
   if (!condition || args.signal.aborted) {
-    return { kind: 'error', message: JUDGE_ERROR_MESSAGE };
+    return judgeErrorResult();
   }
 
   // Feed the conversation transcript (trailing N messages) plus the framed
@@ -180,7 +203,7 @@ export async function judgeGoal(
         new Error('Empty judge response'),
         'empty-response',
       );
-      return { kind: 'error', message: JUDGE_ERROR_MESSAGE };
+      return judgeErrorResult();
     }
     const parsed = parseJudgeReply(text);
     if (!parsed) {
@@ -191,7 +214,7 @@ export async function judgeGoal(
         new Error('Judge response was not parseable as JSON'),
         'parse',
       );
-      return { kind: 'error', message: JUDGE_ERROR_MESSAGE };
+      return judgeErrorResult();
     }
     return toJudgeResult(parsed);
   } catch (err) {
@@ -199,7 +222,7 @@ export async function judgeGoal(
       `Goal judge threw: ${err instanceof Error ? err.message : String(err)}`,
     );
     reportGoalJudgeFailure(err, 'generate-content');
-    return { kind: 'error', message: JUDGE_ERROR_MESSAGE };
+    return judgeErrorResult();
   }
 }
 
@@ -373,12 +396,17 @@ function parseJudgeReply(text: string): JudgeWireResult | null {
   };
 }
 
-function toJudgeResult(result: JudgeWireResult): JudgeResult {
-  if (result.ok) return { kind: 'met', reason: result.reason };
+function toJudgeResult(result: JudgeWireResult): GoalJudgeOutcome {
+  if (result.ok) return { kind: 'met', ok: true, reason: result.reason };
   if (result.impossible) {
-    return { kind: 'impossible', reason: result.reason };
+    return {
+      kind: 'impossible',
+      ok: false,
+      reason: result.reason,
+      impossible: true,
+    };
   }
-  return { kind: 'not_met', reason: result.reason };
+  return { kind: 'not_met', ok: false, reason: result.reason };
 }
 
 function stripCodeFence(s: string): string {
