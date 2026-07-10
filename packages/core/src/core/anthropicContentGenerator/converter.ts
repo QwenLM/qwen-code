@@ -1050,9 +1050,17 @@ function mergeConsecutiveUserMessages(
       Array.isArray(message.content) &&
       Array.isArray(lastMessage.content)
     ) {
-      lastMessage.content = [
+      const combined = [
         ...(lastMessage.content as AnthropicContentBlockParam[]),
         ...(message.content as AnthropicContentBlockParam[]),
+      ];
+      lastMessage.content = [
+        ...combined.filter(
+          (b) => (b as { type?: string }).type === 'tool_result',
+        ),
+        ...combined.filter(
+          (b) => (b as { type?: string }).type !== 'tool_result',
+        ),
       ];
       continue;
     }

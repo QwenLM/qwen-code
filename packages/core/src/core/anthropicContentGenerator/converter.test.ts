@@ -1085,6 +1085,48 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    it('keeps tool results before text when merging consecutive users', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 't1', name: 'tool', args: {} } }],
+          },
+          { role: 'user', parts: [{ text: 'preface' }] },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 't1',
+                  name: 'tool',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(messages[2]).toEqual({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 't1',
+            content: 'ok',
+          },
+          {
+            type: 'text',
+            text: 'preface',
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      });
+    });
+
     it('drops tool results that do not lead user content', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
