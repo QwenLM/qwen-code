@@ -125,7 +125,7 @@ describe('judgeGoal', () => {
     expect(verdict).toEqual({ kind: 'met', reason: 'tests passed' });
   });
 
-  it('ignores non-boolean impossible values', async () => {
+  it('returns an error for a non-boolean impossible value', async () => {
     const client = makeMockClient({
       reply:
         '{"ok": false, "impossible": "true", "reason": "looks impossible"}',
@@ -137,10 +137,7 @@ describe('judgeGoal', () => {
       signal: new AbortController().signal,
     });
 
-    expect(verdict).toEqual({
-      kind: 'not_met',
-      reason: 'looks impossible',
-    });
+    expect(verdict).toMatchObject({ kind: 'error' });
   });
 
   it('falls back to main model when no fast model is configured', async () => {

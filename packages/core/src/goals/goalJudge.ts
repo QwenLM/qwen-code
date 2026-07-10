@@ -357,11 +357,15 @@ function parseJudgeReply(text: string): JudgeWireResult | null {
   if (!payload || typeof payload !== 'object') return null;
   const ok = (payload as { ok?: unknown }).ok;
   const reason = (payload as { reason?: unknown }).reason;
+  const impossibleValue = (payload as { impossible?: unknown }).impossible;
   if (typeof ok !== 'boolean' || typeof reason !== 'string' || !reason.trim()) {
     return null;
   }
+  if (impossibleValue !== undefined && typeof impossibleValue !== 'boolean') {
+    return null;
+  }
   const reasonText = reason.trim().slice(0, MAX_REASON_LEN);
-  const impossible = (payload as { impossible?: unknown }).impossible === true;
+  const impossible = impossibleValue === true;
   return {
     ok,
     reason: reasonText,
