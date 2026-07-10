@@ -27,6 +27,7 @@ export type FakeOpenAIToolCall = {
 export type FakeOpenAIResponse = {
   content?: string;
   contentChunks?: string[];
+  disconnectAfterContentChunks?: number;
   toolCalls?: FakeOpenAIToolCall[];
   finishReason?: 'stop' | 'tool_calls' | 'length';
   usage?: {
@@ -254,12 +255,16 @@ function writeStreamed(
     choices: [{ index: 0, delta, finish_reason }],
     ...(usage ? { usage } : {}),
   });
-  const send = (payload: unknown) => {
-    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  const send = (payload: unknown, callback?: () => void) => {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`, callback);
   };
 
   send(chunk({ role: 'assistant' }));
-  for (const content of message.contentChunks ?? []) {
+  for (const [index, content] of (message.contentChunks ?? []).entries()) {
+    if (message.disconnectAfterContentChunks === index + 1) {
+      send(chunk({ content }), () => res.destroy());
+      return;
+    }
     send(chunk({ content }));
   }
   if (!message.contentChunks && message.content) {

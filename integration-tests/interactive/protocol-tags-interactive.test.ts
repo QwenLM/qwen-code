@@ -27,14 +27,22 @@ describe('Interactive protocol tag filtering', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'retries HTTP 200 streams containing only hidden protocol text',
+    'retries hidden protocol text across SSE disconnect and completed streams',
     async () => {
       fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
-        if (requestIndex < 2) {
+        if (requestIndex === 0) {
           return {
             contentChunks: [
-              `<analysis>hidden failed attempt ${requestIndex + 1}</analysis>`,
+              '<analysis>hidden before disconnect',
+              '</analysis><summary>WRONG_FIRST_ATTEMPT</summary>',
             ],
+            disconnectAfterContentChunks: 1,
+          };
+        }
+
+        if (requestIndex === 1) {
+          return {
+            contentChunks: ['<analysis>hidden completed attempt</analysis>'],
           };
         }
 
@@ -86,7 +94,7 @@ describe('Interactive protocol tag filtering', () => {
 
         const sawVisibleSummary = await rig.waitForText(
           'VISIBLE_TMUX_RETRY_SUMMARY_DONE',
-          45000,
+          15000,
         );
         expect(
           sawVisibleSummary,
@@ -107,6 +115,9 @@ describe('Interactive protocol tag filtering', () => {
         expect(renderedOutput).not.toContain('<summary>');
         expect(renderedOutput).not.toContain('</summary>');
         expect(renderedOutput).not.toContain('retry scratchpad');
+        expect(renderedOutput).not.toContain('hidden before disconnect');
+        expect(renderedOutput).not.toContain('hidden completed attempt');
+        expect(renderedOutput).not.toContain('WRONG_FIRST_ATTEMPT');
       } finally {
         ptyProcess.kill();
         await promise;
