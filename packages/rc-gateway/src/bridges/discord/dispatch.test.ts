@@ -47,6 +47,7 @@ function deps(over: Partial<DiscordDispatchDeps> = {}) {
 
   let promptResult: WriteResult = { ok: true, status: 200 };
   let voteResult: WriteResult = { ok: true, status: 200 };
+  let editReplyResult: DiscordRestResult = { ok: true, status: 200 };
   const redeems: Array<{ bridgeId: string; token: string }> = [];
   let redeemResult: (WriteResult & { sessionId?: string }) | undefined;
 
@@ -88,7 +89,7 @@ function deps(over: Partial<DiscordDispatchDeps> = {}) {
       },
       editInteractionReply: async (token, text) => {
         editedReplies.push({ token, text });
-        return ok;
+        return editReplyResult;
       },
     },
     channels,
@@ -107,6 +108,7 @@ function deps(over: Partial<DiscordDispatchDeps> = {}) {
     redeems,
     setPromptResult: (r: WriteResult) => (promptResult = r),
     setVoteResult: (r: WriteResult) => (voteResult = r),
+    setEditReplyResult: (r: DiscordRestResult) => (editReplyResult = r),
     setRedeemResult: (r: WriteResult & { sessionId?: string }) =>
       (redeemResult = r),
   };
@@ -320,5 +322,31 @@ describe('discord dispatch — button click → vote', () => {
     await handleComponent(comp('vote:approve:req_xyz'), f.deps);
     expect(f.deps.bans.has('discord:111122223333')).toBe(true);
     expect(f.editedReplies[0].text).toContain('blocked');
+  });
+
+  it('>15-min fallback: sends a channel message mentioning the voter when editInteractionReply fails', async () => {
+    await channels.bind('chan_42', 'g1', 'sess_abc');
+    const f = deps();
+    // Simulate an expired interaction token (Discord 401/404 after >15 min).
+    f.setEditReplyResult({ ok: false, status: 401 });
+    await handleComponent(comp('vote:approve:req_xyz'), f.deps);
+    // No edited reply was recorded (editInteractionReply was called but failed).
+    expect(f.editedReplies).toHaveLength(1);
+    // A channel message was sent mentioning the voter instead.
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0].channelId).toBe('chan_42');
+    expect(f.sent[0].text).toContain('<@111122223333>');
+    expect(f.sent[0].text).toContain('approve');
+  });
+
+  it('>15-min fallback: channel message mentions voter on vote failure too', async () => {
+    await channels.bind('chan_42', 'g1', 'sess_abc');
+    const f = deps();
+    f.setVoteResult({ ok: false, status: 500 });
+    f.setEditReplyResult({ ok: false, status: 401 });
+    await handleComponent(comp('vote:approve:req_xyz'), f.deps);
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0].text).toContain('<@111122223333>');
+    expect(f.sent[0].text).toContain('Vote failed');
   });
 });

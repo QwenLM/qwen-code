@@ -205,6 +205,11 @@ export async function handleSlashCommand(
  * clicker is dropped without relaying (the ack already satisfies Discord); a
  * foreign custom_id is ignored; otherwise the vote is POSTed and the deferred
  * reply edited with the outcome (or the daemon error). A 403 caches the ban.
+ *
+ * Discord interaction tokens expire after 15 minutes. If `editInteractionReply`
+ * fails (4xx — the token is expired), we fall back to posting a regular channel
+ * message via the bot token mentioning the voter, so the acknowledgement is
+ * never silently lost.
  */
 export async function handleComponent(
   comp: NormalizedComponent,
@@ -221,10 +226,7 @@ export async function handleComponent(
 
   const sessionId = deps.channels.sessionFor(comp.channelId);
   if (!sessionId) {
-    await deps.rest.editInteractionReply(
-      comp.interactionToken,
-      'This channel is not bound.',
-    );
+    await replyOrFallback(deps, comp, 'This channel is not bound.');
     return;
   }
 
@@ -236,23 +238,44 @@ export async function handleComponent(
   );
   if (r.status === 403) {
     deps.bans.add(subActor);
-    await deps.rest.editInteractionReply(
-      comp.interactionToken,
-      'You are blocked.',
-    );
+    await replyOrFallback(deps, comp, 'You are blocked.');
     return;
   }
   if (!r.ok) {
-    await deps.rest.editInteractionReply(
-      comp.interactionToken,
+    await replyOrFallback(
+      deps,
+      comp,
       'Vote failed — try again from the web client.',
     );
     return;
   }
-  await deps.rest.editInteractionReply(
+  await replyOrFallback(deps, comp, `You voted ${parsed.action}.`);
+}
+
+/**
+ * Edit the deferred interaction reply with `content`. If that fails (4xx —
+ * the interaction token is expired, which happens when >15 minutes have passed
+ * since the permission_request was rendered), fall back to a regular channel
+ * message via the bot token, mentioning the voter by snowflake so they still
+ * see the outcome.
+ */
+async function replyOrFallback(
+  deps: DiscordDispatchDeps,
+  comp: NormalizedComponent,
+  content: string,
+): Promise<void> {
+  const r = await deps.rest.editInteractionReply(
     comp.interactionToken,
-    `You voted ${parsed.action}.`,
+    content,
   );
+  if (!r.ok) {
+    // Interaction token is expired (or otherwise unusable) — fall back to a
+    // plain channel message mentioning the voter so the outcome is not lost.
+    await deps.rest.createMessage(
+      comp.channelId,
+      `<@${comp.userId}> ${content}`,
+    );
+  }
 }
 
 /** Ephemeral reply helper for the slash-command handlers. */

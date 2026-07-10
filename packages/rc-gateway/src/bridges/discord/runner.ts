@@ -47,6 +47,16 @@ export interface DiscordBridgeConfig {
   makeGateway: (handlers: GatewayHandlers) => GatewayController;
   /** User-facing gateway URL for deeplinks (QWEN_DAEMON_URL). */
   baseUrl: string;
+  /**
+   * Durable cursor store for SSE resume positions. When provided, the bridge
+   * persists `lastEventId` per session so cursors survive restarts.
+   */
+  cursors?: CursorStore;
+  /**
+   * The bridge's own token id (used as the cursor-store partition key). Required
+   * when `cursors` is set.
+   */
+  tokenId?: string;
   /** Logger for boot/error lines (default no-op). */
   log?: (msg: string) => void;
   /** Injectable backoff sleep (tests). Resolves early on abort. */
@@ -140,10 +150,10 @@ export class DiscordBridge {
       id: DISCORD_BRIDGE_ID,
       displayName: 'Discord',
       supportsActions: true, // Approve/Deny buttons
-      supportsMarkdown: 'full', // Discord renders full markdown
+      supportsMarkdown: 'limited', // Discord renders a limited markdown subset
       supportsThreads: true, // threads on long streams
       supportsEdits: true, // edits the message on resolve
-      maxMessageBytes: 2000,
+      maxMessageChars: 2000,
     });
   }
 

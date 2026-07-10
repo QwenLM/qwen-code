@@ -73,7 +73,10 @@ export class BridgeClient {
     supportsMarkdown?: BridgeMarkdownSupport;
     supportsThreads?: boolean;
     supportsEdits?: boolean;
+    /** Byte limit (legacy; prefer maxMessageChars). */
     maxMessageBytes?: number;
+    /** Character limit — the preferred alternative to maxMessageBytes. */
+    maxMessageChars?: number;
   }): Promise<WriteResult> {
     return this.postJson('/rc/bridges', reg);
   }
