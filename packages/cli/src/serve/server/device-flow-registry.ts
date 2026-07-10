@@ -68,8 +68,11 @@ export function createDeviceFlowRegistry(deps: {
             data: emission.data,
             ...(originatorClientId ? { originatorClientId } : {}),
           });
-        } catch {
-          // Swallow per-bridge delivery failures; fan-out is best-effort.
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          writeStderrLine(
+            `[serve] auth.device-flow: event delivery failed error=${JSON.stringify(message)}`,
+          );
         }
       }
     },

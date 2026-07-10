@@ -1287,7 +1287,7 @@ export function mountAcpHttp(
         : null;
       const isPluralAcpShape = pluralRawSelector !== null;
       if (rawPath !== path && !isCdpPath && !extraRoute && !isPluralAcpShape) {
-        logReject(`unknown-path ${rawPath}`);
+        logReject(`unknown-path ${logSafe(rawPath)}`);
         socket.destroy();
         return;
       }
@@ -1502,7 +1502,7 @@ export function mountAcpHttp(
           if (cdpBridgeUnregister) {
             cdpBridgeUnregister();
             cdpBridgeUnregister = undefined;
-            removeChromeDevToolsMcpIfUnused(
+            activeMount.removeChromeDevToolsMcpIfUnused(
               connRef?.connectionId ?? 'cdp-bridge',
             );
           }

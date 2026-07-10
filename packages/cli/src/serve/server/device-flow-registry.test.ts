@@ -12,6 +12,7 @@ import {
   type DeviceFlowProviderId,
 } from '../auth/device-flow.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({ writeStderrLine: vi.fn() }));
 
@@ -94,6 +95,9 @@ describe('createDeviceFlowRegistry device-flow event fan-out', () => {
     expect(a.publishWorkspaceEvent).toHaveBeenCalled();
     expect(b.publishWorkspaceEvent).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'auth_device_flow_started' }),
+    );
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('bridge A delivery failed'),
     );
   });
 
