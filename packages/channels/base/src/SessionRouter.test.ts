@@ -134,9 +134,11 @@ describe('SessionRouter', () => {
 
       await router.resolve('ch', 'alice', 'chat1');
 
-      expect(bridge.newSession).toHaveBeenCalledWith('/tmp', {
-        approvalMode: 'yolo',
-      });
+      expect(bridge.newSession).toHaveBeenCalledWith(
+        '/tmp',
+        { approvalMode: 'yolo' },
+        expect.any(Object),
+      );
     });
 
     it('user scope: same sender+chat reuses session', async () => {
@@ -268,6 +270,7 @@ describe('SessionRouter', () => {
       await router.resolve('ch', 'alice', 'chat1', undefined, '/custom');
       expect(bridge.newSession).toHaveBeenCalledWith(
         '/custom',
+        undefined,
         expect.any(Object),
       );
     });
@@ -277,6 +280,7 @@ describe('SessionRouter', () => {
       await router.resolve('ch', 'alice', 'chat1');
       expect(bridge.newSession).toHaveBeenCalledWith(
         '/default',
+        undefined,
         expect.any(Object),
       );
     });
@@ -286,6 +290,7 @@ describe('SessionRouter', () => {
       await router.resolve('ch', 'alice', 'chat1', undefined, '');
       expect(bridge.newSession).toHaveBeenCalledWith(
         '/default',
+        undefined,
         expect.any(Object),
       );
     });
@@ -713,9 +718,12 @@ describe('SessionRouter', () => {
         failed: 0,
       });
 
-      expect(bridge.loadSession).toHaveBeenCalledWith('old-session', '/tmp', {
-        approvalMode: 'yolo',
-      });
+      expect(bridge.loadSession).toHaveBeenCalledWith(
+        'old-session',
+        '/tmp',
+        { approvalMode: 'yolo' },
+        expect.any(Object),
+      );
     });
 
     it('logs malformed persisted session files', async () => {
@@ -882,6 +890,7 @@ describe('SessionRouter', () => {
       expect(restartedBridge.loadSession).toHaveBeenCalledWith(
         aliceSession,
         '/tmp',
+        undefined,
         expect.any(Object),
       );
       expect(router.getSession('ch', 'alice', 'chat1')).toBe(aliceSession);
