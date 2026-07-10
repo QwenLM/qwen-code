@@ -528,6 +528,34 @@ describe('mcp-client', () => {
       });
     });
 
+    it('skips OAuth without opening a browser in non-interactive mode on 401', async () => {
+      const { authenticate, connect, workspaceContext } = setupHttpOAuthRetry(
+        new Error(
+          'HTTP 401 Unauthorized\nwww-authenticate: Bearer realm="example", resource_metadata="https://example.com/.well-known/oauth-protected-resource"',
+        ),
+      );
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+          undefined,
+          false, // non-interactive (`-p`)
+        ),
+      ).rejects.toThrow(
+        // Pin the non-interactive branch specifically: the dialog-instruction
+        // substring alone appears in many OAuth error paths.
+        /non-interactive mode/,
+      );
+
+      // The interactive OAuth flow (which opens a browser) must not run.
+      expect(authenticate).not.toHaveBeenCalled();
+      // Only the initial connect attempt happens; no retry after OAuth.
+      expect(connect).toHaveBeenCalledTimes(1);
+    });
+
     it('falls back to base-url OAuth discovery when www-authenticate lacks resource metadata', async () => {
       const { authenticate, connect, discoverOAuthConfig, workspaceContext } =
         setupHttpOAuthRetry(

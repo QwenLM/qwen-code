@@ -901,6 +901,7 @@ export async function connectAndDiscover(
       debugMode,
       workspaceContext,
       sendSdkMcpMessage,
+      cliConfig.isInteractive(),
     );
 
     mcpClient.onerror = (error) => {
@@ -1291,6 +1292,7 @@ export function hasNetworkTransport(config: MCPServerConfig): boolean {
  * @param mcpServerName The name of the MCP server, used for logging and identification.
  * @param mcpServerConfig The configuration specifying how to connect to the server.
  * @param sendSdkMcpMessage Optional callback for SDK MCP servers to route messages via control plane.
+ * @param interactive When false (non-interactive/headless `-p` mode), skip OAuth flows that open a browser; the connection is rejected instead of blocking on a callback.
  * @returns A promise that resolves to a connected MCP `Client` instance.
  * @throws An error if the connection fails or the configuration is invalid.
  */
@@ -1300,6 +1302,10 @@ export async function connectToMcpServer(
   debugMode: boolean,
   workspaceContext: WorkspaceContext,
   sendSdkMcpMessage?: SendSdkMcpMessage,
+  // When false (non-interactive `-p` mode), never open a browser for MCP OAuth.
+  // A server that would require an interactive OAuth flow is skipped instead of
+  // blocking startup on a browser callback.
+  interactive: boolean = true,
 ): Promise<Client> {
   const mcpClient = new Client({
     name: 'qwen-code-mcp-client',
@@ -1435,6 +1441,18 @@ export async function connectToMcpServer(
           }
         }
         const oauthMessage = getSseOAuth401Message(mcpServerName, tokenState);
+        debugLogger.warn(oauthMessage);
+        throw new Error(oauthMessage);
+      }
+
+      // In non-interactive mode (`-p`) we must never open a browser for OAuth,
+      // as it would block startup on a callback the user can't complete. Skip
+      // this server instead — it surfaces via the normal failed-connection path.
+      if (!interactive) {
+        const oauthMessage =
+          `The MCP server '${mcpServerName}' requires OAuth authentication, ` +
+          `but Qwen Code is running in non-interactive mode. Skipping this server. ` +
+          getMcpOAuthDialogInstruction('authenticate', mcpServerName);
         debugLogger.warn(oauthMessage);
         throw new Error(oauthMessage);
       }
