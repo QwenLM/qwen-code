@@ -3567,4 +3567,173 @@ describe('SessionService', () => {
       expect(titles).toEqual([]);
     });
   });
+
+  describe('listSessions parentSessionId round-trip', () => {
+    // Uses real disk like findSessionTitlesByPrefix — readParentSessionIdFromFile
+    // does a synchronous tail/head scan of the file, so the mocked
+    // jsonl.readLines path can't stand in for it. Seed a real transcript with a
+    // parent_session record and assert listSessions rehydrates parentSessionId.
+    let realTmpDir: string;
+    let realPath: typeof import('node:path');
+    let service: SessionService;
+    let cwd: string;
+
+    beforeEach(async () => {
+      const realOs = await import('node:os');
+      realPath = await vi.importActual<typeof import('node:path')>('node:path');
+      const actualPaths =
+        await vi.importActual<typeof import('../utils/paths.js')>(
+          '../utils/paths.js',
+        );
+      const actualJsonl = await vi.importActual<
+        typeof import('../utils/jsonl-utils.js')
+      >('../utils/jsonl-utils.js');
+
+      vi.mocked(path.join).mockImplementation(
+        realPath.join as unknown as typeof path.join,
+      );
+      vi.mocked(path.dirname).mockImplementation(
+        realPath.dirname as unknown as typeof path.dirname,
+      );
+      vi.mocked(path.isAbsolute).mockImplementation(
+        realPath.isAbsolute as unknown as typeof path.isAbsolute,
+      );
+      vi.mocked(path.resolve).mockImplementation(
+        realPath.resolve as unknown as typeof path.resolve,
+      );
+      vi.mocked(getProjectHash).mockImplementation(actualPaths.getProjectHash);
+      const mockedPaths = (await import('../utils/paths.js')) as unknown as {
+        sanitizeCwd: (cwd: string) => string;
+      };
+      mockedPaths.sanitizeCwd = actualPaths.sanitizeCwd;
+      vi.mocked(jsonl.read).mockImplementation(actualJsonl.read);
+      vi.mocked(jsonl.readLines).mockImplementation(actualJsonl.readLines);
+
+      vi.mocked(readdirSyncSpy).mockRestore?.();
+      vi.mocked(statSyncSpy).mockRestore?.();
+      vi.mocked(unlinkSyncSpy).mockRestore?.();
+
+      realTmpDir = fs.mkdtempSync(
+        realPath.join(realOs.tmpdir(), 'parent-session-id-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = realTmpDir;
+      cwd = process.cwd();
+      service = new SessionService(cwd);
+    });
+
+    afterEach(() => {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      try {
+        fs.rmSync(realTmpDir, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+    });
+
+    const getChatsDir = () => {
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      return chatsDir;
+    };
+
+    const userLine = (sessionId: string, text: string) => ({
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId,
+      type: 'user',
+      timestamp: '2026-04-22T00:00:00.000Z',
+      cwd,
+      version: 'test',
+      message: { role: 'user', parts: [{ text }] },
+    });
+
+    const parentSessionLine = (sessionId: string, parentSessionId: string) => ({
+      uuid: 'u2',
+      parentUuid: 'u1',
+      sessionId,
+      type: 'system',
+      subtype: 'parent_session',
+      timestamp: '2026-04-22T00:00:01.000Z',
+      cwd,
+      version: 'test',
+      systemPayload: { parentSessionId },
+    });
+
+    const writeSession = (
+      sessionId: string,
+      lines: Array<Record<string, unknown>>,
+    ) => {
+      const file = realPath.join(getChatsDir(), `${sessionId}.jsonl`);
+      fs.writeFileSync(
+        file,
+        lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
+      );
+      return file;
+    };
+
+    const findItem = (
+      items: Array<{ sessionId: string; parentSessionId?: string }>,
+      sessionId: string,
+    ) => items.find((item) => item.sessionId === sessionId);
+
+    it('rehydrates parentSessionId from a parent_session record', async () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      writeSession(sessionId, [
+        userLine(sessionId, 'hello'),
+        parentSessionLine(sessionId, 'parent-abc'),
+      ]);
+
+      const result = await service.listSessions();
+
+      const item = findItem(result.items, sessionId);
+      expect(item).toBeDefined();
+      expect(item?.parentSessionId).toBe('parent-abc');
+    });
+
+    it('leaves parentSessionId undefined when no parent_session record exists', async () => {
+      const sessionId = '22222222-2222-2222-2222-222222222222';
+      writeSession(sessionId, [userLine(sessionId, 'hello')]);
+
+      const result = await service.listSessions();
+
+      const item = findItem(result.items, sessionId);
+      expect(item).toBeDefined();
+      expect(item?.parentSessionId).toBeUndefined();
+    });
+
+    it('reads a parent_session record near the head past the tail window', async () => {
+      // The parent_session record is written once near the start of the file.
+      // Push it out of the trailing 64KB scan window with bulk user records so
+      // the read must fall back to the head window to recover it.
+      const sessionId = '33333333-3333-3333-3333-333333333333';
+      const bulk = 'x'.repeat(4000);
+      const lines: Array<Record<string, unknown>> = [
+        userLine(sessionId, 'hello'),
+        parentSessionLine(sessionId, 'parent-head'),
+      ];
+      // 30 * ~4KB comfortably exceeds the 64KB tail window.
+      for (let i = 0; i < 30; i++) {
+        lines.push({
+          uuid: `bulk-${i}`,
+          parentUuid: i === 0 ? 'u2' : `bulk-${i - 1}`,
+          sessionId,
+          type: 'user',
+          timestamp: '2026-04-22T00:01:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: bulk }] },
+        });
+      }
+      writeSession(sessionId, lines);
+
+      const result = await service.listSessions();
+
+      const item = findItem(result.items, sessionId);
+      expect(item).toBeDefined();
+      expect(item?.parentSessionId).toBe('parent-head');
+    });
+  });
 });

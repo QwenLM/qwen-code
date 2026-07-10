@@ -46,7 +46,10 @@ import {
   extractErrorMessage,
   extractErrorCode,
 } from './bridge.js';
-import { SERVE_STATUS_EXT_METHODS } from './status.js';
+import {
+  SERVE_CONTROL_EXT_METHODS,
+  SERVE_STATUS_EXT_METHODS,
+} from './status.js';
 import type { ChannelFactory } from './channel.js';
 import type { BridgeTelemetry } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
@@ -7741,6 +7744,108 @@ describe('createAcpSessionBridge', () => {
       expect(() => bridge.getSessionSummary('missing')).toThrow(
         SessionNotFoundError,
       );
+      await bridge.shutdown();
+    });
+  });
+
+  describe('parentSessionId', () => {
+    it('carries parentSessionId from a spawn into the session summary', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        parentSessionId: 'parent-1',
+      });
+
+      // Both summary readers surface the same parent lineage.
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        sessionId: session.sessionId,
+        parentSessionId: 'parent-1',
+      });
+      const fromList = bridge
+        .listWorkspaceSessions(WS_A)
+        .find((s) => s.sessionId === session.sessionId);
+      expect(fromList?.parentSessionId).toBe('parent-1');
+
+      await bridge.shutdown();
+    });
+
+    it('leaves parentSessionId undefined when the spawn omits it', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      expect(
+        bridge.getSessionSummary(session.sessionId).parentSessionId,
+      ).toBeUndefined();
+      const fromList = bridge
+        .listWorkspaceSessions(WS_A)
+        .find((s) => s.sessionId === session.sessionId);
+      expect(fromList?.parentSessionId).toBeUndefined();
+
+      await bridge.shutdown();
+    });
+
+    it('sends the sessionParent ext-method to the child when spawned with a parent', async () => {
+      const handles: ChannelHandle[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          const h = makeChannel();
+          handles.push(h);
+          return h.channel;
+        },
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        parentSessionId: 'parent-1',
+      });
+
+      // The parent link is persisted fire-and-forget over the child's own
+      // connection, so wait for it to land on the agent side.
+      await vi.waitFor(() => {
+        expect(
+          handles[0]?.agent.extMethodCalls.find(
+            (c) => c.method === SERVE_CONTROL_EXT_METHODS.sessionParent,
+          ),
+        ).toEqual({
+          method: SERVE_CONTROL_EXT_METHODS.sessionParent,
+          params: {
+            sessionId: session.sessionId,
+            parentSessionId: 'parent-1',
+          },
+        });
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('does not send the sessionParent ext-method when spawned without a parent', async () => {
+      const handles: ChannelHandle[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          const h = makeChannel();
+          handles.push(h);
+          return h.channel;
+        },
+      });
+      await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      expect(
+        handles[0]?.agent.extMethodCalls.some(
+          (c) => c.method === SERVE_CONTROL_EXT_METHODS.sessionParent,
+        ),
+      ).toBe(false);
+
       await bridge.shutdown();
     });
   });
