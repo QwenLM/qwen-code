@@ -32,6 +32,7 @@ describe('reviewCommand', () => {
   it('registers exactly the expected internal helper subcommands', () => {
     expect(registeredSubcommands()).toEqual([
       'fetch-pr',
+      'plan-diff',
       'pr-context',
       'load-rules',
       'presubmit',

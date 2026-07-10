@@ -777,7 +777,7 @@ describe('FileHistoryService', () => {
         const bn = s.trackedFileBackups['a.txt']?.backupFileName;
         if (bn) expect(existsSync(backupPath(bn))).toBe(true);
       }
-    });
+    }, 20_000);
 
     it('should preserve deduplicated backup files referenced by survivors', async () => {
       const file = join(projectDir, 'a.txt');

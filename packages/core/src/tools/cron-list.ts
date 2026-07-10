@@ -11,6 +11,7 @@ import type { DurableCronTask } from '../services/cronTasksFile.js';
 import {
   CRON_TASKS_DISPLAY_PATH,
   readCronTasks,
+  taskHasLegacyCondition,
 } from '../services/cronTasksFile.js';
 
 export type CronListParams = Record<string, never>;
@@ -84,7 +85,10 @@ class CronListInvocation extends BaseToolInvocation<
         recurring: task.recurring,
         durable: true,
         ...(task.name ? { name: task.name } : {}),
-        enabled: task.enabled !== false,
+        // A legacy guarded task (removed isolated mode + precondition) can never
+        // fire — the scheduler skips it — so report it disabled here too rather
+        // than as an enabled task that silently never runs.
+        enabled: task.enabled !== false && !taskHasLegacyCondition(task),
       })),
       ...scheduler
         .list()

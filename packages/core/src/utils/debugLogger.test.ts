@@ -95,6 +95,31 @@ describe('debugLogger', () => {
       );
     });
 
+    it('does not write debug log by default when QWEN_DEBUG_LOG_FILE is unset', async () => {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+
+      const logger = createDebugLogger();
+      logger.info('default log');
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.appendFile).not.toHaveBeenCalled();
+    });
+
+    it.each(['', ' ', '0', 'false', 'off', 'no'])(
+      'does not write debug log when QWEN_DEBUG_LOG_FILE is %j',
+      async (value) => {
+        process.env['QWEN_DEBUG_LOG_FILE'] = value;
+
+        const logger = createDebugLogger();
+        logger.info('disabled log');
+
+        await vi.runAllTimersAsync();
+
+        expect(fs.appendFile).not.toHaveBeenCalled();
+      },
+    );
+
     it('writes log with tag when provided', async () => {
       const logger = createDebugLogger('STARTUP');
       logger.info('Server started');
@@ -318,6 +343,17 @@ describe('debugLogger', () => {
         '92ec0176-d354-4147-848b-5cd2d80609c4.txt',
         expectedLatestPath,
       );
+    });
+
+    it('does not create latest symlink when QWEN_DEBUG_LOG_FILE is unset', async () => {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+      vi.clearAllMocks();
+      resetDebugLoggingState();
+      setDebugLogSession(uuidSession);
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).not.toHaveBeenCalled();
     });
 
     it('does not point latest at non-session debug logs', async () => {

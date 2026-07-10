@@ -3391,6 +3391,75 @@ describe('SessionService', () => {
         /Invalid new sessionId/,
       );
     });
+
+    it('drops the source parent_session record so the fork inherits no lineage', async () => {
+      // A fork is a fresh top-level session, not a sub-session. Copying the
+      // source's parent_session record would make the fork report the original's
+      // parent as its own. Seed the parent_session record on the active branch
+      // (u1 -> parent_session -> u2) so it would otherwise be copied.
+      const oldId = 'aaaaaaaa-1111-1111-1111-111111111111';
+      const newId = 'bbbbbbbb-2222-2222-2222-222222222222';
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      const srcFile = realPath.join(chatsDir, `${oldId}.jsonl`);
+      const lines = [
+        {
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId: oldId,
+          type: 'user',
+          timestamp: '2026-04-22T00:00:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+        },
+        {
+          uuid: 'up',
+          parentUuid: 'u1',
+          sessionId: oldId,
+          type: 'system',
+          subtype: 'parent_session',
+          timestamp: '2026-04-22T00:00:00.500Z',
+          cwd,
+          version: 'test',
+          systemPayload: { parentSessionId: 'P' },
+        },
+        {
+          uuid: 'u2',
+          parentUuid: 'up',
+          sessionId: oldId,
+          type: 'assistant',
+          timestamp: '2026-04-22T00:00:01.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'model', parts: [{ text: 'hi' }] },
+        },
+      ];
+      fs.writeFileSync(
+        srcFile,
+        lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      expect(
+        written.some(
+          (r) => r.type === 'system' && r.subtype === 'parent_session',
+        ),
+      ).toBe(false);
+
+      // The source keeps its lineage; the fork carries none of it.
+      expect(await service.readParentSessionId(oldId)).toBe('P');
+      expect(await service.readParentSessionId(newId)).toBeUndefined();
+    });
   });
 
   describe('findSessionTitlesByPrefix', () => {
@@ -3565,6 +3634,198 @@ describe('SessionService', () => {
 
       const titles = await service.findSessionTitlesByPrefix('anything');
       expect(titles).toEqual([]);
+    });
+  });
+
+  describe('listSessions parentSessionId round-trip', () => {
+    // Uses real disk like findSessionTitlesByPrefix — readParentSessionIdFromFile
+    // does a synchronous tail/head scan of the file, so the mocked
+    // jsonl.readLines path can't stand in for it. Seed a real transcript with a
+    // parent_session record and assert listSessions rehydrates parentSessionId.
+    let realTmpDir: string;
+    let realPath: typeof import('node:path');
+    let service: SessionService;
+    let cwd: string;
+
+    beforeEach(async () => {
+      const realOs = await import('node:os');
+      realPath = await vi.importActual<typeof import('node:path')>('node:path');
+      const actualPaths =
+        await vi.importActual<typeof import('../utils/paths.js')>(
+          '../utils/paths.js',
+        );
+      const actualJsonl = await vi.importActual<
+        typeof import('../utils/jsonl-utils.js')
+      >('../utils/jsonl-utils.js');
+
+      vi.mocked(path.join).mockImplementation(
+        realPath.join as unknown as typeof path.join,
+      );
+      vi.mocked(path.dirname).mockImplementation(
+        realPath.dirname as unknown as typeof path.dirname,
+      );
+      vi.mocked(path.isAbsolute).mockImplementation(
+        realPath.isAbsolute as unknown as typeof path.isAbsolute,
+      );
+      vi.mocked(path.resolve).mockImplementation(
+        realPath.resolve as unknown as typeof path.resolve,
+      );
+      vi.mocked(getProjectHash).mockImplementation(actualPaths.getProjectHash);
+      const mockedPaths = (await import('../utils/paths.js')) as unknown as {
+        sanitizeCwd: (cwd: string) => string;
+      };
+      mockedPaths.sanitizeCwd = actualPaths.sanitizeCwd;
+      vi.mocked(jsonl.read).mockImplementation(actualJsonl.read);
+      vi.mocked(jsonl.readLines).mockImplementation(actualJsonl.readLines);
+
+      vi.mocked(readdirSyncSpy).mockRestore?.();
+      vi.mocked(statSyncSpy).mockRestore?.();
+      vi.mocked(unlinkSyncSpy).mockRestore?.();
+
+      realTmpDir = fs.mkdtempSync(
+        realPath.join(realOs.tmpdir(), 'parent-session-id-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = realTmpDir;
+      cwd = process.cwd();
+      service = new SessionService(cwd);
+    });
+
+    afterEach(() => {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      try {
+        fs.rmSync(realTmpDir, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+    });
+
+    const getChatsDir = () => {
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      return chatsDir;
+    };
+
+    const userLine = (sessionId: string, text: string) => ({
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId,
+      type: 'user',
+      timestamp: '2026-04-22T00:00:00.000Z',
+      cwd,
+      version: 'test',
+      message: { role: 'user', parts: [{ text }] },
+    });
+
+    const parentSessionLine = (sessionId: string, parentSessionId: string) => ({
+      uuid: 'u2',
+      parentUuid: 'u1',
+      sessionId,
+      type: 'system',
+      subtype: 'parent_session',
+      timestamp: '2026-04-22T00:00:01.000Z',
+      cwd,
+      version: 'test',
+      systemPayload: { parentSessionId },
+    });
+
+    const writeSession = (
+      sessionId: string,
+      lines: Array<Record<string, unknown>>,
+    ) => {
+      const file = realPath.join(getChatsDir(), `${sessionId}.jsonl`);
+      fs.writeFileSync(
+        file,
+        lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
+      );
+      return file;
+    };
+
+    const findItem = (
+      items: Array<{ sessionId: string; parentSessionId?: string }>,
+      sessionId: string,
+    ) => items.find((item) => item.sessionId === sessionId);
+
+    it('rehydrates parentSessionId from a parent_session record', async () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      writeSession(sessionId, [
+        userLine(sessionId, 'hello'),
+        parentSessionLine(sessionId, 'parent-abc'),
+      ]);
+
+      const result = await service.listSessions();
+
+      const item = findItem(result.items, sessionId);
+      expect(item).toBeDefined();
+      expect(item?.parentSessionId).toBe('parent-abc');
+    });
+
+    it('leaves parentSessionId undefined when no parent_session record exists', async () => {
+      const sessionId = '22222222-2222-2222-2222-222222222222';
+      writeSession(sessionId, [userLine(sessionId, 'hello')]);
+
+      const result = await service.listSessions();
+
+      const item = findItem(result.items, sessionId);
+      expect(item).toBeDefined();
+      expect(item?.parentSessionId).toBeUndefined();
+    });
+
+    it('reads a parent_session record near the head past the tail window', async () => {
+      // The parent_session record is written once near the start of the file.
+      // Push it out of the trailing 64KB scan window with bulk user records so
+      // the read must fall back to the head window to recover it.
+      const sessionId = '33333333-3333-3333-3333-333333333333';
+      const bulk = 'x'.repeat(4000);
+      const lines: Array<Record<string, unknown>> = [
+        userLine(sessionId, 'hello'),
+        parentSessionLine(sessionId, 'parent-head'),
+      ];
+      // 30 * ~4KB comfortably exceeds the 64KB tail window.
+      for (let i = 0; i < 30; i++) {
+        lines.push({
+          uuid: `bulk-${i}`,
+          parentUuid: i === 0 ? 'u2' : `bulk-${i - 1}`,
+          sessionId,
+          type: 'user',
+          timestamp: '2026-04-22T00:01:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: bulk }] },
+        });
+      }
+      writeSession(sessionId, lines);
+
+      const result = await service.listSessions();
+
+      const item = findItem(result.items, sessionId);
+      expect(item).toBeDefined();
+      expect(item?.parentSessionId).toBe('parent-head');
+    });
+
+    it('readParentSessionId returns the parentSessionId for a session with a parent_session record', async () => {
+      const sessionId = '44444444-4444-4444-4444-444444444444';
+      writeSession(sessionId, [
+        userLine(sessionId, 'hello'),
+        parentSessionLine(sessionId, 'parent-xyz'),
+      ]);
+
+      expect(await service.readParentSessionId(sessionId)).toBe('parent-xyz');
+    });
+
+    it('readParentSessionId returns undefined for a session without a parent_session record', async () => {
+      const sessionId = '55555555-5555-5555-5555-555555555555';
+      writeSession(sessionId, [userLine(sessionId, 'hello')]);
+
+      expect(await service.readParentSessionId(sessionId)).toBeUndefined();
+    });
+
+    it('readParentSessionId returns undefined for a nonexistent session', async () => {
+      const sessionId = '66666666-6666-6666-6666-666666666666';
+
+      expect(await service.readParentSessionId(sessionId)).toBeUndefined();
     });
   });
 });

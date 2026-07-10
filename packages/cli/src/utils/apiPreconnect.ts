@@ -197,7 +197,7 @@ export function preconnectApi(
     // Fire HEAD request to warm connection (fire-and-forget).
     // Use undici's own fetch (not Node's built-in fetch) so the dispatcher
     // and fetch come from the same undici version — Node's bundled undici
-    // may differ in major version from the bundled one (e.g. v8 vs v6),
+    // may differ in major version from the packaged one (e.g. v8 vs v7),
     // causing handler-interface mismatches like `invalid onError method`.
     undiciFetch(targetUrl, {
       method: 'HEAD',

@@ -4,6 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { AtMentionPanel } from './AtMentionPanel';
 import type { AtMentionMenuState } from '../hooks/useAtMentionMenu';
+import type { WebShellAtProvider } from '../customization';
 import { I18nProvider } from '../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -20,20 +21,34 @@ let container: HTMLDivElement | null = null;
 let anchor: HTMLDivElement | null = null;
 let root: Root | null = null;
 
+function providerView(provider: WebShellAtProvider) {
+  return {
+    id: provider.id,
+    provider,
+    label: provider.label,
+    textValue:
+      provider.textValue ??
+      (typeof provider.label === 'string' ? provider.label : provider.id),
+    description: provider.description,
+    tabs: provider.tabs,
+    renderItem: provider.renderItem,
+  };
+}
+
 function categoriesMenu(): AtMentionMenuState {
+  const provider: WebShellAtProvider = {
+    id: 'files',
+    label: 'Files',
+    description: 'Reference workspace files',
+    search: async () => [],
+  };
   return {
     from: 0,
     to: 1,
     query: '',
     level: 'categories',
     selectedIndex: 0,
-    providers: [
-      {
-        id: 'files',
-        label: 'Files',
-        description: 'Reference workspace files',
-      },
-    ],
+    providers: [providerView(provider)],
     items: [],
     loading: false,
   };
@@ -49,6 +64,35 @@ function itemsMenu(): AtMentionMenuState {
         id: 'readme',
         label: 'README.md',
         insertText: '@README.md ',
+      },
+    ],
+  };
+}
+
+function tabbedItemsMenu(): AtMentionMenuState {
+  const provider: WebShellAtProvider = {
+    id: 'tables',
+    label: 'Tables',
+    tabs: [
+      { id: 'mc', label: 'MaxCompute' },
+      { id: 'hg', label: 'Hologres' },
+    ],
+    search: async () => [],
+  };
+  return {
+    ...categoriesMenu(),
+    level: 'items',
+    selectedProviderId: 'tables',
+    providers: [providerView(provider)],
+    tabs: provider.tabs,
+    selectedTabId: 'mc',
+    items: [
+      {
+        id: 'orders',
+        label: 'orders',
+        subtitle: 'project_a',
+        description: 'daily order table',
+        insertText: '@orders ',
       },
     ],
   };
@@ -81,6 +125,7 @@ function mount(menu: AtMentionMenuState, handlers = {}) {
           onAccept={vi.fn()}
           onBack={vi.fn()}
           onSearch={vi.fn()}
+          onSelectTab={vi.fn()}
           {...handlers}
         />
       </I18nProvider>,
@@ -174,6 +219,97 @@ describe('AtMentionPanel', () => {
     });
 
     expect(onSearch).toHaveBeenCalledWith('read');
+  });
+
+  it('renders provider tabs and item subtitle fields', () => {
+    const onSelectTab = vi.fn();
+    mount(tabbedItemsMenu(), { onSelectTab });
+
+    expect(document.body.textContent).toContain('MaxCompute');
+    expect(document.body.textContent).toContain('Hologres');
+    expect(document.body.textContent).toContain('orders');
+    expect(document.body.textContent).toContain('project_a');
+    expect(document.body.textContent).toContain('daily order table');
+
+    const tabs = [...document.body.querySelectorAll('[role="tab"]')];
+    act(() => {
+      tabs[1]?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(onSelectTab).toHaveBeenCalledWith('hg');
+  });
+
+  it('guards image icon sources', () => {
+    const menu = itemsMenu();
+    menu.items = [
+      {
+        id: 'safe',
+        label: 'Safe image',
+        icon: 'data:image/png;base64,iVBOR',
+        iconMode: 'image',
+      },
+      {
+        id: 'unsafe',
+        label: 'Unsafe image',
+        icon: 'javascript:alert(1)',
+        iconMode: 'image',
+      },
+    ];
+    mount(menu);
+
+    const images = [...document.body.querySelectorAll('img')];
+    expect(images).toHaveLength(1);
+    expect(images[0]?.getAttribute('src')).toBe('data:image/png;base64,iVBOR');
+  });
+
+  it('guards mask icon sources', () => {
+    const menu = itemsMenu();
+    menu.items = [
+      {
+        id: 'safe',
+        label: 'Safe mask',
+        icon: 'data:image/png;base64,iVBOR',
+      },
+      {
+        id: 'unsafe',
+        label: 'Unsafe mask',
+        icon: 'javascript:alert(1)',
+      },
+    ];
+    mount(menu);
+
+    const icons = [
+      ...document.body.querySelectorAll('[style*="--at-item-icon-url"]'),
+    ];
+    expect(icons).toHaveLength(1);
+    expect(icons[0]?.getAttribute('style')).toContain(
+      'data:image/png;base64,iVBOR',
+    );
+    expect(document.body.innerHTML).not.toContain('javascript:alert');
+  });
+
+  it('falls back when a custom item renderer throws', () => {
+    const error = new Error('bad item');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const menu = itemsMenu();
+    const provider: WebShellAtProvider = {
+      id: 'files',
+      label: 'Files',
+      renderItem: () => {
+        throw error;
+      },
+      search: async () => [],
+    };
+    menu.providers = [providerView(provider)];
+
+    mount(menu);
+
+    expect(document.body.textContent).toContain('README.md');
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] at mention item render failed',
+      error,
+    );
+    warn.mockRestore();
   });
 
   it('focuses search when explicitly requested', () => {
