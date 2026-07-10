@@ -10,9 +10,11 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  buildCronConditionEcho,
   computeInitialTurnFromHistory,
   fireSessionPermissionDeniedForAutoMode,
   isCronConditionMet,
+  MAX_CRON_CONDITION_ECHO_CHARS,
   resolveHomeLoopResolverRoots,
   Session,
   wrapCronConditionPrompt,
@@ -9472,6 +9474,156 @@ describe('Session', () => {
           expect(markCronRunWithheldSpy).not.toHaveBeenCalled();
         });
 
+        /** Text of every `user_message_chunk` the client was sent. */
+        function userEchoes(): string[] {
+          return (
+            mockClient.sessionUpdate as ReturnType<typeof vi.fn>
+          ).mock.calls
+            .filter((c) => c[0]?.update?.sessionUpdate === 'user_message_chunk')
+            .map((c) => String(c[0]?.update?.content?.text ?? ''));
+        }
+        /** Text of every `agent_message_chunk` the client was sent. */
+        function agentEchoes(): string[] {
+          return (
+            mockClient.sessionUpdate as ReturnType<typeof vi.fn>
+          ).mock.calls
+            .filter(
+              (c) => c[0]?.update?.sessionUpdate === 'agent_message_chunk',
+            )
+            .map((c) => String(c[0]?.update?.content?.text ?? ''));
+        }
+
+        it('echoes a compact label, not the instruction wrapper', async () => {
+          // The model needs the wrapper; a transcript that repeats it on every
+          // fire is unreadable. The condition itself — the part the user wrote —
+          // still shows.
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          await fireGuarded(
+            spawner,
+            assistantTurn({ text: 'Nothing new.\nDECISION: NO' }),
+          );
+
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+          );
+          const echo = userEchoes().find((e) =>
+            e.includes('Precondition check'),
+          );
+          expect(echo).toBeDefined();
+          expect(echo).toContain(
+            'Has anything landed on main since yesterday?',
+          );
+          expect(echo).not.toContain('You are evaluating');
+          expect(echo).not.toContain('DECISION: YES');
+
+          // …while the MODEL still receives the full wrapper.
+          expect(cronTurnText()).toContain('PRECONDITION');
+          expect(cronTurnText()).toContain('DECISION: YES');
+        });
+
+        it('says in the transcript that a NO verdict skipped the run', async () => {
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          await fireGuarded(
+            spawner,
+            assistantTurn({ text: 'Nothing new.\nDECISION: NO' }),
+          );
+
+          await vi.waitFor(() =>
+            expect(
+              agentEchoes().some((e) =>
+                e.includes(
+                  'Precondition not met — this scheduled run was skipped.',
+                ),
+              ),
+            ).toBe(true),
+          );
+          expect(spawner).not.toHaveBeenCalled();
+        });
+
+        it('starts every status line on its own paragraph', async () => {
+          // The status is an agent_message_chunk: the client APPENDS it to the
+          // assistant message already on screen, which ends on the verdict with
+          // no trailing newline. Without the break the transcript renders
+          // `DECISION: NO⏰ Precondition not met…` — a real regression a
+          // screenshot caught and the assertions above did not.
+          const spawner = vi
+            .fn()
+            .mockResolvedValue({ sessionId: 'sub-abcdef123456' });
+          await fireGuarded(spawner, assistantTurn({ text: 'DECISION: YES' }));
+
+          // `agent_message_chunk` also carries the MODEL's own text, so look
+          // only at the scheduler's lines.
+          const statusLines = () =>
+            agentEchoes().filter((e) => e.includes('⏰'));
+          await vi.waitFor(() =>
+            expect(statusLines().length).toBeGreaterThan(0),
+          );
+          for (const line of statusLines()) {
+            expect(line.startsWith('\n\n⏰ ')).toBe(true);
+          }
+        });
+
+        it('names the reason when the check never finished', async () => {
+          const spawner = vi.fn().mockResolvedValue({ sessionId: 'sub-abc' });
+          await fireGuarded(spawner, () =>
+            (async function* () {
+              yield {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'DECISION: YES' }] } },
+                  ],
+                },
+              };
+              throw new Error('stream reset mid-turn');
+            })(),
+          );
+
+          await vi.waitFor(() =>
+            expect(
+              agentEchoes().some((e) =>
+                e.includes('The precondition check failed'),
+              ),
+            ).toBe(true),
+          );
+          expect(spawner).not.toHaveBeenCalled();
+        });
+
+        it('links the spawned sub-session from the bound transcript', async () => {
+          // Otherwise a fire that DID run leaves the bound session silent: the
+          // work happened in a sibling the user has no way to reach.
+          const spawner = vi
+            .fn()
+            .mockResolvedValue({ sessionId: 'sub-abcdef123456' });
+          await fireGuarded(spawner, assistantTurn({ text: 'DECISION: YES' }));
+
+          await vi.waitFor(() => expect(spawner).toHaveBeenCalledTimes(1));
+          await vi.waitFor(() =>
+            expect(
+              agentEchoes().some(
+                (e) =>
+                  e.includes('Running this scheduled task in a new session') &&
+                  e.includes('qwen-session://sub-abcdef123456'),
+              ),
+            ).toBe(true),
+          );
+        });
+
+        it('reports a failed dispatch in the transcript, not only on stderr', async () => {
+          const spawner = vi.fn().mockRejectedValue(new Error('cap reached'));
+          await fireGuarded(spawner, assistantTurn({ text: 'DECISION: YES' }));
+
+          await vi.waitFor(() =>
+            expect(
+              agentEchoes().some(
+                (e) =>
+                  e.includes('This scheduled run could not be started') &&
+                  e.includes('cap reached'),
+              ),
+            ).toBe(true),
+          );
+        });
+
         it('never evaluates a condition on a shared task', async () => {
           // The REST route rejects the combination, but the fire path must not
           // depend on that: a condition stranded on a shared task is inert, and
@@ -9566,6 +9718,30 @@ describe('Session', () => {
             'It could be DECISION: NO.\nOn balance:\nDECISION: YES',
           ),
         ).toBe(true);
+      });
+
+      it('builds a compact echo: label, collapsed whitespace, capped length', () => {
+        const echo = buildCronConditionEcho(
+          '  Has anything\n\n  landed on main   since yesterday?  ',
+        );
+        expect(echo).toBe(
+          '⏰ Precondition check\n\nHas anything landed on main since yesterday?',
+        );
+
+        const long = buildCronConditionEcho('x'.repeat(500));
+        const body = long.split('\n\n')[1]!;
+        expect(body).toHaveLength(MAX_CRON_CONDITION_ECHO_CHARS);
+        expect(body.endsWith('…')).toBe(true);
+      });
+
+      it('never truncates a condition inside a surrogate pair', () => {
+        // A cut landing between the halves of an emoji would render as `�`.
+        const emoji = '🎯';
+        const body = buildCronConditionEcho(
+          'x'.repeat(MAX_CRON_CONDITION_ECHO_CHARS - 2) + emoji + 'tail',
+        ).split('\n\n')[1]!;
+        expect(body).not.toContain('\ud83c');
+        expect([...body].every((ch) => ch !== '�')).toBe(true);
       });
 
       it('asks for a verdict without leaking the command into the check', () => {
