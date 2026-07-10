@@ -4,7 +4,7 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 
 type PromptSessionActions = {
-  createSession: () => Promise<unknown>;
+  createSession: (options?: { workspaceCwd?: string }) => Promise<unknown>;
   attachSession: () => Promise<void>;
   closeSession: () => Promise<void>;
   clearSession: () => Promise<void>;
@@ -20,14 +20,16 @@ export async function createAndAttachSessionForPrompt({
   sessionActions,
   modelId,
   modeId,
+  workspaceCwd,
   warn = console.warn,
 }: {
   sessionActions: PromptSessionActions;
   modelId?: string;
   modeId?: string;
+  workspaceCwd?: string;
   warn?: (message?: unknown, ...optionalParams: unknown[]) => void;
 }): Promise<void> {
-  await sessionActions.createSession();
+  await sessionActions.createSession({ workspaceCwd });
   try {
     await sessionActions.attachSession();
   } catch (error) {

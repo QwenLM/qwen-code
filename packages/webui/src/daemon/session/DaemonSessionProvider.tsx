@@ -1681,7 +1681,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           workspaceCwd:
             activeWorkspaceCwdRef.current ?? sessionRef.current?.workspaceCwd,
         }),
-        createDetachedSession: () => {
+        createDetachedSession: (workspaceCwd?: string) => {
           const client =
             workspaceClientRef.current ??
             new DaemonClient({
@@ -1692,7 +1692,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ...createSessionRequestRef.current,
             sessionScope: 'thread' as const,
             workspaceCwd:
-              activeWorkspaceCwdRef.current ?? sessionRef.current?.workspaceCwd,
+              workspaceCwd ??
+              activeWorkspaceCwdRef.current ??
+              sessionRef.current?.workspaceCwd,
           };
           const requestClientId = clientId
             ? clientIdRef.current

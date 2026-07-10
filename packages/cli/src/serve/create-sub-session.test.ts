@@ -53,6 +53,7 @@ function makeFakeBridge(opts?: {
     workspaceCwd: string;
     sessionScope?: string;
     modelServiceId?: string;
+    parentSessionId?: string;
   }> = [];
   const prompts: Array<{ sessionId: string; promptId?: string; text: string }> =
     [];
@@ -67,6 +68,7 @@ function makeFakeBridge(opts?: {
       workspaceCwd: string;
       sessionScope?: 'single' | 'thread';
       modelServiceId?: string;
+      parentSessionId?: string;
     }) => {
       spawns.push(req);
       return { sessionId: `sub-${++n}` };
@@ -155,7 +157,10 @@ describe('sub-session launcher', () => {
     });
 
     expect(res).toEqual({ sessionId: 'sub-1' });
-    expect(fake.spawns).toEqual([{ workspaceCwd: WS, sessionScope: 'thread' }]);
+    // The caller's session id is threaded through as the sub-session's parent.
+    expect(fake.spawns).toEqual([
+      { workspaceCwd: WS, sessionScope: 'thread', parentSessionId: 'caller-1' },
+    ]);
     expect(fake.prompts[0]!.text).toBe('do the thing');
     expect(fake.names[0]!.displayName).toContain('my task');
     // 'sent' returns immediately but starts a background subscription to hold
@@ -163,6 +168,25 @@ describe('sub-session launcher', () => {
     // stays meaningful). The subscription is fire-and-forget — the launch
     // result is already returned before any events are consumed.
     expect(fake.subscribeCalls()).toBe(1);
+  });
+
+  it('passes the caller session id as the sub-session parentSessionId', async () => {
+    // The parent lineage is what lets a rehydrated daemon reconnect a
+    // sub-session to the caller that spawned it — the launcher forwards
+    // `callerSessionId` verbatim as `parentSessionId` on the spawn.
+    const fake = makeFakeBridge();
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await launcher.launch({
+      prompt: 'do the thing',
+      completion: 'sent',
+      callerSessionId: 'caller-42',
+    });
+
+    expect(fake.spawns[0]!.parentSessionId).toBe('caller-42');
   });
 
   it('first-turn: accumulates chunk text until turn_complete and returns it', async () => {
@@ -191,6 +215,7 @@ describe('sub-session launcher', () => {
       workspaceCwd: WS,
       sessionScope: 'thread',
       modelServiceId: 'model-x',
+      parentSessionId: 'caller-1',
     });
     expect(fake.subscribeCalls()).toBe(1);
   });

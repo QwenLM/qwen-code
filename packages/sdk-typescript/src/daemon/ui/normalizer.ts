@@ -380,7 +380,8 @@ function normalizeHistoryTruncated(
     truncatedEvents === undefined ||
     retainedEvents === undefined ||
     maxBytes === undefined ||
-    (isRecord(event.data) && event.data['fullTranscriptAvailable'] !== false)
+    !isRecord(event.data) ||
+    typeof event.data['fullTranscriptAvailable'] !== 'boolean'
   ) {
     return fallbackDebug(event, base, 'malformed history_truncated payload');
   }
