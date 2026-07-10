@@ -41,6 +41,43 @@ beforeEach(() => {
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 describe('buildMatrixHealthReport', () => {
+  it('ok is true only when BOTH daemonReachable AND homeserverReachable', () => {
+    const ctx = { stateDir: dir, startedAtMs: 0, nowMs: 0 };
+    expect(
+      buildMatrixHealthReport(
+        {
+          registeredId: 'matrix',
+          daemonReachable: true,
+          homeserverReachable: true,
+        },
+        ctx,
+      ).ok,
+    ).toBe(true);
+    expect(
+      buildMatrixHealthReport(
+        {
+          registeredId: 'matrix',
+          daemonReachable: true,
+          homeserverReachable: false,
+        },
+        ctx,
+      ).ok,
+    ).toBe(false);
+    expect(
+      buildMatrixHealthReport(
+        {
+          registeredId: 'matrix',
+          daemonReachable: false,
+          homeserverReachable: true,
+        },
+        ctx,
+      ).ok,
+    ).toBe(false);
+    expect(buildMatrixHealthReport(initialMatrixHealthState(), ctx).ok).toBe(
+      false,
+    );
+  });
+
   it('returns the spec shape with live state + computed uptime', () => {
     const r = buildMatrixHealthReport(
       {
@@ -85,6 +122,7 @@ describe('startMatrixHealthServer (live loopback server)', () => {
     const state = initialMatrixHealthState();
     state.registeredId = 'matrix';
     state.daemonReachable = true;
+    state.homeserverReachable = true;
     server = await startMatrixHealthServer(0, () =>
       buildMatrixHealthReport(state, {
         stateDir: dir,
@@ -102,6 +140,7 @@ describe('startMatrixHealthServer (live loopback server)', () => {
     expect(body1).toMatchObject({
       ok: true,
       daemonReachable: true,
+      homeserverReachable: true,
       registeredId: 'matrix',
       olmStorePresent: false,
     });

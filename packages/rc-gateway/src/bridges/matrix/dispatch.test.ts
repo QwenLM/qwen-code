@@ -14,6 +14,7 @@ import {
   handleReaction,
   senderPowerLevel,
   ENCRYPTED_ROOM_NOTICE,
+  DEEPLINK_REACTION_GUIDANCE,
   type MatrixDispatchDeps,
   type TrackedEvent,
 } from './dispatch.js';
@@ -258,9 +259,16 @@ describe('matrix dispatch — reaction → vote', () => {
     ...over,
   });
 
-  it('casts approve for a 👍 on a tracked event with the MXID sub-actor', async () => {
+  it('casts approve for a 👍 on a tracked inline event with the MXID sub-actor', async () => {
     const tracked = new Map([
-      ['$m_42', { requestId: 'req_xyz', sessionId: 'sess_xyz' }],
+      [
+        '$m_42',
+        {
+          requestId: 'req_xyz',
+          sessionId: 'sess_xyz',
+          surface: 'inline' as const,
+        },
+      ],
     ]);
     const f = deps({ tracked });
     await handleReaction(react(), f.deps);
@@ -276,7 +284,14 @@ describe('matrix dispatch — reaction → vote', () => {
 
   it('casts cancelled for a 👎', async () => {
     const tracked = new Map([
-      ['$m_42', { requestId: 'req_xyz', sessionId: 'sess_xyz' }],
+      [
+        '$m_42',
+        {
+          requestId: 'req_xyz',
+          sessionId: 'sess_xyz',
+          surface: 'inline' as const,
+        },
+      ],
     ]);
     const f = deps({ tracked });
     await handleReaction(react({ key: '\u{1F44E}' }), f.deps);
@@ -291,7 +306,14 @@ describe('matrix dispatch — reaction → vote', () => {
 
   it('ignores a non-thumb reaction', async () => {
     const tracked = new Map([
-      ['$m_42', { requestId: 'req_xyz', sessionId: 'sess_xyz' }],
+      [
+        '$m_42',
+        {
+          requestId: 'req_xyz',
+          sessionId: 'sess_xyz',
+          surface: 'inline' as const,
+        },
+      ],
     ]);
     const f = deps({ tracked });
     await handleReaction(react({ key: '❤️' }), f.deps);
@@ -300,7 +322,14 @@ describe('matrix dispatch — reaction → vote', () => {
 
   it('drops a banned reactor without voting or redacting', async () => {
     const tracked = new Map([
-      ['$m_42', { requestId: 'req_xyz', sessionId: 'sess_xyz' }],
+      [
+        '$m_42',
+        {
+          requestId: 'req_xyz',
+          sessionId: 'sess_xyz',
+          surface: 'inline' as const,
+        },
+      ],
     ]);
     const f = deps({
       tracked,
@@ -313,11 +342,59 @@ describe('matrix dispatch — reaction → vote', () => {
 
   it('caches the ban on a daemon 403', async () => {
     const tracked = new Map([
-      ['$m_42', { requestId: 'req_xyz', sessionId: 'sess_xyz' }],
+      [
+        '$m_42',
+        {
+          requestId: 'req_xyz',
+          sessionId: 'sess_xyz',
+          surface: 'inline' as const,
+        },
+      ],
     ]);
     const f = deps({ tracked });
     f.setVoteResult({ ok: false, status: 403 });
     await handleReaction(react(), f.deps);
     expect(f.deps.bans.has('matrix:@alice:home.example.com')).toBe(true);
+  });
+
+  it('deeplink reaction: replies with guidance instead of voting (once per requestId)', async () => {
+    const tracked = new Map([
+      [
+        '$m_42',
+        {
+          requestId: 'req_xyz',
+          sessionId: 'sess_xyz',
+          surface: 'deeplink' as const,
+        },
+      ],
+    ]);
+    const guidanceSent = new Set<string>();
+    const f = deps({ tracked, deeplinkGuidanceSent: guidanceSent });
+    // First reaction → guidance sent.
+    await handleReaction(react(), f.deps);
+    expect(f.votes).toHaveLength(0); // no vote posted
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0].body).toBe(DEEPLINK_REACTION_GUIDANCE);
+    // Second reaction → guidance NOT sent again (once per requestId).
+    await handleReaction(react({ key: '\u{1F44E}' }), f.deps);
+    expect(f.sent).toHaveLength(1); // still only 1
+    expect(f.votes).toHaveLength(0);
+  });
+
+  it('deeplink reaction: sends guidance without a deeplinkGuidanceSent set (ephemeral guard)', async () => {
+    const tracked = new Map([
+      [
+        '$m_42',
+        {
+          requestId: 'req_xyz',
+          sessionId: 'sess_xyz',
+          surface: 'deeplink' as const,
+        },
+      ],
+    ]);
+    const f = deps({ tracked }); // no deeplinkGuidanceSent → local guard applies
+    await handleReaction(react(), f.deps);
+    expect(f.sent[0].body).toBe(DEEPLINK_REACTION_GUIDANCE);
+    expect(f.votes).toHaveLength(0);
   });
 });

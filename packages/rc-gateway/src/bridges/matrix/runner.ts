@@ -176,6 +176,7 @@ export class MatrixBridge {
       bans: this.bans,
       encryptedRooms: this.encryptedRooms,
       tracked: this.tracked,
+      deeplinkGuidanceSent: this.deeplinkGuidanceSent,
       commandPrefix: this.commandPrefix,
       onTurnBoundary: (sessionId) => this.stream.bumpTurn(sessionId),
     };
@@ -414,7 +415,10 @@ export class MatrixBridge {
     const content = renderPermissionRequest(data, {
       baseUrl: this.cfg.baseUrl,
     });
-    const track = tracksReactions(data); // deeplink (sensitive) → not reaction-votable
+    // `tracksReactions` is false for deeplink (sensitive) surface. We still
+    // track deeplink events with surface:'deeplink' so handleReaction can send
+    // a one-time guidance reply when a user reacts on them.
+    const isDeeplink = !tracksReactions(data);
     for (const roomId of this.cfg.rooms.roomsFor(sessionId)) {
       const r = await this.cfg.rest.sendMessage(roomId, content);
       if (!r.ok || !r.eventId) continue;
@@ -422,9 +426,11 @@ export class MatrixBridge {
         const list = this.sent.get(requestId) ?? [];
         list.push({ roomId, eventId: r.eventId, body: content.body });
         this.sent.set(requestId, list);
-        if (track) {
-          this.tracked.set(r.eventId, { requestId, sessionId });
-        }
+        this.tracked.set(r.eventId, {
+          requestId,
+          sessionId,
+          surface: isDeeplink ? 'deeplink' : 'inline',
+        });
       }
     }
   }

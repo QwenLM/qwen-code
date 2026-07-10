@@ -68,6 +68,13 @@ export interface MatrixResponder {
 export interface TrackedEvent {
   requestId: string;
   sessionId: string;
+  /**
+   * The rendering surface for this request:
+   *  - `'inline'`  → reaction-votable (👍/👎 cast a vote).
+   *  - `'deeplink'`→ NOT reaction-votable; a reaction triggers a one-time
+   *    guidance reply ("This decision requires the web client …").
+   */
+  surface: 'inline' | 'deeplink';
 }
 
 export interface MatrixDispatchDeps {
@@ -82,6 +89,13 @@ export interface MatrixDispatchDeps {
   encryptedRooms: Set<string>;
   /** eventId → tracked permission_request (for reaction → vote resolution). */
   tracked: Map<string, TrackedEvent>;
+  /**
+   * requestIds for which the deeplink-guidance reply has already been sent
+   * (once per requestId, to avoid repeating the notice on every reaction). The
+   * runner owns this set and passes it in; pure-dispatch tests may omit it
+   * (defaults to an empty set, meaning guidance is always eligible to send).
+   */
+  deeplinkGuidanceSent?: Set<string>;
   /** Command prefix (default `!qwen`). */
   commandPrefix: string;
   /**
@@ -238,12 +252,21 @@ function inviteError(r: { body?: unknown }): string {
   return typeof err === 'string' ? err : 'Invalid or expired invite token';
 }
 
+/** Guidance text sent once per requestId when a user reacts on a deeplink message. */
+export const DEEPLINK_REACTION_GUIDANCE =
+  'This decision requires the web client — use the link above.';
+
 /**
  * A reaction becomes a vote when it annotates a tracked permission_request event
  * with 👍/👎 (normalized for variation selector / skin tone). Banned reactors and
  * untracked / non-thumb reactions are dropped without a daemon call. The bridge
  * does NOT tally — it POSTs per valid reaction and lets the daemon dedupe
  * (first-responder-wins).
+ *
+ * Deeplink-surface messages are NOT reaction-votable. A 👍/👎 on such a message
+ * triggers a ONE-TIME threaded guidance reply ("This decision requires the web
+ * client …") so the user knows to open the URL. Subsequent reactions on the same
+ * requestId are silently dropped.
  */
 export async function handleReaction(
   reaction: NormalizedMatrixReaction,
@@ -257,6 +280,20 @@ export async function handleReaction(
 
   const vote = voteForReaction(reaction.key);
   if (!vote) return; // not 👍/👎
+
+  // Deeplink-surface messages are NOT reaction-votable. Send guidance once per
+  // requestId so the user knows to open the web-client link.
+  if (tracked.surface === 'deeplink') {
+    const guidanceSent = deps.deeplinkGuidanceSent ?? new Set<string>();
+    if (!guidanceSent.has(tracked.requestId)) {
+      guidanceSent.add(tracked.requestId);
+      await deps.rest.sendMessage(reaction.roomId, {
+        msgtype: 'm.text',
+        body: DEEPLINK_REACTION_GUIDANCE,
+      });
+    }
+    return;
+  }
 
   const r = await deps.bridge.vote(
     tracked.sessionId,

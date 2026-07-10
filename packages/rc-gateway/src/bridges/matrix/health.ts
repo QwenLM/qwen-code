@@ -42,7 +42,8 @@ export interface MatrixHealthState {
 
 /** The `GET /healthz` response body (spec shape). */
 export interface MatrixHealthReport {
-  ok: true;
+  /** `true` iff BOTH daemonReachable AND homeserverReachable. */
+  ok: boolean;
   daemonReachable: boolean;
   homeserverReachable: boolean;
   olmStorePresent: boolean;
@@ -79,15 +80,17 @@ export function initialMatrixHealthState(): MatrixHealthState {
 
 /**
  * Build the health report from the live state plus the olm-store fs check.
- * Pure (aside from the fs read olmStorePresent does) — `nowMs`/`startedAtMs` are
- * injected so uptime is testable.
+ * `ok` is the conjunction of `daemonReachable` AND `homeserverReachable` —
+ * both must be true for the bridge to be fully operational. Pure (aside from
+ * the fs read olmStorePresent does) — `nowMs`/`startedAtMs` are injected so
+ * uptime is testable.
  */
 export function buildMatrixHealthReport(
   state: MatrixHealthState,
   ctx: { stateDir: string; startedAtMs: number; nowMs: number },
 ): MatrixHealthReport {
   return {
-    ok: true,
+    ok: state.daemonReachable && state.homeserverReachable,
     daemonReachable: state.daemonReachable,
     homeserverReachable: state.homeserverReachable,
     olmStorePresent: olmStorePresent(ctx.stateDir),
