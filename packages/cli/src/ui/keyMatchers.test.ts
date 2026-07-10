@@ -64,7 +64,6 @@ describe('keyMatchers', () => {
     [Command.EXIT]: (key: Key) => key.ctrl && key.name === 'd',
     [Command.SHOW_MORE_LINES]: (key: Key) => key.ctrl && key.name === 's',
     [Command.RETRY_LAST]: (key: Key) => key.ctrl && key.name === 'y',
-    [Command.TOGGLE_COMPACT_MODE]: (key: Key) => key.ctrl && key.name === 'o',
     [Command.TOGGLE_RENDER_MODE]: (key: Key) => key.meta && key.name === 'm',
     [Command.PROMOTE_SHELL_TO_BACKGROUND]: (key: Key) =>
       key.ctrl && key.name === 'b',
@@ -94,6 +93,7 @@ describe('keyMatchers', () => {
     [Command.SCROLL_END]: (key: Key) => key.ctrl && key.name === 'end',
     [Command.TOGGLE_THINKING_EXPANDED]: (key: Key) =>
       key.meta && key.name === 't',
+    [Command.TOGGLE_TRANSCRIPT]: (key: Key) => key.ctrl && key.name === 'o',
   };
 
   // Test data for each command with positive and negative test cases
@@ -297,11 +297,6 @@ describe('keyMatchers', () => {
       positive: [createKey('y', { ctrl: true })],
       negative: [createKey('y'), createKey('r', { ctrl: true })],
     },
-    {
-      command: Command.TOGGLE_COMPACT_MODE,
-      positive: [createKey('o', { ctrl: true })],
-      negative: [createKey('o'), createKey('p', { ctrl: true })],
-    },
 
     // Selection list navigation
     {
@@ -417,6 +412,11 @@ describe('keyMatchers', () => {
       command: Command.TOGGLE_THINKING_EXPANDED,
       positive: [createKey('t', { meta: true })],
       negative: [createKey('t'), createKey('t', { ctrl: true })],
+    },
+    {
+      command: Command.TOGGLE_TRANSCRIPT,
+      positive: [createKey('o', { ctrl: true })],
+      negative: [createKey('o'), createKey('o', { meta: true })],
     },
   ];
 

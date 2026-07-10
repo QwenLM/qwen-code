@@ -6,8 +6,16 @@
 
 import type { Application, Request, RequestHandler, Response } from 'express';
 import type { SendBridgeError } from '../server/error-response.js';
-import { createBuildWorkspaceCtx } from '../server/request-helpers.js';
+import {
+  createBuildWorkspaceCtx,
+  parseAndValidateWorkspaceClientId,
+} from '../server/request-helpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
+import {
+  requireTrustedWorkspaceRuntime,
+  resolveWorkspaceRuntimeFromParam,
+} from '../workspace-route-runtime.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 interface RegisterWorkspaceLifecycleRoutesDeps {
   boundWorkspace: string;
@@ -72,4 +80,86 @@ export function registerWorkspaceLifecycleRoutes(
       sendBridgeError(res, err, { route: 'POST /workspace/reload' });
     }
   });
+}
+
+export function registerWorkspaceQualifiedLifecycleRoutes(
+  app: Application,
+  deps: Pick<
+    RegisterWorkspaceLifecycleRoutesDeps,
+    'mutate' | 'safeBody' | 'sendBridgeError' | 'invalidateServeFeaturesCache'
+  > & {
+    workspaceRegistry: WorkspaceRegistry;
+  },
+): void {
+  app.post(
+    '/workspaces/:workspace/init',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const body = deps.safeBody(req);
+      const force = body['force'];
+      if (force !== undefined && typeof force !== 'boolean') {
+        res.status(400).json({
+          error: '`force` must be a boolean when provided',
+          code: 'invalid_force_flag',
+        });
+        return;
+      }
+      const clientId = parseAndValidateWorkspaceClientId(
+        req,
+        res,
+        runtime.bridge,
+      );
+      if (clientId === null) return;
+      const route = 'POST /workspaces/:workspace/init';
+      try {
+        const ctx = createBuildWorkspaceCtx(runtime.workspaceCwd)(
+          route,
+          clientId,
+        );
+        const result = await runtime.workspaceService.initWorkspace(ctx, {
+          force: force === true,
+        });
+        res.status(200).json(result);
+      } catch (err) {
+        deps.sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
+  app.post(
+    '/workspaces/:workspace/reload',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const clientId = parseAndValidateWorkspaceClientId(
+        req,
+        res,
+        runtime.bridge,
+      );
+      if (clientId === null) return;
+      const route = 'POST /workspaces/:workspace/reload';
+      try {
+        const ctx = createBuildWorkspaceCtx(runtime.workspaceCwd)(
+          route,
+          clientId,
+        );
+        const result = await runtime.workspaceService.reload(ctx);
+        deps.invalidateServeFeaturesCache();
+        res.status(200).json(result);
+      } catch (err) {
+        deps.sendBridgeError(res, err, { route });
+      }
+    },
+  );
 }
