@@ -96,6 +96,12 @@ function daemonSession(
   };
 }
 
+async function drainMicrotasks(): Promise<void> {
+  for (let index = 0; index < 20; index++) {
+    await Promise.resolve();
+  }
+}
+
 describe('SessionRouter', () => {
   let bridge: ChannelAgentBridge;
   let tempDirs: string[] = [];
@@ -1404,6 +1410,98 @@ describe('SessionRouter', () => {
       expect(detach).toHaveBeenCalledOnce();
       expect(session.cancel).toHaveBeenCalledOnce();
     });
+
+    it('does not discard a same-id binding owned by another in-flight route', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      const firstSession = daemonSession('shared-session');
+      const secondDetach = vi.fn().mockResolvedValue(undefined);
+      const secondSession = daemonSession('shared-session', secondDetach);
+      const finishFactories: Array<
+        (session: DaemonChannelSessionClient) => void
+      > = [];
+      const daemonBridge = new DaemonChannelBridge({
+        cwd: '/tmp',
+        sessionFactory: vi.fn(
+          () =>
+            new Promise<DaemonChannelSessionClient>((resolve) => {
+              finishFactories.push(resolve);
+            }),
+        ),
+      });
+      await daemonBridge.start();
+      const router = createLazyRouter(persistPath, daemonBridge);
+
+      const first = router.resolve('ch', 'alice', 'chat1');
+      const second = router.resolve('ch', 'bob', 'chat2');
+      await drainMicrotasks();
+      expect(finishFactories).toHaveLength(2);
+      router.removeSession('ch', 'alice', 'chat1');
+      finishFactories[0]!(firstSession);
+      finishFactories[1]!(secondSession);
+
+      await expect(first).rejects.toThrow('invalidated');
+      await expect(second).resolves.toBe('shared-session');
+      expect(router.getSession('ch', 'bob', 'chat2')).toBe('shared-session');
+      expect(daemonBridge.listSessions()).toEqual([
+        {
+          sessionId: 'shared-session',
+          workspaceCwd: '/tmp',
+          hasActivePrompt: false,
+        },
+      ]);
+      expect(secondDetach).not.toHaveBeenCalled();
+
+      daemonBridge.stop();
+    });
+
+    it.each(['detach', 'cancel'] as const)(
+      'does not wait for a hanging %s while rejecting invalidated creation',
+      async (cleanup) => {
+        const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+        tempDirs.push(dir);
+        const persistPath = join(dir, 'routes.json');
+        const neverSettles = vi.fn(() => new Promise<void>(() => undefined));
+        const session = daemonSession(
+          'late-session',
+          cleanup === 'detach' ? neverSettles : undefined,
+        );
+        if (cleanup === 'cancel') {
+          session.cancel = neverSettles;
+        }
+        let finishFactory!: (session: DaemonChannelSessionClient) => void;
+        const daemonBridge = new DaemonChannelBridge({
+          cwd: '/tmp',
+          sessionFactory: vi.fn(
+            () =>
+              new Promise<DaemonChannelSessionClient>((resolve) => {
+                finishFactory = resolve;
+              }),
+          ),
+        });
+        await daemonBridge.start();
+        const router = createLazyRouter(persistPath, daemonBridge);
+
+        let rejection: unknown;
+        const resolving = router.resolve('ch', 'alice', 'chat1');
+        void resolving.catch((error: unknown) => {
+          rejection = error;
+        });
+        await drainMicrotasks();
+        router.removeSession('ch', 'alice', 'chat1');
+        finishFactory(session);
+        await drainMicrotasks();
+
+        expect(rejection).toEqual(
+          expect.objectContaining({
+            message: 'Session route operation was invalidated',
+          }),
+        );
+        expect(neverSettles).toHaveBeenCalledOnce();
+        expect(daemonBridge.listSessions()).toEqual([]);
+      },
+    );
 
     it.each(['removeSession', 'removeSessionId'] as const)(
       'rejects a dormant load invalidated by %s',

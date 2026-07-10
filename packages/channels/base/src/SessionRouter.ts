@@ -161,7 +161,7 @@ export class SessionRouter {
           try {
             this.assertOperationResultCurrent(key, sessionId, creating);
           } catch (error) {
-            await this.discardInvalidatedSession(key, sessionId, creating);
+            this.scheduleDiscardInvalidatedSession(sessionId, creating);
             throw error;
           }
           this.promoteTargetToGroup(sessionId, isGroup);
@@ -200,7 +200,7 @@ export class SessionRouter {
         try {
           this.assertOperationResultCurrent(key, sessionId, operation);
         } catch (error) {
-          await this.discardInvalidatedSession(key, sessionId, operation);
+          this.scheduleDiscardInvalidatedSession(sessionId, operation);
           throw error;
         }
         this.promoteTargetToGroup(sessionId, isGroup);
@@ -242,7 +242,7 @@ export class SessionRouter {
       try {
         this.assertOperationCurrent(operation);
       } catch (error) {
-        await this.discardInvalidatedSession(key, sessionId, operation);
+        this.scheduleDiscardInvalidatedSession(sessionId, operation);
         throw error;
       }
       this.toSession.set(key, sessionId);
@@ -291,7 +291,7 @@ export class SessionRouter {
             this.assertOperationCurrent(operation);
           }
         } catch (error) {
-          await this.discardInvalidatedSession(key, loadedSessionId, operation);
+          this.scheduleDiscardInvalidatedSession(loadedSessionId, operation);
           throw error;
         }
         if (
@@ -324,7 +324,7 @@ export class SessionRouter {
           try {
             this.assertOperationCurrent(operation);
           } catch (error) {
-            await this.discardInvalidatedSession(key, replacement, operation);
+            this.scheduleDiscardInvalidatedSession(replacement, operation);
             throw error;
           }
           this.deleteByKey(key);
@@ -593,7 +593,7 @@ export class SessionRouter {
           try {
             this.assertOperationCurrent(operation);
           } catch (error) {
-            await this.discardInvalidatedSession(key, sessionId, operation);
+            this.scheduleDiscardInvalidatedSession(sessionId, operation);
             throw error;
           }
           if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -803,7 +803,7 @@ export class SessionRouter {
       try {
         this.assertOperationCurrent(operation);
       } catch (error) {
-        await this.discardInvalidatedSession(routingKey, sessionId, operation);
+        this.scheduleDiscardInvalidatedSession(sessionId, operation);
         throw error;
       }
       if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -897,16 +897,31 @@ export class SessionRouter {
     }
   }
 
-  private async discardInvalidatedSession(
-    key: string,
+  private scheduleDiscardInvalidatedSession(
+    sessionId: string,
+    operation: SessionOperation,
+  ): void {
+    void this.discardInvalidatedSessionWhenUnowned(sessionId, operation).catch(
+      () => undefined,
+    );
+  }
+
+  private async discardInvalidatedSessionWhenUnowned(
     sessionId: string,
     operation: SessionOperation,
   ): Promise<void> {
-    const currentOperation = this.creatingSessions.get(key);
-    if (currentOperation && currentOperation !== operation) return;
+    for (;;) {
+      const possibleOwners = [...this.creatingSessions.values()].filter(
+        (current) => current !== operation,
+      );
+      if (possibleOwners.length === 0) break;
+      await Promise.allSettled(
+        possibleOwners.map((current) => current.promise),
+      );
+    }
     if ([...this.toSession.values()].includes(sessionId)) return;
     try {
-      await this.bridge.discardSession?.(sessionId);
+      void this.bridge.discardSession?.(sessionId).catch(() => undefined);
     } catch {
       // Best-effort cleanup must not replace the terminal invalidation.
     }
