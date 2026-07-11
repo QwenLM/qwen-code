@@ -90,11 +90,15 @@ interface RegisterSessionRoutesDeps {
   languageCodes: string[];
 }
 
+function isReadOnlyWorkspaceCatalog(runtime: WorkspaceRuntime): boolean {
+  return !runtime.primary && !runtime.trusted;
+}
+
 function readWorkspaceCatalog<T>(
   runtime: WorkspaceRuntime,
   read: () => Promise<T>,
 ): Promise<T> {
-  return !runtime.primary && !runtime.trusted
+  return isReadOnlyWorkspaceCatalog(runtime)
     ? runWithoutDebugLogSession(read)
     : read();
 }
@@ -365,6 +369,33 @@ export function registerSessionRoutes(
     const runtime = workspaceRegistry.getByWorkspaceCwd(key);
     if (!runtime) {
       sendWorkspaceMismatch(res, key);
+      return null;
+    }
+    return runtime;
+  };
+
+  const resolveRuntimeForCatalogRoute = (
+    req: Request,
+    res: Response,
+    paramName: 'id' | 'workspace',
+    route: string,
+  ): WorkspaceRuntime | null => {
+    const runtime =
+      paramName === 'workspace'
+        ? resolveWorkspaceRuntimeFromParam(
+            workspaceRegistry,
+            req,
+            res,
+            'workspace',
+          )
+        : resolveRuntimeFromWorkspaceParam(req, res, paramName);
+    if (runtime === null) return null;
+    if (paramName === 'workspace' && runtime.primary && !runtime.trusted) {
+      logSessionRoutingFailure(route, 'untrusted_workspace', {
+        workspaceId: runtime.workspaceId,
+        workspaceCwd: runtime.workspaceCwd,
+      });
+      sendUntrustedWorkspaceResponse(res);
       return null;
     }
     return runtime;
@@ -2155,21 +2186,8 @@ export function registerSessionRoutes(
 
   app.get('/workspaces/:workspace/session-groups', async (req, res) => {
     const route = 'GET /workspaces/:workspace/session-groups';
-    const runtime = resolveWorkspaceRuntimeFromParam(
-      workspaceRegistry,
-      req,
-      res,
-      'workspace',
-    );
+    const runtime = resolveRuntimeForCatalogRoute(req, res, 'workspace', route);
     if (!runtime) return;
-    if (runtime.primary && !runtime.trusted) {
-      logSessionRoutingFailure(route, 'untrusted_workspace', {
-        workspaceId: runtime.workspaceId,
-        workspaceCwd: runtime.workspaceCwd,
-      });
-      sendUntrustedWorkspaceResponse(res);
-      return;
-    }
     try {
       res
         .status(200)
@@ -2256,7 +2274,7 @@ export function registerSessionRoutes(
   );
 
   const listWorkspaceSessionsHandler =
-    (paramName: string): RequestHandler =>
+    (paramName: 'id' | 'workspace'): RequestHandler =>
     async (req, res) => {
       const route =
         paramName === 'workspace'
@@ -2265,26 +2283,10 @@ export function registerSessionRoutes(
       // Express decodes URL-encoded path params automatically; clients pass
       // the absolute workspace cwd encoded (e.g.
       // GET /workspace/%2Fwork%2Fa/sessions).
-      const runtime =
-        paramName === 'workspace'
-          ? resolveWorkspaceRuntimeFromParam(
-              workspaceRegistry,
-              req,
-              res,
-              'workspace',
-            )
-          : resolveRuntimeFromWorkspaceParam(req, res, paramName);
+      const runtime = resolveRuntimeForCatalogRoute(req, res, paramName, route);
       if (runtime === null) return;
-      if (paramName === 'workspace' && runtime.primary && !runtime.trusted) {
-        logSessionRoutingFailure(route, 'untrusted_workspace', {
-          workspaceId: runtime.workspaceId,
-          workspaceCwd: runtime.workspaceCwd,
-        });
-        sendUntrustedWorkspaceResponse(res);
-        return;
-      }
       const key = runtime.workspaceCwd;
-      const readOnlySecondary = !runtime.primary && !runtime.trusted;
+      const readOnlySecondary = isReadOnlyWorkspaceCatalog(runtime);
       try {
         const cursor =
           typeof req.query['cursor'] === 'string'

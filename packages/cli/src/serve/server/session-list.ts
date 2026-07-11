@@ -666,14 +666,7 @@ export async function listWorkspaceSessionsForResponse(
     bySessionId.set(item.sessionId, toSummary(item));
   }
 
-  if (archiveState === 'archived') {
-    const sessions = [...bySessionId.values()];
-    const nextCursor =
-      persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
-    return { sessions, nextCursor };
-  }
-
-  if (readOptions.mergeLive === false) {
+  if (archiveState === 'archived' || readOptions.mergeLive === false) {
     const sessions = [...bySessionId.values()];
     const nextCursor =
       persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
