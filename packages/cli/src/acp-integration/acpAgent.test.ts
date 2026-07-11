@@ -333,6 +333,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     StopFailure: 'StopFailure',
     TodoCreated: 'TodoCreated',
     TodoCompleted: 'TodoCompleted',
+    MessageDisplay: 'MessageDisplay',
+    InstructionsLoaded: 'InstructionsLoaded',
   },
   buildInstallPlan: vi.fn((provider, inputs) => {
     const authType = inputs.protocol ?? provider.protocol;
