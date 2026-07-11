@@ -5,12 +5,13 @@
  */
 
 import type { Application, Request, RequestHandler, Response } from 'express';
+import type { ChannelWorkerGroupSnapshot } from '../channel-worker-group.js';
 import type { ChannelWorkerSnapshot } from '../channel-worker-supervisor.js';
 import type { SendBridgeError } from '../server/error-response.js';
 
 interface RegisterWorkspaceChannelControlRoutesDeps {
   getChannelWorkerSnapshot: () => ChannelWorkerSnapshot;
-  getChannelWorkerSnapshots?: () => ChannelWorkerSnapshot[];
+  getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
   reloadChannelWorker: () => Promise<ChannelWorkerSnapshot>;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;

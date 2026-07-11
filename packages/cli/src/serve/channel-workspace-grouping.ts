@@ -53,10 +53,10 @@ export interface ResolveChannelWorkspaceGroupsInput {
 }
 
 /**
- * Resolve the workspace a channel's configured cwd belongs to. Mirrors
- * `config-utils.parseChannelConfig` (`cwd = resolvePath(rawCwd || defaultCwd)`)
- * and the worker-side `validateChannelWorkspaces` canonicalization so the
- * serve-layer grouping and the worker's own validation always agree.
+ * Resolve the workspace a channel's configured cwd belongs to. Relative paths
+ * resolve against the owning workspace via `resolveChannelCwd`, then use the
+ * worker-side `validateChannelWorkspaces` canonicalization so the serve-layer
+ * grouping and the worker's own validation always agree.
  */
 export function resolveChannelOwnerCwd(
   rawCwd: string | undefined,
