@@ -1146,13 +1146,23 @@ export function mountAcpHttp(
   };
 
   const secondaryMounts = new Map<string, RuntimeAcpMount>();
+  const getOrCreateSecondaryMount = (
+    rt: WorkspaceRuntime,
+  ): RuntimeAcpMount | undefined => {
+    if (rt.primary || !rt.trusted) return undefined;
+    const existing = secondaryMounts.get(rt.workspaceId);
+    if (existing) return existing;
+    const mount = createSecondaryAcpMount(rt);
+    secondaryMounts.set(rt.workspaceId, mount);
+    return mount;
+  };
   for (const rt of opts.workspaceRegistry?.list() ?? []) {
     // Only trusted non-primary runtimes get a mount: untrusted workspaces are
     // rejected (403) before any mount lookup on both the HTTP and WS paths, so
     // allocating a dispatcher/registry/remember-lane for them is pure waste and
     // would pollute the aggregate snapshot with always-zero entries.
     if (!rt.primary && rt.trusted) {
-      secondaryMounts.set(rt.workspaceId, createSecondaryAcpMount(rt));
+      getOrCreateSecondaryMount(rt);
     }
   }
 
@@ -1184,7 +1194,7 @@ export function mountAcpHttp(
       return null;
     }
     if (rt.primary) return primaryMount;
-    const mount = secondaryMounts.get(rt.workspaceId);
+    const mount = getOrCreateSecondaryMount(rt);
     if (!mount) {
       res.status(400).json({
         error: `Workspace "${rt.workspaceCwd}" has no registered ACP mount`,
@@ -1197,8 +1207,7 @@ export function mountAcpHttp(
     return mount;
   };
 
-  const workspaceQualifiedAcpEnabled =
-    (opts.workspaceRegistry?.list().length ?? 0) > 1;
+  const workspaceQualifiedAcpEnabled = opts.workspaceRegistry !== undefined;
   const pluralAcpPath = '/workspaces/:workspace/acp';
   if (workspaceQualifiedAcpEnabled) {
     app.post(pluralAcpPath, (req: Request, res: Response) => {
@@ -1434,7 +1443,7 @@ export function mountAcpHttp(
         }
         const resolvedMount = rt.primary
           ? primaryMount
-          : secondaryMounts.get(rt.workspaceId);
+          : getOrCreateSecondaryMount(rt);
         if (!resolvedMount) {
           logReject(`workspace-acp-no-mount ${rt.workspaceId}`);
           socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');

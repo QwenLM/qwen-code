@@ -43,6 +43,7 @@ import { MessageType } from '../../ui/types.js';
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
+const refreshMemoryAfterManagedWriteSpy = vi.hoisted(() => vi.fn());
 const transcribeVoiceAudioSpy = vi.hoisted(() => vi.fn());
 // Records every LoopTickResolver construction's deps so a test can assert what
 // Session computed (e.g. the home confinement root) without a private-field peek.
@@ -62,6 +63,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     generatePromptSuggestion: vi.fn(),
     logPromptSuggestion: vi.fn(),
     runVisionBridge: runVisionBridgeSpy,
+    refreshMemoryAfterManagedWrite: refreshMemoryAfterManagedWriteSpy,
     // Transparent recording wrapper: records the constructor deps, then behaves
     // exactly like the real resolver (subclass → instanceof + methods preserved).
     LoopTickResolver: class extends actual.LoopTickResolver {
@@ -378,6 +380,8 @@ describe('Session', () => {
 
   beforeEach(() => {
     runVisionBridgeSpy.mockReset();
+    refreshMemoryAfterManagedWriteSpy.mockReset();
+    refreshMemoryAfterManagedWriteSpy.mockResolvedValue(false);
     transcribeVoiceAudioSpy.mockReset();
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;
@@ -10845,6 +10849,43 @@ describe('Session', () => {
         isOutputMarkdown: true,
       };
     }
+
+    it('refreshes managed memory instructions after successful ACP tool writes', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'wrote memory',
+        returnDisplay: 'wrote memory',
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.WRITE_FILE, execute),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-memory-write', [
+        {
+          id: 'write_memory',
+          name: core.ToolNames.WRITE_FILE,
+          args: { file_path: '/workspace/.qwen/memory/project.md' },
+        },
+      ]);
+
+      expect(result.stopAfterPermissionCancel).toBe(false);
+      expect(refreshMemoryAfterManagedWriteSpy).toHaveBeenCalledTimes(1);
+      expect(refreshMemoryAfterManagedWriteSpy).toHaveBeenCalledWith(
+        mockConfig,
+        [
+          {
+            toolName: core.ToolNames.WRITE_FILE,
+            args: { file_path: '/workspace/.qwen/memory/project.md' },
+            status: 'success',
+          },
+        ],
+        {
+          logContext: 'ACP session test-session-id memory tool batch',
+        },
+      );
+    });
 
     it('does not fire PostToolBatch hooks from the ACP session path', async () => {
       const messageBus = {

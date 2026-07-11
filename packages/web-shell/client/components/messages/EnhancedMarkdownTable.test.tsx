@@ -120,6 +120,12 @@ function click(el: Element): void {
   });
 }
 
+function doubleClick(el: Element): void {
+  act(() => {
+    el.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+  });
+}
+
 function rightClick(el: Element): MouseEvent {
   const event = new MouseEvent('contextmenu', {
     bubbles: true,
@@ -189,6 +195,10 @@ function textButton(container: HTMLElement, text: string): HTMLButtonElement {
   );
   expect(el).not.toBeNull();
   return el!;
+}
+
+function cellDialog(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[role="dialog"]');
 }
 
 function textButtonContaining(
@@ -720,6 +730,297 @@ describe('EnhancedMarkdownTable', () => {
       detailElements.find((element) => element.textContent === 'Done')?.style
         .textAlign,
     ).toBe('');
+  });
+
+  it('opens a selectable cell value dialog on double click', () => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+
+    const dialog = cellDialog();
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).toContain('Current field value');
+    expect(dialog?.textContent).toContain('Alpha');
+  });
+
+  it('copies the current cell value from the dialog', async () => {
+    const writeText = mockClipboard();
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 1, 0));
+    await act(async () => {
+      textButton(document.body, 'Copy').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith('Beta');
+    expect(document.body.textContent).toContain('Copied!');
+  });
+
+  it('sanitizes the current cell value copied from the dialog', async () => {
+    const writeText = mockClipboard();
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Formula</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>=IMPORTXML(&quot;https://example.com&quot;)</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    doubleClick(dataCell(container, 0, 0));
+    await act(async () => {
+      textButton(document.body, 'Copy').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith(
+      '\'=IMPORTXML("https://example.com")',
+    );
+  });
+
+  it('keeps the cell value dialog in sync with table updates', async () => {
+    const writeText = mockClipboard();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (value: string) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <EnhancedMarkdownTable>
+              <thead>
+                <tr>
+                  <th>Team</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>{value}</td>
+                </tr>
+              </tbody>
+            </EnhancedMarkdownTable>
+          </I18nProvider>,
+        );
+      });
+    };
+    mounted.push({ root, container });
+
+    render('Alpha');
+    doubleClick(dataCell(container, 0, 0));
+    expect(cellDialog()?.textContent).toContain('Alpha');
+    await act(async () => {
+      textButton(document.body, 'Copy').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(cellDialog()?.textContent).toContain('Copied!');
+
+    render('Beta');
+    expect(cellDialog()?.textContent).not.toContain('Alpha');
+    expect(cellDialog()?.textContent).toContain('Beta');
+    expect(cellDialog()?.textContent).not.toContain('Copied!');
+
+    await act(async () => {
+      textButton(document.body, 'Copy').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith('Beta');
+  });
+
+  it('copies an empty cell value from the dialog', async () => {
+    const writeText = mockClipboard();
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Team</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td />
+        </tr>
+      </tbody>,
+    ]);
+
+    doubleClick(dataCell(container, 0, 0));
+    await act(async () => {
+      textButton(document.body, 'Copy').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith('');
+  });
+
+  it('closes the cell value dialog with Escape', () => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+    expect(cellDialog()).not.toBeNull();
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }),
+      );
+    });
+
+    expect(cellDialog()).toBeNull();
+  });
+
+  it('closes the cell value dialog from the backdrop and buttons', () => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+    const backdrop = cellDialog()?.parentElement;
+    expect(backdrop).not.toBeNull();
+    act(() => {
+      backdrop!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    expect(cellDialog()).toBeNull();
+
+    doubleClick(dataCell(container, 0, 0));
+    click(button(document.body, 'Close'));
+    expect(cellDialog()).toBeNull();
+
+    doubleClick(dataCell(container, 0, 0));
+    click(textButton(document.body, 'Close'));
+    expect(cellDialog()).toBeNull();
+  });
+
+  it('restores focus when closing the cell value dialog', () => {
+    const container = renderTable();
+    const scroller = container.querySelector<HTMLElement>('[tabindex="0"]');
+    expect(scroller).not.toBeNull();
+    act(() => {
+      scroller!.focus();
+    });
+
+    doubleClick(dataCell(container, 0, 0));
+    expect(document.activeElement).not.toBe(scroller);
+
+    click(textButton(document.body, 'Close'));
+
+    expect(document.activeElement).toBe(scroller);
+  });
+
+  it('traps focus inside the cell value dialog', () => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+    const iconCloseButton = button(document.body, 'Close');
+    const footerCloseButton = textButton(document.body, 'Close');
+
+    expect(document.activeElement).toBe(iconCloseButton);
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          key: 'Tab',
+          shiftKey: true,
+        }),
+      );
+    });
+    expect(document.activeElement).toBe(footerCloseButton);
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, key: 'Tab' }),
+      );
+    });
+    expect(document.activeElement).toBe(iconCloseButton);
+
+    const dialog = cellDialog();
+    expect(dialog).not.toBeNull();
+    act(() => {
+      dialog!.focus();
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, key: 'Tab' }),
+      );
+    });
+    expect(document.activeElement).toBe(iconCloseButton);
+  });
+
+  it('keeps table Escape handling from running behind the cell dialog', () => {
+    const container = renderTable();
+    const teamHandle = button(container, 'Move Team');
+
+    click(button(container, 'Sort by Team'));
+    expect(teamHandle.className).toContain('reorderHandleVisible');
+
+    doubleClick(dataCell(container, 0, 0));
+    const event = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      key: 'Escape',
+    });
+    act(() => {
+      document.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(cellDialog()).toBeNull();
+    expect(teamHandle.className).toContain('reorderHandleVisible');
+  });
+
+  it('clears table selection and row details when opening a cell dialog', () => {
+    const container = renderTable();
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
+    expect(container.textContent).toContain('1 cell selected');
+
+    click(button(container, 'View details for row 1'));
+    expect(container.textContent).toContain('Row details');
+
+    doubleClick(dataCell(container, 0, 0));
+
+    expect(container.textContent).not.toContain('1 cell selected');
+    expect(container.textContent).not.toContain('Row details');
+    expect(cellDialog()).not.toBeNull();
+  });
+
+  it('closes an open filter menu when opening a cell dialog', () => {
+    const container = renderTable();
+
+    click(button(container, 'Filter Team'));
+    expect(container.textContent).toContain('Custom filter');
+
+    doubleClick(dataCell(container, 0, 0));
+
+    expect(container.textContent).not.toContain('Custom filter');
+    expect(cellDialog()).not.toBeNull();
+  });
+
+  it('does not open the cell dialog when double clicking an interactive target', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Link</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>
+            <a href="#details">Open details</a>
+          </td>
+        </tr>
+      </tbody>,
+    ]);
+    const link = container.querySelector('a');
+    expect(link).not.toBeNull();
+
+    doubleClick(link!);
+
+    expect(cellDialog()).toBeNull();
   });
 
   it('quick copies the visible sorted table', () => {

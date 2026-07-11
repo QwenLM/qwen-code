@@ -116,6 +116,7 @@ import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
+import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   createWorkspaceRegistry,
   type WorkspaceRegistry,
@@ -385,6 +386,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_reload',
   'channel_reload',
   'multi_workspace_sessions',
+  'persistent_workspace_registration',
   'workspace_qualified_rest_core',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
@@ -2187,6 +2189,24 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'persistent_workspace_registration') {
+          expect(
+            predicate({ persistentWorkspaceRegistrationAvailable: true }),
+          ).toBe(true);
+          expect(
+            predicate({ persistentWorkspaceRegistrationAvailable: false }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              persistentWorkspaceRegistrationAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'workspace_qualified_acp') {
           // Advertised only when BOTH multi-workspace sessions and the HTTP ACP
           // surface are enabled.
@@ -2651,6 +2671,48 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.features).not.toContain('session_artifacts_persistence');
+    });
+
+    it('reflects a dynamically added workspace and persistence support', async () => {
+      const primaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+      ]);
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry: registry,
+        workspaceRegistrationStore: {} as unknown as WorkspaceRegistrationStore,
+      });
+
+      const before = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(before.status).toBe(200);
+      expect(before.body.features).toContain(
+        'persistent_workspace_registration',
+      );
+      expect(before.body.features).not.toContain('multi_workspace_sessions');
+      expect(before.body.workspaces).toBeUndefined();
+
+      registry.add(
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: '/workspace/secondary',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+      );
+      const after = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(after.status).toBe(200);
+      expect(after.body.features).toContain('multi_workspace_sessions');
+      expect(after.body.workspaces).toHaveLength(2);
     });
 
     it('advertises workspace voice transcription when a batch ASR model is configured', async () => {

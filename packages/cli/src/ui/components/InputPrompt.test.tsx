@@ -1401,6 +1401,58 @@ describe('InputPrompt', () => {
       unmount();
     });
 
+    it('should show the native clipboard error only once across remounts', async () => {
+      const addItem = vi.fn();
+      const clipboardUnavailableShownRef = { current: false };
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingGeminiHistoryItems: [],
+        historyManager: { addItem },
+      } as unknown as ReturnType<typeof useUIState>);
+      vi.mocked(clipboardUtils.clipboardHasImage).mockImplementation(
+        async (onUnavailable) => {
+          onUnavailable?.();
+          return false;
+        },
+      );
+
+      const first = renderWithProviders(
+        <InputPrompt
+          {...props}
+          clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+        />,
+      );
+      await wait();
+
+      const pasteKey = isWindows ? '\x1Bv' : '\x16';
+      first.stdin.write(pasteKey);
+      await wait();
+      first.stdin.write(pasteKey);
+      await wait();
+      first.unmount();
+
+      const second = renderWithProviders(
+        <InputPrompt
+          {...props}
+          clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+        />,
+      );
+      await wait();
+      second.stdin.write(pasteKey);
+      await wait();
+
+      expect(addItem).toHaveBeenCalledTimes(1);
+      expect(addItem).toHaveBeenCalledWith(
+        {
+          type: 'error',
+          text: 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+        },
+        expect.any(Number),
+      );
+      second.unmount();
+    });
+
     it('should handle image save failure gracefully', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
       vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(null);

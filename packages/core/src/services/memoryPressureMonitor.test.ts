@@ -81,12 +81,14 @@ const {
   };
 });
 
-vi.mock('node:os', () => ({
+vi.mock('node:os', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:os')>()),
   totalmem: () => getMockOsTotalmem(),
   cpus: () => [{ model: 'mock', speed: 0, times: {} }],
 }));
 
-vi.mock('node:fs', () => ({
+vi.mock('node:fs', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:fs')>()),
   readFileSync: (path: string) => getMockCgroupFile(path),
 }));
 
@@ -162,6 +164,8 @@ function createMockConfig(
         }
       : overrides.geminiClient;
   return {
+    getProjectRoot: () => '/mock/project',
+    getTargetDir: () => '/mock/project',
     getFileReadCache: () =>
       ({
         clear: vi.fn(),
@@ -1355,14 +1359,19 @@ describe('MemoryPressureMonitor', () => {
       // Build history with 7 read_file tool results (keep=5, so 2 get cleared)
       const toolHistory: Content[] = [];
       for (let i = 0; i < 7; i++) {
+        const filePath =
+          i === 0
+            ? '/mock/project/.qwen/team-memory/feedback/testing.md'
+            : `/f${i}.ts`;
         toolHistory.push(
           {
             role: 'model',
             parts: [
               {
                 functionCall: {
+                  id: `call_${i}`,
                   name: 'read_file',
-                  args: { path: `/f${i}.ts` },
+                  args: { file_path: filePath },
                 },
               },
             ],
@@ -1419,6 +1428,12 @@ describe('MemoryPressureMonitor', () => {
         ),
       );
       expect(blankedResponses.length).toBeGreaterThan(0);
+      const memoryResult = compacted
+        .flatMap((entry) => entry.parts ?? [])
+        .find((part) => part.functionResponse?.id === 'call_0');
+      expect(memoryResult?.functionResponse?.response?.['output']).toBe(
+        'content of f0',
+      );
     });
 
     it('overrides positive toolResultsThresholdMinutes to 0', async () => {

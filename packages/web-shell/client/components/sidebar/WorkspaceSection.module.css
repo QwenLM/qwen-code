@@ -63,10 +63,8 @@
   border-radius: 4px;
 }
 
-/* Sessions render through the sidebar's shared `renderSessionRow`, whose
-   `.sessionRow` already carries its own left indent — so this container adds no
-   extra left padding, keeping per-workspace rows aligned with the single-
-   workspace list. */
+/* Trusted sessions use the sidebar's shared row with its own left indent;
+   read-only rows apply the same indent below. */
 .sessions {
   display: flex;
   flex-direction: column;
@@ -76,5 +74,29 @@
 .empty {
   padding: 4px 8px 4px 26px;
   font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.sessionItemReadOnly {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 26px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  color: var(--muted-foreground);
+  cursor: default;
+}
+
+.sessionName {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionTime {
+  flex: 0 0 auto;
+  font-size: 10px;
   color: var(--muted-foreground);
 }
