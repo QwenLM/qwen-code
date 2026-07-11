@@ -7,12 +7,12 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
-import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   WorkspaceRegistrationStore,
   WorkspaceRegistrationStoreError,
   getWorkspaceRegistrationStorePath,
+  workspaceRegistrationId,
   workspaceRegistrationScopeHash,
 } from './workspace-registration-store.js';
 
@@ -60,7 +60,7 @@ describe('WorkspaceRegistrationStore', () => {
     if (process.platform !== 'win32') {
       expect((await fs.stat(store.filePath)).mode & 0o777).toBe(0o600);
     }
-    const id = createHashForTest('/work/secondary');
+    const id = workspaceRegistrationId('/work/secondary');
     await expect(store.removeById(id)).resolves.toBe(true);
     await expect(store.read()).resolves.toMatchObject({ workspaces: [] });
   });
@@ -121,6 +121,54 @@ describe('WorkspaceRegistrationStore', () => {
     expect(await fs.readFile(store.filePath, 'utf8')).toBe(mismatched);
   });
 
+  it('rejects unknown schema versions and duplicate entries', async () => {
+    const home = await tempHome();
+    const store = new WorkspaceRegistrationStore('/work/primary', home);
+    await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+    await fs.writeFile(
+      store.filePath,
+      JSON.stringify({
+        schemaVersion: 2,
+        primaryWorkspace: '/work/primary',
+        workspaces: [],
+      }),
+    );
+    await expect(store.read()).rejects.toThrow(/Unsupported.*schema 2/);
+
+    await fs.writeFile(
+      store.filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        primaryWorkspace: '/work/primary',
+        workspaces: ['/work/secondary', '/work/secondary'],
+      }),
+    );
+    await expect(store.read()).rejects.toThrow(/duplicate paths/);
+  });
+
+  it('rejects additions after reaching the secondary workspace limit', async () => {
+    const home = await tempHome();
+    const store = new WorkspaceRegistrationStore('/work/primary', home);
+    await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+    const workspaces = Array.from(
+      { length: 24 },
+      (_, index) => `/work/secondary-${index}`,
+    );
+    await fs.writeFile(
+      store.filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        primaryWorkspace: '/work/primary',
+        workspaces,
+      }),
+    );
+
+    await expect(store.add('/work/overflow')).rejects.toThrow(
+      /limit of 24 reached/,
+    );
+    await expect(store.read()).resolves.toMatchObject({ workspaces });
+  });
+
   it('rejects a symlink store', async () => {
     const home = await tempHome();
     const store = new WorkspaceRegistrationStore('/work/primary', home);
@@ -151,7 +199,3 @@ describe('WorkspaceRegistrationStore', () => {
     await expect(fs.stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });
-
-function createHashForTest(value: string): string {
-  return createHash('sha256').update(value).digest('hex').slice(0, 16);
-}

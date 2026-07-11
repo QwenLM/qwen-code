@@ -489,6 +489,59 @@ Stable contract: when `v` increments the frame layout has changed in a backwards
 
 > **`workspaces[]`** is present only when `features` contains `multi_workspace_sessions`. Each entry is `{ id, cwd, primary, trusted }`. The first/primary workspace remains mirrored by `workspaceCwd`; new clients choose a non-primary runtime by passing that entry's `cwd` to `POST /session`. Untrusted workspaces are advertised for diagnostics but reject fresh session creation with `403 untrusted_workspace` until trust changes.
 
+### `POST /workspaces`
+
+Register an additional workspace runtime. The path must be an existing, accessible, absolute directory that does not duplicate or nest with another registered workspace. Registration is process-local unless the client sends `persist: true`; clients must pre-flight `persistent_workspace_registration` before requesting persistence.
+
+```json
+{ "cwd": "/canonical/path/to/secondary-workspace", "persist": true }
+```
+
+A newly created runtime returns `201`; promoting an already-active secondary workspace to persistent returns `200`. Persistent success includes `persisted: true`:
+
+```json
+{
+  "id": "stable-workspace-id",
+  "cwd": "/canonical/path/to/secondary-workspace",
+  "primary": false,
+  "trusted": true,
+  "persisted": true
+}
+```
+
+Errors include `400 invalid_path` / `invalid_persist_flag`, `409 workspace_exists` / `workspace_nested` / `workspace_limit_reached`, `500 workspace_persist_failed` / `runtime_creation_failed`, and `501 persistence_not_available` / `not_implemented`.
+
+### `GET /workspace-registrations`
+
+List the persisted desired workspace set for this primary workspace. Entries remain visible with `active: false` when a stored directory could not be restored during the current start.
+
+```json
+{
+  "schemaVersion": 1,
+  "primaryWorkspace": "/canonical/path/to/primary-workspace",
+  "entries": [
+    {
+      "id": "stable-registration-id",
+      "cwd": "/canonical/path/to/secondary-workspace",
+      "active": true,
+      "persisted": true
+    }
+  ]
+}
+```
+
+Returns `501 persistence_not_available` when no registration store is configured and `500 workspace_registration_store_unavailable` when the store cannot be read.
+
+### `DELETE /workspace-registrations/:id`
+
+Forget one persisted registration. This does not unload an active runtime or terminate its sessions; `restartRequired: true` means the active runtime disappears on the next daemon restart.
+
+```json
+{ "removed": true, "active": true, "restartRequired": true }
+```
+
+Returns `404 workspace_registration_not_found`, `500 workspace_persist_failed`, or `501 persistence_not_available`. Like other mutation routes, this endpoint requires mutation authentication when daemon authentication is enabled.
+
 ### Read-only runtime status routes
 
 These routes report daemon-side runtime snapshots. They are additive v1 routes,

@@ -296,7 +296,7 @@ export function registerWorkspaceManagementRoutes(
         entries: snapshot.workspaces.map((cwd) => {
           const runtime = workspaceRegistry.getByWorkspaceCwd(cwd);
           return {
-            id: runtime?.workspaceId ?? workspaceRegistrationId(cwd),
+            id: workspaceRegistrationId(cwd),
             cwd,
             active: runtime !== undefined,
             persisted: true,
@@ -328,9 +328,15 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
       try {
-        const removed = await workspaceRegistrationStore.removeById(
-          String(req.params['id']),
-        );
+        const registrationId = String(req.params['id']);
+        const active = workspaceRegistry
+          .list()
+          .some(
+            (runtime) =>
+              workspaceRegistrationId(runtime.workspaceCwd) === registrationId,
+          );
+        const removed =
+          await workspaceRegistrationStore.removeById(registrationId);
         if (!removed) {
           res.status(404).json({
             error: 'Workspace registration not found',
@@ -338,13 +344,10 @@ export function registerWorkspaceManagementRoutes(
           });
           return;
         }
-        const active = workspaceRegistry.getByWorkspaceId(
-          String(req.params['id']),
-        );
         res.json({
           removed: true,
-          active: active !== undefined,
-          restartRequired: active !== undefined,
+          active,
+          restartRequired: active,
         });
       } catch (err) {
         writeStderrLine(

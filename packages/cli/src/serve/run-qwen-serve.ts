@@ -19,6 +19,7 @@ import express, {
   type Response,
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
+import { isWithinRoot } from '../config/path-comparison.js';
 import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   normalizeCompactedReplayMaxBytes,
@@ -1974,18 +1975,11 @@ export async function runQwenServe(
         if (workspaceInputs.some((workspace) => workspace.cwd === cwd)) {
           continue;
         }
-        const nested = workspaceInputs.some((workspace) => {
-          const fromExisting = path.relative(workspace.cwd, cwd);
-          const fromStored = path.relative(cwd, workspace.cwd);
-          return (
-            (fromExisting !== '' &&
-              !fromExisting.startsWith('..') &&
-              !path.isAbsolute(fromExisting)) ||
-            (fromStored !== '' &&
-              !fromStored.startsWith('..') &&
-              !path.isAbsolute(fromStored))
-          );
-        });
+        const nested = workspaceInputs.some(
+          (workspace) =>
+            isWithinRoot(cwd, workspace.cwd) ||
+            isWithinRoot(workspace.cwd, cwd),
+        );
         if (nested) {
           writeStderrLine(
             `qwen serve: skipping persisted workspace registration ${JSON.stringify(

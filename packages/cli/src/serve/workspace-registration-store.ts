@@ -122,7 +122,9 @@ function parseSnapshot(
     record['primaryWorkspace'],
     'primaryWorkspace',
   );
-  if (storedPrimary !== primaryWorkspace) {
+  if (
+    normalizedScopePath(storedPrimary) !== normalizedScopePath(primaryWorkspace)
+  ) {
     throw new WorkspaceRegistrationStoreError(
       'Workspace registration store primary does not match this daemon',
     );
@@ -140,17 +142,18 @@ function parseSnapshot(
   const seen = new Set<string>();
   const workspaces = record['workspaces'].map((entry, index) => {
     const workspace = validateWorkspacePath(entry, `workspaces[${index}]`);
-    if (workspace === primaryWorkspace) {
+    const normalizedWorkspace = normalizedScopePath(workspace);
+    if (normalizedWorkspace === normalizedScopePath(primaryWorkspace)) {
       throw new WorkspaceRegistrationStoreError(
         'Primary workspace cannot be stored as a secondary registration',
       );
     }
-    if (seen.has(workspace)) {
+    if (seen.has(normalizedWorkspace)) {
       throw new WorkspaceRegistrationStoreError(
         'Workspace registration store contains duplicate paths',
       );
     }
-    seen.add(workspace);
+    seen.add(normalizedWorkspace);
     return workspace;
   });
   return { schemaVersion: SCHEMA_VERSION, primaryWorkspace, workspaces };
@@ -173,7 +176,18 @@ async function withInProcessLock<T>(
   return next;
 }
 
-async function acquireFileLock(filePath: string): Promise<() => Promise<void>> {
+interface AcquiredFileLock {
+  assertOwned(): void;
+  release(): Promise<void>;
+}
+
+function compromisedLockError(): WorkspaceRegistrationStoreError {
+  return new WorkspaceRegistrationStoreError(
+    'Workspace registration store lock was compromised',
+  );
+}
+
+async function acquireFileLock(filePath: string): Promise<AcquiredFileLock> {
   await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
   let compromised = false;
   const release = await lockfile.lock(filePath, {
@@ -182,17 +196,18 @@ async function acquireFileLock(filePath: string): Promise<() => Promise<void>> {
       compromised = true;
     },
   });
-  return async () => {
-    try {
-      await release();
-    } catch (err) {
-      if (!compromised) throw err;
-    }
-    if (compromised) {
-      throw new WorkspaceRegistrationStoreError(
-        'Workspace registration store lock was compromised',
-      );
-    }
+  return {
+    assertOwned: () => {
+      if (compromised) throw compromisedLockError();
+    },
+    release: async () => {
+      try {
+        await release();
+      } catch (err) {
+        if (!compromised) throw err;
+      }
+      if (compromised) throw compromisedLockError();
+    },
   };
 }
 
@@ -253,9 +268,22 @@ export class WorkspaceRegistrationStore {
           `Workspace registration store exceeds ${MAX_STORE_BYTES} bytes`,
         );
       }
-      const buffer = Buffer.alloc(MAX_STORE_BYTES + 1);
+      let buffer = Buffer.alloc(
+        Math.max(1, Math.min(stat.size + 1, MAX_STORE_BYTES + 1)),
+      );
       let totalBytesRead = 0;
-      while (totalBytesRead < buffer.length) {
+      for (;;) {
+        if (totalBytesRead === buffer.length) {
+          if (totalBytesRead > MAX_STORE_BYTES) break;
+          const grown = Buffer.alloc(
+            Math.min(
+              MAX_STORE_BYTES + 1,
+              Math.max(buffer.length * 2, totalBytesRead + 1),
+            ),
+          );
+          buffer.copy(grown, 0, 0, totalBytesRead);
+          buffer = grown;
+        }
         const { bytesRead } = await file.read(
           buffer,
           totalBytesRead,
@@ -281,7 +309,10 @@ export class WorkspaceRegistrationStore {
 
   async add(workspace: string): Promise<boolean> {
     validateWorkspacePath(workspace, 'workspace');
-    if (workspace === this.primaryWorkspace) {
+    if (
+      normalizedScopePath(workspace) ===
+      normalizedScopePath(this.primaryWorkspace)
+    ) {
       throw new WorkspaceRegistrationStoreError(
         'Primary workspace cannot be stored as a secondary registration',
       );
@@ -314,11 +345,13 @@ export class WorkspaceRegistrationStore {
   ): Promise<boolean> {
     const { atomicWriteFile } = await import('@qwen-code/qwen-code-core');
     return withInProcessLock(this.filePath, async () => {
-      const release = await acquireFileLock(this.filePath);
+      const lock = await acquireFileLock(this.filePath);
       try {
         const snapshot = await this.read();
+        lock.assertOwned();
         const changed = mutate(snapshot);
         if (!changed) return false;
+        lock.assertOwned();
         await atomicWriteFile(
           this.filePath,
           `${JSON.stringify(snapshot, null, 2)}\n`,
@@ -326,7 +359,7 @@ export class WorkspaceRegistrationStore {
         );
         return true;
       } finally {
-        await release();
+        await lock.release();
       }
     });
   }

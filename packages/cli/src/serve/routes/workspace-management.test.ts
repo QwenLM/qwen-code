@@ -17,7 +17,10 @@ import type {
 } from '../workspace-registry.js';
 import { tmpdir } from 'node:os';
 import { realpathSync } from 'node:fs';
-import type { WorkspaceRegistrationStore } from '../workspace-registration-store.js';
+import {
+  workspaceRegistrationId,
+  type WorkspaceRegistrationStore,
+} from '../workspace-registration-store.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: vi.fn(),
@@ -275,6 +278,20 @@ describe('POST /workspaces', () => {
 });
 
 describe('persistent workspace registrations', () => {
+  it('returns 501 for registration management without a store', async () => {
+    const { app } = createApp();
+
+    const list = await request(app).get('/workspace-registrations');
+    expect(list.status).toBe(501);
+    expect(list.body.code).toBe('persistence_not_available');
+
+    const remove = await request(app).delete(
+      '/workspace-registrations/missing',
+    );
+    expect(remove.status).toBe(501);
+    expect(remove.body.code).toBe('persistence_not_available');
+  });
+
   it('lists desired registrations and whether they are active', async () => {
     const read = vi.fn().mockResolvedValue({
       schemaVersion: 1,
@@ -291,7 +308,12 @@ describe('persistent workspace registrations', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.entries).toEqual([
-      expect.objectContaining({ cwd: REAL_DIR, active: true, persisted: true }),
+      expect.objectContaining({
+        id: workspaceRegistrationId(REAL_DIR),
+        cwd: REAL_DIR,
+        active: true,
+        persisted: true,
+      }),
       expect.objectContaining({
         cwd: '/currently-unavailable',
         active: false,
@@ -309,13 +331,14 @@ describe('persistent workspace registrations', () => {
         removeById,
       } as unknown as WorkspaceRegistrationStore,
     });
+    const registrationId = workspaceRegistrationId(REAL_DIR);
 
     const res = await request(app).delete(
-      `/workspace-registrations/${encodeURIComponent(active.workspaceId)}`,
+      `/workspace-registrations/${registrationId}`,
     );
 
     expect(res.status).toBe(200);
-    expect(removeById).toHaveBeenCalledWith(active.workspaceId);
+    expect(removeById).toHaveBeenCalledWith(registrationId);
     expect(res.body).toEqual({
       removed: true,
       active: true,
