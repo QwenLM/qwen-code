@@ -2660,7 +2660,9 @@ export class GeminiChat {
               if (!(error instanceof InvalidStreamError)) throw error;
 
               attemptState.rollback();
-              if (retryCount >= INVALID_STREAM_RETRY_CONFIG.maxRetries) {
+              if (
+                retryCount >= INVALID_STREAM_RETRY_CONFIG.transientMaxRetries
+              ) {
                 throw error;
               }
 
@@ -2669,7 +2671,7 @@ export class GeminiChat {
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs * retryCount;
               debugLogger.warn(
                 `Invalid stream [${error.type}] during output continuation ` +
-                  `(retry ${retryCount}/${INVALID_STREAM_RETRY_CONFIG.maxRetries}). ` +
+                  `(retry ${retryCount}/${INVALID_STREAM_RETRY_CONFIG.transientMaxRetries}). ` +
                   `Waiting ${delayMs / 1000}s before retrying...`,
               );
               logContentRetry(
