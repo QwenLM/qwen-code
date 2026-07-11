@@ -8594,6 +8594,25 @@ describe('GeminiChat', async () => {
       })();
     }
 
+    function invalidStream(
+      type: 'NO_FINISH_REASON' | 'PROTOCOL_TAG_LEAK',
+    ): AsyncGenerator<GenerateContentResponse> {
+      return {
+        [Symbol.asyncIterator]() {
+          return this;
+        },
+        async next() {
+          throw new InvalidStreamError('Invalid continuation stream.', type);
+        },
+        async return() {
+          return { done: true, value: undefined };
+        },
+        async throw(error?: unknown) {
+          throw error;
+        },
+      } as AsyncGenerator<GenerateContentResponse>;
+    }
+
     it('re-clamps maxOutputTokens on each recovery send as the prompt grows (window invariant)', async () => {
       // The #5950 shape at recovery time: 131,072 window, 71,349 prompt,
       // 64K-ceiling model. Initial clamp grants 49,722. The response
@@ -9882,32 +9901,14 @@ describe('GeminiChat', async () => {
     it('keeps protocol tag leak budget during output continuation', async () => {
       vi.useFakeTimers();
       try {
-        const protocolLeak = () =>
-          ({
-            [Symbol.asyncIterator]() {
-              return this;
-            },
-            async next() {
-              throw new InvalidStreamError(
-                'Protocol tag leaked during continuation.',
-                'PROTOCOL_TAG_LEAK',
-              );
-            },
-            async return() {
-              return { done: true, value: undefined };
-            },
-            async throw(error?: unknown) {
-              throw error;
-            },
-          }) as AsyncGenerator<GenerateContentResponse>;
         const streams = [
           makeStream([makeChunk([{ text: 'initial' }], 'MAX_TOKENS')]),
           makeStream([makeChunk([{ text: 'escalated' }], 'MAX_TOKENS')]),
-          protocolLeak(),
-          protocolLeak(),
-          protocolLeak(),
-          protocolLeak(),
-          protocolLeak(),
+          invalidStream('PROTOCOL_TAG_LEAK'),
+          invalidStream('PROTOCOL_TAG_LEAK'),
+          invalidStream('PROTOCOL_TAG_LEAK'),
+          invalidStream('PROTOCOL_TAG_LEAK'),
+          invalidStream('PROTOCOL_TAG_LEAK'),
         ];
         let callIndex = 0;
         vi.mocked(
@@ -9933,6 +9934,55 @@ describe('GeminiChat', async () => {
             error_type: 'PROTOCOL_TAG_LEAK',
           }),
         );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps continuation retry budgets independent across error types', async () => {
+      vi.useFakeTimers();
+      try {
+        const streams = [
+          makeStream([makeChunk([{ text: 'initial' }], 'MAX_TOKENS')]),
+          makeStream([makeChunk([{ text: 'escalated' }], 'MAX_TOKENS')]),
+          invalidStream('NO_FINISH_REASON'),
+          invalidStream('NO_FINISH_REASON'),
+          invalidStream('PROTOCOL_TAG_LEAK'),
+          makeStream([makeChunk([{ text: ' recovered' }], 'STOP')]),
+        ];
+        let callIndex = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streams[callIndex++]!);
+
+        const stream = await chat.sendMessageStream(
+          'gemini-pro',
+          { message: 'essay' },
+          'prompt-recovery-mixed-invalid-streams',
+        );
+
+        const events = await collectStreamWithFakeTimers(stream, 15_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(6);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(3);
+        expect(mockLogContentRetry).toHaveBeenLastCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            attempt_number: 0,
+            error_type: 'PROTOCOL_TAG_LEAK',
+            retry_delay_ms: 2000,
+          }),
+        );
+        expect(
+          events.some(
+            (e) =>
+              e.type === StreamEventType.CHUNK &&
+              e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                ' recovered',
+          ),
+        ).toBe(true);
       } finally {
         vi.useRealTimers();
       }

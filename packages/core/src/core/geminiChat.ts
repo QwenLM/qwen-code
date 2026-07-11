@@ -2654,7 +2654,8 @@ export class GeminiChat {
             type: StreamEventType.RETRY,
           },
         ): AsyncGenerator<InvalidStreamRetryEvent> {
-          let retryCount = 0;
+          let transientRetryCount = 0;
+          let protocolTagLeakRetryCount = 0;
           for (;;) {
             const attemptState = buildAttempt();
             try {
@@ -2676,22 +2677,32 @@ export class GeminiChat {
                 error.type === 'PROTOCOL_TAG_LEAK'
                   ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
                   : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
-              if (retryCount >= maxContinuationRetries) {
+              const continuationRetryCount =
+                error.type === 'PROTOCOL_TAG_LEAK'
+                  ? protocolTagLeakRetryCount
+                  : transientRetryCount;
+              if (continuationRetryCount >= maxContinuationRetries) {
                 throw error;
               }
 
-              retryCount++;
+              const nextContinuationRetryCount = continuationRetryCount + 1;
+              if (error.type === 'PROTOCOL_TAG_LEAK') {
+                protocolTagLeakRetryCount = nextContinuationRetryCount;
+              } else {
+                transientRetryCount = nextContinuationRetryCount;
+              }
               const delayMs =
-                INVALID_STREAM_RETRY_CONFIG.initialDelayMs * retryCount;
+                INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
+                nextContinuationRetryCount;
               debugLogger.warn(
                 `Invalid stream [${error.type}] during output continuation ` +
-                  `(retry ${retryCount}/${maxContinuationRetries}). ` +
+                  `(retry ${nextContinuationRetryCount}/${maxContinuationRetries}). ` +
                   `Waiting ${delayMs / 1000}s before retrying...`,
               );
               logContentRetry(
                 self.config,
                 new ContentRetryEvent(
-                  retryCount - 1,
+                  nextContinuationRetryCount - 1,
                   error.type,
                   delayMs,
                   model,
