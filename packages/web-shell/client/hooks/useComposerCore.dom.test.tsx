@@ -122,6 +122,24 @@ describe('useComposerCore inline tags', () => {
     warn.mockRestore();
   });
 
+  it('uses a custom inline tooltip without a native title', async () => {
+    await mount({
+      composerInput: {
+        tags: [{ id: 'orders', label: 'Table', value: 'orders' }],
+        tagPlacement: 'inline',
+      },
+      renderComposerTagTooltip: () => 'Details',
+    });
+
+    const tooltip = document.body.querySelector('[role="tooltip"]');
+    expect(tooltip?.textContent).toBe('Details');
+    expect(tooltip?.parentElement?.getAttribute('title')).toBeNull();
+    expect(tooltip?.id).toBeTruthy();
+    expect(tooltip?.parentElement?.getAttribute('aria-describedby')).toBe(
+      tooltip?.id,
+    );
+  });
+
   it('guards inline mask icon sources', async () => {
     await mount({
       composerInput: {

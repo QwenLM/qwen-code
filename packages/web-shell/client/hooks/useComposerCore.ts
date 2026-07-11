@@ -601,6 +601,8 @@ export const removeInlineTagEffect = StateEffect.define<{
 }>();
 export const clearInlineTagsEffect = StateEffect.define<void>();
 
+let nextComposerTagTooltipId = 0;
+
 class ComposerTagWidget extends WidgetType {
   private contentRoot: Root | null = null;
   private tooltipRoot: Root | null = null;
@@ -631,7 +633,12 @@ class ComposerTagWidget extends WidgetType {
     const publicTag = toPublicComposerTag(this.tag);
     chip.style.cssText =
       'position:relative;display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border);border-radius:4px;background:var(--secondary);color:var(--foreground);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
-    if (this.tag.tooltipText) chip.title = this.tag.tooltipText;
+    if (
+      this.tag.tooltipText &&
+      (this.tag.tooltip === undefined || this.tag.tooltip === null)
+    ) {
+      chip.title = this.tag.tooltipText;
+    }
     if (this.tag.onClick) {
       chip.setAttribute('role', 'button');
       chip.tabIndex = 0;
@@ -771,6 +778,8 @@ class ComposerTagWidget extends WidgetType {
       this.tooltipRoot = createRoot(tooltipElement);
       this.tooltipRoot.render(tooltip);
       chip.appendChild(tooltipElement);
+      tooltipElement.id = `composer-tag-tooltip-${++nextComposerTagTooltipId}`;
+      chip.setAttribute('aria-describedby', tooltipElement.id);
     } catch (error) {
       this.tooltipRoot?.unmount();
       this.tooltipRoot = null;
