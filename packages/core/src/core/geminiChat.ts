@@ -342,7 +342,10 @@ const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
 // reason. All are retried with an independent budget (similar to rate-limit
 // retries) so they do not consume each other's retry budgets.
 const INVALID_STREAM_RETRY_CONFIG = {
-  maxRetries: 4,
+  transientMaxRetries: 4,
+  // Protocol-tag leaks are model-output validation failures, not the
+  // provider-side empty/truncated streams covered by issue #6670.
+  protocolTagLeakMaxRetries: 2,
   initialDelayMs: 2000,
 };
 
@@ -2505,13 +2508,16 @@ export class GeminiChat {
               break;
             }
 
-            // Transient stream anomalies (NO_FINISH_REASON / NO_RESPONSE_TEXT):
-            // independent retry budget, similar to rate-limit handling.
-            // Does NOT consume the content retry budget.
-            const isTransientStreamError = error instanceof InvalidStreamError;
+            // Invalid stream responses use an independent retry budget and do
+            // not consume the content retry budget.
+            const isInvalidStreamError = error instanceof InvalidStreamError;
+            const maxInvalidStreamRetries =
+              isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
+                ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
+                : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
             if (
-              isTransientStreamError &&
-              invalidStreamRetryCount < INVALID_STREAM_RETRY_CONFIG.maxRetries
+              isInvalidStreamError &&
+              invalidStreamRetryCount < maxInvalidStreamRetries
             ) {
               self.popPendingPartialAssistantTurn();
               invalidStreamRetryCount++;
@@ -2520,7 +2526,7 @@ export class GeminiChat {
                 invalidStreamRetryCount;
               debugLogger.warn(
                 `Invalid stream [${(error as InvalidStreamError).type}] ` +
-                  `(retry ${invalidStreamRetryCount}/${INVALID_STREAM_RETRY_CONFIG.maxRetries}). ` +
+                  `(retry ${invalidStreamRetryCount}/${maxInvalidStreamRetries}). ` +
                   `Waiting ${delayMs / 1000}s before retrying...`,
               );
               logContentRetry(
@@ -2538,14 +2544,14 @@ export class GeminiChat {
               await delay(delayMs, params.config?.abortSignal).promise;
               continue;
             }
-            // Transient budget exhausted — stop immediately.
-            if (isTransientStreamError) {
+            // Invalid-stream budget exhausted — stop immediately.
+            if (isInvalidStreamError) {
               break;
             }
 
             // Currently unreachable for `InvalidStreamError`. The
             // `isContentError` predicate is identical to
-            // `isTransientStreamError` (`error instanceof InvalidStreamError`),
+            // `isInvalidStreamError` (`error instanceof InvalidStreamError`),
             // and the transient branch above already either continued or
             // broke for that class. The branch is preserved as
             // defense-in-depth: a future error class that should consume
@@ -3736,6 +3742,29 @@ export class GeminiChat {
       );
     }
 
+    // Stream validation logic: A stream is considered successful if:
+    // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
+    // 2. There's a finish reason AND we have non-empty response text or thought text
+    //
+    // Note: Thoughts-only responses are valid for models that use thinking modes.
+    const hasAnyContent = contentText || thoughtText;
+    if (
+      streamError === null &&
+      !hasToolCall &&
+      (!hasFinishReason || !hasAnyContent)
+    ) {
+      if (!hasFinishReason) {
+        throw new InvalidStreamError(
+          'Model stream ended without a finish reason.',
+          'NO_FINISH_REASON',
+        );
+      }
+      throw new InvalidStreamError(
+        'Model stream ended with empty response text.',
+        'NO_RESPONSE_TEXT',
+      );
+    }
+
     // Record assistant turn with raw Content and metadata. Gate matches
     // the in-memory `this.history.push` decision below so chat-recording
     // JSONL never carries a partial turn we deliberately dropped from
@@ -3852,31 +3881,6 @@ export class GeminiChat {
         );
       }
       throw streamError;
-    }
-
-    // Stream validation logic: A stream is considered successful if:
-    // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
-    // 2. There's a finish reason AND we have non-empty response text or thought text
-    //
-    // We throw an error only when there's no tool call AND:
-    // - No finish reason, OR
-    // - Empty response text (e.g., no actual content and no thoughts)
-    //
-    // Note: Thoughts-only responses are valid for models that use thinking modes
-    // These models may send only reasoning content without explicit text output.
-    const hasAnyContent = contentText || thoughtText;
-    if (!hasToolCall && (!hasFinishReason || !hasAnyContent)) {
-      if (!hasFinishReason) {
-        throw new InvalidStreamError(
-          'Model stream ended without a finish reason.',
-          'NO_FINISH_REASON',
-        );
-      } else {
-        throw new InvalidStreamError(
-          'Model stream ended with empty response text.',
-          'NO_RESPONSE_TEXT',
-        );
-      }
     }
 
     this.history.push({

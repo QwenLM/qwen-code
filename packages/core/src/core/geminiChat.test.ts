@@ -4710,9 +4710,68 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('should retry usage-only empty streams and succeed on a later attempt', async () => {
+    it('should keep protocol tag leak retries at the existing budget', async () => {
       vi.useFakeTimers();
       try {
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () =>
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        text: '<analysis>hidden</analysis><summary>leaked</summary>',
+                      },
+                    ],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-protocol-leak-budget',
+        );
+        await expectStreamExhaustion(stream);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(3);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(2);
+        expect(mockLogContentRetryFailure).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            total_attempts: 3,
+            final_error_type: 'PROTOCOL_TAG_LEAK',
+            model: 'test-model',
+          }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should retry usage-only empty streams without recording failed attempts', async () => {
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const chatWithRecording = new GeminiChat(
+          mockConfig,
+          config,
+          [],
+          {
+            recordAssistantTurn,
+            recordChatCompression: vi.fn(),
+          } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+          uiTelemetryService,
+        );
         vi.mocked(mockContentGenerator.generateContentStream)
           .mockImplementationOnce(async () =>
             (async function* () {
@@ -4740,7 +4799,7 @@ describe('GeminiChat', async () => {
             })(),
           );
 
-        const stream = await chat.sendMessageStream(
+        const stream = await chatWithRecording.sendMessageStream(
           'test-model',
           { message: 'test' },
           'prompt-id-empty-usage-retry',
@@ -4751,6 +4810,10 @@ describe('GeminiChat', async () => {
           mockContentGenerator.generateContentStream,
         ).toHaveBeenCalledTimes(2);
         expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
+        expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+        expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
+          { text: 'Recovered after empty stream' },
+        ]);
         expect(
           events.some(
             (e) =>
