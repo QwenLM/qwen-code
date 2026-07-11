@@ -9431,7 +9431,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
 
   function makeRecordingService() {
     return {
-      recordCustomTitle: vi.fn().mockReturnValue(true),
+      recordCustomTitle: vi.fn().mockResolvedValue(true),
       flush: vi.fn().mockResolvedValue(undefined),
     };
   }
@@ -9530,9 +9530,9 @@ describe('QwenAgent extMethod renameSession routing', () => {
       'New Title',
       'manual',
     );
-    // Awaited so the rename is durable before the response returns —
-    // a follow-up listSessions can't race the queued write.
-    expect(recording.flush).toHaveBeenCalledOnce();
+    // The strict title promise itself is the durability boundary. A later,
+    // unrelated queued record must not be allowed to change this result.
+    expect(recording.flush).not.toHaveBeenCalled();
     // The disk-only fallback must NOT fire when a live session exists,
     // otherwise we'd double-write (and the second writer would be the
     // SessionService that lacks the in-memory cache update).
@@ -9579,7 +9579,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
 
   it('returns success=false when the live ChatRecordingService rejects the title (I/O error)', async () => {
     const recording = makeRecordingService();
-    recording.recordCustomTitle.mockReturnValue(false);
+    recording.recordCustomTitle.mockResolvedValue(false);
     const innerConfig = makeLiveSessionInnerConfig(recording);
     const { agent, agentPromise } = await bootAgent(innerConfig);
 
@@ -9591,36 +9591,83 @@ describe('QwenAgent extMethod renameSession routing', () => {
       title: 'New Title',
     });
 
-    // Even on failure we still flush so the writeChain settles before
-    // responding — keeps subsequent reads consistent and surfaces any
-    // queued earlier failure to the caller.
-    expect(recording.flush).toHaveBeenCalledOnce();
+    expect(recording.flush).not.toHaveBeenCalled();
     expect(result).toEqual({ success: false });
 
     mockConnectionState.resolve();
     await agentPromise;
   });
 
-  it('propagates a live session title flush failure', async () => {
+  it('waits for the live title write itself and ignores unrelated flush state', async () => {
     const recording = makeRecordingService();
+    let resolveTitle!: (value: boolean) => void;
+    recording.recordCustomTitle.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveTitle = resolve;
+        }),
+    );
     recording.flush.mockRejectedValue(new Error('flush failed'));
     const innerConfig = makeLiveSessionInnerConfig(recording);
     const { agent, agentPromise } = await bootAgent(innerConfig);
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
-    await expect(
-      agent.extMethod('renameSession', {
+    let settled = false;
+    const renamePromise = agent
+      .extMethod('renameSession', {
         cwd: '/tmp',
         sessionId: liveSessionId,
         title: 'New Title',
-      }),
-    ).rejects.toThrow('flush failed');
+      })
+      .finally(() => {
+        settled = true;
+      });
+    await vi.waitFor(() =>
+      expect(recording.recordCustomTitle).toHaveBeenCalled(),
+    );
+    expect(settled).toBe(false);
+    resolveTitle(true);
+    await expect(renamePromise).resolves.toEqual({ success: true });
     expect(recording.recordCustomTitle).toHaveBeenCalledWith(
       'New Title',
       'manual',
     );
+    expect(recording.flush).not.toHaveBeenCalled();
     expect(SessionService).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('returns the durable result from qwen/control/session/title without an extra flush', async () => {
+    const recording = makeRecordingService();
+    recording.recordCustomTitle.mockResolvedValue(false);
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.sessionTitle,
+      {
+        sessionId: liveSessionId,
+        displayName: 'Remote Title',
+        titleSource: 'auto',
+      },
+    );
+
+    expect(recording.recordCustomTitle).toHaveBeenCalledWith(
+      'Remote Title',
+      'auto',
+    );
+    expect(recording.flush).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      sessionId: liveSessionId,
+      displayName: 'Remote Title',
+      titleSource: 'auto',
+      persisted: false,
+    });
 
     mockConnectionState.resolve();
     await agentPromise;

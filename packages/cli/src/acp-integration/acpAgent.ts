@@ -6900,8 +6900,7 @@ class QwenAgent implements Agent {
         const recording = session.getConfig().getChatRecordingService();
         let ok = false;
         if (recording) {
-          ok = recording.recordCustomTitle(displayName, source);
-          await recording.flush();
+          ok = await recording.recordCustomTitle(displayName, source);
         }
         return { sessionId, displayName, titleSource: source, persisted: ok };
       }
@@ -7832,8 +7831,7 @@ class QwenAgent implements Agent {
           ?.getConfig()
           .getChatRecordingService();
         if (liveRecording) {
-          const ok = liveRecording.recordCustomTitle(title, 'manual');
-          await liveRecording.flush();
+          const ok = await liveRecording.recordCustomTitle(title, 'manual');
           return { success: ok };
         }
         const success = await runWithAcpRuntimeOutputDir(

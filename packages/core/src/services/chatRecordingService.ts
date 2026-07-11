@@ -572,6 +572,10 @@ export class ChatRecordingService {
    * it burn tokens after the session has already moved on.
    */
   private autoTitleController: AbortController | undefined;
+  /** Explicit title writes waiting to settle; background auto-title defers. */
+  private pendingExplicitTitleWrites = 0;
+  /** Title writes whose durable result and final cached value are unresolved. */
+  private pendingTitleWrites = 0;
 
   /**
    * JSON-serialized form of the most recent attribution snapshot accepted for
@@ -587,8 +591,8 @@ export class ChatRecordingService {
     | undefined;
 
   /**
-   * Approximate bytes of JSONL content appended since the last
-   * `custom_title` record landed in this file. Used by the title
+   * Approximate bytes of JSONL content accepted after the last
+   * `custom_title` record in the ordered writer queue. Used by the title
    * re-anchor invariant: once enough non-title content accumulates
    * past the last anchor, {@link appendRecord} re-appends a fresh
    * `custom_title` to EOF so the picker's tail-window scan
@@ -832,10 +836,13 @@ export class ChatRecordingService {
       this.lastRecordUuid = record.uuid;
     }
     const pendingWrite = this.enqueueRecordWrite(conversationFile, record);
+    // Keep anchor accounting in logical queue order, matching appendRecord.
+    // Once accepted, a failed write permanently stops this recorder, so no
+    // rollback of this bookkeeping is needed on rejection.
+    this.updateTitleAnchorTracking(record);
 
     try {
       await pendingWrite;
-      this.updateTitleAnchorTracking(record);
     } catch (error) {
       if (updateActiveTail && this.lastRecordUuid === record.uuid) {
         this.lastRecordUuid = previousLastRecordUuid;
@@ -846,11 +853,11 @@ export class ChatRecordingService {
 
   /**
    * Maintain the "title is always in the tail window" invariant by
-   * counting bytes appended since the last `custom_title` record and
+   * counting bytes accepted since the last `custom_title` record and
    * re-anchoring once enough non-title content has been written.
    *
    * - A `custom_title` record IS the new anchor — reset the counter.
-   * - Without a current title (never set), the counter is irrelevant.
+   * - Without a current or pending title, the counter is irrelevant.
    * - Otherwise accumulate this record's serialized size; if the
    *   running total breaches the threshold, re-append a fresh
    *   `custom_title` to EOF. The recursive `appendRecord` call will
@@ -875,12 +882,23 @@ export class ChatRecordingService {
       this.hasNonTitleContentSinceTitleAnchor = false;
       return;
     }
-    if (!this.currentCustomTitle) return;
+    if (!this.currentCustomTitle && this.pendingTitleWrites === 0) return;
     this.hasNonTitleContentSinceTitleAnchor = true;
+    let serializedRecord: string;
+    try {
+      serializedRecord = JSON.stringify(record);
+    } catch {
+      // Anchor bookkeeping must not change the writer's success contract.
+      // The real serializer will surface the failure through writeChain.
+      return;
+    }
     // +1 for the trailing newline jsonl.writeLine appends.
     this.bytesSinceTitleAnchor +=
-      Buffer.byteLength(JSON.stringify(record), 'utf8') + 1;
-    if (this.bytesSinceTitleAnchor >= TITLE_REANCHOR_BYTES) {
+      Buffer.byteLength(serializedRecord, 'utf8') + 1;
+    if (
+      this.bytesSinceTitleAnchor >= TITLE_REANCHOR_BYTES &&
+      this.pendingTitleWrites === 0
+    ) {
       this.reanchorTitle();
     }
   }
@@ -1073,6 +1091,8 @@ export class ChatRecordingService {
    */
   private maybeTriggerAutoTitle(): void {
     if (this.currentCustomTitle) return;
+    if (this.writeFailure) return;
+    if (this.pendingExplicitTitleWrites > 0) return;
     if (this.autoTitleController) return;
     if (this.autoTitleAttempts >= AUTO_TITLE_ATTEMPT_CAP) return;
     // Opt-out env var — lets users silence auto-titling without having to
@@ -1106,9 +1126,11 @@ export class ChatRecordingService {
         );
         if (!outcome.ok) return;
         if (controller.signal.aborted) return;
-        // Re-check in case a /rename landed while the LLM call was in flight —
-        // manual wins. In-process is the common path.
-        if (this.currentTitleSource === 'manual') return;
+        // Any explicit title, including `/rename --auto`, wins over this
+        // background attempt even while its durable write is still pending.
+        if (this.currentCustomTitle) return;
+        if (this.pendingExplicitTitleWrites > 0) return;
+        if (this.writeFailure) return;
         // Cross-process guard: another CLI tab writing to the same JSONL
         // could have renamed (manually) since we started. Re-read the file's
         // latest title record before we append so we don't clobber it.
@@ -1129,7 +1151,11 @@ export class ChatRecordingService {
           // Best-effort — if the re-read fails for any reason, fall through
           // to the in-process check (which already passed) and proceed.
         }
-        this.recordCustomTitle(outcome.title, 'auto');
+        if (controller.signal.aborted) return;
+        if (this.currentCustomTitle) return;
+        if (this.pendingExplicitTitleWrites > 0) return;
+        if (this.writeFailure) return;
+        await this.persistCustomTitle(outcome.title, 'auto');
       } catch (err) {
         // Don't permanently disable: transient failures (network blips, rate
         // limits, bad UTF-16 in one turn's history) should still allow a
@@ -1341,11 +1367,16 @@ export class ChatRecordingService {
   private titleRecordedCallback?: (
     customTitle: string,
     titleSource: TitleSource,
+    sessionId: string,
   ) => void;
 
   setTitleRecordedCallback(
     callback:
-      | ((customTitle: string, titleSource: TitleSource) => void)
+      | ((
+          customTitle: string,
+          titleSource: TitleSource,
+          sessionId: string,
+        ) => void)
       | undefined,
   ): void {
     this.titleRecordedCallback = callback;
@@ -1357,25 +1388,43 @@ export class ChatRecordingService {
    * title changes without replacing an existing ACP notification callback).
    */
   getTitleRecordedCallback():
-    | ((customTitle: string, titleSource: TitleSource) => void)
+    | ((
+        customTitle: string,
+        titleSource: TitleSource,
+        sessionId: string,
+      ) => void)
     | undefined {
     return this.titleRecordedCallback;
   }
 
   /**
-   * Records a custom title for the session.
-   * Appended as a system record so it persists with the session data.
-   * Also caches the title in memory for re-append on shutdown.
+   * Durably records an explicit custom title for the session. Explicit title
+   * requests take priority over the best-effort background auto-title task.
    *
    * @param customTitle The title text.
    * @param titleSource Where the title came from — defaults to `'manual'`
    *   so existing `/rename` call sites keep their behavior unchanged.
-   * @returns true if the record was written successfully, false on I/O error.
+   * @returns true once the record is written, false on any I/O failure.
    */
-  recordCustomTitle(
+  async recordCustomTitle(
     customTitle: string,
     titleSource: TitleSource = 'manual',
-  ): boolean {
+  ): Promise<boolean> {
+    this.pendingExplicitTitleWrites++;
+    this.autoTitleController?.abort();
+    try {
+      return await this.persistCustomTitle(customTitle, titleSource);
+    } finally {
+      this.pendingExplicitTitleWrites--;
+    }
+  }
+
+  private async persistCustomTitle(
+    customTitle: string,
+    titleSource: TitleSource,
+  ): Promise<boolean> {
+    this.pendingTitleWrites++;
+    let persisted = false;
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -1384,18 +1433,35 @@ export class ChatRecordingService {
         systemPayload: { customTitle, titleSource },
       };
 
-      this.appendRecord(record);
+      await this.appendRecordStrict(record);
       this.currentCustomTitle = customTitle;
       this.currentTitleSource = titleSource;
       try {
-        this.titleRecordedCallback?.(customTitle, titleSource);
+        this.titleRecordedCallback?.(
+          customTitle,
+          titleSource,
+          record.sessionId,
+        );
       } catch {
         // Observer errors must never break title recording.
       }
+      persisted = true;
       return true;
     } catch (error) {
-      debugLogger.error('Error saving custom title record:', error);
+      if (error !== this.writeFailure) {
+        debugLogger.error('Error saving custom title record:', error);
+      }
       return false;
+    } finally {
+      this.pendingTitleWrites--;
+      if (
+        persisted &&
+        this.pendingTitleWrites === 0 &&
+        this.bytesSinceTitleAnchor >= TITLE_REANCHOR_BYTES &&
+        !this.writeFailure
+      ) {
+        this.reanchorTitle();
+      }
     }
   }
 
@@ -1454,6 +1520,12 @@ export class ChatRecordingService {
       } catch {
         // best-effort
       }
+    }
+    // A pending explicit rename owns the next title anchor. Re-appending the
+    // previous cached title behind it would make the JSONL tail revert after
+    // the rename succeeds.
+    if (this.pendingExplicitTitleWrites > 0) {
+      return;
     }
     if (!this.currentCustomTitle) {
       return;

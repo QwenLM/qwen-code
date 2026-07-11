@@ -3465,11 +3465,11 @@ export class Session implements SessionContext {
     // new title on their next poll.
     this.config
       .getChatRecordingService()
-      ?.setTitleRecordedCallback((customTitle, titleSource) => {
+      ?.setTitleRecordedCallback((customTitle, titleSource, sessionId) => {
         void this.client
           .extNotification('qwen/notify/session/title-update', {
             v: 1,
-            sessionId: this.sessionId,
+            sessionId,
             title: customTitle,
             titleSource,
           })

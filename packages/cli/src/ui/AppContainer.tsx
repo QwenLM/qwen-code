@@ -1309,10 +1309,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
     // Chain with existing callback (e.g., Session's ACP notification)
     const existingCallback = chatRecordingService.getTitleRecordedCallback();
-    chatRecordingService.setTitleRecordedCallback((customTitle, source) => {
-      existingCallback?.(customTitle, source);
-      setSessionName(customTitle);
-    });
+    chatRecordingService.setTitleRecordedCallback(
+      (customTitle, source, sessionId) => {
+        existingCallback?.(customTitle, source, sessionId);
+        if (sessionId === config.getSessionId()) {
+          setSessionName(customTitle);
+        }
+      },
+    );
 
     return () => {
       // Restore original callback on unmount

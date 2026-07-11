@@ -5160,7 +5160,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 const r = res as { persisted?: boolean } | undefined;
                 if (r && r.persisted === false) {
                   writeStderrLine(
-                    `qwen serve: displayName for ${sessionId} was not persisted (recording service unavailable)`,
+                    `qwen serve: displayName for ${sessionId} was not persisted`,
                   );
                 }
               })

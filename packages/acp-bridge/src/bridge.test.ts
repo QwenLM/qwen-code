@@ -11889,6 +11889,46 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('keeps the optimistic update and logs a generic persistence failure', async () => {
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const bridge = makeBridge({
+          channelFactory: async () =>
+            makeChannel({
+              extMethodImpl: (method) =>
+                method === SERVE_CONTROL_EXT_METHODS.sessionTitle
+                  ? { persisted: false }
+                  : {},
+            }).channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        bridge.updateSessionMetadata(session.sessionId, {
+          displayName: 'Optimistic Title',
+        });
+
+        expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+          displayName: 'Optimistic Title',
+        });
+        await vi.waitFor(() =>
+          expect(stderrSpy).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `displayName for ${session.sessionId} was not persisted`,
+            ),
+          ),
+        );
+        expect(stderrSpy).not.toHaveBeenCalledWith(
+          expect.stringContaining('recording service unavailable'),
+        );
+
+        await bridge.shutdown();
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
     it('rejects displayName values with control characters', async () => {
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {

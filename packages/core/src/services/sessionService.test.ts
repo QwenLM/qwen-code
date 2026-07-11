@@ -3324,6 +3324,30 @@ describe('SessionService', () => {
       );
     });
 
+    it('removes a partially written target when fork creation fails', async () => {
+      const oldId = '55555555-5555-5555-5555-555555555556';
+      const newId = '66666666-6666-6666-6666-666666666667';
+      seedSession(oldId);
+      const targetPath = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+        `${newId}.jsonl`,
+      );
+      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(((
+        file: fs.PathOrFileDescriptor,
+      ) => {
+        if (typeof file === 'number') {
+          fs.writeSync(file, 'partial');
+        }
+        throw new Error('disk full');
+      }) as typeof fs.writeFileSync);
+
+      await expect(service.forkSession(oldId, newId)).rejects.toThrow(
+        'disk full',
+      );
+      expect(fs.existsSync(targetPath)).toBe(false);
+    });
+
     it('throws when the source session belongs to a different project', async () => {
       // Defensive guard: a file can physically sit in this project's chats
       // dir but carry a record whose cwd hashes to a different project

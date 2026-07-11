@@ -581,6 +581,25 @@ describe('Session', () => {
     expect(unsubscribe).toHaveBeenCalledOnce();
   });
 
+  it('attributes a delayed title notification to the persisted record session', () => {
+    const callback = mockChatRecordingService.setTitleRecordedCallback.mock
+      .calls[0]?.[0] as
+      | ((title: string, source: string, sessionId: string) => void)
+      | undefined;
+
+    callback?.('Durable title', 'auto', 'persisted-session-id');
+
+    expect(mockClient.extNotification).toHaveBeenCalledWith(
+      'qwen/notify/session/title-update',
+      {
+        v: 1,
+        sessionId: 'persisted-session-id',
+        title: 'Durable title',
+        titleSource: 'auto',
+      },
+    );
+  });
+
   describe('continueLastTurn', () => {
     it('returns none and starts no continuation when the last turn ended cleanly', async () => {
       vi.mocked(mockChat.getHistory).mockReturnValue([

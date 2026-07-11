@@ -1290,6 +1290,33 @@ describe('ChatRecordingService', () => {
       expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
     });
 
+    it('does not let anchor size estimation preempt a strict writer result', async () => {
+      await chatRecordingService.recordCustomTitle('durable-title');
+      vi.mocked(jsonl.writeLine).mockClear();
+      const circular: Record<string, unknown> = {};
+      circular['self'] = circular;
+      const payload = {
+        v: 2,
+        sessionId: 'test-session-id',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [
+          {
+            action: 'upsert',
+            artifactId: 'artifact-1',
+            artifact: circular,
+          },
+        ],
+      } as unknown as Parameters<
+        ChatRecordingService['recordSessionArtifactEvent']
+      >[0];
+
+      await expect(
+        chatRecordingService.recordSessionArtifactEvent(payload),
+      ).resolves.toBeUndefined();
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
+
     it('keeps artifact journal records out of the active conversation chain', async () => {
       chatRecordingService.recordUserMessage([{ text: 'before artifact' }]);
       await chatRecordingService.flush();

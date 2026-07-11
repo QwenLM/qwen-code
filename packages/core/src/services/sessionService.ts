@@ -1628,13 +1628,27 @@ export class SessionService {
       }
       throw err;
     }
+    let targetComplete = false;
     try {
-      fs.writeFileSync(fd, body, { encoding: 'utf8' });
-    } finally {
-      fs.closeSync(fd);
-    }
+      try {
+        fs.writeFileSync(fd, body, { encoding: 'utf8' });
+      } finally {
+        fs.closeSync(fd);
+      }
 
-    await copyFileHistoryBackups(sourceSessionId, newSessionId);
+      await copyFileHistoryBackups(sourceSessionId, newSessionId);
+      targetComplete = true;
+    } finally {
+      if (!targetComplete) {
+        try {
+          this.removeFileIfExists(targetPath);
+        } catch (cleanupError) {
+          this.warn(
+            `forkSession: failed to clean up incomplete target ${newSessionId}: ${cleanupError}`,
+          );
+        }
+      }
+    }
 
     return { filePath: targetPath, copiedCount: forked.length };
   }
