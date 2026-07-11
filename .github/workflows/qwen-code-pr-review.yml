@@ -347,7 +347,7 @@ jobs:
          startsWith(github.event.review.body, '@qwen-code /review ') ||
          startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
         needs.authorize.outputs.should_review == 'true'))
-    timeout-minutes: 200
+    timeout-minutes: 260
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
@@ -684,8 +684,8 @@ jobs:
           if [ "$TIMEOUT_MINUTES" -le 5 ]; then
             fail "timeout_minutes must be greater than 5"
           fi
-          if [ "$TIMEOUT_MINUTES" -gt 180 ]; then
-            fail "timeout_minutes must not exceed 180 minutes"
+          if [ "$TIMEOUT_MINUTES" -gt 240 ]; then
+            fail "timeout_minutes must not exceed 240 minutes"
           fi
 
           if ! PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')"; then
@@ -802,10 +802,10 @@ jobs:
             exit 0
           fi
           if [ "$FAILURE_KIND" = "timeout" ]; then
-            if [ "$TIMEOUT_MINUTES" -lt 180 ]; then
-              body="**Qwen Code review timed out.** ${FAILURE_REASON} For large PRs, retry with a longer timeout by commenting: \`@qwen-code /review --timeout=180\`. See [workflow logs](${RUN_URL})."
+            if [ "$TIMEOUT_MINUTES" -lt 240 ]; then
+              body="**Qwen Code review timed out.** ${FAILURE_REASON} For large PRs, retry with a longer timeout by commenting: \`@qwen-code /review --timeout=240\`. See [workflow logs](${RUN_URL})."
             else
-              body="**Qwen Code review timed out.** ${FAILURE_REASON} This run already used the maximum 180 minute timeout. See [workflow logs](${RUN_URL})."
+              body="**Qwen Code review timed out.** ${FAILURE_REASON} This run already used the maximum 240 minute timeout. See [workflow logs](${RUN_URL})."
             fi
           else
             body="**Qwen Code review did not complete successfully.** ${FAILURE_REASON} See [workflow logs](${RUN_URL})."
