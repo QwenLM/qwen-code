@@ -96,5 +96,5 @@ export function validateOutputPath(filePath: string): void {
  * elements scrolled partially off-screen, so each value allows a leading `-`.
  */
 export function stripUiBounds(xml: string): string {
-	return xml.replace(/ bounds="\[-?\d+,-?\d+\]\[-?\d+,-?\d+\]"/g, "");
+  return xml.replace(/ bounds="\[-?\d+,-?\d+\]\[-?\d+,-?\d+\]"/g, '');
 }

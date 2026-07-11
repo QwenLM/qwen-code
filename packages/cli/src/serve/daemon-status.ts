@@ -16,6 +16,7 @@ import { isLoopbackBind } from './loopback-binds.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { ServeOptions } from './types.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import type { DaemonMetricsBucket } from './daemon-metrics-ring.js';
 import type {
   DaemonWorkspaceService,
@@ -104,6 +105,7 @@ export interface BuildDaemonStatusOptions {
   sessionShellCommandEnabled: boolean;
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
@@ -171,6 +173,12 @@ interface DaemonStatusRuntime {
   };
   channel: { live: boolean };
   channelWorker: ChannelWorkerSnapshot;
+  /**
+   * Per-workspace channel workers on a multi-workspace daemon. Additive to
+   * `channelWorker` (which stays as the primary workspace snapshot). Absent on
+   * single-workspace daemons.
+   */
+  channelWorkers?: ChannelWorkerGroupSnapshot[];
   transport: {
     restSseActive: number;
     acp: {
@@ -360,6 +368,12 @@ export async function buildDaemonStatusResponse(
     state: 'disabled',
     channels: [],
   };
+  // Per-workspace worker list is multi-workspace only; single-workspace status
+  // keeps the byte-identical `channelWorker` shape.
+  const channelWorkers =
+    (workspaceRuntimes?.length ?? 1) > 1
+      ? input.getChannelWorkerSnapshots?.()
+      : undefined;
   const totalAdmissionSnapshot = input.getTotalSessionAdmissionSnapshot?.();
   const issues: DaemonStatusIssue[] = [];
   let full: FullDaemonStatus | undefined;
@@ -371,6 +385,7 @@ export async function buildDaemonStatusResponse(
     rateLimitHits,
     input,
     channelWorker,
+    channelWorkers,
     totalAdmissionSnapshot,
     workspaceSnapshots,
   );
@@ -457,6 +472,9 @@ export async function buildDaemonStatusResponse(
       },
       channel: { live: aggregatedChannelLive },
       channelWorker,
+      ...(channelWorkers && channelWorkers.length > 0
+        ? { channelWorkers }
+        : {}),
       transport: {
         restSseActive: input.getRestSseActive(),
         acp: {
@@ -634,6 +652,7 @@ function pushRuntimeIssues(
   rateLimitHits: Record<RateLimitTier, number>,
   input: BuildDaemonStatusOptions,
   channelWorker: ChannelWorkerSnapshot,
+  channelWorkers: readonly ChannelWorkerGroupSnapshot[] | undefined,
   totalAdmissionSnapshot: TotalSessionAdmissionSnapshot | undefined,
   workspaceSnapshots: readonly WorkspaceBridgeStatusSnapshot[],
 ): void {
@@ -728,6 +747,25 @@ function pushRuntimeIssues(
     });
   }
 
+  const groupedWorkers =
+    channelWorkers && channelWorkers.length > 0 ? channelWorkers : undefined;
+  const workers = groupedWorkers ?? [channelWorker];
+  for (const worker of workers) {
+    pushChannelWorkerIssues(issues, worker, groupedWorkers !== undefined);
+  }
+}
+
+function pushChannelWorkerIssues(
+  issues: DaemonStatusIssue[],
+  channelWorker: ChannelWorkerSnapshot | ChannelWorkerGroupSnapshot,
+  grouped: boolean,
+): void {
+  const workspace =
+    'workspaceCwd' in channelWorker
+      ? ` for workspace ${channelWorker.workspaceCwd}`
+      : '';
+  const section = grouped ? 'runtime.channelWorkers' : 'runtime.channelWorker';
+
   if (
     channelWorker.enabled &&
     (channelWorker.state === 'exited' || channelWorker.state === 'failed')
@@ -765,8 +803,8 @@ function pushRuntimeIssues(
     issues.push({
       code: 'channel_worker_exited',
       severity: isPermanentFailure ? 'error' : 'warning',
-      message: `Channel worker is ${channelWorker.state}${details}${error}.`,
-      section: 'runtime.channelWorker',
+      message: `Channel worker${workspace} is ${channelWorker.state}${details}${error}.`,
+      section,
     });
   }
 
@@ -784,9 +822,9 @@ function pushRuntimeIssues(
         code: 'channel_worker_partial_connect',
         severity: 'warning',
         message:
-          `Channel worker connected ${channelWorker.channels.length}/${channelWorker.requestedChannels.length} channel(s). ` +
+          `Channel worker${workspace} connected ${channelWorker.channels.length}/${channelWorker.requestedChannels.length} channel(s). ` +
           `Failed: ${failed.join(', ')}.`,
-        section: 'runtime.channelWorker',
+        section,
       });
     }
   }

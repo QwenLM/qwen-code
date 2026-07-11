@@ -309,6 +309,116 @@ describe('WebShellSidebar — workspace picker', () => {
     expect(onSelectWorkspace).toHaveBeenCalledWith(undefined);
   });
 
+  // Flush the WorkspaceSection async session poll (a resolved promise +
+  // the setState it drives).
+  async function flushSessionPoll(): Promise<void> {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  const moreActionButtons = (container: HTMLElement): HTMLButtonElement[] =>
+    Array.from(container.querySelectorAll<HTMLButtonElement>('button')).filter(
+      (b) => b.getAttribute('aria-label') === 'More actions',
+    );
+
+  it('gives primary-workspace sessions full actions but keeps non-primary rows read-only', async () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([
+      makeSession('shared'),
+    ]);
+    const { container } = renderSidebar(false);
+    await flushSessionPoll();
+
+    const sessionSpans = () =>
+      Array.from(container.querySelectorAll('span')).filter(
+        (el) => el.textContent === 'Session shared',
+      );
+
+    // The primary workspace is expanded by default: its row renders with the
+    // full action set.
+    expect(sessionSpans().length).toBe(1);
+    expect(moreActionButtons(container)).toHaveLength(1);
+
+    // Expand the non-primary ("other") workspace.
+    const other = workspaceButtons(container).find((b) =>
+      b.textContent?.includes('other'),
+    );
+    act(() => {
+      other?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSessionPoll();
+
+    // The non-primary section now renders the same session (so the row is
+    // present)...
+    expect(sessionSpans().length).toBe(2);
+    // ...but it stays read-only — no extra action button was added, because the
+    // daemon (bound to the primary workspace) can't service mutations for it.
+    expect(moreActionButtons(container)).toHaveLength(1);
+  });
+
+  it('re-polls the workspace session list after a mutation', async () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([
+      makeSession('shared'),
+    ]);
+    const { container } = renderSidebar(false);
+    await flushSessionPoll();
+    const callsBefore =
+      mockWorkspace.client.listWorkspaceSessions.mock.calls.length;
+
+    // Archive the primary workspace's session via its row action button.
+    const archiveButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((b) => b.getAttribute('aria-label') === 'Archive');
+    expect(archiveButton).toBeTruthy();
+    act(() => {
+      archiveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSessionPoll();
+
+    // The mutation bumps the shared reload token, so the section re-polls
+    // instead of waiting for the 10s interval.
+    expect(
+      mockWorkspace.client.listWorkspaceSessions.mock.calls.length,
+    ).toBeGreaterThan(callsBefore);
+  });
+
+  it('does not open the inline rename form on a read-only (non-primary) row', async () => {
+    mockConnection.sessionId = 'shared';
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([
+      makeSession('shared'),
+    ]);
+    const { container } = renderSidebar(false);
+    await flushSessionPoll();
+
+    // Expand the non-primary workspace so its read-only copy of the shared
+    // session renders too.
+    const other = workspaceButtons(container).find((b) =>
+      b.textContent?.includes('other'),
+    );
+    act(() => {
+      other?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSessionPoll();
+
+    const rows = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).filter((el) => el.textContent?.includes('Session shared'));
+    expect(rows).toHaveLength(2);
+
+    // Double-click the primary (current-session) row to start a rename.
+    act(() => {
+      rows[0].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+
+    // Only the primary row opens the rename input; the read-only row stays
+    // plain, even though it holds the same (now-editing) session id.
+    expect(container.querySelectorAll('input')).toHaveLength(1);
+  });
+
   it('does not render secondary workspace entries with a single workspace', () => {
     mockWorkspace.capabilities = {
       qwenCodeVersion: '1.2.3',
