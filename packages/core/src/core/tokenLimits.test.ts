@@ -137,8 +137,13 @@ describe('tokenLimit', () => {
   });
 
   describe('Anthropic Claude', () => {
-    it('should return 200K for all Claude models', () => {
-      expect(tokenLimit('claude-opus-4-6')).toBe(200000);
+    it('should return 1M for Opus 4.6 through 4.8', () => {
+      expect(tokenLimit('claude-opus-4-6')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-4-7')).toBe(1_000_000);
+      expect(tokenLimit('vertex/claude-opus-4-8')).toBe(1_000_000);
+    });
+
+    it('should return 200K for other Claude models', () => {
       expect(tokenLimit('claude-sonnet-4-6')).toBe(200000);
       expect(tokenLimit('claude-sonnet-4')).toBe(200000);
       expect(tokenLimit('claude-opus-4')).toBe(200000);
@@ -298,8 +303,10 @@ describe('tokenLimit with output type', () => {
       expect(tokenLimit('gemini-3-flash-preview', 'output')).toBe(65536);
     });
 
-    it('should return correct output limits for Claude 4.6', () => {
+    it('should return correct output limits for Claude Opus 4.6 through 4.8', () => {
       expect(tokenLimit('claude-opus-4-6', 'output')).toBe(131072);
+      expect(tokenLimit('claude-opus-4-7', 'output')).toBe(131072);
+      expect(tokenLimit('vertex/claude-opus-4-8', 'output')).toBe(131072);
       expect(tokenLimit('claude-sonnet-4-6', 'output')).toBe(65536);
     });
   });
