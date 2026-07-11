@@ -268,16 +268,27 @@ function isConfig(value: unknown): value is Config {
 function getTodoDirectoryContext(source?: string | Config): {
   todoDir: string;
   projectRoot?: string;
+  configured: boolean;
 } {
   if (isConfig(source)) {
+    const todoDir = source.getTodosDir();
+    const configured = (
+      source as Config & {
+        isTodosDirectoryConfigured?: () => boolean;
+      }
+    ).isTodosDirectoryConfigured;
     return {
-      todoDir: source.getTodosDir(),
+      todoDir,
       projectRoot: source.getTargetDir?.(),
+      configured: configured
+        ? configured.call(source)
+        : isConfiguredTodoDir(todoDir),
     };
   }
 
   return {
     todoDir: source ?? Storage.getTodosDir(),
+    configured: false,
   };
 }
 
@@ -285,14 +296,15 @@ function assertTodoPathWithinAllowedDirectory(
   todoDir: string,
   todoFilePath: string,
   projectRoot?: string,
+  configured = false,
 ): void {
   Storage.assertPathWithinDirectory(
     todoFilePath,
     todoDir,
-    `todosDirectory must resolve within the project root.`,
+    `Todo file path must resolve within the todos directory.`,
   );
 
-  if (!projectRoot || !isConfiguredTodoDir(todoDir)) {
+  if (!projectRoot || !configured) {
     return;
   }
 
@@ -304,7 +316,7 @@ function assertTodoPathWithinAllowedDirectory(
   Storage.assertPathWithinDirectory(
     todoFilePath,
     projectRoot,
-    `todosDirectory must resolve within the project root.`,
+    `Todo file path must resolve within the project root.`,
   );
 }
 
@@ -315,10 +327,16 @@ async function readTodosFromFile(
   todoDir: string,
   sessionId?: string,
   projectRoot?: string,
+  configured = false,
 ): Promise<TodoItem[]> {
   try {
     const todoFilePath = getTodoFilePath(todoDir, sessionId);
-    assertTodoPathWithinAllowedDirectory(todoDir, todoFilePath, projectRoot);
+    assertTodoPathWithinAllowedDirectory(
+      todoDir,
+      todoFilePath,
+      projectRoot,
+      configured,
+    );
     const content = await fs.readFile(todoFilePath, 'utf-8');
     const data = JSON.parse(content);
     return Array.isArray(data.todos) ? data.todos : [];
@@ -339,11 +357,17 @@ async function writeTodosToFile(
   todos: TodoItem[],
   sessionId?: string,
   projectRoot?: string,
+  configured = false,
 ): Promise<void> {
   const todoFilePath = getTodoFilePath(todoDir, sessionId);
   const todoFileDir = path.dirname(todoFilePath);
 
-  assertTodoPathWithinAllowedDirectory(todoDir, todoFilePath, projectRoot);
+  assertTodoPathWithinAllowedDirectory(
+    todoDir,
+    todoFilePath,
+    projectRoot,
+    configured,
+  );
   await fs.mkdir(todoFileDir, { recursive: true });
 
   const data = {
@@ -354,14 +378,23 @@ async function writeTodosToFile(
   const contents = JSON.stringify(data, null, 2);
   await atomicWriteFile(todoFilePath, contents, {
     encoding: 'utf-8',
+    noFollow: true,
   });
   try {
-    assertTodoPathWithinAllowedDirectory(todoDir, todoFilePath, projectRoot);
+    assertTodoPathWithinAllowedDirectory(
+      todoDir,
+      todoFilePath,
+      projectRoot,
+      configured,
+    );
   } catch (err) {
     try {
       await fs.unlink(todoFilePath);
-    } catch {
-      // Ignore rollback errors; the containment check already failed.
+    } catch (rollbackError) {
+      debugLogger.error(
+        `[TodoWriteTool] Post-write containment rollback failed: could not unlink ${todoFilePath}`,
+        rollbackError,
+      );
     }
     throw err;
   }
@@ -403,12 +436,18 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
   async execute(_signal: AbortSignal): Promise<ToolResult> {
     const { todos, modified_by_user, modified_content } = this.params;
     const sessionId = this.config.getSessionId();
-    const todoDir = this.config.getTodosDir();
-    const projectRoot = this.config.getTargetDir?.();
+    const { todoDir, projectRoot, configured } = getTodoDirectoryContext(
+      this.config,
+    );
 
     try {
       // 1. Read current todos (for change detection)
-      const oldTodos = await readTodosFromFile(todoDir, sessionId, projectRoot);
+      const oldTodos = await readTodosFromFile(
+        todoDir,
+        sessionId,
+        projectRoot,
+        configured,
+      );
 
       let finalTodos: TodoItem[];
 
@@ -491,7 +530,13 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       }
 
       // 4. Write new todos AFTER all validation passes
-      await writeTodosToFile(todoDir, finalTodos, sessionId, projectRoot);
+      await writeTodosToFile(
+        todoDir,
+        finalTodos,
+        sessionId,
+        projectRoot,
+        configured,
+      );
 
       // 5. POST-WRITE PHASE: Execute hooks for side effects (logging, HTTP sync, etc.)
       // These hooks can now safely perform side effects knowing data is persisted
@@ -627,8 +672,8 @@ export async function readTodosForSession(
     source = todoDirOrSessionId;
   }
 
-  const { todoDir, projectRoot } = getTodoDirectoryContext(source);
-  return readTodosFromFile(todoDir, sessionId, projectRoot);
+  const { todoDir, projectRoot, configured } = getTodoDirectoryContext(source);
+  return readTodosFromFile(todoDir, sessionId, projectRoot, configured);
 }
 
 /**
@@ -638,9 +683,12 @@ export async function listTodoSessions(
   todoDirOrConfig?: string | Config,
 ): Promise<string[]> {
   try {
-    const { todoDir: resolvedTodoDir, projectRoot } =
-      getTodoDirectoryContext(todoDirOrConfig);
-    if (projectRoot && isConfiguredTodoDir(resolvedTodoDir)) {
+    const {
+      todoDir: resolvedTodoDir,
+      projectRoot,
+      configured,
+    } = getTodoDirectoryContext(todoDirOrConfig);
+    if (projectRoot && configured) {
       Storage.assertPathWithinDirectory(
         resolvedTodoDir,
         projectRoot,
@@ -712,12 +760,18 @@ export class TodoWriteTool extends BaseDeclarativeTool<
   protected createInvocation(params: TodoWriteParams) {
     // Determine if this is a create or update operation by checking if todos file exists
     const sessionId = this.config.getSessionId();
-    const todoDir = this.config.getTodosDir();
-    const projectRoot = this.config.getTargetDir?.();
+    const { todoDir, projectRoot, configured } = getTodoDirectoryContext(
+      this.config,
+    );
     const todoFilePath = getTodoFilePath(todoDir, sessionId);
     let operationType: 'create' | 'update' = 'create';
     try {
-      assertTodoPathWithinAllowedDirectory(todoDir, todoFilePath, projectRoot);
+      assertTodoPathWithinAllowedDirectory(
+        todoDir,
+        todoFilePath,
+        projectRoot,
+        configured,
+      );
       operationType = fsSync.existsSync(todoFilePath) ? 'update' : 'create';
     } catch {
       operationType = 'create';

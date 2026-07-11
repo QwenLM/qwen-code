@@ -4933,6 +4933,10 @@ export class Config {
     return this.todosDir;
   }
 
+  isTodosDirectoryConfigured(): boolean {
+    return this.todosDirectoryConfigured;
+  }
+
   private assertPlansDirWithinTargetDir(): void {
     if (!this.plansDirectoryConfigured) {
       return;

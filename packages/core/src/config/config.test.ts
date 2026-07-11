@@ -6011,6 +6011,13 @@ describe('setApprovalMode with folder trust', () => {
       expect(config.getTodosDir()).toBe(
         path.join(path.resolve(baseParams.targetDir), 'project-todos'),
       );
+      expect(config.isTodosDirectoryConfigured()).toBe(true);
+    });
+
+    it('should track when todosDirectory is not configured', () => {
+      const config = new Config(baseParams);
+
+      expect(config.isTodosDirectoryConfigured()).toBe(false);
     });
 
     it('should warn when configured todosDirectory hides a legacy todo file', () => {
