@@ -190,7 +190,7 @@ export async function judgeGoal(
         responseSchema: RESPONSE_SCHEMA,
         // Disable extended thinking: the judge is a binary check, and
         // thinking burns latency and tokens for no quality gain.
-        thinkingConfig: { thinkingBudget: 0 },
+        thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
       },
       args.signal,
       model,
@@ -354,11 +354,12 @@ function extractText(response: unknown): string {
     ?.candidates;
   if (!Array.isArray(candidates) || candidates.length === 0) return '';
   const first = candidates[0] as
-    | { content?: { parts?: Array<{ text?: unknown }> } }
+    | { content?: { parts?: Array<{ text?: unknown; thought?: unknown }> } }
     | undefined;
   const parts = first?.content?.parts;
   if (!Array.isArray(parts)) return '';
   return parts
+    .filter((part) => part.thought !== true)
     .map((p) => (typeof p?.text === 'string' ? p.text : ''))
     .join('')
     .trim();
