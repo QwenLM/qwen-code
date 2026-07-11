@@ -182,8 +182,14 @@ export function createChannelWorkerGroup(
       const started: ChannelWorkerGroupEntry[] = [];
       try {
         for (const entry of entries) {
+          if (stopping) {
+            throw new Error('Channel worker group stopped during startup.');
+          }
           await entry.supervisor.start();
           started.push(entry);
+          if (stopping) {
+            throw new Error('Channel worker group stopped during startup.');
+          }
         }
       } catch (err) {
         await stopEntriesBestEffort(started);

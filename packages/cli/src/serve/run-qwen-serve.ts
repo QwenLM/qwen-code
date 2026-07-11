@@ -4051,6 +4051,7 @@ export async function runQwenServe(
           return;
         }
         runtimeStartupSettled = true;
+        runtimeApp = undefined;
         clearRuntimeStartupTimer();
         const message = error.message;
         runtimeStartupError = message;
@@ -4145,6 +4146,7 @@ export async function runQwenServe(
             ...(token ? { daemonToken: token } : {}),
           },
           onReady: (snapshot) => {
+            if (runtimeStartupError !== undefined) return;
             if (workspaceInputs.length > 1) {
               daemonLog.info('channel worker ready', {
                 workspace: snapshot.workspaceCwd,
@@ -4188,21 +4190,17 @@ export async function runQwenServe(
         candidateApp: Application,
       ): Promise<void> => {
         if (runtimeStartupSettled) return;
-        if (opts.channelSelection) {
-          try {
-            await startChannelWorkerGroup(opts.channelSelection, candidateApp);
-          } catch (err) {
-            closeServerAfterChannelWorkerStartupFailure = true;
-            throw err;
-          }
-          if (runtimeStartupSettled) return;
-        }
-        if (runtimeStartupSettled) return;
         runtimeApp = candidateApp;
         const acpHandle = candidateApp.locals?.['acpHandle'] as
           | AcpHttpHandle
           | undefined;
         acpHandle?.attachServer?.(server);
+        if (opts.channelSelection) {
+          closeServerAfterChannelWorkerStartupFailure = true;
+          await startChannelWorkerGroup(opts.channelSelection, candidateApp);
+          if (runtimeStartupSettled) return;
+        }
+        if (runtimeStartupSettled) return;
         runtimeStartupSettled = true;
         clearRuntimeStartupTimer();
         markRuntimeReady();

@@ -4334,8 +4334,12 @@ describe('runQwenServe channel worker supervisor', () => {
       channels: ['telegram'],
       error: 'worker boom',
     });
-    worker.start.mockRejectedValueOnce(new Error('worker boom'));
-    const attachServer = vi.fn();
+    const startupOrder: string[] = [];
+    worker.start.mockImplementationOnce(async () => {
+      startupOrder.push('worker');
+      throw new Error('worker boom');
+    });
+    const attachServer = vi.fn(() => startupOrder.push('runtime'));
     const originalCreateServeApp = serverModule.createServeApp;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
       const app = originalCreateServeApp(...args);
@@ -4365,7 +4369,8 @@ describe('runQwenServe channel worker supervisor', () => {
     try {
       await expect(handle.runtimeReady).rejects.toThrow('worker boom');
       expect(handle.server.listening).toBe(false);
-      expect(attachServer).not.toHaveBeenCalled();
+      expect(attachServer).toHaveBeenCalledTimes(1);
+      expect(startupOrder).toEqual(['runtime', 'worker']);
     } finally {
       await handle.close();
     }
@@ -4556,6 +4561,22 @@ describe('runQwenServe channel worker supervisor', () => {
         webhookEnqueues.set(options.workspace, enqueueWebhookTask);
         return {
           start: vi.fn(async () => {
+            const capabilitiesResponse = await fetch(
+              `${options.daemonUrl}/capabilities`,
+            );
+            expect(capabilitiesResponse.status).toBe(200);
+            expect(await capabilitiesResponse.json()).toMatchObject({
+              workspaces: expect.arrayContaining([
+                expect.objectContaining({
+                  cwd: primaryCwd,
+                  trusted: true,
+                }),
+                expect.objectContaining({
+                  cwd: secondaryCwd,
+                  trusted: true,
+                }),
+              ]),
+            });
             options.onReady?.(snapshots.get(options.workspace)!);
           }),
           stop: vi.fn().mockResolvedValue(undefined),
@@ -4689,6 +4710,18 @@ describe('runQwenServe channel worker supervisor', () => {
       pid: 1234,
       channels: ['telegram'],
     });
+    const startupOrder: string[] = [];
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      const app = originalCreateServeApp(...args);
+      const acpHandle = app.locals['acpHandle'] as
+        | { attachServer?: (server: unknown) => void }
+        | undefined;
+      if (acpHandle) {
+        acpHandle.attachServer = vi.fn(() => startupOrder.push('runtime'));
+      }
+      return app;
+    });
     worker.stop.mockImplementation(async () => {
       order.push('worker');
     });
@@ -4705,12 +4738,20 @@ describe('runQwenServe channel worker supervisor', () => {
       },
       {
         bridge,
-        channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
+        channelWorkerSupervisorFactory: vi.fn((opts) => {
+          worker.start.mockImplementation(async () => {
+            startupOrder.push('worker');
+            opts.onReady?.(worker.snapshot());
+          });
+          return worker;
+        }),
         channelServicePidfile: pidfile,
       },
     );
+    startupOrder.push('runtime-ready');
 
     expect(worker.start).toHaveBeenCalledTimes(1);
+    expect(startupOrder).toEqual(['runtime', 'worker', 'runtime-ready']);
     expect(pidfile.reserveServeServiceInfo).toHaveBeenCalledWith({
       channels: ['telegram'],
       servePid: process.pid,
@@ -5094,12 +5135,6 @@ describe('runQwenServe channel worker supervisor', () => {
       pid: 1234,
       channels: ['telegram'],
     });
-    worker.start.mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          releaseStart = resolve;
-        }),
-    );
     const pidfile = makePidfileDeps();
     const handle = await runQwenServe(
       {
@@ -5112,7 +5147,18 @@ describe('runQwenServe channel worker supervisor', () => {
       },
       {
         bridge: makeFakeBridge(),
-        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelWorkerSupervisorFactory: vi.fn((opts) => {
+          worker.start.mockImplementation(
+            () =>
+              new Promise<void>((resolve) => {
+                releaseStart = () => {
+                  opts.onReady?.(worker.snapshot());
+                  resolve();
+                };
+              }),
+          );
+          return worker;
+        }),
         channelServicePidfile: pidfile,
         resolveOnListen: true,
         runtimeStartupTimeoutMs: 1,
@@ -5131,6 +5177,9 @@ describe('runQwenServe channel worker supervisor', () => {
           ),
         ]),
       ).rejects.toThrow('Daemon runtime startup timed out after 1ms.');
+      await vi.waitFor(() => {
+        expect(handle.server.listening).toBe(false);
+      });
       releaseStart();
       await new Promise((resolve) => setImmediate(resolve));
       expect(pidfile.writeServeServiceInfo).not.toHaveBeenCalled();

@@ -322,6 +322,44 @@ describe('createChannelWorkerGroup', () => {
     expect(recorded[1]!.supervisor.start).not.toHaveBeenCalled();
   });
 
+  it('does not start later supervisors when stopped during startup', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    let releaseStart!: () => void;
+    recorded[0]!.supervisor.start.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseStart = resolve;
+        }),
+    );
+
+    const startPromise = group.start();
+    await vi.waitFor(() => {
+      expect(recorded[0]!.supervisor.start).toHaveBeenCalledTimes(1);
+    });
+    await group.stop();
+    releaseStart();
+    await expect(startPromise).rejects.toThrow(
+      'Channel worker group stopped during startup.',
+    );
+
+    expect(recorded[1]!.supervisor.start).not.toHaveBeenCalled();
+  });
+
   it('rolls back already-started supervisors when a later start fails', async () => {
     const registry = fakeRegistry([
       fakeRuntime(PRIMARY, true),

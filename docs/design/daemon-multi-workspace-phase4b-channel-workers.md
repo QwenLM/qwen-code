@@ -175,10 +175,17 @@ Before the group is created (pre-startup) it reports the disabled snapshot.
   multi-workspace, which always flows through `startRuntime` -> `buildRuntime`),
   builds a supervisor per frozen group, and starts them — replacing the single
   `channelWorker.start()`.
-- The newly built runtime app stays a candidate until every channel supervisor
-  reaches ready. Only then is it published as the active app and attached to
-  ACP transports. A worker startup failure therefore leaves `/health`
-  degraded and cannot expose a half-initialized runtime.
+- The newly built runtime app is published and attached to ACP transports before
+  channel supervisors start. Workers require the runtime `/capabilities` route
+  during bootstrap and may receive channel traffic as soon as they connect, so
+  their daemon session routes must already be available. This matches the
+  existing single-workspace ordering on `main`; `runtimeReady` still settles
+  only after every requested supervisor reaches ready.
+- A channel-worker startup failure remains fatal. Runtime publication is
+  withdrawn before the group, pidfile, bridges, and listener are torn down; a
+  runtime startup timeout during the worker phase follows the same path rather
+  than leaving a listening daemon behind. Group cancellation also prevents a
+  later workspace supervisor from launching after that teardown starts.
 - The pidfile reservation keeps the aggregate channel names; shutdown paths
   (`stopChannelWorkerAfterFailedStartup`, `killAllSync`, normal shutdown) fan
   out to the group.
@@ -186,8 +193,9 @@ Before the group is created (pre-startup) it reports the disabled snapshot.
 Regression risk: for a single workspace the creation timing moves from the
 listen callback to `completeRuntimeStartup`. Existing `run-qwen-serve.test.ts`
 channel tests (injected factory, pidfile-on-ready, second-signal force-kill)
-must stay green — the factory is still invoked, `onReady` still fires, and
-shutdown fan-out is equivalent.
+must stay green. Multi-workspace orchestration coverage also probes the live
+daemon `/capabilities` route from supervisor startup so the runtime/worker
+ordering cannot regress behind an injected ready-only factory.
 
 ## Boot behavior
 
