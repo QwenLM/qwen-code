@@ -56,4 +56,67 @@ describe('deriveCapabilityStatus', () => {
       warning: null,
     });
   });
+
+  it('reports a connected runtime MCP that targets the extension tunnel', () => {
+    expect(
+      deriveCapabilityStatus(
+        true,
+        ['allow_origin', 'cdp_tunnel_over_ws', 'browser_automation_mcp'],
+        {
+          servers: [
+            {
+              name: 'chrome-devtools',
+              mcpStatus: 'connected',
+              config: {
+                args: ['--wsEndpoint', 'ws://127.0.0.1:4170/cdp'],
+              },
+            },
+          ],
+        },
+      ),
+    ).toEqual({
+      state: 'automation-connected',
+      shellReady: true,
+      warning: null,
+    });
+  });
+
+  it('warns while the configured runtime MCP is not connected', () => {
+    expect(
+      deriveCapabilityStatus(
+        true,
+        ['allow_origin', 'cdp_tunnel_over_ws', 'browser_automation_mcp'],
+        { servers: [] },
+      ),
+    ).toEqual({
+      state: 'automation-pending',
+      shellReady: true,
+      warning: 'Browser tools are configured but the adapter is not connected.',
+    });
+  });
+
+  it('warns when an existing chrome-devtools configuration shadows the tunnel', () => {
+    expect(
+      deriveCapabilityStatus(
+        true,
+        ['allow_origin', 'cdp_tunnel_over_ws', 'browser_automation_mcp'],
+        {
+          servers: [
+            {
+              name: 'chrome-devtools',
+              mcpStatus: 'connected',
+              config: {
+                args: ['-y', 'chrome-devtools-mcp@latest', '--autoConnect'],
+              },
+            },
+          ],
+        },
+      ),
+    ).toEqual({
+      state: 'automation-shadowed',
+      shellReady: true,
+      warning:
+        'An existing chrome-devtools MCP configuration is taking precedence. Disable or rename it to use the extension tunnel.',
+    });
+  });
 });
