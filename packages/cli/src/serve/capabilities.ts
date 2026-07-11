@@ -264,9 +264,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `POST /workspace/channel/reload`. The worker is stopped and relaunched;
   // on relaunch it re-reads settings.json (channels / proxy / per-channel
   // model), so channel settings changes apply without a full daemon restart.
-  // Advertised CONDITIONALLY — only when the daemon was started with
-  // `--channel` (i.e. a channel worker exists to reload).
+  // Advertised CONDITIONALLY while the runtime manager has a committed or
+  // recoverable channel worker selection.
   channel_reload: { since: 'v1' },
+  // Runtime GET/PUT/DELETE control for daemon-managed channel selection.
+  // The route exists even when no selection was supplied at daemon boot.
+  channel_control: { since: 'v1' },
   // Multi-workspace sessions closed loop (issue #6378 Phase 2a). Advertised
   // only when one daemon hosts more than one registered workspace runtime.
   multi_workspace_sessions: { since: 'v1' },
@@ -339,10 +342,10 @@ export interface AdvertiseFeatureToggles {
   reloadAvailable?: boolean;
   /**
    * Whether the daemon exposes the channel worker reload route
-   * (`channel_reload`). Set only when the daemon was started with
-   * `--channel`, so a channel worker exists to reload.
+   * (`channel_reload`). Set while the runtime manager is enabled.
    */
   channelReloadAvailable?: boolean;
+  channelControlAvailable?: boolean;
   /**
    * Whether the daemon will accept client-hosted MCP servers over the WS
    * (`client_mcp_over_ws`, issue #5626).
@@ -436,6 +439,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
   ['channel_reload', (toggles) => toggles.channelReloadAvailable === true],
+  ['channel_control', (toggles) => toggles.channelControlAvailable === true],
   [
     'multi_workspace_sessions',
     (toggles) => toggles.multiWorkspaceSessionsEnabled === true,

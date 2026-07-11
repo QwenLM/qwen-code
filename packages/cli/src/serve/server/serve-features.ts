@@ -44,7 +44,8 @@ interface CreateServeFeaturesDeps {
   persistSettingAvailable: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
   reloadAvailable: boolean;
-  channelReloadAvailable: boolean;
+  channelReloadAvailable: () => boolean;
+  channelControlAvailable: boolean;
   sessionShellCommandEnabled: boolean;
   multiWorkspaceSessionsEnabled: boolean;
   env?: Readonly<Record<string, string | undefined>>;
@@ -66,6 +67,7 @@ export function createServeFeatures(
     sessionArtifactsPersistenceAvailable,
     reloadAvailable,
     channelReloadAvailable,
+    channelControlAvailable,
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
   } = deps;
@@ -100,7 +102,8 @@ export function createServeFeatures(
         sessionArtifactsPersistenceAvailable,
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
-        channelReloadAvailable,
+        channelReloadAvailable: channelReloadAvailable(),
+        channelControlAvailable,
         multiWorkspaceSessionsEnabled,
         acpHttpEnabled: resolveAcpHttpEnabled(),
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,

@@ -12,6 +12,7 @@ import type {
   ChannelWorkerSupervisor,
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
+import { ChannelWorkerStopError } from './channel-worker-supervisor.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -274,6 +275,7 @@ describe('createChannelWorkerGroup', () => {
     const { createSupervisor, recorded } = makeCreateSupervisor(() =>
       snapshot({}),
     );
+    const onStateChange = vi.fn();
 
     const group = createChannelWorkerGroup({
       groups: [
@@ -283,6 +285,7 @@ describe('createChannelWorkerGroup', () => {
       registry,
       createSupervisor,
       shared,
+      onStateChange,
     });
 
     await group.start();
@@ -294,6 +297,7 @@ describe('createChannelWorkerGroup', () => {
       expect(entry.supervisor.stop).toHaveBeenCalledTimes(1);
       expect(entry.supervisor.killAllSync).toHaveBeenCalledTimes(1);
     }
+    expect(onStateChange).toHaveBeenCalledTimes(2);
   });
 
   it('does not start later supervisors when the first start fails', async () => {
@@ -623,5 +627,183 @@ describe('createChannelWorkerGroup', () => {
       line: 'boom',
       workspaceCwd: SECONDARY,
     });
+  });
+
+  it('restarts only the workspace whose ordered selection changed', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+
+    await group.reconcile([
+      { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['c'] } },
+      { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+    ]);
+
+    expect(recorded).toHaveLength(3);
+    expect(recorded[0]!.supervisor.stop).toHaveBeenCalledTimes(1);
+    expect(recorded[1]!.supervisor.stop).not.toHaveBeenCalled();
+    expect(recorded[1]!.supervisor.start).not.toHaveBeenCalled();
+    expect(recorded[2]!.opts.workspace).toBe(PRIMARY);
+    expect(recorded[2]!.supervisor.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops failed new workers and restores stopped old workers', async () => {
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
+    const recorded: RecordedSupervisor[] = [];
+    const createSupervisor = (opts: CreateChannelWorkerSupervisorOptions) => {
+      const supervisor = {
+        start: vi.fn(async () => {
+          if (
+            opts.selection.mode === 'names' &&
+            opts.selection.names.includes('c')
+          ) {
+            throw new Error('bad c');
+          }
+        }),
+        stop: vi.fn(async () => {}),
+        restart: vi.fn(async () => snapshot({})),
+        killAllSync: vi.fn(),
+        snapshot: () => snapshot({}),
+        enqueueWebhookTask: vi.fn().mockRejectedValue(new Error('unused')),
+      };
+      recorded.push({ opts, supervisor });
+      return supervisor;
+    };
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+
+    await expect(
+      group.reconcile([
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['c'] } },
+      ]),
+    ).rejects.toMatchObject({ rolledBack: true, stopFailed: false });
+    expect(recorded[1]!.supervisor.stop).toHaveBeenCalledTimes(1);
+    expect(recorded[0]!.supervisor.start).toHaveBeenCalledTimes(2);
+    expect(group.snapshots()[0]!.workspaceCwd).toBe(PRIMARY);
+  });
+
+  it('does not start replacements after an unconfirmed old-worker stop', async () => {
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    recorded[0]!.supervisor.stop.mockRejectedValueOnce(
+      new ChannelWorkerStopError('still alive'),
+    );
+
+    await expect(
+      group.reconcile([
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['c'] } },
+      ]),
+    ).rejects.toMatchObject({
+      stopFailed: true,
+      rolledBack: true,
+    });
+    expect(recorded[1]!.supervisor.start).not.toHaveBeenCalled();
+  });
+
+  it('retains an unconfirmed replacement so a later stop can retry it', async () => {
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    const replacement = group.reconcile([
+      { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['c'] } },
+    ]);
+    recorded[1]!.supervisor.start.mockRejectedValueOnce(
+      new Error('replacement failed'),
+    );
+    recorded[1]!.supervisor.stop.mockRejectedValueOnce(
+      new ChannelWorkerStopError('still alive'),
+    );
+
+    await expect(replacement).rejects.toMatchObject({
+      stopFailed: false,
+      rolledBack: false,
+      rollbackError: 'still alive',
+    });
+    recorded[1]!.supervisor.stop.mockResolvedValueOnce(undefined);
+    await group.stop();
+    expect(recorded[1]!.supervisor.stop).toHaveBeenCalledTimes(2);
+  });
+
+  it('suppresses stale lifecycle callbacks after committing a replacement', async () => {
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
+    const onReady = vi.fn();
+    const onExit = vi.fn();
+    const onLog = vi.fn();
+    const recorded: CreateChannelWorkerSupervisorOptions[] = [];
+    const createSupervisor = (opts: CreateChannelWorkerSupervisorOptions) => {
+      recorded.push(opts);
+      return {
+        start: vi.fn(async () => {}),
+        stop: vi.fn(async () => {}),
+        restart: vi.fn(async () => snapshot({})),
+        killAllSync: vi.fn(),
+        snapshot: () => snapshot({}),
+        enqueueWebhookTask: vi.fn().mockRejectedValue(new Error('unused')),
+      };
+    };
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+      onReady,
+      onExit,
+      onLog,
+    });
+
+    await group.reconcile([
+      { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['c'] } },
+    ]);
+    recorded[0]!.onExit?.(snapshot({ state: 'exited' }));
+
+    expect(onReady).not.toHaveBeenCalled();
+    expect(onExit).not.toHaveBeenCalled();
+    expect(onLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: PRIMARY,
+        line: expect.stringContaining('stale'),
+      }),
+    );
   });
 });
