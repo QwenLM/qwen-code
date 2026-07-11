@@ -25,9 +25,17 @@ export function goalArgOf(text: string): string {
   return text.replace(/^\/goal\b/i, '').trim();
 }
 
-/** True when `text` is a `/goal <clear-keyword>` invocation. */
+/**
+ * True when `text` is a `/goal <clear-keyword>` invocation.
+ *
+ * The prefix is checked here rather than assumed. `goalArgOf` strips `/goal`
+ * only when it is present and otherwise returns the text unchanged, so without
+ * this guard a bare `"clear"` — a perfectly ordinary thing to type into a chat
+ * box — would answer true to "is this a goal-clear command?".
+ */
 export function isGoalClearCommand(text: string): boolean {
-  return isGoalClearKeyword(goalArgOf(text));
+  if (!/^\/goal\b/i.test(text.trim())) return false;
+  return isGoalClearKeyword(goalArgOf(text.trim()));
 }
 
 /**

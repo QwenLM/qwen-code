@@ -2200,6 +2200,68 @@ describe('App /goal command', () => {
     expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
   });
 
+  it("opens a goal's session in the chat view", async () => {
+    // The goal's session transcript IS its history, so the Goals page has to be
+    // able to hand off to it. Nothing exercised this wiring before.
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="goals-page"]'),
+    ).not.toBeNull();
+
+    const onOpenSession = testState.latestGoalsProps?.onOpenSession;
+    if (!onOpenSession) throw new Error('onOpenSession was not captured');
+    mockSessionActions.loadSession.mockClear();
+
+    await act(async () => {
+      onOpenSession('goal-session-9');
+    });
+    await flush();
+
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+      'goal-session-9',
+    );
+    // It must leave the Goals page, or the user loads a transcript they cannot see.
+    expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
+  });
+
+  it("reports a failure to open a goal's session instead of swallowing it", async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+
+    const onOpenSession = testState.latestGoalsProps?.onOpenSession;
+    if (!onOpenSession) throw new Error('onOpenSession was not captured');
+    mockSessionActions.loadSession.mockRejectedValueOnce(
+      new Error('session is gone'),
+    );
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
+    await act(async () => {
+      onOpenSession('goal-session-9');
+    });
+    await flush();
+
+    // `loadSidebarSession` rethrows, so the handler's own `.catch` is the only
+    // thing standing between a dead session and an unhandled rejection. It has
+    // to route the failure to `reportError` (console + toast), not swallow it.
+    expect(consoleError).toHaveBeenCalledWith(
+      '[web-shell]',
+      expect.stringContaining('session is gone'),
+      expect.anything(),
+    );
+    consoleError.mockRestore();
+  });
+
   it('reuses the empty session a failed goal attempt left behind', async () => {
     // `sendPrompt` creates the daemon session lazily, so a prompt that fails
     // after admission leaves a created-but-empty session. The form keeps the

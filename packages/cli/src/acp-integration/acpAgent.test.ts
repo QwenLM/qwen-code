@@ -10271,6 +10271,47 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       models: expect.anything(),
       configOptions: expect.anything(),
     });
+    // The throw path is where the `finally` earns its keep: `registerGoalHook`
+    // clears the observer before exploding, so a session that survives the
+    // throw but loses its observer would go on to reach achieved/failed with
+    // nobody listening — no wire update, no persisted terminal card.
+    expect(lastSessionMock!.installGoalTerminalObserver).toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('reports a malformed condition exactly once on resume', async () => {
+    // Two producers could speak for this one event: `restoreGoalFromHistory`
+    // (which knows the condition is bad) and `#restoreGoalOnResume` (which
+    // knows the session). The env gates print one line; this must too.
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [
+          goalRecord({ type: 'goal_status', kind: 'set', condition: '' }),
+        ],
+      },
+    });
+    allowGoalRestore(innerConfig as unknown as Record<string, unknown>);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true) as unknown as MockInstance;
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    const lines = stderr.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => /goal/i.test(l));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('the condition is empty');
+    expect(registerGoalHook).not.toHaveBeenCalled();
+    stderr.mockRestore();
 
     mockConnectionState.resolve();
     await agentPromise;

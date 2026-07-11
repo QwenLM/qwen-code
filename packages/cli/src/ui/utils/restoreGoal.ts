@@ -67,18 +67,27 @@ export function findGoalToRestore(
 
 /**
  * Walks back from the active goal card at `startIndex` for the `setAt` stamped
- * on the `set` card that opened this run. Any other kind ends the run, so the
- * scan stops there rather than picking up a previous goal's start time.
+ * on the `set` card that opened this run.
+ *
+ * A run ends at any card that is not `set`/`checking` — but that alone is not
+ * enough to stay inside it. A transcript is a file: two goals can sit back to
+ * back with no terminal card between them (hand-edited, truncated, or written
+ * by a version that did not persist terminal cards). The condition is what
+ * actually identifies the run, so the scan stops as soon as it changes rather
+ * than walking into the previous goal and returning *its* start time.
  */
 function findSetAtOfRun(
   history: readonly HistoryItemWithoutId[],
   startIndex: number,
 ): number | undefined {
+  const start = history[startIndex] as HistoryItemGoalStatus | undefined;
+  const condition = start?.condition;
   for (let i = startIndex - 1; i >= 0; i--) {
     const item = history[i];
     if (item?.type !== MessageType.GOAL_STATUS) continue;
     const goal = item as HistoryItemGoalStatus;
     if (goal.kind !== 'set' && goal.kind !== 'checking') return undefined;
+    if (goal.condition !== condition) return undefined;
     if (goal.setAt !== undefined) return goal.setAt;
   }
   return undefined;
@@ -342,9 +351,16 @@ export function restoreGoalFromHistory(
   // corrupted or hand-edited `condition` would otherwise be re-registered —
   // empty and meaningless — and then embedded verbatim in every judge call and
   // continuation prompt for the rest of the session.
+  //
+  // This is the only blocked path that reports itself. The env gates above stay
+  // silent because their caller knows the policy and says so; a malformed
+  // condition is known only here, and three of the four callers (the TUI ones)
+  // discard the result entirely, so saying nothing would lose it completely.
+  // ACP's `#restoreGoalOnResume` skips its own line for this reason, so exactly
+  // one line is written either way.
   if (goalConditionBlockedBy(restorable.condition)) {
     writeStderrLine(
-      'qwen: refusing to restore a goal whose condition is empty.',
+      `qwen: refusing to restore a goal for session ${sessionId}: the condition is empty.`,
     );
     unregisterGoalHook(config, sessionId);
     return { restored: false, blockedBy: 'condition-invalid' };

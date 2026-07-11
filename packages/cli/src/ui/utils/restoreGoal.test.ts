@@ -765,6 +765,30 @@ describe('restoreGoalFromHistory carries the original start time', () => {
     expect(goal!.setAt).toBeGreaterThanOrEqual(now);
   });
 
+  it('does not borrow setAt from a previous goal that has no terminal card', () => {
+    // The run-boundary scan cannot rely on a terminal card being there: a
+    // truncated or hand-edited transcript can put two goals back to back. The
+    // condition is what identifies the run, so goal B must not inherit goal A's
+    // clock just because nothing separates them.
+    const cfg = makeConfig();
+    const now = Date.now();
+    restoreGoalFromHistory(
+      [
+        goalItem({ kind: 'set', condition: 'goal A', setAt: 1000 }),
+        goalItem({ kind: 'checking', condition: 'goal A', iterations: 2 }),
+        // Goal B's own `set` card survived but lost its setAt, and no terminal
+        // card was ever written for goal A.
+        goalItem({ kind: 'set', condition: 'goal B' }),
+        goalItem({ kind: 'checking', condition: 'goal B', iterations: 1 }),
+      ],
+      cfg,
+    );
+    const goal = getActiveGoal('sess-1');
+    expect(goal).toMatchObject({ condition: 'goal B' });
+    expect(goal!.setAt).not.toBe(1000);
+    expect(goal!.setAt).toBeGreaterThanOrEqual(now);
+  });
+
   it('ignores a non-positive setAt from a corrupted transcript', () => {
     const cfg = makeConfig();
     const now = Date.now();

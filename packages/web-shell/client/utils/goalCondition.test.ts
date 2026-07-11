@@ -71,6 +71,19 @@ describe('isGoalClearCommand', () => {
   it('does not match /goal <condition>', () => {
     expect(isGoalClearCommand('/goal clear the build cache')).toBe(false);
   });
+
+  it('requires the /goal prefix, so a bare keyword is just a message', () => {
+    // `goalArgOf` returns text it does not recognise unchanged, so without an
+    // explicit prefix check these all fell through to the keyword test and
+    // answered true. "clear" and "stop" are ordinary things to type in a chat
+    // box; treating them as goal-clear commands would be a live bug the moment
+    // a caller stopped pre-validating the prefix itself.
+    expect(isGoalClearCommand('clear')).toBe(false);
+    expect(isGoalClearCommand('stop')).toBe(false);
+    expect(isGoalClearCommand('  CANCEL  ')).toBe(false);
+    expect(isGoalClearCommand('/goalie clear')).toBe(false);
+    expect(isGoalClearCommand('please /goal clear')).toBe(false);
+  });
 });
 
 describe('the CLI is the authority on the clear keywords', () => {
