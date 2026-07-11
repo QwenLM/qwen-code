@@ -11,8 +11,10 @@ import {
   McpClient,
   MCPDiscoveryState,
   MCPServerStatus,
+  attemptAutomaticMcpOAuth,
   getMCPServerStatus,
   populateMcpServerCommand,
+  probeMcpServerForOAuth,
   removeMCPServerStatus,
   setMCPDiscoveryState,
 } from './mcp-client.js';
@@ -1346,6 +1348,7 @@ export class McpClientManager {
     const existingClient = this.clients.get(serverName);
     if (existingClient) {
       try {
+        existingClient.clearOAuthState?.();
         await existingClient.disconnect();
       } catch (error) {
         debugLogger.error(
@@ -1711,6 +1714,10 @@ export class McpClientManager {
                   `budget=${err.budget}, reservedCount=${err.reservedCount})`,
               );
             } else {
+              // The shared pool is injected by the ACP daemon, where opening
+              // a local browser is invalid. Record the OAuth requirement so a
+              // mediated client can authenticate, but do not auto-retry here.
+              await probeMcpServerForOAuth(name, config);
               debugLogger.error(
                 `Pool acquire failed for ${name}: ${getErrorMessage(err)}`,
               );
@@ -1835,6 +1842,7 @@ export class McpClientManager {
     const disconnectionPromises = Array.from(this.clients.entries()).map(
       async ([name, client]) => {
         try {
+          client.clearOAuthState?.();
           await client.disconnect();
         } catch (error) {
           debugLogger.error(
@@ -1886,6 +1894,7 @@ export class McpClientManager {
     const client = this.clients.get(serverName);
     if (client) {
       try {
+        client.clearOAuthState?.();
         await client.disconnect();
       } catch (error) {
         debugLogger.error(
@@ -2249,6 +2258,18 @@ export class McpClientManager {
           await this.runWithDiscoveryTimeout(name, serverConfig, () =>
             this.discoverMcpToolsForServer(name, cliConfig),
           );
+          await probeMcpServerForOAuth(name, serverConfig);
+          const authenticated = await attemptAutomaticMcpOAuth(
+            name,
+            serverConfig,
+            cliConfig.isInteractive?.() === true &&
+              cliConfig.isBrowserLaunchSuppressed?.() !== true,
+          );
+          if (authenticated) {
+            await this.runWithDiscoveryTimeout(name, serverConfig, () =>
+              this.discoverMcpToolsForServer(name, cliConfig),
+            );
+          }
           // `discoverMcpToolsForServerInternal` swallows connect/discover
           // errors (best-effort discovery semantics — see its catch block),
           // so the try here resolves even for failed servers. Only the
@@ -2518,6 +2539,7 @@ export class McpClientManager {
     const client = this.clients.get(serverName);
     if (client) {
       try {
+        client.clearOAuthState?.();
         await client.disconnect();
       } catch (error) {
         debugLogger.error(
