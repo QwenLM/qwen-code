@@ -287,6 +287,50 @@ function tailVisualLines(
   return lines.slice(-maxLines).join('\n');
 }
 
+const ThinkBody: React.FC<{
+  text: string;
+  isPending: boolean;
+  expanded: boolean;
+  availableTerminalHeight?: number;
+  contentWidth: number;
+}> = ({ text, isPending, expanded, availableTerminalHeight, contentWidth }) => {
+  if (!isPending && !expanded) return null;
+
+  if (isPending && !expanded) {
+    const innerWidth = Math.max(contentWidth - 2, 20);
+    const maxLines =
+      availableTerminalHeight != null
+        ? Math.max(
+            1,
+            Math.min(
+              MAX_STREAMING_THINKING_VISUAL_LINES,
+              Math.floor(availableTerminalHeight / 3),
+            ),
+          )
+        : MAX_STREAMING_THINKING_VISUAL_LINES;
+    const display = tailVisualLines(text, innerWidth, maxLines);
+    return (
+      <Box paddingLeft={2}>
+        <Text dimColor wrap="truncate">
+          {display}
+        </Text>
+      </Box>
+    );
+  }
+
+  return (
+    <Box paddingLeft={2} flexDirection="column">
+      <MarkdownDisplay
+        text={text}
+        isPending={isPending}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={contentWidth - 2}
+        textColor={theme.text.secondary}
+      />
+    </Box>
+  );
+};
+
 export const ThinkMessage: React.FC<ThinkMessageProps> = ({
   text,
   isPending,
@@ -315,54 +359,30 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
     );
   }
 
-  if (isPending) {
-    const innerWidth = Math.max(contentWidth - 2, 20);
-    const maxLines =
-      availableTerminalHeight != null
-        ? Math.max(
-            1,
-            Math.min(
-              MAX_STREAMING_THINKING_VISUAL_LINES,
-              Math.floor(availableTerminalHeight / 3),
-            ),
-          )
-        : MAX_STREAMING_THINKING_VISUAL_LINES;
-    const display = tailVisualLines(text, innerWidth, maxLines);
-    return (
-      <Box flexDirection="column">
-        <Text dimColor italic>
-          {THINKING_ICON_PENDING}
-          {t('Thinking')}…{durationSuffix}
-        </Text>
-        <Box paddingLeft={2}>
-          <Text dimColor wrap="truncate">
-            {display}
-          </Text>
-        </Box>
-      </Box>
-    );
-  }
-
-  const expandedLabel =
-    durationMs != null
+  const label = isPending
+    ? `${t('Thinking')}…${durationSuffix}`
+    : durationMs != null
       ? `${t('Thought for')} ${formatDuration(durationMs)}`
       : `${t('Thinking')}…`;
+  const collapseHint =
+    !isPending && expanded
+      ? ` ${t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}`
+      : '';
+
   return (
     <Box flexDirection="column">
       <Text dimColor italic>
-        {THINKING_ICON}
-        {expandedLabel}{' '}
-        {t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}
+        {isPending ? THINKING_ICON_PENDING : THINKING_ICON}
+        {label}
+        {collapseHint}
       </Text>
-      <Box paddingLeft={2} flexDirection="column">
-        <MarkdownDisplay
-          text={text}
-          isPending={false}
-          availableTerminalHeight={availableTerminalHeight}
-          contentWidth={contentWidth - 2}
-          textColor={theme.text.secondary}
-        />
-      </Box>
+      <ThinkBody
+        text={text}
+        isPending={isPending}
+        expanded={expanded}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={contentWidth}
+      />
     </Box>
   );
 };
@@ -373,42 +393,12 @@ export const ThinkMessageContent: React.FC<ThinkMessageContentProps> = ({
   expanded = false,
   availableTerminalHeight,
   contentWidth,
-}) => {
-  if (!isPending && !expanded) {
-    return null;
-  }
-
-  if (isPending) {
-    const innerWidth = Math.max(contentWidth - 2, 20);
-    const maxLines =
-      availableTerminalHeight != null
-        ? Math.max(
-            1,
-            Math.min(
-              MAX_STREAMING_THINKING_VISUAL_LINES,
-              Math.floor(availableTerminalHeight / 3),
-            ),
-          )
-        : MAX_STREAMING_THINKING_VISUAL_LINES;
-    const display = tailVisualLines(text, innerWidth, maxLines);
-    return (
-      <Box paddingLeft={2}>
-        <Text dimColor wrap="truncate">
-          {display}
-        </Text>
-      </Box>
-    );
-  }
-
-  return (
-    <Box paddingLeft={2} flexDirection="column">
-      <MarkdownDisplay
-        text={text}
-        isPending={false}
-        availableTerminalHeight={availableTerminalHeight}
-        contentWidth={contentWidth - 2}
-        textColor={theme.text.secondary}
-      />
-    </Box>
-  );
-};
+}) => (
+  <ThinkBody
+    text={text}
+    isPending={isPending}
+    expanded={expanded}
+    availableTerminalHeight={availableTerminalHeight}
+    contentWidth={contentWidth}
+  />
+);
