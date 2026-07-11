@@ -164,6 +164,7 @@ export async function cloneFromGit(
     await git.checkout('FETCH_HEAD');
     signal?.throwIfAborted();
   } catch (error) {
+    signal?.throwIfAborted();
     const redactedErrorMessage = redactUrlCredentials(getErrorMessage(error));
     throw new Error(
       `Failed to clone Git repository from ${redactedSource} ${redactedErrorMessage}`,

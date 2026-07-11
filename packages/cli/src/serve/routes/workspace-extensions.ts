@@ -330,13 +330,7 @@ export function registerWorkspaceExtensionRoutes(
       const ctrl = resolve(req, res, true);
       if (!ctrl) return;
       try {
-        if (
-          !ctrl.validateExtensionMutationClient(
-            req,
-            res,
-            `POST ${base}/install`,
-          )
-        ) {
+        if (!ctrl.validateExtensionMutationClient(req, res)) {
           return;
         }
         const body = safeBody(req);
@@ -478,13 +472,7 @@ export function registerWorkspaceExtensionRoutes(
         let timer: ReturnType<typeof setTimeout> | undefined;
         let releaseOperationSlot: (() => void) | undefined;
         try {
-          if (
-            !ctrl.validateExtensionMutationClient(
-              req,
-              res,
-              `POST ${base}/check-updates`,
-            )
-          ) {
+          if (!ctrl.validateExtensionMutationClient(req, res)) {
             return;
           }
           releaseOperationSlot = ctrl.acquireOperationSlot(res);
@@ -529,13 +517,7 @@ export function registerWorkspaceExtensionRoutes(
       const ctrl = resolve(req, res, true);
       if (!ctrl) return;
       try {
-        if (
-          !ctrl.validateExtensionMutationClient(
-            req,
-            res,
-            `POST ${base}/refresh`,
-          )
-        ) {
+        if (!ctrl.validateExtensionMutationClient(req, res)) {
           return;
         }
         const releaseOperationSlot = ctrl.acquireOperationSlot(res);
@@ -559,12 +541,9 @@ export function registerWorkspaceExtensionRoutes(
         if (!ctrl) return;
         try {
           if (
-            !ctrl.validateExtensionMutationClient(
-              req,
-              res,
-              `POST ${base}/:name/enable`,
-              { requireClientId: false },
-            )
+            !ctrl.validateExtensionMutationClient(req, res, {
+              requireClientId: false,
+            })
           ) {
             return;
           }
@@ -614,12 +593,9 @@ export function registerWorkspaceExtensionRoutes(
         if (!ctrl) return;
         try {
           if (
-            !ctrl.validateExtensionMutationClient(
-              req,
-              res,
-              `POST ${base}/:name/disable`,
-              { requireClientId: false },
-            )
+            !ctrl.validateExtensionMutationClient(req, res, {
+              requireClientId: false,
+            })
           ) {
             return;
           }
@@ -668,13 +644,7 @@ export function registerWorkspaceExtensionRoutes(
         const ctrl = resolve(req, res, true);
         if (!ctrl) return;
         try {
-          if (
-            !ctrl.validateExtensionMutationClient(
-              req,
-              res,
-              `POST ${base}/:name/update`,
-            )
-          ) {
+          if (!ctrl.validateExtensionMutationClient(req, res)) {
             return;
           }
           const name = req.params['name'];
@@ -747,13 +717,7 @@ export function registerWorkspaceExtensionRoutes(
       const ctrl = resolve(req, res, true);
       if (!ctrl) return;
       try {
-        if (
-          !ctrl.validateExtensionMutationClient(
-            req,
-            res,
-            `DELETE ${base}/:name`,
-          )
-        ) {
+        if (!ctrl.validateExtensionMutationClient(req, res)) {
           return;
         }
         const name = req.params['name'];
@@ -864,7 +828,7 @@ export function registerWorkspaceExtensionRoutes(
     } = {},
   ): void => {
     if (
-      !primaryController.validateExtensionMutationClient(req, res, route, {
+      !primaryController.validateExtensionMutationClient(req, res, {
         requireClientId: false,
       })
     ) {
@@ -1256,7 +1220,7 @@ export function registerWorkspaceExtensionRoutes(
       if (!extensionId) return;
       const route = 'DELETE /extensions/:extensionId';
       if (
-        !primaryController.validateExtensionMutationClient(req, res, route, {
+        !primaryController.validateExtensionMutationClient(req, res, {
           requireClientId: false,
         })
       ) {

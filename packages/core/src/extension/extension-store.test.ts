@@ -612,6 +612,32 @@ describe('ExtensionStore', () => {
     expect(snapshot.extensions[identity.id]).toBeUndefined();
   });
 
+  it('allows uninstalling an extension from a snapshot with duplicate names', async () => {
+    const store = makeStore();
+    const identity = { id: 'b2'.repeat(32), name: 'demo' };
+    const duplicateId = 'b3'.repeat(32);
+    const destination = path.join(extensionsDir, identity.name);
+    await fsp.mkdir(destination);
+    const snapshot = await store.ensureInitialized([
+      identity,
+      { id: duplicateId, name: 'other' },
+    ]);
+    snapshot.extensions[duplicateId]!.name = identity.name;
+    await fsp.writeFile(
+      path.join(storeDir, 'state.json'),
+      JSON.stringify(snapshot),
+    );
+
+    const uninstalled = await store.commitArtifact({
+      operation: 'uninstall',
+      identity,
+      destinationDirectory: destination,
+    });
+
+    expect(uninstalled.extensions[identity.id]).toBeUndefined();
+    expect(uninstalled.extensions[duplicateId]?.name).toBe(identity.name);
+  });
+
   it('rolls back an artifact-swapped transaction before the commit point', async () => {
     const store = makeStore();
     const identity = { id: 'c1'.repeat(32), name: 'demo' };

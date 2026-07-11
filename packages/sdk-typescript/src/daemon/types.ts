@@ -2943,7 +2943,7 @@ export interface ExtensionOperationStatus {
   warnings?: Array<{
     workspaceId?: string;
     workspaceCwd: string;
-    code?: 'reconcile_slow';
+    code?: string;
     error: string;
   }>;
 }

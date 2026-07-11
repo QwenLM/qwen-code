@@ -347,6 +347,21 @@ describe('git extension helpers', () => {
         'Failed to clone Git repository from http://my-repo.com',
       );
     });
+
+    it('preserves abort errors raised after a git operation', async () => {
+      const installMetadata = {
+        source: 'http://my-repo.com',
+        type: 'git' as const,
+      };
+      const controller = new AbortController();
+      mockGit.clone.mockImplementationOnce(async () => {
+        controller.abort();
+      });
+
+      await expect(
+        cloneFromGit(installMetadata, '/dest', controller.signal),
+      ).rejects.toBe(controller.signal.reason);
+    });
   });
 
   describe('checkForExtensionUpdate', () => {

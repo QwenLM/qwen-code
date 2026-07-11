@@ -613,11 +613,7 @@ export class ExtensionManager {
       const config = getTelemetryConfig(currentDir, this.telemetrySettings);
       logExtensionEnable(config, new ExtensionEnableEvent(name, scope));
       this.applyStoreActivation(snapshot);
-      await this.refreshTools().catch((error) => {
-        debugLogger.warn(
-          `Extension "${name}" was enabled, but runtime refresh failed: ${getErrorMessage(error)}`,
-        );
-      });
+      await this.refreshToolsAfterActivation(name);
       return snapshot;
     } finally {
       endMutation();
@@ -666,11 +662,7 @@ export class ExtensionManager {
       }
       logExtensionDisable(config, new ExtensionDisableEvent(name, scope));
       this.applyStoreActivation(snapshot);
-      await this.refreshTools().catch((error) => {
-        debugLogger.warn(
-          `Extension "${name}" was disabled, but runtime refresh failed: ${getErrorMessage(error)}`,
-        );
-      });
+      await this.refreshToolsAfterActivation(name);
       return snapshot;
     } finally {
       endMutation();

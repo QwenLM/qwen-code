@@ -131,7 +131,6 @@ export interface ExtensionsController {
   validateExtensionMutationClient(
     req: Request,
     res: Response,
-    route: string,
     opts?: { requireClientId?: boolean },
   ): boolean;
   runQueuedExtensionMutation(
@@ -213,7 +212,6 @@ export function createExtensionsController(
   const validateExtensionMutationClient = (
     req: Request,
     res: Response,
-    route: string,
     opts: { requireClientId?: boolean } = {},
   ): boolean => {
     const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);

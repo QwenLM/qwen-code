@@ -370,15 +370,17 @@ export class ExtensionStore {
       if (input.operation === 'install' && !input.initialActivation) {
         throw new Error('Install requires an initial activation.');
       }
-      const nameConflict = Object.entries(snapshot.extensions).find(
-        ([extensionId, policy]) =>
-          extensionId !== input.identity.id &&
-          policy.name.toLowerCase() === input.identity.name.toLowerCase(),
-      );
-      if (nameConflict) {
-        throw new ExtensionConflictError(
-          `Extension name "${input.identity.name}" conflicts with an installed extension.`,
+      if (input.operation !== 'uninstall') {
+        const nameConflict = Object.entries(snapshot.extensions).find(
+          ([extensionId, policy]) =>
+            extensionId !== input.identity.id &&
+            policy.name.toLowerCase() === input.identity.name.toLowerCase(),
         );
+        if (nameConflict) {
+          throw new ExtensionConflictError(
+            `Extension name "${input.identity.name}" conflicts with an installed extension.`,
+          );
+        }
       }
 
       const currentPolicy = snapshot.extensions[input.identity.id];
