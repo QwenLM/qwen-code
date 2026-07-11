@@ -9,11 +9,17 @@ import {
   DaemonSessionProvider,
   useConnection,
   useSessions,
+  type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
 import { ChatPane } from './ChatPane';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MAX_SPLIT_PANES } from '../utils/splitUrl';
+import type {
+  TurnOutputKind,
+  TurnOutputOpenRequest,
+} from './artifacts/TurnOutputs';
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
@@ -36,6 +42,13 @@ export interface SplitViewProps {
   /** Leave the split view (back to the single-session chat). */
   onExit: () => void;
   onError?: (error: unknown, fallback: string) => void;
+  onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onPaneArtifactsChange?: (
+    sessionId: string,
+    artifacts: readonly DaemonSessionArtifact[],
+    workspaceActions: DaemonWorkspaceActions,
+  ) => void;
+  messageTurnOutputs?: readonly TurnOutputKind[];
   /**
    * Bumped by the parent whenever the session list changes elsewhere (create /
    * delete / rename). The "add pane" picker reloads on a change so it never
@@ -56,6 +69,9 @@ export function SplitView({
   onPanesChange,
   onExit,
   onError,
+  onRightPanelOpen,
+  onPaneArtifactsChange,
+  messageTurnOutputs,
   sessionListReloadToken,
 }: SplitViewProps) {
   const { t } = useI18n();
@@ -325,6 +341,9 @@ export function SplitView({
                     title={titleById.get(sessionId)}
                     onClose={() => removePane(sessionId)}
                     onError={onError}
+                    onRightPanelOpen={onRightPanelOpen}
+                    onPaneArtifactsChange={onPaneArtifactsChange}
+                    messageTurnOutputs={messageTurnOutputs}
                   />
                 </DaemonSessionProvider>
               </ErrorBoundary>
