@@ -687,6 +687,7 @@ export class DaemonClient {
       body?: unknown;
       clientId?: string;
       timeoutMs?: number;
+      mode?: 'transport' | 'rest';
     } = {},
   ): Promise<T> {
     return await this.jsonRequest<T>(
@@ -3619,6 +3620,28 @@ export class WorkspaceDaemonClient {
   ): Promise<DaemonSessionSummary[]> {
     const page = await this.listWorkspaceSessionsPage(options);
     return page.sessions;
+  }
+
+  /**
+   * Read one page from an active persisted session transcript in this
+   * workspace.
+   * The daemon performs replay locally without attaching to the session or
+   * starting ACP. This method always uses native REST transport.
+   */
+  getSessionTranscriptPage(
+    sessionId: string,
+    opts: DaemonSessionTranscriptPageOptions = {},
+  ): Promise<DaemonSessionTranscriptPage> {
+    const query = new URLSearchParams();
+    if (opts.cursor !== undefined) query.set('cursor', opts.cursor);
+    if (opts.limit !== undefined) query.set('limit', String(opts.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : '';
+    return this.client.workspaceJsonRequest<DaemonSessionTranscriptPage>(
+      this.workspaceSelector,
+      `/session/${urlEncode(sessionId)}/transcript${suffix}`,
+      'GET /workspaces/:workspace/session/:id/transcript',
+      { clientId: opts.clientId, mode: 'rest' },
+    );
   }
 
   listSessionGroups(): Promise<DaemonSessionGroupCatalog> {

@@ -15,7 +15,7 @@ import type {
   Content,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
-import type { SessionContext } from './types.js';
+import type { SessionEmitterContext } from './types.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
 import { getToolResultCallId } from '../../utils/chat-record-tool-call-id.js';
@@ -53,7 +53,7 @@ export interface HistoryReplayPageState {
  * have appeared during the original session.
  */
 export class HistoryReplayer {
-  private readonly ctx: SessionContext;
+  private readonly ctx: SessionEmitterContext;
   private readonly messageEmitter: MessageEmitter;
   private readonly toolCallEmitter: ToolCallEmitter;
   private readonly pendingReplayToolCalls = new Map<
@@ -61,7 +61,7 @@ export class HistoryReplayer {
     PendingReplayToolCall
   >();
 
-  constructor(ctx: SessionContext) {
+  constructor(ctx: SessionEmitterContext) {
     this.ctx = ctx;
     this.messageEmitter = new MessageEmitter(ctx);
     this.toolCallEmitter = new ToolCallEmitter(ctx);

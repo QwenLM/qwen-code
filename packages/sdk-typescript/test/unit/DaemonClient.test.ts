@@ -4609,6 +4609,50 @@ describe('DaemonClient', () => {
       }
     });
 
+    it('workspace transcript paging forces direct REST transport', async () => {
+      const body = {
+        v: 1 as const,
+        sessionId: 'session/1',
+        events: [],
+        nextCursor: 'next',
+        hasMore: true,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const transportFetch = vi.fn(async () => {
+        throw new Error('replaceable transport must not be used');
+      });
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await expect(
+        client
+          .workspaceById('workspace/id')
+          .getSessionTranscriptPage('session/1', {
+            cursor: 'cur 1',
+            limit: 500,
+            clientId: 'client-1',
+          }),
+      ).resolves.toEqual(body);
+
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspaces/workspace%2Fid/session/session%2F1/transcript?cursor=cur+1&limit=500',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
     it('workspaceByCwd deleteSessionGroup uses workspace-qualified group route', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, { deleted: true }),

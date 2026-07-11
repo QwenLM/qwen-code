@@ -309,6 +309,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_extensions',
   'session_branch',
   'workspace_qualified_rest_core',
+  'workspace_persisted_transcript',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -354,6 +355,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_extensions' &&
       f !== 'session_branch' &&
       f !== 'workspace_qualified_rest_core' &&
+      f !== 'workspace_persisted_transcript' &&
       f !== 'voice_transcribe',
   ),
   'workspace_settings',
@@ -388,6 +390,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'multi_workspace_sessions',
   'persistent_workspace_registration',
   'workspace_qualified_rest_core',
+  'workspace_persisted_transcript',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',

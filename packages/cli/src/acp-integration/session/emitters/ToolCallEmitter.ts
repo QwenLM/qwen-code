@@ -7,12 +7,13 @@
 import { BaseEmitter } from './BaseEmitter.js';
 import { PlanEmitter } from './PlanEmitter.js';
 import type {
-  SessionContext,
+  SessionEmitterContext,
   ToolCallStartParams,
   ToolCallResultParams,
   ResolvedToolMetadata,
   SubagentMeta,
 } from '../types.js';
+import { hasFullSessionContext } from '../types.js';
 import type {
   ToolCallContent,
   ToolCallLocation,
@@ -56,7 +57,7 @@ const KIND_MAP: Record<Kind, ToolKind> = {
 export class ToolCallEmitter extends BaseEmitter {
   private readonly planEmitter: PlanEmitter;
 
-  constructor(ctx: SessionContext) {
+  constructor(ctx: SessionEmitterContext) {
     super(ctx);
     this.planEmitter = new PlanEmitter(ctx);
   }
@@ -297,7 +298,18 @@ export class ToolCallEmitter extends BaseEmitter {
     toolName: string,
     args?: Record<string, unknown>,
   ): ResolvedToolMetadata {
-    const toolRegistry = this.config.getToolRegistry();
+    if (!hasFullSessionContext(this.ctx)) {
+      const description =
+        typeof args?.['description'] === 'string'
+          ? args['description'].trim()
+          : '';
+      return {
+        title: description ? `${toolName}: ${description}` : toolName,
+        locations: [],
+        kind: 'other',
+      };
+    }
+    const toolRegistry = this.ctx.config.getToolRegistry();
     const tool = toolRegistry.getTool(toolName);
 
     let title = tool?.displayName ?? toolName;

@@ -6,7 +6,11 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ToolCallEmitter } from './ToolCallEmitter.js';
-import type { SessionContext, SubagentMeta } from '../types.js';
+import type {
+  SessionContext,
+  SessionEmitterContext,
+  SubagentMeta,
+} from '../types.js';
 import type {
   Config,
   ToolRegistry,
@@ -543,6 +547,25 @@ describe('ToolCallEmitter', () => {
   });
 
   describe('resolveToolMetadata', () => {
+    it('uses persisted metadata without a Config in direct replay', () => {
+      const context: SessionEmitterContext = {
+        sessionId: 'persisted-session',
+        sendUpdate: vi.fn().mockResolvedValue(undefined),
+      };
+      const configless = new ToolCallEmitter(context);
+
+      expect(
+        configless.resolveToolMetadata('read_file', {
+          description: 'Read the persisted file',
+          path: '/untrusted/project/file.ts',
+        }),
+      ).toEqual({
+        title: 'read_file: Read the persisted file',
+        locations: [],
+        kind: 'other',
+      });
+    });
+
     it('should return defaults when tool not found', () => {
       const metadata = emitter.resolveToolMetadata('unknown_tool', {
         arg: 'value',

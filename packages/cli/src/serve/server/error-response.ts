@@ -6,8 +6,11 @@
 
 import {
   emitDaemonLog,
+  InvalidSessionTranscriptCursorError,
   recordDaemonBridgeError,
   recordDaemonError,
+  SessionTranscriptSnapshotUnavailableError,
+  SessionTranscriptTooLargeError,
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
@@ -148,6 +151,31 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof InvalidSessionTranscriptCursorError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_transcript_cursor',
+    });
+    return;
+  }
+  if (err instanceof SessionTranscriptSnapshotUnavailableError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'transcript_snapshot_unavailable',
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+    });
+    return;
+  }
+  if (err instanceof SessionTranscriptTooLargeError) {
+    res.status(413).json({
+      error: err.message,
+      code: 'transcript_too_large',
+      sessionId: err.sessionId,
+      snapshotSize: err.snapshotSize,
+      maxBytes: err.maxBytes,
+    });
+    return;
+  }
   if (err instanceof WorkspaceInitConflictError) {
     // The target file already exists with non-
     // whitespace content and the caller did not pass `force: true`.

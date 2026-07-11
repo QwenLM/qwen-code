@@ -117,6 +117,15 @@ export function resolveDaemonTelemetryRoute(
   if (req.method === 'GET' && /^\/workspaces\/[^/]+\/sessions$/.test(path)) {
     return { route: 'GET /workspace/:id/sessions' };
   }
+  const workspaceTranscript = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/transcript$/,
+  );
+  if (workspaceTranscript?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/transcript',
+      sessionId: workspaceTranscript[1],
+    };
+  }
   const pluralWorkspacePrefix = /^\/workspaces\/[^/]+/;
   if (pluralWorkspacePrefix.test(path)) {
     const suffix = path.replace(pluralWorkspacePrefix, '/workspace');
