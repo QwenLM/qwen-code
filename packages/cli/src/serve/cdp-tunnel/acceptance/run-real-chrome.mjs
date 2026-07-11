@@ -102,6 +102,14 @@ const waitForJson = async (url, predicate, timeoutMs = 30_000) => {
   }
   throw new Error(`Timed out waiting for ${url}: ${lastError?.message || ''}`);
 };
+const waitFor = async (predicate, timeoutMs = 30_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+  }
+  throw new Error('Timed out waiting for condition');
+};
 const runScript = async (script, env) => {
   const child = spawnChild(process.execPath, [script], { env });
   const getOutput = collect(child);
@@ -116,6 +124,7 @@ const qwenHome = await mkdtemp(resolve(tmpdir(), 'qwen-chrome-e2e-'));
 await writeFile(resolve(qwenHome, 'settings.json'), '{}\n');
 let daemon;
 let fixtureServer;
+let getDaemonOutput = () => '';
 try {
   await assertPortFree(port);
   await assertPortFree(fixturePort);
@@ -131,7 +140,7 @@ try {
     throw new Error(`${error.message}\n${fixtureOutput()}`);
   });
 
-  const startDaemon = async ({ withAdapter }) => {
+  const startDaemon = async ({ withAdapter, waitForBridge = false }) => {
     const daemonEnv = { ...process.env, QWEN_HOME: qwenHome };
     if (withAdapter) daemonEnv.QWEN_CDP_MCP_COMMAND = adapter;
     else delete daemonEnv.QWEN_CDP_MCP_COMMAND;
@@ -151,7 +160,15 @@ try {
       },
     );
     const getOutput = collect(child);
+    getDaemonOutput = getOutput;
     await waitForJson(`${baseUrl}/health`, (value) => value.status === 'ok');
+    if (waitForBridge) {
+      await waitFor(() =>
+        getOutput().includes('registered as CDP bridge'),
+      ).catch((error) => {
+        throw new Error(`${error.message}\n${getOutput()}`);
+      });
+    }
     if (withAdapter) {
       await waitForJson(`${baseUrl}/workspace/mcp`, (value) =>
         value.servers?.some(
@@ -167,7 +184,7 @@ try {
     return child;
   };
 
-  daemon = await startDaemon({ withAdapter: false });
+  daemon = await startDaemon({ withAdapter: false, waitForBridge: true });
   await waitForJson(
     `${baseUrl}/capabilities`,
     (value) =>
@@ -182,16 +199,26 @@ try {
   await stop(daemon);
 
   daemon = await startDaemon({ withAdapter: true });
+  console.log('RUNTIME-MCP: PASS');
+  await stop(daemon);
+  daemon = await startDaemon({ withAdapter: true });
+  console.log('RUNTIME-MCP-RECONNECT: PASS');
+  await stop(daemon);
+
+  daemon = await startDaemon({ withAdapter: false, waitForBridge: true });
   const smokeEnv = {
     ...process.env,
     PORT: String(port),
     FIXTURE_URL: `http://127.0.0.1:${fixturePort}`,
     QWEN_CDP_MCP_COMMAND: adapter,
   };
-  await runScript(fullSmoke, smokeEnv);
+  await runScript(fullSmoke, smokeEnv).catch((error) => {
+    process.stderr.write(getDaemonOutput());
+    throw error;
+  });
 
   await stop(daemon);
-  daemon = await startDaemon({ withAdapter: true });
+  daemon = await startDaemon({ withAdapter: false, waitForBridge: true });
   await runScript(reconnectSmoke, smokeEnv);
   console.log('REAL-CHROME-E2E: PASS');
 } finally {
