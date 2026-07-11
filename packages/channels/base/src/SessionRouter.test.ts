@@ -1263,6 +1263,18 @@ describe('SessionRouter', () => {
   });
 
   describe('lazy recovery', () => {
+    it('rejects route restoration outside lazy recovery mode', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      expect(() => router.restoreRoutes()).toThrow(
+        'restoreRoutes requires lazy recovery mode',
+      );
+    });
+
     function createLazyRouter(persistPath: string, customBridge = bridge) {
       return new SessionRouter(customBridge, '/tmp', 'user', persistPath, {
         recoveryMode: 'lazy',

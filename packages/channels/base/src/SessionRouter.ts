@@ -521,6 +521,9 @@ export class SessionRouter {
   }
 
   restoreRoutes(): { restored: number; dropped: number } {
+    if (this.recoveryMode !== 'lazy') {
+      throw new Error('restoreRoutes requires lazy recovery mode');
+    }
     const persisted = this.readPersistedEntries();
     if (!persisted) return { restored: 0, dropped: 0 };
     this.dispose();
