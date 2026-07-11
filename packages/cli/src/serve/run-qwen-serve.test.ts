@@ -1939,6 +1939,10 @@ describe('runQwenServe runtime startup failures', () => {
     fs.mkdirSync(secondary);
     const canonicalPrimary = canonicalizeWorkspace(primary);
     const canonicalSecondary = canonicalizeWorkspace(secondary);
+    const missingPersistedWorkspace = path.join(tmpDir, 'missing-secondary');
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
@@ -1968,7 +1972,7 @@ describe('runQwenServe runtime startup failures', () => {
       read: vi.fn().mockResolvedValue({
         schemaVersion: 1,
         primaryWorkspace: canonicalPrimary,
-        workspaces: [canonicalSecondary],
+        workspaces: [missingPersistedWorkspace, canonicalSecondary],
       }),
     } as unknown as WorkspaceRegistrationStore;
 
@@ -1994,6 +1998,15 @@ describe('runQwenServe runtime startup failures', () => {
       expect(restoredCwds).toEqual([canonicalPrimary, canonicalSecondary]);
       expect(createBridge).toHaveBeenCalledTimes(2);
       expect(advertisedMaxTotalSessions).toBe(2);
+      expect(
+        stderrWrite.mock.calls.some(([message]) =>
+          String(message).includes(
+            `skipping persisted workspace registration ${JSON.stringify(
+              missingPersistedWorkspace,
+            )}`,
+          ),
+        ),
+      ).toBe(true);
     } finally {
       await handle.close();
     }

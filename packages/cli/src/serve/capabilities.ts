@@ -448,6 +448,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'workspace_qualified_acp',
+    // The plural routes are pre-mounted for workspaces registered after app
+    // creation, but the capability becomes meaningful only once a secondary
+    // runtime exists. Until then the qualified primary route is only an alias
+    // for the always-available legacy `/acp` surface.
     (toggles) =>
       toggles.acpHttpEnabled === true &&
       toggles.multiWorkspaceSessionsEnabled === true,
