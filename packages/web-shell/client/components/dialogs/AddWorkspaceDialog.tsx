@@ -9,6 +9,9 @@ interface AddWorkspaceDialogProps {
   onAdd: (cwd: string) => Promise<void>;
 }
 
+const HINT_ID = 'add-workspace-hint';
+const ERROR_ID = 'add-workspace-error';
+
 export function AddWorkspaceDialog({
   onClose,
   onAdd,
@@ -51,30 +54,48 @@ export function AddWorkspaceDialog({
   return (
     <DialogShell
       title={t('sidebar.addWorkspaceTitle')}
-      size="sm"
+      size="md"
       onClose={onClose}
     >
       <form className={dp('dialog-form')} onSubmit={handleSubmit}>
-        <div className={dp('dialog-form-row')}>
-          <label className={styles.label} htmlFor="add-workspace-path">
+        <div className={styles.field}>
+          <label htmlFor="add-workspace-path">
             {t('sidebar.addWorkspacePath')}
           </label>
           <input
             ref={inputRef}
             id="add-workspace-path"
             type="text"
-            className={styles.input}
             placeholder="/absolute/path/to/project"
             value={path}
-            onChange={(e) => setPath(e.target.value)}
+            onChange={(e) => {
+              setPath(e.target.value);
+              if (error) setError(null);
+            }}
             disabled={submitting}
+            autoCapitalize="off"
+            autoCorrect="off"
+            autoComplete="off"
+            spellCheck={false}
+            aria-describedby={error ? `${ERROR_ID} ${HINT_ID}` : HINT_ID}
+            aria-invalid={error ? true : undefined}
           />
+          <span className={styles.hint} id={HINT_ID}>
+            {t('sidebar.addWorkspaceHint')}
+          </span>
+          {error && (
+            <span className={styles.error} id={ERROR_ID} role="alert">
+              {error}
+            </span>
+          )}
         </div>
-        {error && <div className={styles.error}>{error}</div>}
-        <div className={dp('dialog-footer-actions')}>
+        <div
+          className={dp('dialog-footer-actions')}
+          style={{ paddingLeft: 0, paddingRight: 0 }}
+        >
           <button
             type="button"
-            className={styles.cancelButton}
+            className={dp('dialog-inline-button')}
             onClick={onClose}
             disabled={submitting}
           >
@@ -85,7 +106,9 @@ export function AddWorkspaceDialog({
             className={dp('dialog-primary-button')}
             disabled={submitting || !path.trim()}
           >
-            {submitting ? '...' : t('sidebar.addWorkspaceRegister')}
+            {submitting
+              ? t('sidebar.addWorkspaceAdding')
+              : t('sidebar.addWorkspaceRegister')}
           </button>
         </div>
       </form>
