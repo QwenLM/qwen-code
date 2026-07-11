@@ -96,7 +96,7 @@ Diff size is a bad proxy for review risk, because tests dominate it. Across this
 
 Territory fan-out is worth it when there is a lot of _risky_ code to divide, not a lot of _lines_. So the gate is `srcDiffLines > 500`, with a second clause `diffLines > 3200` as a delivery bound: past that point `ceil(diffLines / 400) + 4 > 12`, so chunking uses fewer agents than the twelve-agent topology anyway, and asking twelve agents each to read a diff that large dilutes all of them. On the 40-PR sample the second clause never fires; it exists for a changeset dominated by tests or generated files.
 
-Re-gating moves 6 of those 40 PRs from 3B back to 3A and costs 22 extra agents in total across all 40 — about 5%. It buys those six PRs ten review lenses on their production code instead of one.
+Re-gating moves 6 of those 40 PRs from 3B back to 3A and cost 22 extra agents in total across all 40 — about 5% — when measured under the earlier 10-agent 3A roster; under the current 12-agent roster the same six PRs cost 2 more each, ~34 extra (~7%). It buys those six PRs ten review lenses on their production code instead of one.
 
 Chunking itself is unchanged: the plan still tiles every line, tests and generated files included. Only the count of reviewers and their brief change. `heavy` is likewise restricted to `source` files — the invariant checklist asks about fields, timers, collections, and error taxonomies, and a rewritten test file has none of those.
 
@@ -448,6 +448,6 @@ With Fork + prompt cache sharing:
 - Verification and reverse audit agents inherit all prior findings naturally
 - Agent 6 personas can fork from a shared diff-loaded base, paying only the persona-framing delta
 
-**Estimated savings:** ~85-90% token reduction (~750-950K → ~85K) with zero quality impact. The savings ratio is now even more compelling than under the 5-agent design.
+**Estimated savings:** ~88-92% token reduction (~750-950K → ~80-88K) with zero quality impact. The savings ratio is now even more compelling than under the 5-agent design.
 
 **Why not implemented now:** Fork Subagent requires changes to the Qwen Code core (`AgentTool`, `forkSubagent.ts`, `CacheSafeParams`). This is a platform-level feature (~400 lines, ~5 days), not a /review-specific change. When available, /review should be updated to use fork instead of independent subagents.

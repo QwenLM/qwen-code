@@ -60,7 +60,9 @@ Step 3A: high, <=500 source lines: 12 parallel agents      [12+ LLM calls]
            |-- Agent 8: Diff-specialized finders (0-2, only when
            |     the diff's domain calls for them)
            '-- Agent 7: Build & Test (runs shell commands)
-Step 3B: high, >500 source lines: territory x dimension    [N+4..6+H calls]
+Step 3B: high, >500 source lines: territory x dimension    [N+4..6+3H calls]
+           (N chunks, 4-6 whole-diff agents, 3 invariant
+            agents per heavy file H)
            |-- 1 chunk agent per ~400 diff lines (all dimensions,
            |     its territory only, returns a coverage receipt)
            |-- 3 invariant agents per heavily-rewritten source
