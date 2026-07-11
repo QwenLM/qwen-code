@@ -1796,6 +1796,12 @@ const ZH: Messages = {
   'toolName.enter_worktree': '进入 Worktree',
   'toolName.exit_worktree': '退出 Worktree',
   'toolName.workflow': '工作流',
+  'toolName.team_plan_approval': '团队计划审批',
+  'toolName.loop_wakeup': '循环唤醒',
+  'toolName.create_sub_session': '创建子会话',
+  'toolName.read_mcp_resource': '读取 MCP 资源',
+  'toolName.artifact': '制品',
+  'toolName.record_artifact': '记录制品',
   // web-shell-only wire aliases (see TOOL_DISPLAY_NAMES in toolFormatting.ts)
   'toolName.bash': '运行命令',
   'toolName.shell': 'Shell 命令',
