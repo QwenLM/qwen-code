@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { WebShellApi } from './App';
 
 type StreamingState = 'idle' | 'responding';
 
@@ -29,6 +30,7 @@ type ChatEditorTestProps = {
     images?: undefined,
     commitAccepted?: () => void,
   ) => boolean | void;
+  skills?: Array<{ name: string; description: string }>;
   isPreparing?: boolean;
   dialogOpen?: boolean;
 };
@@ -80,6 +82,7 @@ const {
       forkSession: vi.fn().mockResolvedValue({ launched: false }),
       sendShellCommand: vi.fn().mockResolvedValue(undefined),
       getStats: vi.fn().mockResolvedValue({}),
+      loadArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
       loadSession: vi.fn().mockResolvedValue(undefined),
     },
     mockWorkspaceActions: {
@@ -135,6 +138,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     onDismissFollowup: mockFollowup.onDismissFollowup,
   }),
   useSessionNotices: () => ({ notices: [], dismissNotice: vi.fn() }),
+  usePromptStatus: () => 'idle',
   useSettings: () => ({
     settings: [],
     setValue: vi.fn().mockResolvedValue(undefined),
@@ -145,7 +149,10 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useTranscriptBlocks: () => testState.blocks,
   useTranscriptStore: () => mockStore,
   useWorkspaceActions: () => mockWorkspaceActions,
-  useWorkspaceEventSignals: () => ({ extensionsVersion: 0 }),
+  useWorkspaceEventSignals: () => ({
+    artifactsVersion: 0,
+    extensionsVersion: 0,
+  }),
 }));
 
 vi.mock('@qwen-code/sdk/daemon', async (importOriginal) => ({
@@ -363,17 +370,42 @@ vi.doMock('./components/SplitView', async () => {
   return {
     SplitView: (props: {
       onExit?: () => void;
-      initialSessionIds?: string[];
+      sessionIds?: string[];
       onPanesChange?: (ids: string[]) => void;
-    }) =>
-      React.createElement(
+      onPaneArtifactsChange?: (
+        sessionId: string,
+        artifacts: unknown[],
+        workspaceActions: unknown,
+      ) => void;
+      onRightPanelOpen?: (request: unknown) => void;
+    }) => {
+      const paneActions = {
+        readWorkspaceFile: vi.fn().mockResolvedValue('<p>pane</p>'),
+      };
+      const artifact = {
+        id: 'pane-artifact',
+        kind: 'report',
+        storage: 'memory',
+        source: 'tool',
+        status: 'available',
+        title: 'Pane artifact',
+        updatedAt: '2026-07-10T00:00:00Z',
+        sizeBytes: 10,
+      };
+      const updatedArtifact = {
+        ...artifact,
+        title: 'Updated pane artifact',
+        updatedAt: '2026-07-10T00:01:00Z',
+        sizeBytes: 20,
+      };
+      return React.createElement(
         'div',
         { 'data-testid': 'split-view-mock' },
         // Surface the seed so a test can assert the App preserved / restored it.
         React.createElement(
           'span',
           { 'data-testid': 'split-initial' },
-          (props.initialSessionIds ?? []).join(','),
+          (props.sessionIds ?? []).join(','),
         ),
         // Simulate the real SplitView reporting its live pane set up to the App.
         React.createElement(
@@ -388,13 +420,71 @@ vi.doMock('./components/SplitView', async () => {
         React.createElement(
           'button',
           {
+            'data-testid': 'split-report-artifact',
+            type: 'button',
+            onClick: () =>
+              props.onPaneArtifactsChange?.(
+                'pane-session',
+                [artifact],
+                paneActions,
+              ),
+          },
+          'artifact',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-report-updated-artifact',
+            type: 'button',
+            onClick: () =>
+              props.onPaneArtifactsChange?.(
+                'pane-session',
+                [updatedArtifact],
+                paneActions,
+              ),
+          },
+          'updated artifact',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-clear-artifacts',
+            type: 'button',
+            onClick: () =>
+              props.onPaneArtifactsChange?.('pane-session', [], paneActions),
+          },
+          'clear artifacts',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-open-artifact',
+            type: 'button',
+            onClick: () =>
+              props.onRightPanelOpen?.({
+                id: 'artifact:pane-artifact:pane-session',
+                kind: 'artifact',
+                title: artifact.title,
+                turnId: 'turn-1',
+                artifactId: artifact.id,
+                artifact,
+                workspaceActions: paneActions,
+                previewContent: '<p>stale</p>',
+              }),
+          },
+          'open artifact',
+        ),
+        React.createElement(
+          'button',
+          {
             'data-testid': 'split-back',
             type: 'button',
             onClick: props.onExit,
           },
           'back',
         ),
-      ),
+      );
+    },
   };
 });
 // Capturing mock: stores the onRunPrompt handler (App's real runTaskManually)
@@ -443,6 +533,7 @@ const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 function renderApp(props: React.ComponentProps<typeof App> = {}): {
   container: HTMLElement;
   rerender: (nextProps?: React.ComponentProps<typeof App>) => void;
+  unmount: () => void;
 } {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -453,8 +544,15 @@ function renderApp(props: React.ComponentProps<typeof App> = {}): {
     });
   };
   doRender(props);
-  mounted.push({ root, container });
-  return { container, rerender: doRender };
+  const entry = { root, container };
+  mounted.push(entry);
+  const unmount = () => {
+    const index = mounted.indexOf(entry);
+    if (index >= 0) mounted.splice(index, 1);
+    act(() => root.unmount());
+    container.remove();
+  };
+  return { container, rerender: doRender, unmount };
 }
 
 async function flush(): Promise<void> {
@@ -581,6 +679,30 @@ afterEach(() => {
 });
 
 describe('App session callbacks', () => {
+  it('filters disabled skills from the web-shell skills list', async () => {
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          name: 'enabled-skill',
+          description: 'Enabled',
+          status: 'ok',
+        },
+        {
+          name: 'disabled-extension-skill',
+          description: 'Disabled',
+          status: 'disabled',
+        },
+      ],
+    });
+
+    renderApp();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'enabled-skill', description: 'Enabled' },
+    ]);
+  });
+
   it.each([404, 410])(
     'shows a missing-session empty state with a new-session action for %d',
     async (status) => {
@@ -1093,6 +1215,231 @@ describe('App session callbacks', () => {
     expect(messages?.closest('[aria-hidden="true"]')).not.toBeNull();
   });
 
+  it('syncs the split view from external session ids without the sidebar', async () => {
+    const { container, rerender } = renderApp({
+      sidebar: false,
+      splitSessionIds: ['s1'],
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="sidebar"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1');
+
+    rerender({ sidebar: false, splitSessionIds: ['s1', 's2'] });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1,s2');
+
+    rerender({ sidebar: false, splitSessionIds: [] });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+
+    rerender({ sidebar: false, splitSessionIds: ['s1', 's2'] });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1,s2');
+  });
+
+  it('dedupes and caps external split session ids', async () => {
+    const { container } = renderApp({
+      sidebar: false,
+      splitSessionIds: ['s1', 's1', 's2', 's3', 's4', 's5', 's6', 's7'],
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1,s2,s3,s4,s5,s6');
+  });
+
+  it('does not reopen controlled split view when the same ids get a new array reference', async () => {
+    const { container, rerender } = renderApp({
+      sidebar: false,
+      splitSessionIds: ['s1', 's2'],
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="inline-panel"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Session Overview');
+
+    rerender({ sidebar: false, splitSessionIds: ['s1', 's2'] });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="inline-panel"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Session Overview');
+  });
+
+  it('notifies external callers when split session ids change inside WebShell', async () => {
+    const onSplitSessionIdsChange = vi.fn();
+    const { container, rerender } = renderApp({
+      sidebar: false,
+      splitSessionIds: ['s1'],
+      onSplitSessionIdsChange,
+    });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-report-panes"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(onSplitSessionIdsChange).toHaveBeenCalledWith(['s1', 's2', 's3']);
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1');
+
+    rerender({
+      sidebar: false,
+      splitSessionIds: ['s1', 's2', 's3'],
+      onSplitSessionIdsChange,
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1,s2,s3');
+  });
+
+  it('notifies external callers when uncontrolled split session ids change', async () => {
+    const onSplitSessionIdsChange = vi.fn();
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({
+      sidebar: false,
+      onSplitSessionIdsChange,
+      shellRef,
+    });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSplitView();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-report-panes"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(onSplitSessionIdsChange).toHaveBeenCalledWith(['s1', 's2', 's3']);
+  });
+
+  it('opens the split view from the external shell ref like the sidebar button', async () => {
+    let shellApi: WebShellApi | null = null;
+    const { container } = renderApp({
+      sidebar: false,
+      shellRef: (api) => {
+        shellApi = api;
+      },
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="sidebar"]')).toBeNull();
+
+    await act(async () => {
+      shellApi?.openSplitView();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('session-1');
+  });
+
+  it('requests controlled split ids from the external shell ref', async () => {
+    const onSplitSessionIdsChange = vi.fn();
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({
+      sidebar: false,
+      splitSessionIds: [],
+      onSplitSessionIdsChange,
+      shellRef,
+    });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSplitView();
+      await Promise.resolve();
+    });
+
+    expect(onSplitSessionIdsChange).toHaveBeenCalledWith(['session-1']);
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+  });
+
+  it('assigns and clears the external shell object ref', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { unmount } = renderApp({
+      sidebar: false,
+      shellRef,
+    });
+    await flush();
+
+    expect(shellRef.current).not.toBeNull();
+
+    unmount();
+
+    expect(shellRef.current).toBeNull();
+  });
+
+  it('opens the Session Overview from the external shell ref like the sidebar button', async () => {
+    let shellApi: WebShellApi | null = null;
+    const { container } = renderApp({
+      sidebar: false,
+      shellRef: (api) => {
+        shellApi = api;
+      },
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="sidebar"]')).toBeNull();
+
+    await act(async () => {
+      shellApi?.openSessionOverview();
+      await Promise.resolve();
+    });
+
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    expect(panel).not.toBeNull();
+    expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
+  });
+
   it('returns to the Session Overview when leaving the split view', async () => {
     const { container } = renderApp();
     await flush();
@@ -1122,6 +1469,33 @@ describe('App session callbacks', () => {
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
   });
 
+  it('notifies controlled callers when leaving the split view', async () => {
+    const onSplitSessionIdsChange = vi.fn();
+    const { container } = renderApp({
+      sidebar: false,
+      splitSessionIds: ['s1', 's2'],
+      onSplitSessionIdsChange,
+    });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(onSplitSessionIdsChange).toHaveBeenCalledWith([]);
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="inline-panel"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Session Overview');
+  });
+
   it('preserves the pane set when leaving the split view and reopening it', async () => {
     const { container } = renderApp();
     await flush();
@@ -1148,7 +1522,9 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
-    expect(container.querySelector('[data-testid="split-view-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
 
     // …and reopen it from the toolbar. The reported panes must be restored, not
     // reset to empty / the current session (the regression this guards).
@@ -1163,6 +1539,93 @@ describe('App session callbacks', () => {
     ).toBe('s1,s2,s3');
   });
 
+  it('reconciles split pane artifact snapshots in the right panel', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-report-artifact"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-open-artifact"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Pane artifact');
+    expect(container.textContent).toContain('10 B');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-report-updated-artifact"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('20 B');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-clear-artifacts"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Artifact not found.');
+  });
+
+  it('clears split pane artifact snapshots when switching sessions', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-report-artifact"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-open-artifact"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Pane artifact');
+
+    await act(async () => {
+      mockConnection.sessionId = 'session-2';
+      rerender();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toContain('Pane artifact');
+  });
+
   it('enters the split view from a ?split= URL and consumes the param', async () => {
     window.history.pushState({}, '', '/?split=s1,s2');
     try {
@@ -1172,6 +1635,23 @@ describe('App session callbacks', () => {
         container.querySelector('[data-testid="split-view-page"]'),
       ).not.toBeNull();
       // The one-shot param is stripped so a reload/exit doesn't force it back.
+      expect(window.location.search).toBe('');
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
+  it('lets controlled split session ids take precedence over a ?split= URL', async () => {
+    window.history.pushState({}, '', '/?split=s1,s2');
+    try {
+      const { container } = renderApp({
+        sidebar: false,
+        splitSessionIds: ['s3'],
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-initial"]')?.textContent,
+      ).toBe('s3');
       expect(window.location.search).toBe('');
     } finally {
       window.history.pushState({}, '', '/');
@@ -1301,6 +1781,49 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
     // Shrinking below the large-screen breakpoint folds the split back to chat.
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+  });
+
+  it('notifies controlled callers when a screen shrink closes the split view', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('min-width')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    const onSplitSessionIdsChange = vi.fn();
+
+    const { container } = renderApp({
+      sidebar: false,
+      splitSessionIds: ['s1', 's2'],
+      onSplitSessionIdsChange,
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      large = false;
+      changeHandler?.({ matches: false });
+      await Promise.resolve();
+    });
+
+    expect(onSplitSessionIdsChange).toHaveBeenCalledWith([]);
     expect(
       container.querySelector('[data-testid="split-view-page"]'),
     ).toBeNull();

@@ -5,7 +5,12 @@
  */
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { getInstallationInfo, PackageManager } from './installationInfo.js';
+import {
+  formatUpdateInstructions,
+  getInstallationInfo,
+  PackageManager,
+  resolveUpdateCommand,
+} from './installationInfo.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
@@ -668,5 +673,70 @@ describe('getInstallationInfo', () => {
     // No updateCommand -> the auto-updater won't attempt an unattended sudo.
     expect(info.updateCommand).toBeUndefined();
     expect(info.updateMessage).toContain('sudo');
+  });
+});
+
+describe('resolveUpdateCommand', () => {
+  it('replaces @latest with the pinned stable version', () => {
+    expect(
+      resolveUpdateCommand('npm i -g @qwen-code/qwen-code@latest', '1.2.3'),
+    ).toBe('npm i -g @qwen-code/qwen-code@1.2.3');
+  });
+
+  it('replaces @latest with @nightly for nightly versions', () => {
+    expect(
+      resolveUpdateCommand(
+        'npm i -g @qwen-code/qwen-code@latest',
+        '1.2.3-nightly.20250101',
+      ),
+    ).toBe('npm i -g @qwen-code/qwen-code@nightly');
+  });
+});
+
+describe('formatUpdateInstructions', () => {
+  it('formats package-manager update commands', () => {
+    expect(
+      formatUpdateInstructions(
+        {
+          packageManager: PackageManager.NPM,
+          isGlobal: true,
+          updateCommand: 'npm i -g @qwen-code/qwen-code@latest',
+        },
+        '1.2.3',
+      ),
+    ).toEqual([
+      'Run the following to update:',
+      '  npm i -g @qwen-code/qwen-code@1.2.3',
+    ]);
+  });
+
+  it('resolves @latest in updateMessage-only guidance for nightly versions', () => {
+    expect(
+      formatUpdateInstructions(
+        {
+          packageManager: PackageManager.NPM,
+          isGlobal: true,
+          updateMessage:
+            'Update requires sudo. Please run: sudo npm i -g @qwen-code/qwen-code@latest',
+        },
+        '1.2.3-nightly.20250101',
+      ),
+    ).toEqual([
+      'Update requires sudo. Please run:',
+      '  sudo npm i -g @qwen-code/qwen-code@nightly',
+    ]);
+  });
+
+  it('keeps updateMessage-only guidance as-is when no formatter applies', () => {
+    expect(
+      formatUpdateInstructions(
+        {
+          packageManager: PackageManager.NPX,
+          isGlobal: true,
+          updateMessage: 'Running via npx, update not applicable.',
+        },
+        '1.2.3',
+      ),
+    ).toEqual(['Running via npx, update not applicable.']);
   });
 });

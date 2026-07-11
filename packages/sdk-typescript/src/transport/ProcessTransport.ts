@@ -29,6 +29,7 @@ export class ProcessTransport implements Transport {
   private inputClosed = false;
   private abortController: AbortController;
   private abortHandler: (() => void) | null = null;
+  private killEscalationTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: TransportOptions) {
     this.options = options;
@@ -211,8 +212,41 @@ export class ProcessTransport implements Transport {
   }
 
   private killChildProcess(): void {
-    if (this.childProcess && !this.childProcess.killed) {
+    this.requestChildProcessExit();
+  }
+
+  private requestChildProcessExit(): void {
+    if (!this.childProcess || this.childProcess.exitCode !== null) {
+      return;
+    }
+
+    if (!this.childProcess.killed) {
       this.childProcess.kill('SIGTERM');
+    }
+
+    this.scheduleChildProcessKillEscalation(this.childProcess);
+  }
+
+  private scheduleChildProcessKillEscalation(childProcess: ChildProcess): void {
+    this.clearKillEscalationTimer();
+
+    this.killEscalationTimer = setTimeout(() => {
+      if (
+        this.childProcess === childProcess &&
+        childProcess.exitCode === null
+      ) {
+        childProcess.kill('SIGKILL');
+      }
+      this.killEscalationTimer = null;
+    }, 5000);
+
+    this.killEscalationTimer.unref?.();
+  }
+
+  private clearKillEscalationTimer(): void {
+    if (this.killEscalationTimer) {
+      clearTimeout(this.killEscalationTimer);
+      this.killEscalationTimer = null;
     }
   }
 
@@ -251,6 +285,7 @@ export class ProcessTransport implements Transport {
     });
 
     this.childProcess.on('close', (code, signal) => {
+      this.clearKillEscalationTimer();
       this.unregisterForProcessExit();
       this.ready = false;
       if (this.abortController.signal.aborted) {
@@ -428,14 +463,7 @@ export class ProcessTransport implements Transport {
       this.abortHandler = null;
     }
 
-    if (this.childProcess && !this.childProcess.killed) {
-      this.childProcess.kill('SIGTERM');
-      setTimeout(() => {
-        if (this.childProcess && !this.childProcess.killed) {
-          this.childProcess.kill('SIGKILL');
-        }
-      }, 5000);
-    }
+    this.requestChildProcessExit();
 
     this.ready = false;
     this.closed = true;

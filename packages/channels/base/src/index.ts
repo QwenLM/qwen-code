@@ -7,6 +7,8 @@ export type {
   ChannelLoopToolCreateInput,
   ChannelLoopToolHandler,
   ChannelLoopToolResult,
+  PermissionRequestEvent,
+  PermissionResolvedEvent,
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
@@ -34,6 +36,17 @@ export type {
   ChannelLoopSchedulerOptions,
   ChannelLoopRunner,
 } from './ChannelLoopScheduler.js';
+export {
+  buildChannelWebhookPrompt,
+  resolveChannelWebhookTarget,
+} from './ChannelWebhookTask.js';
+export type {
+  ChannelWebhookConfig,
+  ChannelWebhookRunOptions,
+  ChannelWebhookSourceConfig,
+  ChannelWebhookTargetConfig,
+  ChannelWebhookTask,
+} from './ChannelWebhookTask.js';
 export { ChannelLoopStore } from './ChannelLoopStore.js';
 export type {
   ChannelLoop,
@@ -46,6 +59,8 @@ export { PairingStore } from './PairingStore.js';
 export type { PairingRequest } from './PairingStore.js';
 export { GroupGate } from './GroupGate.js';
 export type { GroupCheckResult } from './GroupGate.js';
+export { DmGate } from './DmGate.js';
+export type { DmCheckResult } from './DmGate.js';
 export { SenderGate } from './SenderGate.js';
 export type { SenderCheckResult } from './SenderGate.js';
 export { SessionRouter } from './SessionRouter.js';
@@ -73,6 +88,7 @@ export type {
   ChannelTaskLifecycleEvent,
   ChannelType,
   DispatchMode,
+  DmPolicy,
   Envelope,
   GroupConfig,
   GroupPolicy,

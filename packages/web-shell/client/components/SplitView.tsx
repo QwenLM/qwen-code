@@ -9,11 +9,17 @@ import {
   DaemonSessionProvider,
   useConnection,
   useSessions,
+  type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
 import { ChatPane } from './ChatPane';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MAX_SPLIT_PANES } from '../utils/splitUrl';
+import type {
+  TurnOutputKind,
+  TurnOutputOpenRequest,
+} from './artifacts/TurnOutputs';
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
@@ -23,8 +29,8 @@ import styles from './SplitView.module.css';
 const MAX_PANES = MAX_SPLIT_PANES;
 
 export interface SplitViewProps {
-  /** Sessions to open initially (e.g. the selection from the overview). */
-  initialSessionIds?: string[];
+  /** Sessions to show in the split view. */
+  sessionIds?: string[];
   /**
    * Report the live pane set (after every add / remove) up to the parent so it
    * survives this view unmounting. Switching away from the split and back must
@@ -36,6 +42,13 @@ export interface SplitViewProps {
   /** Leave the split view (back to the single-session chat). */
   onExit: () => void;
   onError?: (error: unknown, fallback: string) => void;
+  onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onPaneArtifactsChange?: (
+    sessionId: string,
+    artifacts: readonly DaemonSessionArtifact[],
+    workspaceActions: DaemonWorkspaceActions,
+  ) => void;
+  messageTurnOutputs?: readonly TurnOutputKind[];
   /**
    * Bumped by the parent whenever the session list changes elsewhere (create /
    * delete / rename). The "add pane" picker reloads on a change so it never
@@ -52,10 +65,13 @@ export interface SplitViewProps {
  * fight over which session an approval or Enter belongs to.
  */
 export function SplitView({
-  initialSessionIds,
+  sessionIds,
   onPanesChange,
   onExit,
   onError,
+  onRightPanelOpen,
+  onPaneArtifactsChange,
+  messageTurnOutputs,
   sessionListReloadToken,
 }: SplitViewProps) {
   const { t } = useI18n();
@@ -72,10 +88,18 @@ export function SplitView({
       ? { view: 'organized' as const, group: 'all' }
       : {}),
   });
+  const sessionIdsControlled = sessionIds !== undefined;
+  const normalizedSessionIds = useMemo(
+    () =>
+      Array.from(new Set((sessionIds ?? []).filter(Boolean))).slice(
+        0,
+        MAX_PANES,
+      ),
+    [sessionIds],
+  );
 
   const [paneIds, setPaneIds] = useState<string[]>(() => {
-    const seed = Array.from(new Set((initialSessionIds ?? []).filter(Boolean)));
-    if (seed.length > 0) return seed.slice(0, MAX_PANES);
+    if (normalizedSessionIds.length > 0) return normalizedSessionIds;
     return currentSessionId ? [currentSessionId] : [];
   });
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -88,6 +112,18 @@ export function SplitView({
       ? crypto.randomUUID()
       : Math.random().toString(36).slice(2),
   );
+
+  useEffect(() => {
+    if (!sessionIdsControlled) return;
+    setPaneIds((prev) =>
+      prev.length === normalizedSessionIds.length &&
+      prev.every((id, index) => id === normalizedSessionIds[index])
+        ? prev
+        : normalizedSessionIds,
+    );
+  }, [normalizedSessionIds, sessionIdsControlled]);
+  const paneIdsRef = useRef(paneIds);
+  paneIdsRef.current = paneIds;
 
   // Dismiss the "add session" picker on Escape or a click outside it.
   useEffect(() => {
@@ -149,14 +185,26 @@ export function SplitView({
     return map;
   }, [sessions]);
 
-  const addPane = useCallback((sessionId: string) => {
-    setPaneIds((prev) =>
-      prev.includes(sessionId) || prev.length >= MAX_PANES
-        ? prev
-        : [...prev, sessionId],
-    );
-    setPickerOpen(false);
-  }, []);
+  const addPane = useCallback(
+    (sessionId: string) => {
+      const currentPaneIds = paneIdsRef.current;
+      if (
+        currentPaneIds.includes(sessionId) ||
+        currentPaneIds.length >= MAX_PANES
+      ) {
+        setPickerOpen(false);
+        return;
+      }
+      const next = [...currentPaneIds, sessionId];
+      if (sessionIdsControlled) {
+        onPanesChange?.(next);
+      } else {
+        setPaneIds(next);
+      }
+      setPickerOpen(false);
+    },
+    [onPanesChange, sessionIdsControlled],
+  );
 
   // Closing the last pane is a natural "I'm done" gesture — return to the
   // overview instead of stranding the user on an empty split. Guarded so an
@@ -172,14 +220,24 @@ export function SplitView({
 
   // Mirror the live pane set up to the parent so it outlives this component
   // unmounting when the user switches views. On re-entry the parent reseeds
-  // `initialSessionIds` from it, restoring the exact panes instead of clearing.
+  // `sessionIds` from it, restoring the exact panes instead of clearing.
   useEffect(() => {
-    onPanesChange?.(paneIds);
-  }, [paneIds, onPanesChange]);
+    if (!sessionIdsControlled) onPanesChange?.(paneIds);
+  }, [paneIds, onPanesChange, sessionIdsControlled]);
 
-  const removePane = useCallback((sessionId: string) => {
-    setPaneIds((prev) => prev.filter((id) => id !== sessionId));
-  }, []);
+  const removePane = useCallback(
+    (sessionId: string) => {
+      const currentPaneIds = paneIdsRef.current;
+      if (!currentPaneIds.includes(sessionId)) return;
+      const next = currentPaneIds.filter((id) => id !== sessionId);
+      if (sessionIdsControlled) {
+        onPanesChange?.(next);
+      } else {
+        setPaneIds(next);
+      }
+    },
+    [onPanesChange, sessionIdsControlled],
+  );
 
   const available = useMemo(
     () => sessions.filter((session) => !paneIds.includes(session.sessionId)),
@@ -283,6 +341,9 @@ export function SplitView({
                     title={titleById.get(sessionId)}
                     onClose={() => removePane(sessionId)}
                     onError={onError}
+                    onRightPanelOpen={onRightPanelOpen}
+                    onPaneArtifactsChange={onPaneArtifactsChange}
+                    messageTurnOutputs={messageTurnOutputs}
                   />
                 </DaemonSessionProvider>
               </ErrorBoundary>

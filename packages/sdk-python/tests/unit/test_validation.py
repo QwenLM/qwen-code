@@ -275,3 +275,13 @@ def test_accepts_fork_session_with_resume() -> None:
             resume="123e4567-e89b-12d3-a456-426614174000",
         )
     )
+
+
+def test_rejects_invalid_effort() -> None:
+    with pytest.raises(ValidationError, match="Invalid effort"):
+        validate_query_options(QueryOptions(effort="invalid"))  # type: ignore[arg-type]
+
+
+def test_accepts_valid_effort() -> None:
+    for effort in ("low", "medium", "high", "xhigh", "max"):
+        validate_query_options(QueryOptions(effort=effort))  # type: ignore[arg-type]

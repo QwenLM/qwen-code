@@ -99,7 +99,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
 /** Alias for consumers who prefer a standalone naming style. */
 export const StandaloneWebShell = WebShellWithProviders;
 
-export type { WebShellProps, WebShellSidebarOptions } from './App';
+export type { WebShellApi, WebShellProps, WebShellSidebarOptions } from './App';
 export type { ToastTone } from './components/ToastHost';
 export type { WebShellLanguage } from './i18n';
 export type {
@@ -115,8 +115,10 @@ export type {
   ToolHeaderExtraRenderer,
   ToolHeaderExtraRenderInfo,
   ToolHeaderKind,
+  AssistantTurnFooterRenderer,
   UserMessageContentRenderer,
   UserMessageContentRenderInfo,
+  ComposerHeaderRenderer,
   ComposerToolbarStartRenderer,
   ComposerToolbarRightRenderer,
   WebShellComposerToolbarRenderInfo,
@@ -124,10 +126,17 @@ export type {
   WebShellComposerToolbarRightRenderInfo,
   WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
+  WebShellBottomStatusItem,
   WebShellCodeBlockRenderInfo,
   WebShellMarkdownCustomization,
+  WebShellAssistantMessageInfo,
+  WebShellAssistantTurnFooterRenderInfo,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
+export type {
+  TurnOutputKind,
+  TurnOutputOpenRequest,
+} from './components/artifacts/TurnOutputs';
 export {
   ECHARTS_FULLDATA_LANGUAGE,
   EchartsFullDataBlock,

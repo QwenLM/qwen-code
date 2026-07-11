@@ -55,6 +55,11 @@ export type {
 } from '@qwen-code/acp-bridge';
 
 export type {
+  BridgeFreshSessionAdmission,
+  BridgeFreshSessionAdmissionContext,
+  BridgeFreshSessionReservation,
+  BridgeSessionLifecycle,
+  BridgeSessionLifecycleEvent,
   BridgeOptions,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge/bridgeOptions';
@@ -67,6 +72,8 @@ export type {
   BridgeRestoreSessionRequest,
   BridgeSessionState,
   BridgeRestoredSession,
+  BridgeSessionTranscriptPage,
+  BridgeSessionTranscriptPageRequest,
   BridgeSessionSummary,
   SessionMetadataUpdate,
   BridgeClientRequestContext,
@@ -110,6 +117,7 @@ export {
   McpServerRestartFailedError,
   SessionBusyError,
   InvalidRewindTargetError,
+  TotalSessionLimitExceededError,
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
   // Multi-client permission coordination errors.
   CancelSentinelCollisionError,
@@ -124,4 +132,7 @@ export {
   canonicalizeWorkspace,
 } from '@qwen-code/acp-bridge/workspacePaths';
 
-export { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
+export {
+  SessionArtifactAuthorizationError,
+  SessionArtifactValidationError,
+} from '@qwen-code/acp-bridge/sessionArtifacts';

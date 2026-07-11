@@ -14,6 +14,7 @@ from .types import (
 
 _VALID_PERMISSION_MODES = {"default", "plan", "auto-edit", "yolo"}
 _VALID_AUTH_TYPES = {"openai", "anthropic", "qwen-oauth", "gemini", "vertex-ai"}
+_VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 
 _RESERVED_CLI_FLAGS = frozenset(
@@ -94,6 +95,12 @@ def validate_query_options(options: QueryOptions) -> None:
         raise ValidationError(
             f"Invalid auth_type: {options.auth_type!r}. "
             "Expected one of: openai, anthropic, qwen-oauth, gemini, vertex-ai."
+        )
+
+    if options.effort and options.effort not in _VALID_EFFORTS:
+        raise ValidationError(
+            f"Invalid effort: {options.effort!r}. "
+            "Expected one of: low, medium, high, xhigh, max."
         )
 
     _validate_optional_callable(options.can_use_tool, _validate_can_use_tool_callable)

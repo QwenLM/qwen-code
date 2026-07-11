@@ -15,6 +15,7 @@ import {
   useActions,
   useConnection,
   useSessions,
+  useWorkspace,
   useWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type {
@@ -25,6 +26,8 @@ import type {
 import { useI18n } from '../../i18n';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
+import { AddWorkspaceDialog } from '../dialogs/AddWorkspaceDialog';
+import { WorkspaceSection } from './WorkspaceSection';
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
@@ -35,6 +38,12 @@ const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const SIDEBAR_DEFAULT_WIDTH = 260;
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 420;
+const SIDEBAR_FOOTER_COMPACT_WIDTH = 344;
+const SIDEBAR_FOOTER_TIGHT_WIDTH = 250;
+const SIDEBAR_DRAG_VISUAL_MIN_WIDTH = 200;
+const SIDEBAR_COLLAPSE_DRAG_THRESHOLD = 56;
+const SIDEBAR_COLLAPSE_DRAG_WIDTH =
+  SIDEBAR_DRAG_VISUAL_MIN_WIDTH - SIDEBAR_COLLAPSE_DRAG_THRESHOLD;
 const ACTIVE_SESSION_POLL_INTERVAL_MS = 2000;
 const IDLE_SESSION_POLL_INTERVAL_MS = 30_000;
 const DIALOG_SESSION_LABEL_MAX_LENGTH = 96;
@@ -104,6 +113,12 @@ interface WebShellSidebarProps {
   onError: (error: unknown, fallback: string) => void;
   mobileOpen?: boolean;
   sessionListReloadToken?: number;
+  /**
+   * Phase 4: workspace cwd picked for the next new session (undefined =
+   * primary). Only meaningful on multi-workspace daemons.
+   */
+  selectedWorkspaceCwd?: string;
+  onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
 }
 
 function cx(...classes: Array<string | false | undefined>): string {
@@ -168,6 +183,13 @@ function getGroupColorClass(color: DaemonSessionGroupColor): string {
 
 function clampSidebarWidth(width: number): number {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width));
+}
+
+function clampSidebarVisualWidth(width: number): number {
+  return Math.min(
+    SIDEBAR_MAX_WIDTH,
+    Math.max(SIDEBAR_DRAG_VISUAL_MIN_WIDTH, width),
+  );
 }
 
 function readSidebarWidth(): number {
@@ -493,14 +515,20 @@ export function WebShellSidebar({
   onError,
   mobileOpen,
   sessionListReloadToken,
+  selectedWorkspaceCwd,
+  onSelectWorkspace,
 }: WebShellSidebarProps) {
   const { t } = useI18n();
   const connection = useConnection();
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
+  const workspace = useWorkspace();
   const organizationEnabled = Boolean(
     connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE),
   );
+  // Phase 4: registered workspaces on a multi-workspace daemon (absent or a
+  // single entry otherwise). Drives the new-session workspace picker.
+  const workspaces = workspace.capabilities?.workspaces ?? [];
   const {
     sessions,
     loading,
@@ -570,6 +598,9 @@ export function WebShellSidebar({
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
   const [projectExpanded, setProjectExpanded] = useState(true);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
+  const [workspaceSessionsReloadToken, setWorkspaceSessionsReloadToken] =
+    useState(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [isResizing, setIsResizing] = useState(false);
   const [tooltip, setTooltip] = useState<{
@@ -600,6 +631,9 @@ export function WebShellSidebar({
       ? `v${qwenCodeVersion}`
       : qwenCodeVersion
     : '';
+  const footerCompact =
+    !collapsed && sidebarWidth < SIDEBAR_FOOTER_COMPACT_WIDTH;
+  const footerTight = !collapsed && sidebarWidth < SIDEBAR_FOOTER_TIGHT_WIDTH;
   const sidebarStyle = {
     '--web-shell-sidebar-width': `${sidebarWidth}px`,
   } as CSSProperties;
@@ -867,6 +901,23 @@ export function WebShellSidebar({
     [completedUnreadIds, currentSessionId, t],
   );
 
+  const handleAddWorkspace = useCallback(
+    async (cwd: string) => {
+      await workspaceActions.addWorkspace(cwd);
+      // Force a fresh capabilities fetch so the new workspace appears
+      // immediately. Best-effort: registration already succeeded, so a
+      // refresh failure must not surface as an add-workspace error — the
+      // next reload reconciles. (The former `getCapabilities?.()` was a
+      // no-op: it returns a cached promise and never updates state.)
+      try {
+        await workspace.refreshCapabilities?.();
+      } catch {
+        // ignore — the workspace is registered; the list reconciles on reload
+      }
+    },
+    [workspaceActions, workspace],
+  );
+
   const handleNewSession = useCallback(() => {
     if (creatingSessionRef.current) return;
 
@@ -877,6 +928,7 @@ export function WebShellSidebar({
         const created = await onNewSession();
         if (created) {
           void reload().catch(() => undefined);
+          setWorkspaceSessionsReloadToken((v) => v + 1);
         }
       } catch (err) {
         if (!isAbortError(err)) {
@@ -1479,6 +1531,8 @@ export function WebShellSidebar({
       const startWidth = sidebarWidth;
       const previousCursor = document.body.style.cursor;
       const previousUserSelect = document.body.style.userSelect;
+      let collapsedByDrag = false;
+      let teardown: (updateState: boolean) => void = () => undefined;
       document.body.style.cursor = 'col-resize';
       document.body.style.userSelect = 'none';
       try {
@@ -1486,13 +1540,30 @@ export function WebShellSidebar({
       } catch {
         // Pointer capture is best-effort; window listeners still handle drag.
       }
-      const handlePointerMove = (moveEvent: PointerEvent) => {
-        const nextWidth = clampSidebarWidth(
-          startWidth + moveEvent.clientX - startX,
-        );
-        setSidebarWidth(nextWidth);
-      };
-      const teardown = (updateState: boolean) => {
+      function getRawWidth(clientX: number) {
+        return startWidth + clientX - startX;
+      }
+      function restoreExpandedWidth() {
+        const restoredWidth = clampSidebarWidth(startWidth);
+        setSidebarWidth(restoredWidth);
+        writeSidebarWidth(restoredWidth);
+      }
+      function collapseFromDrag() {
+        if (collapsedByDrag) return;
+        collapsedByDrag = true;
+        restoreExpandedWidth();
+        teardown(true);
+        onCollapsedChange(true);
+      }
+      function handlePointerMove(moveEvent: PointerEvent) {
+        const rawWidth = getRawWidth(moveEvent.clientX);
+        if (rawWidth <= SIDEBAR_COLLAPSE_DRAG_WIDTH) {
+          collapseFromDrag();
+          return;
+        }
+        setSidebarWidth(clampSidebarVisualWidth(rawWidth));
+      }
+      teardown = function resizeTeardown(updateState: boolean) {
         document.body.style.cursor = previousCursor;
         document.body.style.userSelect = previousUserSelect;
         window.removeEventListener('pointermove', handlePointerMove);
@@ -1503,17 +1574,20 @@ export function WebShellSidebar({
           setIsResizing(false);
         }
       };
-      const handlePointerUp = (upEvent: PointerEvent) => {
-        const nextWidth = clampSidebarWidth(
-          startWidth + upEvent.clientX - startX,
-        );
+      function handlePointerUp(upEvent: PointerEvent) {
+        const rawWidth = getRawWidth(upEvent.clientX);
+        if (rawWidth <= SIDEBAR_COLLAPSE_DRAG_WIDTH) {
+          collapseFromDrag();
+          return;
+        }
+        const nextWidth = clampSidebarWidth(rawWidth);
         setSidebarWidth(nextWidth);
         writeSidebarWidth(nextWidth);
         teardown(true);
-      };
-      const handlePointerCancel = () => {
+      }
+      function handlePointerCancel() {
         teardown(true);
-      };
+      }
       resizeTeardownRef.current = teardown;
       window.addEventListener('pointermove', handlePointerMove);
       window.addEventListener('pointerup', handlePointerUp, { once: true });
@@ -1521,7 +1595,7 @@ export function WebShellSidebar({
         once: true,
       });
     },
-    [collapsed, sidebarWidth],
+    [collapsed, onCollapsedChange, sidebarWidth],
   );
 
   const deleteCandidateLabel = deleteCandidate
@@ -2124,340 +2198,352 @@ export function WebShellSidebar({
   ]);
 
   return (
-    <aside
-      className={cx(
-        styles.sidebar,
-        collapsed && styles.collapsed,
-        isResizing && styles.resizing,
-        mobileOpen && styles.mobileOpen,
-      )}
-      aria-label={t('sidebar.label')}
-      style={sidebarStyle}
-    >
-      {tooltip && (
-        <div
-          className={styles.floatingTooltip}
-          role="tooltip"
-          style={{
-            top: tooltip.top,
-            left: tooltip.left,
-          }}
-          onMouseEnter={cancelHideTooltip}
-          onMouseLeave={hideTooltip}
-        >
-          {tooltip.content}
-        </div>
-      )}
-      {groupMenu && (
-        <div
-          ref={groupMenuRef}
-          className={styles.groupMenu}
-          role="menu"
-          aria-label={t('sidebar.sessionGroup')}
-          style={{ top: groupMenu.top, left: groupMenu.left }}
-          onClick={(event) => event.stopPropagation()}
-          onKeyDown={handleGroupMenuKeyDown}
-          onMouseDown={(event) => event.stopPropagation()}
-        >
-          <button
-            className={cx(
-              styles.groupMenuItem,
-              groupMenuUngroupedSelected && styles.groupMenuItemActive,
-            )}
-            type="button"
-            role="menuitemradio"
-            aria-checked={groupMenuUngroupedSelected}
-            onClick={() => assignSessionGroup(groupMenu.session, null)}
+    <>
+      <aside
+        className={cx(
+          styles.sidebar,
+          collapsed && styles.collapsed,
+          isResizing && styles.resizing,
+          mobileOpen && styles.mobileOpen,
+        )}
+        aria-label={t('sidebar.label')}
+        style={sidebarStyle}
+      >
+        {tooltip && (
+          <div
+            className={styles.floatingTooltip}
+            role="tooltip"
+            style={{
+              top: tooltip.top,
+              left: tooltip.left,
+            }}
+            onMouseEnter={cancelHideTooltip}
+            onMouseLeave={hideTooltip}
           >
-            <span className={styles.groupMenuEmptyDot} />
-            <span className={styles.groupMenuName}>
-              {t('sidebar.groupUngrouped')}
-            </span>
-            {groupMenuUngroupedSelected && (
-              <span className={styles.groupMenuCheck}>✓</span>
-            )}
-          </button>
-          {menuColorOptions.map((color) => {
-            const selected = groupMenuSelectedColor === color;
-            return (
-              <button
-                key={`color:${color}`}
-                className={cx(
-                  styles.groupMenuItem,
-                  selected && styles.groupMenuItemActive,
-                )}
-                type="button"
-                role="menuitemradio"
-                aria-checked={selected}
-                onClick={() => assignSessionColor(groupMenu.session, color)}
-              >
-                <span
-                  className={cx(styles.groupMenuDot, getGroupColorClass(color))}
-                />
-                <span className={styles.groupMenuName}>
-                  {t(`sidebar.groupColor.${color}`)}
-                </span>
-                {selected && <span className={styles.groupMenuCheck}>✓</span>}
-              </button>
-            );
-          })}
-          {groups.map((group) => {
-            const selected = groupMenuSelectedGroupId === group.id;
-            return (
-              <button
-                key={group.id}
-                className={cx(
-                  styles.groupMenuItem,
-                  selected && styles.groupMenuItemActive,
-                )}
-                type="button"
-                role="menuitemradio"
-                aria-checked={selected}
-                onClick={() => assignSessionGroup(groupMenu.session, group.id)}
-              >
-                <span
-                  className={cx(
-                    styles.groupMenuDot,
-                    getGroupColorClass(group.color),
-                  )}
-                />
-                <span className={styles.groupMenuName}>{group.name}</span>
-                {selected && <span className={styles.groupMenuCheck}>✓</span>}
-              </button>
-            );
-          })}
-          <div className={styles.groupMenuSeparator} />
-          <button
-            className={styles.groupMenuItem}
-            type="button"
-            role="menuitem"
-            onClick={() => handleCreateGroupForSession(groupMenu.session)}
-          >
-            <span className={styles.groupMenuIcon}>
-              <IconNewChat />
-            </span>
-            <span className={styles.groupMenuName}>
-              {t('sidebar.groupCreate')}
-            </span>
-          </button>
-        </div>
-      )}
-      {menuState && (
-        <SessionActionsMenu
-          anchorEl={menuState.anchorEl}
-          items={menuItems}
-          onClose={closeMenu}
-        />
-      )}
-      {deleteCandidate && (
-        <DialogShell
-          title={t('delete.title')}
-          size="sm"
-          onClose={() => setDeleteCandidate(null)}
-        >
-          <div className={styles.confirmContent}>
-            <p className={styles.confirmDescription}>
-              {t('sidebar.deleteConfirmDescription', {
-                name: deleteCandidateLabel,
-              })}
-            </p>
-            <div className={styles.confirmActions}>
-              <button
-                className={styles.secondaryButton}
-                type="button"
-                onClick={() => setDeleteCandidate(null)}
-              >
-                {t('common.cancel')}
-              </button>
-              <button
-                className={styles.dangerButton}
-                type="button"
-                onClick={confirmDeleteSession}
-              >
-                {t('sidebar.delete')}
-              </button>
-            </div>
+            {tooltip.content}
           </div>
-        </DialogShell>
-      )}
-      {groupEditor && (
-        <DialogShell
-          title={groupEditorTitle}
-          size="sm"
-          onClose={closeGroupEditor}
-        >
-          <form
-            className={styles.groupForm}
-            onSubmit={(event) => {
-              event.preventDefault();
-              saveGroupEditor();
+        )}
+        {groupMenu && (
+          <div
+            ref={groupMenuRef}
+            className={styles.groupMenu}
+            role="menu"
+            aria-label={t('sidebar.sessionGroup')}
+            style={{ top: groupMenu.top, left: groupMenu.left }}
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={handleGroupMenuKeyDown}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <button
+              className={cx(
+                styles.groupMenuItem,
+                groupMenuUngroupedSelected && styles.groupMenuItemActive,
+              )}
+              type="button"
+              role="menuitemradio"
+              aria-checked={groupMenuUngroupedSelected}
+              onClick={() => assignSessionGroup(groupMenu.session, null)}
+            >
+              <span className={styles.groupMenuEmptyDot} />
+              <span className={styles.groupMenuName}>
+                {t('sidebar.groupUngrouped')}
+              </span>
+              {groupMenuUngroupedSelected && (
+                <span className={styles.groupMenuCheck}>✓</span>
+              )}
+            </button>
+            {menuColorOptions.map((color) => {
+              const selected = groupMenuSelectedColor === color;
+              return (
+                <button
+                  key={`color:${color}`}
+                  className={cx(
+                    styles.groupMenuItem,
+                    selected && styles.groupMenuItemActive,
+                  )}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={selected}
+                  onClick={() => assignSessionColor(groupMenu.session, color)}
+                >
+                  <span
+                    className={cx(
+                      styles.groupMenuDot,
+                      getGroupColorClass(color),
+                    )}
+                  />
+                  <span className={styles.groupMenuName}>
+                    {t(`sidebar.groupColor.${color}`)}
+                  </span>
+                  {selected && <span className={styles.groupMenuCheck}>✓</span>}
+                </button>
+              );
+            })}
+            {groups.map((group) => {
+              const selected = groupMenuSelectedGroupId === group.id;
+              return (
+                <button
+                  key={group.id}
+                  className={cx(
+                    styles.groupMenuItem,
+                    selected && styles.groupMenuItemActive,
+                  )}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={selected}
+                  onClick={() =>
+                    assignSessionGroup(groupMenu.session, group.id)
+                  }
+                >
+                  <span
+                    className={cx(
+                      styles.groupMenuDot,
+                      getGroupColorClass(group.color),
+                    )}
+                  />
+                  <span className={styles.groupMenuName}>{group.name}</span>
+                  {selected && <span className={styles.groupMenuCheck}>✓</span>}
+                </button>
+              );
+            })}
+            <div className={styles.groupMenuSeparator} />
+            <button
+              className={styles.groupMenuItem}
+              type="button"
+              role="menuitem"
+              onClick={() => handleCreateGroupForSession(groupMenu.session)}
+            >
+              <span className={styles.groupMenuIcon}>
+                <IconNewChat />
+              </span>
+              <span className={styles.groupMenuName}>
+                {t('sidebar.groupCreate')}
+              </span>
+            </button>
+          </div>
+        )}
+        {menuState && (
+          <SessionActionsMenu
+            anchorEl={menuState.anchorEl}
+            items={menuItems}
+            onClose={closeMenu}
+          />
+        )}
+        {deleteCandidate && (
+          <DialogShell
+            title={t('delete.title')}
+            size="sm"
+            onClose={() => setDeleteCandidate(null)}
+          >
+            <div className={styles.confirmContent}>
+              <p className={styles.confirmDescription}>
+                {t('sidebar.deleteConfirmDescription', {
+                  name: deleteCandidateLabel,
+                })}
+              </p>
+              <div className={styles.confirmActions}>
+                <button
+                  className={styles.secondaryButton}
+                  type="button"
+                  onClick={() => setDeleteCandidate(null)}
+                >
+                  {t('common.cancel')}
+                </button>
+                <button
+                  className={styles.dangerButton}
+                  type="button"
+                  onClick={confirmDeleteSession}
+                >
+                  {t('sidebar.delete')}
+                </button>
+              </div>
+            </div>
+          </DialogShell>
+        )}
+        {groupEditor && (
+          <DialogShell
+            title={groupEditorTitle}
+            size="sm"
+            onClose={closeGroupEditor}
+          >
+            <form
+              className={styles.groupForm}
+              onSubmit={(event) => {
+                event.preventDefault();
+                saveGroupEditor();
+              }}
+            >
+              <label className={styles.fieldStack}>
+                <span>{t('sidebar.groupNamePrompt')}</span>
+                <input
+                  className={styles.dialogInput}
+                  value={groupName}
+                  autoFocus
+                  maxLength={64}
+                  onChange={(event) => setGroupName(event.target.value)}
+                />
+              </label>
+              <label className={styles.fieldStack}>
+                <span>{t('sidebar.groupColor')}</span>
+                <select
+                  className={styles.dialogSelect}
+                  value={groupColor}
+                  onChange={(event) =>
+                    setGroupColor(event.target.value as DaemonSessionGroupColor)
+                  }
+                >
+                  {groupColorChoices.map((color) => (
+                    <option key={color} value={color}>
+                      {t(`sidebar.groupColor.${color}`)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className={styles.confirmActions}>
+                <button
+                  className={styles.secondaryButton}
+                  type="button"
+                  disabled={groupBusy}
+                  onClick={closeGroupEditor}
+                >
+                  {t('common.cancel')}
+                </button>
+                <button
+                  className={styles.secondaryButton}
+                  type="submit"
+                  disabled={!canSaveGroup}
+                >
+                  {t('common.save')}
+                </button>
+              </div>
+            </form>
+          </DialogShell>
+        )}
+        {deleteGroupCandidate && (
+          <DialogShell
+            title={t('sidebar.groupDelete')}
+            size="sm"
+            onClose={() => {
+              if (!groupBusy) setDeleteGroupCandidate(null);
             }}
           >
-            <label className={styles.fieldStack}>
-              <span>{t('sidebar.groupNamePrompt')}</span>
-              <input
-                className={styles.dialogInput}
-                value={groupName}
-                autoFocus
-                maxLength={64}
-                onChange={(event) => setGroupName(event.target.value)}
-              />
-            </label>
-            <label className={styles.fieldStack}>
-              <span>{t('sidebar.groupColor')}</span>
-              <select
-                className={styles.dialogSelect}
-                value={groupColor}
-                onChange={(event) =>
-                  setGroupColor(event.target.value as DaemonSessionGroupColor)
-                }
-              >
-                {groupColorChoices.map((color) => (
-                  <option key={color} value={color}>
-                    {t(`sidebar.groupColor.${color}`)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className={styles.confirmActions}>
+            <div className={styles.confirmContent}>
+              <p className={styles.confirmDescription}>
+                {t('sidebar.groupDeleteConfirm', {
+                  name: deleteGroupCandidateLabel,
+                })}
+              </p>
+              <div className={styles.confirmActions}>
+                <button
+                  className={styles.secondaryButton}
+                  type="button"
+                  disabled={groupBusy}
+                  onClick={() => setDeleteGroupCandidate(null)}
+                >
+                  {t('common.cancel')}
+                </button>
+                <button
+                  className={styles.dangerButton}
+                  type="button"
+                  disabled={groupBusy}
+                  onClick={confirmDeleteGroup}
+                >
+                  {t('sidebar.groupDelete')}
+                </button>
+              </div>
+            </div>
+          </DialogShell>
+        )}
+        <div className={styles.topRow}>
+          {!collapsed && (
+            <span className={styles.brandLogo} aria-hidden="true">
+              <IconQwenLogo />
+            </span>
+          )}
+          <button
+            className={styles.newChatButton}
+            type="button"
+            title={t('sidebar.newChat')}
+            aria-label={t('sidebar.newChat')}
+            disabled={newSessionDisabled}
+            onClick={handleNewSession}
+          >
+            <span className={styles.navIcon}>
+              <IconNewChat />
+            </span>
+            {!collapsed && <span>{t('sidebar.newChat')}</span>}
+          </button>
+        </div>
+        {!collapsed && workspaces.length > 1 && (
+          <div className={styles.workspacePicker}>
+            <div className={styles.workspacePickerHeader}>
+              <span className={styles.workspacePickerLabel}>
+                {t('sidebar.workspaceSelectLabel')}
+              </span>
               <button
-                className={styles.secondaryButton}
+                className={styles.workspaceAddIconButton}
                 type="button"
-                disabled={groupBusy}
-                onClick={closeGroupEditor}
+                title={t('sidebar.addWorkspace')}
+                aria-label={t('sidebar.addWorkspace')}
+                onClick={() => setShowAddWorkspaceDialog(true)}
               >
-                {t('common.cancel')}
-              </button>
-              <button
-                className={styles.secondaryButton}
-                type="submit"
-                disabled={!canSaveGroup}
-              >
-                {t('common.save')}
+                +
               </button>
             </div>
-          </form>
-        </DialogShell>
-      )}
-      {deleteGroupCandidate && (
-        <DialogShell
-          title={t('sidebar.groupDelete')}
-          size="sm"
-          onClose={() => {
-            if (!groupBusy) setDeleteGroupCandidate(null);
-          }}
-        >
-          <div className={styles.confirmContent}>
-            <p className={styles.confirmDescription}>
-              {t('sidebar.groupDeleteConfirm', {
-                name: deleteGroupCandidateLabel,
-              })}
-            </p>
-            <div className={styles.confirmActions}>
-              <button
-                className={styles.secondaryButton}
-                type="button"
-                disabled={groupBusy}
-                onClick={() => setDeleteGroupCandidate(null)}
-              >
-                {t('common.cancel')}
-              </button>
-              <button
-                className={styles.dangerButton}
-                type="button"
-                disabled={groupBusy}
-                onClick={confirmDeleteGroup}
-              >
-                {t('sidebar.groupDelete')}
-              </button>
+            <div className={styles.workspaceList}>
+              {workspaces.map((ws) => (
+                <WorkspaceSection
+                  key={ws.id}
+                  workspace={ws}
+                  client={workspace.client}
+                  isActive={
+                    ws.primary
+                      ? selectedWorkspaceCwd === undefined
+                      : selectedWorkspaceCwd === ws.cwd
+                  }
+                  currentSessionId={currentSessionId}
+                  reloadToken={workspaceSessionsReloadToken}
+                  primaryLabel={t('sidebar.workspacePrimary')}
+                  untrustedLabel={t('sidebar.workspaceUntrusted')}
+                  noSessionsLabel={t('sidebar.noSessions')}
+                  formatTime={(iso) => formatRelativeTime(iso, t)}
+                  onSelectWorkspace={(cwd) => onSelectWorkspace?.(cwd)}
+                  onLoadSession={handleLoadSession}
+                />
+              ))}
             </div>
           </div>
-        </DialogShell>
-      )}
-      <div className={styles.topRow}>
-        {!collapsed && (
-          <span className={styles.brandLogo} aria-hidden="true">
-            <IconQwenLogo />
-          </span>
         )}
-        <button
-          className={styles.newChatButton}
-          type="button"
-          title={t('sidebar.newChat')}
-          aria-label={t('sidebar.newChat')}
-          disabled={newSessionDisabled}
-          onClick={handleNewSession}
-        >
-          <span className={styles.navIcon}>
-            <IconNewChat />
-          </span>
-          {!collapsed && <span>{t('sidebar.newChat')}</span>}
-        </button>
-      </div>
+        {!collapsed && workspaces.length <= 1 && (
+          <button
+            type="button"
+            className={styles.addWorkspaceButton}
+            title={t('sidebar.addWorkspace')}
+            onClick={() => setShowAddWorkspaceDialog(true)}
+          >
+            + {t('sidebar.addWorkspace')}
+          </button>
+        )}
 
-      <div className={styles.body}>
-        {!collapsed && (
-          <div className={styles.sectionTitle}>{t('sidebar.project')}</div>
-        )}
-        <div
-          className={styles.projectRow}
-          role="button"
-          tabIndex={0}
-          aria-expanded={projectExpanded}
-          onClick={() => {
-            if (!collapsed) {
-              setProjectExpanded((expanded) => !expanded);
-            }
-          }}
-          onKeyDown={(event) => {
-            if (collapsed) return;
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault();
-              setProjectExpanded((expanded) => !expanded);
-            }
-          }}
-          onMouseEnter={(event) =>
-            showTooltip(
-              event,
-              <div className={styles.tooltipContent}>
-                <div className={styles.tooltipTitle}>{projectName}</div>
-                <div className={styles.tooltipMeta}>
-                  {connection.workspaceCwd || projectName}
-                </div>
-              </div>,
-            )
-          }
-          onMouseLeave={hideTooltip}
-          onFocus={(event) =>
-            showTooltip(
-              event,
-              <div className={styles.tooltipContent}>
-                <div className={styles.tooltipTitle}>{projectName}</div>
-                <div className={styles.tooltipMeta}>
-                  {connection.workspaceCwd || projectName}
-                </div>
-              </div>,
-            )
-          }
-          onBlur={hideTooltip}
-        >
-          <span className={`${styles.navIcon} ${styles.projectFolderIcon}`}>
-            <IconFolder expanded={projectExpanded} />
-          </span>
-          {!collapsed && (
-            <>
-              <span className={styles.projectName}>{projectName}</span>
+        <div className={styles.body}>
+          {!collapsed && workspaces.length <= 1 && (
+            <div className={styles.projectRow}>
+              <span className={`${styles.navIcon} ${styles.projectFolderIcon}`}>
+                <IconFolder expanded={projectExpanded} />
+              </span>
+              <span
+                className={styles.projectName}
+                title={connection.workspaceCwd || projectName}
+              >
+                {projectName}
+              </span>
               <button
                 className={styles.projectIconButton}
                 type="button"
                 aria-label={t('sidebar.search')}
-                onKeyDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
+                onClick={() => {
                   setSearchOpen((open) => {
-                    if (open) {
-                      setSearchQuery('');
-                    }
+                    if (open) setSearchQuery('');
                     return !open;
                   });
                   setProjectExpanded(true);
@@ -2473,115 +2559,132 @@ export function WebShellSidebar({
                     ? t('sidebar.collapseProject')
                     : t('sidebar.expandProject')
                 }
-                onKeyDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setProjectExpanded((expanded) => !expanded);
-                }}
+                onClick={() => setProjectExpanded((expanded) => !expanded)}
               >
                 <IconChevron expanded={projectExpanded} />
               </button>
-            </>
+            </div>
+          )}
+          {searchOpen && !collapsed && (
+            <input
+              className={styles.searchInput}
+              value={searchQuery}
+              placeholder={t('sidebar.searchPlaceholder')}
+              aria-label={t('sidebar.search')}
+              autoFocus
+              onChange={(event) => setSearchQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  setSearchQuery('');
+                  setSearchOpen(false);
+                }
+              }}
+            />
+          )}
+          <div className={styles.sessionList}>
+            {workspaces.length <= 1 && body}
+            {archivedSection}
+          </div>
+        </div>
+
+        <div
+          className={cx(
+            styles.footer,
+            footerCompact && styles.footerCompact,
+            footerTight && styles.footerTight,
+          )}
+        >
+          <button
+            className={styles.footerButton}
+            type="button"
+            title={t('sidebar.settings')}
+            aria-label={t('sidebar.settings')}
+            onClick={onOpenSettings}
+          >
+            <span className={`${styles.navIcon} ${styles.settingsIcon}`}>
+              <IconSettings />
+            </span>
+            {!collapsed && !footerCompact && (
+              <span className={styles.footerButtonLabel}>
+                {t('sidebar.settings')}
+              </span>
+            )}
+          </button>
+          {!collapsed && !footerTight && versionLabel && (
+            <span
+              className={styles.version}
+              title={`Qwen Code ${versionLabel}`}
+            >
+              {versionLabel}
+            </span>
+          )}
+          <button
+            className={styles.collapseButton}
+            type="button"
+            title={t('sidebar.scheduledTasks')}
+            aria-label={t('sidebar.scheduledTasks')}
+            onClick={onOpenScheduledTasks}
+          >
+            <IconSchedule />
+          </button>
+          {canOpenSessionsOverview && (
+            <button
+              className={styles.collapseButton}
+              type="button"
+              title={t('sidebar.sessionsOverview')}
+              aria-label={t('sidebar.sessionsOverview')}
+              onClick={onOpenSessions}
+            >
+              <IconGrid />
+            </button>
+          )}
+          {canOpenSplitView && (
+            <button
+              className={styles.collapseButton}
+              type="button"
+              title={t('sidebar.splitView')}
+              aria-label={t('sidebar.splitView')}
+              onClick={onOpenSplitView}
+            >
+              <IconColumns />
+            </button>
+          )}
+          <button
+            className={styles.collapseButton}
+            type="button"
+            title={t('sidebar.daemonStatus')}
+            aria-label={t('sidebar.daemonStatus')}
+            onClick={onOpenDaemonStatus}
+          >
+            <IconPulse />
+          </button>
+          {!mobileOpen && (
+            <button
+              className={styles.collapseButton}
+              type="button"
+              title={collapsed ? t('sidebar.expand') : t('sidebar.collapse')}
+              aria-label={
+                collapsed ? t('sidebar.expand') : t('sidebar.collapse')
+              }
+              onClick={() => onCollapsedChange(!collapsed)}
+            >
+              <IconCollapse collapsed={collapsed} />
+            </button>
           )}
         </div>
-        {searchOpen && !collapsed && projectExpanded && (
-          <input
-            className={styles.searchInput}
-            value={searchQuery}
-            placeholder={t('sidebar.searchPlaceholder')}
-            aria-label={t('sidebar.search')}
-            autoFocus
-            onChange={(event) => setSearchQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Escape') {
-                setSearchQuery('');
-                setSearchOpen(false);
-              }
-            }}
-          />
-        )}
-        <div className={styles.sessionList}>
-          {body}
-          {archivedSection}
-        </div>
-      </div>
-
-      <div className={styles.footer}>
-        <button
-          className={styles.footerButton}
-          type="button"
-          title={t('sidebar.settings')}
-          aria-label={t('sidebar.settings')}
-          onClick={onOpenSettings}
-        >
-          <span className={`${styles.navIcon} ${styles.settingsIcon}`}>
-            <IconSettings />
-          </span>
-          {!collapsed && <span>{t('sidebar.settings')}</span>}
-        </button>
-        {!collapsed && versionLabel && (
-          <span className={styles.version} title={`Qwen Code ${versionLabel}`}>
-            {versionLabel}
-          </span>
-        )}
-        <button
-          className={styles.collapseButton}
-          type="button"
-          title={t('sidebar.scheduledTasks')}
-          aria-label={t('sidebar.scheduledTasks')}
-          onClick={onOpenScheduledTasks}
-        >
-          <IconSchedule />
-        </button>
-        {canOpenSessionsOverview && (
-          <button
-            className={styles.collapseButton}
-            type="button"
-            title={t('sidebar.sessionsOverview')}
-            aria-label={t('sidebar.sessionsOverview')}
-            onClick={onOpenSessions}
-          >
-            <IconGrid />
-          </button>
-        )}
-        {canOpenSplitView && (
-          <button
-            className={styles.collapseButton}
-            type="button"
-            title={t('sidebar.splitView')}
-            aria-label={t('sidebar.splitView')}
-            onClick={onOpenSplitView}
-          >
-            <IconColumns />
-          </button>
-        )}
-        <button
-          className={styles.collapseButton}
-          type="button"
-          title={t('sidebar.daemonStatus')}
-          aria-label={t('sidebar.daemonStatus')}
-          onClick={onOpenDaemonStatus}
-        >
-          <IconPulse />
-        </button>
-        {!mobileOpen && (
-          <button
-            className={styles.collapseButton}
-            type="button"
-            title={collapsed ? t('sidebar.expand') : t('sidebar.collapse')}
-            aria-label={collapsed ? t('sidebar.expand') : t('sidebar.collapse')}
-            onClick={() => onCollapsedChange(!collapsed)}
-          >
-            <IconCollapse collapsed={collapsed} />
-          </button>
-        )}
-      </div>
-      <div
-        className={styles.resizeHandle}
-        role="separator"
-        aria-orientation="vertical"
-        onPointerDown={handleResizePointerDown}
-      />
-    </aside>
+        <div
+          className={styles.resizeHandle}
+          role="separator"
+          aria-orientation="vertical"
+          onPointerDown={handleResizePointerDown}
+        />
+      </aside>
+      {showAddWorkspaceDialog && (
+        <AddWorkspaceDialog
+          onClose={() => setShowAddWorkspaceDialog(false)}
+          onAdd={handleAddWorkspace}
+        />
+      )}
+    </>
   );
 }

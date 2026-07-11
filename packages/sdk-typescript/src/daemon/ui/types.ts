@@ -9,6 +9,7 @@ import type {
   DaemonAuthProviderId,
   DaemonEvent,
   DaemonErrorKind,
+  DaemonSessionArtifactChange,
   PermissionResponse,
 } from '../types.js';
 
@@ -34,6 +35,7 @@ export type DaemonUiEventType =
   | 'debug'
   // Session-meta events
   | 'session.metadata.changed'
+  | 'session.artifact.changed'
   | 'session.approval_mode.changed'
   | 'session.available_commands'
   | 'session.state_resync_required'
@@ -279,6 +281,12 @@ export interface DaemonUiSessionMetadataChangedEvent extends DaemonUiEventBase {
   type: 'session.metadata.changed';
   sessionId: string;
   displayName?: string;
+}
+
+export interface DaemonUiSessionArtifactChangedEvent extends DaemonUiEventBase {
+  type: 'session.artifact.changed';
+  sessionId: string;
+  change: DaemonSessionArtifactChange;
 }
 
 export interface DaemonUiSessionApprovalModeChangedEvent
@@ -556,6 +564,7 @@ export type DaemonUiEvent =
   | DaemonUiErrorEvent
   // Session-meta events
   | DaemonUiSessionMetadataChangedEvent
+  | DaemonUiSessionArtifactChangedEvent
   | DaemonUiSessionApprovalModeChangedEvent
   | DaemonUiSessionAvailableCommandsEvent
   | DaemonUiStateResyncRequiredEvent

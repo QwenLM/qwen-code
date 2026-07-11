@@ -166,20 +166,61 @@ npm run preflight  # Full check: clean → install → format → lint → build
 2. **Test plan for behavioral changes** — write an E2E test plan in
    `.qwen/e2e-tests/` when the change affects user-observable behavior. Dry-run
    against the global `qwen` CLI first to confirm the baseline.
-3. **Build + typecheck before declaring done**:
-   `npm run build && npm run typecheck`.
-4. **Code review** — run `/review` when available. Triage each comment:
-   valid / false positive / overthinking.
+3. **Build, typecheck, and test before declaring done**:
+   `npm run build && npm run typecheck`, plus unit tests for the files you
+   changed.
+4. **Self-audit before declaring done** — read the full diff you are about
+   to ship, including new untracked files, in open-ended passes, not hunting
+   for anything specific. Then verify each change, and each green test you
+   rely on as evidence, presuming it wrong (a passing test can assert the
+   wrong thing). Stop after two consecutive clean passes — a clean pass is
+   evidence about that pass, not the code. A fix re-runs step 3, resets the
+   clean-pass count, and gets a further pass over the updated diff — never
+   exit on a pass that found something. If five passes bring no convergence,
+   say so instead of declaring done. Scale to the diff: one clean, careful
+   pass suffices for a trivial change.
+5. **Code review** — run `/review` when available. Triage each comment:
+   valid / false positive / overthinking. Fixes go back through steps 3-4.
 
 ### Feature development
 
 Use the `/feat-dev` skill for the full workflow: investigate, design, test plan,
-dry-run, implement, verify, code review, and iterate.
+dry-run, implement, verify, self-audit, code review, and iterate.
 
 ### Bugfix
 
 Use the `/bugfix` skill for the reproduce-first workflow: reproduce, fix,
-verify, test, and code review.
+verify, test, self-audit, and code review.
+
+## Code Review
+
+Project-specific rules for `/review`. The skill loads this section verbatim (by
+its `## Code Review` heading) and hands it to every review agent, so keep it to
+things a reviewer of _this_ codebase must check — not general advice.
+
+- **Verify a finding against the exact reviewed commit before reporting it.**
+  Read the lines you are about to cite. A Critical that quotes code not present at
+  the commit under review is worse than no finding — it blocks the author over
+  nothing. Do not report a defect you have only inferred from a symbol name or a
+  diff fragment.
+- **A `C=0` / APPROVE is a claim, not a default.** Before submitting one, take
+  each unresolved Critical already on the PR and check it against the code as it
+  stands: _still stands_ / _fixed by this diff_ / _cannot tell_. A GitHub thread
+  can read `isResolved: false, isOutdated: false` for a bug that a later commit
+  fixed on an adjacent line — the flag tracks the anchored line, not the fix.
+- **For every added field, option, or optional parameter, grep its read sites**,
+  including outside the diff. A `foo?: boolean` that is declared and read but never
+  set by any caller is a dead switch (`options.foo ?? true` always takes the
+  default). Decide severity at the read site; never explain an unpopulated field
+  with author intent you cannot observe.
+- **Match the house style when judging.** ESM only; no `any`; no relative imports
+  between packages; `kebab-case.ts` for `.ts` in `packages/core` and `packages/cli`,
+  `PascalCase.tsx` for React components; tests collocated as `file.test.ts`.
+  Comments default to none — flag a _missing_ comment only where the _why_ is
+  genuinely non-obvious, and never fault a diff for deleting a comment that no
+  longer applies.
+- **A missing test for changed behavior is a Suggestion, not a Critical**, unless
+  the untested path is itself the defect.
 
 ## GitHub Operations
 

@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import type {
   ChannelTaskLifecycleEvent,
+  Envelope,
   SessionTarget,
 } from '@qwen-code/channel-base';
 
@@ -12,17 +17,51 @@ type LifecycleBase = Omit<
 
 const dingtalkSdkMock = vi.hoisted(() => ({
   instances: [] as unknown[],
+  nextConnect: undefined as (() => Promise<void>) | undefined,
   rawLog: vi.fn(),
 }));
 
 vi.mock('dingtalk-stream-sdk-nodejs', () => ({
   DWClient: class {
     debug = true;
+    connected = true;
+    registered = true;
+    config = { autoReconnect: true };
+    socket = new (class {
+      readyState = 1;
+      ping = vi.fn();
+      private listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+
+      on(event: string, listener: (...args: unknown[]) => void): void {
+        const listeners = this.listeners.get(event) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(event, listeners);
+      }
+
+      off(event: string, listener: (...args: unknown[]) => void): void {
+        this.listeners.get(event)?.delete(listener);
+      }
+
+      emit(event: string, ...args: unknown[]): void {
+        for (const listener of this.listeners.get(event) ?? []) {
+          listener(...args);
+        }
+      }
+    })();
+    callback?: (msg: DWClientDownStream) => void;
     disconnect = vi.fn();
     getConfig = vi.fn(() => ({ access_token: 'token' }));
-    registerCallbackListener = vi.fn();
+    registerCallbackListener = vi.fn(
+      (_topic: string, callback: (msg: DWClientDownStream) => void) => {
+        this.callback = callback;
+      },
+    );
     send = vi.fn();
-    connect = vi.fn();
+    connect = vi.fn(() => {
+      const connect = dingtalkSdkMock.nextConnect;
+      dingtalkSdkMock.nextConnect = undefined;
+      return connect?.() ?? Promise.resolve();
+    });
 
     onSystem = vi.fn();
     onEvent = vi.fn();
@@ -35,7 +74,7 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => ({
       if (msg.type === 'CALLBACK') this.onCallback(msg);
     });
 
-    constructor() {
+    constructor(readonly options: Record<string, unknown>) {
       dingtalkSdkMock.instances.push(this);
     }
   },
@@ -57,6 +96,23 @@ vi.mock('@qwen-code/channel-base', async () => {
       protected name: string;
       handleInbound = vi.fn().mockResolvedValue(undefined);
       onSessionDied(_sessionId: string): void {}
+      protected logDebugPayload(platform: string, payload: unknown): void {
+        (
+          real.ChannelBase.prototype as unknown as {
+            logDebugPayload(platform: string, payload: unknown): void;
+          }
+        ).logDebugPayload.call(this, platform, payload);
+      }
+      protected onPromptBufferDropped(
+        _chatId: string,
+        _sessionId: string,
+        _messageIds: string[],
+      ): void {}
+      protected onPromptBufferDrained(
+        _chatId: string,
+        _sessionId: string,
+        _messageIds: string[],
+      ): void {}
 
       constructor(
         name: string,
@@ -76,7 +132,9 @@ vi.mock('@qwen-code/channel-base', async () => {
 const { DingtalkChannel } = await import('./DingtalkAdapter.js');
 type DingtalkChannelInstance = InstanceType<typeof DingtalkChannel>;
 
-function createChannel(): DingtalkChannelInstance {
+function createChannel(
+  overrides: Record<string, unknown> = {},
+): DingtalkChannelInstance {
   return new DingtalkChannel(
     'test-dingtalk',
     {
@@ -89,8 +147,10 @@ function createChannel(): DingtalkChannelInstance {
       sessionScope: 'user',
       cwd: '/tmp',
       groupPolicy: 'open',
+      dmPolicy: 'open',
       groups: {},
-    },
+      ...overrides,
+    } as never,
     {} as never,
   );
 }
@@ -103,6 +163,104 @@ function latestMockClient(): Record<string, unknown> {
   return client;
 }
 
+interface MockDingtalkClient {
+  callback?: (msg: DWClientDownStream) => void;
+  disconnect: ReturnType<typeof vi.fn>;
+  onDownStream(raw: string): void;
+  registerCallbackListener: ReturnType<typeof vi.fn>;
+  send: ReturnType<typeof vi.fn>;
+}
+
+function mockClientAt(index: number): MockDingtalkClient {
+  const client = dingtalkSdkMock.instances[index] as
+    | MockDingtalkClient
+    | undefined;
+  if (!client) throw new Error(`No mock DingTalk client at index ${index}`);
+  return client;
+}
+
+it('uses the connection manager by default', () => {
+  createChannel();
+
+  expect(latestMockClient().options).toEqual(
+    expect.objectContaining({
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      keepAlive: false,
+    }),
+  );
+  expect(
+    (latestMockClient().config as { autoReconnect: boolean }).autoReconnect,
+  ).toBe(false);
+});
+
+it('uses SDK keepalive when the connection manager is disabled', () => {
+  createChannel({ useConnectionManager: false });
+
+  expect(latestMockClient().options).toEqual(
+    expect.objectContaining({
+      keepAlive: true,
+    }),
+  );
+  expect(
+    (latestMockClient().config as { autoReconnect: boolean }).autoReconnect,
+  ).toBe(true);
+});
+
+it('rejects a non-boolean useConnectionManager value', () => {
+  expect(() => createChannel({ useConnectionManager: 'false' })).toThrow(
+    'useConnectionManager must be a boolean',
+  );
+});
+
+it('keeps callbacks and ACKs bound to the client that received them', async () => {
+  const firstIndex = dingtalkSdkMock.instances.length;
+  const channel = createChannel();
+  const firstClient = mockClientAt(firstIndex);
+  await channel.connect();
+  const replacementConnect = deferredPromise<void>();
+  dingtalkSdkMock.nextConnect = () => replacementConnect.promise;
+
+  firstClient.onDownStream(
+    JSON.stringify({
+      type: 'SYSTEM',
+      headers: { topic: 'disconnect', messageId: 'system-message' },
+      data: '',
+    }),
+  );
+
+  await vi.waitFor(() => {
+    expect(dingtalkSdkMock.instances.length).toBe(firstIndex + 2);
+  });
+  const replacement = mockClientAt(firstIndex + 1);
+
+  firstClient.callback?.({
+    headers: { messageId: 'old-message' },
+    data: '{}',
+  } as DWClientDownStream);
+  replacementConnect.resolve();
+  await vi.waitFor(() => {
+    expect(firstClient.disconnect).toHaveBeenCalledOnce();
+  });
+  replacement.callback?.({
+    headers: { messageId: 'new-message' },
+    data: '{}',
+  } as DWClientDownStream);
+
+  expect(firstClient.registerCallbackListener).toHaveBeenCalledOnce();
+  expect(replacement.registerCallbackListener).toHaveBeenCalledOnce();
+  expect(firstClient.send).toHaveBeenCalledWith('old-message', {
+    status: 'success',
+    message: 'ok',
+  });
+  expect(replacement.send).toHaveBeenCalledWith('new-message', {
+    status: 'success',
+    message: 'ok',
+  });
+  expect(firstClient.disconnect).toHaveBeenCalledOnce();
+  channel.disconnect();
+});
+
 function getPromptHook(
   channel: DingtalkChannelInstance,
   hook: 'onPromptStart' | 'onPromptEnd',
@@ -112,6 +270,33 @@ function getPromptHook(
     sessionId: string,
     messageId?: string,
   ) => void;
+  return fn.bind(channel);
+}
+
+function getResponseHook(
+  channel: DingtalkChannelInstance,
+): (chatId: string, text: string, sessionId: string) => Promise<void> {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'sendResponseMessage'
+  ] as (chatId: string, text: string, sessionId: string) => Promise<void>;
+  return fn.bind(channel);
+}
+
+function getPromptBufferDropHook(
+  channel: DingtalkChannelInstance,
+): (chatId: string, sessionId: string, messageIds: string[]) => void {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'onPromptBufferDropped'
+  ] as (chatId: string, sessionId: string, messageIds: string[]) => void;
+  return fn.bind(channel);
+}
+
+function getPromptBufferDrainHook(
+  channel: DingtalkChannelInstance,
+): (chatId: string, sessionId: string, messageIds: string[]) => void {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'onPromptBufferDrained'
+  ] as (chatId: string, sessionId: string, messageIds: string[]) => void;
   return fn.bind(channel);
 }
 
@@ -134,6 +319,23 @@ function seedSeenMessage(
   ).inboundMessageIds.add(messageId);
 }
 
+function seedWebhook(channel: DingtalkChannelInstance, chatId: string): void {
+  (channel as unknown as { webhooks: Map<string, string> }).webhooks.set(
+    chatId,
+    'https://oapi.dingtalk.com/robot/send?access_token=token',
+  );
+}
+
+function seedMentionTarget(
+  channel: DingtalkChannelInstance,
+  messageId: string,
+  staffId: string,
+): void {
+  (
+    channel as unknown as { mentionTargets: Map<string, string> }
+  ).mentionTargets.set(messageId, staffId);
+}
+
 function deferredPromise<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
@@ -147,6 +349,7 @@ function deferredPromise<T>() {
 describe('DingtalkChannel prompt reactions', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it('maps lifecycle start and terminal events to the eye reaction', () => {
@@ -176,6 +379,7 @@ describe('DingtalkChannel prompt reactions', () => {
     } satisfies LifecycleBase;
 
     seedSeenMessage(channel, 'message-1');
+    seedMentionTarget(channel, 'message-1', 'staff-1');
     const lifecycle = getLifecycleHook(channel);
     lifecycle({ ...event, type: 'started' });
     lifecycle({ ...event, type: 'started' });
@@ -186,6 +390,11 @@ describe('DingtalkChannel prompt reactions', () => {
     expect(attachReaction).toHaveBeenCalledWith('message-1', 'cid-123');
     expect(recallReaction).toHaveBeenCalledOnce();
     expect(recallReaction).toHaveBeenCalledWith('message-1', 'cid-123');
+    expect(
+      (
+        channel as unknown as { mentionTargets: Map<string, string> }
+      ).mentionTargets.has('message-1'),
+    ).toBe(false);
   });
 
   it('recalls again when a late lifecycle attach resolves after terminal cleanup', async () => {
@@ -683,6 +892,50 @@ describe('DingtalkChannel unroutable-message logging', () => {
 });
 
 describe('DingtalkChannel parsed-message logging', () => {
+  it('logs debug payloads when enabled for the channel', () => {
+    const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+    process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'test-dingtalk';
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'debug-m1',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        text: { content: '@qwen-code hello' },
+      }),
+      headers: { messageId: 'debug-m1' },
+    } as unknown as DWClientDownStream;
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    let logged = '';
+
+    try {
+      (
+        channel as unknown as { onMessage(d: DWClientDownStream): void }
+      ).onMessage(downstream);
+      logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    } finally {
+      if (oldDebugPayload === undefined) {
+        delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      } else {
+        process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+      }
+      writeSpy.mockRestore();
+    }
+
+    expect(logged).toContain('[DingTalk:test-dingtalk] debug payload');
+    expect(logged).toContain('"msgId":"debug-m1"');
+    expect(logged).toContain('"sessionWebhook":"[redacted]"');
+    expect(logged).not.toContain('access_token=token');
+  });
+
   it('logs parsed routing and sender fields for routable group messages', () => {
     const channel = createChannel();
     const downstream = {
@@ -1107,6 +1360,533 @@ describe('DingtalkChannel sender attribution', () => {
         messageId: 'header-m1',
       }),
     );
+  });
+});
+
+describe('DingtalkChannel reply mentions', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it('retains queued mention after dedup cleanup until onPromptStart', async () => {
+    vi.useFakeTimers();
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    (
+      channel as unknown as { seenMessages: Map<string, number> }
+    ).seenMessages.set('m1', Date.now() - 5 * 60 * 1000 - 1);
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    try {
+      await channel.connect();
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+      await getResponseHook(channel)('cid123', 'hello', 'session-1');
+
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      const body = JSON.parse(
+        String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
+      );
+      expect(body).toMatchObject({
+        msgtype: 'text',
+        text: { content: '@staff-1\n\nhello' },
+        at: { atUserIds: ['staff-1'] },
+      });
+    } finally {
+      channel.disconnect();
+      vi.useRealTimers();
+    }
+  });
+
+  it('removes mention targets for dropped queued prompts', () => {
+    const channel = createChannel({ atSender: true });
+    seedMentionTarget(channel, 'm1', 'staff-1');
+
+    getPromptBufferDropHook(channel)('cid123', 'session-1', ['m1']);
+
+    expect(
+      (
+        channel as unknown as { mentionTargets: Map<string, string> }
+      ).mentionTargets.has('m1'),
+    ).toBe(false);
+  });
+
+  it('keeps only the final mention target for a coalesced queued prompt', () => {
+    const channel = createChannel({ atSender: true });
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    seedMentionTarget(channel, 'm2', 'staff-2');
+
+    getPromptBufferDrainHook(channel)('cid123', 'session-1', ['m1', 'm2']);
+
+    const mentionTargets = (
+      channel as unknown as { mentionTargets: Map<string, string> }
+    ).mentionTargets;
+    expect(mentionTargets.has('m1')).toBe(false);
+    expect(mentionTargets.get('m2')).toBe('staff-2');
+  });
+
+  it('mentions the originating group member when atSender is enabled', async () => {
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    await getResponseHook(channel)('cid123', 'hello', 'session-1');
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(
+      JSON.parse(String((fetchSpy.mock.calls[0]![1] as RequestInit).body)),
+    ).toMatchObject({
+      msgtype: 'text',
+      text: { content: '@staff-1\n\nhello' },
+      at: { atUserIds: ['staff-1'] },
+    });
+  });
+
+  it('logs the redacted mention delivery result when diagnostics are enabled', async () => {
+    vi.stubEnv('QWEN_CHANNEL_DEBUG_MENTIONS', '1');
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
+    );
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    await getResponseHook(channel)('cid123', 'hello', 'session-1');
+
+    expect(writeSpy).toHaveBeenCalledWith(
+      '[DingTalk:test-dingtalk] mention delivery status=200 code=0\n',
+    );
+  });
+
+  it('does not mention the sender by default', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    await getResponseHook(channel)('cid123', 'hello', 'session-1');
+
+    const body = JSON.parse(
+      String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
+    );
+    expect(body).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: 'hello' },
+    });
+    expect(body).not.toHaveProperty('at');
+  });
+
+  it('does not mention when the correlated prompt has no stored staff ID', async () => {
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    await getResponseHook(channel)('cid123', 'hello', 'session-1');
+
+    const body = JSON.parse(
+      String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
+    );
+    expect(body).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: 'hello' },
+    });
+    expect(body).not.toHaveProperty('at');
+  });
+
+  it('reserves the mention prefix within the first text chunk limit', async () => {
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    const text = 'a'.repeat(3800);
+    await getResponseHook(channel)('cid123', text, 'session-1');
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const bodies = fetchSpy.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    );
+    expect(bodies[0]).toMatchObject({
+      msgtype: 'text',
+      at: { atUserIds: ['staff-1'] },
+    });
+    expect(bodies[1]).toMatchObject({ msgtype: 'text' });
+    expect(bodies[1]).not.toHaveProperty('at');
+    expect(bodies.map((body) => body.text.content.length)).toEqual([3800, 10]);
+    expect(
+      bodies
+        .map((body, index) =>
+          index === 0
+            ? body.text.content.slice('@staff-1\n\n'.length)
+            : body.text.content,
+        )
+        .join(''),
+    ).toBe(text);
+  });
+
+  it('preserves code fences across mentioned text chunks', async () => {
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const text = `\`\`\`\n${'a'.repeat(3800)}\n\`\`\``;
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    await getResponseHook(channel)('cid123', text, 'session-1');
+
+    const contents = fetchSpy.mock.calls.map(([, init], index) => {
+      const body = JSON.parse(String((init as RequestInit).body));
+      return index === 0
+        ? body.text.content.slice('@staff-1\n\n'.length)
+        : body.text.content;
+    });
+    expect(contents.join('')).toBe(text);
+    expect(
+      fetchSpy.mock.calls.every(([, init]) => {
+        const body = JSON.parse(String((init as RequestInit).body));
+        return body.text.content.length <= 3800;
+      }),
+    ).toBe(true);
+  });
+
+  it('mentions only the first block-streamed response', async () => {
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    await getResponseHook(channel)('cid123', 'first block', 'session-1');
+    await getResponseHook(channel)('cid123', 'second block', 'session-1');
+
+    const bodies = fetchSpy.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    );
+    expect(bodies[0]).toMatchObject({ at: { atUserIds: ['staff-1'] } });
+    expect(bodies[0].msgtype).toBe('text');
+    expect(bodies[1]).toMatchObject({ msgtype: 'text' });
+    expect(bodies[1]).not.toHaveProperty('at');
+  });
+});
+
+describe('DingtalkChannel mention target lifecycle', () => {
+  it('does not retain a preflight-rejected group candidate', async () => {
+    vi.doUnmock('@qwen-code/channel-base');
+    vi.resetModules();
+    const { DingtalkChannel: RealDingtalkChannel } = await import(
+      './DingtalkAdapter.js'
+    );
+    const bridge = Object.assign(new EventEmitter(), {
+      availableCommands: [],
+      newSession: vi.fn().mockResolvedValue('session-1'),
+      loadSession: vi.fn(),
+      prompt: vi.fn().mockResolvedValue('agent response'),
+      cancelSession: vi.fn().mockResolvedValue(undefined),
+    }) as never;
+    const createRealChannel = (groups: Record<string, unknown>) =>
+      new RealDingtalkChannel(
+        'real-dingtalk',
+        {
+          type: 'dingtalk',
+          token: '',
+          clientId: 'client-id',
+          clientSecret: 'client-secret',
+          senderPolicy: 'open',
+          allowedUsers: [],
+          sessionScope: 'user',
+          cwd: '/tmp',
+          groupPolicy: 'open',
+          dmPolicy: 'open',
+          atSender: true,
+          groups,
+        },
+        bridge,
+        {
+          registerBridgeEvents: false,
+          groupHistoryPath: join(
+            mkdtempSync(join(tmpdir(), 'dingtalk-mention-lifecycle-')),
+            'history.jsonl',
+          ),
+        },
+      );
+    const sendInbound = (
+      channel: InstanceType<typeof RealDingtalkChannel>,
+      msgId: string,
+      text: string,
+      isInAtList: boolean,
+    ) => {
+      (
+        channel as unknown as {
+          onMessage(downstream: DWClientDownStream): void;
+        }
+      ).onMessage({
+        data: JSON.stringify({
+          msgId,
+          conversationType: '2',
+          conversationId: 'cid-123',
+          sessionWebhook:
+            'https://oapi.dingtalk.com/robot/send?access_token=token',
+          senderStaffId: 'staff-123',
+          senderId: 'sender-123',
+          senderNick: 'Alice',
+          isInAtList,
+          text: { content: text },
+        }),
+        headers: { messageId: msgId },
+      } as unknown as DWClientDownStream);
+    };
+    const targetMap = (channel: InstanceType<typeof RealDingtalkChannel>) =>
+      (channel as unknown as { mentionTargets: Map<string, string> })
+        .mentionTargets;
+    const rejected = createRealChannel({ '*': { requireMention: true } });
+    sendInbound(rejected, 'rejected-1', 'not for the bot', false);
+
+    await vi.waitFor(() => {
+      expect(targetMap(rejected).has('rejected-1')).toBe(false);
+    });
+  });
+
+  it('does not retain a local-command candidate', async () => {
+    vi.doUnmock('@qwen-code/channel-base');
+    vi.resetModules();
+    const { DingtalkChannel: RealDingtalkChannel } = await import(
+      './DingtalkAdapter.js'
+    );
+    const bridge = Object.assign(new EventEmitter(), {
+      availableCommands: [],
+      newSession: vi.fn().mockResolvedValue('session-1'),
+      loadSession: vi.fn(),
+      prompt: vi.fn().mockResolvedValue('agent response'),
+      cancelSession: vi.fn().mockResolvedValue(undefined),
+    }) as never;
+    const channel = new RealDingtalkChannel(
+      'real-dingtalk',
+      {
+        type: 'dingtalk',
+        token: '',
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        senderPolicy: 'open',
+        allowedUsers: [],
+        sessionScope: 'user',
+        cwd: '/tmp',
+        groupPolicy: 'open',
+        dmPolicy: 'open',
+        atSender: true,
+        groups: { '*': { requireMention: false } },
+      },
+      bridge,
+      { registerBridgeEvents: false },
+    );
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    (
+      channel as unknown as {
+        onMessage(downstream: DWClientDownStream): void;
+      }
+    ).onMessage({
+      data: JSON.stringify({
+        msgId: 'command-1',
+        conversationType: '2',
+        conversationId: 'cid-123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderStaffId: 'staff-123',
+        senderId: 'sender-123',
+        senderNick: 'Alice',
+        isInAtList: true,
+        text: { content: '/help' },
+      }),
+      headers: { messageId: 'command-1' },
+    } as unknown as DWClientDownStream);
+
+    await vi.waitFor(() => {
+      expect(
+        (
+          channel as unknown as { mentionTargets: Map<string, string> }
+        ).mentionTargets.has('command-1'),
+      ).toBe(false);
+    });
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  it('clears the final buffered command target after synthetic collect re-entry', async () => {
+    vi.doUnmock('@qwen-code/channel-base');
+    vi.resetModules();
+    const { DingtalkChannel: RealDingtalkChannel } = await import(
+      './DingtalkAdapter.js'
+    );
+    const firstPrompt = deferredPromise<string>();
+    const bridge = Object.assign(new EventEmitter(), {
+      availableCommands: [],
+      newSession: vi.fn().mockResolvedValue('session-1'),
+      loadSession: vi.fn(),
+      prompt: vi.fn().mockReturnValueOnce(firstPrompt.promise),
+      cancelSession: vi.fn().mockResolvedValue(undefined),
+    }) as never;
+    const channel = new RealDingtalkChannel(
+      'real-dingtalk',
+      {
+        type: 'dingtalk',
+        token: '',
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        senderPolicy: 'open',
+        allowedUsers: [],
+        sessionScope: 'user',
+        cwd: '/tmp',
+        groupPolicy: 'open',
+        dmPolicy: 'open',
+        dispatchMode: 'collect',
+        atSender: true,
+        groups: { '*': { requireMention: false } },
+      },
+      bridge,
+      { registerBridgeEvents: false },
+    );
+    const finalCommand: Envelope = {
+      chatId: 'cid-123',
+      senderId: 'sender-123',
+      senderName: 'Alice',
+      messageId: 'command-1',
+      text: '/help',
+      isGroup: true,
+      isMentioned: true,
+    };
+    const initial = channel.handleInbound({
+      ...finalCommand,
+      messageId: 'active-1',
+      text: 'first request',
+    });
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+    const internals = channel as unknown as {
+      collectBuffers: Map<string, Array<{ text: string; envelope: Envelope }>>;
+      mentionTargets: Map<string, string>;
+      onPromptBuffered(
+        chatId: string,
+        sessionId: string,
+        messageId?: string,
+      ): void;
+    };
+    internals.mentionTargets.set('command-1', 'staff-123');
+    internals.collectBuffers.set('session-1', [
+      { text: '/help', envelope: finalCommand },
+    ]);
+    internals.onPromptBuffered('cid-123', 'session-1', 'command-1');
+
+    firstPrompt.resolve('first response');
+    await initial;
+
+    await vi.waitFor(() => {
+      expect(internals.mentionTargets.has('command-1')).toBe(false);
+    });
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+  });
+
+  it('clears buffered mention targets for a dead session only', async () => {
+    vi.doUnmock('@qwen-code/channel-base');
+    vi.resetModules();
+    const { DingtalkChannel: RealDingtalkChannel } = await import(
+      './DingtalkAdapter.js'
+    );
+    const bridge = Object.assign(new EventEmitter(), {
+      availableCommands: [],
+      newSession: vi.fn(),
+      loadSession: vi.fn(),
+      prompt: vi.fn(),
+      cancelSession: vi.fn(),
+    }) as never;
+    const channel = new RealDingtalkChannel(
+      'real-dingtalk',
+      {
+        type: 'dingtalk',
+        token: '',
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        senderPolicy: 'open',
+        allowedUsers: [],
+        sessionScope: 'user',
+        cwd: '/tmp',
+        groupPolicy: 'open',
+        dmPolicy: 'open',
+        atSender: true,
+        groups: {},
+      },
+      bridge,
+      { registerBridgeEvents: false },
+    );
+    const internals = channel as unknown as {
+      mentionTargets: Map<string, string>;
+      sessionMentionTargets: Map<string, string>;
+      textReplySessions: Set<string>;
+      bufferedMentionTargets: Set<string>;
+      bufferedMentionTargetsBySession: Map<string, Set<string>>;
+      onPromptBuffered(
+        chatId: string,
+        sessionId: string,
+        messageId?: string,
+      ): void;
+    };
+    internals.mentionTargets.set('buffered-1', 'staff-buffered');
+    internals.mentionTargets.set('queued-1', 'staff-queued');
+    internals.mentionTargets.set('other-1', 'staff-other');
+    internals.onPromptBuffered('cid-123', 'session-1', 'buffered-1');
+    internals.onPromptBuffered('cid-123', 'session-1', 'queued-1');
+    internals.onPromptBuffered('cid-123', 'session-2', 'other-1');
+    internals.sessionMentionTargets.set('session-1', 'staff-active');
+    internals.sessionMentionTargets.set('session-2', 'staff-other-active');
+    internals.textReplySessions.add('session-1');
+    internals.textReplySessions.add('session-2');
+
+    channel.onSessionDied('session-1');
+
+    expect(internals.mentionTargets.has('buffered-1')).toBe(false);
+    expect(internals.mentionTargets.has('queued-1')).toBe(false);
+    expect(internals.bufferedMentionTargets.has('buffered-1')).toBe(false);
+    expect(internals.bufferedMentionTargets.has('queued-1')).toBe(false);
+    expect(internals.bufferedMentionTargetsBySession.has('session-1')).toBe(
+      false,
+    );
+    expect(internals.sessionMentionTargets.has('session-1')).toBe(false);
+    expect(internals.textReplySessions.has('session-1')).toBe(false);
+    expect(internals.mentionTargets.get('other-1')).toBe('staff-other');
+    expect(internals.bufferedMentionTargets.has('other-1')).toBe(true);
+    expect(internals.bufferedMentionTargetsBySession.get('session-2')).toEqual(
+      new Set(['other-1']),
+    );
+    expect(internals.sessionMentionTargets.get('session-2')).toBe(
+      'staff-other-active',
+    );
+    expect(internals.textReplySessions.has('session-2')).toBe(true);
   });
 });
 

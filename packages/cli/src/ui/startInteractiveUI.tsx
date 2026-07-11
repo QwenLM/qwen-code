@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
+import type { ExtensionRefreshState } from '../config/extension-refresh-state.js';
 import { DualOutputBridge } from '../dualOutput/DualOutputBridge.js';
 import { DualOutputContext } from '../dualOutput/DualOutputContext.js';
 import { RemoteInputWatcher } from '../remoteInput/RemoteInputWatcher.js';
@@ -42,9 +43,15 @@ import { getCliVersion } from '../utils/version.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
+// The tool scheduler only runs a pressure check after a tool call, so a long
+// interactive conversation with no tool calls would never reclaim and could
+// grow toward the V8 heap limit. This interval closes that gap.
+const PRESSURE_CHECK_INTERVAL_MS = 30_000;
+
 export interface StartInteractiveUIOptions {
   postRenderConnectIde?: boolean;
   postRenderInitializeTelemetry?: boolean;
+  extensionRefreshState?: ExtensionRefreshState;
 }
 
 export async function startInteractiveUI(
@@ -164,6 +171,7 @@ export async function startInteractiveUI(
                         startupWarnings={startupWarnings}
                         version={version}
                         initializationResult={initializationResult}
+                        extensionRefreshState={options.extensionRefreshState}
                       />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
@@ -200,6 +208,7 @@ export async function startInteractiveUI(
   // after this — it carries the `config_initialize_*` and
   // `input_enabled` checkpoints that complete the first-screen picture.
   profileCheckpoint('first_paint');
+
   startPostRenderPrefetches(config, settings, {
     connectIde: options.postRenderConnectIde ?? false,
     initializeTelemetry:
@@ -207,7 +216,32 @@ export async function startInteractiveUI(
       config.isTelemetryInitializationDeferred(),
   });
 
+  // Periodic memory-pressure check for the interactive session. The interval
+  // is unref'd (can't keep the loop alive on its own) and cleared on cleanup.
+  const pressureMonitor = config.getMemoryPressureMonitor?.();
+  let pressureCheckTimer: NodeJS.Timeout | undefined;
+  if (pressureMonitor) {
+    pressureCheckTimer = setInterval(() => {
+      try {
+        pressureMonitor.performCheck();
+      } catch {
+        // Best-effort: a failing pressure check must not break the UI loop.
+      }
+    }, PRESSURE_CHECK_INTERVAL_MS);
+    pressureCheckTimer.unref?.();
+  }
+
   registerCleanup(async () => {
+    if (pressureCheckTimer) clearInterval(pressureCheckTimer);
+    // Best-effort reclaim before unmounting the React tree. Runs the
+    // synchronous cache-eviction step (and schedules compact_history) so a
+    // near-limit heap is not pushed over the edge by React reconciliation
+    // during unmount.
+    try {
+      pressureMonitor?.performCheck();
+    } catch {
+      // Best-effort: ignore.
+    }
     remoteInputWatcher?.shutdown();
     await dualOutputBridge?.shutdown();
     // Explicitly disable the Kitty keyboard protocol before unmounting Ink so

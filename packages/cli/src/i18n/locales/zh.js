@@ -191,6 +191,7 @@ export default {
   'toolDisplayName.CronList': '定时任务列表',
   'toolDisplayName.CronDelete': '删除定时任务',
   'toolDisplayName.LoopWakeup': '循环唤醒',
+  'toolDisplayName.CreateSubSession': '创建子会话',
   'toolDisplayName.TaskCreate': '创建任务',
   'toolDisplayName.TaskUpdate': '更新任务',
   'toolDisplayName.TaskList': '任务列表',
@@ -222,7 +223,9 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell 模式',
   'YOLO mode': 'YOLO 模式',
-  'Auto mode': 'Auto 模式',
+  'Auto mode': '自动模式',
+  'auto_mode.entry_notice':
+    '已启用自动模式。\n   LLM 分类器会评估每次工具调用 — 安全操作将自动批准，\n   有风险的操作将被阻止。退出：Shift+Tab 或 /approval-mode default。',
   'plan mode': '规划模式',
   'auto-accept edits': '自动接受编辑',
   'Accepting edits': '接受编辑',
@@ -256,7 +259,7 @@ export default {
   'to search history': '搜索历史',
   'to paste images': '粘贴图片',
   'for external editor': '外部编辑器',
-  'to toggle compact mode': '切换紧凑模式',
+  'to view transcript': '查看完整记录',
   'Jump through words in the input': '在输入中按单词跳转',
   'Close dialogs, cancel requests, or quit application':
     '关闭对话框、取消请求或退出应用程序',
@@ -469,6 +472,42 @@ export default {
   'Delete {{name}}': '删除 {{name}}',
   'Unknown Step': '未知步骤',
   'Esc to close': '按 Esc 关闭',
+  Transcript: '完整记录',
+  'to close': '关闭',
+  'to scroll': '滚动',
+  'Failed to render transcript.': '无法渲染完整记录。',
+  'Read {{count}} file': '读取了 {{count}} 个文件',
+  'Read {{count}} files': '读取了 {{count}} 个文件',
+  'Reading {{count}} file': '正在读取 {{count}} 个文件',
+  'Reading {{count}} files': '正在读取 {{count}} 个文件',
+  'Edited {{count}} file': '编辑了 {{count}} 个文件',
+  'Edited {{count}} files': '编辑了 {{count}} 个文件',
+  'Editing {{count}} file': '正在编辑 {{count}} 个文件',
+  'Editing {{count}} files': '正在编辑 {{count}} 个文件',
+  'Wrote {{count}} file': '写入了 {{count}} 个文件',
+  'Wrote {{count}} files': '写入了 {{count}} 个文件',
+  'Writing {{count}} file': '正在写入 {{count}} 个文件',
+  'Writing {{count}} files': '正在写入 {{count}} 个文件',
+  'Searched {{count}} pattern': '搜索了 {{count}} 个模式',
+  'Searched {{count}} patterns': '搜索了 {{count}} 个模式',
+  'Searching {{count}} pattern': '正在搜索 {{count}} 个模式',
+  'Searching {{count}} patterns': '正在搜索 {{count}} 个模式',
+  'Listed {{count}} directory': '列出了 {{count}} 个目录',
+  'Listed {{count}} directories': '列出了 {{count}} 个目录',
+  'Listing {{count}} directory': '正在列出 {{count}} 个目录',
+  'Listing {{count}} directories': '正在列出 {{count}} 个目录',
+  'Ran {{count}} command': '运行了 {{count}} 个命令',
+  'Ran {{count}} commands': '运行了 {{count}} 个命令',
+  'Running {{count}} command': '正在运行 {{count}} 个命令',
+  'Running {{count}} commands': '正在运行 {{count}} 个命令',
+  'Ran {{count}} agent': '运行了 {{count}} 个智能体',
+  'Ran {{count}} agents': '运行了 {{count}} 个智能体',
+  'Running {{count}} agent': '正在运行 {{count}} 个智能体',
+  'Running {{count}} agents': '正在运行 {{count}} 个智能体',
+  'Used {{count}} tool': '使用了 {{count}} 个工具',
+  'Used {{count}} tools': '使用了 {{count}} 个工具',
+  'Using {{count}} tool': '正在使用 {{count}} 个工具',
+  'Using {{count}} tools': '正在使用 {{count}} 个工具',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter 选择，↑↓ 导航，Esc 关闭',
   'Esc to go back': '按 Esc 返回',
@@ -1784,8 +1823,6 @@ export default {
     '按 Tab 或输入 /approval-mode 可快速切换权限模式。',
   'Try /insight to generate personalized insights from your chat history.':
     '试试 /insight，从聊天记录中生成个性化洞察。',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    '按 Ctrl+O 切换紧凑模式 ── 隐藏工具输出和思考过程，界面更简洁。',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     '添加 QWEN.md 文件，为 Qwen Code 提供持久的项目上下文。',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -2125,9 +2162,6 @@ export default {
     '原始模式不可用。请在交互式终端中运行。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    '紧凑模式下隐藏工具输出和思考过程，界面更简洁（Ctrl+O 切换）。',
-  'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',
   'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
     '设置具备推理能力的模型思考的强度（{{tiers}}）；按各提供方进行映射与钳制。',
@@ -2347,4 +2381,93 @@ export default {
   '中国 (China) - 阿里云百炼': '中国 - 阿里云百炼',
   '阿里云百炼 (aliyun.com)': '阿里云百炼（aliyun.com）',
   'No compression needed.': '无需压缩。',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    '检查 Qwen Code 更新并安装（如果可用）',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Qwen Code 有可用更新！{{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Qwen Code 有新版本可用！{{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} 已是最新！',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    '检查更新失败。请检查网络或 registry 配置。',
+  'Unable to check for updates: {{reason}}': '无法检查更新：{{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    '更新成功！新版本将在下次运行时生效。',
+  'Update downloaded. It will be applied after you exit this session.':
+    '更新已下载。将在退出当前会话后应用。',
+  'Update failed: {{error}}': '更新失败：{{error}}',
+  'Downloading update...': '正在下载更新...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    '更新成功！请重启 Qwen Code 以使用新版本。重启前切换模型提供商可能无法正常工作。',
+  'Automatic update failed. Please try updating manually.':
+    '自动更新失败。请尝试手动更新。',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    '自动更新失败：{{error}}。请重新运行安装程序以手动更新。',
+  'Running from a local git clone. Please update with "git pull".':
+    '正在从本地 Git 克隆运行。请使用 "git pull" 更新。',
+  'Running via npx, update not applicable.': '正在通过 npx 运行，更新不适用。',
+  'Running via pnpx, update not applicable.':
+    '正在通过 pnpx 运行，更新不适用。',
+  'Running via bunx, update not applicable.':
+    '正在通过 bunx 运行，更新不适用。',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    '通过 Homebrew 安装。请使用 "brew upgrade" 更新。',
+  "Locally installed. Please update via your project's package.json.":
+    '本地安装。请通过项目的 package.json 更新。',
+  'Update requires sudo. Please run:': '更新需要 sudo。请运行：',
+  'Standalone install detected. Attempting to automatically update now...':
+    '检测到独立安装。正在尝试自动更新...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    '检测到独立安装。请重新运行独立安装程序以更新：',
+  'Run the following to update:': '运行以下命令进行更新：',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    '无法自动更新此独立安装。请从以下地址重新安装：',
+  'Manual update required. Please reinstall Qwen Code.':
+    '需要手动更新。请重新安装 Qwen Code。',
+  '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
+    '⚠️ 历史记录缺口：此处之前的会话记录已丢失（存储中断），且无法找回。',
+
+  // ============================================================================
+  // reload-plugins 命令
+  // ============================================================================
+  '{{count}} extension': '{{count}} 个扩展',
+  '{{count}} extensions': '{{count}} 个扩展',
+  '{{count}} command': '{{count}} 个命令',
+  '{{count}} commands': '{{count}} 个命令',
+  '{{count}} skill': '{{count}} 个技能',
+  '{{count}} skills': '{{count}} 个技能',
+  '{{count}} agent': '{{count}} 个代理',
+  '{{count}} agents': '{{count}} 个代理',
+  '{{count}} hook': '{{count}} 个钩子',
+  '{{count}} hooks': '{{count}} 个钩子',
+  '{{count}} extension MCP server': '{{count}} 个扩展 MCP 服务器',
+  '{{count}} extension MCP servers': '{{count}} 个扩展 MCP 服务器',
+  '{{count}} extension LSP server': '{{count}} 个扩展 LSP 服务器',
+  '{{count}} extension LSP servers': '{{count}} 个扩展 LSP 服务器',
+  'Reload extension changes from disk': '从磁盘重新加载扩展变更',
+  'Reloaded extensions: {{summary}}': '已重新加载扩展：{{summary}}',
+  'Reload failed: {{message}}': '重新加载失败：{{message}}',
+  'Reload failed.': '重新加载失败。',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    '磁盘上的扩展已变更。运行 /reload-plugins 来应用更新。',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    '扩展内容刷新失败：{{message}}。运行 /reload-plugins 来应用更新。',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    '扩展内容刷新失败。运行 /reload-plugins 来应用更新。',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    '扩展重新加载未完成。运行 /reload-plugins 重试。',
+  'Precondition check': '前置条件检查',
+  'Precondition not met — this scheduled run was skipped.':
+    '前置条件不满足 —— 已跳过本次定时运行。',
+  'The precondition check was cancelled — this scheduled run was skipped.':
+    '前置条件检查已取消 —— 已跳过本次定时运行。',
+  'The precondition check was interrupted — this scheduled run was skipped.':
+    '前置条件检查被中断 —— 已跳过本次定时运行。',
+  'The precondition check failed — this scheduled run was skipped.':
+    '前置条件检查失败 —— 已跳过本次定时运行。',
+  'Running this scheduled task in a new session: {{link}}':
+    '正在新会话中运行该定时任务：{{link}}',
+  'This scheduled run could not be started: {{error}}':
+    '本次定时运行无法启动：{{error}}',
 };

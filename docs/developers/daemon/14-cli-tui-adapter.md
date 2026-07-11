@@ -128,7 +128,7 @@ Hosts can stop at `(E)` and implement their own reducer, or consume `(G)` and th
 
 ### `state_resync_required`
 
-`session.state_resync_required` maps to a transcript "missed range" marker. UI code can call `formatMissedRange(state)` to render text such as "missed events X-Y". The reducer **continues applying later events**, but marks affected blocks with `resyncRecovery: true` so renderers can add visual context. See [`10-event-bus.md`](./10-event-bus.md) for ring-eviction and `state_resync_required` semantics.
+`session.state_resync_required` maps to a transcript "missed range" marker. UI code can call `formatMissedRange(state)` to render text such as "missed events X-Y". The reducer sets `awaitingResync` and skips ordinary delta events until consumer code reloads the session's bounded replay snapshot window and clears the latch. A loaded snapshot may start with `history_truncated`; that marker renders as status only and must not start another resync loop. See [`10-event-bus.md`](./10-event-bus.md) for ring-eviction and `state_resync_required` semantics.
 
 ## Consumers
 

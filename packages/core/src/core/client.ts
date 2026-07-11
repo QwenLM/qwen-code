@@ -34,11 +34,7 @@ import {
 import { abortGoalForStopHookCap } from '../goals/goalHook.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
-import {
-  DEFAULT_TOKEN_LIMIT,
-  escalatedOutputTokenLimit,
-  parsePositiveIntegerEnvValue,
-} from './tokenLimits.js';
+import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
 import { createSessionStartProfiler } from './session-start-profiler.js';
 
 const debugLogger = createDebugLogger('CLIENT');
@@ -67,10 +63,7 @@ import { CommitAttributionService } from '../services/commitAttribution.js';
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
-import {
-  DEFAULT_AUTO_SKILL_MAX_TURNS,
-  DEFAULT_AUTO_SKILL_TIMEOUT_MS,
-} from '../memory/skillReviewAgentPlanner.js';
+import { DEFAULT_AUTO_SKILL_MAX_TURNS } from '../memory/skillReviewAgentPlanner.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
 
@@ -1593,7 +1586,6 @@ export class GeminiClient {
           enabled: autoSkillEnabled,
           threshold: AUTO_SKILL_THRESHOLD,
           maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
-          timeoutMs: DEFAULT_AUTO_SKILL_TIMEOUT_MS,
           confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
         });
         if (skillReviewResult.status === 'scheduled') {
@@ -2900,22 +2892,7 @@ export class GeminiClient {
     signal?: AbortSignal,
     customInstructions?: string,
   ): Promise<ChatCompressionInfo> {
-    // Compute reservedOutputTokens using the same fallback logic as
-    // GeminiChat.sendMessageStream so the cheap-gate thresholds align with
-    // the real available input budget (issue #5950).
-    const cgConfig = this.config.getContentGeneratorConfig();
     const model = this.config.getModel();
-    const parsedEnvMaxTokens = parsePositiveIntegerEnvValue(
-      process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
-    );
-    const hasUserMaxTokensOverride =
-      (cgConfig?.samplingParams?.max_tokens !== undefined &&
-        cgConfig?.samplingParams?.max_tokens !== null) ||
-      parsedEnvMaxTokens !== undefined;
-    const reservedOutputTokens: number = hasUserMaxTokensOverride
-      ? (cgConfig?.samplingParams?.max_tokens ?? parsedEnvMaxTokens ?? 0)
-      : escalatedOutputTokenLimit(model, cgConfig?.contextWindowSize);
-
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
     const info = await this.getChat().tryCompress(
@@ -2923,10 +2900,7 @@ export class GeminiClient {
       model,
       force,
       signal,
-      {
-        ...(customInstructions ? { customInstructions } : undefined),
-        reservedOutputTokens,
-      },
+      customInstructions ? { customInstructions } : undefined,
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       const chat = this.getChat();

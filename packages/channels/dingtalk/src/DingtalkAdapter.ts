@@ -13,6 +13,10 @@ import {
 } from '@qwen-code/channel-base';
 import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
 import { downloadMedia } from './media.js';
+import {
+  DingtalkConnectionManager,
+  type DingtalkManagedSocket,
+} from './DingtalkConnectionManager.js';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
@@ -87,12 +91,32 @@ const GROUP_MSG_API = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
 const GROUP_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
+const TEXT_MESSAGE_LIMIT = 3800;
+const mentionTarget = Symbol('mentionTarget');
+
+type MentionTargetEnvelope = Envelope & {
+  [mentionTarget]?: string;
+};
 
 interface DingTalkTokenResponse {
   errcode?: number;
   errmsg?: string;
   access_token?: string;
   expires_in?: number;
+}
+
+function splitTextChunks(text: string, firstChunkLimit: number): string[] {
+  if (!text) return [text];
+
+  const chunks: string[] = [];
+  let offset = 0;
+  let chunkLimit = firstChunkLimit;
+  while (offset < text.length) {
+    chunks.push(text.slice(offset, offset + chunkLimit));
+    offset += chunkLimit;
+    chunkLimit = TEXT_MESSAGE_LIMIT;
+  }
+  return chunks;
 }
 
 type DingTalkClientInternals = DWClient & {
@@ -103,9 +127,20 @@ type DingTalkClientInternals = DWClient & {
   onCallback(message: DWClientDownStream): void;
 };
 
+type DingtalkChannelConfig = ChannelConfig & {
+  useConnectionManager?: unknown;
+};
+
 export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
+  private readonly atSender: boolean;
+  private connectionManager?: DingtalkConnectionManager<DWClient>;
   private seenMessages: Map<string, number> = new Map();
+  private mentionTargets = new Map<string, string>();
+  private sessionMentionTargets = new Map<string, string>();
+  private textReplySessions = new Set<string>();
+  private bufferedMentionTargets = new Set<string>();
+  private bufferedMentionTargetsBySession = new Map<string, Set<string>>();
   private dedupTimer?: ReturnType<typeof setInterval>;
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
@@ -135,21 +170,60 @@ export class DingtalkChannel extends ChannelBase {
   ) {
     super(name, config, bridge, options);
 
+    this.atSender =
+      (config as unknown as Record<string, unknown>)['atSender'] === true;
+
     if (!config.clientId || !config.clientSecret) {
       throw new Error(
         `Channel "${name}" requires clientId and clientSecret for DingTalk.`,
       );
     }
 
-    this.client = new DWClient({
-      clientId: config.clientId,
-      clientSecret: config.clientSecret,
-    });
-    this.installStructuredDownstreamHandler();
+    const rawUseConnectionManager = (config as DingtalkChannelConfig)
+      .useConnectionManager;
+    if (
+      rawUseConnectionManager !== undefined &&
+      typeof rawUseConnectionManager !== 'boolean'
+    ) {
+      throw new Error(
+        `Channel "${name}" useConnectionManager must be a boolean.`,
+      );
+    }
+    const useConnectionManager = rawUseConnectionManager ?? true;
+
+    this.client = this.createClient(useConnectionManager);
+    if (useConnectionManager) {
+      this.connectionManager = new DingtalkConnectionManager({
+        initialClient: this.client,
+        createClient: () => this.createClient(true),
+        getSocket: (client) =>
+          (client as unknown as { socket?: DingtalkManagedSocket }).socket,
+        onClientChanged: (client) => {
+          this.client = client;
+        },
+        log: (message) => {
+          process.stderr.write(
+            `[DingTalk:${this.name}] ${sanitizeLogText(message, 200)}\n`,
+          );
+        },
+      });
+    }
   }
 
-  private installStructuredDownstreamHandler(): void {
-    const client = this.client as DingTalkClientInternals;
+  private createClient(useConnectionManager: boolean): DWClient {
+    const client = new DWClient({
+      clientId: this.config.clientId!,
+      clientSecret: this.config.clientSecret!,
+      keepAlive: !useConnectionManager,
+    });
+    client.config.autoReconnect = !useConnectionManager;
+    this.installStructuredDownstreamHandler(client);
+    this.registerMessageHandler(client);
+    return client;
+  }
+
+  private installStructuredDownstreamHandler(streamClient: DWClient): void {
+    const client = streamClient as DingTalkClientInternals;
     client.debug = false;
     // Keep raw SDK downstream frames off stdout; this switch mirrors the SDK
     // dispatch table and should be checked when upgrading the DingTalk SDK.
@@ -158,7 +232,18 @@ export class DingtalkChannel extends ChannelBase {
     };
   }
 
+  private registerMessageHandler(client: DWClient): void {
+    client.registerCallbackListener(TOPIC_ROBOT, (msg: DWClientDownStream) => {
+      client.send(msg.headers.messageId, {
+        status: EventAck.SUCCESS,
+        message: 'ok',
+      });
+      this.onMessage(msg);
+    });
+  }
+
   private onDownStream(raw: unknown, client: DingTalkClientInternals): void {
+    this.connectionManager?.noteActivity(client);
     const decoded = this.decodeDownStream(raw);
     let msg: DWClientDownStream;
     try {
@@ -208,6 +293,9 @@ export class DingtalkChannel extends ChannelBase {
     switch (type) {
       case 'SYSTEM':
         this.callDownStreamHandler(client, 'onSystem', normalizedMsg);
+        if (topic === 'disconnect') {
+          this.connectionManager?.requestReconnect(client, 'SYSTEM disconnect');
+        }
         break;
       case 'EVENT':
         this.callDownStreamHandler(client, 'onEvent', normalizedMsg);
@@ -262,19 +350,11 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   async connect(): Promise<void> {
-    this.client.registerCallbackListener(
-      TOPIC_ROBOT,
-      (msg: DWClientDownStream) => {
-        // ACK immediately so DingTalk doesn't retry
-        this.client.send(msg.headers.messageId, {
-          status: EventAck.SUCCESS,
-          message: 'ok',
-        });
-        this.onMessage(msg);
-      },
-    );
-
-    await this.client.connect();
+    if (this.connectionManager) {
+      await this.connectionManager.start();
+    } else {
+      await this.client.connect();
+    }
 
     // Periodically clean up dedup map
     this.dedupTimer = setInterval(() => {
@@ -301,7 +381,7 @@ export class DingtalkChannel extends ChannelBase {
     return isGroup && !conversationId;
   }
 
-  async sendMessage(chatId: string, text: string): Promise<void> {
+  private async sendReply(chatId: string, text: string): Promise<void> {
     // chatId is a conversationId — resolve to the latest sessionWebhook
     const webhook = this.webhooks.get(chatId);
     if (!webhook) {
@@ -337,6 +417,65 @@ export class DingtalkChannel extends ChannelBase {
         );
       }
     }
+  }
+
+  private async sendTextReply(
+    chatId: string,
+    text: string,
+    atUserId?: string,
+  ): Promise<void> {
+    const webhook = this.webhooks.get(chatId);
+    if (!webhook) return;
+
+    const mentionPrefix = atUserId ? `@${atUserId}\n\n` : '';
+    const chunks = splitTextChunks(
+      text,
+      TEXT_MESSAGE_LIMIT - mentionPrefix.length,
+    );
+    for (let i = 0; i < chunks.length; i++) {
+      const isMention = i === 0 && atUserId !== undefined;
+      const resp = await fetch(webhook, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          msgtype: 'text',
+          text: {
+            content: isMention ? `${mentionPrefix}${chunks[i]!}` : chunks[i]!,
+          },
+          ...(isMention ? { at: { atUserIds: [atUserId] } } : {}),
+        }),
+      });
+
+      if (isMention && process.env['QWEN_CHANNEL_DEBUG_MENTIONS'] === '1') {
+        const payload = (await resp
+          .clone()
+          .json()
+          .catch(() => undefined)) as unknown;
+        const response =
+          payload && typeof payload === 'object'
+            ? (payload as Record<string, unknown>)
+            : {};
+        const value = response['errcode'] ?? response['code'];
+        const code =
+          typeof value === 'number' || typeof value === 'string'
+            ? String(value)
+            : 'unknown';
+        process.stderr.write(
+          `[DingTalk:${this.name}] mention delivery status=${resp.status} code=${code}\n`,
+        );
+      }
+
+      if (!resp.ok) {
+        const detail = await resp.text().catch(() => '');
+        process.stderr.write(
+          `[DingTalk:${this.name}] sendTextReply failed: HTTP ${resp.status} ${detail}\n`,
+        );
+      }
+    }
+  }
+
+  async sendMessage(chatId: string, text: string): Promise<void> {
+    await this.sendReply(chatId, text);
   }
 
   override supportsProactiveSend(): boolean {
@@ -537,7 +676,11 @@ export class DingtalkChannel extends ChannelBase {
     }
     this.activeReactionKeys.clear();
     this.sessionReactionKeys.clear();
-    this.client.disconnect();
+    if (this.connectionManager) {
+      this.connectionManager.stop();
+    } else {
+      this.client.disconnect();
+    }
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
   }
 
@@ -626,6 +769,16 @@ export class DingtalkChannel extends ChannelBase {
 
   /** Recall reactions left behind when a session dies without terminal lifecycle events. */
   override onSessionDied(sessionId: string): void {
+    const bufferedTargets = this.bufferedMentionTargetsBySession.get(sessionId);
+    if (bufferedTargets) {
+      this.bufferedMentionTargetsBySession.delete(sessionId);
+      for (const messageId of bufferedTargets) {
+        this.bufferedMentionTargets.delete(messageId);
+        this.mentionTargets.delete(messageId);
+      }
+    }
+    this.sessionMentionTargets.delete(sessionId);
+    this.textReplySessions.delete(sessionId);
     const keys = this.sessionReactionKeys.get(sessionId);
     if (keys) {
       this.sessionReactionKeys.delete(sessionId);
@@ -646,7 +799,50 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
     if (isTerminalTaskLifecycleType(event.type)) {
+      if (event.messageId) this.mentionTargets.delete(event.messageId);
       this.stopReaction(event.chatId, event.messageId, event.sessionId);
+    }
+  }
+
+  protected override onPromptBufferDropped(
+    _chatId: string,
+    sessionId: string,
+    messageIds: string[],
+  ): void {
+    for (const messageId of messageIds) {
+      this.bufferedMentionTargets.delete(messageId);
+      this.mentionTargets.delete(messageId);
+      this.untrackBufferedMentionTarget(sessionId, messageId);
+    }
+  }
+
+  protected override onPromptBufferDrained(
+    _chatId: string,
+    sessionId: string,
+    messageIds: string[],
+  ): void {
+    for (const messageId of messageIds) {
+      this.bufferedMentionTargets.delete(messageId);
+      this.untrackBufferedMentionTarget(sessionId, messageId);
+    }
+    for (const messageId of messageIds.slice(0, -1)) {
+      this.mentionTargets.delete(messageId);
+    }
+  }
+
+  protected override onPromptBuffered(
+    _chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    if (messageId && this.mentionTargets.has(messageId)) {
+      this.bufferedMentionTargets.add(messageId);
+      let targets = this.bufferedMentionTargetsBySession.get(sessionId);
+      if (!targets) {
+        targets = new Set();
+        this.bufferedMentionTargetsBySession.set(sessionId, targets);
+      }
+      targets.add(messageId);
     }
   }
 
@@ -655,7 +851,51 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
+    if (messageId) {
+      this.bufferedMentionTargets.delete(messageId);
+      this.untrackBufferedMentionTarget(sessionId, messageId);
+      const atUserId = this.mentionTargets.get(messageId);
+      this.mentionTargets.delete(messageId);
+      if (this.atSender && atUserId) {
+        this.sessionMentionTargets.set(sessionId, atUserId);
+        this.textReplySessions.add(sessionId);
+      }
+    }
     this.startReaction(chatId, messageId, sessionId);
+  }
+
+  override async handleInbound(envelope: Envelope): Promise<void> {
+    if (!(await this.preflightInbound(envelope))) return;
+
+    const messageId = envelope.messageId;
+    const atUserId = (envelope as MentionTargetEnvelope)[mentionTarget];
+    if (this.atSender && messageId && atUserId) {
+      this.mentionTargets.set(messageId, atUserId);
+    }
+
+    await this.processInbound(envelope);
+  }
+
+  protected override async processInbound(envelope: Envelope): Promise<void> {
+    const messageId = envelope.messageId;
+    try {
+      await super.processInbound(envelope);
+    } finally {
+      if (messageId && !this.bufferedMentionTargets.has(messageId)) {
+        this.mentionTargets.delete(messageId);
+      }
+    }
+  }
+
+  private untrackBufferedMentionTarget(
+    sessionId: string,
+    messageId: string,
+  ): void {
+    const targets = this.bufferedMentionTargetsBySession.get(sessionId);
+    if (!targets) return;
+    targets.delete(messageId);
+    if (targets.size === 0)
+      this.bufferedMentionTargetsBySession.delete(sessionId);
   }
 
   protected override onPromptEnd(
@@ -663,7 +903,25 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
+    this.sessionMentionTargets.delete(sessionId);
+    this.textReplySessions.delete(sessionId);
     this.stopReaction(chatId, messageId, sessionId);
+  }
+
+  protected override async sendResponseMessage(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    const atUserId = this.atSender
+      ? this.sessionMentionTargets.get(sessionId)
+      : undefined;
+    if (atUserId) this.sessionMentionTargets.delete(sessionId);
+    if (this.textReplySessions.has(sessionId)) {
+      await this.sendTextReply(chatId, text, atUserId);
+      return;
+    }
+    await this.sendReply(chatId, text);
   }
 
   /**
@@ -892,6 +1150,7 @@ export class DingtalkChannel extends ChannelBase {
         typeof downstream.data === 'string'
           ? JSON.parse(downstream.data)
           : (downstream.data as DingTalkMessageData);
+      this.logDebugPayload('DingTalk', data);
       const dataMsgId = typeof data.msgId === 'string' ? data.msgId : undefined;
       const headerMsgId =
         typeof downstream.headers.messageId === 'string'
@@ -1006,6 +1265,10 @@ export class DingtalkChannel extends ChannelBase {
       // Reactions are resolved later via the chatId passed to
       // onPromptStart/onPromptEnd — no extra bookkeeping needed.
       envelope.messageId = msgId;
+
+      if (this.atSender && isGroup && senderStaffId) {
+        (envelope as MentionTargetEnvelope)[mentionTarget] = senderStaffId;
+      }
 
       const processMessage = async () => {
         // Download media if present (first downloadCode only for images)

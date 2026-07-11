@@ -897,6 +897,99 @@ describe('AnthropicContentGenerator', () => {
       expect(reqTools?.[0]?.cache_control).toEqual({ type: 'ephemeral' });
     });
 
+    it('emits scope:"global" on non-Anthropic baseURLs when forceGlobalCacheScope is true (#6642)', async () => {
+      // Proxy providers (e.g. Routify, OpenRouter) can opt-in to global
+      // cache scope via `forceGlobalCacheScope: true`. The
+      // `prompt-caching-scope-2026-01-05` beta and body-side
+      // `scope: 'global'` must be emitted even when the base URL is not
+      // Anthropic-native.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          ...baseConfig,
+          baseUrl: 'https://proxy.routify.ai/v1',
+          forceGlobalCacheScope: true,
+          reasoning: false,
+        },
+        mockConfig,
+      );
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hi',
+        config: {
+          systemInstruction: 'sys',
+          tools: [
+            {
+              functionDeclarations: [
+                { name: 'get_weather', description: 'Get weather' },
+              ],
+            },
+          ],
+        },
+      } as unknown as GenerateContentParameters);
+
+      const [req, options] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const reqHeaders = ((options as { headers?: Record<string, string> })
+        ?.headers || {}) as Record<string, string>;
+      // Beta header must be sent when forceGlobalCacheScope is true.
+      expect(reqHeaders['anthropic-beta']).toContain(
+        'prompt-caching-scope-2026-01-05',
+      );
+      // Body carries scope:'global' on system block.
+      expect((req as { system?: unknown }).system).toEqual([
+        {
+          type: 'text',
+          text: 'sys',
+          cache_control: { type: 'ephemeral', scope: 'global' },
+        },
+      ]);
+      // And on the last tool.
+      const reqTools = (req as { tools?: Array<{ cache_control?: unknown }> })
+        .tools;
+      expect(reqTools?.[0]?.cache_control).toEqual({
+        type: 'ephemeral',
+        scope: 'global',
+      });
+    });
+
+    it('suppresses scope:"global" when enableCacheControl is false even with forceGlobalCacheScope', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          ...baseConfig,
+          baseUrl: 'https://proxy.routify.ai/v1',
+          enableCacheControl: false,
+          forceGlobalCacheScope: true,
+          reasoning: false,
+        },
+        mockConfig,
+      );
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hi',
+        config: {
+          systemInstruction: 'sys',
+        },
+      } as unknown as GenerateContentParameters);
+
+      const [req] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      // System should be a plain string (no cache_control at all).
+      expect((req as { system?: unknown }).system).toBe('sys');
+    });
+
     it('merges user-supplied customHeaders[anthropic-beta] with computed flags (no overwrite)', async () => {
       // Users configure additional Anthropic beta flags via customHeaders.
       // The per-request override must add to that list, not replace it.
@@ -1231,7 +1324,7 @@ describe('AnthropicContentGenerator', () => {
       expect(capturedSignal!.aborted).toBe(true);
     });
 
-    it('builds request with config sampling params (config overrides request) and thinking budget', async () => {
+    it('builds request with config sampling params (config overrides request; max_tokens takes the smaller) and thinking budget', async () => {
       const { AnthropicContentConverter } = await importConverter();
       const { AnthropicContentGenerator } = await importGenerator();
 
@@ -1302,7 +1395,10 @@ describe('AnthropicContentGenerator', () => {
       expect(anthropicRequest).toEqual(
         expect.objectContaining({
           model: 'claude-test',
-          max_tokens: 1000,
+          // Sampling params override the request — EXCEPT max_tokens, where
+          // the smaller of config (1000) and request (200) wins so the
+          // send-path window clamp can never be overridden upward.
+          max_tokens: 200,
           temperature: 0.7,
           top_p: 0.9,
           top_k: 20,
@@ -1554,6 +1650,137 @@ describe('AnthropicContentGenerator', () => {
           output_config: { effort: 'xhigh' },
           thinking: { type: 'adaptive' },
         }),
+      );
+    });
+
+    // Claude 4.8+ deprecated the `temperature` sampling parameter — the
+    // server responds with a 400 when it is sent. Verify the generator
+    // omits it for 4.8+ and keeps it for older models.
+    it('omits temperature on Opus 4.8 (deprecated)', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-opus-4-8',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-8',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500, temperature: 0.7 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).not.toHaveProperty('temperature');
+    });
+
+    it('keeps temperature on Opus 4.7 (still accepted)', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-opus-4-7',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-7',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500, temperature: 0.7 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ temperature: 0.7 }),
+      );
+    });
+
+    it('omits temperature on Sonnet 5 (5.x family, deprecated)', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-sonnet-5',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-sonnet-5',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500, temperature: 0.5 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).not.toHaveProperty('temperature');
+    });
+
+    it('keeps temperature on unknown/unversioned model id', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'some-custom-model',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'some-custom-model',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500, temperature: 0.3 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ temperature: 0.3 }),
       );
     });
 
@@ -2120,7 +2347,7 @@ describe('AnthropicContentGenerator', () => {
         const [anthropicRequest] =
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect(anthropicRequest).toEqual(
-          expect.objectContaining({ max_tokens: 65536 }),
+          expect.objectContaining({ max_tokens: 64000 }),
         );
       });
 
@@ -2155,7 +2382,7 @@ describe('AnthropicContentGenerator', () => {
           const [anthropicRequest] =
             anthropicState.lastCreateArgs as AnthropicCreateArgs;
           expect(anthropicRequest).toEqual(
-            expect.objectContaining({ max_tokens: 65536 }),
+            expect.objectContaining({ max_tokens: 64000 }),
           );
         }
       });
@@ -2254,7 +2481,7 @@ describe('AnthropicContentGenerator', () => {
         const [anthropicRequest] =
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect(anthropicRequest).toEqual(
-          expect.objectContaining({ max_tokens: 65536 }),
+          expect.objectContaining({ max_tokens: 64000 }),
         );
       });
     });

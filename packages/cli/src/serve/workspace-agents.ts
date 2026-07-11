@@ -23,6 +23,14 @@ import {
   type AcpSessionBridge,
 } from './acp-session-bridge.js';
 import { safeLogValue } from './server/request-helpers.js';
+import {
+  requireTrustedWorkspaceRuntime,
+  resolveWorkspaceRuntimeFromParam,
+} from './workspace-route-runtime.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from './workspace-registry.js';
 
 /**
  * Pattern for the route-layer `:agentType` URL parameter. Matches the
@@ -96,6 +104,13 @@ import {
 export interface WorkspaceAgentsRouteDeps {
   bridge: AcpSessionBridge;
   boundWorkspace: string;
+  mutate: (opts?: { strict?: boolean }) => RequestHandler;
+  parseClientId: (req: Request, res: Response) => string | undefined | null;
+  safeBody: (req: Request) => Record<string, unknown>;
+}
+
+export interface WorkspaceQualifiedAgentsRouteDeps {
+  workspaceRegistry: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   parseClientId: (req: Request, res: Response) => string | undefined | null;
   safeBody: (req: Request) => Record<string, unknown>;
@@ -680,6 +695,318 @@ export function mountWorkspaceAgentsRoutes(
   );
 }
 
+export function mountWorkspaceQualifiedAgentsRoutes(
+  app: Application,
+  deps: WorkspaceQualifiedAgentsRouteDeps,
+): void {
+  app.get('/workspaces/:workspace/agents', async (req, res) => {
+    const runtime = resolveTrustedWorkspaceAgentRuntime(deps, req, res);
+    if (!runtime) return;
+    const scopedLevel = parseWorkspaceOnlyAgentScopeQuery(req, res);
+    if (scopedLevel === null) return;
+    const manager = createDaemonSubagentManager(runtime.workspaceCwd);
+    try {
+      const agents = await manager.listSubagents({ force: true });
+      const status: ServeWorkspaceAgentsStatus = {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: runtime.workspaceCwd,
+        agents: agents
+          .filter((agent) => agent.level === 'project')
+          .map(toSummary),
+      };
+      res.status(200).json(status);
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: GET /workspaces/:workspace/agents failed: ${
+          err instanceof Error ? (err.stack ?? err.message) : String(err)
+        }`,
+      );
+      res.status(500).json({
+        error: 'Failed to list workspace agents',
+        code: 'agent_list_failed',
+      });
+    }
+  });
+
+  app.post(
+    '/workspaces/:workspace/agents',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveTrustedWorkspaceAgentRuntime(deps, req, res);
+      if (!runtime) return;
+      const routeDeps = workspaceAgentDepsForRuntime(runtime, deps);
+      const body = deps.safeBody(req);
+      const clientIdResult = resolveOriginatorClientId(routeDeps, req, res);
+      if (clientIdResult === null) return;
+      const originatorClientId = clientIdResult;
+
+      const level = parseWorkspaceOnlyAgentBodyScope(body, res);
+      if (level === null) return;
+      const manager = createDaemonSubagentManager(runtime.workspaceCwd);
+      const config = parseAgentConfig(body, level, res);
+      if (!config) return;
+
+      const collision = await manager.loadSubagent(config.name, level);
+      if (collision) {
+        res.status(409).json({
+          error: `Subagent "${config.name}" already exists at ${level} level`,
+          code: 'agent_already_exists',
+          name: config.name,
+          level,
+        });
+        return;
+      }
+
+      try {
+        await manager.createSubagent(config, { level });
+      } catch (err) {
+        if (sendCreateAgentError(res, err, config.name)) return;
+        writeStderrLine(
+          `qwen serve: POST /workspaces/:workspace/agents failed: ${
+            err instanceof Error ? (err.stack ?? err.message) : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to create workspace agent',
+          code: 'agent_create_failed',
+        });
+        return;
+      }
+
+      const created = await manager.loadSubagent(config.name, level);
+      if (!created) {
+        writeStderrLine(
+          `qwen serve: agent_create_reload_failed (name=${safeLogValue(config.name)} ` +
+            `level=${level}) — file likely persisted on disk; check ` +
+            '`GET /workspaces/:workspace/agents` for a phantom entry',
+        );
+        res.status(500).json({
+          error: 'Agent creation succeeded but reload failed',
+          code: 'agent_create_reload_failed',
+          name: config.name,
+          level,
+        });
+        return;
+      }
+      runtime.bridge.publishWorkspaceEvent({
+        type: 'agent_changed',
+        data: { change: 'created', name: config.name, level: 'project' },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+      res.status(201).json({ ok: true, agent: toDetail(created) });
+    },
+  );
+
+  app.get('/workspaces/:workspace/agents/:agentType', async (req, res) => {
+    const runtime = resolveTrustedWorkspaceAgentRuntime(deps, req, res);
+    if (!runtime) return;
+    const agentType = validateAgentType(req, res);
+    if (agentType === null) return;
+    const scopedLevel = parseWorkspaceOnlyAgentScopeQuery(req, res);
+    if (scopedLevel === null) return;
+    const manager = createDaemonSubagentManager(runtime.workspaceCwd);
+    try {
+      const config = await manager.loadSubagent(agentType, scopedLevel);
+      if (!config) {
+        res.status(404).json({
+          error: `Subagent "${agentType}" not found`,
+          code: 'agent_not_found',
+          name: agentType,
+        });
+        return;
+      }
+      res.status(200).json(toDetail(config));
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: GET /workspaces/:workspace/agents/${safeLogValue(agentType)} failed: ${
+          err instanceof Error ? (err.stack ?? err.message) : String(err)
+        }`,
+      );
+      res.status(500).json({
+        error: 'Failed to read workspace agent',
+        code: 'agent_read_failed',
+      });
+    }
+  });
+
+  app.post(
+    '/workspaces/:workspace/agents/:agentType',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveTrustedWorkspaceAgentRuntime(deps, req, res);
+      if (!runtime) return;
+      const agentType = validateAgentType(req, res);
+      if (agentType === null) return;
+      const scopedLevel = parseWorkspaceOnlyAgentScopeQuery(req, res);
+      if (scopedLevel === null) return;
+      const routeDeps = workspaceAgentDepsForRuntime(runtime, deps);
+      const clientIdResult = resolveOriginatorClientId(routeDeps, req, res);
+      if (clientIdResult === null) return;
+      const originatorClientId = clientIdResult;
+
+      const body = deps.safeBody(req);
+      const updates = parseAgentUpdates(body, res);
+      if (!updates) return;
+      const manager = createDaemonSubagentManager(runtime.workspaceCwd);
+      const existing = await manager.loadSubagent(agentType, scopedLevel);
+      if (!existing) {
+        res.status(404).json({
+          error: `Subagent "${agentType}" not found`,
+          code: 'agent_not_found',
+          name: agentType,
+        });
+        return;
+      }
+      if (assertMutableLevel(existing, agentType, res)) return;
+
+      if (Object.keys(updates).length === 0) {
+        res.status(400).json({
+          error:
+            '`POST /workspaces/:workspace/agents/:agentType` requires at least one updatable field in the body',
+          code: 'invalid_config',
+          name: agentType,
+        });
+        return;
+      }
+      if (isNoOpUpdate(existing, updates)) {
+        res.status(200).json({
+          ok: true,
+          agent: toDetail(existing),
+          changed: false,
+        });
+        return;
+      }
+
+      try {
+        await manager.updateSubagent(agentType, updates, existing.level);
+      } catch (err) {
+        if (sendUpdateAgentError(res, err, agentType)) return;
+        writeStderrLine(
+          `qwen serve: POST /workspaces/:workspace/agents/${safeLogValue(agentType)} failed: ${
+            err instanceof Error ? (err.stack ?? err.message) : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to update workspace agent',
+          code: 'agent_update_failed',
+        });
+        return;
+      }
+
+      const updated = await manager.loadSubagent(agentType, existing.level);
+      if (!updated) {
+        writeStderrLine(
+          `qwen serve: agent_update_reload_failed (name=${safeLogValue(agentType)} ` +
+            `level=${existing.level}) — disk write completed; check ` +
+            `\`GET /workspaces/:workspace/agents/${safeLogValue(agentType)}\` for the new state`,
+        );
+        res.status(500).json({
+          error: 'Agent update succeeded but reload failed',
+          code: 'agent_update_reload_failed',
+          name: agentType,
+          level: existing.level,
+        });
+        return;
+      }
+      runtime.bridge.publishWorkspaceEvent({
+        type: 'agent_changed',
+        data: { change: 'updated', name: existing.name, level: 'project' },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+      res
+        .status(200)
+        .json({ ok: true, agent: toDetail(updated), changed: true });
+    },
+  );
+
+  app.delete(
+    '/workspaces/:workspace/agents/:agentType',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveTrustedWorkspaceAgentRuntime(deps, req, res);
+      if (!runtime) return;
+      const agentType = validateAgentType(req, res);
+      if (agentType === null) return;
+      const scopedLevel = parseWorkspaceOnlyAgentScopeQuery(req, res);
+      if (scopedLevel === null) return;
+      const routeDeps = workspaceAgentDepsForRuntime(runtime, deps);
+      const clientIdResult = resolveOriginatorClientId(routeDeps, req, res);
+      if (clientIdResult === null) return;
+      const originatorClientId = clientIdResult;
+      const manager = createDaemonSubagentManager(runtime.workspaceCwd);
+
+      const existing = await manager.loadSubagent(agentType, scopedLevel);
+      if (existing && assertMutableLevel(existing, agentType, res)) return;
+
+      try {
+        await manager.deleteSubagent(agentType, scopedLevel);
+      } catch (err) {
+        if (err instanceof SubagentError) {
+          if (err.code === SubagentErrorCode.NOT_FOUND) {
+            res.status(404).json({
+              error: err.message,
+              code: 'agent_not_found',
+              name: err.subagentName ?? agentType,
+            });
+            return;
+          }
+          if (err.code === SubagentErrorCode.INVALID_CONFIG) {
+            res.status(403).json({
+              error: err.message,
+              code: 'agent_readonly',
+              name: err.subagentName ?? agentType,
+            });
+            return;
+          }
+        }
+        writeStderrLine(
+          `qwen serve: DELETE /workspaces/:workspace/agents/${safeLogValue(agentType)} failed: ${
+            err instanceof Error ? (err.stack ?? err.message) : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to delete workspace agent',
+          code: 'agent_delete_failed',
+        });
+        return;
+      }
+
+      if (existing?.filePath) {
+        try {
+          await fs.access(existing.filePath);
+          writeStderrLine(
+            `qwen serve: DELETE /workspaces/:workspace/agents/${safeLogValue(agentType)} partial — ` +
+              `remaining=${existing.level}:${existing.filePath}`,
+          );
+          res.status(500).json({
+            error:
+              `Failed to delete subagent "${agentType}" — ` +
+              `${existing.level} level still has its file on disk`,
+            code: 'agent_delete_partial',
+            name: agentType,
+            removedLevels: [],
+            remainingLevels: [existing.level],
+          });
+          return;
+        } catch {
+          // Access failure means the project-level file is gone.
+        }
+      }
+
+      runtime.bridge.publishWorkspaceEvent({
+        type: 'agent_changed',
+        data: {
+          change: 'deleted',
+          name: existing?.name ?? agentType,
+          level: 'project',
+        },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+      res.status(204).end();
+    },
+  );
+}
+
 /**
  * Pull `:agentType` off the request and reject malformed values at
  * the route boundary. Returns the validated string, or `null` AFTER
@@ -792,6 +1119,167 @@ function resolveOriginatorClientId(
     return null;
   }
   return clientId;
+}
+
+function resolveTrustedWorkspaceAgentRuntime(
+  deps: WorkspaceQualifiedAgentsRouteDeps,
+  req: Request,
+  res: Response,
+): WorkspaceRuntime | undefined {
+  const runtime = resolveWorkspaceRuntimeFromParam(
+    deps.workspaceRegistry,
+    req,
+    res,
+  );
+  if (!runtime) return undefined;
+  if (!requireTrustedWorkspaceRuntime(runtime, res)) return undefined;
+  return runtime;
+}
+
+function workspaceAgentDepsForRuntime(
+  runtime: WorkspaceRuntime,
+  deps: WorkspaceQualifiedAgentsRouteDeps,
+): WorkspaceAgentsRouteDeps {
+  return {
+    bridge: runtime.bridge,
+    boundWorkspace: runtime.workspaceCwd,
+    mutate: deps.mutate,
+    parseClientId: deps.parseClientId,
+    safeBody: deps.safeBody,
+  };
+}
+
+function parseWorkspaceOnlyAgentBodyScope(
+  body: Record<string, unknown>,
+  res: Response,
+): SubagentLevel | null {
+  const scope = body['scope'];
+  if (scope === undefined || scope === 'workspace' || scope === 'project') {
+    return 'project';
+  }
+  return rejectWorkspaceQualifiedAgentScope(scope, res);
+}
+
+function parseWorkspaceOnlyAgentScopeQuery(
+  req: Request,
+  res: Response,
+): SubagentLevel | null {
+  const raw = req.query['scope'];
+  if (raw === undefined || raw === 'workspace' || raw === 'project') {
+    return 'project';
+  }
+  if (typeof raw !== 'string') {
+    res.status(400).json({
+      error: '`scope` query must be a single workspace/project value',
+      code: 'invalid_scope',
+    });
+    return null;
+  }
+  return rejectWorkspaceQualifiedAgentScope(raw, res);
+}
+
+function rejectWorkspaceQualifiedAgentScope(
+  scope: unknown,
+  res: Response,
+): null {
+  if (scope === 'global' || scope === 'user') {
+    res.status(400).json({
+      error:
+        'Workspace-qualified agents routes only support workspace/project scope',
+      code: 'global_scope_not_supported_for_workspace_route',
+    });
+    return null;
+  }
+  res.status(400).json({
+    error: '`scope` must be "workspace" or "project"',
+    code: 'invalid_scope',
+  });
+  return null;
+}
+
+function sendCreateAgentError(
+  res: Response,
+  err: unknown,
+  name: string,
+): boolean {
+  if (!(err instanceof SubagentError)) return false;
+  if (err.code === SubagentErrorCode.ALREADY_EXISTS) {
+    res.status(409).json({
+      error: err.message,
+      code: 'agent_already_exists',
+      name: err.subagentName ?? name,
+    });
+    return true;
+  }
+  if (
+    err.code === SubagentErrorCode.VALIDATION_ERROR ||
+    err.code === SubagentErrorCode.INVALID_CONFIG ||
+    err.code === SubagentErrorCode.INVALID_NAME ||
+    err.code === SubagentErrorCode.TOOL_NOT_FOUND
+  ) {
+    res.status(422).json({
+      error: err.message,
+      code: 'invalid_config',
+      name: err.subagentName ?? name,
+    });
+    return true;
+  }
+  if (err.code === SubagentErrorCode.FILE_ERROR) {
+    const debug = isServeDebugMode();
+    res.status(500).json({
+      error: debug ? err.message : 'Failed to write workspace agent file',
+      code: 'file_error',
+      name: err.subagentName ?? name,
+    });
+    return true;
+  }
+  return false;
+}
+
+function sendUpdateAgentError(
+  res: Response,
+  err: unknown,
+  agentType: string,
+): boolean {
+  if (!(err instanceof SubagentError)) return false;
+  if (err.code === SubagentErrorCode.NOT_FOUND) {
+    res.status(404).json({
+      error: err.message,
+      code: 'agent_not_found',
+      name: err.subagentName ?? agentType,
+    });
+    return true;
+  }
+  if (err.code === SubagentErrorCode.INVALID_CONFIG) {
+    res.status(403).json({
+      error: err.message,
+      code: 'agent_readonly',
+      name: err.subagentName ?? agentType,
+    });
+    return true;
+  }
+  if (
+    err.code === SubagentErrorCode.VALIDATION_ERROR ||
+    err.code === SubagentErrorCode.INVALID_NAME ||
+    err.code === SubagentErrorCode.TOOL_NOT_FOUND
+  ) {
+    res.status(422).json({
+      error: err.message,
+      code: 'invalid_config',
+      name: err.subagentName ?? agentType,
+    });
+    return true;
+  }
+  if (err.code === SubagentErrorCode.FILE_ERROR) {
+    const debug = isServeDebugMode();
+    res.status(500).json({
+      error: debug ? err.message : 'Failed to write workspace agent file',
+      code: 'file_error',
+      name: err.subagentName ?? agentType,
+    });
+    return true;
+  }
+  return false;
 }
 
 function parseAgentConfig(

@@ -3265,6 +3265,68 @@ describe('daemon UI reducer state machine (PR-E)', () => {
     expect(JSON.stringify(state.blocks)).not.toContain('stale delta');
   });
 
+  it('projects history truncation as status without entering resync', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'history_truncated',
+      data: {
+        reason: 'replay_window_exceeded',
+        truncatedEvents: 4,
+        retainedEvents: 2,
+        maxBytes: 512,
+        truncatedTurns: 2,
+        fullTranscriptAvailable: true,
+      },
+    } as never);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'status',
+        source: 'history_truncated',
+        text: expect.stringContaining('History truncated') as string,
+      }),
+    ]);
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      events,
+      { now: 2 },
+    );
+
+    expect(state.awaitingResync).toBe(false);
+    expect(state.resyncRequiredCount).toBe(0);
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'status',
+        text: expect.stringContaining('History truncated') as string,
+      },
+    ]);
+    expect(daemonUiEventToTerminalText(events[0])).toContain(
+      'History truncated',
+    );
+  });
+
+  it('routes malformed history truncation payloads to debug', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'history_truncated',
+      data: {
+        reason: 'replay_window_exceeded',
+        truncatedEvents: '4',
+        retainedEvents: 2,
+        maxBytes: 512,
+        fullTranscriptAvailable: true,
+      },
+    } as never);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        text: 'history_truncated: malformed history_truncated payload',
+      }),
+    ]);
+  });
+
   it('mirrors approval mode from session.approval_mode.changed event', async () => {
     const { selectApprovalMode } = await import('../../src/daemon/ui/index.js');
     let state = createDaemonTranscriptState({ now: 1 });
@@ -6586,6 +6648,71 @@ describe('parallel subAgent text interleaving — normalizer', () => {
       },
     } as never);
     expect(events[0]).not.toHaveProperty('parentToolCallId');
+  });
+});
+
+describe('daemon UI normalizer — artifact events', () => {
+  it('normalizes artifact_changed as a structured session event', () => {
+    const events = normalizeDaemonEvent({
+      type: 'artifact_changed',
+      data: {
+        sessionId: 'session-1',
+        change: {
+          action: 'updated',
+          artifactId: 'artifact-1',
+          artifact: {
+            id: 'artifact-1',
+            title: 'Report',
+            kind: 'html',
+            storage: 'workspace',
+            source: 'tool',
+            status: 'available',
+          },
+        },
+      },
+    } as never);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'session.artifact.changed',
+        sessionId: 'session-1',
+        change: expect.objectContaining({
+          action: 'updated',
+          artifactId: 'artifact-1',
+        }),
+      }),
+    ]);
+  });
+
+  it('falls back to debug for malformed artifact_changed payloads', () => {
+    const events = normalizeDaemonEvent({
+      type: 'artifact_changed',
+      data: { sessionId: 'session-1' },
+    } as never);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        text: 'artifact_changed: malformed artifact_changed payload',
+      }),
+    ]);
+  });
+
+  it('falls back to debug when artifact_changed change misses required fields', () => {
+    const events = normalizeDaemonEvent({
+      type: 'artifact_changed',
+      data: {
+        sessionId: 'session-1',
+        change: {},
+      },
+    } as never);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        text: 'artifact_changed: missing action or artifactId',
+      }),
+    ]);
   });
 });
 

@@ -525,6 +525,97 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getMemoryAgentTimeoutMinutes', () => {
+    it('returns undefined when unset', () => {
+      expect(
+        new Config(baseParams).getMemoryAgentTimeoutMinutes(),
+      ).toBeUndefined();
+    });
+
+    it('passes through non-negative values, including 0 (no time limit)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentTimeoutMinutes: 30,
+        }).getMemoryAgentTimeoutMinutes(),
+      ).toBe(30);
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentTimeoutMinutes: 0,
+        }).getMemoryAgentTimeoutMinutes(),
+      ).toBe(0);
+    });
+
+    it('treats negative values as unset (schema validation is bypassed on load)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentTimeoutMinutes: -5,
+        }).getMemoryAgentTimeoutMinutes(),
+      ).toBeUndefined();
+    });
+  });
+
+  describe('getVisionBridgeTimeoutMs', () => {
+    it('returns undefined when unset', () => {
+      expect(new Config(baseParams).getVisionBridgeTimeoutMs()).toBeUndefined();
+    });
+
+    it('passes through positive values', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          visionBridgeTimeoutMs: 120_000,
+        }).getVisionBridgeTimeoutMs(),
+      ).toBe(120_000);
+    });
+
+    it('treats non-positive values as unset (schema validation is bypassed on load)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          visionBridgeTimeoutMs: 0,
+        }).getVisionBridgeTimeoutMs(),
+      ).toBeUndefined();
+      expect(
+        new Config({
+          ...baseParams,
+          visionBridgeTimeoutMs: -5000,
+        }).getVisionBridgeTimeoutMs(),
+      ).toBeUndefined();
+    });
+
+    it('rejects values AbortSignal.timeout cannot take (fractional, over 2^31-1, non-finite)', () => {
+      // These pass the number-typed schema's `minimum: 1` via /config but would
+      // make AbortSignal.timeout throw RangeError or degrade to a 1ms timer.
+      for (const bad of [
+        30_000.5,
+        2_147_483_648,
+        4_294_967_296,
+        1e300,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        expect(
+          new Config({
+            ...baseParams,
+            visionBridgeTimeoutMs: bad,
+          }).getVisionBridgeTimeoutMs(),
+        ).toBeUndefined();
+      }
+    });
+
+    it('accepts the maximum supported integer timeout', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          visionBridgeTimeoutMs: 2_147_483_647,
+        }).getVisionBridgeTimeoutMs(),
+      ).toBe(2_147_483_647);
+    });
+  });
+
   describe('getMaxSubagentDepth', () => {
     it('defaults to 5 when unset', () => {
       expect(new Config(baseParams).getMaxSubagentDepth()).toBe(5);
@@ -587,6 +678,17 @@ describe('Server Config (config.ts)', () => {
           maxSubagentDepth: 5000,
         }).getMaxSubagentDepth(),
       ).toBe(100);
+    });
+  });
+
+  describe('setAutoSkillEnabled', () => {
+    it('flips the live value read by getAutoSkillEnabled', () => {
+      const config = new Config({ ...baseParams, enableAutoSkill: true });
+      expect(config.getAutoSkillEnabled()).toBe(true);
+      config.setAutoSkillEnabled(false);
+      expect(config.getAutoSkillEnabled()).toBe(false);
+      config.setAutoSkillEnabled(true);
+      expect(config.getAutoSkillEnabled()).toBe(true);
     });
   });
 
@@ -2214,6 +2316,46 @@ describe('Server Config (config.ts)', () => {
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
       ]);
+    });
+
+    it('should skip hook, skill, and file checkpointing side effects when requested', async () => {
+      const config = new Config({
+        ...baseParams,
+        fileCheckpointingEnabled: true,
+      });
+
+      await expect(
+        config.initialize({
+          skipMcpDiscovery: true,
+          skipHooks: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(HookSystem).not.toHaveBeenCalled();
+      expect(config.getHookSystem()).toBeUndefined();
+      expect(SkillManager).not.toHaveBeenCalled();
+      expect(config.getSkillManager()).toBeNull();
+      expect(config.getFileCheckpointingEnabled()).toBe(false);
+    });
+
+    it('warms tools strictly by default and leniently when lenientToolWarmup is set', async () => {
+      // Regression guard for the read-only transcript-replay path: a Config that
+      // skips the SkillManager must warm tools leniently, otherwise warmAll()
+      // aborts initialize() when SkillTool's constructor throws.
+      const warmAll = vi.mocked(ToolRegistry.prototype.warmAll);
+
+      warmAll.mockClear();
+      await new Config({ ...baseParams }).initialize();
+      expect(warmAll).toHaveBeenLastCalledWith({ strict: true });
+
+      warmAll.mockClear();
+      await new Config({ ...baseParams }).initialize({
+        skipSkillManager: true,
+        lenientToolWarmup: true,
+      });
+      expect(warmAll).toHaveBeenLastCalledWith({ strict: false });
     });
 
     it('registers loop_wakeup when cron is enabled', async () => {
@@ -6225,6 +6367,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 1_000_000,
       ['samplingParams']: { temperature: 0.7 },
       ['enableCacheControl']: true,
+      ['forceGlobalCacheScope']: true,
     };
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -6250,6 +6393,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 128_000,
       ['samplingParams']: { temperature: 0.8 },
       ['enableCacheControl']: false,
+      ['forceGlobalCacheScope']: false,
       ['toolResultContentFormat']: 'string',
       ['modalities']: { image: true },
     };
@@ -6261,6 +6405,7 @@ describe('Model Switching and Config Updates', () => {
         contextWindowSize: { kind: 'computed', detail: 'auto' },
         samplingParams: { kind: 'settings' },
         enableCacheControl: { kind: 'settings' },
+        forceGlobalCacheScope: { kind: 'settings' },
         toolResultContentFormat: { kind: 'settings' },
         modalities: { kind: 'computed', detail: 'auto' },
       },
@@ -6282,6 +6427,7 @@ describe('Model Switching and Config Updates', () => {
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
     expect(updatedConfig['samplingParams']?.temperature).toBe(0.8);
     expect(updatedConfig['enableCacheControl']).toBe(false);
+    expect(updatedConfig['forceGlobalCacheScope']).toBe(false);
     expect(updatedConfig['toolResultContentFormat']).toBe('string');
     // Modalities are model-derived; a hot switch must refresh them so the
     // vision-bridge gate reflects the new model (it reads getEffectiveInputModalities()).
@@ -6296,6 +6442,7 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['contextWindowSize']?.detail).toBe('auto');
     expect(sources['samplingParams']?.kind).toBe('settings');
     expect(sources['enableCacheControl']?.kind).toBe('settings');
+    expect(sources['forceGlobalCacheScope']?.kind).toBe('settings');
     expect(sources['toolResultContentFormat']?.kind).toBe('settings');
     expect(sources['modalities']?.kind).toBe('computed');
   });

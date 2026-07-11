@@ -4,34 +4,78 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   useActions,
   useConnection,
+  useDaemonFollowupSuggestion,
   useStreamingState,
   useTranscriptBlocks,
+  useTranscriptStore,
+  useWorkspaceActions,
+  type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
 import { useMessages } from '../hooks/useMessages';
+import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptImage } from '../adapters/promptTypes';
-import type { ComposerSubmitCommit } from '../hooks/useComposerCore';
+import type {
+  ComposerSubmitCommit,
+  EditorHandle,
+} from '../hooks/useComposerCore';
+import { useQueuedPrompts } from '../hooks/useQueuedPrompts';
 import { isAskUserPermission } from '../utils/askUserPermission';
+import { isDaemonApprovalMode } from '../utils/sessionPreparation';
+import { isVisibleComposerModel } from '../utils/composerModels';
+import { getModelDisplayName } from '../utils/modelDisplay';
+import {
+  getLocalCommands,
+  localizeBuiltinDescriptions,
+  skillDescriptionKey,
+} from '../constants/localCommands';
+import { mergeCommands } from '../hooks/daemonSessionMappers';
 import { MessageList } from './MessageList';
 import { StreamingStatus } from './StreamingStatus';
-import { ChatEditor } from './ChatEditor';
+import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import { QueuedPromptDisplay } from './QueuedPromptDisplay';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
+import type {
+  TurnOutputKind,
+  TurnOutputOpenRequest,
+} from './artifacts/TurnOutputs';
+import { TURN_OUTPUT_KINDS } from './artifacts/TurnOutputs';
+import {
+  getArtifactsByTurn,
+  getFileChangesByTurn,
+  getScheduledTasksByTurn,
+} from './artifacts/turnOutputSelectors';
 import styles from './ChatPane.module.css';
 
-const EMPTY_COMMANDS: never[] = [];
-const EMPTY_TOOLBAR: never[] = [];
+// Split-view panes get the same interactive composer controls as the main chat,
+// each scoped to the pane's own session: the approval-mode and model pickers,
+// plus voice dictation. The width toggle is omitted (panes size themselves); the
+// slash menu is populated from the session's own command list (see below).
+const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
+  'approvalMode',
+  'model',
+  'voice',
+];
 
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */
   title?: string;
   onClose?: () => void;
   onError?: (error: unknown, fallback: string) => void;
+  onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onPaneArtifactsChange?: (
+    sessionId: string,
+    artifacts: readonly DaemonSessionArtifact[],
+    workspaceActions: DaemonWorkspaceActions,
+  ) => void;
+  messageTurnOutputs?: readonly TurnOutputKind[];
 }
 
 /**
@@ -41,13 +85,49 @@ export interface ChatPaneProps {
  * state, approvals, and composer, and the browser scopes keyboard focus to the
  * pane the user clicks into — so there is no cross-pane approval arbitration.
  */
-export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
+export function ChatPane({
+  title,
+  onClose,
+  onError,
+  onRightPanelOpen,
+  onPaneArtifactsChange,
+  messageTurnOutputs,
+}: ChatPaneProps) {
   const { t } = useI18n();
   const connection = useConnection();
   const actions = useActions();
+  const workspaceActions = useWorkspaceActions();
   const messages = useMessages(t);
   const blocks = useTranscriptBlocks();
+  const store = useTranscriptStore();
   const streamingState = useStreamingState();
+  const { artifacts } = useSessionArtifacts();
+  useEffect(() => {
+    const sessionId = connection.sessionId;
+    if (!sessionId) return;
+    onPaneArtifactsChange?.(sessionId, artifacts, workspaceActions);
+    return () => {
+      onPaneArtifactsChange?.(sessionId, [], workspaceActions);
+    };
+  }, [
+    artifacts,
+    connection.sessionId,
+    onPaneArtifactsChange,
+    workspaceActions,
+  ]);
+  const streamingStateRef = useRef(streamingState);
+  streamingStateRef.current = streamingState;
+  const editorRef = useRef<EditorHandle | null>(null);
+  const {
+    followupState,
+    onAcceptFollowup,
+    onDismissFollowup,
+    clear: clearFollowup,
+  } = useDaemonFollowupSuggestion({
+    onAccept: (suggestion) => {
+      editorRef.current?.insertText(suggestion);
+    },
+  });
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -55,6 +135,10 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
       else console.error(fallback, error);
     },
     [onError],
+  );
+  const notifySuccess = useCallback(
+    (message: string) => store.dispatch([{ type: 'status', text: message }]),
+    [store],
   );
 
   const pendingApproval = useMemo(
@@ -66,9 +150,57 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
     pendingApproval && !isAskUser ? pendingApproval : null;
   const pendingAskUserApproval =
     pendingApproval && isAskUser ? pendingApproval : null;
+  // Tracked in a ref so an async approval-mode switch (handleSelectMode) reads
+  // the approval current when setApprovalMode *resolves*, not a stale one
+  // captured at click time — mirrors App's pendingApprovalRef.
+  const pendingToolApprovalRef = useRef(pendingToolApproval);
+  pendingToolApprovalRef.current = pendingToolApproval;
   const approvalActive =
     pendingToolApproval !== null || pendingAskUserApproval !== null;
   const isResponding = streamingState !== 'idle';
+  const artifactsByTurn = useMemo(
+    () =>
+      getArtifactsByTurn(messages, artifacts, connection.workspaceCwd || ''),
+    [messages, artifacts, connection.workspaceCwd],
+  );
+  const fileChangesByTurn = useMemo(
+    () =>
+      getFileChangesByTurn(
+        messages,
+        artifactsByTurn,
+        connection.workspaceCwd || '',
+      ),
+    [messages, artifactsByTurn, connection.workspaceCwd],
+  );
+  const scheduledTasksByTurn = useMemo(
+    () => getScheduledTasksByTurn(messages),
+    [messages],
+  );
+  const visibleTurnOutputKinds = useMemo(
+    () => new Set<TurnOutputKind>(messageTurnOutputs ?? TURN_OUTPUT_KINDS),
+    [messageTurnOutputs],
+  );
+  const {
+    queuedPrompts,
+    queuedTexts,
+    enqueuePrompt,
+    removeQueuedPrompt,
+    insertQueuedPrompt,
+    editQueuedPrompt,
+    editLastQueuedPrompt,
+    clearQueuedPrompts,
+  } = useQueuedPrompts({
+    connected: connection.status === 'connected',
+    sessionId: connection.sessionId,
+    clientId: connection.clientId,
+    streamingState,
+    sessionActions: actions,
+    store,
+    editorRef,
+    reportError,
+    notifySuccess,
+    t,
+  });
 
   // Anchor the streaming timer to the turn's own start (the last user message's
   // timestamp) rather than letting StreamingStatus fall back to "now" — so a
@@ -90,23 +222,24 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
     ): boolean => {
       const trimmed = text.trim();
       if (!trimmed) return false;
-      // Keep the draft (return false) and clear it only once the daemon ADMITS
-      // the prompt. `onAdmitted` fires at acceptance; the sendPrompt promise
-      // itself resolves only when the whole (possibly long) turn finishes, so
-      // committing on resolution would strand the sent text in the composer for
-      // the entire response. If the prompt is rejected before admission
-      // (transcript still loading, session disconnected, or a turn already
-      // active) onAdmitted never fires, so the draft is preserved and the error
-      // is surfaced.
-      actions
-        .sendPrompt(trimmed, {
-          ...(images && images.length ? { images } : {}),
-          onAdmitted: commitAccepted,
-        })
-        .catch((error: unknown) => reportError(error, 'Failed to send prompt'));
-      return false;
+      if (connection.status !== 'connected') return false;
+      if (streamingStateRef.current === 'idle') {
+        actions
+          .sendPrompt(trimmed, {
+            ...(images && images.length ? { images } : {}),
+            onAdmitted: () => {
+              clearFollowup();
+              commitAccepted?.();
+            },
+          })
+          .catch((error: unknown) =>
+            reportError(error, 'Failed to send prompt'),
+          );
+        return false;
+      }
+      return enqueuePrompt(trimmed, images);
     },
-    [actions, reportError],
+    [actions, clearFollowup, connection.status, enqueuePrompt, reportError],
   );
 
   const handleConfirm = useCallback(
@@ -127,6 +260,96 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
         reportError(error, 'Failed to cancel request'),
       );
   }, [actions, reportError]);
+
+  const handleRightPanelOpen = useCallback(
+    (request: TurnOutputOpenRequest) => {
+      if (!onRightPanelOpen) return;
+      if (request.kind === 'artifact' || request.kind === 'scheduled_task') {
+        onRightPanelOpen({ ...request, workspaceActions });
+        return;
+      }
+      onRightPanelOpen(request);
+    },
+    [onRightPanelOpen, workspaceActions],
+  );
+
+  // Composer wiring, all scoped to THIS pane's own DaemonSession context. The
+  // slash menu lists the session's daemon commands — they run server-side when
+  // submitted (via sendPrompt), so e.g. `/clear` clears this pane's session, not
+  // the outer one. The approval-mode and model pickers likewise drive this
+  // session's own actions; the SDK reflects the change back on `connection`.
+  const commands = useMemo(() => {
+    return localizeBuiltinDescriptions(
+      mergeCommands(connection.commands ?? [], getLocalCommands(t)),
+      t,
+    ).map((command) => {
+      const skillKey = skillDescriptionKey(command.name);
+      if (!skillKey) return command;
+      return {
+        ...command,
+        displayCategory: 'skill' as const,
+        description: t(skillKey),
+      };
+    });
+  }, [connection.commands, t]);
+  const availableModels = useMemo(
+    () =>
+      (connection.models ?? []).filter(isVisibleComposerModel).map((model) => ({
+        id: model.id,
+        label: getModelDisplayName(model.label || model.id),
+      })),
+    [connection.models],
+  );
+  const handleSelectMode = useCallback(
+    (modeId: string) => {
+      // Modes always arrive from the toolbar's own picker, but narrow anyway so
+      // the daemon action gets a well-typed value (mirrors App's handleSetMode).
+      if (!isDaemonApprovalMode(modeId)) {
+        reportError(
+          new Error(`Unsupported approval mode: ${modeId}`),
+          'Failed to set approval mode',
+        );
+        return;
+      }
+      actions
+        .setApprovalMode(modeId)
+        .then(() => {
+          // Mirror App's handleSetMode: switching THIS pane to yolo (or
+          // auto-edit for an edit tool) auto-approves a tool call already
+          // awaiting approval in this pane, so the shortcut behaves the same as
+          // in the single-session chat.
+          const approval = pendingToolApprovalRef.current;
+          if (!approval) return;
+          const autoApprove =
+            modeId === 'yolo' ||
+            (modeId === 'auto-edit' && approval.toolKind === 'edit');
+          if (!autoApprove) return;
+          const allowOnce = approval.options.find(
+            (option) => option.kind === 'allow_once',
+          );
+          if (!allowOnce) return;
+          actions
+            .submitPermission(approval.id, allowOnce.id)
+            .catch((error: unknown) =>
+              reportError(error, 'Failed to auto-approve tool call'),
+            );
+        })
+        .catch((error: unknown) =>
+          reportError(error, 'Failed to set approval mode'),
+        );
+    },
+    [actions, reportError],
+  );
+  const handleSelectModel = useCallback(
+    (modelId: string) => {
+      actions
+        .setModel(modelId)
+        .catch((error: unknown) =>
+          reportError(error, 'Failed to switch model'),
+        );
+    },
+    [actions, reportError],
+  );
 
   const headerLabel =
     title || connection.displayName || connection.sessionId?.slice(0, 8) || '';
@@ -179,6 +402,18 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
           isResponding={isResponding}
           workspaceCwd={connection.workspaceCwd || ''}
           hideSessionTimeline
+          turnFileChanges={
+            visibleTurnOutputKinds.has('file') ? fileChangesByTurn : undefined
+          }
+          turnArtifacts={
+            visibleTurnOutputKinds.has('artifact') ? artifactsByTurn : undefined
+          }
+          turnScheduledTasks={
+            visibleTurnOutputKinds.has('scheduled_task')
+              ? scheduledTasksByTurn
+              : undefined
+          }
+          onTurnOutputOpen={handleRightPanelOpen}
         />
       </div>
 
@@ -208,13 +443,32 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
         {/* Panes keep the composer status compact: spinner + elapsed time +
             token count + cancel hint, but no rotating "witty" loading phrase. */}
         <StreamingStatus startedAt={activeTurnStartedAt} showPhrase={false} />
+        <QueuedPromptDisplay
+          prompts={queuedPrompts}
+          t={t}
+          onDelete={removeQueuedPrompt}
+          onInsert={insertQueuedPrompt}
+          onEdit={editQueuedPrompt}
+        />
         <ChatEditor
+          ref={editorRef}
           onSubmit={handleSubmit}
           onCancel={handleCancel}
           isRunning={isResponding}
-          commands={EMPTY_COMMANDS}
-          visibleToolbarActions={EMPTY_TOOLBAR}
+          commands={commands}
+          queuedMessages={queuedTexts}
+          onPopQueuedMessages={editLastQueuedPrompt}
+          onClearQueuedMessages={clearQueuedPrompts}
+          visibleToolbarActions={PANE_TOOLBAR_ACTIONS}
+          currentMode={connection.currentMode ?? 'default'}
+          currentModel={connection.currentModel ?? ''}
+          availableModels={availableModels}
+          onSelectMode={handleSelectMode}
+          onSelectModel={handleSelectModel}
           dialogOpen={approvalActive}
+          followupState={followupState}
+          onAcceptFollowup={onAcceptFollowup}
+          onDismissFollowup={onDismissFollowup}
           placeholderText={t('splitView.composerPlaceholder')}
         />
       </div>

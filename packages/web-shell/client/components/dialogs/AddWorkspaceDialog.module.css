@@ -1,0 +1,45 @@
+.label {
+  font-size: 0.8125rem;
+  color: var(--text-secondary, #a0a0a0);
+  margin-bottom: 4px;
+}
+
+.input {
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color, #333);
+  background: var(--input-bg, #1a1a1a);
+  color: var(--text-primary, #e0e0e0);
+  font-size: 0.875rem;
+  font-family: var(--font-mono, monospace);
+  outline: none;
+}
+
+.input:focus {
+  border-color: var(--accent-color, #7c5cff);
+}
+
+.input:disabled {
+  opacity: 0.5;
+}
+
+.error {
+  color: var(--error-color, #f44);
+  font-size: 0.8125rem;
+  margin-top: 4px;
+}
+
+.cancelButton {
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color, #333);
+  background: transparent;
+  color: var(--text-secondary, #a0a0a0);
+  cursor: pointer;
+  font-size: 0.8125rem;
+}
+
+.cancelButton:hover {
+  background: var(--hover-bg, #252525);
+}

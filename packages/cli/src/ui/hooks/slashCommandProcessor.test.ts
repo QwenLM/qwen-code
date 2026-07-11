@@ -23,6 +23,8 @@ import { MessageType } from '../types.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
+import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
+import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
 import {
   type GeminiClient,
   SlashCommandStatus,
@@ -111,6 +113,10 @@ vi.mock('./useKeypress.js', () => ({
   useKeypress: vi.fn(),
 }));
 
+vi.mock('../../config/extension-runtime-reload.js', () => ({
+  refreshExtensionContentRuntime: vi.fn(async () => undefined),
+}));
+
 function createTestCommand(
   overrides: Partial<SlashCommand>,
   kind: CommandKind = CommandKind.BUILT_IN,
@@ -182,6 +188,7 @@ describe('useSlashCommandProcessor', () => {
     mockOpenModelDialog.mockClear();
     mockOpenMemoryDialog.mockClear();
     mockFireUserPromptExpansionEvent.mockResolvedValue(undefined);
+    vi.mocked(refreshExtensionContentRuntime).mockResolvedValue(undefined);
     mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
     mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
     mockConfig.getHookSystem = vi.fn().mockReturnValue({
@@ -197,6 +204,7 @@ describe('useSlashCommandProcessor', () => {
     mcpCommands: SlashCommand[] = [],
     setIsProcessing = vi.fn(),
     settings: LoadedSettings = mockSettings,
+    extensionRefreshState?: ExtensionRefreshState,
   ) => {
     mockBuiltinLoadCommands.mockResolvedValue(Object.freeze(builtinCommands));
     mockFileLoadCommands.mockResolvedValue(Object.freeze(fileCommands));
@@ -221,6 +229,8 @@ describe('useSlashCommandProcessor', () => {
         true, // isConfigInitialized
         null, // logger
         mockUpdateItem,
+        undefined, // setSessionName
+        extensionRefreshState,
       ),
     );
 
@@ -1697,6 +1707,147 @@ describe('useSlashCommandProcessor', () => {
       unmount();
 
       expect(abortSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('auto-refreshes extension content changes after debounce', async () => {
+      const extensionRefreshState = new ExtensionRefreshState();
+      const result = setupProcessorHook(
+        [],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        extensionRefreshState,
+      );
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+
+      act(() => {
+        extensionRefreshState.markExtensionContentChanged('content changed');
+      });
+
+      await waitFor(() => {
+        expect(refreshExtensionContentRuntime).toHaveBeenCalledOnce();
+      });
+      expect(refreshExtensionContentRuntime).toHaveBeenCalledWith({
+        config: mockConfig,
+        reloadCommands: expect.any(Function),
+      });
+    });
+
+    it('shows an error when extension content auto-refresh fails', async () => {
+      vi.mocked(refreshExtensionContentRuntime).mockRejectedValueOnce(
+        new Error('refresh failed'),
+      );
+      const extensionRefreshState = new ExtensionRefreshState();
+      const result = setupProcessorHook(
+        [],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        extensionRefreshState,
+      );
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+
+      act(() => {
+        extensionRefreshState.markExtensionContentChanged('content changed');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          {
+            type: MessageType.ERROR,
+            text: 'Failed to refresh extension content: refresh failed. Run /reload-plugins to apply updates.',
+          },
+          expect.any(Number),
+        );
+      });
+    });
+
+    it('skips content auto-refresh while package reload is needed', async () => {
+      const extensionRefreshState = new ExtensionRefreshState();
+      const result = setupProcessorHook(
+        [],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        extensionRefreshState,
+      );
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+
+      act(() => {
+        extensionRefreshState.markExtensionsChanged('manifest changed');
+        extensionRefreshState.markExtensionContentChanged('content changed');
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 350));
+
+      expect(refreshExtensionContentRuntime).not.toHaveBeenCalled();
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Extensions changed on disk. Run /reload-plugins to apply updates.',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('shows a retry message when extension reload fails', async () => {
+      const extensionRefreshState = new ExtensionRefreshState();
+      const result = setupProcessorHook(
+        [],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        extensionRefreshState,
+      );
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+
+      act(() => {
+        extensionRefreshState.markExtensionsReloadFailed();
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Extension reload did not complete. Run /reload-plugins to try again.',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('cancels pending content auto-refresh when manual reload starts', async () => {
+      const extensionRefreshState = new ExtensionRefreshState();
+      const result = setupProcessorHook(
+        [],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        extensionRefreshState,
+      );
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+
+      act(() => {
+        extensionRefreshState.markExtensionContentChanged('content changed');
+        extensionRefreshState.notifyExtensionsReloadStarted();
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 350));
+
+      expect(refreshExtensionContentRuntime).not.toHaveBeenCalled();
     });
 
     it('should reload commands when SkillManager fires a change event', async () => {

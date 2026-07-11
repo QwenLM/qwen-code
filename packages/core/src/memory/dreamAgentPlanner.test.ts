@@ -50,6 +50,7 @@ describe('dreamAgentPlanner', () => {
       getSessionId: vi.fn().mockReturnValue('session-1'),
       getModel: vi.fn().mockReturnValue('qwen-test'),
       getApprovalMode: vi.fn(),
+      getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
     vi.mocked(runForkedAgent).mockReset();
   });
@@ -138,6 +139,20 @@ describe('dreamAgentPlanner', () => {
           'edit',
         ],
       }),
+    );
+  });
+
+  it('threads the configured memory agent timeout into the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+    vi.mocked(config.getMemoryAgentTimeoutMinutes).mockReturnValueOnce(30);
+
+    await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTimeMinutes: 30 }),
     );
   });
 

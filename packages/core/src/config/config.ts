@@ -1132,6 +1132,11 @@ export interface ConfigParameters {
   /** Require user confirmation before persisting an auto-activated skill. Defaults to true. */
   autoSkillConfirm?: boolean;
   /**
+   * Max runtime in minutes for background memory agents (extraction, dream,
+   * remember, skill review). Unset → per-agent defaults; 0 → no time limit.
+   */
+  memoryAgentTimeoutMinutes?: number;
+  /**
    * Lightweight model for background tasks (memory extraction, dream, /btw side questions).
    * When set and valid for the current auth type, forked agents use this model instead of
    * the main session model, reducing latency and cost.
@@ -1151,6 +1156,12 @@ export interface ConfigParameters {
    * (configurable via `/model --vision`).
    */
   visionModel?: string;
+  /**
+   * Per-attempt timeout in milliseconds for the vision bridge transcription
+   * call. Unset → built-in 30s. Corresponds to the `visionBridgeTimeoutMs`
+   * setting; useful for slow or proxied vision endpoints.
+   */
+  visionBridgeTimeoutMs?: number;
   /**
    * Ordered list of fallback model IDs to try when the primary model hits
    * capacity errors (429/503/529). At most 3 entries; duplicate fallback
@@ -1357,6 +1368,31 @@ export interface ConfigInitializeOptions {
    * AND closes the 2N subprocess leak.
    */
   skipMcpDiscovery?: boolean;
+  /**
+   * Skip hook system and hook MessageBus initialization. Read-only replay
+   * helpers use this to avoid loading or subscribing user/workspace hooks.
+   */
+  skipHooks?: boolean;
+  /**
+   * Skip SkillManager creation and file watching. Read-only replay helpers do
+   * not need skill discovery and must not start long-lived watchers.
+   */
+  skipSkillManager?: boolean;
+  /**
+   * Force file checkpointing off for read-only replay helpers, even when the
+   * Config was constructed with checkpointing enabled.
+   */
+  skipFileCheckpointing?: boolean;
+  /**
+   * Warm the tool registry in best-effort (non-strict) mode. Read-only replay
+   * Configs set this so a tool whose constructor requires a subsystem this
+   * Config deliberately skipped (e.g. `SkillTool` needs the `SkillManager` that
+   * `skipSkillManager` omits) is logged and skipped instead of aborting
+   * `initialize()`. Replay only needs optional tool_call metadata, and
+   * `ToolCallEmitter` already falls back to the recorded tool name when a tool
+   * is absent from the registry.
+   */
+  lenientToolWarmup?: boolean;
 }
 
 const DEFAULT_BARE_CORE_TOOLS = [
@@ -1430,6 +1466,41 @@ function resolveCronRecurringMaxAgeDays(setting: number | undefined): number {
   }
   return normalizeRecurringMaxAge(raw, DEFAULT_RECURRING_MAX_AGE_DAYS);
 }
+
+/** Request from the `create_sub_session` tool to spawn a fresh top-level
+ * sub-session and run a prompt in it. */
+export interface SubSessionSpawnRequest {
+  prompt: string;
+  /** `'sent'` = resolve as soon as the prompt is dispatched; `'first-turn'` =
+   * resolve after the sub-session's first turn finishes (result returned). */
+  completion: 'sent' | 'first-turn';
+  /** Optional model service id for the sub-session. */
+  model?: string;
+  /** Optional display name for the sub-session in the session list. */
+  name?: string;
+}
+
+/** Result returned to the `create_sub_session` tool. `result` (the sub-session's
+ * first-turn output) is present only for `completion: 'first-turn'`. */
+export interface SubSessionSpawnResult {
+  sessionId: string;
+  result?: string;
+  stopReason?: string;
+  /** Whether the parent lineage was durably persisted to the sub-session's
+   * transcript. `false` = live-only (the parent link disappears from the
+   * persisted session list after a daemon restart). Absent when unknown. */
+  parentSessionPersisted?: boolean;
+}
+
+/**
+ * Injected capability that spawns a sub-session. Used by the `create_sub_session`
+ * tool. Wired ONLY by the daemon/ACP session layer (`Session.ts` →
+ * `this.client.extMethod`); absent in interactive TUI / headless (no bridge),
+ * which is precisely the tool's daemon-only gate.
+ */
+export type SubSessionSpawner = (
+  req: SubSessionSpawnRequest,
+) => Promise<SubSessionSpawnResult>;
 
 export class Config {
   private sessionId: string;
@@ -1710,10 +1781,12 @@ export class Config {
   // may re-run. Keyed rather than a single boolean so entering a new repo (/cd)
   // re-checks shareability instead of reusing the first repo's result.
   private readonly teamMemoryShareabilityChecked = new Set<string>();
-  private readonly enableAutoSkill: boolean;
+  private enableAutoSkill: boolean;
   private readonly autoSkillConfirm: boolean;
+  private readonly memoryAgentTimeoutMinutes: number | undefined;
   private fastModel?: string;
   private visionModel?: string;
+  private readonly visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
@@ -2033,8 +2106,29 @@ export class Config {
     this.enableTeamMemorySync = params.enableTeamMemorySync ?? false;
     this.enableAutoSkill = params.enableAutoSkill ?? true;
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
+    // Clamp: schema validation only runs on interactive edit paths, so a
+    // negative value in settings.json would otherwise reach the agent runtime
+    // and make every memory agent time out immediately.
+    this.memoryAgentTimeoutMinutes =
+      params.memoryAgentTimeoutMinutes !== undefined &&
+      params.memoryAgentTimeoutMinutes >= 0
+        ? params.memoryAgentTimeoutMinutes
+        : undefined;
     this.fastModel = params.fastModel || undefined;
     this.visionModel = params.visionModel || undefined;
+    // Guard: nothing validates settings.json on the load path, so this is the
+    // only real gate. `AbortSignal.timeout()` requires an integer in
+    // [0, 2^31-1] — a fractional or out-of-range value (which the number-typed
+    // schema still accepts via /config) would throw RangeError or silently
+    // degrade to a 1ms timeout, killing every bridge turn. Reject anything the
+    // timer can't take and fall back to the built-in default.
+    this.visionBridgeTimeoutMs =
+      params.visionBridgeTimeoutMs !== undefined &&
+      Number.isInteger(params.visionBridgeTimeoutMs) &&
+      params.visionBridgeTimeoutMs > 0 &&
+      params.visionBridgeTimeoutMs <= 2_147_483_647
+        ? params.visionBridgeTimeoutMs
+        : undefined;
     this.modelFallbacks = normalizeModelFallbacks(params.modelFallbacks);
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
@@ -2059,6 +2153,10 @@ export class Config {
     }
     this.initialized = true;
     this.debugLogger.info('Config initialization started');
+    if (options?.skipFileCheckpointing === true) {
+      this.fileCheckpointingEnabled = false;
+      this.fileHistoryService = undefined;
+    }
 
     // Initialize centralized FileDiscoveryService
     this.getFileService();
@@ -2079,8 +2177,8 @@ export class Config {
     }
     this.debugLogger.debug('Extension manager initialized');
 
-    // Bare mode skips all hook loading and execution.
-    if (!this.getDisableAllHooks()) {
+    // Bare mode and read-only replay helpers skip all hook loading and execution.
+    if (!options?.skipHooks && !this.getDisableAllHooks()) {
       this.hookSystem = new HookSystem(this);
       await this.hookSystem.initialize();
       this.debugLogger.debug('Hook system initialized');
@@ -2283,13 +2381,18 @@ export class Config {
     }
 
     this.subagentManager = new SubagentManager(this);
-    this.skillManager = new SkillManager(this);
-    if (this.getBareMode() || this.isSafeMode()) {
-      await this.skillManager.refreshCache();
+    if (!options?.skipSkillManager) {
+      this.skillManager = new SkillManager(this);
+      if (this.getBareMode() || this.isSafeMode()) {
+        await this.skillManager.refreshCache();
+      } else {
+        await this.skillManager.startWatching();
+      }
+      this.debugLogger.debug('Skill manager initialized');
     } else {
-      await this.skillManager.startWatching();
+      this.skillManager = null;
+      this.debugLogger.debug('Skill manager skipped');
     }
-    this.debugLogger.debug('Skill manager initialized');
 
     this.memoryPressureConfig = loadMemoryPressureConfig();
     this.memoryPressureMonitor = new MemoryPressureMonitor(
@@ -2355,8 +2458,13 @@ export class Config {
     this.modelsConfig.detectAndCaptureRuntimeModel();
 
     // Warm all lazy tool factories so telemetry can access tool metadata synchronously.
-    // Use strict mode so a broken built-in tool surfaces immediately at startup.
-    await this.toolRegistry.warmAll({ strict: true });
+    // Strict by default so a broken built-in tool surfaces immediately at startup;
+    // read-only replay Configs pass `lenientToolWarmup` so a tool that cannot be
+    // constructed under their deliberately-skipped subsystems (e.g. SkillTool without
+    // a SkillManager) is logged and skipped instead of aborting initialize().
+    await this.toolRegistry.warmAll({
+      strict: options?.lenientToolWarmup !== true,
+    });
 
     // Fire-and-forget MCP discovery. Each server's tools land in the
     // registry as it becomes ready; the cli's AppContainer debounces
@@ -3421,6 +3529,15 @@ export class Config {
   }
 
   /**
+   * Per-attempt timeout in milliseconds for the vision bridge transcription
+   * call. Resolves the `visionBridgeTimeoutMs` setting; `undefined` means the
+   * bridge's built-in default applies.
+   */
+  getVisionBridgeTimeoutMs(): number | undefined {
+    return this.visionBridgeTimeoutMs;
+  }
+
+  /**
    * Set model programmatically (e.g., VLM auto-switch, fallback).
    * Delegates to ModelsConfig.
    */
@@ -3489,6 +3606,8 @@ export class Config {
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;
+      this.contentGeneratorConfig.forceGlobalCacheScope =
+        config.forceGlobalCacheScope;
       this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
       this.contentGeneratorConfig.toolResultContentFormat =
         config.toolResultContentFormat;
@@ -3511,6 +3630,10 @@ export class Config {
       if ('enableCacheControl' in sources) {
         this.contentGeneratorConfigSources['enableCacheControl'] =
           sources['enableCacheControl'];
+      }
+      if ('forceGlobalCacheScope' in sources) {
+        this.contentGeneratorConfigSources['forceGlobalCacheScope'] =
+          sources['forceGlobalCacheScope'];
       }
       if ('contextWindowSize' in sources) {
         this.contentGeneratorConfigSources['contextWindowSize'] =
@@ -5452,8 +5575,30 @@ export class Config {
     return this.enableAutoSkill && !this.getBareMode() && !this.isSafeMode();
   }
 
+  /**
+   * Toggle auto-skill for the running session. The startup value is copied from
+   * settings, so persisting a settings change alone would not take effect until
+   * the next launch; the skill-review scheduler reads `getAutoSkillEnabled()`
+   * live, so flipping this stops (or resumes) reviews immediately.
+   *
+   * @remarks `getAutoSkillEnabled()` additionally gates on bare/safe mode, so
+   * it can still return false after `setAutoSkillEnabled(true)`.
+   */
+  setAutoSkillEnabled(enabled: boolean): void {
+    this.enableAutoSkill = enabled;
+  }
+
   getAutoSkillConfirmEnabled(): boolean {
     return this.autoSkillConfirm && !this.getBareMode();
+  }
+
+  /**
+   * Max runtime in minutes for background memory agents (extraction, dream,
+   * remember, skill review). Resolves the `memory.agentTimeoutMinutes`
+   * setting. Unset → each agent's built-in default; 0 → no time limit.
+   */
+  getMemoryAgentTimeoutMinutes(): number | undefined {
+    return this.memoryAgentTimeoutMinutes;
   }
 
   getPreventSystemSleepEnabled(): boolean {
@@ -6333,6 +6478,18 @@ export class Config {
       });
     }
 
+    // create_sub_session: spawn a fresh top-level sub-session and run a prompt
+    // in it. Only functional under `qwen serve` (needs the bridge, wired as a
+    // spawner by the ACP session); the tool's execute() reports a clear
+    // daemon-only error otherwise. Registered unconditionally so the message is
+    // available rather than the tool silently missing.
+    await registerLazy(ToolNames.CREATE_SUB_SESSION, async () => {
+      const { CreateSubSessionTool } = await import(
+        '../tools/create-sub-session.js'
+      );
+      return new CreateSubSessionTool(this);
+    });
+
     // Register team collaboration tools (experimental). The team-specific
     // tools (team_create/team_delete/task_create/task_update/task_list)
     // are gated on this flag.
@@ -6470,5 +6627,22 @@ export class Config {
     }
     // Pre-init path: stash for `createToolRegistry` to consume.
     this.pendingMcpBudgetCallback = cb;
+  }
+
+  private subSessionSpawner?: SubSessionSpawner;
+
+  /**
+   * Wire the sub-session spawner used by the `create_sub_session` tool. Set by
+   * the daemon/ACP session layer (which routes it to the bridge over
+   * `extMethod`); left unset in interactive TUI / headless — the tool then
+   * reports itself as daemon-only. `undefined` clears it on session teardown.
+   */
+  setSubSessionSpawner(spawner: SubSessionSpawner | undefined): void {
+    this.subSessionSpawner = spawner;
+  }
+
+  /** The injected sub-session spawner, or undefined outside daemon mode. */
+  getSubSessionSpawner(): SubSessionSpawner | undefined {
+    return this.subSessionSpawner;
   }
 }

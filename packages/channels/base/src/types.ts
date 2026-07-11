@@ -1,10 +1,12 @@
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelBase, ChannelBaseOptions } from './ChannelBase.js';
+import type { ChannelWebhookConfig } from './ChannelWebhookTask.js';
 
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
 export type SessionScope = 'user' | 'thread' | 'single';
 export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'open';
+export type DmPolicy = 'disabled' | 'open';
 export type DispatchMode = 'collect' | 'steer' | 'followup';
 
 export interface ChannelIdentityConfig {
@@ -62,8 +64,10 @@ export interface ChannelConfig {
   instructions?: string;
   identity?: ChannelIdentityConfig;
   memoryScope?: ChannelMemoryScopeConfig;
+  webhooks?: ChannelWebhookConfig;
   model?: string;
   groupPolicy: GroupPolicy; // default: "disabled"
+  dmPolicy: DmPolicy; // default: "open"
   groupHistoryLimit?: number;
   groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
 

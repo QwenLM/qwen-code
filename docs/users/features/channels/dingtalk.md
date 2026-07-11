@@ -30,11 +30,13 @@ Add the channel to `~/.qwen/settings.json`:
       "type": "dingtalk",
       "clientId": "$DINGTALK_CLIENT_ID",
       "clientSecret": "$DINGTALK_CLIENT_SECRET",
+      "useConnectionManager": true,
       "senderPolicy": "open",
       "sessionScope": "user",
       "cwd": "/path/to/your/project",
       "instructions": "You are a concise coding assistant responding via DingTalk.",
       "groupPolicy": "open",
+      "atSender": true,
       "groups": {
         "*": { "requireMention": true }
       }
@@ -61,6 +63,12 @@ Or define them in the `env` section of `settings.json`:
 }
 ```
 
+### Connection Recovery
+
+`useConnectionManager` defaults to `true`. The connection manager monitors the Stream WebSocket and replaces the DingTalk SDK client when the connection stops responding. You should normally leave it enabled.
+
+Set `"useConnectionManager": false` to disable Qwen Code's connection manager and fall back to the SDK's keepalive and automatic reconnect behavior.
+
 ## Running
 
 ```bash
@@ -83,6 +91,8 @@ DingTalk bots work in both DM and group conversations. To enable group support:
 
 By default, the bot requires an @mention in group chats (`requireMention: true`). Set `"requireMention": false` for a specific group to make it respond to all messages. See [Group Chats](./overview#group-chats) for full details.
 
+Set `"atSender": true` to have the bot @mention the member whose group message triggered its response. It is off by default and only applies to agent replies with a DingTalk staff ID. Mentioned replies use plain text so the @ is visible; replies without a mention use Markdown formatting.
+
 ### Finding a Group's Conversation ID
 
 DingTalk uses `conversationId` to identify groups. You can find it in the channel service logs when someone sends a message in the group — look for the `conversationId` field in the log output.
@@ -99,14 +109,14 @@ You can send photos and documents to the bot, not just text.
 
 - **Authentication:** AppKey + AppSecret instead of a static bot token. The SDK manages access token refresh automatically.
 - **Connection:** WebSocket stream instead of polling — no public IP or webhook URL needed.
-- **Formatting:** Responses use DingTalk's markdown dialect (a limited subset). Tables are automatically converted to plain text since DingTalk doesn't render them. Long messages are split into chunks at ~3800 characters.
+- **Formatting:** Responses use DingTalk's markdown dialect. Markdown tables are passed through to the DingTalk client; long messages are split into chunks at ~3800 characters.
 - **Working indicator:** A 👀 emoji reaction is added to the user's message while processing, then removed when the response is sent.
 - **Media download:** Two-step process — a `downloadCode` from the message is exchanged for a temporary download URL via DingTalk's API.
 - **Groups:** DingTalk uses `isInAtList` for @mention detection instead of parsing message entities.
 
 ## Tips
 
-- **Use DingTalk markdown-aware instructions** — DingTalk supports a limited markdown subset (headers, bold, links, code blocks, but not tables). Adding instructions like "Use DingTalk markdown. Avoid tables." helps the agent format responses correctly.
+- **Use DingTalk markdown-aware instructions** — DingTalk supports headings, bold text, links, code blocks, and tables. Keep tables compact because narrow screens may scroll horizontally.
 - **Restrict access** — In an organization context, `senderPolicy: "open"` may be acceptable. For tighter control, use `"allowlist"` or `"pairing"`. See [DM Pairing](./overview#dm-pairing) for details.
 - **Referenced messages** — Quoting (replying to) a user message includes the quoted text as context for the agent. Quoting bot responses is not yet supported.
 

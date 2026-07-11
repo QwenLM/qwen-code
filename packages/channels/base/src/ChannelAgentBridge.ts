@@ -1,3 +1,8 @@
+import type {
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+} from '@agentclientprotocol/sdk';
+
 export interface AvailableCommand {
   name: string;
   description: string;
@@ -47,16 +52,34 @@ export interface SessionDiedEvent {
   reason?: string;
 }
 
+export interface PermissionRequestEvent {
+  requestId: string;
+  sessionId: string;
+  request: RequestPermissionRequest;
+}
+
+export interface PermissionResolvedEvent {
+  requestId: string;
+  outcome?: RequestPermissionResponse['outcome'];
+}
+
 interface ChannelAgentBridgeEventMap {
   sessionDied: [SessionDiedEvent];
   textChunk: [sessionId: string, chunk: string];
+  responseBoundary: [sessionId: string];
   toolCall: [ToolCallEvent];
+  permissionRequest: [PermissionRequestEvent];
+  permissionResolved: [PermissionResolvedEvent];
 }
 
 export interface BridgeSessionInfo {
   sessionId: string;
   workspaceCwd: string;
   hasActivePrompt: boolean;
+}
+
+export interface ChannelAgentBridgeSessionOptions {
+  approvalMode?: string;
 }
 
 export interface ChannelAgentBridge {
@@ -70,14 +93,25 @@ export interface ChannelAgentBridge {
     eventName: K,
     listener: (...args: ChannelAgentBridgeEventMap[K]) => void,
   ): unknown;
-  newSession(cwd: string): Promise<string>;
-  loadSession(sessionId: string, cwd: string): Promise<string>;
+  newSession(
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+  ): Promise<string>;
+  loadSession(
+    sessionId: string,
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+  ): Promise<string>;
   prompt(
     sessionId: string,
     text: string,
     options?: { imageBase64?: string; imageMimeType?: string },
   ): Promise<string>;
   cancelSession(sessionId: string): Promise<void>;
+  respondToPermission?(
+    requestId: string,
+    response: RequestPermissionResponse,
+  ): Promise<boolean>;
   shellCommand?(
     sessionId: string,
     command: string,

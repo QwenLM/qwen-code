@@ -172,11 +172,13 @@ export class FeishuChannel extends ChannelBase {
   private buildHandlerMap(): Record<string, (data: unknown) => unknown> {
     return {
       'im.message.receive_v1': (data: unknown) => {
+        this.logDebugPayload('Feishu', data);
         this.onMessage(data as FeishuMessageEvent);
         return {};
       },
       'card.action.trigger': (data: unknown) => {
         const payload = data as Record<string, unknown>;
+        this.logDebugPayload('Feishu', payload);
         const stopped = this.onCardAction(payload);
         if (stopped) {
           return { toast: { type: 'info', content: '已停止' } };
@@ -1058,6 +1060,22 @@ export class FeishuChannel extends ChannelBase {
         }
       }, delay);
     }
+  }
+
+  protected override onResponseBoundary(
+    _chatId: string,
+    sessionId: string,
+  ): void {
+    if (this.config.blockStreaming === 'on') return;
+    const inboundMsgId = this.sessionToInboundMsg.get(sessionId);
+    if (!inboundMsgId) return;
+    const cardState = this.cardSessions.get(inboundMsgId);
+    if (!cardState || cardState.stopped) return;
+    if (cardState.pendingUpdateTimer) {
+      clearTimeout(cardState.pendingUpdateTimer);
+      cardState.pendingUpdateTimer = undefined;
+    }
+    cardState.accumulatedText = '';
   }
 
   private isKnownInboundMessageId(messageId: string): boolean {

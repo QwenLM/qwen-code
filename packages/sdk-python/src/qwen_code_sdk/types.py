@@ -23,6 +23,7 @@ AuthType: TypeAlias = Literal[
     "gemini",
     "vertex-ai",
 ]
+Effort: TypeAlias = Literal["low", "medium", "high", "xhigh", "max"]
 
 
 class PermissionSuggestion(TypedDict):
@@ -129,6 +130,7 @@ class QueryOptionsDict(TypedDict, total=False):
     insecure: bool
     worktree: bool
     disabled_slash_commands: list[str]
+    effort: Effort
 
 
 @dataclass
@@ -169,6 +171,7 @@ class QueryOptions:
     insecure: bool = False
     worktree: bool = False
     disabled_slash_commands: list[str] | None = None
+    effort: Effort | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any] | None) -> QueryOptions:
@@ -231,6 +234,10 @@ class QueryOptions:
             worktree=_as_optional_bool(data, "worktree") or False,
             disabled_slash_commands=_as_optional_str_list(
                 data, "disabled_slash_commands"
+            ),
+            effort=cast(
+                Effort | None,
+                _as_optional_str(data, "effort"),
             ),
         )
 

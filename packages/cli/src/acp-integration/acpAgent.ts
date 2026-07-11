@@ -55,6 +55,13 @@ import {
   InvalidMcpConfigError,
   MCPOAuthProvider,
   MCPOAuthTokenStorage,
+  InvalidSessionTranscriptCursorError,
+  SESSION_TRANSCRIPT_MAX_LIMIT,
+  SessionTranscriptReader,
+  SessionTranscriptSnapshotUnavailableError,
+  SessionTranscriptTooLargeError,
+  encodeSessionTranscriptCursor,
+  type SessionTranscriptCursorState,
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
@@ -66,28 +73,33 @@ import {
   matchesAnyServerPattern,
   IMAGE_CAPABILITY,
   registerAcpEventLoopLagGauge,
+  SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  normalizeEventPayload,
+  normalizeSnapshotPayload,
   startEventLoopLagMonitor,
+  type AgentParams,
+  type ApprovalMode,
+  type ChatRecord,
+  type Config,
+  type ConfigInitializeOptions,
+  type DeviceAuthorizationData,
+  type DiscoveredMCPPrompt,
+  type DiscoveredMCPResource,
+  type HistoryGap,
+  type HookConfig,
+  type McpBudgetEvent,
+  type McpBudgetMode,
+  type McpTransportKind,
+  type ProviderConfig,
+  type ProviderModelConfig,
+  type ProviderSetupInputs,
+  type ResumedSessionData,
+  type SendSdkMcpMessage,
+  type SessionArtifactEventRecordPayload,
+  type SessionArtifactSnapshotRecordPayload,
+  type WorkspaceRememberContextMode,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
-import type {
-  AgentParams,
-  ApprovalMode,
-  Config,
-  DeviceAuthorizationData,
-  HookConfig,
-  McpBudgetEvent,
-  McpBudgetMode,
-  McpTransportKind,
-  ProviderConfig,
-  ProviderModelConfig,
-  ProviderSetupInputs,
-  ResumedSessionData,
-  SendSdkMcpMessage,
-  DiscoveredMCPResource,
-  DiscoveredMCPPrompt,
-  WorkspaceRememberContextMode,
-  ChatRecord,
-} from '@qwen-code/qwen-code-core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   AgentSideConnection,
@@ -167,12 +179,24 @@ import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
 } from '../config/config.js';
-import { extractRememberErrorCode } from '../serve/workspace-remember-errors.js';
+import {
+  createWorkspaceMemoryExtractionErrorLogger,
+  shouldSuppressRememberErrorDetails,
+  workspaceMemoryFailureCode,
+  workspaceMemoryFailureDiagnostics,
+} from '../serve/workspace-remember-errors.js';
 import { formatWorkspaceMemoryForgetSummary } from '../serve/workspace-memory-summaries.js';
 import { mapSkillConfigToStatus } from '../serve/workspace-skills-mapping.js';
+import {
+  inactiveExtensionSkillRefs,
+  isInactiveExtensionSkill,
+} from './extension-skills.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
-import { HistoryReplayer } from './session/HistoryReplayer.js';
+import {
+  HistoryReplayer,
+  type PendingReplayToolCall,
+} from './session/HistoryReplayer.js';
 import {
   formatAcpModelId,
   parseAcpBaseModelId,
@@ -271,6 +295,19 @@ const BTW_CHILD_TIMEOUT_MS = 55_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
+function workspaceMemoryErrorData(
+  code: string,
+  diagnostics: { details?: string },
+): { errorKind: string; details?: string } {
+  return {
+    errorKind: code,
+    ...(diagnostics.details ? { details: diagnostics.details } : {}),
+  };
+}
+
+const logWorkspaceMemoryExtractionError =
+  createWorkspaceMemoryExtractionErrorLogger(debugLogger);
+
 function parseAcpLocalReadRootsEnv(
   raw = process.env[QWEN_ACP_LOCAL_READ_ROOTS_ENV],
 ): string[] {
@@ -307,6 +344,67 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function parseSessionArtifactEventPayload(
+  payload: unknown,
+  expectedSessionId: string,
+): SessionArtifactEventRecordPayload {
+  const record = parseSessionArtifactBasePayload(payload, expectedSessionId);
+  const warnings: string[] = [];
+  const normalized = normalizeEventPayload(record, warnings);
+  if (
+    !normalized ||
+    warnings.length > 0 ||
+    normalized.changes.length !== (record['changes'] as unknown[]).length
+  ) {
+    throw invalidArtifactPersistPayload();
+  }
+  return normalized;
+}
+
+function parseSessionArtifactSnapshotPayload(
+  payload: unknown,
+  expectedSessionId: string,
+): SessionArtifactSnapshotRecordPayload {
+  const record = parseSessionArtifactBasePayload(payload, expectedSessionId);
+  const warnings: string[] = [];
+  const normalized = normalizeSnapshotPayload(record, warnings);
+  if (
+    !normalized ||
+    warnings.length > 0 ||
+    normalized.artifacts.length !== (record['artifacts'] as unknown[]).length
+  ) {
+    throw invalidArtifactPersistPayload();
+  }
+  return normalized;
+}
+
+function parseSessionArtifactBasePayload(
+  payload: unknown,
+  expectedSessionId: string,
+): Record<string, unknown> {
+  if (!isObjectRecord(payload)) {
+    throw invalidArtifactPersistPayload();
+  }
+  if (
+    payload['v'] !== SESSION_ARTIFACT_PERSISTENCE_VERSION ||
+    payload['sessionId'] !== expectedSessionId ||
+    !Number.isSafeInteger(payload['sequence']) ||
+    (payload['sequence'] as number) < 0 ||
+    typeof payload['recordedAt'] !== 'string' ||
+    payload['recordedAt'].length === 0
+  ) {
+    throw invalidArtifactPersistPayload();
+  }
+  return payload;
+}
+
+function invalidArtifactPersistPayload(): Error {
+  return RequestError.invalidParams(
+    undefined,
+    'Invalid or missing artifact persist payload',
+  );
+}
+
 function isBulkLoadReplayRequest(params: LoadSessionRequest): boolean {
   const meta = isObjectRecord(params._meta) ? params._meta : undefined;
   return meta?.[LOAD_REPLAY_MODE_META_KEY] === LOAD_REPLAY_BULK_MODE;
@@ -331,15 +429,76 @@ function copyCumulativeUsage(
   target.apiTimeMs = source.apiTimeMs;
 }
 
+function isCumulativeUsage(value: unknown): value is CumulativeUsage {
+  if (!isObjectRecord(value)) return false;
+  return (
+    typeof value['promptTokens'] === 'number' &&
+    Number.isFinite(value['promptTokens']) &&
+    typeof value['cachedTokens'] === 'number' &&
+    Number.isFinite(value['cachedTokens']) &&
+    typeof value['candidateTokens'] === 'number' &&
+    Number.isFinite(value['candidateTokens']) &&
+    typeof value['apiTimeMs'] === 'number' &&
+    Number.isFinite(value['apiTimeMs'])
+  );
+}
+
+function isPendingReplayToolCall(
+  value: unknown,
+): value is PendingReplayToolCall {
+  if (!isObjectRecord(value)) return false;
+  return (
+    typeof value['callId'] === 'string' &&
+    typeof value['toolName'] === 'string' &&
+    (value['timestamp'] === undefined ||
+      typeof value['timestamp'] === 'string') &&
+    typeof value['recordId'] === 'string'
+  );
+}
+
+function parseTranscriptReplayState(replay: unknown): {
+  pendingToolCalls: PendingReplayToolCall[];
+  cumulativeUsage: CumulativeUsage;
+} {
+  if (!isObjectRecord(replay)) {
+    return {
+      pendingToolCalls: [],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    };
+  }
+  const rawPending = replay['pendingToolCalls'];
+  const pendingToolCalls = Array.isArray(rawPending)
+    ? rawPending.filter(isPendingReplayToolCall)
+    : [];
+  if (
+    Array.isArray(rawPending) &&
+    pendingToolCalls.length !== rawPending.length
+  ) {
+    // A cursor from a newer or corrupted daemon can carry pending tool calls
+    // whose shape no longer matches; drop them defensively but log it so an
+    // operator can tell this apart from a genuine "tool never completed".
+    const dropped = rawPending.length - pendingToolCalls.length;
+    debugLogger.warn(
+      `[transcript] replay state dropped ${dropped} of ${rawPending.length} malformed pending tool calls`,
+    );
+  }
+  const cumulativeUsage = isCumulativeUsage(replay['cumulativeUsage'])
+    ? { ...replay['cumulativeUsage'] }
+    : createReplayCumulativeUsage();
+  return { pendingToolCalls, cumulativeUsage };
+}
+
 async function collectHistoryReplayUpdates({
   sessionId,
   config,
   records,
+  gaps,
   cumulativeUsage,
 }: {
   sessionId: string;
   config: Config;
   records: ChatRecord[];
+  gaps?: HistoryGap[];
   cumulativeUsage: CumulativeUsage;
 }): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
   const updates: SessionUpdate[] = [];
@@ -353,7 +512,7 @@ async function collectHistoryReplayUpdates({
   };
 
   try {
-    await new HistoryReplayer(replayContext).replay(records);
+    await new HistoryReplayer(replayContext).replay(records, gaps);
   } catch (error) {
     const replayError = error instanceof Error ? error.message : String(error);
     debugLogger.warn(
@@ -366,6 +525,60 @@ async function collectHistoryReplayUpdates({
   }
 
   return { updates };
+}
+
+async function collectHistoryReplayUpdatesPage({
+  sessionId,
+  config,
+  records,
+  gaps,
+  cumulativeUsage,
+  pendingToolCalls,
+  finalizeDangling,
+}: {
+  sessionId: string;
+  config: Config;
+  records: ChatRecord[];
+  gaps?: HistoryGap[];
+  cumulativeUsage: CumulativeUsage;
+  pendingToolCalls: PendingReplayToolCall[];
+  finalizeDangling: boolean;
+}): Promise<{
+  updates: SessionUpdate[];
+  pendingToolCalls: PendingReplayToolCall[];
+  replayError?: string;
+}> {
+  const updates: SessionUpdate[] = [];
+  const replayContext: SessionContext = {
+    sessionId,
+    config,
+    sendUpdate: async (update) => {
+      updates.push(update);
+    },
+    cumulativeUsage,
+  };
+  const replayer = new HistoryReplayer(replayContext);
+
+  try {
+    const state = await replayer.replayPage(records, {
+      pendingToolCalls,
+      finalizeDangling,
+      gaps,
+    });
+    return { updates, pendingToolCalls: state.pendingToolCalls };
+  } catch (error) {
+    debugLogger.warn(
+      '[historyReplay] Paged history replay failed for session %s (partial updates: %d):',
+      sessionId,
+      updates.length,
+      error,
+    );
+    return {
+      updates,
+      pendingToolCalls: replayer.getPendingToolCalls(),
+      replayError: 'Replay conversion failed for this page',
+    };
+  }
 }
 
 function liftSessionUpdateTimestamps(
@@ -2740,8 +2953,18 @@ function parseAcpSessionListCursor(
   return parsedCursor;
 }
 
+interface TranscriptReplayConfigCacheEntry {
+  settings: LoadedSettings;
+  config?: Config;
+  pending?: Promise<Config>;
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
+  private readonly transcriptReplayConfigCache = new Map<
+    string,
+    TranscriptReplayConfigCacheEntry
+  >();
   private clientCapabilities: ClientCapabilities | undefined;
   // CPU-usage delta baseline for the daemon's `workspaceResource` extMethod
   // (Daemon Status child-resource chart). The daemon polls this at a fixed
@@ -2909,6 +3132,7 @@ class QwenAgent implements Agent {
       session.dispose();
     }
     this.sessions.clear();
+    this.disposeTranscriptReplayConfigs();
   }
 
   constructor(
@@ -3141,6 +3365,7 @@ class QwenAgent implements Agent {
             sessionId: params.sessionId,
             config,
             records,
+            gaps: sessionData?.historyGaps,
             cumulativeUsage: replayUsage,
           });
           replayUpdates = liftSessionUpdateTimestamps(replay.updates);
@@ -3176,7 +3401,10 @@ class QwenAgent implements Agent {
       modes: modesData,
       models: availableModels,
       configOptions,
-    };
+      ...(sessionData?.artifactSnapshot
+        ? { artifactSnapshot: sessionData.artifactSnapshot }
+        : {}),
+    } as LoadSessionResponse;
     if (!replayEnvelope) {
       return response;
     }
@@ -3229,11 +3457,15 @@ class QwenAgent implements Agent {
     const availableModels = this.buildAvailableModels(config);
     const configOptions = this.buildConfigOptions(config);
 
+    const sessionData = config.getResumedSessionData();
     return {
       modes: modesData,
       models: availableModels,
       configOptions,
-    };
+      ...(sessionData?.artifactSnapshot
+        ? { artifactSnapshot: sessionData.artifactSnapshot }
+        : {}),
+    } as ResumeSessionResponse;
   }
 
   /**
@@ -4196,12 +4428,58 @@ class QwenAgent implements Agent {
 
     try {
       const disabled = config.getDisabledSkillNames();
+      try {
+        await config.getExtensionManager().refreshCache();
+      } catch (error) {
+        debugLogger.warn('Extension cache refresh failed:', error);
+      }
+      try {
+        await skillManager.refreshCache();
+      } catch (error) {
+        debugLogger.warn('Skill cache refresh failed:', error);
+      }
       const skills = await skillManager.listSkills();
+      const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
+      const skillsByKey = new Map(
+        skills.map((skill) => [
+          `${skill.level}:${skill.extensionName ?? ''}:${skill.name}`,
+          mapSkillConfigToStatus(skill, disabled, {
+            disabled: isInactiveExtensionSkill(skill, inactiveSkillRefs),
+          }),
+        ]),
+      );
+      for (const extension of config.getExtensions()) {
+        if (extension.isActive) continue;
+        for (const skill of extension.skills ?? []) {
+          const extensionName = extension.displayName ?? extension.name;
+          const key = `extension:${extensionName}:${skill.name}`;
+          if (
+            skillsByKey.has(`extension:${extension.name}:${skill.name}`) ||
+            skillsByKey.has(key)
+          ) {
+            continue;
+          }
+          skillsByKey.set(
+            key,
+            mapSkillConfigToStatus(
+              {
+                ...skill,
+                level: 'extension',
+                extensionName,
+              },
+              disabled,
+              { disabled: true },
+            ),
+          );
+        }
+      }
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: this.workspaceCwd(config),
         initialized: true,
-        skills: skills.map((skill) => mapSkillConfigToStatus(skill, disabled)),
+        skills: Array.from(skillsByKey.values()).sort((a, b) =>
+          a.name.localeCompare(b.name),
+        ),
       };
     } catch (error) {
       return {
@@ -5695,6 +5973,136 @@ class QwenAgent implements Agent {
           unknown
         >;
       }
+      case SERVE_STATUS_EXT_METHODS.sessionTranscript: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const rawCursor = params['cursor'];
+        if (rawCursor !== undefined && typeof rawCursor !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript cursor',
+          );
+        }
+        const rawLimit = params['limit'];
+        if (
+          rawLimit !== undefined &&
+          (!Number.isSafeInteger(rawLimit) ||
+            (rawLimit as number) < 1 ||
+            (rawLimit as number) > SESSION_TRANSCRIPT_MAX_LIMIT)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript limit',
+          );
+        }
+
+        try {
+          const settings = loadSettingsCached(cwd);
+          return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+            const reader = new SessionTranscriptReader(cwd);
+            const page = await reader.readPage(sessionId, {
+              ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
+              ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
+            });
+            const config = await this.getTranscriptReplayConfig(cwd, settings);
+            const replayState = parseTranscriptReplayState(page.replay);
+            const replay = await collectHistoryReplayUpdatesPage({
+              sessionId,
+              config,
+              records: page.records,
+              gaps: page.gaps,
+              cumulativeUsage: replayState.cumulativeUsage,
+              pendingToolCalls: replayState.pendingToolCalls,
+              finalizeDangling: !page.hasMore,
+            });
+            const updates = liftSessionUpdateTimestamps(replay.updates);
+            let nextCursor: string | undefined;
+            // On a mid-page replay error the page is partial: records after the
+            // failed record are dropped and pendingToolCalls reflect partial
+            // state. Withhold nextCursor so the client cannot paginate forward
+            // past the dropped records with a corrupted cursor — the page is
+            // already flagged partial + replayError below.
+            if (page.nextCursorState && replay.replayError === undefined) {
+              const nextCursorState: SessionTranscriptCursorState = {
+                ...page.nextCursorState,
+                replay: {
+                  pendingToolCalls: replay.pendingToolCalls,
+                  // Preserved for future replay emitters that need cumulative
+                  // usage across page boundaries; current frames expose per-record
+                  // usage metadata only.
+                  cumulativeUsage: replayState.cumulativeUsage,
+                },
+              };
+              nextCursor = encodeSessionTranscriptCursor(nextCursorState, cwd);
+            }
+            return {
+              v: 1,
+              sessionId,
+              events: updates.map((update) => ({
+                v: 1,
+                type: 'session_update',
+                data: update,
+              })),
+              ...(nextCursor !== undefined ? { nextCursor } : {}),
+              hasMore: page.hasMore,
+              startTime: page.startTime,
+              lastUpdated: page.lastUpdated,
+              ...(replay.replayError !== undefined
+                ? { partial: true, replayError: replay.replayError }
+                : {}),
+            } as Record<string, unknown>;
+          });
+        } catch (error) {
+          if (
+            error instanceof InvalidSessionTranscriptCursorError ||
+            error instanceof RangeError
+          ) {
+            throw new RequestError(
+              -32602,
+              error instanceof Error ? error.message : 'Invalid transcript',
+              {
+                errorKind:
+                  error instanceof InvalidSessionTranscriptCursorError
+                    ? 'invalid_transcript_cursor'
+                    : 'invalid_transcript_limit',
+              },
+            );
+          }
+          if (error instanceof SessionTranscriptSnapshotUnavailableError) {
+            throw new RequestError(-32010, error.message, {
+              errorKind: 'transcript_snapshot_unavailable',
+              sessionId,
+            });
+          }
+          if (error instanceof SessionTranscriptTooLargeError) {
+            throw new RequestError(-32011, error.message, {
+              errorKind: 'transcript_too_large',
+              sessionId,
+              snapshotSize: error.snapshotSize,
+              maxBytes: error.maxBytes,
+            });
+          }
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            if (typeof rawCursor === 'string') {
+              throw new RequestError(
+                -32010,
+                `Transcript snapshot is unavailable for session ${sessionId}`,
+                {
+                  errorKind: 'transcript_snapshot_unavailable',
+                  sessionId,
+                },
+              );
+            }
+            throw RequestError.resourceNotFound(`session:${sessionId}`);
+          }
+          throw error;
+        }
+      }
       case SERVE_STATUS_EXT_METHODS.sessionStats: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -5808,10 +6216,12 @@ class QwenAgent implements Agent {
         const childSignal = AbortSignal.timeout(
           WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS,
         );
+        let projectRoot = '<unknown>';
         try {
+          projectRoot = this.config.getProjectRoot();
           const result = await runManagedRememberByAgent({
             config: this.config,
-            projectRoot: this.config.getProjectRoot(),
+            projectRoot,
             content: content.trim(),
             contextMode,
             abortSignal: childSignal,
@@ -5821,15 +6231,36 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
+          const diagnostics = workspaceMemoryFailureDiagnostics(
+            err,
+            logWorkspaceMemoryExtractionError,
+          );
+          const code = workspaceMemoryFailureCode(
+            err,
+            'remember_failed',
+            logWorkspaceMemoryExtractionError,
+          );
           if (childSignal.aborted) {
+            const timeoutCode = 'remember_timeout';
+            debugLogger.error('Workspace memory remember timed out:', {
+              projectRoot,
+              code: timeoutCode,
+              details: diagnostics.debugDetails,
+              ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
+            });
             throw new RequestError(
               -32099,
               'Workspace memory remember timed out',
-              { errorKind: 'remember_timeout' },
+              workspaceMemoryErrorData(timeoutCode, diagnostics),
             );
           }
-          const code = extractRememberErrorCode(err);
-          if (code === 'managed_memory_unavailable') {
+          debugLogger.error('Workspace memory remember failed:', {
+            projectRoot,
+            code,
+            details: diagnostics.debugDetails,
+            ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
+          });
+          if (shouldSuppressRememberErrorDetails(code)) {
             throw new RequestError(
               -32009,
               'Managed memory is unavailable for this daemon workspace',
@@ -5838,12 +6269,8 @@ class QwenAgent implements Agent {
           }
           throw new RequestError(
             -32099,
-            err instanceof Error && err.message
-              ? err.message
-              : 'Workspace memory remember failed',
-            {
-              errorKind: code,
-            },
+            'Workspace memory remember failed',
+            workspaceMemoryErrorData(code, diagnostics),
           );
         }
       }
@@ -5875,8 +6302,9 @@ class QwenAgent implements Agent {
         const childSignal = AbortSignal.timeout(
           WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS,
         );
+        let projectRoot = '<unknown>';
         try {
-          const projectRoot = this.config.getProjectRoot();
+          projectRoot = this.config.getProjectRoot();
           const hiddenConfig = createHiddenWorkspaceMemoryConfig(this.config);
           const result = await this.config
             .getMemoryManager()
@@ -5890,31 +6318,53 @@ class QwenAgent implements Agent {
               formatWorkspaceMemoryForgetSummary(result.removedEntries.length),
             removedEntries: result.removedEntries,
             touchedTopics: result.touchedTopics,
+            touchedScopes: result.touchedScopes,
           } as unknown as Record<string, unknown>;
         } catch (err) {
           if (err instanceof RequestError) {
             throw err;
           }
+          const diagnostics = workspaceMemoryFailureDiagnostics(
+            err,
+            logWorkspaceMemoryExtractionError,
+          );
+          const code = workspaceMemoryFailureCode(
+            err,
+            'forget_failed',
+            logWorkspaceMemoryExtractionError,
+          );
           if (childSignal.aborted) {
+            const timeoutCode = 'forget_timeout';
+            debugLogger.error('Workspace memory forget timed out:', {
+              projectRoot,
+              code: timeoutCode,
+              details: diagnostics.debugDetails,
+              ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
+            });
             throw new RequestError(
               -32099,
               'Workspace memory forget timed out',
-              {
-                errorKind: 'forget_timeout',
-              },
+              workspaceMemoryErrorData(timeoutCode, diagnostics),
             );
           }
-          const code = extractRememberErrorCode(err, 'forget_failed');
-          if (code === 'managed_memory_unavailable') {
+          debugLogger.error('Workspace memory forget failed:', {
+            projectRoot,
+            code,
+            details: diagnostics.debugDetails,
+            ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
+          });
+          if (shouldSuppressRememberErrorDetails(code)) {
             throw new RequestError(
               -32009,
               'Managed memory is unavailable for this daemon workspace',
               { errorKind: 'managed_memory_unavailable' },
             );
           }
-          throw new RequestError(-32099, 'Workspace memory forget failed', {
-            errorKind: code,
-          });
+          throw new RequestError(
+            -32099,
+            'Workspace memory forget failed',
+            workspaceMemoryErrorData(code, diagnostics),
+          );
         }
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream: {
@@ -5929,9 +6379,11 @@ class QwenAgent implements Agent {
         const childSignal = AbortSignal.timeout(
           WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS,
         );
+        let projectRoot = '<unknown>';
         try {
+          projectRoot = this.config.getProjectRoot();
           const result = await runManagedAutoMemoryDream(
-            this.config.getProjectRoot(),
+            projectRoot,
             new Date(),
             createHiddenWorkspaceMemoryConfig(this.config),
             childSignal,
@@ -5950,22 +6402,47 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
+          const diagnostics = workspaceMemoryFailureDiagnostics(
+            err,
+            logWorkspaceMemoryExtractionError,
+          );
+          const code = workspaceMemoryFailureCode(
+            err,
+            'dream_failed',
+            logWorkspaceMemoryExtractionError,
+          );
           if (childSignal.aborted) {
-            throw new RequestError(-32099, 'Workspace memory dream timed out', {
-              errorKind: 'dream_timeout',
+            const timeoutCode = 'dream_timeout';
+            debugLogger.error('Workspace memory dream timed out:', {
+              projectRoot,
+              code: timeoutCode,
+              details: diagnostics.debugDetails,
+              ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
             });
+            throw new RequestError(
+              -32099,
+              'Workspace memory dream timed out',
+              workspaceMemoryErrorData(timeoutCode, diagnostics),
+            );
           }
-          const code = extractRememberErrorCode(err, 'dream_failed');
-          if (code === 'managed_memory_unavailable') {
+          debugLogger.error('Workspace memory dream failed:', {
+            projectRoot,
+            code,
+            details: diagnostics.debugDetails,
+            ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
+          });
+          if (shouldSuppressRememberErrorDetails(code)) {
             throw new RequestError(
               -32009,
               'Managed memory is unavailable for this daemon workspace',
               { errorKind: 'managed_memory_unavailable' },
             );
           }
-          throw new RequestError(-32099, 'Workspace memory dream failed', {
-            errorKind: code,
-          });
+          throw new RequestError(
+            -32099,
+            'Workspace memory dream failed',
+            workspaceMemoryErrorData(code, diagnostics),
+          );
         }
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart: {
@@ -6332,6 +6809,47 @@ class QwenAgent implements Agent {
           AbortSignal.timeout(5 * 60_000),
         )) as unknown as Record<string, unknown>;
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const kind = params['kind'];
+        if (kind !== 'event' && kind !== 'snapshot') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing artifact persist kind',
+          );
+        }
+        const payload = params['payload'];
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing artifact persist payload',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const recording = session.getConfig().getChatRecordingService();
+        if (!recording) {
+          throw RequestError.internalError(
+            undefined,
+            'Chat recording service unavailable',
+          );
+        }
+        if (kind === 'event') {
+          await recording.recordSessionArtifactEvent(
+            parseSessionArtifactEventPayload(payload, sessionId),
+          );
+        } else {
+          await recording.recordSessionArtifactSnapshot(
+            parseSessionArtifactSnapshotPayload(payload, sessionId),
+          );
+        }
+        return { sessionId, persisted: true, kind };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionTitle: {
         const sessionId = params['sessionId'];
         const displayName = params['displayName'];
@@ -6364,6 +6882,35 @@ class QwenAgent implements Agent {
           await recording.flush();
         }
         return { sessionId, displayName, titleSource: source, persisted: ok };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionParent: {
+        const sessionId = params['sessionId'];
+        const parentSessionId = params['parentSessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          typeof parentSessionId !== 'string' ||
+          parentSessionId.length === 0
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing parentSessionId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const recording = session.getConfig().getChatRecordingService();
+        let ok = false;
+        if (recording) {
+          // Awaited: `recordParentSession` resolves only once the record is
+          // durably written, so `persisted` never claims success for a write
+          // that silently failed.
+          ok = await recording.recordParentSession(parentSessionId);
+        }
+        return { sessionId, parentSessionId, persisted: ok };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {
         const sessionId = params['sessionId'];
@@ -7182,7 +7729,23 @@ class QwenAgent implements Agent {
         const sessionId = params['sessionId'] as string;
         const session = this.sessionOrThrow(sessionId);
         const extensionManager = session.getConfig().getExtensionManager();
-        await extensionManager.refreshCache();
+        const skillManager = session.getConfig().getSkillManager();
+        await Promise.all([
+          extensionManager.refreshCache().catch((err: unknown) => {
+            debugLogger.warn(
+              `Extension refresh failed for session ${sessionId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }),
+          skillManager?.refreshCache().catch((err: unknown) => {
+            debugLogger.warn(
+              `Skill refresh failed after extension refresh for session ${sessionId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }),
+        ]);
         try {
           await extensionManager.refreshTools();
         } catch (err) {
@@ -7364,6 +7927,46 @@ class QwenAgent implements Agent {
             filesFailed = [`file-history-rewind: ${reason}`];
           }
         }
+        let artifactSnapshot: unknown;
+        let artifactSnapshotUnavailable: string | undefined;
+        try {
+          await session.getConfig().getChatRecordingService()?.flush();
+          const cwd = session.getConfig().getProjectRoot();
+          const sessionData = await runWithAcpRuntimeOutputDir(
+            this.settings,
+            cwd,
+            async () => {
+              const sessionService = new SessionService(cwd);
+              return sessionService.loadSession(sessionId);
+            },
+          );
+          if (sessionData === undefined) {
+            artifactSnapshotUnavailable =
+              'session data unavailable after rewind';
+          } else if (sessionData.artifactSnapshot) {
+            artifactSnapshot = sessionData.artifactSnapshot;
+          } else {
+            // A successful reload with no artifact records is a valid empty
+            // artifact timeline, distinct from an unavailable reload.
+            artifactSnapshot = {
+              v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+              sessionId,
+              sequence: 0,
+              artifacts: [],
+              tombstonedIds: [],
+              stickyEphemeralIds: [],
+              warnings: [],
+            };
+          }
+        } catch (err) {
+          artifactSnapshotUnavailable =
+            err instanceof Error ? err.message : String(err);
+          debugLogger.warn(
+            `[ACP] Failed to rebuild artifact snapshot after rewind for session=${sessionId}: ${
+              artifactSnapshotUnavailable
+            }`,
+          );
+        }
 
         return {
           success: true,
@@ -7371,6 +7974,10 @@ class QwenAgent implements Agent {
           ...rewindResult,
           filesChanged,
           filesFailed,
+          ...(artifactSnapshot ? { artifactSnapshot } : {}),
+          ...(artifactSnapshotUnavailable
+            ? { artifactSnapshotUnavailable }
+            : {}),
         };
       }
       case 'qwen/session/loadUpdates': {
@@ -7398,6 +8005,7 @@ class QwenAgent implements Agent {
           sessionId,
           config: this.config,
           records: sessionData.conversation.messages,
+          gaps: sessionData.historyGaps,
           cumulativeUsage: createReplayCumulativeUsage(),
         });
 
@@ -7959,12 +8567,97 @@ class QwenAgent implements Agent {
       deliverClientMcpMessage(this.connection, serverName, message, sessionId);
   }
 
+  private disposeTranscriptReplayConfig(config: Config): void {
+    try {
+      void Promise.resolve(config.getToolRegistry()?.stop()).catch((err) => {
+        debugLogger.debug(
+          `Transcript replay config tool registry stop failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
+    } catch (err) {
+      debugLogger.debug(
+        `Transcript replay config tool registry stop failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  private disposeTranscriptReplayConfigs(): void {
+    for (const entry of this.transcriptReplayConfigCache.values()) {
+      if (entry.config) {
+        this.disposeTranscriptReplayConfig(entry.config);
+      }
+    }
+    this.transcriptReplayConfigCache.clear();
+  }
+
+  private async getTranscriptReplayConfig(
+    cwd: string,
+    settings: LoadedSettings,
+  ): Promise<Config> {
+    const key = path.resolve(cwd);
+    const cached = this.transcriptReplayConfigCache.get(key);
+    if (cached?.settings === settings) {
+      if (cached.config) {
+        return cached.config;
+      }
+      if (cached.pending) {
+        return cached.pending;
+      }
+    } else if (cached?.config) {
+      this.disposeTranscriptReplayConfig(cached.config);
+    }
+
+    const entry: TranscriptReplayConfigCacheEntry = { settings };
+    const pending = this.newSessionConfig(cwd, [], settings, undefined, false, {
+      skipMcpDiscovery: true,
+      skipHooks: true,
+      skipSkillManager: true,
+      skipFileCheckpointing: true,
+      // Read-only replay: tolerate tools that cannot construct without the
+      // subsystems skipped above (e.g. SkillTool needs the SkillManager). The
+      // registry is only consulted for optional tool_call metadata during
+      // replay, and ToolCallEmitter falls back to the recorded tool name.
+      lenientToolWarmup: true,
+    });
+    entry.pending = pending;
+    this.transcriptReplayConfigCache.set(key, entry);
+    try {
+      const config = await pending;
+      const current = this.transcriptReplayConfigCache.get(key);
+      if (current !== entry) {
+        this.disposeTranscriptReplayConfig(config);
+        if (current?.config) {
+          return current.config;
+        }
+        if (current?.pending) {
+          return current.pending;
+        }
+        throw new Error(
+          'Transcript replay config was invalidated while loading',
+        );
+      }
+      entry.config = config;
+      entry.pending = undefined;
+      return config;
+    } catch (error) {
+      if (this.transcriptReplayConfigCache.get(key) === entry) {
+        this.transcriptReplayConfigCache.delete(key);
+      }
+      throw error;
+    }
+  }
+
   private async newSessionConfig(
     cwd: string,
     mcpServers: McpServer[],
     settings: LoadedSettings,
     sessionId?: string,
     resume?: boolean,
+    initializeOptions: ConfigInitializeOptions = {},
   ): Promise<Config> {
     // ACP/IDE-injected servers are session-level: they must outrank a project
     // `.mcp.json` and stay un-gated. Collect them separately and pass them as
@@ -8028,9 +8721,13 @@ class QwenAgent implements Agent {
 
     const mergedSettings = settings.merged;
 
+    const sessionArg =
+      resume === true
+        ? { resume: sessionId, sessionId: undefined }
+        : { sessionId, resume: undefined };
     const argvForSession = {
       ...this.argv,
-      ...(resume ? { resume: sessionId } : { sessionId }),
+      ...sessionArg,
       continue: false,
     };
 
@@ -8059,7 +8756,10 @@ class QwenAgent implements Agent {
     // ACP sessions run with piped stdio (non-TTY), so the default
     // interactive-based gating disables file checkpointing. Enable it
     // explicitly so /rewind works across daemon session resume.
-    if (typeof config.enableFileCheckpointing === 'function') {
+    if (
+      !initializeOptions.skipFileCheckpointing &&
+      typeof config.enableFileCheckpointing === 'function'
+    ) {
       config.enableFileCheckpointing();
     }
     // Reverse tool channel (issue #5626, Phase 2). Runtime-added MCP servers
@@ -8129,6 +8829,7 @@ class QwenAgent implements Agent {
       });
     }
     await config.initialize({
+      ...initializeOptions,
       // Reverse tool channel (issue #5626, Phase 2): bind the session
       // manager's SDK MCP callback to the `client_mcp/message` ext-method so a
       // client-hosted (extension) MCP server added at runtime reaches the
@@ -8241,7 +8942,10 @@ class QwenAgent implements Agent {
     }
 
     if (options.replayHistory !== false && sessionData?.conversation.messages) {
-      await session.replayHistory(sessionData.conversation.messages);
+      await session.replayHistory(
+        sessionData.conversation.messages,
+        sessionData.historyGaps,
+      );
     }
 
     if (options.startPostReplayServices !== false) {

@@ -1,6 +1,6 @@
 # Channels
 
-Channels let you interact with a Qwen Code agent from messaging platforms like Telegram, WeChat, QQ, DingTalk, or Feishu, instead of the terminal. You send messages from your phone or desktop chat app, and the agent responds just like it would in the CLI.
+Channels let you interact with a Qwen Code agent from messaging platforms like Telegram, WeChat, QQ, DingTalk, WeCom, or Feishu, instead of the terminal. You send messages from your phone or desktop chat app, and the agent responds just like it would in the CLI.
 
 ## How It Works
 
@@ -15,7 +15,7 @@ All channels share one agent process with isolated sessions per user. Each chann
 
 ## Quick Start
 
-1. Set up a bot on your messaging platform (see channel-specific guides: [Telegram](./telegram), [WeChat](./weixin), [QQ Bot](./qqbot), [DingTalk](./dingtalk), [Feishu](./feishu))
+1. Set up a bot on your messaging platform (see channel-specific guides: [Telegram](./telegram), [WeChat](./weixin), [QQ Bot](./qqbot), [DingTalk](./dingtalk), [WeCom](./wecom), [Feishu](./feishu))
 2. Add the channel configuration to `~/.qwen/settings.json`
 3. Run `qwen channel start` to start all channels, or `qwen channel start <name>` for a single channel
 
@@ -37,6 +37,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
       "cwd": "/path/to/working/directory",
       "instructions": "Optional system instructions for the agent.",
       "groupPolicy": "disabled",
+      "dmPolicy": "open",
       "groups": {
         "*": { "requireMention": true }
       }
@@ -49,10 +50,12 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 | Option                   | Required         | Description                                                                                                                                                            |
 | ------------------------ | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`                   | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `feishu`, or a custom type from an extension (see [Plugins](./plugins))                                          |
-| `token`                  | Telegram         | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat, DingTalk, or Feishu                                                   |
+| `type`                   | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `wecom`, `feishu`, or a custom type from an extension (see [Plugins](./plugins))                                 |
+| `token`                  | Telegram         | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat, DingTalk, WeCom, or Feishu                                            |
 | `clientId`               | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                           |
 | `clientSecret`           | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                    |
+| `botId`                  | WeCom            | WeCom intelligent robot Bot ID. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                       |
+| `secret`                 | WeCom            | WeCom intelligent robot Secret. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                       |
 | `model`                  | No               | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                               |
 | `senderPolicy`           | No               | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                   |
 | `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                   |
@@ -60,6 +63,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                     |
 | `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                     |
 | `groupPolicy`            | No               | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                                                       |
+| `dmPolicy`               | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                  |
 | `groupHistoryLimit`      | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many authorized, unmentioned group messages for the next bot mention/reply. |
 | `groups`                 | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                     |
 | `dispatchMode`           | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                         |
@@ -85,7 +89,7 @@ Controls how conversation sessions are managed:
 
 ### Channel Memory
 
-Channel memory lets an authorized channel member save stable context for one chat or thread. Qwen Code injects that memory when a fresh channel session starts, including after `/clear`.
+Channel memory lets accepted channel senders save stable context for one chat or thread. Qwen Code injects that memory when a fresh channel session starts, including after `/clear`.
 
 Natural-language examples:
 
@@ -94,10 +98,11 @@ Natural-language examples:
 - `你现在都记住了什么` shows saved memory for the current chat or thread.
 - `把这个聊天的记忆清空` starts the clear flow; `确认清空记忆` confirms it.
 
-Group chats can show saved memory, but writes and clears are blocked to avoid
-turning shared memory into a prompt-injection path for other participants.
+Channel memory follows the channel access gates. Any message accepted by `senderPolicy`, `dmPolicy`, `groupPolicy`, group settings, pairing, and mention requirements can read, write, or clear memory for that chat or thread.
 
-Only users listed in `allowedUsers` can read, write, or clear channel memory. If `allowedUsers` is empty, channel memory commands are disabled for everyone.
+In open groups, any accepted member can update shared channel memory for that group. Use `allowlist` or `pairing` policies when memory should be limited to trusted senders.
+
+Memory is keyed to the current chat or thread, so it is not injected into `single` session scope, where every chat shares one channel-wide agent session.
 
 ### Token Security
 
@@ -211,9 +216,10 @@ By default, Qwen ignores unmentioned group messages and does not store them as s
 
 ```
 1. groupPolicy — is this group allowed?           (no → ignore)
-2. requireMention — was the bot mentioned/replied to? (no → ignore)
-3. senderPolicy — is this sender approved?         (no → pairing flow)
-4. Route to session
+2. dmPolicy  — is this DM allowed?               (disabled → ignore)
+3. requireMention — was the bot mentioned/replied to? (no → ignore)
+4. senderPolicy — is this sender approved?         (no → pairing flow)
+5. Route to session
 ```
 
 ### Telegram Setup for Groups
@@ -273,6 +279,8 @@ Files work with any model — no multimodal support required.
 | Captions | Photo/file captions included as message text | Not applicable                   | Rich text: mixed text + images in one message | Rich text (`post`): text extracted; embedded images ignored |
 
 > QQ Bot does not process incoming media — image and sticker messages are ignored, so it has no media-handling row above.
+>
+> WeCom accepts text, images, mixed text plus images, files, videos, and voice messages (transcribed). Images are passed to the agent as attachments; files and videos are downloaded to temporary local paths. See [WeCom](./wecom#images-and-files) for details.
 
 ## Dispatch Modes
 
@@ -343,7 +351,7 @@ Channels support slash commands. These are handled locally (no agent round-trip)
 
 All other slash commands (e.g., `/compress`, `/summary`) are forwarded to the agent.
 
-These commands work on all channel types (Telegram, WeChat, QQ, DingTalk, Feishu).
+These commands work on all channel types (Telegram, WeChat, QQ, DingTalk, WeCom, Feishu).
 
 ## Running
 
@@ -380,6 +388,72 @@ This mode starts one channel worker process owned by `qwen serve`. The worker co
 `qwen serve --channel` is not the same service as `qwen channel start`. Standalone `qwen channel start` still uses the ACP-backed channel service and can run channel configs with different `cwd` values. Daemon-managed channels require every selected channel's `cwd` to resolve to the daemon workspace.
 
 When channels are serve-managed, `qwen channel status` shows the owner as `qwen serve`, and `qwen channel stop` tells you to stop the daemon instead of signaling the worker directly. If a ready worker exits unexpectedly, the daemon continues running and reports a channel-worker warning in `/daemon/status`.
+
+## Webhook-triggered tasks
+
+Daemon-managed channels can also accept authenticated webhook events. Qwen receives the event as context, summarizes and decides what matters, and then delivers the final response to the configured chat target. This is not a raw notification relay.
+Webhook tasks require `approvalMode: "yolo"` because they run without interactive approval. That setting applies to the whole channel, not only webhook turns, so use a dedicated webhook channel or tightly restrict normal chat senders for that channel.
+
+Example channel config:
+
+```json
+{
+  "channels": {
+    "dingtalk-main": {
+      "type": "dingtalk",
+      "clientId": "$DINGTALK_CLIENT_ID",
+      "clientSecret": "$DINGTALK_CLIENT_SECRET",
+      "cwd": "/repo",
+      "senderPolicy": "allowlist",
+      "allowedUsers": ["12345"],
+      "approvalMode": "yolo",
+      "sessionScope": "user",
+      "webhooks": {
+        "sources": {
+          "github-ci": {
+            "secretEnv": "QWEN_CHANNEL_GITHUB_CI_SECRET",
+            "targets": {
+              "default": {
+                "chatId": "OPEN_CONVERSATION_ID",
+                "senderId": "webhook:github-ci",
+                "isGroup": true
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+For DingTalk, `chatId` must be the group `openConversationId`; other adapters may require their own proactive target shape.
+
+Start `qwen serve` with the channel worker enabled:
+
+```bash
+QWEN_SERVER_TOKEN="$QWEN_SERVER_TOKEN" qwen serve --require-auth --channel dingtalk-main
+```
+
+Example request:
+
+```bash
+curl -X POST "http://127.0.0.1:4170/channels/dingtalk-main/webhooks/github-ci" \
+  -H "x-qwen-webhook-secret: $QWEN_CHANNEL_GITHUB_CI_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "eventType": "push",
+    "targetRef": "default",
+    "title": "CI pipeline finished",
+    "payload": {
+      "targetRef": "refs/heads/main",
+      "repository": "qwen-code",
+      "status": "success"
+    }
+  }'
+```
+
+Webhook routes authenticate with the webhook secret header, even when `qwen serve` is running with bearer auth enabled. Do not share the daemon bearer token with webhook providers. Webhook config and `secretEnv` values are loaded when the daemon starts; restart `qwen serve` after changing webhook sources or rotating secrets. A `202 {"accepted": true}` response means the channel worker accepted ownership of the task, not that the final response has already been delivered to chat. Check daemon and channel worker logs, plus `/daemon/status`, when troubleshooting delivery failures.
 
 ### Multi-Channel Mode
 

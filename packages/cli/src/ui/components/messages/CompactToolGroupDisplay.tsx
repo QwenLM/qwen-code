@@ -10,6 +10,7 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import type { AnsiOutputDisplay } from '@qwen-code/qwen-code-core';
 import { ToolDisplayNames } from '@qwen-code/qwen-code-core';
+import { t } from '../../../i18n/index.js';
 import { SHELL_COMMAND_NAME } from '../../constants.js';
 import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
@@ -95,61 +96,91 @@ const TOOL_NAME_TO_CATEGORY: Record<string, ToolCategory> = {
   TodoWrite: 'other',
 };
 
+type SummaryForms = { one: string; many: string };
 type CategoryTemplate = {
+  // Count-based phrasing (i18n keys; also the English source strings).
+  // `{{count}}` is interpolated via t() so every locale supplies a natural
+  // phrase — keep these as literals here so they stay greppable and aligned
+  // with the locale files. Used for the multi-tool case and the single-tool
+  // case that has no usable description.
+  past: SummaryForms;
+  active: SummaryForms;
+  // Bare verb prefixed to a concrete single-tool description ("Read a.ts").
+  // Intentionally NOT run through t(): the description it precedes is a raw,
+  // language-neutral file path or command, and single-word verb keys would
+  // collide with unrelated existing i18n entries. English matches upstream
+  // behavior (#6448); the localized count phrases above still cover the
+  // multi-tool and no-description paths.
   pastVerb: string;
   activeVerb: string;
-  singular: string;
-  plural: string;
 };
 
 const CATEGORY_TEMPLATES: Record<ToolCategory, CategoryTemplate> = {
   read: {
+    past: { one: 'Read {{count}} file', many: 'Read {{count}} files' },
+    active: { one: 'Reading {{count}} file', many: 'Reading {{count}} files' },
     pastVerb: 'Read',
     activeVerb: 'Reading',
-    singular: 'file',
-    plural: 'files',
   },
   edit: {
+    past: { one: 'Edited {{count}} file', many: 'Edited {{count}} files' },
+    active: { one: 'Editing {{count}} file', many: 'Editing {{count}} files' },
     pastVerb: 'Edited',
     activeVerb: 'Editing',
-    singular: 'file',
-    plural: 'files',
   },
   write: {
+    past: { one: 'Wrote {{count}} file', many: 'Wrote {{count}} files' },
+    active: { one: 'Writing {{count}} file', many: 'Writing {{count}} files' },
     pastVerb: 'Wrote',
     activeVerb: 'Writing',
-    singular: 'file',
-    plural: 'files',
   },
   search: {
+    past: {
+      one: 'Searched {{count}} pattern',
+      many: 'Searched {{count}} patterns',
+    },
+    active: {
+      one: 'Searching {{count}} pattern',
+      many: 'Searching {{count}} patterns',
+    },
     pastVerb: 'Searched',
     activeVerb: 'Searching',
-    singular: 'pattern',
-    plural: 'patterns',
   },
   list: {
+    past: {
+      one: 'Listed {{count}} directory',
+      many: 'Listed {{count}} directories',
+    },
+    active: {
+      one: 'Listing {{count}} directory',
+      many: 'Listing {{count}} directories',
+    },
     pastVerb: 'Listed',
     activeVerb: 'Listing',
-    singular: 'directory',
-    plural: 'directories',
   },
   command: {
+    past: { one: 'Ran {{count}} command', many: 'Ran {{count}} commands' },
+    active: {
+      one: 'Running {{count}} command',
+      many: 'Running {{count}} commands',
+    },
     pastVerb: 'Ran',
     activeVerb: 'Running',
-    singular: 'command',
-    plural: 'commands',
   },
   agent: {
+    past: { one: 'Ran {{count}} agent', many: 'Ran {{count}} agents' },
+    active: {
+      one: 'Running {{count}} agent',
+      many: 'Running {{count}} agents',
+    },
     pastVerb: 'Ran',
     activeVerb: 'Running',
-    singular: 'agent',
-    plural: 'agents',
   },
   other: {
+    past: { one: 'Used {{count}} tool', many: 'Used {{count}} tools' },
+    active: { one: 'Using {{count}} tool', many: 'Using {{count}} tools' },
     pastVerb: 'Used',
     activeVerb: 'Using',
-    singular: 'tool',
-    plural: 'tools',
   },
 };
 
@@ -190,13 +221,42 @@ export function isCollapsibleTool(toolName: string): boolean {
 }
 
 /**
+ * Strip ANSI control sequences and reject JSON-looking error fallbacks.
+ *
+ * When a tool call errors, `useReactToolScheduler` sets description to
+ * `JSON.stringify(request.args)` which produces `{...}` blobs. Return
+ * `undefined` for those so the caller falls back to count format.
+ */
+function safeDescription(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+
+  /* eslint-disable no-control-regex */
+  // Strip all common ANSI escape sequences: OSC, charset, CSI, and single-byte ESC
+  const stripped = raw.replace(
+    /\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b\[[0-9;]*[a-zA-Z]|\x1b./g,
+    '',
+  );
+  // Replace all C0 control characters (including \n, \r) with spaces
+  const cleaned = stripped.replace(/[\x00-\x1f\x7f]/g, ' ').trim();
+  /* eslint-enable no-control-regex */
+
+  // Reject JSON-looking blobs (error fallback from args)
+  if (cleaned.startsWith('{') || cleaned.startsWith('[')) return undefined;
+
+  return cleaned || undefined;
+}
+
+/**
  * Build a semantic summary line from a batch of tool calls.
  *
- * Single tool  → "Read 1 file" / "Ran 1 command"
- * Multi  same  → "Read 3 files"
- * Multi mixed  → "Read 3 files, edited 2 files, ran 1 command"
+ * Single tool (with description) → "Read a.ts" / "Ran ls -la"
+ * Single tool (no description)   → "Read 1 file" / "Ran 1 command"
+ * Multi  same                    → "Read 3 files"
+ * Multi mixed                    → "Read a.ts, ran npm test, edited b.ts"
  *
  * Uses past tense when all tools are done, present progressive when active.
+ * Falls back to count format when description is empty, contains control
+ * characters, or looks like a JSON blob (e.g. error fallback from args).
  */
 export function buildToolSummary(
   toolCalls: IndividualToolCallDisplay[],
@@ -204,29 +264,49 @@ export function buildToolSummary(
 ): string {
   if (toolCalls.length === 0) return '';
 
-  // Group by category and count
-  const counts = new Map<ToolCategory, number>();
+  // Group by category to preserve tool references for description access
+  const toolsByCategory = new Map<ToolCategory, IndividualToolCallDisplay[]>();
 
   for (const tool of toolCalls) {
     const cat = getToolCategory(tool.name);
-    counts.set(cat, (counts.get(cat) ?? 0) + 1);
+    const arr = toolsByCategory.get(cat) ?? [];
+    arr.push(tool);
+    toolsByCategory.set(cat, arr);
   }
 
   const parts: string[] = [];
   for (const cat of CATEGORY_ORDER) {
-    const count = counts.get(cat);
-    if (!count) continue;
+    const tools = toolsByCategory.get(cat);
+    if (!tools || tools.length === 0) continue;
 
     const template = CATEGORY_TEMPLATES[cat];
-    const verb = isActive ? template.activeVerb : template.pastVerb;
-    const lower = parts.length > 0;
-    const v = lower ? verb.toLowerCase() : verb;
-
-    if (count === 1) {
-      parts.push(`${v} 1 ${template.singular}`);
+    let part: string;
+    if (tools.length === 1) {
+      const safeDesc = safeDescription(tools[0].description);
+      if (safeDesc !== undefined) {
+        // Single tool with a concrete description: show it ("Read a.ts").
+        // Verb is English (see CategoryTemplate note) but the description is
+        // language-neutral, so the line reads correctly in every locale.
+        const verb = isActive ? template.activeVerb : template.pastVerb;
+        part = `${verb} ${safeDesc}`;
+      } else {
+        // No usable description → localized count phrase ("Read 1 file").
+        part = t(isActive ? template.active.one : template.past.one, {
+          count: '1',
+        });
+      }
     } else {
-      parts.push(`${v} ${count} ${template.plural}`);
+      // Multiple tools of one category → localized plural count phrase.
+      const forms = isActive ? template.active : template.past;
+      part = t(forms.many, { count: String(tools.length) });
     }
+    // Lowercase the leading character for every part after the first ("Read 3
+    // files, edited 2 files"). Operating on the first char only keeps already-
+    // lowercase nouns intact and is a no-op for caseless scripts (e.g. CJK).
+    if (parts.length > 0) {
+      part = part.charAt(0).toLowerCase() + part.slice(1);
+    }
+    parts.push(part);
   }
 
   return parts.join(', ');

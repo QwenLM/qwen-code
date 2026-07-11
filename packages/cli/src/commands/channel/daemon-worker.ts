@@ -14,6 +14,8 @@ import {
 import type {
   ChannelAgentBridge,
   ChannelBase,
+  ChannelWebhookRunOptions,
+  ChannelWebhookTask,
   DaemonChannelSessionClient,
   DaemonChannelSessionFactory,
   DaemonChannelSessionFactoryRequest,
@@ -28,6 +30,10 @@ import {
   QWEN_DAEMON_WORKSPACE_ENV,
   QWEN_SERVER_TOKEN_ENV,
 } from '../../serve/channel-worker-env.js';
+import {
+  isChannelWebhookTaskMessage,
+  type ChannelWebhookEnqueueErrorCode,
+} from '../../serve/channel-webhook-ipc.js';
 import { isLoopbackBind } from '../../serve/loopback-binds.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
@@ -36,6 +42,7 @@ import {
   loadChannelsConfig,
   loadChannelsFromExtensions,
   parseConfiguredChannels,
+  registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
   selectFirstModel,
@@ -44,6 +51,8 @@ import {
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
+const MAX_ACTIVE_WEBHOOK_TASKS = 16;
+const WEBHOOK_TASK_SHUTDOWN_DRAIN_MS = 10_000;
 
 interface DaemonCapabilitiesLike {
   features: string[];
@@ -61,6 +70,7 @@ interface DaemonSessionClientStaticLike {
       workspaceCwd: string;
       modelServiceId?: string;
       sessionScope: 'thread';
+      approvalMode?: string;
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
@@ -71,6 +81,7 @@ interface DaemonSessionClientStaticLike {
       workspaceCwd: string;
       modelServiceId?: string;
       sessionScope: 'thread';
+      approvalMode?: string;
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
@@ -92,6 +103,11 @@ interface ChannelDaemonWorkerReady {
 
 export interface ChannelDaemonWorkerHandle {
   readonly channels: string[];
+  validateWebhookTask(task: ChannelWebhookTask): void;
+  runWebhookTask(
+    task: ChannelWebhookTask,
+    options?: ChannelWebhookRunOptions,
+  ): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -120,6 +136,7 @@ export function createDaemonSessionFactory({
     const daemonReq = {
       workspaceCwd: req.workspaceCwd,
       ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
+      ...(req.approvalMode ? { approvalMode: req.approvalMode } : {}),
       // Channel-level user/thread/single routing stays in SessionRouter; daemon
       // sessions remain thread-scoped so different channels never share the
       // daemon's default single session.
@@ -156,6 +173,10 @@ export function createDaemonChannelBridgeFacade(
     prompt: bridge.prompt.bind(bridge),
     cancelSession: bridge.cancelSession.bind(bridge),
   };
+
+  if (bridge.respondToPermission) {
+    facade.respondToPermission = bridge.respondToPermission.bind(bridge);
+  }
 
   if (bridge.getAvailableCommands) {
     facade.getAvailableCommands = bridge.getAvailableCommands.bind(bridge);
@@ -333,6 +354,9 @@ export async function runChannelDaemonWorker(
     router = createdRouter;
     for (const { name, config } of parsed) {
       createdRouter.setChannelScope(name, config.sessionScope);
+      if (config['webhooks']) {
+        createdRouter.setChannelApprovalMode(name, config.approvalMode);
+      }
     }
 
     for (const { name, config } of parsed) {
@@ -358,6 +382,7 @@ export async function runChannelDaemonWorker(
       );
     }
     registerToolCallDispatch(bridgeFacade, createdRouter, channels);
+    registerPermissionRelay(bridgeFacade, createdRouter, channels);
     registerSessionCleanup(bridgeFacade, createdRouter, channels);
 
     for (const [name, channel] of channels) {
@@ -399,6 +424,27 @@ export async function runChannelDaemonWorker(
 
     return {
       channels: connected,
+      validateWebhookTask(task: ChannelWebhookTask): void {
+        const channel = channels.get(task.channelName);
+        if (!channel || !connected.includes(task.channelName)) {
+          throw new Error(`Channel "${task.channelName}" is not running.`);
+        }
+        channel.validateWebhookTask(task);
+      },
+      async runWebhookTask(
+        task: ChannelWebhookTask,
+        options?: ChannelWebhookRunOptions,
+      ): Promise<void> {
+        const channel = channels.get(task.channelName);
+        if (!channel || !connected.includes(task.channelName)) {
+          throw new Error(`Channel "${task.channelName}" is not running.`);
+        }
+        if (options) {
+          await channel.runWebhookTask(task, options);
+        } else {
+          await channel.runWebhookTask(task);
+        }
+      },
       async close() {
         disconnectAll();
         try {
@@ -523,6 +569,82 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       removeEarlyShutdownHandlers();
 
       let heartbeatTimer: NodeJS.Timeout | undefined;
+      const sendWebhookTaskResult = (
+        id: string,
+        result:
+          | { ok: true }
+          | {
+              ok: false;
+              code: ChannelWebhookEnqueueErrorCode;
+              error: string;
+            },
+      ) => {
+        try {
+          process.send?.({
+            type: 'webhook_task_result',
+            id,
+            ...result,
+          });
+        } catch {
+          // Supervisor will time out if the IPC channel is already closed.
+        }
+      };
+      const activeWebhookTasks = new Map<string, Promise<void>>();
+      const onMessage = (message: unknown) => {
+        if (!isChannelWebhookTaskMessage(message)) return;
+        if (message.expiresAt <= Date.now()) {
+          sendWebhookTaskResult(message.id, {
+            ok: false,
+            code: 'channel_webhook_enqueue_timeout',
+            error: 'Channel webhook task IPC timed out.',
+          });
+          return;
+        }
+        try {
+          handle.validateWebhookTask(message.task);
+        } catch (err) {
+          sendWebhookTaskResult(message.id, {
+            ok: false,
+            code: classifyWebhookTaskValidationError(err),
+            error: sanitizeLogText(
+              err instanceof Error ? err.message : String(err),
+              512,
+            ),
+          });
+          return;
+        }
+        if (activeWebhookTasks.size >= MAX_ACTIVE_WEBHOOK_TASKS) {
+          sendWebhookTaskResult(message.id, {
+            ok: false,
+            code: 'channel_webhook_queue_full',
+            error: 'Channel webhook task queue is full.',
+          });
+          return;
+        }
+        const taskId = message.id;
+        const task = message.task;
+        const safeId = sanitizeLogText(taskId, 128);
+        const safeChannel = sanitizeLogText(task.channelName, 128);
+        const safeSource = sanitizeLogText(task.source, 128);
+        sendWebhookTaskResult(message.id, { ok: true });
+        const taskPromise = handle
+          .runWebhookTask(task, { timeoutMs: 5 * 60_000 })
+          .catch((err: unknown) => {
+            const safeMessage = sanitizeLogText(
+              err instanceof Error ? err.message : String(err),
+              512,
+            );
+            writeStderrLine(
+              `[Channel] webhook task failed ` +
+                `(id=${safeId}, channel=${safeChannel}, source=${safeSource}): ` +
+                safeMessage,
+            );
+          })
+          .finally(() => {
+            activeWebhookTasks.delete(taskId);
+          });
+        activeWebhookTasks.set(taskId, taskPromise);
+      };
       const clearHeartbeat = () => {
         if (!heartbeatTimer) return;
         clearInterval(heartbeatTimer);
@@ -540,6 +662,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         }
       }, CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS);
       heartbeatTimer.unref();
+      process.on('message', onMessage);
 
       let shuttingDown = false;
       let exitCode = 0;
@@ -553,7 +676,23 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         } else {
           shuttingDown = true;
           clearHeartbeat();
+          process.removeListener('message', onMessage);
           try {
+            if (activeWebhookTasks.size > 0) {
+              writeStderrLine(
+                `[Channel] shutdown: draining ${activeWebhookTasks.size} webhook task(s)...`,
+              );
+              await Promise.race([
+                Promise.allSettled(activeWebhookTasks.values()),
+                new Promise<void>((resolve) => {
+                  const timer = setTimeout(
+                    resolve,
+                    WEBHOOK_TASK_SHUTDOWN_DRAIN_MS,
+                  );
+                  timer.unref();
+                }),
+              ]);
+            }
             await handle.close();
           } catch (err) {
             exitCode = 1;
@@ -582,6 +721,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       }
       await finished;
       clearHeartbeat();
+      process.removeListener('message', onMessage);
       process.removeListener('SIGINT', shutdown);
       process.removeListener('SIGTERM', shutdown);
       process.removeListener('disconnect', onDisconnect);
@@ -597,3 +737,30 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
     }
   },
 };
+
+function classifyWebhookTaskValidationError(
+  error: unknown,
+): ChannelWebhookEnqueueErrorCode {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    message === 'Webhook tasks require unattended approval mode.' ||
+    message ===
+      'Webhook tasks are not supported when sessionScope is single.' ||
+    message === 'Channel does not support proactive webhook messages.' ||
+    message ===
+      'Channel does not support proactive webhook messages for this chat target.'
+  ) {
+    return 'channel_webhook_target_unavailable';
+  }
+  if (
+    message.startsWith('Unknown webhook source "') ||
+    message.startsWith('Unknown webhook target "') ||
+    message.startsWith('Webhook task belongs to ')
+  ) {
+    return 'channel_webhook_invalid_task';
+  }
+  if (/^Channel ".+" is not running\.$/u.test(message)) {
+    return 'channel_worker_unavailable';
+  }
+  return 'channel_webhook_enqueue_failed';
+}

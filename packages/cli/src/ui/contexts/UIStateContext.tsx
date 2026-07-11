@@ -45,6 +45,8 @@ import type { StartupIdeConnectionStatus } from '../../utils/events.js';
 export interface PendingSkillView {
   name: string;
   description: string;
+  /** Absolute path of the staged SKILL.md, for inline preview / open-in-editor. */
+  stagedManifestPath: string;
 }
 
 export interface UIState {
@@ -128,6 +130,8 @@ export interface UIState {
   contextFileNames: string[];
   availableTerminalHeight: number | undefined;
   useTerminalBuffer: boolean;
+  /** Whether the VP scrollbar is shown (auto-hides while idle). */
+  showScrollbar?: boolean;
   mainAreaWidth: number;
   staticAreaMaxItemHeight: number;
   staticExtraHeight: number;

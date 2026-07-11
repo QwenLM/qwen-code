@@ -13,6 +13,7 @@ import type { SessionContext } from './types.js';
 import type {
   Config,
   ChatRecord,
+  HistoryGap,
   ToolRegistry,
   ToolResultDisplay,
   TodoResultDisplay,
@@ -373,6 +374,152 @@ describe('HistoryReplayer', () => {
       });
     });
 
+    it('should carry dangling function calls across replay pages', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-missing',
+                name: 'run_shell_command',
+                args: { command: 'sleep 10' },
+              },
+            },
+          ],
+        },
+      };
+
+      const firstPage = await replayer.replayPage([record], {
+        finalizeDangling: false,
+      });
+      expect(firstPage.pendingToolCalls).toEqual([
+        {
+          callId: 'call-missing',
+          toolName: 'run_shell_command',
+          recordId: record.uuid,
+          timestamp: record.timestamp,
+        },
+      ]);
+      expect(sentUpdates().map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+      ]);
+
+      sendUpdateSpy.mockClear();
+      sentUpdateContexts = [];
+      const lastPage = await replayer.replayPage([], {
+        pendingToolCalls: firstPage.pendingToolCalls,
+        finalizeDangling: true,
+      });
+
+      expect(lastPage.pendingToolCalls).toEqual([]);
+      expect(sentUpdates().map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call_update',
+      ]);
+      expect(sentUpdates()[0]).toMatchObject({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-missing',
+        status: 'failed',
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: MISSING_TOOL_RESULT_MESSAGE,
+            },
+          },
+        ],
+        _meta: {
+          toolName: 'run_shell_command',
+          provenance: 'builtin',
+          timestamp: toEpochMs(record.timestamp),
+        },
+      });
+      expect(sentUpdateContexts[0]).toEqual({
+        activeRecordId: record.uuid,
+        activeRecordTimestamp: record.timestamp,
+      });
+    });
+
+    it('should match a pending function call with its result on the next page', async () => {
+      const callRecord: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-123',
+                name: 'read_file',
+                args: { path: '/test.ts' },
+              },
+            },
+          ],
+        },
+      };
+      const firstPage = await replayer.replayPage([callRecord], {
+        finalizeDangling: false,
+      });
+
+      sendUpdateSpy.mockClear();
+      const resultRecord = createToolResultRecord(
+        'read_file',
+        'File contents here',
+      );
+      const secondPage = await replayer.replayPage([resultRecord], {
+        pendingToolCalls: firstPage.pendingToolCalls,
+        finalizeDangling: true,
+      });
+
+      expect(secondPage.pendingToolCalls).toEqual([]);
+      expect(sentUpdates()).toHaveLength(1);
+      expect(sentUpdates()[0]).toMatchObject({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-123',
+        status: 'completed',
+      });
+    });
+
+    it('should expose pending function calls when replayPage throws mid-page', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-started-before-error',
+                name: 'run_shell_command',
+                args: { command: 'sleep 10' },
+              },
+            },
+            { text: 'this send fails' },
+          ],
+        },
+      };
+      sendUpdateSpy.mockImplementation(
+        async (update: Record<string, unknown>) => {
+          if (update['sessionUpdate'] === 'agent_message_chunk') {
+            throw new Error('replay failed');
+          }
+        },
+      );
+
+      await expect(
+        replayer.replayPage([record], { finalizeDangling: false }),
+      ).rejects.toThrow('replay failed');
+
+      expect(replayer.getPendingToolCalls()).toEqual([
+        {
+          callId: 'call-started-before-error',
+          toolName: 'run_shell_command',
+          recordId: record.uuid,
+          timestamp: record.timestamp,
+        },
+      ]);
+    });
+
     it('should not synthesize missing-result failures for calls without source ids', async () => {
       const records: ChatRecord[] = [
         {
@@ -678,6 +825,25 @@ describe('HistoryReplayer', () => {
       });
     });
 
+    it('should replay structured artifacts from stored tool results', async () => {
+      const record = createToolResultRecord('read_file', 'File contents here');
+      const artifacts = [
+        {
+          title: 'Replay artifact',
+          url: 'https://example.com/replayed',
+        },
+      ];
+      record.toolCallResult!.artifacts = artifacts;
+
+      await replayer.replay([record]);
+
+      expect(sentUpdates()[0]).toMatchObject({
+        _meta: {
+          artifacts,
+        },
+      });
+    });
+
     it('should emit failed status for tool results with errors', async () => {
       const records = [createToolResultRecord('failing_tool', undefined, true)];
 
@@ -883,6 +1049,50 @@ describe('HistoryReplayer', () => {
           },
         },
       });
+    });
+  });
+
+  describe('history gaps', () => {
+    const userRec = (uuid: string, text: string): ChatRecord =>
+      ({
+        uuid,
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: '2026-07-05T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text }] },
+        cwd: '/tmp',
+        version: '0',
+      }) as unknown as ChatRecord;
+
+    it('emits a history-gap notice before the gap child record', async () => {
+      const records = [
+        userRec('old', 'older turn'),
+        userRec('new', 'newer turn'),
+      ];
+      const gaps: HistoryGap[] = [
+        { childUuid: 'new', missingParentUuid: 'gone' },
+      ];
+
+      await replayer.replay(records, gaps);
+
+      const texts = sentUpdates().map((u) => {
+        const content = u['content'] as { text?: string } | undefined;
+        return content?.text ?? '';
+      });
+      const gapIdx = texts.findIndex((t) => t.includes('History gap'));
+      const newIdx = texts.findIndex((t) => t.includes('newer turn'));
+      expect(gapIdx).toBeGreaterThanOrEqual(0);
+      expect(newIdx).toBeGreaterThan(gapIdx);
+    });
+
+    it('emits no gap notice when there are no gaps', async () => {
+      await replayer.replay([userRec('a', 'a turn')]);
+      const hasGap = sentUpdates().some((u) => {
+        const content = u['content'] as { text?: string } | undefined;
+        return (content?.text ?? '').includes('History gap');
+      });
+      expect(hasGap).toBe(false);
     });
   });
 });

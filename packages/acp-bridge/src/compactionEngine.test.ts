@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import { EventBus } from './eventBus.js';
 import type { BridgeEvent } from './eventBus.js';
@@ -354,6 +354,134 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(snap.compactedTurns).toHaveLength(2); // text + turn_complete
       expect(snap.liveJournal).toHaveLength(0);
     });
+
+    it('does not persist history_truncated markers through ingest or seed', () => {
+      const marker: BridgeEvent = {
+        v: 1,
+        type: 'history_truncated',
+        data: {
+          reason: 'replay_window_exceeded',
+          truncatedEvents: 2,
+          retainedEvents: 1,
+          maxBytes: 128,
+          fullTranscriptAvailable: true,
+        },
+      };
+      const engine = new TurnBoundaryCompactionEngine();
+
+      engine.ingest(marker);
+      engine.ingest(makeTextChunk(1, 'Hello'));
+      engine.ingest(makeTurnComplete(2));
+
+      expect(engine.snapshot().compactedTurns.map((e) => e.type)).toEqual([
+        'session_update',
+        'turn_complete',
+      ]);
+
+      const seeded = new TurnBoundaryCompactionEngine();
+      seeded.seed({
+        compactedTurns: [
+          marker,
+          makeTextChunk(1, 'Loaded'),
+          makeTurnComplete(2),
+        ],
+        lastEventId: 2,
+      });
+
+      expect(seeded.snapshot().compactedTurns.map((e) => e.type)).toEqual([
+        'session_update',
+        'turn_complete',
+      ]);
+    });
+  });
+
+  describe('bounded replay window', () => {
+    it('drops oldest completed live turn segments when max replay bytes is exceeded', () => {
+      const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+
+      engine.ingest(makeTextChunk(1, `first-${'x'.repeat(600)}`));
+      engine.ingest(makeTurnComplete(2));
+      engine.ingest(makeTextChunk(3, `second-${'y'.repeat(600)}`));
+      engine.ingest(makeTurnComplete(4));
+      engine.ingest(makeTextChunk(5, `third-${'z'.repeat(600)}`));
+      engine.ingest(makeTurnComplete(6));
+
+      const snap = engine.snapshot();
+      expect(snap.compactedTurns[0]?.type).toBe('history_truncated');
+      expect(extractTexts(snap.compactedTurns)).toEqual([
+        `third-${'z'.repeat(600)}`,
+      ]);
+      expect(snap.compactedTurns.at(-1)?.id).toBe(6);
+      expect(snap.liveJournal).toHaveLength(0);
+
+      expect(snap.compactedTurns[0]?.data).toMatchObject({
+        reason: 'replay_window_exceeded',
+        truncatedEvents: 4,
+        truncatedTurns: 2,
+        retainedEvents: 2,
+        maxBytes: 512,
+        fullTranscriptAvailable: true,
+      });
+    });
+
+    it('retains the newest oversized live turn without a truncation marker', () => {
+      const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 128 });
+
+      engine.ingest(makeTextChunk(1, `oversized-${'x'.repeat(600)}`));
+      engine.ingest(makeTurnComplete(2));
+
+      const snap = engine.snapshot();
+      expect(snap.compactedTurns[0]?.type).not.toBe('history_truncated');
+      expect(extractTexts(snap.compactedTurns)).toEqual([
+        `oversized-${'x'.repeat(600)}`,
+      ]);
+      expect(snap.compactedTurns.at(-1)?.id).toBe(2);
+    });
+
+    it('notifies the eviction diagnostic hook when replay is dropped', () => {
+      const onReplayWindowEviction = vi.fn();
+      const engine = new TurnBoundaryCompactionEngine({
+        maxReplayBytes: 512,
+        onReplayWindowEviction,
+      });
+
+      engine.ingest(makeTextChunk(1, `first-${'x'.repeat(600)}`));
+      engine.ingest(makeTurnComplete(2));
+      engine.ingest(makeTextChunk(3, `second-${'y'.repeat(600)}`));
+      engine.ingest(makeTurnComplete(4));
+
+      expect(onReplayWindowEviction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          droppedEvents: 2,
+          droppedSegments: 1,
+          droppedTurns: 1,
+          maxBytes: 512,
+          retainedEvents: 2,
+        }),
+      );
+    });
+
+    it('keeps replay working when the eviction diagnostic hook throws', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxReplayBytes: 512,
+        onReplayWindowEviction: () => {
+          throw new Error('diagnostic failed');
+        },
+      });
+
+      expect(() => {
+        engine.ingest(makeTextChunk(1, `first-${'x'.repeat(600)}`));
+        engine.ingest(makeTurnComplete(2));
+        engine.ingest(makeTextChunk(3, `second-${'y'.repeat(600)}`));
+        engine.ingest(makeTurnComplete(4));
+      }).not.toThrow();
+
+      const snap = engine.snapshot();
+      expect(snap.compactedTurns[0]?.type).toBe('history_truncated');
+      expect(extractTexts(snap.compactedTurns)).toEqual([
+        `second-${'y'.repeat(600)}`,
+      ]);
+    });
   });
 
   describe('latest-wins events', () => {
@@ -544,6 +672,65 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(texts).toEqual(['seeded', 'fresh']);
       expect(snap.compactedTurns).toHaveLength(4); // seeded text + seeded tc + fresh text + fresh tc
     });
+
+    it('applies the replay byte cap to seeded compacted turns', () => {
+      const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+
+      engine.seed({
+        compactedTurns: [
+          makeTextChunk(10, `old-${'x'.repeat(600)}`),
+          makeTextChunk(11, `new-${'y'.repeat(600)}`),
+        ],
+        lastEventId: 11,
+      });
+
+      const snap = engine.snapshot();
+      expect(snap.lastEventId).toBe(11);
+      expect(snap.liveJournal).toHaveLength(0);
+      expect(snap.compactedTurns[0]?.type).toBe('history_truncated');
+      expect(extractTexts(snap.compactedTurns)).toEqual([
+        `new-${'y'.repeat(600)}`,
+      ]);
+      expect(snap.compactedTurns[0]?.data).toMatchObject({
+        reason: 'replay_window_exceeded',
+        truncatedEvents: 1,
+        retainedEvents: 1,
+        maxBytes: 512,
+        fullTranscriptAvailable: true,
+      });
+    });
+
+    it('evicts seeded replay segments when later live turns exceed the byte cap', () => {
+      const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+
+      engine.seed({
+        compactedTurns: [makeTextChunk(10, `seed-${'x'.repeat(600)}`)],
+        lastEventId: 10,
+      });
+      engine.ingest(makeTextChunk(11, `live-${'y'.repeat(600)}`));
+      engine.ingest(makeTurnComplete(12));
+
+      const snap = engine.snapshot();
+      expect(snap.lastEventId).toBe(12);
+      expect(snap.liveJournal).toHaveLength(0);
+      expect(snap.compactedTurns[0]?.type).toBe('history_truncated');
+      expect(extractTexts(snap.compactedTurns)).toEqual([
+        `live-${'y'.repeat(600)}`,
+      ]);
+      expect(snap.compactedTurns.at(-1)?.id).toBe(12);
+      expect(snap.compactedTurns[0]?.data).toMatchObject({
+        reason: 'replay_window_exceeded',
+        truncatedEvents: 1,
+        retainedEvents: 2,
+        maxBytes: 512,
+        fullTranscriptAvailable: true,
+      });
+      expect(
+        (snap.compactedTurns[0]?.data as Record<string, unknown>)[
+          'truncatedTurns'
+        ],
+      ).toBeUndefined();
+    });
   });
 
   describe('close', () => {
@@ -652,7 +839,7 @@ describe('TurnBoundaryCompactionEngine', () => {
 });
 
 describe('EventBus + CompactionEngine integration', () => {
-  it('seedReplayEvents advances replay state without populating the ring', async () => {
+  it('seedReplayEvents advances replay state without populating the ring or liveJournal', async () => {
     const engine = new TurnBoundaryCompactionEngine();
     const bus = new EventBus(100, undefined, engine);
 
@@ -680,8 +867,9 @@ describe('EventBus + CompactionEngine integration', () => {
 
     const snapshot = bus.snapshotReplay()!;
     expect(snapshot.lastEventId).toBe(2);
-    expect(snapshot.liveJournal).toHaveLength(2);
-    expect(snapshot.liveJournal[0]!._meta?.['serverTimestamp']).toBe(
+    expect(snapshot.compactedTurns).toHaveLength(2);
+    expect(snapshot.liveJournal).toHaveLength(0);
+    expect(snapshot.compactedTurns[0]!._meta?.['serverTimestamp']).toBe(
       1_700_000_000_000,
     );
 
@@ -696,6 +884,163 @@ describe('EventBus + CompactionEngine integration', () => {
       },
     });
     await iterator.return?.();
+  });
+
+  it('seedReplayEvents emits a bounded compacted replay window with a truncation marker', () => {
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+    const bus = new EventBus(100, undefined, engine);
+
+    bus.seedReplayEvents([
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: `old-${'x'.repeat(600)}` },
+          },
+        },
+      },
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `new-${'y'.repeat(600)}` },
+          },
+        },
+      },
+    ]);
+
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.lastEventId).toBe(2);
+    expect(snapshot.liveJournal).toHaveLength(0);
+    expect(snapshot.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(extractTexts(snapshot.compactedTurns)).toEqual([
+      `new-${'y'.repeat(600)}`,
+    ]);
+    expect(snapshot.compactedTurns[0]?.data).toMatchObject({
+      reason: 'replay_window_exceeded',
+      truncatedEvents: 1,
+      retainedEvents: 1,
+      maxBytes: 512,
+      fullTranscriptAvailable: true,
+    });
+    expect(
+      (snapshot.compactedTurns[0]?.data as Record<string, unknown>)[
+        'truncatedTurns'
+      ],
+    ).toBeUndefined();
+  });
+
+  it('seedReplayEvents replaces prior replay and truncation state', () => {
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+    const bus = new EventBus(100, undefined, engine);
+
+    bus.seedReplayEvents([
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `old-${'x'.repeat(600)}` },
+          },
+        },
+      },
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `drop-${'y'.repeat(600)}` },
+          },
+        },
+      },
+    ]);
+    expect(bus.snapshotReplay()!.compactedTurns[0]?.type).toBe(
+      'history_truncated',
+    );
+
+    bus.seedReplayEvents([
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'fresh' },
+          },
+        },
+      },
+    ]);
+
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.lastEventId).toBe(3);
+    expect(snapshot.liveJournal).toHaveLength(0);
+    expect(snapshot.compactedTurns).toHaveLength(1);
+    expect(snapshot.compactedTurns[0]?.type).toBe('session_update');
+    expect(snapshot.compactedTurns[0]?.id).toBe(3);
+    expect(extractTexts(snapshot.compactedTurns)).toEqual(['fresh']);
+  });
+
+  it('seedReplayEvents treats event sizing failures as zero bytes', () => {
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 1 });
+    const bus = new EventBus(100, undefined, engine);
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    try {
+      expect(() =>
+        bus.seedReplayEvents([
+          { type: 'seeded_misc', data: circular },
+          {
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'tail' },
+              },
+            },
+          },
+        ]),
+      ).not.toThrow();
+
+      const snapshot = bus.snapshotReplay()!;
+      expect(snapshot.compactedTurns[0]?.type).toBe('history_truncated');
+      expect(extractTexts(snapshot.compactedTurns)).toEqual(['tail']);
+      expect(snapshot.compactedTurns[0]?.data).toMatchObject({
+        truncatedEvents: 1,
+        retainedEvents: 1,
+        maxBytes: 1,
+      });
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'qwen serve: EventBus event sizing failed {"type":"seeded_misc"}',
+        ),
+      );
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('seedReplayEvents keeps its never-throws contract when the compaction seed path fails', () => {
+    const engine = {
+      ingest: vi.fn(),
+      seedReplayEvents: vi.fn(() => {
+        throw new Error('seed boom');
+      }),
+      snapshot: vi.fn(() => ({
+        compactedTurns: [],
+        liveJournal: [],
+        lastEventId: 0,
+      })),
+      close: vi.fn(),
+    };
+    const bus = new EventBus(100, undefined, engine);
+
+    expect(() =>
+      bus.seedReplayEvents([{ type: 'session_update', data: {} }]),
+    ).not.toThrow();
+    expect(bus.lastEventId).toBe(1);
   });
 
   it('snapshotReplay returns compacted state after publish + turn_complete', () => {

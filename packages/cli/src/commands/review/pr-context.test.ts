@@ -5,61 +5,133 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { collectSuggestionSummaries } from './pr-context.js';
-import { SUMMARY_MARKER } from './post-suggestions.js';
+import {
+  isLegacySuggestionSummary,
+  SUMMARY_MARKER,
+  truncatedHeadings,
+  buildMarkdown,
+  type PrMetadata,
+  type RawComment,
+} from './pr-context.js';
 
-// Guards the security-sensitive selection of "our own" suggestion-summary
-// comments. This is what decides which issue comment is promoted into the
-// trusted "Previous suggestion summary" section (and excluded from the
-// "Already discussed" list), so the author check and latest-wins ordering
-// must not regress.
-describe('collectSuggestionSummaries', () => {
+// Guards the recognition of legacy suggestion-summary comments. This is what
+// decides which issue comment is excluded from the "Already discussed" list.
+// A summary that slips through is rendered as settled discussion and tells
+// the review agents not to re-report the findings it lists — so recognition
+// must not regress, whoever authored the summary.
+describe('isLegacySuggestionSummary', () => {
   const withMarker = (extra = '') => `${SUMMARY_MARKER}\n${extra}`;
 
-  it('matches only comments authored by me that carry the marker', () => {
-    const comments = [
-      { id: 1, user: { login: 'me' }, body: withMarker('mine') },
-      { id: 2, user: { login: 'me' }, body: 'no marker here' },
-      { id: 3, user: { login: 'someone-else' }, body: withMarker('theirs') },
-    ];
-    const result = collectSuggestionSummaries(comments, 'me');
-    expect(result.map((c) => c.id)).toEqual([1]);
+  it('matches a summary regardless of who posted it', () => {
+    // `/review` ran under whichever identity invoked it: a maintainer
+    // locally, or the CI bot in the review workflow. Both left summaries
+    // behind, and both must be excluded no matter who runs the next review.
+    expect(isLegacySuggestionSummary(withMarker('by a maintainer'))).toBe(true);
+    expect(isLegacySuggestionSummary(withMarker('by the CI bot'))).toBe(true);
   });
 
-  it('rejects a third-party comment that embeds the marker (prompt injection)', () => {
-    const comments = [
-      { id: 10, user: { login: 'attacker' }, body: withMarker('malicious') },
-    ];
-    expect(collectSuggestionSummaries(comments, 'me')).toEqual([]);
+  it('does not match an ordinary comment', () => {
+    expect(isLegacySuggestionSummary('no marker here')).toBe(false);
+    expect(
+      isLegacySuggestionSummary('mentions qwen-review-suggestion-summary'),
+    ).toBe(false);
   });
 
-  it('is case-insensitive on the author login', () => {
-    const comments = [{ id: 5, user: { login: 'Me' }, body: withMarker() }];
-    expect(collectSuggestionSummaries(comments, 'mE').map((c) => c.id)).toEqual(
-      [5],
+  it('matches wherever the marker sits in the body', () => {
+    expect(isLegacySuggestionSummary(`preamble\n${SUMMARY_MARKER}`)).toBe(true);
+  });
+
+  it('tolerates a missing body', () => {
+    expect(isLegacySuggestionSummary(undefined)).toBe(false);
+    expect(isLegacySuggestionSummary('')).toBe(false);
+  });
+});
+
+describe('truncatedHeadings', () => {
+  it('names the headings that begin past the limit', () => {
+    const md = ['## A', 'x'.repeat(50), '## B', 'y'.repeat(10), '## C'].join(
+      '\n',
     );
+    const bOffset = md.indexOf('## B');
+    const got = truncatedHeadings(md, bOffset);
+    expect(got.map((h) => h.heading)).toEqual(['## B', '## C']);
+    expect(got[0].offset).toBe(bOffset);
   });
 
-  it('returns all of my summaries, newest (highest id) first', () => {
-    const comments = [
-      { id: 7, user: { login: 'me' }, body: withMarker('old') },
-      { id: 21, user: { login: 'me' }, body: withMarker('new') },
-      { id: 14, user: { login: 'me' }, body: withMarker('mid') },
-      { id: 8, user: { login: 'other' }, body: withMarker('theirs') },
-    ];
-    // All three of mine are returned so the caller can exclude every stale
-    // summary from the "Already discussed" list, not just the latest.
-    expect(collectSuggestionSummaries(comments, 'me').map((c) => c.id)).toEqual(
-      [21, 14, 7],
-    );
+  it('returns nothing when the whole document fits', () => {
+    expect(truncatedHeadings('## A\nbody\n## B\n', 10_000)).toEqual([]);
   });
 
-  it('tolerates comments missing user/body', () => {
-    const comments = [
-      { id: 1 },
-      { id: 2, user: { login: 'me' } },
-      { id: 3, body: withMarker() },
-    ];
-    expect(collectSuggestionSummaries(comments, 'me')).toEqual([]);
+  it('scans ### as well as ##, and ignores # and ####', () => {
+    const md = '# T\n## A\n### B\n#### C\n';
+    expect(truncatedHeadings(md, 0).map((h) => h.heading)).toEqual([
+      '## A',
+      '### B',
+    ]);
+  });
+
+  it('ignores a hash that is not at the start of a line', () => {
+    expect(truncatedHeadings('text ## not a heading\n', 0)).toEqual([]);
+  });
+});
+
+describe('buildMarkdown section order', () => {
+  const meta = {
+    title: 't',
+    body: '',
+    author: { login: 'a' },
+    baseRefName: 'main',
+    headRefName: 'f',
+    headRefOid: 'abc',
+    additions: 1,
+    deletions: 0,
+    changedFiles: 1,
+    state: 'OPEN',
+  } as PrMetadata;
+
+  // One thread with a reply (already discussed) and one without (still open).
+  const root: RawComment = {
+    id: 1,
+    user: { login: 'r' },
+    body: 'settled',
+    path: 'a.ts',
+    line: 1,
+  };
+  const reply: RawComment = {
+    id: 2,
+    user: { login: 'a' },
+    body: 'fixed',
+    in_reply_to_id: 1,
+  };
+  const open: RawComment = {
+    id: 3,
+    user: { login: 'r' },
+    body: 'still live',
+    path: 'b.ts',
+    line: 2,
+  };
+
+  it('puts the open comments before the already-discussed ones', () => {
+    const md = buildMarkdown('1', 'o/r', meta, [root, reply, open], [], []);
+    const openAt = md.indexOf('## Open inline comments');
+    const discussedAt = md.indexOf('## Already discussed');
+    expect(openAt).toBeGreaterThan(-1);
+    expect(discussedAt).toBeGreaterThan(-1);
+    // The section a review must answer is written first, so a truncated read
+    // keeps it. PR 5738 lost it at char 27125 of a 31220-char file.
+    expect(openAt).toBeLessThan(discussedAt);
+  });
+
+  it('still renders both sections in full', () => {
+    const md = buildMarkdown('1', 'o/r', meta, [root, reply, open], [], []);
+    expect(md).toContain('still live');
+    expect(md).toContain('settled');
+    expect(md).toContain('fixed');
+  });
+
+  it('omits the open section when every thread has a reply', () => {
+    const md = buildMarkdown('1', 'o/r', meta, [root, reply], [], []);
+    expect(md).not.toContain('## Open inline comments');
+    expect(md).toContain('## Already discussed');
   });
 });

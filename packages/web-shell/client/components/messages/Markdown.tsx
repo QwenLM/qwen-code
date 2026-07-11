@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useTheme } from '../../themeContext';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -230,7 +230,9 @@ function MermaidBlock({ code }: { code: string }) {
     return (
       <div className={styles.codeBlock}>
         <div className={styles.codeBlockHeader}>
-          <span className={styles.codeBlockLang}>mermaid (error)</span>
+          <span className={styles.codeBlockLang}>
+            {t('mermaid.errorLabel')}
+          </span>
         </div>
         <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
           <code>{code}</code>
@@ -242,7 +244,7 @@ function MermaidBlock({ code }: { code: string }) {
   return (
     <div className={styles.codeBlock}>
       <div className={styles.codeBlockHeader}>
-        <span className={styles.codeBlockLang}>mermaid</span>
+        <span className={styles.codeBlockLang}>{t('mermaid.label')}</span>
         <span className={styles.mermaidActions}>
           <button
             className={styles.codeBlockCopy}
@@ -534,6 +536,27 @@ function MarkdownPre({ children }: { children?: ReactNode }) {
   return <>{children}</>;
 }
 
+/** `qwen-session://<id>` links are intercepted and dispatched as a DOM event
+ * (`qwen:open-session`) so the app shell can navigate to the session without
+ * the markdown renderer needing to know about session management. */
+const QWEN_SESSION_SCHEME = /^qwen-session:\/\//i;
+
+/**
+ * react-markdown sanitizes every href through `defaultUrlTransform`, which
+ * allows only `http(s)`, `irc(s)`, `mailto` and `xmpp` and rewrites everything
+ * else to `''`. Without this, `qwen-session://<id>` never reaches
+ * {@link MarkdownLink} with its scheme intact, the interception below is dead
+ * code, and the link renders as an inert anchor.
+ *
+ * Letting the scheme through is safe: `MarkdownLink` never puts it in the DOM.
+ * It renders `href="#"` and dispatches the id as an event, so nothing navigates
+ * to a `qwen-session:` URL — and an unknown scheme is inert in a browser anyway.
+ * Every other href keeps the default sanitizer.
+ */
+export function markdownUrlTransform(url: string): string {
+  return QWEN_SESSION_SCHEME.test(url.trim()) ? url : defaultUrlTransform(url);
+}
+
 function MarkdownLink({
   href,
   children,
@@ -541,6 +564,25 @@ function MarkdownLink({
   href?: string;
   children?: ReactNode;
 }) {
+  if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
+    const sessionId = href.trim().replace(QWEN_SESSION_SCHEME, '');
+    return (
+      <a
+        href="#"
+        role="button"
+        className={styles.link}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          window.dispatchEvent(
+            new CustomEvent('qwen:open-session', { detail: sessionId }),
+          );
+        }}
+      >
+        {children}
+      </a>
+    );
+  }
   const safeHref = isSafeHref(href) ? href : undefined;
   return (
     <a
@@ -644,6 +686,7 @@ export const Markdown = memo(function Markdown({
             remarkPlugins={remarkPlugins}
             rehypePlugins={rehypePlugins}
             components={renderedComponents}
+            urlTransform={markdownUrlTransform}
           >
             {renderedContent}
           </ReactMarkdown>

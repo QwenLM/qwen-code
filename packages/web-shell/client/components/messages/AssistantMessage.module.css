@@ -4,6 +4,10 @@
   gap: 4px;
 }
 
+.customFooter {
+  margin-top: 8px;
+}
+
 .messageFooter {
   display: inline-flex;
   width: fit-content;

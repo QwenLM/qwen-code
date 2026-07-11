@@ -15,6 +15,10 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
+if (!document.execCommand) {
+  document.execCommand = () => true;
+}
+
 interface MockTask {
   id: string;
   name: string | null;
@@ -26,7 +30,11 @@ interface MockTask {
   lastFiredAt: number | null;
   nextRunAt: number | null;
   sessionId: string | null;
-  runs: Array<{ at: number; kind?: 'scheduled' | 'catch-up' }>;
+  runs: Array<{
+    at: number;
+    kind?: 'scheduled' | 'catch-up';
+    sessionId?: string;
+  }>;
 }
 
 const { actions } = vi.hoisted(() => ({
@@ -36,6 +44,9 @@ const { actions } = vi.hoisted(() => ({
     updateScheduledTask: vi.fn(),
     runScheduledTask: vi.fn(),
     deleteScheduledTask: vi.fn(),
+    loadExtensionsStatus: vi.fn(),
+    loadSkillsStatus: vi.fn(),
+    loadMcpStatus: vi.fn(),
   },
 }));
 
@@ -63,6 +74,15 @@ async function mount(
   actions.listScheduledTasks.mockResolvedValue(tasks);
   actions.updateScheduledTask.mockResolvedValue(tasks[0]);
   actions.runScheduledTask.mockResolvedValue(tasks[0]);
+  actions.loadExtensionsStatus.mockResolvedValue({
+    extensions: [],
+  });
+  actions.loadSkillsStatus.mockResolvedValue({
+    skills: [],
+  });
+  actions.loadMcpStatus.mockResolvedValue({
+    servers: [],
+  });
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -104,6 +124,39 @@ function findButton(label: string): HTMLButtonElement | undefined {
   );
 }
 
+function findButtonContaining(label: string): HTMLButtonElement | undefined {
+  return Array.from(document.querySelectorAll('button')).find((b) =>
+    b.textContent?.includes(label),
+  );
+}
+
+// The frequency picker is the (only) <select> with a weekdays option.
+function findFrequencySelect(): HTMLSelectElement | undefined {
+  return Array.from(document.querySelectorAll('select')).find(
+    (s) => !!s.querySelector('option[value="weekdays"]'),
+  );
+}
+
+function deferred<T = unknown>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+function dispatchClipboardEvent(
+  target: Element,
+  type: 'copy' | 'cut',
+  clipboardData: { setData: ReturnType<typeof vi.fn> },
+) {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'clipboardData', { value: clipboardData });
+  act(() => {
+    target.dispatchEvent(event);
+  });
+}
+
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
@@ -128,6 +181,19 @@ const baseTask = (over: Partial<MockTask>): MockTask => ({
 });
 
 describe('ScheduledTasksDialog editing', () => {
+  it('keeps the prompt placeholder outside the editable textbox', async () => {
+    await mount([]);
+
+    click(findButton('New scheduled task'));
+
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    expect(prompt?.textContent).toBe('');
+    expect(prompt?.getAttribute('aria-placeholder')).toBe(
+      'What should this task do?',
+    );
+    expect(document.body.textContent).toContain('What should this task do?');
+  });
+
   it('prefills the form from the task and saves via updateScheduledTask', async () => {
     await mount([baseTask({})]);
 
@@ -137,11 +203,11 @@ describe('ScheduledTasksDialog editing', () => {
     // The cron reverses onto the structured pickers (weekdays @ 12:30) and the
     // name/prompt are prefilled — not left blank as they would be for create.
     const name = document.querySelector<HTMLInputElement>('input[type="text"]');
-    const prompt = document.querySelector<HTMLTextAreaElement>('textarea');
-    const frequency = document.querySelector<HTMLSelectElement>('select');
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    const frequency = findFrequencySelect();
     const time = document.querySelector<HTMLInputElement>('input[type="time"]');
     expect(name?.value).toBe('Digest');
-    expect(prompt?.value).toBe('summarize the day');
+    expect(prompt?.textContent).toBe('summarize the day');
     expect(frequency?.value).toBe('weekdays');
     expect(time?.value).toBe('12:30');
 
@@ -158,11 +224,355 @@ describe('ScheduledTasksDialog editing', () => {
     expect(actions.createScheduledTask).not.toHaveBeenCalled();
   });
 
+  it('renders saved prompt references as inline tags when editing', async () => {
+    const promptText = '@mcp:amap-maps3 /agent-reproduce-align @ext:clickhouse';
+    await mount([baseTask({ prompt: promptText })]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+
+    const tags = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-prompt-tag-serialized]'),
+    );
+    expect(tags.map((tag) => tag.dataset.promptTagSerialized)).toEqual([
+      '@mcp:amap-maps3',
+      '/agent-reproduce-align',
+      '@ext:clickhouse',
+    ]);
+    expect(tags.map((tag) => tag.textContent)).toEqual([
+      'amap-maps3',
+      'agent-reproduce-align',
+      'clickhouse',
+    ]);
+
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({
+        prompt: promptText,
+      }),
+    );
+  });
+
+  it('copies and cuts prompt references as serialized tokens', async () => {
+    const promptText = '@ext:clickhouse /review @mcp:repo-tools';
+    await mount([baseTask({ prompt: promptText })]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    if (!prompt) throw new Error('prompt editor not found');
+    const range = document.createRange();
+    range.selectNodeContents(prompt);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    const copyClipboard = { setData: vi.fn() };
+    dispatchClipboardEvent(prompt, 'copy', copyClipboard);
+    expect(copyClipboard.setData).toHaveBeenCalledWith(
+      'text/plain',
+      promptText,
+    );
+
+    const cutClipboard = { setData: vi.fn() };
+    dispatchClipboardEvent(prompt, 'cut', cutClipboard);
+    await flush();
+    expect(cutClipboard.setData).toHaveBeenCalledWith('text/plain', promptText);
+    expect(prompt.textContent).toBe('');
+  });
+
+  it('does not render filesystem paths as skill tags', async () => {
+    await mount([
+      baseTask({ prompt: 'check /var/log and then /agent-reproduce-align' }),
+    ]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+
+    const tags = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-prompt-tag-serialized]'),
+    );
+    expect(tags.map((tag) => tag.dataset.promptTagSerialized)).toEqual([
+      '/agent-reproduce-align',
+    ]);
+    expect(document.querySelector('[role="textbox"]')?.textContent).toContain(
+      '/var/log',
+    );
+  });
+
+  it('does not hang on escaped slash-reference near-misses', async () => {
+    const promptText = `check /${'\\a'.repeat(30)}/ after`;
+    await mount([baseTask({ prompt: promptText })]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+
+    expect(document.querySelector('[role="textbox"]')?.textContent).toContain(
+      promptText,
+    );
+  });
+
+  it('inserts extension, skill, and MCP references into the created prompt', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+
+    await mount([]);
+
+    actions.loadExtensionsStatus.mockResolvedValue({
+      extensions: [
+        {
+          id: 'ext-1',
+          name: 'alibabacloud-compute-suite',
+          displayName: 'Alibaba Cloud',
+          description: '',
+          version: '1.0.0',
+          isActive: true,
+          path: '/ext',
+          capabilities: {},
+        },
+      ],
+    });
+    actions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          kind: 'skill',
+          name: 'review',
+          description: 'Review code',
+          level: 'project',
+          modelInvocable: true,
+        },
+      ],
+    });
+    actions.loadMcpStatus.mockResolvedValue({
+      servers: [
+        {
+          kind: 'mcp_server',
+          name: 'repo-tools',
+          transport: 'stdio',
+          disabled: false,
+          mcpStatus: 'connected',
+        },
+      ],
+    });
+    click(findButton('New scheduled task'));
+
+    click(findButtonContaining('Extensions'));
+    await flush();
+    click(findButtonContaining('alibabacloud-compute-suite'));
+    await flush();
+
+    click(findButtonContaining('Skills'));
+    await flush();
+    click(findButtonContaining('review'));
+    await flush();
+
+    click(findButtonContaining('MCP'));
+    await flush();
+    click(findButtonContaining('repo-tools'));
+    await flush();
+
+    expect(document.querySelector('[role="textbox"]')?.textContent).toContain(
+      'alibabacloud-compute-suite',
+    );
+
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: '@ext:alibabacloud-compute-suite /review @mcp:repo-tools',
+      }),
+    );
+  });
+
+  it('escapes skill names when inserting references', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    await mount([]);
+    actions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          kind: 'skill',
+          name: 'review task',
+          description: 'Review code',
+          level: 'project',
+          modelInvocable: true,
+        },
+      ],
+    });
+
+    click(findButton('New scheduled task'));
+    click(findButtonContaining('Skills'));
+    await flush();
+    click(findButtonContaining('review task'));
+    await flush();
+
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: '/review\\ task',
+      }),
+    );
+  });
+
+  it('keeps the latest reference picker results when loads resolve out of order', async () => {
+    await mount([]);
+    const extensions = deferred();
+    const skills = deferred();
+    actions.loadExtensionsStatus.mockReturnValueOnce(extensions.promise);
+    actions.loadSkillsStatus.mockReturnValueOnce(skills.promise);
+
+    click(findButton('New scheduled task'));
+    click(findButtonContaining('Extensions'));
+    click(findButtonContaining('Skills'));
+
+    skills.resolve({
+      skills: [
+        {
+          kind: 'skill',
+          name: 'review',
+          description: 'Review code',
+          level: 'project',
+          modelInvocable: true,
+        },
+      ],
+    });
+    await flush();
+    expect(findButtonContaining('review')).toBeTruthy();
+
+    extensions.resolve({
+      extensions: [
+        {
+          id: 'ext-1',
+          name: 'alibabacloud-compute-suite',
+          displayName: 'Alibaba Cloud',
+          description: '',
+          version: '1.0.0',
+          isActive: true,
+          path: '/ext',
+          capabilities: {},
+        },
+      ],
+    });
+    await flush();
+    expect(findButtonContaining('review')).toBeTruthy();
+    expect(findButtonContaining('alibabacloud-compute-suite')).toBeUndefined();
+  });
+
+  it('drops plain text only into the prompt editor', async () => {
+    await mount([]);
+    click(findButton('New scheduled task'));
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    if (!prompt) throw new Error('prompt editor not found');
+    const execCommand = vi.spyOn(document, 'execCommand').mockReturnValue(true);
+    const drop = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, 'dataTransfer', {
+      value: {
+        getData: (type: string) =>
+          type === 'text/plain' ? 'plain text' : '<b>html</b>',
+      },
+    });
+
+    act(() => {
+      prompt.dispatchEvent(drop);
+    });
+
+    expect(execCommand).toHaveBeenCalledWith('insertText', false, 'plain text');
+    execCommand.mockRestore();
+  });
+
+  it('pastes plain text only into the prompt editor', async () => {
+    await mount([]);
+    click(findButton('New scheduled task'));
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    if (!prompt) throw new Error('prompt editor not found');
+    const execCommand = vi.spyOn(document, 'execCommand').mockReturnValue(true);
+    const paste = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, 'clipboardData', {
+      value: {
+        getData: (type: string) =>
+          type === 'text/plain' ? 'plain text' : '<b>html</b>',
+      },
+    });
+
+    act(() => {
+      prompt.dispatchEvent(paste);
+    });
+
+    expect(execCommand).toHaveBeenCalledWith('insertText', false, 'plain text');
+    execCommand.mockRestore();
+  });
+
+  it('caps contenteditable input at the scheduled-task prompt limit', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    await mount([]);
+    click(findButton('New scheduled task'));
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    if (!prompt) throw new Error('prompt editor not found');
+
+    act(() => {
+      prompt.textContent = 'x'.repeat(100_001);
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+    await flush();
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: 'x'.repeat(100_000),
+      }),
+    );
+  });
+
+  it('does not preserve empty contenteditable leftovers before an inserted reference', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+
+    await mount([]);
+
+    actions.loadExtensionsStatus.mockResolvedValue({
+      extensions: [
+        {
+          id: 'ext-1',
+          name: 'alibabacloud-compute-suite',
+          displayName: 'Alibaba Cloud',
+          description: '',
+          version: '1.0.0',
+          isActive: true,
+          path: '/ext',
+          capabilities: {},
+        },
+      ],
+    });
+    click(findButton('New scheduled task'));
+
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    if (!prompt) throw new Error('prompt editor not found');
+    act(() => {
+      prompt.innerHTML = '<br>';
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+    await flush();
+
+    click(findButtonContaining('Extensions'));
+    await flush();
+    click(findButtonContaining('alibabacloud-compute-suite'));
+    await flush();
+
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: '@ext:alibabacloud-compute-suite',
+      }),
+    );
+  });
+
   it('an unrepresentable cron lands in the custom field, losslessly', async () => {
     await mount([baseTask({ cron: '0 9 * * 1,3,5' })]); // day-of-week list
 
     click(document.querySelector('[aria-label="Edit"]'));
-    const frequency = document.querySelector<HTMLSelectElement>('select');
+    const frequency = findFrequencySelect();
     expect(frequency?.value).toBe('custom');
 
     click(findButton('Save'));
@@ -405,9 +815,9 @@ describe('ScheduledTasksDialog view-history (bound session)', () => {
       ],
       { onOpenSession },
     );
-    // A bound task shows a "View history" control (with a run count) that opens
-    // its session transcript — not the inline expand toggle.
-    const btn = findButton('View history (1)');
+    // A bound task shows a "View conversation" control (with a run count) that
+    // opens its session transcript — not the inline expand toggle.
+    const btn = findButton('View conversation (1)');
     expect(btn).toBeDefined();
     expect(document.querySelector('button[aria-expanded]')).toBeNull();
     click(btn);
@@ -420,7 +830,7 @@ describe('ScheduledTasksDialog view-history (bound session)', () => {
       onOpenSession,
     });
     // Discoverable even with zero runs — the original "can't find history" pain.
-    const btn = findButton('View history');
+    const btn = findButton('View conversation');
     expect(btn).toBeDefined();
     click(btn);
     expect(onOpenSession).toHaveBeenCalledWith('sess-42');
@@ -432,7 +842,7 @@ describe('ScheduledTasksDialog view-history (bound session)', () => {
     await mount([
       baseTask({ sessionId: 'sess-42', runs: [{ at: 1_700_000_100_000 }] }),
     ]);
-    expect(findButton('View history (1)')).toBeUndefined();
+    expect(findButton('View conversation (1)')).toBeUndefined();
     expect(document.querySelector('button[aria-expanded]')).not.toBeNull();
   });
 });

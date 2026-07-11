@@ -243,6 +243,7 @@ export const QueryOptionsSchema = z
         ),
       )
       .optional(),
+    effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
     includePartialMessages: z.boolean().optional(),
     resume: z.string().optional(),
     sessionId: z.string().optional(),
