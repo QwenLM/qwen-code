@@ -57,6 +57,16 @@ qwen serve --allow-origin chrome-extension://<this-extension-id>
 No browser automation adapter is bundled with the main `@qwen-code/qwen-code`
 package. When `QWEN_CDP_MCP_COMMAND` is unset, the extension can still open the
 Web Shell, but the daemon will not register browser automation MCP tools.
+Install the adapter separately and point the daemon at its executable:
+
+```bash
+npm install -g chrome-devtools-mcp@1.5.0
+QWEN_CDP_MCP_COMMAND=chrome-devtools-mcp \
+  qwen serve --allow-origin chrome-extension://idkijaaipeeinemigojbjkmfmabokbdk
+```
+
+The separately installed adapter is not included in the Qwen Code npm package
+or Chrome extension zip.
 Clients can distinguish the states through `/capabilities`:
 
 - `allow_origin` means the extension may frame and call the daemon.
@@ -96,8 +106,8 @@ QWEN_CDP_MCP_COMMAND=/path/to/cdp-mcp-adapter \
 ```
 
 The command exits successfully only after printing `DEGRADED-MODE: PASS`,
-`FULL-CDP-SMOKE: PASS`, and `REAL-CHROME-E2E: PASS`. It does not read or modify
-the user's Qwen settings.
+`RUNTIME-MCP-RECONNECT: PASS`, `FULL-CDP-SMOKE: PASS`, and
+`REAL-CHROME-E2E: PASS`. It does not read or modify the user's Qwen settings.
 
 ## Packaging for the Chrome Web Store
 

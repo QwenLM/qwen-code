@@ -86,7 +86,12 @@ try {
   checks.toolCount = tools.tools?.length || 0;
 
   const pages = textOf(await call('list_pages'));
-  originalUrl = process.env.RESTORE_URL || pages.match(/0:\s+(\S+)/)?.[1];
+  const selectedPage =
+    pages.split('\n').find((line) => line.includes('[selected]')) || pages;
+  originalUrl =
+    process.env.RESTORE_URL ||
+    selectedPage.match(/\(([a-z][a-z0-9+.-]*:\/\/[^)]+)\)/i)?.[1] ||
+    selectedPage.match(/\d+:\s+([a-z][a-z0-9+.-]*:\/\/\S+)/i)?.[1];
   checks.originalUrl = originalUrl;
   await call('navigate_page', { type: 'url', url: fixtureUrl });
 
@@ -101,7 +106,14 @@ try {
   checks.buttonFound = Boolean(buttonUid);
   checks.linkFound = Boolean(linkUid);
 
-  if (buttonUid) await call('click', { uid: buttonUid });
+  if (buttonUid) {
+    try {
+      await call('click', { uid: buttonUid });
+      checks.clickReturned = true;
+    } catch (error) {
+      checks.clickError = error.message;
+    }
+  }
   const afterClick = await waitUntil(
     async () => textOf(await call('take_snapshot')),
     (text) => text.includes('clicked'),
@@ -136,7 +148,13 @@ try {
       await call('navigate_page', { type: 'url', url: originalUrl });
       checks.restoredOriginalUrl = true;
     } catch (error) {
-      checks.restoreError = error.message;
+      checks.restoreCommandError = error.message;
+      try {
+        const restoredPages = textOf(await call('list_pages'));
+        checks.restoredOriginalUrl = restoredPages.includes(originalUrl);
+      } catch (verificationError) {
+        checks.restoreVerificationError = verificationError.message;
+      }
     }
   }
   child.kill('SIGTERM');
@@ -147,13 +165,14 @@ const passed =
   checks.snapshot &&
   checks.buttonFound &&
   checks.linkFound &&
+  checks.clickReturned &&
   checks.buttonClick &&
   checks.console &&
   checks.network &&
   checks.linkNavigation &&
   checks.restoredOriginalUrl &&
   !checks.error &&
-  !checks.restoreError;
+  !checks.restoreVerificationError;
 
 console.log(JSON.stringify(checks, null, 2));
 console.log(`FULL-CDP-SMOKE: ${passed ? 'PASS' : 'FAIL'}`);
