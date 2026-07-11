@@ -99,7 +99,7 @@ export function templateString(
   template: string,
   context: ContextState,
 ): string {
-  const placeholderRegex = /\$\{(\w+)\}/g;
+  const placeholderRegex = /\$\{([a-zA-Z_]\w*)\}/g;
 
   // First, find all unique keys required by the template.
   const requiredKeys = new Set(
