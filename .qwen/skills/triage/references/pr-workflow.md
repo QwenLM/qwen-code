@@ -363,6 +363,7 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "Needs some re
 ```
 
 Genuinely unsure, or `GUARD` blocked approval — **don't approve or reject**, but **never defer silently**. Post an explicit defer comment that:
+
 1. States you are escalating to the maintainer.
 2. Names the specific reason(s) for uncertainty — what you cannot resolve from the diff, tests, and PR description.
 3. @mentions the maintainer (use `$QWEN_MAINTAINER_HANDLE` if set, or the most recent human reviewer).

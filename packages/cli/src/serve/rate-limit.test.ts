@@ -171,6 +171,48 @@ describe('rateLimit', () => {
       limiter.dispose();
     });
 
+    it('exempts only enabled workspace-qualified ACP transport paths', () => {
+      const qualifiedLimiter = createRateLimiter({
+        tiers: {
+          prompt: { windowMs: 60_000, max: 1 },
+          mutation: { windowMs: 60_000, max: 1 },
+          read: { windowMs: 60_000, max: 1 },
+        },
+        hostname: '127.0.0.1',
+        workspaceQualifiedAcpEnabled: true,
+      });
+
+      for (const path of [
+        '/workspaces/secondary-id/acp',
+        '/workspaces/secondary-id/acp/',
+        '/WORKSPACES/secondary-id/ACP',
+      ]) {
+        const next = vi.fn();
+        qualifiedLimiter.middleware(mockReq({ path }), mockRes(), next);
+        qualifiedLimiter.middleware(mockReq({ path }), mockRes(), next);
+        expect(next).toHaveBeenCalledTimes(2);
+      }
+
+      const nearby = '/workspaces/secondary-id/acp/extra';
+      qualifiedLimiter.middleware(
+        mockReq({ path: nearby }),
+        mockRes(),
+        vi.fn(),
+      );
+      const res = mockRes();
+      qualifiedLimiter.middleware(mockReq({ path: nearby }), res, vi.fn());
+      expect(res.body).toMatchObject({ tier: 'mutation' });
+      qualifiedLimiter.dispose();
+    });
+
+    it('does not exempt workspace-qualified ACP when the route is disabled', () => {
+      const path = '/workspaces/secondary-id/acp';
+      limiter.middleware(mockReq({ path }), mockRes(), vi.fn());
+      const res = mockRes();
+      limiter.middleware(mockReq({ path }), res, vi.fn());
+      expect(res.body).toMatchObject({ tier: 'mutation' });
+    });
+
     it('classifies POST .../prompt as prompt tier', () => {
       const next = vi.fn();
       limiter.middleware(
