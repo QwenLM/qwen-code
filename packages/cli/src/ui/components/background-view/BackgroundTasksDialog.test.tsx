@@ -1239,6 +1239,32 @@ describe('BackgroundTasksDialog', () => {
       expect(frame).not.toContain('history-0.ts');
     });
 
+    it('keeps the live row visible with a full 10-row history and no transcript (short terminal)', () => {
+      // The [Critical] reviewer scenario: maxHeight=14 (availableTerminalHeight
+      // 20 - 6 chrome), 10 activities, no outputFile/parent/children. The
+      // Progress spacer+header are budgeted, so the live row must still render.
+      const activities = [
+        ...Array.from({ length: 9 }, (_, i) => ({
+          name: 'read_file',
+          description: `hist-${i}.ts`,
+          at: i,
+        })),
+        {
+          name: 'run_shell_command',
+          description: 'git log ONLY_LIVE_ROW_MARKER',
+          at: 9,
+        },
+      ];
+      const h = setup(
+        [entry({ outputFile: '', recentActivities: activities })],
+        20,
+      );
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = (h.lastFrame() ?? '').replace(/\n\s*/g, ' ');
+      expect(frame).toContain('ONLY_LIVE_ROW_MARKER');
+    });
+
     it('renders the full transcript path (wraps instead of truncating)', () => {
       const longPath =
         '/home/runner/.qwen/projects/some-workspace-slug/subagents/2f9c1a7b-1234-4a5b-8c9d-abcdef012345/agent-general-purpose-call-9.jsonl';
