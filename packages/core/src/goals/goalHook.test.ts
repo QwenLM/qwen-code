@@ -345,6 +345,31 @@ describe('createGoalStopHookCallback', () => {
     });
   });
 
+  it('continues after recording the final allowed not-met evaluation', async () => {
+    setActiveGoal('sess-1', {
+      condition: 'do x',
+      iterations: MAX_GOAL_ITERATIONS - 1,
+      setAt: 100,
+      tokensAtStart: 0,
+      hookId: 'h1',
+    });
+    judgeMock.mockResolvedValue({
+      kind: 'not_met',
+      reason: 'still not done',
+    });
+    const cb = createGoalStopHookCallback({
+      config: makeGoalConfig(),
+      sessionId: 'sess-1',
+      condition: 'do x',
+    });
+
+    await expect(cb(stopInput(), undefined)).resolves.toEqual({
+      decision: 'block',
+      reason: expect.stringContaining('do x'),
+    });
+    expect(getActiveGoal('sess-1')?.iterations).toBe(MAX_GOAL_ITERATIONS);
+  });
+
   it('clears and stops the loop when MAX_GOAL_ITERATIONS is reached', async () => {
     setActiveGoal('sess-1', {
       condition: 'do x',
