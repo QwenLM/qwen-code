@@ -40,7 +40,7 @@ on:
       timeout_minutes:
         description: 'Review timeout in minutes'
         required: false
-        default: '120'
+        default: '180'
         type: 'number'
       dry_run:
         description: 'Run /resolve without pushing'
@@ -398,14 +398,14 @@ jobs:
           TRIGGER_BODY: "${{ github.event.comment.body || github.event.review.body || '' }}"
         run: |-
           set -euo pipefail
-          DEFAULT_TIMEOUT_MINUTES=120
+          DEFAULT_TIMEOUT_MINUTES=180
           TIMEOUT_MINUTES="$DEFAULT_TIMEOUT_MINUTES"
           TRIGGER_COMMAND="${TRIGGER_BODY%%$'\n'*}"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             PR_NUMBER="${{ github.event.inputs.pr_number }}"
             REVIEW_MODE="${{ github.event.inputs.review_mode }}"
-            TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '120' }}"
+            TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '180' }}"
           elif [ "${{ github.event_name }}" = "issue_comment" ]; then
             if ! printf '%s\n' "$TRIGGER_COMMAND" | grep -Eq '^@qwen-code[[:space:]]+/review([[:space:]]|$)'; then
               echo "should_run=false" >> "$GITHUB_OUTPUT"
