@@ -359,7 +359,7 @@ function extractText(response: unknown): string {
   const parts = first?.content?.parts;
   if (!Array.isArray(parts)) return '';
   return parts
-    .filter((part) => part.thought !== true)
+    .filter((part) => part?.thought !== true)
     .map((p) => (typeof p?.text === 'string' ? p.text : ''))
     .join('')
     .trim();

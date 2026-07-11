@@ -99,6 +99,7 @@ describe('judgeGoal', () => {
           content: {
             parts: [
               { text: 'Return {"ok": false}.', thought: true },
+              null,
               { text: '{"ok": true, "reason": "tests passing"}' },
             ],
           },
