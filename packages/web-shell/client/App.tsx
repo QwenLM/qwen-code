@@ -414,6 +414,8 @@ export interface WebShellApi {
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
   onSessionIdChange?: (sessionId: string | undefined) => void;
+  /** Called after a new session is created. Session setup waits for it to resolve. */
+  onSessionCreated?: (sessionId: string) => Promise<void>;
   /** Visual theme for the embedded shell. */
   theme?: WebShellTheme;
   /** Called when `/theme` changes the web-shell theme. */
@@ -889,6 +891,7 @@ function translateCopyMessage(
 
 export function App({
   onSessionIdChange,
+  onSessionCreated,
   theme: providedTheme,
   onThemeChange,
   language: providedLanguage,
@@ -2290,6 +2293,7 @@ export function App({
           modelId,
           modeId,
           workspaceCwd: selectedWorkspaceCwdRef.current,
+          onSessionCreated,
         });
         // One-shot: the picker targets only the *next* new session, so clear
         // it after creation. The next new chat defaults back to the primary
@@ -2301,7 +2305,7 @@ export function App({
       });
     }
     return createSessionPromiseRef.current;
-  }, [sessionActions]);
+  }, [onSessionCreated, sessionActions]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
   const [sessionListReloadToken, setSessionListReloadToken] = useState(0);

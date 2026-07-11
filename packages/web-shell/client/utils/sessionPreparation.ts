@@ -4,7 +4,9 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 
 type PromptSessionActions = {
-  createSession: (options?: { workspaceCwd?: string }) => Promise<unknown>;
+  createSession: (options?: {
+    workspaceCwd?: string;
+  }) => Promise<{ sessionId: string }>;
   attachSession: () => Promise<void>;
   closeSession: () => Promise<void>;
   clearSession: () => Promise<void>;
@@ -21,19 +23,22 @@ export async function createAndAttachSessionForPrompt({
   modelId,
   modeId,
   workspaceCwd,
+  onSessionCreated,
   warn = console.warn,
 }: {
   sessionActions: PromptSessionActions;
   modelId?: string;
   modeId?: string;
   workspaceCwd?: string;
+  onSessionCreated?: (sessionId: string) => Promise<void>;
   warn?: (message?: unknown, ...optionalParams: unknown[]) => void;
 }): Promise<void> {
-  await sessionActions.createSession({ workspaceCwd });
+  const { sessionId } = await sessionActions.createSession({ workspaceCwd });
   try {
+    await onSessionCreated?.(sessionId);
     await sessionActions.attachSession();
   } catch (error) {
-    warn('[WebShell] failed to attach new session:', error);
+    warn('[WebShell] failed to prepare new session:', error);
     await sessionActions.closeSession().catch((closeError: unknown) => {
       warn('[WebShell] failed to close unattached session:', closeError);
     });

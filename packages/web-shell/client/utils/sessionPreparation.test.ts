@@ -140,7 +140,7 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.setModel).not.toHaveBeenCalled();
     expect(actions.setApprovalMode).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(
-      '[WebShell] failed to attach new session:',
+      '[WebShell] failed to prepare new session:',
       error,
     );
   });
@@ -182,6 +182,61 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: '/ws/secondary',
     });
+  });
+
+  it('waits for onSessionCreated before attaching the session', async () => {
+    const order: string[] = [];
+    const callbackFinished = createDeferred<void>();
+    const actions = createActions({
+      createSession: vi.fn(async () => {
+        order.push('create');
+        return sessionResult;
+      }),
+      attachSession: vi.fn(async () => {
+        order.push('attach');
+      }),
+    });
+
+    const result = createAndAttachSessionForPrompt({
+      sessionActions: actions,
+      onSessionCreated: vi.fn(async (sessionId) => {
+        order.push(`callback:${sessionId}`);
+        await callbackFinished.promise;
+        order.push('callback-finished');
+      }),
+    });
+
+    await vi.waitFor(() => {
+      expect(order).toEqual(['create', 'callback:session-1']);
+    });
+    callbackFinished.resolve();
+    await result;
+
+    expect(order).toEqual([
+      'create',
+      'callback:session-1',
+      'callback-finished',
+      'attach',
+    ]);
+  });
+
+  it('cleans up the created session when onSessionCreated rejects', async () => {
+    const error = new Error('callback failed');
+    const actions = createActions();
+
+    await expect(
+      createAndAttachSessionForPrompt({
+        sessionActions: actions,
+        onSessionCreated: vi.fn(async () => {
+          throw error;
+        }),
+        warn: vi.fn(),
+      }),
+    ).rejects.toThrow(error);
+
+    expect(actions.attachSession).not.toHaveBeenCalled();
+    expect(actions.closeSession).toHaveBeenCalledOnce();
+    expect(actions.clearSession).toHaveBeenCalledOnce();
   });
 });
 
