@@ -71,9 +71,66 @@ const waitUntil = async (read, predicate, timeoutMs = 5_000) => {
   }
   return value;
 };
+const verifyCurrentPage = async (expectedUrl) => {
+  const verifier = spawn(command, ['--wsEndpoint', endpoint], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let verifierBuffer = '';
+  let verifierStderr = '';
+  const verifierResponses = new Map();
+  verifier.stderr.on('data', (chunk) => (verifierStderr += chunk));
+  verifier.stdout.on('data', (chunk) => {
+    verifierBuffer += chunk;
+    let newline;
+    while ((newline = verifierBuffer.indexOf('\n')) >= 0) {
+      const line = verifierBuffer.slice(0, newline).trim();
+      verifierBuffer = verifierBuffer.slice(newline + 1);
+      if (!line) continue;
+      try {
+        const message = JSON.parse(line);
+        if (message.id != null) verifierResponses.set(message.id, message);
+      } catch {
+        // Adapter logs may share stdout; only JSON-RPC responses matter here.
+      }
+    }
+  });
+  const verifierRequest = async (id, method, params = {}) => {
+    verifier.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const response = verifierResponses.get(id);
+      if (response) {
+        if (response.error) throw new Error(JSON.stringify(response.error));
+        return response.result;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error(`verification timeout; stderr=${verifierStderr.slice(-500)}`);
+  };
+  try {
+    await verifierRequest(1, 'initialize', {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'qwen-cdp-restore-verifier', version: '1' },
+    });
+    verifier.stdin.write(
+      `${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`,
+    );
+    const pages = textOf(
+      await verifierRequest(2, 'tools/call', {
+        name: 'list_pages',
+        arguments: {},
+      }),
+    );
+    return pages.includes(expectedUrl);
+  } finally {
+    verifier.kill('SIGTERM');
+  }
+};
 
 const checks = {};
 let originalUrl;
+let verifyRestoredPage = false;
 try {
   await request('initialize', {
     protocolVersion: '2025-06-18',
@@ -149,15 +206,20 @@ try {
       checks.restoredOriginalUrl = true;
     } catch (error) {
       checks.restoreCommandError = error.message;
-      try {
-        const restoredPages = textOf(await call('list_pages'));
-        checks.restoredOriginalUrl = restoredPages.includes(originalUrl);
-      } catch (verificationError) {
-        checks.restoreVerificationError = verificationError.message;
-      }
+      verifyRestoredPage = true;
     }
   }
   child.kill('SIGTERM');
+  if (child.exitCode === null) {
+    await new Promise((resolve) => child.once('exit', resolve));
+  }
+  if (verifyRestoredPage) {
+    try {
+      checks.restoredOriginalUrl = await verifyCurrentPage(originalUrl);
+    } catch (verificationError) {
+      checks.restoreVerificationError = verificationError.message;
+    }
+  }
 }
 
 const passed =
