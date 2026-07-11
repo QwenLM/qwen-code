@@ -389,7 +389,6 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
-  composerTagIcons?: WebShellComposerTagIconMap;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   renderWelcomeFooter?: WelcomeFooterRenderer;
