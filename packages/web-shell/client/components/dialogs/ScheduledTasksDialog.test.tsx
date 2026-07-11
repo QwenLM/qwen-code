@@ -480,6 +480,28 @@ describe('ScheduledTasksDialog editing', () => {
     execCommand.mockRestore();
   });
 
+  it('pastes plain text only into the prompt editor', async () => {
+    await mount([]);
+    click(findButton('New scheduled task'));
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    if (!prompt) throw new Error('prompt editor not found');
+    const execCommand = vi.spyOn(document, 'execCommand').mockReturnValue(true);
+    const paste = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, 'clipboardData', {
+      value: {
+        getData: (type: string) =>
+          type === 'text/plain' ? 'plain text' : '<b>html</b>',
+      },
+    });
+
+    act(() => {
+      prompt.dispatchEvent(paste);
+    });
+
+    expect(execCommand).toHaveBeenCalledWith('insertText', false, 'plain text');
+    execCommand.mockRestore();
+  });
+
   it('caps contenteditable input at the scheduled-task prompt limit', async () => {
     actions.createScheduledTask.mockResolvedValue(baseTask({}));
     await mount([]);

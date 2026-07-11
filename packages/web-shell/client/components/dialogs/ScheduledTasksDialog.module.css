@@ -105,6 +105,7 @@
 }
 
 .input,
+.textarea,
 .select {
   width: 100%;
   box-sizing: border-box;
@@ -115,6 +116,12 @@
   background: var(--background);
   color: var(--foreground);
   font-family: inherit;
+}
+
+.textarea {
+  resize: vertical;
+  min-height: 72px;
+  line-height: 1.5;
 }
 
 .promptEditorWrap {
@@ -142,6 +149,7 @@
 }
 
 .input:focus,
+.textarea:focus,
 .promptEditor:focus,
 .select:focus {
   outline: 2px solid var(--primary);
