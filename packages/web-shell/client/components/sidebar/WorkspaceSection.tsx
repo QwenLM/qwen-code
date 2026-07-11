@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, type ReactNode } from 'react';
 import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import type {
   DaemonSessionSummary,
@@ -51,7 +51,6 @@ interface WorkspaceSectionProps {
   workspace: DaemonWorkspaceCapability;
   client: DaemonClient;
   isActive: boolean;
-  currentSessionId?: string;
   reloadToken: number;
   primaryLabel: string;
   untrustedLabel: string;
@@ -60,14 +59,17 @@ interface WorkspaceSectionProps {
   noSessionsLabel: string;
   formatTime: (iso: string) => string;
   onSelectWorkspace: (cwd: string | undefined) => void;
-  onLoadSession: (sessionId: string) => void;
+  /**
+   * Render a trusted session row with the sidebar's shared interactions and
+   * styling. Untrusted rows stay non-interactive in this component.
+   */
+  renderSession: (session: DaemonSessionSummary) => ReactNode;
 }
 
 export function WorkspaceSection({
   workspace,
   client,
   isActive,
-  currentSessionId,
   reloadToken,
   primaryLabel,
   untrustedLabel,
@@ -76,7 +78,7 @@ export function WorkspaceSection({
   noSessionsLabel,
   formatTime,
   onSelectWorkspace,
-  onLoadSession,
+  renderSession,
 }: WorkspaceSectionProps) {
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
   const [expanded, setExpanded] = useState(workspace.primary);
@@ -146,40 +148,21 @@ export function WorkspaceSection({
             <div className={styles.empty}>{noSessionsLabel}</div>
           ) : (
             sessions.map((session) => {
-              const content = (
-                <>
-                  <span className={styles.sessionName}>
-                    {getSessionLabel(session)}
-                  </span>
-                  {session.createdAt && (
-                    <span className={styles.sessionTime}>
-                      {formatTime(session.createdAt)}
-                    </span>
-                  )}
-                </>
-              );
-              return readOnly ? (
+              if (!readOnly) return renderSession(session);
+              const label = getSessionLabel(session);
+              const time = session.createdAt
+                ? formatTime(session.createdAt)
+                : '';
+              return (
                 <div
                   key={session.sessionId}
-                  className={cx(styles.sessionItem, styles.sessionItemReadOnly)}
+                  className={styles.sessionItemReadOnly}
                   role="note"
-                  aria-label={`${getSessionLabel(session)}. ${trustToOpenLabel}`}
+                  aria-label={`${label}${time ? `, ${time}` : ''}. ${trustToOpenLabel}`}
                 >
-                  {content}
+                  <span className={styles.sessionName}>{label}</span>
+                  {time && <span className={styles.sessionTime}>{time}</span>}
                 </div>
-              ) : (
-                <button
-                  key={session.sessionId}
-                  className={cx(
-                    styles.sessionItem,
-                    session.sessionId === currentSessionId &&
-                      styles.sessionItemActive,
-                  )}
-                  onClick={() => onLoadSession(session.sessionId)}
-                  title={getSessionLabel(session)}
-                >
-                  {content}
-                </button>
               );
             })
           )}

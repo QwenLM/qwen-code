@@ -1465,6 +1465,7 @@ describe('multi-workspace session dispatch', () => {
       expect(second.body.sessions[0].sessionId).not.toBe(
         first.body.sessions[0].sessionId,
       );
+      expect(second.body.nextCursor).toBeUndefined();
       expect(secondaryBridge.listCalls).toEqual([]);
     });
   });

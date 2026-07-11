@@ -443,6 +443,23 @@ export interface QueryOptions {
   agents?: SubagentConfig[];
 
   /**
+   * Initial reasoning effort tier applied at session start.
+   *
+   * Controls the depth of model reasoning/thinking. Higher tiers produce more
+   * thorough reasoning at the cost of latency and tokens. Provider adapters
+   * clamp the tier to what the active model supports.
+   *
+   * - `'low'`: Minimal reasoning, fastest responses
+   * - `'medium'`: Balanced reasoning and speed
+   * - `'high'`: More thorough reasoning
+   * - `'xhigh'`: Extended reasoning for complex tasks
+   * - `'max'`: Maximum reasoning depth
+   *
+   * Use {@link Query.setEffort} to change the tier at runtime.
+   */
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+  /**
    * Include partial messages in the response stream.
    * When true, the SDK will emit incomplete messages as they are being generated,
    * allowing for real-time streaming of the AI's response.
