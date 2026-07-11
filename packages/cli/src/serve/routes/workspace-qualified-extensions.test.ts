@@ -417,6 +417,61 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('includes the mutation status in post-commit failure broadcasts', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    vi.mocked(
+      h.primary.workspaceService.invalidateWorkspaceSkillsStatus,
+    ).mockImplementationOnce(() => {
+      throw new Error('status invalidation failed');
+    });
+    try {
+      const started = await auth(
+        request(h.app).delete(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/${extensionId}/activation`,
+        ),
+      );
+
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded_with_warnings' });
+      expect(h.primary.bridge.broadcastExtensionsChanged).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'disabled', failed: 1 }),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('retries generation reconciliation after a runtime refresh times out', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    vi.mocked(
+      h.secondary.bridge.refreshExtensionsForAllSessions,
+    ).mockImplementation(async () => await new Promise(() => undefined));
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(90_000);
+
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledTimes(2);
+    } finally {
+      (
+        h.app.locals as { stopExtensionGenerationReconciler?: () => void }
+      ).stopExtensionGenerationReconciler?.();
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('advances applied generation only after the workspace reconciles', async () => {
     const h = await makeHarness();
     mockExtensionManager();

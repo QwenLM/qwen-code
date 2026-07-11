@@ -298,7 +298,7 @@ describe('handleInstall', () => {
     processSpy.mockRestore();
   });
 
-  it('does not report a committed install warning as a failed install', async () => {
+  it('reports a committed install warning without failing', async () => {
     const processSpy = vi
       .spyOn(process, 'exit')
       .mockImplementation(() => undefined as never);
@@ -319,7 +319,7 @@ describe('handleInstall', () => {
     await handleInstall({ source: 'git@some-url' });
 
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
-      'Extension committed but could not be reloaded.',
+      'Warning: Extension committed but could not be reloaded.',
     );
     expect(processSpy).not.toHaveBeenCalled();
 

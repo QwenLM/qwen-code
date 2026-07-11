@@ -274,12 +274,19 @@ export class ExtensionStore {
           const rules = legacy[identity.name]?.overrides ?? [];
           const existingPolicy = existing.extensions[identity.id];
           if (existingPolicy) {
+            const previousRules = existingPolicy.legacyPathRules ?? [];
+            const policyChanged =
+              existingPolicy.name !== identity.name ||
+              previousRules.length !== rules.length ||
+              previousRules.some((rule, index) => rule !== rules[index]);
+            if (!policyChanged) continue;
             existingPolicy.name = identity.name;
             if (rules.length > 0) {
               existingPolicy.legacyPathRules = [...rules];
             } else {
               delete existingPolicy.legacyPathRules;
             }
+            changed = true;
           } else {
             existing.extensions[identity.id] = {
               name: identity.name,
@@ -287,9 +294,16 @@ export class ExtensionStore {
               workspaceOverrides: {},
               ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
             };
+            changed = true;
           }
         }
-        changed = true;
+        if (!changed) {
+          try {
+            await this.writeLegacyProjectionUnlocked(existing);
+          } catch {
+            // state.json remains authoritative; a later access retries repair.
+          }
+        }
       } else {
         for (const identity of extensions) {
           assertIdentity(identity);
@@ -784,7 +798,7 @@ export class ExtensionStore {
       noFollow: true,
     });
     try {
-      await this.writeLegacyProjectionUnlocked(snapshot);
+      await this.writeLegacyProjectionUnlocked(snapshot, projection);
     } catch {
       // state.json is the commit point. A later V2-aware store access repairs
       // a stale projection instead of reporting a mutation failure after the
@@ -794,8 +808,8 @@ export class ExtensionStore {
 
   private async writeLegacyProjectionUnlocked(
     snapshot: ExtensionStoreSnapshot,
+    projection = this.buildLegacyProjection(snapshot),
   ): Promise<void> {
-    const projection = this.buildLegacyProjection(snapshot);
     await atomicWriteJSON(this.enablementPath, projection, {
       mode: 0o600,
       forceMode: true,
@@ -911,11 +925,11 @@ export class ExtensionStore {
   private async recoverTransactionsUnlocked(): Promise<void> {
     const transactionsDir = path.join(this.storeDir, 'transactions');
     const names = await fsp.readdir(transactionsDir);
+    const snapshot = await this.readSnapshotUnlocked();
     for (const name of names) {
       if (!name.endsWith('.json')) continue;
       const journalPath = path.join(transactionsDir, name);
       const journal = await this.readJournalUnlocked(journalPath);
-      const snapshot = await this.readSnapshotUnlocked();
       if (
         journal.phase === 'state_committed' ||
         (snapshot?.generation ?? -1) >= journal.targetGeneration

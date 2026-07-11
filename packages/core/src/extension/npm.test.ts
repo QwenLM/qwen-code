@@ -311,29 +311,32 @@ describe('downloadFromNpmRegistry', () => {
     expect(http.get).not.toHaveBeenCalled();
   });
 
-  it('rejects npm tarballs containing link entries before extraction', async () => {
-    mockNpmDownload('https://registry.example.com/pkg.tgz');
-    vi.mocked(tar.t).mockImplementationOnce(async (options) => {
-      options.onReadEntry?.({
-        type: 'SymbolicLink',
-        path: 'package/escape',
-      } as never);
-    });
+  it.each(['SymbolicLink', 'Link'] as const)(
+    'rejects npm tarballs containing %s entries before extraction',
+    async (type) => {
+      mockNpmDownload('https://registry.example.com/pkg.tgz');
+      vi.mocked(tar.t).mockImplementationOnce(async (options) => {
+        options.onReadEntry?.({
+          type,
+          path: 'package/escape',
+        } as never);
+      });
 
-    await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-      ),
-    ).rejects.toThrow(
-      'Tar archive contains unsupported link entry: package/escape',
-    );
-    expect(tar.x).not.toHaveBeenCalled();
-  });
+      await expect(
+        downloadFromNpmRegistry(
+          {
+            source: '@scope/pkg',
+            type: 'npm',
+            registryUrl: 'https://registry.example.com',
+          },
+          '/tmp/qwen-extension',
+        ),
+      ).rejects.toThrow(
+        'Tar archive contains unsupported link entry: package/escape',
+      );
+      expect(tar.x).not.toHaveBeenCalled();
+    },
+  );
 
   it('rejects npm tarballs larger than 100 MB', async () => {
     mockNpmDownload(

@@ -367,6 +367,7 @@ export function createExtensionsController(
     void (async () => {
       let deadline: ReturnType<typeof setTimeout> | undefined;
       let committedGeneration: number | undefined;
+      let mutationEvent: ExtensionMutationEvent | undefined;
       const commitWarnings: NonNullable<ExtensionOperationStatus['warnings']> =
         [];
       try {
@@ -440,6 +441,7 @@ export function createExtensionsController(
           deadlineController.signal,
           context,
         );
+        mutationEvent = event;
         if (deadline) clearTimeout(deadline);
         extensionsStatusCache = undefined;
         if (options.skipRefresh || event.updated === false) {
@@ -667,10 +669,18 @@ export function createExtensionsController(
           });
           try {
             bridge.broadcastExtensionsChanged({
-              ...(failureContext.source
-                ? { source: redactUrlCredentials(failureContext.source) }
-                : {}),
-              ...(failureContext.name ? { name: failureContext.name } : {}),
+              ...(mutationEvent
+                ? bridgeMutationEvent(mutationEvent)
+                : {
+                    ...(failureContext.source
+                      ? {
+                          source: redactUrlCredentials(failureContext.source),
+                        }
+                      : {}),
+                    ...(failureContext.name
+                      ? { name: failureContext.name }
+                      : {}),
+                  }),
               refreshed: 0,
               failed: 1,
               error,

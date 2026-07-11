@@ -313,6 +313,22 @@ describe('ExtensionStore', () => {
     expect(imported.extensions[id]?.legacyPathRules).toEqual(['!/workspace/*']);
   });
 
+  it('repairs an unchanged newer V1 projection without changing generation', async () => {
+    const store = makeStore();
+    const id = 'e4'.repeat(32);
+    const initialized = await store.ensureInitialized([{ id, name: 'demo' }]);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({ stale: { overrides: ['/workspace/unused'] } }),
+    );
+
+    const repaired = await store.ensureInitialized([{ id, name: 'demo' }]);
+
+    expect(repaired.generation).toBe(initialized.generation);
+    expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({});
+  });
+
   it('preserves artifact generation across a sequential downgrade write', async () => {
     const store = makeStore();
     const identity = { id: 'e3'.repeat(32), name: 'demo' };

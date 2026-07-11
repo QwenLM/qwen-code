@@ -37,6 +37,7 @@ type SafeBody = typeof safeBodyType;
 
 const EXTENSION_PREPARE_DEADLINE_MS = 10 * 60_000;
 const EXTENSION_UPDATE_CHECK_DEADLINE_MS = 2 * 60_000;
+const EXTENSION_GENERATION_RECONCILE_TIMEOUT_MS = 60_000;
 
 const parseExtensionScope = (
   body: Record<string, unknown>,
@@ -223,8 +224,22 @@ export function registerWorkspaceExtensionRoutes(
         const results = await Promise.allSettled(
           runtimes.map(async (runtime) => {
             runtime.workspaceService.invalidateWorkspaceSkillsStatus();
-            const result =
-              await runtime.bridge.refreshExtensionsForAllSessions();
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const result = await Promise.race([
+              runtime.bridge.refreshExtensionsForAllSessions(),
+              new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(() => {
+                  reject(
+                    new Error(
+                      `Extension generation reconciliation timed out after ${EXTENSION_GENERATION_RECONCILE_TIMEOUT_MS}ms.`,
+                    ),
+                  );
+                }, EXTENSION_GENERATION_RECONCILE_TIMEOUT_MS);
+                timer.unref();
+              }),
+            ]).finally(() => {
+              if (timer) clearTimeout(timer);
+            });
             if (result.failed > 0) {
               throw new Error(
                 `${result.failed} extension session refresh(es) failed`,

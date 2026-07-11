@@ -123,8 +123,11 @@ export async function handleInstall(args: InstallArgs) {
           }),
     );
   } catch (error) {
+    if (isExtensionCommittedWithWarningsError(error)) {
+      writeStderrLine(`Warning: ${getErrorMessage(error)}`);
+      return;
+    }
     writeStderrLine(getErrorMessage(error));
-    if (isExtensionCommittedWithWarningsError(error)) return;
     process.exit(1);
   }
 }

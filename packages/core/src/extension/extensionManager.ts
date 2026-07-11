@@ -1935,18 +1935,50 @@ export class ExtensionManager {
         )
       : () => undefined;
     try {
-      const snapshot = await this.extensionStore.commitArtifact({
-        operation: prepared.operation,
-        identity: prepared.identity,
-        stagingDirectory: prepared.stagingDirectory,
-        destinationDirectory: prepared.destinationDirectory,
-        ...(prepared.operation === 'install'
-          ? { initialActivation: prepared.initialActivation }
-          : {
-              expectedArtifactGeneration:
-                prepared.expectedArtifactGeneration ?? 0,
-            }),
-      });
+      let snapshot: ExtensionStoreSnapshot;
+      try {
+        snapshot = await this.extensionStore.commitArtifact({
+          operation: prepared.operation,
+          identity: prepared.identity,
+          stagingDirectory: prepared.stagingDirectory,
+          destinationDirectory: prepared.destinationDirectory,
+          ...(prepared.operation === 'install'
+            ? { initialActivation: prepared.initialActivation }
+            : {
+                expectedArtifactGeneration:
+                  prepared.expectedArtifactGeneration ?? 0,
+              }),
+        });
+      } catch (error) {
+        const telemetryConfig = getTelemetryConfig(
+          prepared.currentDir,
+          this.telemetrySettings,
+        );
+        if (prepared.operation === 'update' && prepared.previousConfig) {
+          logExtensionUpdateEvent(
+            telemetryConfig,
+            new ExtensionUpdateEvent(
+              prepared.identity.name,
+              prepared.identity.id,
+              prepared.version,
+              prepared.previousConfig.version,
+              prepared.installMetadata.type,
+              'error',
+            ),
+          );
+        } else {
+          logExtensionInstallEvent(
+            telemetryConfig,
+            new ExtensionInstallEvent(
+              prepared.identity.name,
+              prepared.version,
+              redactUrlCredentials(prepared.installMetadata.source),
+              'error',
+            ),
+          );
+        }
+        throw error;
+      }
       const warnings: NonNullable<CommittedExtensionMutation['warnings']> = [];
       let extension: Extension | undefined;
       try {

@@ -281,6 +281,40 @@ describe('extension tests', () => {
       ).resolves.toBeUndefined();
     });
 
+    it('records error telemetry when a prepared install commit fails', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'commit-failure.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'commit-failure');
+        },
+      );
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: { type: 'local', source: archivePath },
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
+      });
+      vi.spyOn(
+        ExtensionStore.prototype,
+        'commitArtifact',
+      ).mockRejectedValueOnce(new Error('disk full'));
+      mockLogExtensionInstallEvent.mockClear();
+
+      await expect(manager.commitPreparedExtension(prepared)).rejects.toThrow(
+        'disk full',
+      );
+      expect(mockLogExtensionInstallEvent).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          extension_name: 'commit-failure',
+          status: 'error',
+        }),
+      );
+      await manager.disposePreparedExtension(prepared);
+    });
+
     it('rejects forged prepared handles without deleting their paths', async () => {
       const manager = createExtensionManager();
       const protectedPath = path.join(tempWorkspaceDir, 'keep-me');
