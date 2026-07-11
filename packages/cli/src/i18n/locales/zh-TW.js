@@ -2268,4 +2268,21 @@ export default {
     '正在新會話中執行該定時任務：{{link}}',
   'This scheduled run could not be started: {{error}}':
     '本次定時執行無法啟動：{{error}}',
+
+  // ============================================================================
+  // reload-env 命令
+  // ============================================================================
+  'Reload environment variables and API keys from settings.json and .env files without restarting':
+    '從 settings.json 和 .env 檔案重新載入環境變數和 API 金鑰，無需重啟',
+  'Updated keys': '已更新的金鑰',
+  'Removed keys': '已移除的金鑰',
+  'No environment changes detected.': '未偵測到環境變更。',
+  'Environment reloaded and API client refreshed. New keys are live.':
+    '環境已重新載入，API 用戶端已重新整理。新金鑰已生效。',
+  'Environment reloaded. New API keys will take effect on the next request.':
+    '環境已重新載入。新 API 金鑰將在下次請求時生效。',
+  'Environment reloaded, but API client refresh failed. Restart the CLI to pick up new keys.':
+    '環境已重新載入，但 API 用戶端重新整理失敗。請重啟 CLI 以使新金鑰生效。',
+  'Warning: Failed to parse settings file. Check for JSON syntax errors.':
+    '警告：解析設定檔失敗。請檢查 JSON 語法錯誤。',
 };

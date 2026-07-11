@@ -6,9 +6,21 @@
 
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
-import { SettingScope, type Config } from '@qwen-code/qwen-code-core';
-import { reloadEnvironment } from '../../config/settings.js';
+import {
+  SettingScope,
+  type Config,
+  createDebugLogger,
+} from '@qwen-code/qwen-code-core';
+import {
+  reloadEnvironment,
+  getUserSettingsPath,
+} from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
+import fs from 'fs';
+import path from 'path';
+import stripJsonComments from 'strip-json-comments';
+
+const debugLogger = createDebugLogger('RELOAD_ENV');
 
 async function getCurrentCwd(config: Config | null): Promise<string> {
   if (config?.getCwd) {
@@ -16,6 +28,17 @@ async function getCurrentCwd(config: Config | null): Promise<string> {
     if (cwd) return cwd;
   }
   return process.cwd();
+}
+
+function validateSettingsFile(filePath: string): boolean {
+  try {
+    if (!fs.existsSync(filePath)) return true;
+    const content = fs.readFileSync(filePath, 'utf-8');
+    JSON.parse(stripJsonComments(content));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export const reloadEnvCommand: SlashCommand = {
@@ -34,29 +57,52 @@ export const reloadEnvCommand: SlashCommand = {
 
     const cwd = await getCurrentCwd(services.config);
 
+    // Pre-check: validate settings files are parseable before reloading.
+    // reloadScopeFromDisk swallows parse errors internally (debugLogger.warn
+    // only), so without this check the command would report success while
+    // silently using stale settings.
+    const settingsWarnings: string[] = [];
+    const userSettingsPath = getUserSettingsPath();
+    if (!validateSettingsFile(userSettingsPath)) {
+      settingsWarnings.push(userSettingsPath);
+    }
+    const workspaceSettingsPath = path.join(cwd, '.qwen', 'settings.json');
+    if (!validateSettingsFile(workspaceSettingsPath)) {
+      settingsWarnings.push(workspaceSettingsPath);
+    }
+
     settings.reloadScopeFromDisk(SettingScope.User);
     settings.reloadScopeFromDisk(SettingScope.Workspace);
 
     const result = reloadEnvironment(settings.merged, cwd);
 
-    // If env keys changed, refresh auth so the ContentGenerator picks up the
-    // new API key immediately. Without this, process.env is updated but the
-    // cached ContentGenerator still holds the old key.
-    let authRefreshed = false;
-    if (result.updatedKeys.length > 0 && services.config) {
+    // Refresh auth when any env keys changed (added OR removed) so the
+    // ContentGenerator picks up new credentials immediately.
+    type AuthState = 'success' | 'failed' | 'not_attempted';
+    let authState: AuthState = 'not_attempted';
+    if (
+      (result.updatedKeys.length > 0 || result.removedKeys.length > 0) &&
+      services.config
+    ) {
       const cgConfig = services.config.getContentGeneratorConfig?.();
       if (cgConfig?.authType) {
         try {
           await services.config.refreshAuth(cgConfig.authType);
-          authRefreshed = true;
-        } catch {
-          // refreshAuth failure is non-fatal — env vars are still updated,
-          // the user can restart to pick up the new key.
+          authState = 'success';
+        } catch (err) {
+          debugLogger.warn(`refreshAuth failed after env reload: ${err}`);
+          authState = 'failed';
         }
       }
     }
 
     const parts: string[] = [];
+
+    if (settingsWarnings.length > 0) {
+      parts.push(
+        `${t('Warning: Failed to parse settings file. Check for JSON syntax errors.')} (${settingsWarnings.join(', ')})`,
+      );
+    }
 
     if (result.updatedKeys.length > 0) {
       const masked = result.updatedKeys.map((k) => {
@@ -84,9 +130,15 @@ export const reloadEnvCommand: SlashCommand = {
     }
 
     parts.push('');
-    if (authRefreshed) {
+    if (authState === 'success') {
       parts.push(
         t('Environment reloaded and API client refreshed. New keys are live.'),
+      );
+    } else if (authState === 'failed') {
+      parts.push(
+        t(
+          'Environment reloaded, but API client refresh failed. Restart the CLI to pick up new keys.',
+        ),
       );
     } else {
       parts.push(
