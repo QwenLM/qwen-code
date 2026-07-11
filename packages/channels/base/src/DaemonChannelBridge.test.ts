@@ -1870,6 +1870,7 @@ describe('DaemonChannelBridge', () => {
   it('rejects mismatched daemon session ids while loading', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events, 'different-session');
+    session.detach = vi.fn().mockResolvedValue(undefined);
     const bridge = new DaemonChannelBridge({
       cwd: '/repo',
       sessionFactory: vi.fn().mockResolvedValue(session),
@@ -1884,6 +1885,7 @@ describe('DaemonChannelBridge', () => {
     await expect(bridge.prompt('different-session', 'hello')).rejects.toThrow(
       'No daemon session bound for different-session',
     );
+    expect(session.detach).toHaveBeenCalledOnce();
 
     events.close();
     bridge.stop();

@@ -288,6 +288,9 @@ export class DaemonChannelBridge
       await this.rejectStaleSession(session);
     }
     if (session.sessionId !== sessionId) {
+      void this.releaseSessionClient(session).catch((error: unknown) => {
+        this.lastError = error;
+      });
       throw new Error(
         `Daemon returned session ${session.sessionId} while loading ${sessionId}`,
       );
