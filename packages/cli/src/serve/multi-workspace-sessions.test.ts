@@ -68,6 +68,7 @@ interface FakeBridge extends AcpSessionBridge {
     req: BridgeRestoreSessionRequest;
   }>;
   readonly listCalls: string[];
+  readonly summaryCalls: string[];
 }
 
 function makeSummary(
@@ -148,6 +149,7 @@ function makeBridge(
   const removePendingPromptCalls: FakeBridge['removePendingPromptCalls'] = [];
   const restoreCalls: FakeBridge['restoreCalls'] = [];
   const listCalls: string[] = [];
+  const summaryCalls: string[] = [];
   const bridge = {
     permissionPolicy: 'first-responder' as const,
     spawnCalls,
@@ -162,6 +164,7 @@ function makeBridge(
     removePendingPromptCalls,
     restoreCalls,
     listCalls,
+    summaryCalls,
     get sessionCount() {
       return live.size;
     },
@@ -240,6 +243,7 @@ function makeBridge(
       );
     },
     getSessionSummary(sessionId: string) {
+      summaryCalls.push(sessionId);
       const summary = live.get(sessionId);
       if (!summary) throw new SessionNotFoundError(sessionId);
       return summary;
@@ -1227,6 +1231,303 @@ describe('multi-workspace session dispatch', () => {
         workspaceCwd: PRIMARY_CWD,
       }),
     );
+  });
+
+  it('updates a persisted secondary session organization without touching the primary sidecar', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440160';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:30:00.000Z',
+        prompt: 'secondary pin target',
+        mtime: new Date('2026-07-08T00:30:00.000Z'),
+      });
+      const { app } = makeHarness({ secondarySummaries: [] });
+      const createdGroup = await request(app)
+        .post('/workspaces/secondary-id/session-groups')
+        .set('Host', host())
+        .send({ name: 'Secondary Work', color: 'blue' })
+        .expect(201);
+      const groupId = createdGroup.body.group.id as string;
+
+      const updated = await request(app)
+        .patch(`/workspaces/secondary-id/session/${sessionId}/organization`)
+        .set('Host', host())
+        .send({ isPinned: true, groupId });
+      expect(updated.status).toBe(200);
+      expect(updated.body).toMatchObject({
+        sessionId,
+        isPinned: true,
+        groupId,
+      });
+
+      const pinned = await request(app)
+        .get('/workspaces/secondary-id/sessions?view=organized&group=pinned')
+        .set('Host', host())
+        .expect(200);
+      expect(pinned.body.sessions).toEqual([
+        expect.objectContaining({
+          sessionId,
+          isPinned: true,
+          groupId,
+        }),
+      ]);
+
+      const grouped = await request(app)
+        .get(
+          `/workspaces/secondary-id/sessions?view=organized&group=${encodeURIComponent(groupId)}`,
+        )
+        .set('Host', host())
+        .expect(200);
+      expect(grouped.body.sessions).toEqual([
+        expect.objectContaining({ sessionId, groupId }),
+      ]);
+
+      const colored = await request(app)
+        .patch(`/workspaces/secondary-id/session/${sessionId}/organization`)
+        .set('Host', host())
+        .send({ color: 'purple' });
+      expect(colored.status).toBe(200);
+      expect(colored.body).toMatchObject({
+        sessionId,
+        groupId,
+        color: 'purple',
+      });
+
+      const organized = await request(app)
+        .get('/workspaces/secondary-id/sessions?view=organized&group=all')
+        .set('Host', host())
+        .expect(200);
+      expect(organized.body.sessions).toEqual([
+        expect.objectContaining({ sessionId, groupId, color: 'purple' }),
+      ]);
+
+      const secondarySnapshot =
+        await createSessionOrganizationService(SECONDARY_CWD).readSnapshot();
+      const primarySnapshot =
+        await createSessionOrganizationService(PRIMARY_CWD).readSnapshot();
+      expect(secondarySnapshot.sessions.get(sessionId)).toMatchObject({
+        isPinned: true,
+        groupId,
+        color: 'purple',
+      });
+      expect(primarySnapshot.sessions.has(sessionId)).toBe(false);
+    });
+  });
+
+  it('updates a live-only secondary session organization through the target bridge fallback', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440161';
+      const missingSessionId = '550e8400-e29b-41d4-a716-446655440163';
+      const { app } = makeHarness({
+        secondarySummaries: [makeSummary(sessionId, SECONDARY_CWD)],
+      });
+
+      const missing = await request(app)
+        .patch(
+          `/workspaces/secondary-id/session/${missingSessionId}/organization`,
+        )
+        .set('Host', host())
+        .send({ isPinned: 'yes' });
+      expect(missing.status).toBe(404);
+      expect(missing.body).toEqual({
+        error: `No session with id "${missingSessionId}"`,
+        sessionId: missingSessionId,
+      });
+
+      const updated = await request(app)
+        .patch(`/workspaces/secondary-id/session/${sessionId}/organization`)
+        .set('Host', host())
+        .send({ isPinned: true });
+      expect(updated.status).toBe(200);
+
+      const pinned = await request(app)
+        .get('/workspaces/secondary-id/sessions?view=organized&group=pinned')
+        .set('Host', host())
+        .expect(200);
+      expect(pinned.body.sessions).toEqual([
+        expect.objectContaining({
+          sessionId,
+          workspaceCwd: SECONDARY_CWD,
+          isPinned: true,
+        }),
+      ]);
+    });
+  });
+
+  it('rejects organization updates for an untrusted secondary workspace', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440162';
+      const { app, secondaryBridge } = makeHarness({
+        secondaryTrusted: false,
+        secondarySummaries: [makeSummary(sessionId, SECONDARY_CWD)],
+      });
+
+      const res = await request(app)
+        .patch(`/workspaces/secondary-id/session/${sessionId}/organization`)
+        .set('Host', host())
+        .send({ isPinned: 'yes' });
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+      const secondarySnapshot =
+        await createSessionOrganizationService(SECONDARY_CWD).readSnapshot();
+      expect(secondarySnapshot.sessions.has(sessionId)).toBe(false);
+      expect(secondaryBridge.summaryCalls).toEqual([]);
+    });
+  });
+
+  it('updates an archived secondary session without changing its archive state', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440164';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:40:00.000Z',
+        prompt: 'secondary archived organization target',
+        mtime: new Date('2026-07-08T00:40:00.000Z'),
+      });
+      const { app } = makeHarness({ secondarySummaries: [] });
+
+      await request(app)
+        .post('/workspaces/secondary-id/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId] })
+        .expect(200);
+
+      const updated = await request(app)
+        .patch(`/workspaces/secondary-id/session/${sessionId}/organization`)
+        .set('Host', host())
+        .send({ isPinned: true, color: 'green' })
+        .expect(200);
+      expect(updated.body).toMatchObject({
+        sessionId,
+        isPinned: true,
+        color: 'green',
+      });
+
+      const archived = await request(app)
+        .get(
+          '/workspaces/secondary-id/sessions?view=organized&archiveState=archived&group=pinned',
+        )
+        .set('Host', host())
+        .expect(200);
+      expect(archived.body.sessions).toEqual([
+        expect.objectContaining({
+          sessionId,
+          isArchived: true,
+          isPinned: true,
+          color: 'green',
+        }),
+      ]);
+    });
+  });
+
+  it('does not fall back across workspaces for organization updates', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440165';
+      await writeStoredSession({
+        sessionId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:50:00.000Z',
+        prompt: 'primary-only organization target',
+        mtime: new Date('2026-07-08T00:50:00.000Z'),
+      });
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        secondarySummaries: [],
+      });
+
+      const res = await request(app)
+        .patch(`/workspaces/secondary-id/session/${sessionId}/organization`)
+        .set('Host', host())
+        .send({ isPinned: true });
+
+      expect(res.status).toBe(404);
+      expect(primaryBridge.summaryCalls).toEqual([]);
+      expect(secondaryBridge.summaryCalls).toEqual([sessionId]);
+      const primarySnapshot =
+        await createSessionOrganizationService(PRIMARY_CWD).readSnapshot();
+      const secondarySnapshot =
+        await createSessionOrganizationService(SECONDARY_CWD).readSnapshot();
+      expect(primarySnapshot.sessions.has(sessionId)).toBe(false);
+      expect(secondarySnapshot.sessions.has(sessionId)).toBe(false);
+    });
+  });
+
+  it('rejects an unknown organization workspace selector before probing bridges', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+
+    const res = await request(app)
+      .patch(
+        '/workspaces/missing-id/session/550e8400-e29b-41d4-a716-446655440166/organization',
+      )
+      .set('Host', host())
+      .send({ isPinned: 'yes' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('workspace_mismatch');
+    expect(primaryBridge.summaryCalls).toEqual([]);
+    expect(secondaryBridge.summaryCalls).toEqual([]);
+  });
+
+  it('keeps organization validation and store errors scoped to the selected workspace', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440167';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T01:00:00.000Z',
+        prompt: 'secondary validation target',
+        mtime: new Date('2026-07-08T01:00:00.000Z'),
+      });
+      const { app } = makeHarness({ secondarySummaries: [] });
+      const primaryGroup = await request(app)
+        .post('/workspaces/primary-id/session-groups')
+        .set('Host', host())
+        .send({ name: 'Primary Only', color: 'orange' })
+        .expect(201);
+      const primaryGroupId = primaryGroup.body.group.id as string;
+
+      const wrongGroup = await request(app)
+        .patch(`/workspaces/secondary-id/session/${sessionId}/organization`)
+        .set('Host', host())
+        .send({ groupId: primaryGroupId });
+      expect(wrongGroup.status).toBe(404);
+      expect(wrongGroup.body.code).toBe('group_not_found');
+
+      const invalid = await request(app)
+        .patch(`/workspaces/secondary-id/session/${sessionId}/organization`)
+        .set('Host', host())
+        .send({ isPinned: 'yes' });
+      expect(invalid.status).toBe(400);
+      expect(invalid.body.code).toBe('invalid_session_organization');
+
+      const empty = await request(app)
+        .patch(`/workspaces/secondary-id/session/${sessionId}/organization`)
+        .set('Host', host())
+        .send({});
+      expect(empty.status).toBe(200);
+      expect(empty.body).toMatchObject({ sessionId, isPinned: false });
+
+      const secondaryService = createSessionOrganizationService(SECONDARY_CWD);
+      await fsp.mkdir(path.dirname(secondaryService.getStorePath()), {
+        recursive: true,
+      });
+      await fsp.writeFile(secondaryService.getStorePath(), '{broken', 'utf8');
+      const unreadable = await request(app)
+        .patch(`/workspaces/secondary-id/session/${sessionId}/organization`)
+        .set('Host', host())
+        .send({ color: 'red' });
+      expect(unreadable.status).toBe(500);
+      expect(unreadable.body.code).toBe(
+        'session_organization_store_unreadable',
+      );
+
+      const primarySnapshot =
+        await createSessionOrganizationService(PRIMARY_CWD).readSnapshot();
+      expect(primarySnapshot.sessions.has(sessionId)).toBe(false);
+    });
   });
 
   it('routes plural batch archive, unarchive, and delete to the selected workspace', async () => {
