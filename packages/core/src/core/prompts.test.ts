@@ -95,6 +95,10 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain(
       'Copy or move a secret-bearing file only if the task text names that file',
     );
+    expect(prompt).toContain(
+      'If unsure whether a file is secret-bearing, ask before proceeding',
+    );
+    expect(prompt).toContain('report that you held back secret-bearing files');
   });
 
   it('should return the base prompt when userMemory is empty string', () => {
