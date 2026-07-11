@@ -19,6 +19,7 @@ import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptImage } from '../adapters/promptTypes';
 import type {
   ComposerSubmitCommit,
+  ComposerSubmitMetadata,
   EditorHandle,
 } from '../hooks/useComposerCore';
 import { useQueuedPrompts } from '../hooks/useQueuedPrompts';
@@ -154,14 +155,17 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
       text: string,
       images?: PromptImage[],
       commitAccepted?: ComposerSubmitCommit,
+      metadata?: ComposerSubmitMetadata,
     ): boolean => {
       const trimmed = text.trim();
       if (!trimmed) return false;
       if (connection.status !== 'connected') return false;
+      const inputAnnotations = metadata?.inputAnnotations;
       if (streamingStateRef.current === 'idle') {
         actions
           .sendPrompt(trimmed, {
             ...(images && images.length ? { images } : {}),
+            ...(inputAnnotations ? { inputAnnotations } : {}),
             onAdmitted: () => {
               clearFollowup();
               commitAccepted?.();
@@ -172,7 +176,9 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
           );
         return false;
       }
-      return enqueuePrompt(trimmed, images);
+      return inputAnnotations
+        ? enqueuePrompt(trimmed, images, undefined, inputAnnotations)
+        : enqueuePrompt(trimmed, images);
     },
     [actions, clearFollowup, connection.status, enqueuePrompt, reportError],
   );
