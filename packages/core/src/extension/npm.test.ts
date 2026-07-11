@@ -214,7 +214,7 @@ function mockNpmRegistryStatus(statusCode: number) {
   );
 }
 
-function mockNpmDownload(tarballUrl: string) {
+function mockNpmDownload(tarballUrl: string, tarballBytes?: number) {
   let requestCount = 0;
   vi.mocked(https.get).mockImplementation(
     (_url: unknown, _options: unknown, callback: unknown) => {
@@ -240,7 +240,17 @@ function mockNpmDownload(tarballUrl: string) {
                 if (event === 'end') handler();
               }),
             }
-          : { statusCode: 200, headers: {}, pipe: vi.fn() };
+          : {
+              statusCode: 200,
+              headers: {},
+              on: vi.fn((event: string, handler: (chunk: Buffer) => void) => {
+                if (event === 'data' && tarballBytes !== undefined) {
+                  handler({ length: tarballBytes } as Buffer);
+                }
+              }),
+              pipe: vi.fn(),
+              destroy: vi.fn(),
+            };
       if (typeof callback === 'function') callback(mockRes as never);
       return { on: vi.fn() } as never;
     },
@@ -258,6 +268,7 @@ describe('downloadFromNpmRegistry', () => {
         }
       }),
       close: vi.fn((callback: () => void) => callback()),
+      destroy: vi.fn(),
     } as never);
     vi.mocked(tar.t).mockResolvedValue(undefined);
     vi.mocked(tar.x).mockResolvedValue(undefined);
@@ -322,6 +333,27 @@ describe('downloadFromNpmRegistry', () => {
       'Tar archive contains unsupported link entry: package/escape',
     );
     expect(tar.x).not.toHaveBeenCalled();
+  });
+
+  it('rejects npm tarballs larger than 100 MB', async () => {
+    mockNpmDownload(
+      'https://registry.example.com/pkg.tgz',
+      100 * 1024 * 1024 + 1,
+    );
+
+    await expect(
+      downloadFromNpmRegistry(
+        {
+          source: '@scope/pkg',
+          type: 'npm',
+          registryUrl: 'https://registry.example.com',
+        },
+        '/tmp/qwen-extension',
+      ),
+    ).rejects.toThrow(
+      'npm extension archive download exceeded maximum size of 104857600 bytes',
+    );
+    expect(tar.t).not.toHaveBeenCalled();
   });
 });
 

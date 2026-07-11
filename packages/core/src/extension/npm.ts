@@ -14,6 +14,7 @@ import { clientForUrl } from './http-client.js';
 import { assertTarArchiveHasNoLinks } from './archive-safety.js';
 
 const debugLogger = createDebugLogger('EXT_NPM');
+const NPM_ARCHIVE_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024;
 
 export interface NpmDownloadResult {
   version: string;
@@ -247,6 +248,17 @@ function downloadNpmFile(
   const client = clientForUrl(url);
 
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
     client
       .get(url, { headers, signal }, (res) => {
         if (res.statusCode === 301 || res.statusCode === 302) {
@@ -257,23 +269,44 @@ function downloadNpmFile(
             const redirectToken =
               redirectHost === originalHost ? authToken : undefined;
             downloadNpmFile(res.headers.location, dest, redirectToken, signal)
-              .then(resolve)
-              .catch(reject);
+              .then(finish)
+              .catch(fail);
             return;
           }
         }
         if (res.statusCode !== 200) {
-          return reject(
+          return fail(
             new Error(
               `Failed to download npm tarball: status ${res.statusCode}`,
             ),
           );
         }
         const file = fs.createWriteStream(dest);
+        let bytesWritten = 0;
+        res.on('data', (chunk: Buffer) => {
+          bytesWritten += chunk.length;
+          if (bytesWritten > NPM_ARCHIVE_DOWNLOAD_MAX_BYTES) {
+            res.destroy();
+            file.destroy();
+            fail(
+              new Error(
+                `npm extension archive download exceeded maximum size of ${NPM_ARCHIVE_DOWNLOAD_MAX_BYTES} bytes`,
+              ),
+            );
+          }
+        });
+        res.on('error', (error) => {
+          file.destroy();
+          fail(error);
+        });
+        file.on('error', (error) => {
+          res.destroy();
+          fail(error);
+        });
         res.pipe(file);
-        file.on('finish', () => file.close(resolve as () => void));
+        file.on('finish', () => file.close(finish));
       })
-      .on('error', reject);
+      .on('error', fail);
   });
 }
 
