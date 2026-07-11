@@ -270,8 +270,11 @@ transient signals, and produces O(turns) replay logs instead of O(tokens) logs
 from that byte window, `compactedReplay[0]` is a synthetic id-less
 `history_truncated` marker with `{reason: 'replay_window_exceeded',
 truncatedEvents, retainedEvents, maxBytes, truncatedTurns?,
-fullTranscriptAvailable: false}`. Clients should render it as status and apply
-the retained replay normally; it must not trigger a resync loop.
+fullTranscriptAvailable: boolean}`. `fullTranscriptAvailable` is a capability
+flag: `true` means the client can page the full persisted transcript with
+`GET /session/:id/transcript`, while `false` means only the bounded replay is
+available. Clients should render it as status and apply the retained replay
+normally; it must not trigger a resync loop.
 
 ### ACP Child Preheat
 

@@ -88,6 +88,63 @@ describe('CreateSubSessionTool', () => {
     expect(res.llmContent).toContain('no text output');
   });
 
+  it('first-turn: warns when the parent link is live-only (parentSessionPersisted:false)', async () => {
+    // The daemon reported the parent lineage was NOT durably written — surface
+    // the degraded link so the caller knows it won't survive a daemon restart.
+    const spawner = vi.fn(async () => ({
+      sessionId: 'sub-9',
+      result: 'the answer',
+      stopReason: 'end_turn',
+      parentSessionPersisted: false,
+    }));
+    const tool = new CreateSubSessionTool(makeConfig(spawner));
+    const res = await tool
+      .build({ prompt: 'x' })
+      .execute(new AbortController().signal);
+    expect(res.error).toBeUndefined();
+    expect(res.llmContent).toContain('live-only');
+    expect(res.llmContent).toContain('will not survive a daemon restart');
+  });
+
+  it('sent: warns when the parent link is live-only (parentSessionPersisted:false)', async () => {
+    const spawner = vi.fn(async () => ({
+      sessionId: 'sub-10',
+      parentSessionPersisted: false,
+    }));
+    const tool = new CreateSubSessionTool(makeConfig(spawner));
+    const res = await tool
+      .build({ prompt: 'go', completion: 'sent' })
+      .execute(new AbortController().signal);
+    expect(res.error).toBeUndefined();
+    expect(res.llmContent).toContain('live-only');
+    expect(res.llmContent).toContain('will not survive a daemon restart');
+  });
+
+  it('does NOT warn about the parent link when it persisted (or is unreported)', async () => {
+    // parentSessionPersisted:true → durable link, no warning.
+    const persisted = vi.fn(async () => ({
+      sessionId: 'sub-11',
+      result: 'ok',
+      stopReason: 'end_turn',
+      parentSessionPersisted: true,
+    }));
+    const okRes = await new CreateSubSessionTool(makeConfig(persisted))
+      .build({ prompt: 'x' })
+      .execute(new AbortController().signal);
+    expect(okRes.llmContent).not.toContain('live-only');
+
+    // Field absent (no parent, or a non-reporting path) → also no warning.
+    const unreported = vi.fn(async () => ({
+      sessionId: 'sub-12',
+      result: 'ok',
+      stopReason: 'end_turn',
+    }));
+    const unreportedRes = await new CreateSubSessionTool(makeConfig(unreported))
+      .build({ prompt: 'x' })
+      .execute(new AbortController().signal);
+    expect(unreportedRes.llmContent).not.toContain('live-only');
+  });
+
   it('surfaces a spawner error as a tool error', async () => {
     const spawner = vi.fn(async () => {
       throw new Error('spawn boom');

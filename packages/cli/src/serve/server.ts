@@ -14,7 +14,10 @@ import type {
   DaemonPerfSnapshot,
   DaemonStartupSnapshot,
 } from './daemon-status.js';
-import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type {
+  ChannelWorkerSnapshot,
+  ChannelWorkerSupervisor,
+} from './channel-worker-supervisor.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -119,6 +122,7 @@ import {
 } from './routes/workspace-voice.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import { setRateLimiter } from './rate-limit.js';
+import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
 import {
   createTotalSessionAdmissionController,
   type TotalSessionAdmissionSnapshot,
@@ -150,6 +154,7 @@ import {
   createSingleWorkspaceRegistry,
   createWorkspaceSessionOwnerIndex,
   type WorkspaceRegistry,
+  type WorkspaceRuntime,
   type WorkspaceRuntimeEnvMetadata,
 } from './workspace-registry.js';
 import {
@@ -160,6 +165,7 @@ import {
   registerWorkspaceLifecycleRoutes,
   registerWorkspaceQualifiedLifecycleRoutes,
 } from './routes/workspace-lifecycle.js';
+import { registerWorkspaceManagementRoutes } from './routes/workspace-management.js';
 import {
   registerWorkspaceMcpControlRoutes,
   registerWorkspaceQualifiedMcpControlRoutes,
@@ -169,6 +175,13 @@ import {
   registerWorkspaceQualifiedToolsRoutes,
   registerWorkspaceToolsRoutes,
 } from './routes/workspace-tools.js';
+import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
+import {
+  parseChannelWebhookConfigLenient,
+  type parseChannelWebhookConfig,
+} from '../commands/channel/config-utils.js';
+import { loadChannelsConfig } from '../commands/channel/runtime.js';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 export {
   createDefaultFsAuditEmit,
@@ -196,6 +209,49 @@ export { getActiveSseCount } from './routes/sse-events.js';
  * `createServeApp` repeatedly would flood stderr with identical lines.
  */
 let warnedDefaultTrust = false;
+
+function loadServeChannelWebhookConfigs(
+  workspace: string,
+): Record<string, { webhooks?: ReturnType<typeof parseChannelWebhookConfig> }> {
+  const channelsConfig = loadChannelsConfig(workspace);
+  const parsed: Record<
+    string,
+    { webhooks?: ReturnType<typeof parseChannelWebhookConfig> }
+  > = {};
+
+  for (const [channelName, rawConfig] of Object.entries(channelsConfig)) {
+    if (typeof rawConfig !== 'object' || rawConfig === null) {
+      continue;
+    }
+    let webhooks: ReturnType<typeof parseChannelWebhookConfig>;
+    try {
+      webhooks = parseChannelWebhookConfigLenient(
+        channelName,
+        rawConfig as Record<string, unknown>,
+        (source, sourceError) => {
+          const sourceMessage =
+            sourceError instanceof Error
+              ? sourceError.message
+              : String(sourceError);
+          writeStderrLine(
+            `[daemon] Skipping malformed webhook source "${source}" for channel "${channelName}": ${sourceMessage}`,
+          );
+        },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      writeStderrLine(
+        `[daemon] Skipping malformed webhook config for channel "${channelName}": ${message}`,
+      );
+      continue;
+    }
+    if (webhooks) {
+      parsed[channelName] = { webhooks };
+    }
+  }
+
+  return parsed;
+}
 
 function describeRegistryPrimaryForConflict(
   registry: WorkspaceRegistry,
@@ -293,6 +349,7 @@ export interface ServeAppDeps {
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  enqueueChannelWebhookTask?: ChannelWorkerSupervisor['enqueueWebhookTask'];
   /**
    * Stop and relaunch the daemon-managed channel worker so it re-reads
    * settings.json. Wired only when the daemon owns a channel worker; its
@@ -344,6 +401,7 @@ export interface ServeAppDeps {
    */
   clientMcpSenderRegistry?: ClientMcpSenderRegistry;
   workspaceRegistry?: WorkspaceRegistry;
+  createWorkspaceRuntime?: (cwd: string) => Promise<WorkspaceRuntime>;
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
@@ -559,6 +617,7 @@ export function createServeApp(
       sessionShellCommandEnabled,
       multiWorkspaceSessionsEnabled:
         (injectedWorkspaceRegistry?.list().length ?? 1) > 1,
+      ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
     });
   const statusProvider =
     deps.statusProvider ??
@@ -629,6 +688,20 @@ export function createServeApp(
       bridge,
       registry: deps.deviceFlowRegistry,
       providers: deps.deviceFlowProviders,
+      // Phase 4: fan device-flow events out to the primary and every trusted
+      // secondary runtime bridge, so workspace-qualified ACP clients receive
+      // their own flow's events. Resolved lazily: the registry is created
+      // before the workspace registry exists, but by the time a flow emits,
+      // `app.locals` holds the populated registry.
+      resolveEventBridges: () => {
+        const reg = (app.locals as { workspaceRegistry?: WorkspaceRegistry })
+          .workspaceRegistry;
+        if (!reg) return [bridge];
+        return reg
+          .list()
+          .filter((rt) => rt.primary || rt.trusted)
+          .map((rt) => rt.bridge);
+      },
     });
 
   const { daemonLog } = deps;
@@ -709,6 +782,8 @@ export function createServeApp(
   const primaryBridge = primaryRuntime.bridge;
   const primaryWorkspace = primaryRuntime.workspaceService;
   const primaryRouteFileSystemFactory = primaryRuntime.routeFileSystemFactory;
+  const workspaceQualifiedAcpEnabled =
+    resolveAcpHttpEnabled() && workspaceRegistry.list().length > 1;
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -738,6 +813,10 @@ export function createServeApp(
     app.use(denyBrowserOriginCors);
   }
   app.use(hostAllowlist(opts.hostname, getPort));
+  const rateLimiter = installRateLimiter(app, opts, daemonLog, {
+    mount: false,
+    workspaceQualifiedAcpEnabled,
+  });
 
   const healthDemoRoutes = createHealthDemoRoutes({
     opts,
@@ -780,12 +859,23 @@ export function createServeApp(
     mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
   }
 
+  if (deps.enqueueChannelWebhookTask) {
+    registerChannelWebhookRoutes(app, {
+      channelsConfig: loadServeChannelWebhookConfigs(primaryBoundWorkspace),
+      safeBody,
+      enqueueWebhookTask: deps.enqueueChannelWebhookTask,
+      rateLimiter,
+      daemonLog,
+    });
+  }
+
   app.use(bearerAuth(opts.token));
 
-  // Rate limiter: after auth (only count authenticated requests),
-  // before body parser (reject early without burning JSON.parse CPU).
-  const rateLimiter = installRateLimiter(app, opts, daemonLog);
-  installJsonBodyParser(app);
+  // Rate limiter: after auth (only count authenticated requests), except
+  // webhook routes which use their own shared-secret auth before bearerAuth.
+  if (rateLimiter) {
+    app.use(rateLimiter.middleware);
+  }
 
   if (!healthDemoRoutes.exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
@@ -795,6 +885,8 @@ export function createServeApp(
     // leaks the full API surface).
     healthDemoRoutes.register(app);
   }
+
+  installJsonBodyParser(app);
 
   // Mutation-route gate factory. Non-strict mode is passthrough;
   // `{ strict: true }` requires a token even on loopback defaults.
@@ -985,6 +1077,14 @@ export function createServeApp(
     workspaceRegistry,
     mutate,
     safeBody,
+  });
+
+  // Dynamic workspace registration.
+  registerWorkspaceManagementRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    createWorkspaceRuntime: deps.createWorkspaceRuntime,
   });
 
   const broadcastSettingsChanged = (
@@ -1254,6 +1354,9 @@ export function createServeApp(
   // route through the JSON error contract below.
   acpHandleRef.current = mountAcpHttp(app, primaryBridge, {
     boundWorkspace: primaryBoundWorkspace,
+    // Phase 4 (issue #6378): pass the registry so `/workspaces/:workspace/acp`
+    // mounts a per-runtime ACP dispatcher for each registered workspace.
+    workspaceRegistry,
     archiveCoordinator,
     workspace: primaryWorkspace,
     fsFactory: primaryRouteFileSystemFactory,

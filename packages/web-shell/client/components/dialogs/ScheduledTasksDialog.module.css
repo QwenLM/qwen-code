@@ -104,26 +104,6 @@
   color: var(--muted-foreground);
 }
 
-.radioGroup {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-  padding: 2px 0;
-}
-
-.radioOption {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.radioOption input {
-  cursor: pointer;
-  margin: 0;
-}
-
 .input,
 .select {
   width: 100%;

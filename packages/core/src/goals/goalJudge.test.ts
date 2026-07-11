@@ -312,6 +312,23 @@ describe('judgeGoal', () => {
     expect(text).not.toContain('Condition: done"');
   });
 
+  it('does not truncate long conditions in the judge prompt', async () => {
+    const client = makeMockClient({});
+    const config = makeConfig({ client });
+    const condition = `${'x'.repeat(4_001)}-goal-condition-end`;
+
+    await judgeGoal(config, {
+      condition,
+      lastAssistantText: 'not done',
+      signal: new AbortController().signal,
+    });
+
+    const [contents] = client.generateContent.mock.calls[0];
+    const wrapped = contents.at(-1) as Content;
+    const text = (wrapped.parts ?? []).map((p) => p.text ?? '').join('');
+    expect(text).toContain(JSON.stringify(condition));
+  });
+
   it('uses a bounded history tail without cloning the full session when available', async () => {
     const tail: Content[] = [
       { role: 'user', parts: [{ text: 'recent prompt' }] },

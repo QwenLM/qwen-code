@@ -252,6 +252,7 @@ export interface ChatRecord {
     | 'cron'
     | 'mid_turn_user_message'
     | 'custom_title'
+    | 'parent_session'
     | 'rewind'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
@@ -301,6 +302,7 @@ export interface ChatRecord {
     | AtCommandRecordPayload
     | AttributionSnapshotPayload
     | CustomTitleRecordPayload
+    | ParentSessionRecordPayload
     | NotificationRecordPayload
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
@@ -431,6 +433,17 @@ export interface CustomTitleRecordPayload {
 }
 
 /**
+ * Stored payload recording the session that spawned this one (a
+ * `create_sub_session` caller). Immutable — written once, near the start of the
+ * transcript. Lets a management UI link a sub-session back to its parent, and
+ * survives a daemon restart via the session-list transcript scan.
+ */
+export interface ParentSessionRecordPayload {
+  /** Id of the session that spawned this one. */
+  parentSessionId: string;
+}
+
+/**
  * Stored payload for UI telemetry replay.
  */
 export interface UiTelemetryRecordPayload {
@@ -523,6 +536,10 @@ export class ChatRecordingService {
    * (safe default) without rewriting the persisted record.
    */
   private currentTitleSource: TitleSource | undefined;
+  /** Parent session id once recorded, so {@link recordParentSession} is
+   * idempotent — a bridge retry (after a failed response) must not append a
+   * second `parent_session` record for the same immutable lineage. */
+  private currentParentSessionId: string | undefined;
   /**
    * How many auto-title attempts have been made this process.
    *
@@ -1361,6 +1378,40 @@ export class ChatRecordingService {
       return true;
     } catch (error) {
       debugLogger.error('Error saving custom title record:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Records the session that spawned this one (a `create_sub_session` caller).
+   * Appended as a system record near the start of the transcript so the parent
+   * lineage persists with the session and survives a daemon restart (the
+   * session list rehydrates it by scanning the transcript). Immutable — written
+   * once when the sub-session is created.
+   *
+   * @param parentSessionId Id of the spawning session.
+   * @returns true once the record is durably written, false on I/O error.
+   *   AWAITS the write (via the strict append path) rather than the
+   *   fire-and-forget `appendRecord`, whose swallowed rejection would let the
+   *   caller report `persisted: true` for a record that never reached disk.
+   */
+  async recordParentSession(parentSessionId: string): Promise<boolean> {
+    // Idempotent: the lineage is immutable and written once. A bridge retry
+    // (the write succeeded but its response was lost) must not append a second
+    // record — the session would then carry two `parent_session` entries.
+    if (this.currentParentSessionId === parentSessionId) return true;
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'parent_session',
+        systemPayload: { parentSessionId },
+      };
+      await this.appendRecordStrict(record);
+      this.currentParentSessionId = parentSessionId;
+      return true;
+    } catch (error) {
+      debugLogger.error('Error saving parent session record:', error);
       return false;
     }
   }

@@ -116,6 +116,16 @@ export interface DaemonWorkspaceContextValue {
   error?: Error;
   capabilities?: DaemonCapabilities;
   getCapabilities?: () => Promise<DaemonCapabilities>;
+  /**
+   * Force a fresh `/capabilities` fetch and push the result into the
+   * provider's `capabilities` state so consumers re-render. Unlike
+   * `getCapabilities` — which memoizes its first in-flight promise for the
+   * lifetime of the connection and never calls `setCapabilities` outside the
+   * initial mount — this bypasses that cache. Use it after a mutation that
+   * changes capabilities (e.g. registering a workspace) so the new state
+   * shows without a full page reload.
+   */
+  refreshCapabilities?: () => Promise<DaemonCapabilities>;
   actions: DaemonWorkspaceActions;
 }
 
@@ -171,6 +181,11 @@ export interface DaemonScheduledTaskRun {
    * daemon's `CronTaskRun.sessionId` so run-attribution isn't silently dropped
    * on the client (not surfaced in the UI yet). */
   sessionId?: string;
+  /** READ-ONLY legacy compat: a pre-removal version stamped this on a fire whose
+   * precondition withheld the prompt. Never written now, but kept so the UI can
+   * still mark such stored entries "skipped" instead of showing them as ordinary
+   * successful runs. Absent = a real dispatched run. */
+  withheld?: boolean;
 }
 
 export interface DaemonScheduledTask {
@@ -188,13 +203,6 @@ export interface DaemonScheduledTask {
   /** Id of the dedicated session this task is bound to — its transcript is the
    * task's run history. Null for unbound tool-created/legacy tasks. */
   sessionId: string | null;
-  /** How each fire runs. `'shared'` (default) runs in the bound session so runs
-   * accumulate in one transcript; `'isolated'` dispatches each scheduled fire
-   * into a fresh sub-session daemon-side, so the bound session's transcript
-   * stays empty. Normalized (never undefined). Note: `runs[].sessionId` always
-   * records the anchor (bound) session — the sub-session id is not surfaced
-   * here. */
-  runMode: 'shared' | 'isolated';
   /** Bounded, newest-last history of recent fires. Empty for tasks that have
    * not fired (and, by nature, for one-shots — they are deleted on fire). */
   runs: DaemonScheduledTaskRun[];
@@ -209,9 +217,6 @@ export interface DaemonCreateScheduledTaskRequest {
   recurring?: boolean;
   /** Defaults to true. */
   enabled?: boolean;
-  /** Defaults to `'shared'` (the #6389 single-session model). `'isolated'`
-   * spawns a fresh session per fire. */
-  runMode?: 'shared' | 'isolated';
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are
@@ -222,7 +227,13 @@ export interface DaemonUpdateScheduledTaskRequest {
   name?: string | null;
   recurring?: boolean;
   enabled?: boolean;
-  runMode?: 'shared' | 'isolated';
+}
+
+export interface DaemonAddWorkspaceResult {
+  id: string;
+  cwd: string;
+  primary: boolean;
+  trusted: boolean;
 }
 
 export interface DaemonWorkspaceActions {
@@ -412,4 +423,7 @@ export interface DaemonWorkspaceActions {
   installAuthProvider(
     req: DaemonAuthProviderInstallRequest,
   ): Promise<DaemonAuthProviderInstallResult>;
+
+  // Workspace management
+  addWorkspace(cwd: string): Promise<DaemonAddWorkspaceResult>;
 }

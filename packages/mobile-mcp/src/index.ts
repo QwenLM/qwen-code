@@ -53,12 +53,10 @@ const startSseServer = async (host: string, port: number) => {
 
   app.get('/mcp', (req, res) => {
     if (transport) {
-      res
-        .status(409)
-        .json({
-          error:
-            'Another client is already connected. Disconnect the existing client first.',
-        });
+      res.status(409).json({
+        error:
+          'Another client is already connected. Disconnect the existing client first.',
+      });
       return;
     }
 

@@ -219,7 +219,9 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell 模式',
   'YOLO mode': 'YOLO 模式',
-  'Auto mode': 'Auto 模式',
+  'Auto mode': '自動模式',
+  'auto_mode.entry_notice':
+    '已啟用自動模式。\n   LLM 分類器會評估每次工具呼叫 — 安全操作將自動批准，\n   有風險的操作將被阻止。退出：Shift+Tab 或 /approval-mode default。',
   'plan mode': '規劃模式',
   'auto-accept edits': '自動接受編輯',
   'Accepting edits': '接受編輯',
@@ -2253,4 +2255,17 @@ export default {
     '擴充內容重新整理失敗。執行 /reload-plugins 來套用更新。',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     '擴充重新載入未完成。執行 /reload-plugins 重試。',
+  'Precondition check': '前置條件檢查',
+  'Precondition not met — this scheduled run was skipped.':
+    '前置條件不滿足 —— 已略過本次定時執行。',
+  'The precondition check was cancelled — this scheduled run was skipped.':
+    '前置條件檢查已取消 —— 已略過本次定時執行。',
+  'The precondition check was interrupted — this scheduled run was skipped.':
+    '前置條件檢查被中斷 —— 已略過本次定時執行。',
+  'The precondition check failed — this scheduled run was skipped.':
+    '前置條件檢查失敗 —— 已略過本次定時執行。',
+  'Running this scheduled task in a new session: {{link}}':
+    '正在新會話中執行該定時任務：{{link}}',
+  'This scheduled run could not be started: {{error}}':
+    '本次定時執行無法啟動：{{error}}',
 };

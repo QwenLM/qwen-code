@@ -61,6 +61,23 @@
   overflow: hidden;
 }
 
+.artifactResizeHandle {
+  flex: 0 0 8px;
+  width: 8px;
+  margin-left: -4px;
+  cursor: col-resize;
+  position: relative;
+  z-index: 2;
+  touch-action: none;
+}
+
+.artifactResizeHandle::after {
+  content: '';
+  position: absolute;
+  inset: 0 3px;
+  background: transparent;
+}
+
 /* Positioning context so the scheduled-tasks page (position:absolute) covers
    exactly the chat pane. Only applied while the page is shown, so normal chat
    layout is untouched. */
@@ -174,6 +191,12 @@
 .hamburgerButton svg {
   width: 20px;
   height: 20px;
+}
+
+@media (max-width: 900px) {
+  .artifactResizeHandle {
+    display: none;
+  }
 }
 
 @media (max-width: 760px) {
@@ -678,6 +701,14 @@
   padding: 0;
 }
 
+.composerHeader {
+  margin-bottom: 8px;
+}
+
+.customFooter {
+  flex-shrink: 0;
+}
+
 /* Esc-clear hint, shown in the composer's top status slot (where the streaming
    loader sits) — the two never coexist, so it stays clear of the queue. */
 .escClearStatus {
@@ -689,6 +720,76 @@
 
 .emptyWelcomeFooter {
   padding: 12px 0 0;
+}
+
+.mobileWelcomeFooterMiddle {
+  display: none;
+}
+
+.mobileWelcomeGroup {
+  display: contents;
+}
+
+@media (max-width: 760px) {
+  .appChatEmpty .chatPaneWithMobileComposerBottom {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .appChatEmpty .chatViewWithMobileComposerBottom .footer {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    margin-top: 0;
+  }
+
+  .appChatEmpty .mobileWelcomeGroup {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .appChatEmpty .chatViewWithWelcomeMiddle .footerWithCustomFooter {
+    display: contents;
+  }
+
+  .appChatEmpty .chatViewWithWelcomeMiddle .footerWithCustomFooter .composer {
+    order: 2;
+    width: min(100%, var(--chat-shell-width));
+    margin: 0 auto;
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+
+  .appChatEmpty .chatViewWithWelcomeMiddle .mobileWelcomeFooterMiddle {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: flex-start;
+    justify-content: center;
+    width: min(100%, var(--chat-shell-width));
+    margin: 0 auto;
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+
+  .appChatEmpty .chatViewWithWelcomeMiddle .customFooter {
+    order: 1;
+    display: flex;
+    flex: 0 0 auto;
+    align-items: flex-start;
+    justify-content: center;
+    width: min(100%, var(--chat-shell-width));
+    margin: 0 auto;
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+  .desktopWelcomeFooter {
+    display: none;
+  }
+
+  .emptyWelcomeFooter {
+    text-align: center;
+  }
 }
 
 .queuedPrompts {

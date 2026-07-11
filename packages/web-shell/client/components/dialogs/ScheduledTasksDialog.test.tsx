@@ -30,7 +30,6 @@ interface MockTask {
   lastFiredAt: number | null;
   nextRunAt: number | null;
   sessionId: string | null;
-  runMode?: 'shared' | 'isolated';
   runs: Array<{
     at: number;
     kind?: 'scheduled' | 'catch-up';
@@ -131,17 +130,7 @@ function findButtonContaining(label: string): HTMLButtonElement | undefined {
   );
 }
 
-// Run mode is a radio group; the frequency picker is the (only) <select>.
-function findRunModeRadio(
-  value: 'shared' | 'isolated',
-): HTMLInputElement | undefined {
-  return Array.from(
-    document.querySelectorAll<HTMLInputElement>(
-      'input[type="radio"][name="runMode"]',
-    ),
-  ).find((r) => r.value === value);
-}
-
+// The frequency picker is the (only) <select> with a weekdays option.
 function findFrequencySelect(): HTMLSelectElement | undefined {
   return Array.from(document.querySelectorAll('select')).find(
     (s) => !!s.querySelector('option[value="weekdays"]'),
@@ -231,8 +220,6 @@ describe('ScheduledTasksDialog editing', () => {
       cron: '30 12 * * 1-5',
       prompt: 'summarize the day',
       name: 'Digest',
-      // A task with no runMode prefills + saves as the default 'shared'.
-      runMode: 'shared',
     });
     expect(actions.createScheduledTask).not.toHaveBeenCalled();
   });
@@ -573,51 +560,6 @@ describe('ScheduledTasksDialog editing', () => {
       't1',
       expect.objectContaining({ cron: '0 9 * * 1,3,5' }),
     );
-  });
-});
-
-describe('ScheduledTasksDialog run mode', () => {
-  it('offers run-mode radios defaulting to shared in the create form', async () => {
-    await mount([]);
-    click(findButton('New scheduled task'));
-    // Both modes are offered as radios; shared is selected by default.
-    expect(findRunModeRadio('shared')?.checked).toBe(true);
-    expect(findRunModeRadio('isolated')?.checked).toBe(false);
-  });
-
-  it('prefills and saves runMode for an isolated task', async () => {
-    await mount([baseTask({ runMode: 'isolated', sessionId: 'anchor-1' })]);
-    click(document.querySelector('[aria-label="Edit"]'));
-
-    expect(findRunModeRadio('isolated')?.checked).toBe(true);
-    expect(findRunModeRadio('shared')?.checked).toBe(false);
-
-    click(findButton('Save'));
-    await flush();
-    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
-      't1',
-      expect.objectContaining({ runMode: 'isolated' }),
-    );
-  });
-
-  it('opens the bound session for an isolated task, same as shared', async () => {
-    const onOpenSession = vi.fn();
-    await mount(
-      [
-        baseTask({
-          runMode: 'isolated',
-          sessionId: 'anchor-1',
-          runs: [
-            { at: 1_700_000_100_000, kind: 'scheduled', sessionId: 'anchor-1' },
-          ],
-        }),
-      ],
-      { onOpenSession },
-    );
-    // Isolated uses the SAME bound-session history button as shared — its
-    // transcript shows the model dispatching each run into a sub-session.
-    click(findButton('View conversation (1)'));
-    expect(onOpenSession).toHaveBeenCalledWith('anchor-1');
   });
 });
 

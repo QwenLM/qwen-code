@@ -116,6 +116,7 @@ describe('ProcessTransport', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -525,8 +526,97 @@ describe('ProcessTransport', () => {
       vi.advanceTimersByTime(5000);
 
       expect(mockChildProcess.kill).toHaveBeenCalledWith('SIGKILL');
+    });
 
-      vi.useRealTimers();
+    it('should escalate abort-triggered SIGTERM to SIGKILL after timeout', () => {
+      vi.useFakeTimers();
+
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+
+      mockChildProcess.kill = vi.fn((signal?: NodeJS.Signals | number) => {
+        if (signal === 'SIGTERM') {
+          mockChildProcess.killed = true;
+        }
+        return true;
+      }) as unknown as typeof mockChildProcess.kill;
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const abortController = new AbortController();
+      new ProcessTransport({
+        pathToQwenExecutable: 'qwen',
+        abortController,
+      });
+
+      abortController.abort();
+
+      expect(mockChildProcess.kill).toHaveBeenCalledWith('SIGTERM');
+
+      vi.advanceTimersByTime(5000);
+
+      expect(mockChildProcess.kill).toHaveBeenCalledWith('SIGKILL');
+    });
+
+    it('should escalate close-triggered SIGTERM even after killed becomes true', async () => {
+      vi.useFakeTimers();
+
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+
+      mockChildProcess.kill = vi.fn((signal?: NodeJS.Signals | number) => {
+        if (signal === 'SIGTERM') {
+          mockChildProcess.killed = true;
+        }
+        return true;
+      }) as unknown as typeof mockChildProcess.kill;
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const transport = new ProcessTransport({
+        pathToQwenExecutable: 'qwen',
+      });
+
+      await transport.close();
+
+      expect(mockChildProcess.kill).toHaveBeenCalledWith('SIGTERM');
+
+      vi.advanceTimersByTime(5000);
+
+      expect(mockChildProcess.kill).toHaveBeenCalledWith('SIGKILL');
+    });
+
+    it('should clear the escalation timer when the child exits promptly', () => {
+      vi.useFakeTimers();
+
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const abortController = new AbortController();
+      new ProcessTransport({
+        pathToQwenExecutable: 'qwen',
+        abortController,
+      });
+
+      abortController.abort();
+      mockChildProcess.exitCode = 0;
+      mockChildProcess.emit('close', 0, null);
+
+      vi.advanceTimersByTime(5000);
+
+      expect(mockChildProcess.kill).toHaveBeenCalledTimes(1);
+      expect(mockChildProcess.kill).not.toHaveBeenCalledWith('SIGKILL');
     });
 
     it('should be idempotent when calling close() multiple times', async () => {

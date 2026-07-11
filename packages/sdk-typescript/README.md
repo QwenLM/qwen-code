@@ -314,6 +314,45 @@ const result = query({
 });
 ```
 
+### Handling `ask_user_question`
+
+When the model needs a decision from the user it calls the built-in
+`ask_user_question` tool. The SDK surfaces this through the same
+`canUseTool` callback: the tool input contains a `questions` array, and you
+return the collected answers via `updatedInput.answers`. `answers` is an
+object keyed by the question's index (as a string), where each value is the
+label of the chosen option (or free-form text when the user picks "Other").
+
+```typescript
+import { query, type CanUseTool } from '@qwen-code/sdk';
+
+const canUseTool: CanUseTool = async (toolName, input, { signal }) => {
+  if (toolName === 'ask_user_question') {
+    const questions = input.questions as Array<{
+      question: string;
+      header: string;
+      options: Array<{ label: string; description: string }>;
+    }>;
+
+    // Present the questions to the user however your app sees fit, then
+    // build an index-keyed map of their answers.
+    const answers: Record<string, string> = {};
+    for (let i = 0; i < questions.length; i++) {
+      answers[String(i)] = await promptUserToChoose(questions[i]);
+    }
+
+    // Return the answers through `updatedInput.answers` — the CLI forwards
+    // them to the tool so the model receives the user's decisions.
+    return { behavior: 'allow', updatedInput: { ...input, answers } };
+  }
+
+  return { behavior: 'allow', updatedInput: input };
+};
+```
+
+> If you return `allow` without any `answers`, the tool reports that no
+> answer was provided; return `deny` to signal the user declined.
+
 ### With External MCP Servers
 
 ```typescript
