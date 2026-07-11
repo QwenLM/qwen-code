@@ -25,6 +25,7 @@ import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
+import { ToolNames } from './tool-names.js';
 
 type ToolParams = Record<string, unknown>;
 
@@ -193,6 +194,9 @@ export class ToolRegistry {
   // tool's schema is included in subsequent function-declaration lists even
   // though it would normally be hidden.
   private revealedDeferred: Set<string> = new Set();
+  // Current-schema fingerprints that have been shown to the model through
+  // ToolSearch and are therefore eligible for deferred_tool_call proxy routing.
+  private proxySchemaPresentations: Map<string, string> = new Map();
   private config: Config;
   private mcpClientManager: McpClientManager;
 
@@ -247,6 +251,11 @@ export class ToolRegistry {
    * @param tool - The tool object containing schema and execution logic.
    */
   registerTool(tool: AnyDeclarativeTool): void {
+    if (tool.name === ToolNames.DEFERRED_TOOL_CALL) {
+      throw new Error(
+        `"${ToolNames.DEFERRED_TOOL_CALL}" is a reserved Qwen Code tool name.`,
+      );
+    }
     if (this.isToolDisabled(tool.name)) {
       debugLogger.info(
         `Tool "${tool.name}" skipped: present in disabledTools set.`,
@@ -297,7 +306,19 @@ export class ToolRegistry {
    * Registers a lazy tool factory. The tool module is not imported and the tool
    * is not instantiated until {@link ensureTool} or {@link warmAll} is called.
    */
-  registerFactory(name: string, factory: ToolFactory): void {
+  registerFactory(
+    name: string,
+    factory: ToolFactory,
+    options?: { allowReservedName?: boolean },
+  ): void {
+    if (
+      name === ToolNames.DEFERRED_TOOL_CALL &&
+      options?.allowReservedName !== true
+    ) {
+      throw new Error(
+        `"${ToolNames.DEFERRED_TOOL_CALL}" is a reserved Qwen Code tool name.`,
+      );
+    }
     if (this.isToolDisabled(name)) {
       debugLogger.info(
         `Tool factory "${name}" skipped: present in disabledTools set.`,
@@ -392,6 +413,7 @@ export class ToolRegistry {
         // this a re-discovered tool of the same name would inherit
         // stale "revealed" state across the disconnect/reconnect.
         this.revealedDeferred.delete(tool.name);
+        this.proxySchemaPresentations.delete(tool.name);
       }
     }
   }
@@ -411,6 +433,7 @@ export class ToolRegistry {
         // checks reveal state) before the model has any way to know
         // the tool exists this session.
         this.revealedDeferred.delete(name);
+        this.proxySchemaPresentations.delete(name);
       }
     }
   }
@@ -540,6 +563,7 @@ export class ToolRegistry {
         // disconnect (would surface in declarations before any
         // ToolSearch call this session).
         this.revealedDeferred.delete(name);
+        this.proxySchemaPresentations.delete(name);
       }
     }
 
@@ -731,6 +755,38 @@ export class ToolRegistry {
     return this.revealedDeferred.has(name);
   }
 
+  private getSchemaFingerprint(tool: AnyDeclarativeTool): string {
+    return JSON.stringify(tool.schema);
+  }
+
+  isProxyEligibleDeferredTool(name: string): boolean {
+    const tool = this.tools.get(name);
+    return !!(
+      tool &&
+      tool.shouldDefer &&
+      !tool.alwaysLoad &&
+      !this.config.getVisibleTools().has(name)
+    );
+  }
+
+  markProxySchemaPresented(name: string): boolean {
+    const tool = this.tools.get(name);
+    if (!tool || !this.isProxyEligibleDeferredTool(name)) {
+      return false;
+    }
+    this.proxySchemaPresentations.set(name, this.getSchemaFingerprint(tool));
+    return true;
+  }
+
+  hasPresentedProxySchema(name: string): boolean {
+    const tool = this.tools.get(name);
+    if (!tool) return false;
+    return (
+      this.proxySchemaPresentations.get(name) ===
+      this.getSchemaFingerprint(tool)
+    );
+  }
+
   /**
    * Whether a deferred tool is currently hidden from the model's
    * function-declaration list. Returns `true` when the tool:
@@ -757,6 +813,7 @@ export class ToolRegistry {
    */
   clearRevealedDeferredTools(): void {
     this.revealedDeferred.clear();
+    this.proxySchemaPresentations.clear();
   }
 
   /**

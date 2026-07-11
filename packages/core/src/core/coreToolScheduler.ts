@@ -479,6 +479,10 @@ function canonicalToolName(toolName: string): string {
   return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
 }
 
+function providerToolName(request: ToolCallRequestInfo): string {
+  return request.providerName ?? request.name;
+}
+
 function isFilesystemPathTool(toolName: string): boolean {
   return FS_PATH_TOOL_NAMES.has(canonicalToolName(toolName));
 }
@@ -850,7 +854,7 @@ const createErrorResponse = (
     {
       functionResponse: {
         id: request.callId,
-        name: request.name,
+        name: providerToolName(request),
         response: { error: error.message },
       },
     },
@@ -873,7 +877,7 @@ const createCancelledResponse = (
       {
         functionResponse: {
           id: request.callId,
-          name: request.name,
+          name: providerToolName(request),
           response: { error: errorMessage },
         },
       },
@@ -1400,7 +1404,7 @@ export class CoreToolScheduler {
                   {
                     functionResponse: {
                       id: currentCall.request.callId,
-                      name: currentCall.request.name,
+                      name: providerToolName(currentCall.request),
                       response: {
                         error: errorMessage,
                       },
@@ -1783,6 +1787,63 @@ export class CoreToolScheduler {
     return `Tool "${unknownToolName}" not found in registry. Tools must use the exact names that are registered.${suggestion}`;
   }
 
+  private async normalizeDeferredToolCall(
+    request: ToolCallRequestInfo,
+  ): Promise<ToolCallRequestInfo | Error> {
+    if (request.name !== ToolNames.DEFERRED_TOOL_CALL) {
+      return request;
+    }
+
+    const targetName = request.args['name'];
+    const targetArgs = request.args['arguments'];
+    if (typeof targetName !== 'string' || targetName.trim().length === 0) {
+      return new Error(
+        '`deferred_tool_call.name` must be the exact deferred tool name returned by tool_search.',
+      );
+    }
+    if (
+      !targetArgs ||
+      typeof targetArgs !== 'object' ||
+      Array.isArray(targetArgs)
+    ) {
+      return new Error(
+        '`deferred_tool_call.arguments` must be an object matching the target tool schema returned by tool_search.',
+      );
+    }
+
+    const canonicalTarget = canonicalToolName(targetName);
+    if (canonicalTarget === ToolNames.DEFERRED_TOOL_CALL) {
+      return new Error(
+        '`deferred_tool_call` cannot target itself. Use tool_search to fetch the real deferred tool schema, then call deferred_tool_call with that real target name.',
+      );
+    }
+
+    const targetTool = await this.toolRegistry.ensureTool(canonicalTarget);
+    if (!targetTool) {
+      return new Error(
+        `Deferred tool "${targetName}" is not available. Use tool_search to find the current deferred tool name and schema.`,
+      );
+    }
+    if (!this.toolRegistry.isProxyEligibleDeferredTool(canonicalTarget)) {
+      return new Error(
+        `Tool "${canonicalTarget}" is not eligible for deferred_tool_call. Call directly if it is visible, or use tool_search for deferred tools.`,
+      );
+    }
+    if (!this.toolRegistry.hasPresentedProxySchema(canonicalTarget)) {
+      return new Error(
+        `Schema for deferred tool "${canonicalTarget}" has not been fetched in the active context. Use tool_search first, then call deferred_tool_call on a later turn.`,
+      );
+    }
+
+    return {
+      ...request,
+      name: canonicalTarget,
+      args: targetArgs as Record<string, unknown>,
+      providerName: ToolNames.DEFERRED_TOOL_CALL,
+      providerArgs: request.args,
+    };
+  }
+
   /**
    * For an `mcp__<server>__<tool>` name whose tool is not registered, explains
    * *why* in MCP terms — the server was removed this session, is not (or no
@@ -1982,7 +2043,22 @@ export class CoreToolScheduler {
 
       const newToolCalls: ToolCall[] = [];
       for (const reqInfo of requestsToProcess) {
-        const canonicalName = canonicalToolName(reqInfo.name);
+        const normalizedRequest = await this.normalizeDeferredToolCall(reqInfo);
+        if (normalizedRequest instanceof Error) {
+          newToolCalls.push({
+            status: 'error',
+            request: reqInfo,
+            response: createErrorResponse(
+              reqInfo,
+              normalizedRequest,
+              ToolErrorType.INVALID_TOOL_PARAMS,
+            ),
+            durationMs: 0,
+          });
+          continue;
+        }
+        const effectiveReqInfo = normalizedRequest;
+        const canonicalName = canonicalToolName(effectiveReqInfo.name);
 
         // Check if the tool is excluded due to permissions/environment restrictions
         // This check should happen before registry lookup to provide a clear permission error
@@ -1994,12 +2070,12 @@ export class CoreToolScheduler {
           const ruleInfo = matchingRule
             ? ` Matching deny rule: "${matchingRule}".`
             : '';
-          const permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.${ruleInfo}`;
+          const permissionErrorMessage = `Qwen Code requires permission to use "${effectiveReqInfo.name}", but that permission was declined.${ruleInfo}`;
           newToolCalls.push({
             status: 'error',
-            request: reqInfo,
+            request: effectiveReqInfo,
             response: createErrorResponse(
-              reqInfo,
+              effectiveReqInfo,
               new Error(permissionErrorMessage),
               ToolErrorType.EXECUTION_DENIED,
             ),
@@ -2021,9 +2097,9 @@ export class CoreToolScheduler {
               const permissionErrorMessage = `Qwen Code requires permission to use ${excludedMatch}, but that permission was declined.`;
               newToolCalls.push({
                 status: 'error',
-                request: reqInfo,
+                request: effectiveReqInfo,
                 response: createErrorResponse(
-                  reqInfo,
+                  effectiveReqInfo,
                   new Error(permissionErrorMessage),
                   ToolErrorType.EXECUTION_DENIED,
                 ),
@@ -2040,9 +2116,9 @@ export class CoreToolScheduler {
           const errorMessage = await this.getToolNotFoundMessage(reqInfo.name);
           newToolCalls.push({
             status: 'error',
-            request: reqInfo,
+            request: effectiveReqInfo,
             response: createErrorResponse(
-              reqInfo,
+              effectiveReqInfo,
               new Error(errorMessage),
               ToolErrorType.TOOL_NOT_REGISTERED,
             ),
@@ -2053,9 +2129,12 @@ export class CoreToolScheduler {
 
         // Reject file-modifying calls when truncated to prevent
         // writing incomplete content, even if params failed schema validation.
-        if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
+        if (
+          effectiveReqInfo.wasOutputTruncated &&
+          toolInstance.kind === Kind.Edit
+        ) {
           const count = this.recordRetryableToolError(
-            reqInfo.name,
+            effectiveReqInfo.name,
             TRUNCATION_EDIT_REJECTION,
           );
           const truncationError = new Error(
@@ -2065,10 +2144,10 @@ export class CoreToolScheduler {
           );
           newToolCalls.push({
             status: 'error',
-            request: reqInfo,
+            request: effectiveReqInfo,
             tool: toolInstance,
             response: createErrorResponse(
-              reqInfo,
+              effectiveReqInfo,
               truncationError,
               ToolErrorType.OUTPUT_TRUNCATED,
             ),
@@ -2079,12 +2158,12 @@ export class CoreToolScheduler {
 
         const invocationOrError = this.buildInvocation(
           toolInstance,
-          reqInfo.args,
-          reqInfo.callId,
-          reqInfo.prompt_id,
+          effectiveReqInfo.args,
+          effectiveReqInfo.callId,
+          effectiveReqInfo.prompt_id,
         );
         if (invocationOrError instanceof Error) {
-          const displayError = reqInfo.wasOutputTruncated
+          const displayError = effectiveReqInfo.wasOutputTruncated
             ? new Error(
                 `${invocationOrError.message} ${TRUNCATION_PARAM_GUIDANCE}`,
               )
@@ -2094,7 +2173,7 @@ export class CoreToolScheduler {
           // (tool, error message) pair so a different validation mistake on
           // the same tool starts fresh rather than tripping the threshold.
           const count = this.recordRetryableToolError(
-            reqInfo.name,
+            effectiveReqInfo.name,
             invocationOrError.message,
           );
 
@@ -2107,10 +2186,10 @@ export class CoreToolScheduler {
 
           newToolCalls.push({
             status: 'error',
-            request: reqInfo,
+            request: effectiveReqInfo,
             tool: toolInstance,
             response: createErrorResponse(
-              reqInfo,
+              effectiveReqInfo,
               finalError,
               ToolErrorType.INVALID_TOOL_PARAMS,
             ),
@@ -2120,11 +2199,11 @@ export class CoreToolScheduler {
         }
 
         // Reset all validation retry counters for this tool since it passed validation
-        this.clearRetryCountsForTool(reqInfo.name);
+        this.clearRetryCountsForTool(effectiveReqInfo.name);
 
         newToolCalls.push({
           status: 'validating',
-          request: reqInfo,
+          request: effectiveReqInfo,
           tool: toolInstance,
           invocation: invocationOrError,
           startTime: Date.now(),
@@ -4150,7 +4229,11 @@ export class CoreToolScheduler {
         contentLength =
           typeof content === 'string' ? content.length : undefined;
 
-        const response = convertToFunctionResponse(toolName, callId, content);
+        const response = convertToFunctionResponse(
+          providerToolName(scheduledCall.request),
+          callId,
+          content,
+        );
         const artifacts = [
           ...(toolResult.artifacts ?? []),
           ...(postToolUseArtifacts ?? []),
@@ -4170,6 +4253,11 @@ export class CoreToolScheduler {
             ? { modelOverride: toolResult.modelOverride }
             : {}),
           ...(artifacts.length > 0 ? { artifacts } : {}),
+          ...(toolResult.deferredToolPresentations
+            ? {
+                deferredToolPresentations: toolResult.deferredToolPresentations,
+              }
+            : {}),
         };
         this.setStatusInternal(callId, 'success', successResponse);
         safeSetStatus(span, { code: SpanStatusCode.OK });
@@ -4499,6 +4587,7 @@ export class CoreToolScheduler {
         if (this.onAllToolCallsComplete) {
           await this.onAllToolCallsComplete(completedCalls);
         }
+        this.commitDeferredToolPresentations(completedCalls);
       } finally {
         try {
           this.notifyToolCallsUpdate();
@@ -4687,6 +4776,17 @@ export class CoreToolScheduler {
   private notifyToolCallsUpdate(): void {
     if (this.onToolCallsUpdate) {
       this.onToolCallsUpdate([...this.toolCalls]);
+    }
+  }
+
+  private commitDeferredToolPresentations(
+    completedCalls: CompletedToolCall[],
+  ): void {
+    for (const call of completedCalls) {
+      if (call.status !== 'success') continue;
+      for (const name of call.response.deferredToolPresentations ?? []) {
+        this.toolRegistry.markProxySchemaPresented(name);
+      }
     }
   }
 

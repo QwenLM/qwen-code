@@ -125,6 +125,13 @@ export interface ToolCallRequestInfo {
   providerCallId?: string;
   name: string;
   args: Record<string, unknown>;
+  /**
+   * Provider-visible wrapper name for normalized proxy calls. Internal
+   * scheduling, permission checks, validation, execution and telemetry use
+   * `name`/`args`; model-facing function responses use this field when set.
+   */
+  providerName?: string;
+  providerArgs?: Record<string, unknown>;
   isClientInitiated: boolean;
   prompt_id: string;
   response_id?: string;
@@ -141,6 +148,7 @@ export interface ToolCallResponseInfo {
   contentLength?: number;
   modelOverride?: string;
   artifacts?: ToolArtifact[];
+  deferredToolPresentations?: string[];
 }
 
 function normalizeRequestParts(req: PartListUnion): Part[] {

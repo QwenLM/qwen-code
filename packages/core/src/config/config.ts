@@ -6227,7 +6227,11 @@ export class Config {
     const registerLazy = async (
       toolName: ToolName,
       factory: ToolFactory,
-    ): Promise<void> => {
+      registryOptions?: { allowReservedName?: boolean },
+    ): Promise<boolean> => {
+      if (this.getDisabledTools().has(toolName)) {
+        return false;
+      }
       // PermissionManager handles both the coreTools allowlist (registry-level)
       // and deny rules (runtime-level) in a single check.
       let pmEnabled = true;
@@ -6240,12 +6244,14 @@ export class Config {
           `Failed to check permissions for tool "${toolName}", skipping registration:`,
           error,
         );
-        return;
+        return false;
       }
 
       if (pmEnabled) {
-        registry.registerFactory(toolName, factory);
+        registry.registerFactory(toolName, factory, registryOptions);
+        return true;
       }
+      return false;
     };
 
     // The synthetic structured_output tool is the terminal contract for
@@ -6304,10 +6310,25 @@ export class Config {
     }
 
     // --- Core tools (always registered) ---
-    await registerLazy(ToolNames.TOOL_SEARCH, async () => {
-      const { ToolSearchTool } = await import('../tools/tool-search.js');
-      return new ToolSearchTool(this);
-    });
+    const toolSearchRegistered = await registerLazy(
+      ToolNames.TOOL_SEARCH,
+      async () => {
+        const { ToolSearchTool } = await import('../tools/tool-search.js');
+        return new ToolSearchTool(this);
+      },
+    );
+    if (toolSearchRegistered && !options?.forSubAgent) {
+      await registerLazy(
+        ToolNames.DEFERRED_TOOL_CALL,
+        async () => {
+          const { DeferredToolCallTool } = await import(
+            '../tools/deferred-tool-call.js'
+          );
+          return new DeferredToolCallTool();
+        },
+        { allowReservedName: true },
+      );
+    }
     await registerLazy(ToolNames.READ_MCP_RESOURCE, async () => {
       const { ReadMcpResourceTool } = await import(
         '../tools/read-mcp-resource.js'
@@ -6542,7 +6563,9 @@ export class Config {
       const { registerComputerUseTools } = await import(
         '../tools/computer-use/index.js'
       );
-      await registerComputerUseTools(registerLazy, this);
+      await registerComputerUseTools(async (name, factory) => {
+        await registerLazy(name, factory);
+      }, this);
     }
 
     // Register monitor tool

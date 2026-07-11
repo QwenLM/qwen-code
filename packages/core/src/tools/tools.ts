@@ -500,6 +500,13 @@ export interface ToolResult {
   artifacts?: ToolArtifact[];
 
   /**
+   * Deferred tool schemas that this result has shown to the model and may be
+   * committed for deferred_tool_call routing after the result is accepted into
+   * the active conversation flow.
+   */
+  deferredToolPresentations?: string[];
+
+  /**
    * If this property is present, the tool call is considered a failure.
    */
   error?: {

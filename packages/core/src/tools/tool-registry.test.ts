@@ -17,6 +17,7 @@ import { mcpToTool } from '@google/genai';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import { MockTool } from '../test-utils/mock-tool.js';
+import { ToolNames } from './tool-names.js';
 
 import { McpClientManager } from './mcp-client-manager.js';
 import {
@@ -157,6 +158,23 @@ describe('ToolRegistry', () => {
       const tool = new MockTool({ name: 'mock-tool' });
       toolRegistry.registerTool(tool);
       expect(toolRegistry.getTool('mock-tool')).toBe(tool);
+    });
+
+    it('rejects tools that try to use the reserved deferred_tool_call name', () => {
+      expect(() =>
+        toolRegistry.registerTool(
+          new MockTool({ name: ToolNames.DEFERRED_TOOL_CALL }),
+        ),
+      ).toThrow('reserved Qwen Code tool name');
+    });
+
+    it('rejects ordinary factories that try to use the reserved deferred_tool_call name', () => {
+      expect(() =>
+        toolRegistry.registerFactory(
+          ToolNames.DEFERRED_TOOL_CALL,
+          async () => new MockTool({ name: ToolNames.DEFERRED_TOOL_CALL }),
+        ),
+      ).toThrow('reserved Qwen Code tool name');
     });
 
     it('renames an MCP tool whose name shadows a registered lazy factory', async () => {
