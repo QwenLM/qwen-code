@@ -247,7 +247,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
         'prompt-id',
       );
 
-      expect(result.max_tokens).toBe(131072);
+      expect(result.max_tokens).toBe(128_000);
     });
 
     it('should ignore malformed QWEN_CODE_MAX_OUTPUT_TOKENS values', () => {

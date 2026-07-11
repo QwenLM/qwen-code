@@ -309,9 +309,9 @@ describe('tokenLimit with output type', () => {
     });
 
     it('should return correct output limits for Claude Opus 4.6 through 4.8', () => {
-      expect(tokenLimit('claude-opus-4-6', 'output')).toBe(131072);
-      expect(tokenLimit('claude-opus-4-7', 'output')).toBe(131072);
-      expect(tokenLimit('vertex/claude-opus-4-8', 'output')).toBe(131072);
+      expect(tokenLimit('claude-opus-4-6', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-4-7', 'output')).toBe(128_000);
+      expect(tokenLimit('vertex/claude-opus-4-8', 'output')).toBe(128_000);
       expect(tokenLimit('claude-sonnet-4-6', 'output')).toBe(65536);
     });
   });
@@ -469,9 +469,9 @@ describe('defaultOutputCeiling', () => {
   });
 
   it('allows Claude Opus 4.6 through 4.8 to use the full 128K default', () => {
-    expect(defaultOutputCeiling('claude-opus-4-6')).toBe(131_072);
-    expect(defaultOutputCeiling('claude-opus-4-7')).toBe(131_072);
-    expect(defaultOutputCeiling('vertex/claude-opus-4-8')).toBe(131_072);
+    expect(defaultOutputCeiling('claude-opus-4-6')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-4-7')).toBe(128_000);
+    expect(defaultOutputCeiling('vertex/claude-opus-4-8')).toBe(128_000);
   });
 
   it('uses the default output limit for an unknown model', () => {
