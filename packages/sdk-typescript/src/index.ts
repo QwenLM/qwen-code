@@ -42,6 +42,7 @@ export {
   type DaemonInitWorkspaceResult,
   type DaemonMcpRestartResult,
   type DaemonReloadResponse,
+  type DaemonChannelReloadResult,
   type DaemonSessionRecapResult,
   type DaemonShellCommandResult,
   type DaemonRuntimeMcpAddRequest,

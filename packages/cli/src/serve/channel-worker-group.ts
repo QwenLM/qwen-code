@@ -30,6 +30,7 @@ export interface ChannelWorkerGroupSnapshot extends ChannelWorkerSnapshot {
 export interface ChannelWorkerGroup {
   start(): Promise<void>;
   stop(): Promise<void>;
+  /** On rejection, all supervisors are stopped; call again to retry. */
   restart(): Promise<ChannelWorkerGroupSnapshot[]>;
   killAllSync(): void;
   snapshots(): ChannelWorkerGroupSnapshot[];

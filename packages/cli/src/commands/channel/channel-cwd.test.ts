@@ -27,4 +27,9 @@ describe('resolveChannelCwd', () => {
       path.resolve('/workspace/channels'),
     );
   });
+
+  it('preserves absolute paths', () => {
+    const absolute = path.resolve('/opt/app');
+    expect(resolveChannelCwd(absolute, '/workspace')).toBe(absolute);
+  });
 });
