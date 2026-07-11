@@ -1233,7 +1233,7 @@ describe('multi-workspace session dispatch', () => {
     );
   });
 
-  it('updates a persisted secondary session organization without touching the primary sidecar', async () => {
+  it('updates a persisted secondary session by encoded cwd without touching the primary sidecar', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440160';
       await writeStoredSession({
@@ -1252,7 +1252,9 @@ describe('multi-workspace session dispatch', () => {
       const groupId = createdGroup.body.group.id as string;
 
       const updated = await request(app)
-        .patch(`/workspaces/secondary-id/session/${sessionId}/organization`)
+        .patch(
+          `/workspaces/${encodeURIComponent(SECONDARY_CWD)}/session/${sessionId}/organization`,
+        )
         .set('Host', host())
         .send({ isPinned: true, groupId });
       expect(updated.status).toBe(200);
