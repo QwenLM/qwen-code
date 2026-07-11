@@ -2785,6 +2785,26 @@ describe('ShellTool', () => {
             timeoutSpy.mockRestore();
           }
         });
+
+        it('does not emit the spurious long-run hint when the timeout is disabled (0)', async () => {
+          // Regression guard: with the timeout disabled there is no
+          // "half the timeout" threshold. `longRunThresholdFor(0)` would
+          // return its 1000ms floor and fire the auto-bg hint on every
+          // foreground command running longer than ~1s. The disabled case
+          // must suppress the hint entirely.
+          timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(0);
+          const invocation = shellTool.build({
+            command: 'dev-server.sh',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          // Well past the 1000ms floor that would otherwise trip the hint.
+          await vi.advanceTimersByTimeAsync(120_000);
+          resolveShellExecution({ output: 'listening', exitCode: 0 });
+          const result = await promise;
+          expect(result.llmContent).not.toContain('foreground command ran for');
+          expect(result.llmContent).not.toContain('is_background: true');
+        });
       });
 
       it('threshold-scaling positive case: hint DOES fire at the scaled threshold', async () => {

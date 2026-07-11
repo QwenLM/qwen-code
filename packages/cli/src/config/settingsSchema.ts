@@ -2251,7 +2251,7 @@ const SETTINGS_SCHEMA = {
             maximum: 600000,
             label: 'Default Command Timeout (ms)',
             category: 'Tools',
-            requiresRestart: false,
+            requiresRestart: true,
             default: undefined as number | undefined,
             description:
               'Default timeout, in milliseconds, for foreground shell commands started by the agent. A per-call timeout on the shell tool overrides this. When unset, foreground commands time out after 120000 ms (2 minutes). Set to 0 to disable the timeout.',
