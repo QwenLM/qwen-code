@@ -316,7 +316,7 @@ describe('WebShellSidebar — workspace picker', () => {
       '[aria-disabled="true"]',
     )!;
     expect(session.textContent).toContain('Session danger-session');
-    expect(session.title).toBe('Trust this workspace to open the session.');
+    expect(session.title).toBe('');
     expect(session.getAttribute('role')).toBe('note');
     expect(session.getAttribute('aria-label')).toBe(
       'Session danger-session. Trust this workspace to open the session.',

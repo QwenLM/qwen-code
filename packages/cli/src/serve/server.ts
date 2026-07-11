@@ -199,6 +199,7 @@ export {
 } from './server/session-list.js';
 export type {
   ListWorkspaceSessionsOptions,
+  ListWorkspaceSessionsReadOptions,
   ListWorkspaceSessionsResult,
 } from './server/session-list.js';
 export { getActiveSseCount } from './routes/sse-events.js';

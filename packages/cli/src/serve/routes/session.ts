@@ -2097,6 +2097,8 @@ export function registerSessionRoutes(
   });
 
   app.get('/workspace/:id/session-groups', async (req, res) => {
+    // Preserve the legacy singular-route behavior for an untrusted primary;
+    // plural catalog routes intentionally retain their trust gate.
     const runtime = resolveRuntimeFromWorkspaceParam(req, res);
     if (runtime === null) return;
     try {

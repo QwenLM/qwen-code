@@ -165,7 +165,6 @@ export function WorkspaceSection({
                   role="note"
                   aria-disabled="true"
                   aria-label={`${getSessionLabel(session)}. ${trustToOpenLabel}`}
-                  title={trustToOpenLabel}
                 >
                   {content}
                 </div>
