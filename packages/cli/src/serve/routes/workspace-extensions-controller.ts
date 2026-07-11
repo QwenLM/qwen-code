@@ -120,7 +120,6 @@ export interface ExtensionsController {
     isWorkspaceTrusted?: boolean,
   ): ExtensionManager;
   buildLocalExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
-  invalidateStatusCache(): void;
   refreshExtensionsForAllSessions(): Promise<{
     refreshed: number;
     failed: number;
@@ -359,11 +358,17 @@ export function createExtensionsController(
     });
     const operationBasePath =
       options.operationBasePath ?? '/workspace/extensions/operations';
-    res
-      .status(202)
-      .location(`${operationBasePath}/${operationId}`)
-      .set('Retry-After', '1')
-      .json({ accepted: true, operationId });
+    try {
+      res
+        .status(202)
+        .location(`${operationBasePath}/${operationId}`)
+        .set('Retry-After', '1')
+        .json({ accepted: true, operationId });
+    } catch {
+      extensionOperations.delete(operationId);
+      releaseOperationSlot();
+      return;
+    }
     void (async () => {
       let deadline: ReturnType<typeof setTimeout> | undefined;
       let committedGeneration: number | undefined;
@@ -828,9 +833,6 @@ export function createExtensionsController(
     buildWorkspaceCtx,
     createExtensionManager,
     buildLocalExtensionsStatus,
-    invalidateStatusCache: () => {
-      extensionsStatusCache = undefined;
-    },
     refreshExtensionsForAllSessions,
     getOperation: (operationId) => extensionOperations.get(operationId),
     preparationQueue,

@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ExtensionManager } from '@qwen-code/qwen-code-core';
+import type { Response } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { createExtensionsController } from './workspace-extensions-controller.js';
@@ -86,5 +87,44 @@ describe('createExtensionsController', () => {
     await controller.buildLocalExtensionsStatus();
 
     expect(refreshCache).toHaveBeenCalledOnce();
+  });
+
+  it('releases the operation slot when the acceptance response throws', () => {
+    let operationId: string | undefined;
+    const throwingResponse = {
+      status: vi.fn().mockReturnThis(),
+      location: vi.fn().mockReturnThis(),
+      set: vi.fn().mockReturnThis(),
+      json: vi.fn((body: { operationId: string }) => {
+        operationId = body.operationId;
+        throw new Error('socket closed');
+      }),
+    } as unknown as Response;
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {} as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+    });
+
+    expect(() =>
+      controller.runQueuedExtensionMutation(
+        'install',
+        {},
+        throwingResponse,
+        async () => ({ status: 'installed' }),
+      ),
+    ).not.toThrow();
+    expect(operationId).toBeDefined();
+    expect(controller.getOperation(operationId!)).toBeUndefined();
+
+    const response = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn(),
+    } as unknown as Response;
+    const releases = Array.from({ length: 10 }, () =>
+      controller.acquireOperationSlot(response),
+    );
+    expect(releases.every(Boolean)).toBe(true);
+    releases.forEach((release) => release?.());
   });
 });
