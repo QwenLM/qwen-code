@@ -357,6 +357,8 @@ export interface CloseSessionOpts {
   reason?: string;
   /** Require the ACP child to acknowledge session close before resolving. */
   requireAgentClose?: boolean;
+  /** Persist an intentional termination boundary before closing the session. */
+  persistCancellation?: boolean;
 }
 
 export interface BridgeClientRequestContext {
@@ -624,15 +626,15 @@ export interface AcpSessionBridge {
   /**
    * Remove a specific prompt from the pending queue. For `queued` prompts,
    * aborts them so the FIFO skips dispatch. For `running` prompts, aborts
-   * the in-flight turn (equivalent to cancel). Returns `{ removed: false }`
-   * when the promptId is not found. Throws `SessionNotFoundError` for
-   * unknown session ids.
+   * the in-flight turn (equivalent to cancel) and waits for its durable
+   * cancellation boundary. Returns `{ removed: false }` when the promptId is
+   * not found. Throws `SessionNotFoundError` for unknown session ids.
    */
   removePendingPrompt(
     sessionId: string,
     promptId: string,
     context?: BridgeClientRequestContext,
-  ): { removed: boolean };
+  ): Promise<{ removed: boolean }>;
 
   /**
    * Cancel the in-flight prompt on the session. Throws

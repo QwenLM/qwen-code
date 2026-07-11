@@ -10,6 +10,9 @@ import { SkillError } from '@qwen-code/qwen-code-core';
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
 
+/** Trusted daemon stamp for an explicit client cancellation. */
+export const DAEMON_USER_CANCEL_META_KEY = 'qwen.daemon.userCancel' as const;
+
 /**
  * Closed enumeration of structured error categories surfaced on diagnostic
  * status cells. Cells produced by `/workspace/preflight`, `/workspace/env`,
@@ -128,6 +131,7 @@ export const SERVE_STATUS_EXT_METHODS = {
  * which then mutates Config / ToolRegistry / McpClientManager state.
  */
 export const SERVE_CONTROL_EXT_METHODS = {
+  sessionCancel: 'qwen/control/session/cancel',
   sessionClose: 'qwen/control/session/close',
   sessionApprovalMode: 'qwen/control/session/approval_mode',
   sessionBranch: 'qwen/control/session/branch',

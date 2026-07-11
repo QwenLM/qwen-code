@@ -66,6 +66,7 @@ import {
 import {
   FakeAgent,
   type ChannelHandle,
+  type FakeAgentOpts,
   makeBridge,
   makeChannel,
   WS_A,
@@ -4508,9 +4509,11 @@ describe('createAcpSessionBridge', () => {
       // Cross-client sync: a cancel must surface as a first-class event
       // so peer subscribers don't have to infer it from the absence of
       // further agent chunks.
-      const factory: ChannelFactory = async () =>
-        makeChannel({ promptImpl: () => ({ stopReason: 'end_turn' }) }).channel;
-      const bridge = makeBridge({ channelFactory: factory });
+      const prompt = deferred<PromptResponse>();
+      const handle = makeChannel({ promptImpl: () => prompt.promise });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       const abort = new AbortController();
@@ -4524,6 +4527,16 @@ describe('createAcpSessionBridge', () => {
         throw new Error('no prompt_cancelled observed');
       })();
 
+      const turn = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'long running' }],
+      });
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)[0]?.state).toBe(
+          'running',
+        );
+      });
+
       await bridge.cancelSession(session.sessionId, undefined, {
         clientId: session.clientId,
       });
@@ -4535,6 +4548,8 @@ describe('createAcpSessionBridge', () => {
       );
       expect(evt.originatorClientId).toBe(session.clientId);
 
+      prompt.resolve({ stopReason: 'cancelled' });
+      await turn;
       abort.abort();
       await bridge.shutdown();
     });
@@ -4772,6 +4787,7 @@ describe('createAcpSessionBridge', () => {
       await vi.waitFor(() => {
         expect(cancelSpy).toHaveBeenCalledWith({
           sessionId: session.sessionId,
+          _meta: { 'qwen.daemon.userCancel': false },
         });
       });
       peerAbort.abort();
@@ -5074,9 +5090,9 @@ describe('createAcpSessionBridge', () => {
       });
       const queuedId = bridge.getPendingPrompts(session.sessionId)[1]?.promptId;
       expect(queuedId).toBeDefined();
-      expect(bridge.removePendingPrompt(session.sessionId, queuedId!)).toEqual({
-        removed: true,
-      });
+      await expect(
+        bridge.removePendingPrompt(session.sessionId, queuedId!),
+      ).resolves.toEqual({ removed: true });
 
       expect(() =>
         bridge.sendPrompt(session.sessionId, {
@@ -5471,11 +5487,14 @@ describe('createAcpSessionBridge', () => {
       const queuedId = pending[1]?.promptId;
       expect(queuedId).toBeDefined();
 
-      const result = bridge.removePendingPrompt(session.sessionId, queuedId!);
+      const result = await bridge.removePendingPrompt(
+        session.sessionId,
+        queuedId!,
+      );
       expect(result.removed).toBe(true);
       expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
 
-      const again = bridge.removePendingPrompt(
+      const again = await bridge.removePendingPrompt(
         session.sessionId,
         'nonexistent',
       );
@@ -5565,9 +5584,7 @@ describe('createAcpSessionBridge', () => {
       });
       const handle = makeChannel({
         promptImpl: () => promptPromise,
-        cancelImpl: () => {
-          rejectPrompt?.(new Error('cancelled'));
-        },
+        extMethodImpl: () => ({}),
       });
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
@@ -5591,17 +5608,23 @@ describe('createAcpSessionBridge', () => {
       const runningId = pending[0]?.promptId;
       expect(runningId).toBeDefined();
 
-      const result = bridge.removePendingPrompt(session.sessionId, runningId!);
+      const result = await bridge.removePendingPrompt(
+        session.sessionId,
+        runningId!,
+      );
       expect(result.removed).toBe(true);
 
       // The running prompt is removed from the list immediately.
       expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(0);
 
       // The prompt should reject after the cancel path fires.
+      rejectPrompt?.(new Error('cancelled'));
       await expect(p1).rejects.toBeDefined();
 
-      // Cancel was forwarded to the agent.
-      expect(handle.agent.cancelCalls.length).toBeGreaterThanOrEqual(1);
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: 'qwen/control/session/cancel',
+        params: { sessionId: session.sessionId },
+      });
 
       // A pending_prompt_completed event with state 'removed' was published.
       const completedEvents = events.filter(
@@ -5616,6 +5639,272 @@ describe('createAcpSessionBridge', () => {
       );
       expect(removedEvent).toBeDefined();
 
+      sub.catch(() => {});
+      await bridge.shutdown();
+    });
+
+    it('publishes completion when a running removal fails after the prompt settles', async () => {
+      const events: BridgeEvent[] = [];
+      let resolveFirst!: (response: PromptResponse) => void;
+      let resolveSecond!: (response: PromptResponse) => void;
+      let rejectCancellation!: (error: Error) => void;
+      const firstPrompt = new Promise<PromptResponse>((resolve) => {
+        resolveFirst = resolve;
+      });
+      const secondPrompt = new Promise<PromptResponse>((resolve) => {
+        resolveSecond = resolve;
+      });
+      const cancellation = new Promise<Record<string, unknown>>(
+        (_resolve, reject) => {
+          rejectCancellation = reject;
+        },
+      );
+      const handle = makeChannel({
+        promptImpl: (request) =>
+          (request.prompt[0] as { text?: string }).text === 'first'
+            ? firstPrompt
+            : secondPrompt,
+        extMethodImpl: (method) =>
+          method === 'qwen/control/session/cancel' ? cancellation : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sub = (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId)) {
+          events.push(event);
+        }
+      })();
+
+      const first = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first' }],
+      });
+      const second = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'second' }],
+      });
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
+      });
+      const secondId = bridge.getPendingPrompts(session.sessionId)[1]?.promptId;
+      expect(secondId).toBeDefined();
+
+      resolveFirst({ stopReason: 'end_turn' });
+      await first;
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)[0]).toMatchObject({
+          promptId: secondId,
+          state: 'running',
+        });
+      });
+
+      const removal = bridge.removePendingPrompt(session.sessionId, secondId!);
+      await vi.waitFor(() => {
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: 'qwen/control/session/cancel',
+          params: { sessionId: session.sessionId },
+        });
+      });
+      resolveSecond({ stopReason: 'end_turn' });
+      await second;
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(0);
+      });
+      rejectCancellation(new Error('cancellation marker failed'));
+      await expect(removal).rejects.toThrow();
+
+      await vi.waitFor(() => {
+        const terminalEvents = events.filter(
+          (event) =>
+            event.type === 'pending_prompt_completed' &&
+            (
+              event as BridgeEvent & {
+                data: { promptId: string; state: string };
+              }
+            ).data.promptId === secondId,
+        );
+        expect(terminalEvents).toHaveLength(1);
+        expect(
+          (
+            terminalEvents[0] as BridgeEvent & {
+              data: { state: string };
+            }
+          ).data.state,
+        ).toBe('completed');
+      });
+
+      sub.catch(() => {});
+      await bridge.shutdown();
+    });
+
+    it('does not publish cancellation when a running prompt settles before removal succeeds', async () => {
+      const events: BridgeEvent[] = [];
+      const firstPrompt = deferred<PromptResponse>();
+      const secondPrompt = deferred<PromptResponse>();
+      const cancellation = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        promptImpl: (request) =>
+          (request.prompt[0] as { text?: string }).text === 'first'
+            ? firstPrompt.promise
+            : secondPrompt.promise,
+        extMethodImpl: (method) =>
+          method === 'qwen/control/session/cancel' ? cancellation.promise : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sub = (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId)) {
+          events.push(event);
+        }
+      })();
+
+      const first = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first' }],
+      });
+      const second = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'second' }],
+      });
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
+      });
+      const secondId = bridge.getPendingPrompts(session.sessionId)[1]?.promptId;
+      expect(secondId).toBeDefined();
+
+      firstPrompt.resolve({ stopReason: 'end_turn' });
+      await first;
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)[0]).toMatchObject({
+          promptId: secondId,
+          state: 'running',
+        });
+      });
+      const removal = bridge.removePendingPrompt(session.sessionId, secondId!);
+      await vi.waitFor(() => {
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: 'qwen/control/session/cancel',
+          params: { sessionId: session.sessionId },
+        });
+      });
+
+      secondPrompt.resolve({ stopReason: 'end_turn' });
+      await second;
+      cancellation.resolve({ cancelled: true });
+      await expect(removal).resolves.toEqual({ removed: true });
+
+      await vi.waitFor(() => {
+        const terminalEvents = events.filter(
+          (event) =>
+            event.type === 'pending_prompt_completed' &&
+            (
+              event as BridgeEvent & {
+                data: { promptId: string; state: string };
+              }
+            ).data.promptId === secondId,
+        );
+        expect(terminalEvents).toHaveLength(1);
+        expect(
+          (
+            terminalEvents[0] as BridgeEvent & {
+              data: { state: string };
+            }
+          ).data.state,
+        ).toBe('completed');
+        expect(
+          events.filter((event) => event.type === 'prompt_cancelled'),
+        ).toHaveLength(0);
+      });
+
+      sub.catch(() => {});
+      await bridge.shutdown();
+    });
+
+    it('keeps a running prompt and permission live when removal persistence fails', async () => {
+      const events: BridgeEvent[] = [];
+      const prompt = deferred<PromptResponse>();
+      const handle = makeChannel({
+        promptImpl: () => prompt.promise,
+        extMethodImpl: (method) => {
+          if (method === 'qwen/control/session/cancel') {
+            throw new Error('cancellation marker failed');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sub = (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId)) {
+          events.push(event);
+        }
+      })();
+
+      const turn = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'running prompt' }],
+      });
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)[0]?.state).toBe(
+          'running',
+        );
+      });
+      const runningId = bridge.getPendingPrompts(session.sessionId)[0]
+        ?.promptId;
+      expect(runningId).toBeDefined();
+
+      const permissionResponse = (
+        handle.agentConnection as unknown as {
+          requestPermission(params: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-remove', title: 'permission' },
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      });
+      await vi.waitFor(() => {
+        expect(bridge.pendingPermissionCount).toBe(1);
+      });
+      const permissionEvent = events.find(
+        (event) => event.type === 'permission_request',
+      );
+      expect(permissionEvent).toBeDefined();
+      const requestId = (
+        permissionEvent as BridgeEvent & { data: { requestId: string } }
+      ).data.requestId;
+
+      await expect(
+        bridge.removePendingPrompt(session.sessionId, runningId!),
+      ).rejects.toThrow();
+
+      expect(bridge.getPendingPrompts(session.sessionId)[0]).toMatchObject({
+        promptId: runningId,
+        state: 'running',
+      });
+      expect(
+        events.filter((event) => event.type === 'prompt_cancelled'),
+      ).toHaveLength(0);
+      expect(bridge.pendingPermissionCount).toBe(1);
+      expect(
+        bridge.respondToSessionPermission(
+          session.sessionId,
+          requestId,
+          { outcome: { outcome: 'selected', optionId: 'allow' } },
+          { clientId: session.clientId },
+        ),
+      ).toBe(true);
+      await expect(permissionResponse).resolves.toMatchObject({
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+
+      prompt.resolve({ stopReason: 'end_turn' });
+      await turn;
       sub.catch(() => {});
       await bridge.shutdown();
     });
@@ -5649,9 +5938,9 @@ describe('createAcpSessionBridge', () => {
         ?.promptId;
       expect(runningId).toBeDefined();
 
-      expect(bridge.removePendingPrompt(session.sessionId, runningId!)).toEqual(
-        { removed: true },
-      );
+      await expect(
+        bridge.removePendingPrompt(session.sessionId, runningId!),
+      ).resolves.toEqual({ removed: true });
 
       const p2 = bridge.sendPrompt(session.sessionId, {
         sessionId: session.sessionId,
@@ -5670,11 +5959,11 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('removePendingPrompt throws SessionNotFoundError for unknown sessions', () => {
+    it('removePendingPrompt throws SessionNotFoundError for unknown sessions', async () => {
       const bridge = makeBridge();
-      expect(() => bridge.removePendingPrompt('unknown', 'some-id')).toThrow(
-        SessionNotFoundError,
-      );
+      await expect(
+        bridge.removePendingPrompt('unknown', 'some-id'),
+      ).rejects.toThrow(SessionNotFoundError);
     });
 
     it('getPendingPrompts throws SessionNotFoundError for unknown sessions', () => {
@@ -5686,24 +5975,228 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('cancelSession', () => {
-    it('forwards a cancel notification with the routing id', async () => {
+    it('uses an acknowledged cancellation request with the routing id', async () => {
       const handles: ChannelHandle[] = [];
+      let finishCancellation!: () => void;
       const factory: ChannelFactory = async () => {
-        const h = makeChannel();
+        const h = makeChannel({
+          extMethodImpl: (method) =>
+            method === 'qwen/control/session/cancel'
+              ? new Promise<Record<string, unknown>>((resolve) => {
+                  finishCancellation = () => resolve({ cancelled: true });
+                })
+              : {},
+        });
         handles.push(h);
         return h.channel;
       };
       const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
-      await bridge.cancelSession(session.sessionId);
-      // Cancel is a notification — let it propagate before observing.
-      await new Promise((r) => setTimeout(r, 10));
-      expect(handles[0]?.agent.cancelCalls).toHaveLength(1);
-      expect(handles[0]?.agent.cancelCalls[0]?.sessionId).toBe(
-        session.sessionId,
-      );
+      let settled = false;
+      const cancellation = bridge
+        .cancelSession(session.sessionId, {
+          sessionId: session.sessionId,
+          _meta: { 'qwen.daemon.userCancel': false, caller: 'test' },
+        })
+        .then(() => {
+          settled = true;
+        });
+      await vi.waitFor(() => {
+        expect(handles[0]?.agent.extMethodCalls).toContainEqual({
+          method: 'qwen/control/session/cancel',
+          params: {
+            sessionId: session.sessionId,
+            _meta: { 'qwen.daemon.userCancel': false, caller: 'test' },
+          },
+        });
+      });
+      expect(settled).toBe(false);
+      finishCancellation();
+      await cancellation;
 
+      await bridge.shutdown();
+    });
+
+    it('keeps the active prompt and permission live when persistence fails', async () => {
+      const events: BridgeEvent[] = [];
+      const prompt = deferred<PromptResponse>();
+      const handle = makeChannel({
+        promptImpl: () => prompt.promise,
+        extMethodImpl: (method) => {
+          if (method === 'qwen/control/session/cancel') {
+            throw new Error('cancellation marker failed');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sub = (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId)) {
+          events.push(event);
+        }
+      })();
+      const turn = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'cancel target' }],
+      });
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)[0]?.state).toBe(
+          'running',
+        );
+      });
+      const targetId = bridge.getPendingPrompts(session.sessionId)[0]?.promptId;
+      expect(targetId).toBeDefined();
+
+      const permissionResponse = (
+        handle.agentConnection as unknown as {
+          requestPermission(params: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-cancel-fail', title: 'permission' },
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      });
+      await vi.waitFor(() => {
+        expect(bridge.pendingPermissionCount).toBe(1);
+      });
+      const permissionEvent = events.find(
+        (event) => event.type === 'permission_request',
+      );
+      expect(permissionEvent).toBeDefined();
+      const requestId = (
+        permissionEvent as BridgeEvent & { data: { requestId: string } }
+      ).data.requestId;
+
+      await expect(bridge.cancelSession(session.sessionId)).rejects.toThrow();
+
+      expect(bridge.getPendingPrompts(session.sessionId)[0]).toMatchObject({
+        promptId: targetId,
+        state: 'running',
+      });
+      expect(
+        events.filter((event) => event.type === 'prompt_cancelled'),
+      ).toHaveLength(0);
+      expect(bridge.pendingPermissionCount).toBe(1);
+      expect(
+        bridge.respondToSessionPermission(
+          session.sessionId,
+          requestId,
+          { outcome: { outcome: 'selected', optionId: 'allow' } },
+          { clientId: session.clientId },
+        ),
+      ).toBe(true);
+      await expect(permissionResponse).resolves.toMatchObject({
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+
+      prompt.resolve({ stopReason: 'end_turn' });
+      await turn;
+      sub.catch(() => {});
+      await bridge.shutdown();
+    });
+
+    it('does not cancel the next prompt when the original target settles before acknowledgement', async () => {
+      const events: BridgeEvent[] = [];
+      const firstPrompt = deferred<PromptResponse>();
+      const secondPrompt = deferred<PromptResponse>();
+      const cancellation = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        promptImpl: (request) =>
+          (request.prompt[0] as { text?: string }).text === 'first'
+            ? firstPrompt.promise
+            : secondPrompt.promise,
+        extMethodImpl: (method) =>
+          method === 'qwen/control/session/cancel' ? cancellation.promise : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sub = (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId)) {
+          events.push(event);
+        }
+      })();
+      const first = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first' }],
+      });
+      const second = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'second' }],
+      });
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
+      });
+      const secondId = bridge.getPendingPrompts(session.sessionId)[1]?.promptId;
+      expect(secondId).toBeDefined();
+
+      const cancel = bridge.cancelSession(session.sessionId);
+      await vi.waitFor(() => {
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: 'qwen/control/session/cancel',
+          params: { sessionId: session.sessionId },
+        });
+      });
+      firstPrompt.resolve({ stopReason: 'end_turn' });
+      await first;
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)[0]).toMatchObject({
+          promptId: secondId,
+          state: 'running',
+        });
+      });
+
+      const permissionResponse = (
+        handle.agentConnection as unknown as {
+          requestPermission(params: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-next', title: 'next permission' },
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      });
+      await vi.waitFor(() => {
+        expect(bridge.pendingPermissionCount).toBe(1);
+      });
+      const permissionEvent = events.find(
+        (event) => event.type === 'permission_request',
+      );
+      expect(permissionEvent).toBeDefined();
+      const requestId = (
+        permissionEvent as BridgeEvent & { data: { requestId: string } }
+      ).data.requestId;
+
+      cancellation.resolve({ cancelled: true });
+      await cancel;
+
+      expect(bridge.getPendingPrompts(session.sessionId)[0]).toMatchObject({
+        promptId: secondId,
+        state: 'running',
+      });
+      expect(
+        events.filter((event) => event.type === 'prompt_cancelled'),
+      ).toHaveLength(0);
+      expect(bridge.pendingPermissionCount).toBe(1);
+      expect(
+        bridge.respondToSessionPermission(
+          session.sessionId,
+          requestId,
+          { outcome: { outcome: 'selected', optionId: 'allow' } },
+          { clientId: session.clientId },
+        ),
+      ).toBe(true);
+      await expect(permissionResponse).resolves.toMatchObject({
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+
+      secondPrompt.resolve({ stopReason: 'end_turn' });
+      await second;
+      sub.catch(() => {});
       await bridge.shutdown();
     });
 
@@ -5722,12 +6215,9 @@ describe('createAcpSessionBridge', () => {
       const handles: ChannelHandle[] = [];
       const factory: ChannelFactory = async () => {
         const h = makeChannel({
-          cancelImpl: () => {
-            throw {
-              code: -32603,
-              message: 'Internal error',
-              data: { details: 'Not currently generating' },
-            };
+          extMethodImpl: (method) => {
+            if (method !== 'qwen/control/session/cancel') return {};
+            throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
           },
         });
         handles.push(h);
@@ -5739,7 +6229,7 @@ describe('createAcpSessionBridge', () => {
       await expect(
         bridge.cancelSession(session.sessionId),
       ).resolves.toBeUndefined();
-      expect(handles[0]?.agent.cancelCalls).toHaveLength(1);
+      expect(handles[0]?.agent.extMethodCalls).toHaveLength(1);
 
       await bridge.shutdown();
     });
@@ -5747,18 +6237,15 @@ describe('createAcpSessionBridge', () => {
     it('treats idle agent cancel wording variants as success', async () => {
       const variants: unknown[] = [
         new Error(`${NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE} (session idle)`),
-        {
-          code: -32603,
-          message: 'Internal error',
-          data: { details: 'not currently generating' },
-        },
+        new Error('not currently generating'),
       ];
 
       for (const err of variants) {
         const handles: ChannelHandle[] = [];
         const factory: ChannelFactory = async () => {
           const h = makeChannel({
-            cancelImpl: () => {
+            extMethodImpl: (method) => {
+              if (method !== 'qwen/control/session/cancel') return {};
               throw err;
             },
           });
@@ -5771,7 +6258,7 @@ describe('createAcpSessionBridge', () => {
         await expect(
           bridge.cancelSession(session.sessionId),
         ).resolves.toBeUndefined();
-        expect(handles[0]?.agent.cancelCalls).toHaveLength(1);
+        expect(handles[0]?.agent.extMethodCalls).toHaveLength(1);
 
         await bridge.shutdown();
       }
@@ -5782,12 +6269,14 @@ describe('createAcpSessionBridge', () => {
     /** Spin up a bridge with a hand-driven channel; returns the bridge,
      *  session, and a function the test uses to call `requestPermission`
      *  from the agent side. */
-    async function setupForPermission() {
+    async function setupForPermission(
+      promptImpl?: FakeAgentOpts['promptImpl'],
+    ) {
       let capturedConn: AgentSideConnection | undefined;
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {
         const { clientStream, agentStream } = createInMemoryChannel();
-        const fakeAgent = new FakeAgent();
+        const fakeAgent = new FakeAgent(promptImpl ? { promptImpl } : {});
         // The agent side gets an AgentSideConnection; that exposes a
         // ClientSideConnection-equivalent on its `agent` callback. We need
         // to drive `requestPermission` from the agent direction — for that
@@ -6620,11 +7109,24 @@ describe('createAcpSessionBridge', () => {
     });
 
     it('cancelSession resolves outstanding permissions as cancelled', async () => {
-      const { bridge, session, conn } = await setupForPermission();
+      const prompt = deferred<PromptResponse>();
+      const { bridge, session, conn } = await setupForPermission(
+        () => prompt.promise,
+      );
 
       const subAbort = new AbortController();
       const iter = bridge.subscribeEvents(session.sessionId, {
         signal: subAbort.signal,
+      });
+
+      const turn = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'permission turn' }],
+      });
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)[0]?.state).toBe(
+          'running',
+        );
       });
 
       const respPromise = (
@@ -6641,7 +7143,10 @@ describe('createAcpSessionBridge', () => {
       // (resolving via cancel publishes a permission_resolved event;
       // ensure the consumer's queue isn't already full of unread frames).
       const it = iter[Symbol.asyncIterator]();
-      await it.next();
+      while (true) {
+        const next = await it.next();
+        if (next.done || next.value?.type === 'permission_request') break;
+      }
       expect(bridge.pendingPermissionCount).toBe(1);
 
       await bridge.cancelSession(session.sessionId);
@@ -6652,6 +7157,8 @@ describe('createAcpSessionBridge', () => {
       expect(response.outcome.outcome).toBe('cancelled');
       expect(bridge.pendingPermissionCount).toBe(0);
 
+      prompt.resolve({ stopReason: 'cancelled' });
+      await turn;
       subAbort.abort();
       await bridge.shutdown();
     });
@@ -11460,6 +11967,89 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('persists an intentional termination before an explicit client close', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.closeSession(session.sessionId, undefined, {
+        persistCancellation: true,
+      });
+
+      expect(handle.agent.extMethodCalls[0]).toEqual({
+        method: 'qwen/control/session/close',
+        params: {
+          sessionId: session.sessionId,
+          requireFlush: true,
+          persistCancellation: true,
+        },
+      });
+      await bridge.shutdown();
+    });
+
+    it('does not dispatch a queued prompt while an explicit close is committing', async () => {
+      let resolveFirst!: (response: PromptResponse) => void;
+      let finishClose!: () => void;
+      const firstPrompt = new Promise<PromptResponse>((resolve) => {
+        resolveFirst = resolve;
+      });
+      const handle = makeChannel({
+        promptImpl: (request) =>
+          (request.prompt[0] as { text?: string }).text === 'first'
+            ? firstPrompt
+            : { stopReason: 'end_turn' },
+        extMethodImpl: (method) => {
+          if (method !== 'qwen/control/session/close') return {};
+          resolveFirst({ stopReason: 'cancelled' });
+          return new Promise<Record<string, unknown>>((resolve) => {
+            finishClose = () => resolve({ closed: true });
+          });
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const first = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first' }],
+      });
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      const second = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'second' }],
+      });
+      const secondOutcome = second.catch((error: unknown) => error);
+      const close = bridge.closeSession(session.sessionId, undefined, {
+        persistCancellation: true,
+      });
+      await vi.waitFor(() => {
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: 'qwen/control/session/close',
+          params: {
+            sessionId: session.sessionId,
+            requireFlush: true,
+            persistCancellation: true,
+          },
+        });
+      });
+
+      await first;
+      await Promise.resolve();
+      expect(handle.agent.promptCalls).toHaveLength(1);
+
+      finishClose();
+      await close;
+      await expect(secondOutcome).resolves.toMatchObject({
+        name: 'AbortError',
+      });
+      expect(handle.agent.promptCalls).toHaveLength(1);
+      await bridge.shutdown();
+    });
+
     it('throws SessionNotFoundError for unknown session', async () => {
       const bridge = makeBridge();
       await expect(bridge.closeSession('nonexistent')).rejects.toThrow(
@@ -11501,6 +12091,12 @@ describe('createAcpSessionBridge', () => {
           clientId: session.clientId,
         }),
       ).not.toThrow();
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'still usable' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
 
       await bridge.closeSession(session.sessionId, undefined, {
         requireAgentClose: true,

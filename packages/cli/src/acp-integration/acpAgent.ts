@@ -225,6 +225,7 @@ import {
 } from '../config/trustedFolders.js';
 import {
   ACP_PREFLIGHT_KINDS,
+  DAEMON_USER_CANCEL_META_KEY,
   STATUS_SCHEMA_VERSION,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
@@ -268,6 +269,7 @@ import {
   type ServeWorkspaceExtensionsStatus,
   IDLE_HOOK_EVENTS,
 } from '@qwen-code/acp-bridge/status';
+import { isNotCurrentlyGeneratingCancelError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
   LOAD_REPLAY_BULK_MODE,
@@ -3029,7 +3031,7 @@ class QwenAgent implements Agent {
 
   private async closeStoredSession(
     sessionId: string,
-    opts?: { requireFlush?: boolean },
+    opts?: { requireFlush?: boolean; persistCancellation?: boolean },
   ): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -3059,14 +3061,28 @@ class QwenAgent implements Agent {
       }
     }
 
+    let persistInterruptedFallback = false;
     try {
-      await session.cancelPendingPrompt();
+      await session.cancelPendingPrompt({
+        persistCancellation: opts?.persistCancellation === true,
+      });
     } catch (err) {
       debugLogger.debug(
         `Session ${sessionId} cancel during close failed: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
+      if (opts?.persistCancellation === true) {
+        if (isNotCurrentlyGeneratingCancelError(err)) {
+          persistInterruptedFallback = true;
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    if (persistInterruptedFallback) {
+      await session.persistTurnCancellationIfInterrupted();
     }
 
     const flushError = await flushRecording();
@@ -3359,7 +3375,6 @@ class QwenAgent implements Agent {
         const records = sessionData?.conversation.messages;
         let replayUpdates: SessionUpdate[] = [];
         if (records) {
-          session.primeTurnFromHistory(records);
           const replayUsage = createReplayCumulativeUsage();
           const replay = await collectHistoryReplayUpdates({
             sessionId: params.sessionId,
@@ -3444,20 +3459,19 @@ class QwenAgent implements Agent {
     await this.ensureAuthenticated(config);
     this.setupFileSystem(config);
 
+    const sessionData = config.getResumedSessionData();
     const session = await this.createAndStoreSession(
       config,
       settings,
-      config.getResumedSessionData(),
+      sessionData,
       { replayHistory: false },
     );
-
     await this.#restoreWorktreeOnResume(config, session);
 
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
     const configOptions = this.buildConfigOptions(config);
 
-    const sessionData = config.getResumedSessionData();
     return {
       modes: modesData,
       models: availableModels,
@@ -3614,7 +3628,10 @@ class QwenAgent implements Agent {
     if (!session) {
       throw new Error(`Session not found: ${params.sessionId}`);
     }
-    await session.cancelPendingPrompt();
+    await session.cancelPendingPrompt({
+      persistCancellation:
+        params._meta?.[DAEMON_USER_CANCEL_META_KEY] !== false,
+    });
   }
 
   private loadPermissionSettings(cwd: string): LoadedSettings {
@@ -6922,8 +6939,28 @@ class QwenAgent implements Agent {
         }
         await this.closeStoredSession(sessionId, {
           requireFlush: params['requireFlush'] === true,
+          persistCancellation: params['persistCancellation'] === true,
         });
         return { sessionId, closed: true };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionCancel: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        try {
+          await session.cancelPendingPrompt({ persistCancellation: true });
+        } catch (error) {
+          if (!isNotCurrentlyGeneratingCancelError(error)) {
+            throw error;
+          }
+          await session.persistTurnCancellationIfInterrupted();
+        }
+        return { sessionId, cancelled: true };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionCd: {
         const sessionId = params['sessionId'];
@@ -8925,10 +8962,6 @@ class QwenAgent implements Agent {
     const session = new Session(sessionId, config, this.connection, settings);
     this.sessions.set(sessionId, session);
 
-    setTimeout(async () => {
-      await session.sendAvailableCommandsUpdate();
-    }, 0);
-
     if (sessionData?.fileHistorySnapshots?.length) {
       config
         .getFileHistoryService()
@@ -8936,10 +8969,20 @@ class QwenAgent implements Agent {
     }
 
     if (sessionData?.conversation.messages) {
-      config
-        .getChatRecordingService()
-        ?.rebuildTurnBoundaries(sessionData.conversation.messages);
+      try {
+        session.primeTurnFromHistory(sessionData.conversation.messages);
+        config
+          .getChatRecordingService()
+          ?.rebuildTurnBoundaries(sessionData.conversation.messages);
+      } catch (error) {
+        this.discardStoredSessionIfCurrent(sessionId, session);
+        throw error;
+      }
     }
+
+    setTimeout(async () => {
+      await session.sendAvailableCommandsUpdate();
+    }, 0);
 
     if (options.replayHistory !== false && sessionData?.conversation.messages) {
       await session.replayHistory(

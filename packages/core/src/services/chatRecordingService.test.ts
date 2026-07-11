@@ -169,6 +169,135 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordTurnCancellation', () => {
+    it('durably appends a cancellation boundary after the active turn', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'Keep working' }]);
+
+      await chatRecordingService.recordTurnCancellation();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+      const user = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const cancellation = vi.mocked(jsonl.writeLine).mock
+        .calls[1][1] as ChatRecord;
+      expect(cancellation).toMatchObject({
+        type: 'system',
+        subtype: 'turn_cancelled',
+        parentUuid: user.uuid,
+      });
+    });
+
+    it('rejects when the cancellation boundary cannot be persisted', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'Keep working' }]);
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+
+      await expect(
+        chatRecordingService.recordTurnCancellation(),
+      ).rejects.toThrow('disk full');
+    });
+
+    it('reparents a concurrent completion when the cancellation write fails', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'Keep working' }]);
+      await chatRecordingService.flush();
+      let rejectCancellation!: (error: Error) => void;
+      let assistantParentAtWrite: string | null | undefined;
+      vi.mocked(jsonl.writeLine)
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((_resolve, reject) => {
+              rejectCancellation = reject;
+            }),
+        )
+        .mockImplementationOnce((_file, record) => {
+          assistantParentAtWrite = (record as ChatRecord).parentUuid;
+          return Promise.resolve();
+        });
+
+      const cancellation = chatRecordingService.recordTurnCancellation();
+      const cancellationFailure = cancellation.then(
+        () => {
+          throw new Error('Expected cancellation persistence to fail');
+        },
+        (error: unknown) => {
+          expect(error).toMatchObject({ message: 'disk full' });
+        },
+      );
+      await vi.waitFor(() => {
+        expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+      });
+      chatRecordingService.recordAssistantTurn({
+        model: 'gemini-pro',
+        message: [{ text: 'Completed while cancellation was pending' }],
+      });
+
+      rejectCancellation(new Error('disk full'));
+      await cancellationFailure;
+      await chatRecordingService.flush();
+      chatRecordingService.recordUserMessage([{ text: 'Next turn' }]);
+      await chatRecordingService.flush();
+
+      const records = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(assistantParentAtWrite).toBe(records[0]?.uuid);
+      expect(records[2]?.parentUuid).toBe(records[0]?.uuid);
+      expect(records[2]?.parentUuid).not.toBe(records[1]?.uuid);
+      expect(records[3]?.parentUuid).toBe(records[2]?.uuid);
+    });
+
+    it('appends a durable resumption boundary for an explicit retry', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'Keep working' }]);
+      await chatRecordingService.recordTurnCancellation();
+
+      await chatRecordingService.recordTurnResumption();
+
+      const records = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(records.map((record) => record.subtype)).toEqual([
+        undefined,
+        'turn_cancelled',
+        'turn_resumed',
+      ]);
+      expect(records[2]?.parentUuid).toBe(records[1]?.uuid);
+    });
+  });
+
+  describe('recordTurnStop', () => {
+    it.each([
+      'end_turn',
+      'max_tokens',
+      'max_turn_requests',
+      'refusal',
+      'cancelled',
+    ] as const)('durably records the ACP %s boundary', async (stopReason) => {
+      chatRecordingService.recordAssistantTurn({
+        model: 'qwen3-coder-plus',
+        message: [{ text: 'Done' }],
+      });
+
+      await chatRecordingService.recordTurnStop(stopReason);
+
+      const records = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(records[1]).toMatchObject({
+        type: 'system',
+        subtype: 'turn_stopped',
+        parentUuid: records[0]?.uuid,
+        systemPayload: { stopReason },
+      });
+    });
+
+    it('rejects when the terminal boundary cannot be persisted', async () => {
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+
+      await expect(
+        chatRecordingService.recordTurnStop('end_turn'),
+      ).rejects.toThrow('disk full');
+    });
+  });
+
   describe('rewindRecording', () => {
     it('preserves a resumed user turn parent when rebuilding rewind boundaries', async () => {
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({

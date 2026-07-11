@@ -420,7 +420,7 @@ interface FakeBridgeOpts {
   removePendingPromptImpl?: (
     sessionId: string,
     promptId: string,
-  ) => { removed: boolean };
+  ) => Promise<{ removed: boolean }> | { removed: boolean };
   spawnImpl?: (req: BridgeSpawnRequest) => Promise<BridgeSession>;
   loadImpl?: (
     req: BridgeRestoreSessionRequest,
@@ -638,6 +638,7 @@ interface FakeBridgeOpts {
 interface FakeCloseSessionOpts {
   reason?: string;
   requireAgentClose?: boolean;
+  persistCancellation?: boolean;
 }
 
 interface FakeBridge extends AcpSessionBridge {
@@ -1689,9 +1690,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       getPendingPromptsCalls.push(sessionId);
       return getPendingPromptsImpl(sessionId);
     },
-    removePendingPrompt(sessionId, promptId) {
+    async removePendingPrompt(sessionId, promptId) {
       removePendingPromptCalls.push({ sessionId, promptId });
-      return removePendingPromptImpl(sessionId, promptId);
+      return await removePendingPromptImpl(sessionId, promptId);
     },
     async executeShellCommand(sessionId, command, signal, context) {
       shellCalls.push({
@@ -11497,6 +11498,9 @@ describe('createServeApp', () => {
       expect(res.status).toBe(204);
       expect(bridge.closeCalls).toHaveLength(1);
       expect(bridge.closeCalls[0]?.sessionId).toBe('session-A');
+      expect(bridge.closeCalls[0]?.closeOpts).toEqual({
+        persistCancellation: true,
+      });
     });
 
     it('passes client identity context', async () => {
@@ -12610,6 +12614,9 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body.removed).toEqual([sid]);
       expect(bridge.closeCalls).toHaveLength(1);
+      expect(bridge.closeCalls[0]?.closeOpts).toEqual({
+        persistCancellation: true,
+      });
     });
 
     it('preserves transcript file when bridge.closeSession throws non-SessionNotFoundError', async () => {

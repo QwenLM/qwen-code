@@ -328,13 +328,19 @@ class FakeBridge {
   }
 
   detached: Array<{ sessionId: string; clientId?: string }> = [];
+  closeOptions: unknown[] = [];
 
   async cancelSession(sessionId: string) {
     this.cancelled.push(sessionId);
   }
   closeGate: Promise<void> | undefined;
-  async closeSession(sessionId: string) {
+  async closeSession(
+    sessionId: string,
+    _context?: unknown,
+    closeOptions?: unknown,
+  ) {
     this.closedSessions.push(sessionId);
+    this.closeOptions.push(closeOptions);
     if (this.closeGate) await this.closeGate;
     if (this.closeError) throw this.closeError;
     if (this.closeShouldThrow) throw new Error('bridge close failed');
@@ -4084,6 +4090,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const frames = (await got) as Array<{ id: number }>;
     expect(frames.map((f) => f.id)).toContain(22);
     expect(bridge.closedSessions).toContain('sess-1');
+    expect(bridge.closeOptions).toContainEqual({ persistCancellation: true });
   });
 
   it('initialize clamps protocolVersion to [1, 1]', async () => {
@@ -4517,11 +4524,30 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
-  it('session/close runs local cleanup even if the bridge close throws', async () => {
+  it('session/close keeps the prompt and ownership when durable close fails', async () => {
     bridge.closeShouldThrow = true;
+    let promptSignal: AbortSignal | undefined;
+    let releasePrompt!: () => void;
+    bridge.promptBehavior = async (_s, _q, signal) => {
+      promptSignal = signal;
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve;
+      });
+      return { stopReason: 'end_turn' };
+    };
     const connId = await initialize();
     await newSession(connId); // creates + owns sess-1
-    await new Promise((r) => setTimeout(r, 30));
+    const before = await openStream(connId, 'sess-1');
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 45,
+      method: 'session/prompt',
+      params: {
+        sessionId: 'sess-1',
+        prompt: [{ type: 'text', text: 'keep running' }],
+      },
+    });
+    await vi.waitFor(() => expect(promptSignal).toBeDefined());
     await post(connId, {
       jsonrpc: '2.0',
       id: 46,
@@ -4530,9 +4556,13 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     await new Promise((r) => setTimeout(r, 50));
     expect(bridge.closedSessions).toContain('sess-1'); // bridge was called (then threw)
-    // Local teardown ran in `finally` despite the throw → session unowned now.
+    expect(promptSignal?.aborted).toBe(false);
+    // Ownership is restored, so the client can retry the close.
     const after = await openStream(connId, 'sess-1');
-    expect(after.status).toBe(403);
+    expect(after.status).toBe(200);
+    releasePrompt();
+    await before.body?.cancel();
+    await after.body?.cancel();
   });
 
   it('connection cap → 503 on initialize', async () => {
@@ -4568,10 +4598,16 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
   it('session/cancel aborts the in-flight prompt and calls the bridge', async () => {
     let promptSignal: AbortSignal | undefined;
+    let promptWasAbortedWhenBridgeCalled: boolean | undefined;
     bridge.promptBehavior = async (_s, _q, signal) => {
       promptSignal = signal;
       await new Promise((r) => setTimeout(r, 300));
       return { stopReason: 'cancelled' };
+    };
+    const cancelSession = bridge.cancelSession.bind(bridge);
+    bridge.cancelSession = async (sessionId) => {
+      promptWasAbortedWhenBridgeCalled = promptSignal?.aborted;
+      await cancelSession(sessionId);
     };
     const connId = await initialize();
     await newSession(connId);
@@ -4591,6 +4627,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       params: { sessionId: 'sess-1' },
     });
     await new Promise((r) => setTimeout(r, 40));
+    expect(promptWasAbortedWhenBridgeCalled).toBe(false);
     expect(promptSignal?.aborted).toBe(true);
     expect(bridge.cancelled).toContain('sess-1');
     await sess.body?.cancel();

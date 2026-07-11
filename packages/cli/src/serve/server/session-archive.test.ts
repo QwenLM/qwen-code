@@ -190,6 +190,9 @@ describe('archiveDaemonSessions', () => {
       errors: [],
     });
     expect(closeSession).toHaveBeenCalledTimes(1);
+    expect(closeSession).toHaveBeenCalledWith(sessionId, undefined, {
+      requireAgentClose: true,
+    });
     expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
       false,
     );
@@ -439,13 +442,17 @@ describe('deleteDaemonSessions', () => {
       },
     ]);
 
+    const closeSession = vi.fn().mockResolvedValue(undefined);
     const result = await deleteDaemonSessions({
       sessionIds: [sessionId],
       service: new SessionService(workspaceDir),
-      bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+      bridge: { closeSession },
       coordinator: new SessionArchiveCoordinator(),
     });
     expect(result.removed).toEqual([sessionId]);
+    expect(closeSession).toHaveBeenCalledWith(sessionId, undefined, {
+      persistCancellation: true,
+    });
 
     const ids = (await readCronTasks(workspaceDir)).map((t) => t.id).sort();
     expect(ids).toEqual(['other']); // bound task deleted, unbound survives

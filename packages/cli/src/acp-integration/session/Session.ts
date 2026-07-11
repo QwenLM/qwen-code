@@ -740,6 +740,25 @@ function isUserPromptRecord(record: ChatRecord): boolean {
   );
 }
 
+function wasLastTurnExplicitlyCancelled(records: ChatRecord[]): boolean {
+  let cancelled = false;
+  for (const record of records) {
+    if (record.type === 'system' && record.subtype === 'turn_cancelled') {
+      cancelled = true;
+    } else if (
+      (record.type === 'user' &&
+        record.subtype !== 'mid_turn_user_message' &&
+        record.subtype !== 'notification' &&
+        record.subtype !== 'cron') ||
+      (record.type === 'system' &&
+        (record.subtype === 'rewind' || record.subtype === 'turn_resumed'))
+    ) {
+      cancelled = false;
+    }
+  }
+  return cancelled;
+}
+
 const AT_TOKEN_RE = /@([^\s,;!?()[\]{}]+)/g;
 
 function collectExtensionMentionRefs(
@@ -919,6 +938,12 @@ export async function buildAvailableCommandsSnapshot(
  */
 export class Session implements SessionContext {
   private pendingPrompt: AbortController | null = null;
+  private readonly persistedPromptControllers = new WeakSet<AbortController>();
+  private readonly persistedBackgroundControllers =
+    new WeakSet<AbortController>();
+  private lastTurnExplicitlyCancelled = false;
+  private turnCancellationInFlight: Promise<void> | null = null;
+  private turnResumptionInFlight: Promise<void> | null = null;
   /**
    * Tracks the completion of the current prompt so that the next prompt
    * can await it.  This prevents a new prompt from reading chat history
@@ -1197,6 +1222,7 @@ export class Session implements SessionContext {
       this.turn,
       computeInitialTurnFromHistory(records, this.config.getSessionId()),
     );
+    this.lastTurnExplicitlyCancelled = wasLastTurnExplicitlyCancelled(records);
   }
 
   async replayHistory(
@@ -1268,6 +1294,7 @@ export class Session implements SessionContext {
         { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
         survivingSnapshots,
       );
+    this.lastTurnExplicitlyCancelled = false;
 
     return { targetTurnIndex, apiTruncateIndex };
   }
@@ -1360,36 +1387,63 @@ export class Session implements SessionContext {
     return content.parts.some((part) => 'text' in part && part.text);
   }
 
-  async cancelPendingPrompt(): Promise<void> {
-    const hadPrompt = !!this.pendingPrompt;
-    const hadCron = !!this.cronAbortController;
+  async cancelPendingPrompt(options?: {
+    persistCancellation?: boolean;
+  }): Promise<void> {
+    const pendingPrompt = this.pendingPrompt;
+    const cronAbortController = this.cronAbortController;
+    const notificationAbortController = this.notificationAbortController;
+    const hadPrompt = !!pendingPrompt;
+    const hadCron = !!cronAbortController;
     const hadNotification =
-      !!this.notificationAbortController || this.notificationProcessing;
+      !!notificationAbortController || this.notificationProcessing;
+
+    if (!hadPrompt && !hadCron && !hadNotification) {
+      throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
+    }
+
+    const persistedCapturedWork =
+      (pendingPrompt !== null &&
+        this.persistedPromptControllers.has(pendingPrompt)) ||
+      (notificationAbortController !== null &&
+        this.persistedBackgroundControllers.has(notificationAbortController));
+    if (options?.persistCancellation === true) {
+      if (persistedCapturedWork) {
+        await this.#persistTurnCancellationBoundary();
+      } else if (hadPrompt || hadNotification) {
+        // This controller has not recorded its own turn yet. Stop it now so it
+        // cannot persist while we seal any older interrupted tail it shadows.
+        pendingPrompt?.abort(USER_CANCEL_ABORT_REASON);
+        notificationAbortController?.abort();
+        await this.persistTurnCancellationIfInterrupted();
+      }
+    }
 
     if (this.followupAbort) {
       this.followupAbort.abort();
       this.followupAbort = null;
     }
-    if (!hadPrompt && !hadCron && !hadNotification) {
-      throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
-    }
 
-    if (this.pendingPrompt) {
-      this.pendingPrompt.abort(USER_CANCEL_ABORT_REASON);
-      this.pendingPrompt = null;
+    if (pendingPrompt) {
+      pendingPrompt.abort(USER_CANCEL_ABORT_REASON);
+      if (this.pendingPrompt === pendingPrompt) this.pendingPrompt = null;
     }
 
     // Cancel any in-progress cron execution
-    if (this.cronAbortController) {
-      this.cronAbortController.abort();
-      this.cronAbortController = null;
+    if (cronAbortController) {
+      cronAbortController.abort();
+      if (this.cronAbortController === cronAbortController) {
+        this.cronAbortController = null;
+      }
       this.cronQueue = [];
       this.cronProcessing = false;
     }
 
-    if (this.notificationAbortController) {
-      this.notificationAbortController.abort();
-      this.notificationAbortController = null;
+    if (notificationAbortController) {
+      notificationAbortController.abort();
+      if (this.notificationAbortController === notificationAbortController) {
+        this.notificationAbortController = null;
+      }
     }
     this.notificationQueue = [];
     this.notificationProcessing = false;
@@ -1403,6 +1457,81 @@ export class Session implements SessionContext {
       scheduler.stop();
       if (summary) {
         await this.messageEmitter.emitAgentMessage(summary);
+      }
+    }
+  }
+
+  async persistTurnCancellationIfInterrupted(): Promise<void> {
+    if (this.turnResumptionInFlight) {
+      await this.turnResumptionInFlight;
+    }
+    if (this.turnCancellationInFlight) {
+      await this.turnCancellationInFlight;
+    }
+    if (this.lastTurnExplicitlyCancelled) return;
+    const geminiClient = this.config.getGeminiClient();
+    if (!geminiClient || !geminiClient.isInitialized()) return;
+    const detection = detectTurnInterruption(
+      this.#getCurrentChat().getHistoryTailShallow?.(
+        TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
+      ) ??
+        this.#getCurrentChat().getHistoryTail(
+          TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
+        ),
+    );
+    if (detection.kind === 'none') return;
+    await this.#persistTurnCancellationBoundary();
+  }
+
+  async #persistTurnCancellationBoundary(): Promise<void> {
+    if (this.turnResumptionInFlight) {
+      await this.turnResumptionInFlight;
+    }
+    if (this.turnCancellationInFlight) {
+      await this.turnCancellationInFlight;
+    }
+    if (this.lastTurnExplicitlyCancelled) return;
+    const recording = this.config.getChatRecordingService();
+    if (!recording) {
+      throw new Error('Chat recording service unavailable');
+    }
+    this.lastTurnExplicitlyCancelled = true;
+    const cancellation = recording.recordTurnCancellation();
+    this.turnCancellationInFlight = cancellation;
+    try {
+      await cancellation;
+    } catch (error) {
+      this.lastTurnExplicitlyCancelled = false;
+      throw error;
+    } finally {
+      if (this.turnCancellationInFlight === cancellation) {
+        this.turnCancellationInFlight = null;
+      }
+    }
+  }
+
+  async #clearTurnCancellationBoundary(): Promise<void> {
+    if (this.turnCancellationInFlight) {
+      await this.turnCancellationInFlight;
+    }
+    if (this.turnResumptionInFlight) {
+      await this.turnResumptionInFlight;
+      return;
+    }
+    if (!this.lastTurnExplicitlyCancelled) return;
+    const recording = this.config.getChatRecordingService();
+    if (!recording) {
+      throw new Error('Chat recording service unavailable');
+    }
+    const resumption = recording.recordTurnResumption().then(() => {
+      this.lastTurnExplicitlyCancelled = false;
+    });
+    this.turnResumptionInFlight = resumption;
+    try {
+      await resumption;
+    } finally {
+      if (this.turnResumptionInFlight === resumption) {
+        this.turnResumptionInFlight = null;
       }
     }
   }
@@ -1464,6 +1593,18 @@ export class Session implements SessionContext {
       }
     }
 
+    // Do not append a new user record behind a cancellation boundary that may
+    // still fail. Otherwise the new record can point at a marker that never
+    // reached disk and disappear from reconstructed history after restart.
+    if (this.turnCancellationInFlight) {
+      try {
+        await this.turnCancellationInFlight;
+      } catch (error) {
+        if (this.pendingPrompt === pendingSend) this.pendingPrompt = null;
+        throw error;
+      }
+    }
+
     // Cancelled while waiting for the previous prompt to finish.
     if (pendingSend.signal.aborted) {
       return { stopReason: 'cancelled' };
@@ -1479,6 +1620,9 @@ export class Session implements SessionContext {
 
     try {
       const result = await this.#executePrompt(params, pendingSend);
+      await this.config
+        .getChatRecordingService()
+        ?.recordTurnStop(result.stopReason);
       this.pendingPrompt = null;
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
@@ -1530,6 +1674,9 @@ export class Session implements SessionContext {
     );
     if (detection.kind === 'none') {
       return { accepted: false, interruption: 'none' };
+    }
+    if (this.lastTurnExplicitlyCancelled) {
+      return { accepted: false, interruption: detection.kind };
     }
     // A prompt (or an earlier continuation) is still in flight: there is no
     // settled turn to continue. Reject rather than abort the live turn.
@@ -1730,12 +1877,15 @@ export class Session implements SessionContext {
               const detection = detectTurnInterruption(
                 this.#getCurrentChat().getHistory(),
               );
-              if (detection.kind === 'none') {
+              if (
+                detection.kind === 'none' ||
+                this.lastTurnExplicitlyCancelled
+              ) {
                 // History moved between continueLastTurn()'s accept and this
                 // re-detection (e.g. a concurrent turn settled it). Nothing to
                 // continue; log so an abandoned continuation is diagnosable.
                 debugLogger.warn(
-                  `[Session] continue ${promptId}: no interrupted turn on re-detection, nothing to continue`,
+                  `[Session] continue ${promptId}: ${this.lastTurnExplicitlyCancelled ? 'turn was explicitly cancelled' : 'no interrupted turn on re-detection'}, nothing to continue`,
                 );
                 // This early return sits before the send-loop try/finally that
                 // emits conversation_finished, so emit it here too — otherwise a
@@ -1767,13 +1917,20 @@ export class Session implements SessionContext {
             if (isContinue) {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
+              this.persistedPromptControllers.add(pendingSend);
             } else if (isRetry) {
+              this.persistedPromptControllers.add(pendingSend);
+              if (!pendingSend.signal.aborted) {
+                await this.#clearTurnCancellationBoundary();
+              }
               this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
             } else {
               // record user message for session management
               this.config
                 .getChatRecordingService()
                 ?.recordUserMessage(promptText);
+              this.persistedPromptControllers.add(pendingSend);
+              this.lastTurnExplicitlyCancelled = false;
             }
 
             // Check if the input contains a slash command
@@ -2952,6 +3109,7 @@ export class Session implements SessionContext {
   async #drainCronQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.cronProcessing) return;
+    if (this.turnCancellationInFlight) return;
     // Don't process cron while a user prompt is active — the queue will be
     // drained after the prompt completes (see end of prompt()).
     if (this.pendingPrompt) return;
@@ -3420,6 +3578,7 @@ export class Session implements SessionContext {
   async #drainNotificationQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.notificationProcessing) return;
+    if (this.turnCancellationInFlight) return;
     if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
       return;
     }
@@ -3435,6 +3594,7 @@ export class Session implements SessionContext {
       while (this.notificationQueue.length > 0) {
         if (
           this.pendingPrompt ||
+          this.turnCancellationInFlight ||
           this.cronProcessing ||
           this.cronAbortController
         ) {
@@ -3459,6 +3619,7 @@ export class Session implements SessionContext {
       if (
         this.notificationQueue.length > 0 &&
         !this.pendingPrompt &&
+        !this.turnCancellationInFlight &&
         !this.cronProcessing &&
         !this.cronAbortController
       ) {
@@ -3481,11 +3642,15 @@ export class Session implements SessionContext {
 
         try {
           await this.#emitBackgroundNotificationDisplay(item);
+          if (ac.signal.aborted) {
+            await this.#emitBackgroundNotificationEndTurn('cancelled');
+            return;
+          }
 
           const notificationParts: Part[] = [{ text: item.modelText }];
-          this.config
-            .getChatRecordingService()
-            ?.recordNotification(notificationParts, item.displayText);
+          const recording = this.config.getChatRecordingService();
+          recording?.recordNotification(notificationParts, item.displayText);
+          if (recording) this.persistedBackgroundControllers.add(ac);
 
           const notificationReminders =
             await this.#buildInitialSystemReminders();
