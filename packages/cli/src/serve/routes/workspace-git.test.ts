@@ -8,6 +8,7 @@ import express from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import { sendBridgeError } from '../server/error-response.js';
 import type { WorkspaceGitState } from '../workspace-git-state.js';
 import type {
   WorkspaceRegistry,
@@ -61,6 +62,7 @@ describe('workspace Git routes', () => {
       boundWorkspace: '/work/main',
       bridge,
       gitState: { getStatus } as unknown as WorkspaceGitState,
+      sendBridgeError,
     });
 
     const response = await request(app).get('/workspace/git');
@@ -72,6 +74,30 @@ describe('workspace Git routes', () => {
       branch: 'main',
     });
     expect(getStatus).toHaveBeenCalledWith('/work/main', bridge);
+  });
+
+  it('returns a structured error when bound Git status fails', async () => {
+    const app = express();
+    const bridge = runtime('primary', '/work/main', true).bridge;
+    const getStatus = vi.fn(async () => {
+      throw Object.assign(new Error('git failed'), {
+        code: 'git_status_failed',
+      });
+    });
+    registerWorkspaceGitRoutes(app, {
+      boundWorkspace: '/work/main',
+      bridge,
+      gitState: { getStatus } as unknown as WorkspaceGitState,
+      sendBridgeError,
+    });
+
+    const response = await request(app).get('/workspace/git');
+
+    expect(response.status).toBe(500);
+    expect(response.body).toMatchObject({
+      error: 'git failed',
+      code: 'git_status_failed',
+    });
   });
 
   it('uses the selected trusted workspace runtime', async () => {
@@ -86,6 +112,7 @@ describe('workspace Git routes', () => {
     registerWorkspaceQualifiedGitRoutes(app, {
       workspaceRegistry: registry([primary, secondary]),
       gitState: { getStatus } as unknown as WorkspaceGitState,
+      sendBridgeError,
     });
 
     const response = await request(app).get('/workspaces/secondary/git');
@@ -106,6 +133,7 @@ describe('workspace Git routes', () => {
     registerWorkspaceQualifiedGitRoutes(app, {
       workspaceRegistry: registry([primary, untrusted]),
       gitState: { getStatus } as unknown as WorkspaceGitState,
+      sendBridgeError,
     });
 
     const response = await request(app).get('/workspaces/untrusted/git');
@@ -113,5 +141,47 @@ describe('workspace Git routes', () => {
     expect(response.status).toBe(403);
     expect(response.body.code).toBe('untrusted_workspace');
     expect(getStatus).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown workspace before reading Git status', async () => {
+    const app = express();
+    const primary = runtime('primary', '/work/main', true);
+    const getStatus = vi.fn();
+    registerWorkspaceQualifiedGitRoutes(app, {
+      workspaceRegistry: registry([primary]),
+      gitState: { getStatus } as unknown as WorkspaceGitState,
+      sendBridgeError,
+    });
+
+    const response = await request(app).get('/workspaces/missing/git');
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      code: 'workspace_mismatch',
+    });
+    expect(getStatus).not.toHaveBeenCalled();
+  });
+
+  it('returns a structured error when qualified Git status fails', async () => {
+    const app = express();
+    const primary = runtime('primary', '/work/main', true);
+    const getStatus = vi.fn(async () => {
+      throw Object.assign(new Error('qualified git failed'), {
+        data: { reason: 'watcher' },
+      });
+    });
+    registerWorkspaceQualifiedGitRoutes(app, {
+      workspaceRegistry: registry([primary]),
+      gitState: { getStatus } as unknown as WorkspaceGitState,
+      sendBridgeError,
+    });
+
+    const response = await request(app).get('/workspaces/primary/git');
+
+    expect(response.status).toBe(500);
+    expect(response.body).toMatchObject({
+      error: 'qualified git failed',
+      data: { reason: 'watcher' },
+    });
   });
 });

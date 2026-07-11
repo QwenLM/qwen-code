@@ -454,8 +454,35 @@ describe('DaemonSessionProvider', () => {
       status: 'connected',
       workspaceCwd: '/mock-workspace',
       currentMode: 'yolo',
+      gitBranch: 'main',
     });
     expect(connection).not.toHaveProperty('sessionId');
+  });
+
+  it('populates git branch from the active session workspace', async () => {
+    sdkMocks.sessions.push(createMockSession());
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-1',
+      workspaceCwd: '/mock-workspace',
+      gitBranch: 'main',
+    });
+    expect(sdkMocks.workspaceByCwd).toHaveBeenCalledWith('/mock-workspace');
   });
 
   it('populates skill slash commands during deferred connect (before first prompt)', async () => {
@@ -5397,12 +5424,13 @@ describe('DaemonSessionProvider', () => {
       heartbeatFailureThreshold: 2,
     });
 
+    await vi.waitFor(() =>
+      expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
     await act(async () => {
-      await wait(10);
       await flushPromises();
     });
 
-    expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(connection).toMatchObject({
       status: 'disconnected',
       error: 'session gone',

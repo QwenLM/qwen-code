@@ -989,10 +989,12 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     gitState: workspaceGitState,
+    sendBridgeError,
   });
   registerWorkspaceQualifiedGitRoutes(app, {
     workspaceRegistry,
     gitState: workspaceGitState,
+    sendBridgeError,
   });
 
   // Workspace memory + agents CRUD routes.

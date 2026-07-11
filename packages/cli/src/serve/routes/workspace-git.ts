@@ -6,6 +6,7 @@
 
 import type { Application, Request, Response } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { SendBridgeError } from '../server/error-response.js';
 import type { WorkspaceGitState } from '../workspace-git-state.js';
 import type {
   WorkspaceRegistry,
@@ -22,12 +23,17 @@ export function registerWorkspaceGitRoutes(
     boundWorkspace: string;
     bridge: AcpSessionBridge;
     gitState: WorkspaceGitState;
+    sendBridgeError: SendBridgeError;
   },
 ): void {
   app.get('/workspace/git', async (_req, res) => {
-    res
-      .status(200)
-      .json(await deps.gitState.getStatus(deps.boundWorkspace, deps.bridge));
+    try {
+      res
+        .status(200)
+        .json(await deps.gitState.getStatus(deps.boundWorkspace, deps.bridge));
+    } catch (err) {
+      deps.sendBridgeError(res, err, { route: 'GET /workspace/git' });
+    }
   });
 }
 
@@ -43,15 +49,24 @@ function resolveTrustedRuntime(
 
 export function registerWorkspaceQualifiedGitRoutes(
   app: Application,
-  deps: { workspaceRegistry: WorkspaceRegistry; gitState: WorkspaceGitState },
+  deps: {
+    workspaceRegistry: WorkspaceRegistry;
+    gitState: WorkspaceGitState;
+    sendBridgeError: SendBridgeError;
+  },
 ): void {
   app.get('/workspaces/:workspace/git', async (req, res) => {
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
-    res
-      .status(200)
-      .json(
-        await deps.gitState.getStatus(runtime.workspaceCwd, runtime.bridge),
-      );
+    const route = 'GET /workspaces/:workspace/git';
+    try {
+      res
+        .status(200)
+        .json(
+          await deps.gitState.getStatus(runtime.workspaceCwd, runtime.bridge),
+        );
+    } catch (err) {
+      deps.sendBridgeError(res, err, { route });
+    }
   });
 }
