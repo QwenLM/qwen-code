@@ -147,13 +147,14 @@ You can review PRs from other repositories by passing the full URL:
 
 This runs in **lightweight mode** — no worktree, no build/test. The review is based on the diff text only (fetched via GitHub API). PR comments can still be posted if you have write access.
 
-| Capability                                                 | Same-repo | Cross-repo                    |
-| ---------------------------------------------------------- | --------- | ----------------------------- |
-| LLM review (Agents 0-6 + verify + iterative reverse audit) | ✅        | ✅                            |
-| Agent 7: Build & test                                      | ✅        | ❌ (no local codebase)        |
-| Cross-file impact analysis                                 | ✅        | ❌                            |
-| PR inline comments                                         | ✅        | ✅ (if you have write access) |
-| Incremental review cache                                   | ✅        | ❌                            |
+| Capability                                                            | Same-repo | Cross-repo                     |
+| --------------------------------------------------------------------- | --------- | ------------------------------ |
+| LLM review (Agents 0, 1a, 1b, 2-6 + verify + iterative reverse audit) | ✅        | ✅                             |
+| Agent 1c: Cross-file tracer                                           | ✅        | ❌ (no local codebase to grep) |
+| Agent 7: Build & test                                                 | ✅        | ❌ (no local codebase)         |
+| Agent 8: Diff-specialized finders (0-2, when the domain calls for it) | ✅        | ✅ (needs only the diff)       |
+| PR inline comments                                                    | ✅        | ✅ (if you have write access)  |
+| Incremental review cache                                              | ✅        | ❌                             |
 
 ## PR Inline Comments
 

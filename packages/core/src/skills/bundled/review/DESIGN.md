@@ -299,7 +299,7 @@ Step 3B's coverage receipts guarantee every chunk was read, but they cover only 
 
 Dogfooding surfaced it concretely. On a heavy-file review, one of the three invariant agents returned in 11 seconds having emitted ~370 tokens while its siblings ran for minutes and thousands; the fast one owned the checklist half (counters / return-values / error-taxonomy) that, in a parallel exhaustive pass, produced the run's most serious finding. Nothing flagged the whiff, and the orchestrator folded its silence into "no issues in that dimension".
 
-The countermeasure is cheap and needs no new machinery: before Step 4, sanity-check that each whole-diff agent's return actually describes its walk (the fields/callers/lines it enumerated) rather than a bare "No issues found." A response conspicuously shorter and faster than its peers is treated as a non-return and that one agent is relaunched. It is the whole-diff analogue of "a chunk with no receipt was never reviewed."
+The countermeasure is cheap and needs no new machinery: before Step 4, sanity-check that each receipt-less agent's return actually describes its walk (the fields/callers/lines it enumerated) rather than a bare "No issues found." The primary test is evidential, not statistical — a return that names nothing it examined is a non-return regardless of length, and a legitimately empty scope passes as long as it says what it checked. The comparative signal ("far shorter and faster than its peers") is only a prompt to look at that agent's output, never a threshold to relaunch on: no fixed cutoff would survive a review where every agent is legitimately terse. Deliberately no number, because a false relaunch costs one agent call and a missed whiff costs a shipped bug — when in doubt, relaunch. It is the receipt-less analogue of "a chunk with no receipt was never reviewed," and it applies to 3A's dimension agents just as it does to 3B's whole-diff agents, since neither emits a receipt.
 
 ## Why effort levels (low / medium / high)
 
@@ -309,7 +309,7 @@ The countermeasure is cheap and needs no new machinery: before Step 4, sanity-ch
 - **A `--quick` boolean:** two modes, but "quick" hides what is and isn't checked (rules? cross-file? build?).
 - **Three levels (chosen):** **low** = one orchestrator pass over the chunk plan, hunk-visible bugs only, ≤8 findings. **medium** = the finder angles (1a, 1b, 1c, quality/altitude, performance, conventions) run **sequentially in the orchestrator's own context** — inline sequencing, not subagents, is what makes the level cheap — ≤12 findings. **high** = the full pipeline, unchanged.
 
-**Guardrails, because a quick pass is recall-limited by construction:**
+**Guardrails, because a quick pass is recall-limited by construction.** "Quick pass" means **low and medium together** — they differ in depth (one diff pass vs. sequential finder angles; ≤8 vs. ≤12 findings) but share every guardrail below, because what the guardrails defend against is the same at both: findings that no verifier ever checked.
 
 - Labeled **unverified**; no Approve/Request-changes verdict is emitted. A verdict is a claim the pipeline earns in Steps 4–5; a quick pass claims findings, not absence of findings.
 - Never posts to the PR: `--comment` forces high, and a "post comments" follow-up after a quick pass is declined.
