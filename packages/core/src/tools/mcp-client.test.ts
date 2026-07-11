@@ -94,6 +94,7 @@ describe('mcp-client', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     process.env = ORIGINAL_ENV;
   });
@@ -875,6 +876,74 @@ describe('mcp-client', () => {
 
       expect(authenticate).toHaveBeenCalledTimes(2);
       expect(maxActiveAuthentications).toBe(1);
+    });
+
+    it('times out automatic OAuth so discovery can settle', async () => {
+      vi.useFakeTimers();
+      const serverName = 'hanging-oauth-server';
+      const serverConfig = { httpUrl: 'https://hanging.example/mcp' };
+      const unauthorized = Object.assign(new Error('unauthorized'), {
+        status: 401,
+      });
+      await probeMcpServerForOAuth(serverName, serverConfig, unauthorized);
+      vi.spyOn(OAuthUtils, 'discoverOAuthConfig').mockResolvedValue({
+        authorizationUrl: 'https://auth.example/authorize',
+        tokenUrl: 'https://auth.example/token',
+        scopes: [],
+      });
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () =>
+          ({
+            authenticate: vi.fn(() => new Promise(() => undefined)),
+          }) as unknown as MCPOAuthProvider,
+      );
+
+      const recovery = attemptAutomaticMcpOAuth(serverName, serverConfig, true);
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      await expect(recovery).resolves.toBe(false);
+    });
+
+    it('ignores stale OAuth probe results after the requirement is cleared', async () => {
+      let resolveProbe!: (response: Response) => void;
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockReturnValue(
+        new Promise<Response>((resolve) => {
+          resolveProbe = resolve;
+        }),
+      );
+      const serverName = 'cleared-oauth-probe-server';
+      const serverConfig = { httpUrl: 'https://example.com/mcp' };
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials: vi.fn().mockResolvedValue(null),
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const client = new McpClient(
+        serverName,
+        serverConfig,
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+      await expect(client.connect()).rejects.toThrow('unauthorized');
+
+      const probe = probeMcpServerForOAuth(serverName, serverConfig);
+      client.clearOAuthState();
+      resolveProbe(new Response(null, { status: 401 }));
+
+      await expect(probe).resolves.toBe(false);
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      expect(mcpServerRequiresOAuth.has(serverName)).toBe(false);
     });
 
     it('clears only the matching URL from the name-level OAuth marker', async () => {

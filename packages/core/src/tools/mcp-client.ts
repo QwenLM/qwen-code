@@ -76,6 +76,7 @@ export type SendSdkMcpMessage = (
 export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
 
 const debugLogger = createDebugLogger('MCP');
+const AUTOMATIC_MCP_OAUTH_TIMEOUT_MS = 60_000;
 
 const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400]);
 const STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT = 512;
@@ -655,6 +656,7 @@ const mcpServerOAuthChallenges = new Map<string, string>();
 const mcpServerOAuthRequirements = new Set<string>();
 const mcpServerOAuthProbeCandidates = new Set<string>();
 const mcpServerOAuthProbeInFlight = new Map<string, Promise<boolean>>();
+const mcpServerOAuthProbeVersions = new Map<string, number>();
 const automaticOAuthInFlight = new Map<string, Promise<boolean>>();
 let automaticOAuthQueue: Promise<void> = Promise.resolve();
 
@@ -750,6 +752,10 @@ function clearMcpOAuthRequirement(
   mcpServerConfig: MCPServerConfig,
 ): void {
   const key = oauthRecoveryKey(mcpServerName, mcpServerConfig);
+  mcpServerOAuthProbeVersions.set(
+    key,
+    (mcpServerOAuthProbeVersions.get(key) ?? 0) + 1,
+  );
   mcpServerOAuthProbeCandidates.delete(key);
   mcpServerOAuthRequirements.delete(key);
   mcpServerOAuthChallenges.delete(key);
@@ -801,6 +807,7 @@ export async function probeMcpServerForOAuth(
   if (existingProbe) {
     return existingProbe;
   }
+  const probeVersion = mcpServerOAuthProbeVersions.get(key) ?? 0;
 
   const probe = (async () => {
     try {
@@ -819,6 +826,9 @@ export async function probeMcpServerForOAuth(
         },
       );
       if (response.status === 401) {
+        if ((mcpServerOAuthProbeVersions.get(key) ?? 0) !== probeVersion) {
+          return false;
+        }
         setMcpOAuthRequirement(
           mcpServerName,
           mcpServerConfig,
@@ -919,6 +929,30 @@ async function handleAutomaticOAuth(
   }
 }
 
+async function withAutomaticOAuthTimeout(
+  recovery: Promise<boolean>,
+  mcpServerName: string,
+): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<boolean>((resolve) => {
+    timeout = setTimeout(() => {
+      debugLogger.error(
+        `Timed out handling automatic OAuth for server '${mcpServerName}'. ` +
+          getMcpOAuthDialogInstruction('authenticate', mcpServerName),
+      );
+      resolve(false);
+    }, AUTOMATIC_MCP_OAUTH_TIMEOUT_MS);
+  });
+
+  try {
+    return await Promise.race([recovery, timedOut]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 export async function attemptAutomaticMcpOAuth(
   mcpServerName: string,
   mcpServerConfig: MCPServerConfig,
@@ -943,10 +977,13 @@ export async function attemptAutomaticMcpOAuth(
 
   const recovery = automaticOAuthQueue
     .then(() =>
-      handleAutomaticOAuth(
+      withAutomaticOAuthTimeout(
+        handleAutomaticOAuth(
+          mcpServerName,
+          mcpServerConfig,
+          mcpServerOAuthChallenges.get(key) ?? '',
+        ),
         mcpServerName,
-        mcpServerConfig,
-        mcpServerOAuthChallenges.get(key) ?? '',
       ),
     )
     .finally(() => {
