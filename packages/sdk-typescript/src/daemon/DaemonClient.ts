@@ -3355,13 +3355,23 @@ export class DaemonClient {
 
   async addWorkspace(
     cwd: string,
-  ): Promise<{ id: string; cwd: string; primary: boolean; trusted: boolean }> {
+    options: { persist?: boolean } = {},
+  ): Promise<{
+    id: string;
+    cwd: string;
+    primary: boolean;
+    trusted: boolean;
+    persisted?: boolean;
+  }> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspaces`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ cwd }),
+        body: JSON.stringify({
+          cwd,
+          ...(options.persist ? { persist: true } : {}),
+        }),
       },
       async (res) => {
         if (!res.ok) {
@@ -3372,6 +3382,7 @@ export class DaemonClient {
           cwd: string;
           primary: boolean;
           trusted: boolean;
+          persisted?: boolean;
         };
       },
     );

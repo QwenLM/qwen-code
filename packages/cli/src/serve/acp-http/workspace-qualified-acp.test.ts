@@ -379,7 +379,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(res.status).toBe(500);
   });
 
-  it('does not expose qualified HTTP or WS routes with one runtime', async () => {
+  it('exposes qualified HTTP and WS routes with one runtime', async () => {
     const primaryBridge = makeBridge();
     const registry = createWorkspaceRegistry([
       makeRuntime({
@@ -414,7 +414,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
           body: INITIALIZE,
         },
       );
-      expect(qualified.status).toBe(404);
+      expect(qualified.status).toBe(200);
 
       const upgradeStatus = await new Promise<number>((resolve) => {
         const ws = new WebSocket(
@@ -430,7 +430,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         });
         ws.on('error', () => resolve(0));
       });
-      expect(upgradeStatus).not.toBe(101);
+      expect(upgradeStatus).toBe(101);
 
       const legacy = await fetch(`http://127.0.0.1:${singlePort}/acp`, {
         method: 'POST',
@@ -438,6 +438,25 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         body: INITIALIZE,
       });
       expect(legacy.status).toBe(200);
+
+      registry.add(
+        makeRuntime({
+          id: 'dynamic-id',
+          cwd: '/dynamic',
+          primary: false,
+          trusted: true,
+          bridge: makeBridge(),
+        }),
+      );
+      const dynamic = await fetch(
+        `http://127.0.0.1:${singlePort}/workspaces/dynamic-id/acp`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: INITIALIZE,
+        },
+      );
+      expect(dynamic.status).toBe(200);
     } finally {
       singleHandle.dispose();
       singleServer.closeAllConnections?.();

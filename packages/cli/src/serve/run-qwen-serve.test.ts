@@ -45,6 +45,7 @@ import type {
 import type { ServiceInfo } from '../commands/channel/pidfile.js';
 import { LARGE_PIPE_FRAME_THRESHOLD_BYTES } from './large-pipe-frame-observer.js';
 import type { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
+import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 
 const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   limits: {
@@ -1923,6 +1924,76 @@ describe('runQwenServe runtime startup failures', () => {
       expect(env.envFilePaths).toBe(envFilePaths);
       expect(env.envFileReadFailures).toBe(envFileReadFailures);
       expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe('reloaded');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('restores persisted workspaces through the normal secondary runtime path', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-restored-workspace-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    const canonicalPrimary = canonicalizeWorkspace(primary);
+    const canonicalSecondary = canonicalizeWorkspace(secondary);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+    let restoredCwds: string[] = [];
+    let advertisedMaxTotalSessions: number | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(
+      (opts, _getPort, deps) => {
+        restoredCwds =
+          deps?.workspaceRegistry
+            ?.list()
+            .map((runtime) => runtime.workspaceCwd) ?? [];
+        advertisedMaxTotalSessions = opts.maxTotalSessions;
+        return express();
+      },
+    );
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        primaryWorkspace: canonicalPrimary,
+        workspaces: [canonicalSecondary],
+      }),
+    } as unknown as WorkspaceRegistrationStore;
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: primary,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        workspaceRegistrationStore: store,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(store.read).toHaveBeenCalledTimes(1);
+      expect(restoredCwds).toEqual([canonicalPrimary, canonicalSecondary]);
+      expect(createBridge).toHaveBeenCalledTimes(2);
+      expect(advertisedMaxTotalSessions).toBe(2);
     } finally {
       await handle.close();
     }

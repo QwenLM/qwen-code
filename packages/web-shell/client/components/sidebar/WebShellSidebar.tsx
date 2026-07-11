@@ -903,7 +903,17 @@ export function WebShellSidebar({
 
   const handleAddWorkspace = useCallback(
     async (cwd: string) => {
-      await workspaceActions.addWorkspace(cwd);
+      const capabilities =
+        workspace.capabilities ?? (await workspace.getCapabilities?.());
+      const supportsPersistence = Boolean(
+        capabilities?.features?.includes('persistent_workspace_registration'),
+      );
+      const result = supportsPersistence
+        ? await workspaceActions.addWorkspace(cwd, { persist: true })
+        : await workspaceActions.addWorkspace(cwd);
+      if (supportsPersistence && result.persisted !== true) {
+        throw new Error(t('sidebar.addWorkspacePersistenceError'));
+      }
       // Force a fresh capabilities fetch so the new workspace appears
       // immediately. Best-effort: registration already succeeded, so a
       // refresh failure must not surface as an add-workspace error — the
@@ -915,7 +925,7 @@ export function WebShellSidebar({
         // ignore — the workspace is registered; the list reconciles on reload
       }
     },
-    [workspaceActions, workspace],
+    [t, workspaceActions, workspace],
   );
 
   const handleNewSession = useCallback(() => {

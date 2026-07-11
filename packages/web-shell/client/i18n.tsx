@@ -786,6 +786,8 @@ const EN: Messages = {
   'sidebar.addWorkspaceRegister': 'Register',
   'sidebar.addWorkspaceCancel': 'Cancel',
   'sidebar.addWorkspaceError': 'Failed to add workspace',
+  'sidebar.addWorkspacePersistenceError':
+    'The daemon did not confirm persistent workspace registration',
   'sidebar.addWorkspaceAbsError': 'Path must be absolute',
   'sidebar.noSessions': 'No sessions.',
   'sidebar.projectFallback': 'Project',
@@ -2519,6 +2521,7 @@ const ZH: Messages = {
   'sidebar.addWorkspaceRegister': '注册',
   'sidebar.addWorkspaceCancel': '取消',
   'sidebar.addWorkspaceError': '添加工作区失败',
+  'sidebar.addWorkspacePersistenceError': '守护进程未确认工作区已持久化注册',
   'sidebar.addWorkspaceAbsError': '路径必须是绝对路径',
   'sidebar.noSessions': '暂无会话',
   'sidebar.projectFallback': '项目',

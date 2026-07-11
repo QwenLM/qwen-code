@@ -7,6 +7,8 @@
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { isWithinRoot } from '../config/path-comparison.js';
 
+export const MAX_REGISTERED_WORKSPACES = 25;
+
 export class DuplicateWorkspaceInputError extends Error {
   constructor(workspace: string) {
     super(

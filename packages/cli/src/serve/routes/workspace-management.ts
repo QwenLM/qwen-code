@@ -11,30 +11,40 @@ import type { Application, Request, Response } from 'express';
 import { isWithinRoot } from '@qwen-code/qwen-code-core';
 import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { MAX_REGISTERED_WORKSPACES } from '../workspace-inputs.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import {
+  workspaceRegistrationId,
+  type WorkspaceRegistrationStore,
+} from '../workspace-registration-store.js';
 
 // Upper bound on total registered workspaces (startup + dynamic). Each
 // registration allocates a full runtime (bridge, channel factory, sub-session
 // launcher), so an unbounded POST /workspaces would let an authenticated
-// client exhaust memory / file descriptors. There is no DELETE yet, so this is
-// the sole backpressure.
-const MAX_REGISTERED_WORKSPACES = 25;
-
+// client exhaust memory / file descriptors. Forgetting persistence does not
+// unload an active runtime, so this remains the runtime backpressure.
 export interface WorkspaceManagementRouteDeps {
   workspaceRegistry: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   createWorkspaceRuntime?: (cwd: string) => Promise<WorkspaceRuntime>;
+  workspaceRegistrationStore?: WorkspaceRegistrationStore;
 }
 
 export function registerWorkspaceManagementRoutes(
   app: Application,
   deps: WorkspaceManagementRouteDeps,
 ): void {
-  const { workspaceRegistry, mutate, safeBody, createWorkspaceRuntime } = deps;
+  const {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    createWorkspaceRuntime,
+    workspaceRegistrationStore,
+  } = deps;
   // Canonical cwds with a registration in flight, so two concurrent POSTs for
   // the same directory can't both pass the duplicate check and both build
   // runtime infrastructure before one add() throws.
@@ -44,20 +54,34 @@ export function registerWorkspaceManagementRoutes(
     '/workspaces',
     mutate({ strict: true }),
     async (req: Request, res: Response) => {
-      if (!createWorkspaceRuntime) {
-        res.status(501).json({
-          error: 'Dynamic workspace registration is not available',
-          code: 'not_implemented',
-        });
-        return;
-      }
-
       const body = safeBody(req);
       const cwd = body['cwd'];
+      const persist = body['persist'] ?? false;
       if (typeof cwd !== 'string' || cwd.trim().length === 0) {
         res.status(400).json({
           error: '`cwd` must be a non-empty string',
           code: 'invalid_path',
+        });
+        return;
+      }
+      if (typeof persist !== 'boolean') {
+        res.status(400).json({
+          error: '`persist` must be a boolean',
+          code: 'invalid_persist_flag',
+        });
+        return;
+      }
+      if (persist && !workspaceRegistrationStore) {
+        res.status(501).json({
+          error: 'Persistent workspace registration is not available',
+          code: 'persistence_not_available',
+        });
+        return;
+      }
+      if (!createWorkspaceRuntime && !persist) {
+        res.status(501).json({
+          error: 'Dynamic workspace registration is not available',
+          code: 'not_implemented',
         });
         return;
       }
@@ -118,13 +142,41 @@ export function registerWorkspaceManagementRoutes(
       // same canonical cwd can't race past registration. Error messages stay
       // generic and never echo a resolved path (which could reveal symlink
       // targets or another workspace's location).
-      if (
-        workspaceRegistry.getByWorkspaceCwd(canonical) ||
-        inFlight.has(canonical)
-      ) {
+      const existingRuntime = workspaceRegistry.getByWorkspaceCwd(canonical);
+      if (existingRuntime && persist && !existingRuntime.primary) {
+        try {
+          await workspaceRegistrationStore!.add(canonical);
+          res.status(200).json({
+            id: existingRuntime.workspaceId,
+            cwd: existingRuntime.workspaceCwd,
+            primary: existingRuntime.primary,
+            trusted: existingRuntime.trusted,
+            persisted: true,
+          });
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: failed to persist existing workspace registration: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+          res.status(500).json({
+            error: 'Failed to persist workspace registration',
+            code: 'workspace_persist_failed',
+          });
+        }
+        return;
+      }
+      if (existingRuntime || inFlight.has(canonical)) {
         res.status(409).json({
           error: 'Workspace already registered',
           code: 'workspace_exists',
+        });
+        return;
+      }
+      if (!createWorkspaceRuntime) {
+        res.status(501).json({
+          error: 'Dynamic workspace registration is not available',
+          code: 'not_implemented',
         });
         return;
       }
@@ -162,14 +214,46 @@ export function registerWorkspaceManagementRoutes(
       }
 
       inFlight.add(canonical);
+      let persistenceFailed = false;
       try {
         const runtime = await createWorkspaceRuntime(canonical);
-        workspaceRegistry.add(runtime);
+        let persistedRecordAdded = false;
+        try {
+          if (persist) {
+            try {
+              persistedRecordAdded =
+                await workspaceRegistrationStore!.add(canonical);
+            } catch (err) {
+              persistenceFailed = true;
+              throw err;
+            }
+          }
+          workspaceRegistry.add(runtime);
+        } catch (err) {
+          if (persistedRecordAdded) {
+            try {
+              await workspaceRegistrationStore!.removeById(
+                workspaceRegistrationId(canonical),
+              );
+            } catch (rollbackErr) {
+              writeStderrLine(
+                `qwen serve: failed to roll back workspace persistence after runtime registration failure: ${
+                  rollbackErr instanceof Error
+                    ? rollbackErr.message
+                    : String(rollbackErr)
+                }`,
+              );
+            }
+          }
+          await runtime.bridge.shutdown().catch(() => undefined);
+          throw err;
+        }
         res.status(201).json({
           id: runtime.workspaceId,
           cwd: runtime.workspaceCwd,
           primary: runtime.primary,
           trusted: runtime.trusted,
+          ...(persist ? { persisted: true } : {}),
         });
       } catch (err) {
         // Log the full error server-side but return a generic message so the
@@ -179,12 +263,99 @@ export function registerWorkspaceManagementRoutes(
             err instanceof Error ? err.message : String(err)
           }`,
         );
-        res.status(500).json({
-          error: 'Failed to register workspace',
-          code: 'runtime_creation_failed',
-        });
+        if (persistenceFailed) {
+          res.status(500).json({
+            error: 'Failed to persist workspace registration',
+            code: 'workspace_persist_failed',
+          });
+        } else {
+          res.status(500).json({
+            error: 'Failed to register workspace',
+            code: 'runtime_creation_failed',
+          });
+        }
       } finally {
         inFlight.delete(canonical);
+      }
+    },
+  );
+
+  app.get('/workspace-registrations', async (_req, res) => {
+    if (!workspaceRegistrationStore) {
+      res.status(501).json({
+        error: 'Persistent workspace registration is not available',
+        code: 'persistence_not_available',
+      });
+      return;
+    }
+    try {
+      const snapshot = await workspaceRegistrationStore.read();
+      res.json({
+        schemaVersion: snapshot.schemaVersion,
+        primaryWorkspace: snapshot.primaryWorkspace,
+        entries: snapshot.workspaces.map((cwd) => {
+          const runtime = workspaceRegistry.getByWorkspaceCwd(cwd);
+          return {
+            id: runtime?.workspaceId ?? workspaceRegistrationId(cwd),
+            cwd,
+            active: runtime !== undefined,
+            persisted: true,
+          };
+        }),
+      });
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: failed to read workspace registrations: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      res.status(500).json({
+        error: 'Failed to read workspace registrations',
+        code: 'workspace_registration_store_unavailable',
+      });
+    }
+  });
+
+  app.delete(
+    '/workspace-registrations/:id',
+    mutate({ strict: true }),
+    async (req, res) => {
+      if (!workspaceRegistrationStore) {
+        res.status(501).json({
+          error: 'Persistent workspace registration is not available',
+          code: 'persistence_not_available',
+        });
+        return;
+      }
+      try {
+        const removed = await workspaceRegistrationStore.removeById(
+          String(req.params['id']),
+        );
+        if (!removed) {
+          res.status(404).json({
+            error: 'Workspace registration not found',
+            code: 'workspace_registration_not_found',
+          });
+          return;
+        }
+        const active = workspaceRegistry.getByWorkspaceId(
+          String(req.params['id']),
+        );
+        res.json({
+          removed: true,
+          active: active !== undefined,
+          restartRequired: active !== undefined,
+        });
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: failed to forget workspace registration: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to forget workspace registration',
+          code: 'workspace_persist_failed',
+        });
       }
     },
   );
