@@ -55,6 +55,8 @@ interface WorkspaceSectionProps {
   reloadToken: number;
   primaryLabel: string;
   untrustedLabel: string;
+  readOnlyLabel: string;
+  trustToOpenLabel: string;
   noSessionsLabel: string;
   formatTime: (iso: string) => string;
   onSelectWorkspace: (cwd: string | undefined) => void;
@@ -69,6 +71,8 @@ export function WorkspaceSection({
   reloadToken,
   primaryLabel,
   untrustedLabel,
+  readOnlyLabel,
+  trustToOpenLabel,
   noSessionsLabel,
   formatTime,
   onSelectWorkspace,
@@ -76,6 +80,8 @@ export function WorkspaceSection({
 }: WorkspaceSectionProps) {
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
   const [expanded, setExpanded] = useState(workspace.primary);
+  const readOnly = !workspace.primary && !workspace.trusted;
+  const disabled = workspace.primary && !workspace.trusted;
 
   // Sync if the primary flag changes after mount (e.g. capabilities refresh).
   useEffect(() => {
@@ -83,7 +89,7 @@ export function WorkspaceSection({
   }, [workspace.primary]);
 
   const loadSessions = useCallback(async () => {
-    if (!workspace.trusted) return;
+    if (disabled) return;
     try {
       const result = await client.listWorkspaceSessions(workspace.cwd, {
         archiveState: 'active',
@@ -95,14 +101,15 @@ export function WorkspaceSection({
       console.warn('[WorkspaceSection] session poll failed:', err);
       setSessions([]);
     }
-  }, [client, workspace.cwd, workspace.trusted]);
+  }, [client, disabled, workspace.cwd]);
 
   useEffect(() => {
     if (!expanded) return;
     void loadSessions();
+    if (readOnly) return;
     const timer = setInterval(() => void loadSessions(), 10_000);
     return () => clearInterval(timer);
-  }, [expanded, loadSessions, reloadToken]);
+  }, [expanded, loadSessions, readOnly, reloadToken]);
 
   return (
     <div className={styles.section}>
@@ -110,12 +117,14 @@ export function WorkspaceSection({
         className={cx(
           styles.header,
           isActive && styles.headerActive,
-          !workspace.trusted && styles.headerDisabled,
+          disabled && styles.headerDisabled,
         )}
-        disabled={!workspace.trusted}
+        disabled={disabled}
         aria-expanded={expanded}
         onClick={() => {
-          onSelectWorkspace(workspace.primary ? undefined : workspace.cwd);
+          if (!readOnly) {
+            onSelectWorkspace(workspace.primary ? undefined : workspace.cwd);
+          }
           setExpanded((v) => !v);
         }}
       >
@@ -129,33 +138,52 @@ export function WorkspaceSection({
         {!workspace.trusted && (
           <span className={styles.badge}>{untrustedLabel}</span>
         )}
+        {readOnly && <span className={styles.badge}>{readOnlyLabel}</span>}
       </button>
-      {expanded && workspace.trusted && (
+      {expanded && !disabled && (
         <div className={styles.sessions}>
           {sessions.length === 0 ? (
             <div className={styles.empty}>{noSessionsLabel}</div>
           ) : (
-            sessions.map((session) => (
-              <button
-                key={session.sessionId}
-                className={cx(
-                  styles.sessionItem,
-                  session.sessionId === currentSessionId &&
-                    styles.sessionItemActive,
-                )}
-                onClick={() => onLoadSession(session.sessionId)}
-                title={getSessionLabel(session)}
-              >
-                <span className={styles.sessionName}>
-                  {getSessionLabel(session)}
-                </span>
-                {session.createdAt && (
-                  <span className={styles.sessionTime}>
-                    {formatTime(session.createdAt)}
+            sessions.map((session) => {
+              const content = (
+                <>
+                  <span className={styles.sessionName}>
+                    {getSessionLabel(session)}
                   </span>
-                )}
-              </button>
-            ))
+                  {session.createdAt && (
+                    <span className={styles.sessionTime}>
+                      {formatTime(session.createdAt)}
+                    </span>
+                  )}
+                </>
+              );
+              return readOnly ? (
+                <div
+                  key={session.sessionId}
+                  className={cx(styles.sessionItem, styles.sessionItemReadOnly)}
+                  role="note"
+                  aria-disabled="true"
+                  aria-label={`${getSessionLabel(session)}. ${trustToOpenLabel}`}
+                  title={trustToOpenLabel}
+                >
+                  {content}
+                </div>
+              ) : (
+                <button
+                  key={session.sessionId}
+                  className={cx(
+                    styles.sessionItem,
+                    session.sessionId === currentSessionId &&
+                      styles.sessionItemActive,
+                  )}
+                  onClick={() => onLoadSession(session.sessionId)}
+                  title={getSessionLabel(session)}
+                >
+                  {content}
+                </button>
+              );
+            })
           )}
         </div>
       )}

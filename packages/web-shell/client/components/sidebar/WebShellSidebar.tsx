@@ -2505,6 +2505,8 @@ export function WebShellSidebar({
                   reloadToken={workspaceSessionsReloadToken}
                   primaryLabel={t('sidebar.workspacePrimary')}
                   untrustedLabel={t('sidebar.workspaceUntrusted')}
+                  readOnlyLabel={t('sidebar.workspaceReadOnly')}
+                  trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
                   noSessionsLabel={t('sidebar.noSessions')}
                   formatTime={(iso) => formatRelativeTime(iso, t)}
                   onSelectWorkspace={(cwd) => onSelectWorkspace?.(cwd)}

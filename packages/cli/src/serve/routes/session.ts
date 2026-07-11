@@ -14,6 +14,7 @@ import {
   SessionOrganizationError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   addDaemonRequestAttribute,
+  runWithoutDebugLogSession,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionArchiveState,
@@ -87,6 +88,15 @@ interface RegisterSessionRoutesDeps {
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
   languageCodes: string[];
+}
+
+function readWorkspaceCatalog<T>(
+  runtime: WorkspaceRuntime,
+  read: () => Promise<T>,
+): Promise<T> {
+  return !runtime.primary && !runtime.trusted
+    ? runWithoutDebugLogSession(read)
+    : read();
 }
 
 function requireSessionArtifactClientId(
@@ -2056,12 +2066,16 @@ export function registerSessionRoutes(
   });
 
   app.get('/workspace/:id/session-groups', async (req, res) => {
-    const key = resolveWorkspaceParam(req, res);
-    if (key === null) return;
+    const runtime = resolveRuntimeFromWorkspaceParam(req, res);
+    if (runtime === null) return;
     try {
       res
         .status(200)
-        .json(await createSessionOrganizationService(key).listGroups());
+        .json(
+          await readWorkspaceCatalog(runtime, () =>
+            createSessionOrganizationService(runtime.workspaceCwd).listGroups(),
+          ),
+        );
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /workspace/:id/session-groups',
@@ -2141,15 +2155,28 @@ export function registerSessionRoutes(
 
   app.get('/workspaces/:workspace/session-groups', async (req, res) => {
     const route = 'GET /workspaces/:workspace/session-groups';
-    const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      workspaceRegistry,
+      req,
+      res,
+      'workspace',
+    );
     if (!runtime) return;
+    if (runtime.primary && !runtime.trusted) {
+      logSessionRoutingFailure(route, 'untrusted_workspace', {
+        workspaceId: runtime.workspaceId,
+        workspaceCwd: runtime.workspaceCwd,
+      });
+      sendUntrustedWorkspaceResponse(res);
+      return;
+    }
     try {
       res
         .status(200)
         .json(
-          await createSessionOrganizationService(
-            runtime.workspaceCwd,
-          ).listGroups(),
+          await readWorkspaceCatalog(runtime, () =>
+            createSessionOrganizationService(runtime.workspaceCwd).listGroups(),
+          ),
         );
     } catch (err) {
       sendBridgeError(res, err, { route });
@@ -2248,11 +2275,7 @@ export function registerSessionRoutes(
             )
           : resolveRuntimeFromWorkspaceParam(req, res, paramName);
       if (runtime === null) return;
-      if (
-        paramName === 'workspace'
-          ? !runtime.trusted
-          : !runtime.primary && !runtime.trusted
-      ) {
+      if (paramName === 'workspace' && runtime.primary && !runtime.trusted) {
         logSessionRoutingFailure(route, 'untrusted_workspace', {
           workspaceId: runtime.workspaceId,
           workspaceCwd: runtime.workspaceCwd,
@@ -2261,6 +2284,7 @@ export function registerSessionRoutes(
         return;
       }
       const key = runtime.workspaceCwd;
+      const readOnlySecondary = !runtime.primary && !runtime.trusted;
       try {
         const cursor =
           typeof req.query['cursor'] === 'string'
@@ -2342,6 +2366,7 @@ export function registerSessionRoutes(
         // (persisted + live) to filter completely and paginates with an opaque
         // activity cursor, so the numeric-cursor live fallback can't serve it.
         const usePersisted =
+          readOnlySecondary ||
           runtime.primary ||
           view === 'organized' ||
           archiveState === 'archived' ||
@@ -2362,7 +2387,11 @@ export function registerSessionRoutes(
           );
         }
         const result = usePersisted
-          ? await listWorkspaceSessionsForResponse(runtime.bridge, key, options)
+          ? await readWorkspaceCatalog(runtime, () =>
+              listWorkspaceSessionsForResponse(runtime.bridge, key, options, {
+                mergeLive: !readOnlySecondary,
+              }),
+            )
           : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
         res.status(200).json({
           sessions: result.sessions,

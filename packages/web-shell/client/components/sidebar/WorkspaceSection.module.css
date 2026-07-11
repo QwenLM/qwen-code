@@ -96,6 +96,15 @@
   background: var(--sidebar-accent);
 }
 
+.sessionItemReadOnly {
+  color: var(--muted-foreground);
+  cursor: default;
+}
+
+.sessionItemReadOnly:hover {
+  background: transparent;
+}
+
 .sessionItemActive {
   background: var(--sidebar-accent);
 }
