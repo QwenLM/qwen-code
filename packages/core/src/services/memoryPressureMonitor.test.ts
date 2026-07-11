@@ -162,6 +162,7 @@ function createMockConfig(
         }
       : overrides.geminiClient;
   return {
+    getTargetDir: () => '/project',
     getFileReadCache: () =>
       ({
         clear: vi.fn(),
