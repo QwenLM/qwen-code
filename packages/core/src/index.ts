@@ -111,6 +111,7 @@ export {
 export type { ConnectionId, PoolEvent } from './tools/mcp-pool-events.js';
 export { WorkspaceMcpBudget } from './tools/mcp-workspace-budget.js';
 export * from './tools/mcp-tool.js';
+export * from './tools/elicitation.js';
 export * from './tools/read-file.js';
 export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';

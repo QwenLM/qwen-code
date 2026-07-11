@@ -40,6 +40,7 @@ import { type RestartReason } from '../hooks/useIdeTrustListener.js';
 import { type ProviderUpdateRequest } from '../hooks/useProviderUpdates.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
 import type { StatusLinePresetConfig } from '../statusLinePresets.js';
+import type { QueuedElicitationRequest } from '../components/mcp/ElicitationDialog.js';
 import type { StartupIdeConnectionStatus } from '../../utils/events.js';
 
 export interface PendingSkillView {
@@ -93,6 +94,7 @@ export interface UIState {
   providerUpdateRequest: ProviderUpdateRequest | undefined;
   settingInputRequests: SettingInputRequest[];
   pluginChoiceRequests: PluginChoiceRequest[];
+  elicitationRequests: QueuedElicitationRequest[];
   loopDetectionConfirmationRequest: LoopDetectionConfirmationRequest | null;
   geminiMdFileCount: number;
   streamingState: StreamingState;

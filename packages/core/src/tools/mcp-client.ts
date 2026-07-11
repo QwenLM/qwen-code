@@ -33,6 +33,11 @@ import { ServiceAccountImpersonationProvider } from '../mcp/sa-impersonation-pro
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import type { McpToolAnnotations } from './mcp-tool.js';
 import { SdkControlClientTransport } from './sdk-control-client-transport.js';
+import {
+  registerDefaultElicitationHandler,
+  registerElicitationCompletionHandler,
+  registerElicitationHandler,
+} from './elicitation.js';
 import { MCPServerStatus, updateMCPServerStatus } from './mcp-status.js';
 export {
   addMCPStatusChangeListener,
@@ -76,6 +81,25 @@ export type SendSdkMcpMessage = (
 export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
 
 const debugLogger = createDebugLogger('MCP');
+
+function getMcpClientCapabilities(enableUrlElicitationCapability = false) {
+  // Keep the default capability shape intentionally conservative:
+  // `elicitation: {}` is defined by the MCP spec as form-mode support and is
+  // accepted by stricter Java/Kotlin servers that may reject unknown nested
+  // `form`/`url` properties during capability deserialization. Servers that
+  // need direct URL-mode elicitation can opt in per MCP server config.
+  const elicitation = enableUrlElicitationCapability
+    ? {
+        form: {},
+        url: {},
+      }
+    : {};
+
+  return {
+    roots: {},
+    elicitation,
+  };
+}
 
 const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400]);
 const STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT = 512;
@@ -301,10 +325,17 @@ export class McpClient {
     private readonly debugMode: boolean,
     private readonly sendSdkMcpMessage?: SendSdkMcpMessage,
   ) {
-    this.client = new Client({
-      name: `qwen-cli-mcp-client-${this.serverName}`,
-      version: '0.0.1',
-    });
+    this.client = new Client(
+      {
+        name: `qwen-cli-mcp-client-${this.serverName}`,
+        version: '0.0.1',
+      },
+      {
+        capabilities: getMcpClientCapabilities(
+          this.serverConfig.enableUrlElicitationCapability,
+        ),
+      },
+    );
   }
 
   /**
@@ -344,9 +375,7 @@ export class McpClient {
         this.updateStatus(MCPServerStatus.DISCONNECTED);
       };
 
-      this.client.registerCapabilities({
-        roots: {},
-      });
+      registerDefaultElicitationHandler(this.client);
 
       this.client.setRequestHandler(ListRootsRequestSchema, async () => {
         const roots = [];
@@ -489,6 +518,12 @@ export class McpClient {
           { applyConfigFilters: opts?.applyConfigFilters ?? true },
         ),
       ]);
+      registerElicitationCompletionHandler(
+        this.client,
+        this.serverName,
+        cliConfig,
+      );
+      registerElicitationHandler(this.client, this.serverName, cliConfig);
 
       if (
         prompts.length === 0 &&
@@ -878,6 +913,7 @@ export function populateMcpServerCommand(
  * @param mcpServerName The name identifier for this MCP server
  * @param mcpServerConfig Configuration object containing connection details
  * @param toolRegistry The registry to register discovered tools with
+ * @param cliConfig Runtime config used by MCP handlers, including elicitation.
  * @param sendSdkMcpMessage Optional callback for SDK MCP servers to route messages via control plane.
  * @returns Promise that resolves when discovery is complete
  */
@@ -900,6 +936,7 @@ export async function connectAndDiscover(
       mcpServerConfig,
       debugMode,
       workspaceContext,
+      cliConfig,
       sendSdkMcpMessage,
     );
 
@@ -1290,6 +1327,7 @@ export function hasNetworkTransport(config: MCPServerConfig): boolean {
  *
  * @param mcpServerName The name of the MCP server, used for logging and identification.
  * @param mcpServerConfig The configuration specifying how to connect to the server.
+ * @param cliConfig Runtime config used by MCP handlers, including elicitation.
  * @param sendSdkMcpMessage Optional callback for SDK MCP servers to route messages via control plane.
  * @returns A promise that resolves to a connected MCP `Client` instance.
  * @throws An error if the connection fails or the configuration is invalid.
@@ -1299,18 +1337,22 @@ export async function connectToMcpServer(
   mcpServerConfig: MCPServerConfig,
   debugMode: boolean,
   workspaceContext: WorkspaceContext,
+  cliConfig: Config,
   sendSdkMcpMessage?: SendSdkMcpMessage,
 ): Promise<Client> {
-  const mcpClient = new Client({
-    name: 'qwen-code-mcp-client',
-    version: '0.0.1',
-  });
-
-  mcpClient.registerCapabilities({
-    roots: {
-      listChanged: true,
+  const mcpClient = new Client(
+    {
+      name: 'qwen-code-mcp-client',
+      version: '0.0.1',
     },
-  });
+    {
+      capabilities: getMcpClientCapabilities(
+        mcpServerConfig.enableUrlElicitationCapability,
+      ),
+    },
+  );
+
+  registerDefaultElicitationHandler(mcpClient);
 
   mcpClient.setRequestHandler(ListRootsRequestSchema, async () => {
     const roots = [];
@@ -1385,6 +1427,8 @@ export async function connectToMcpServer(
       await mcpClient.connect(transport, {
         timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
       });
+      registerElicitationCompletionHandler(mcpClient, mcpServerName, cliConfig);
+      registerElicitationHandler(mcpClient, mcpServerName, cliConfig);
       return mcpClient;
     } catch (error) {
       unlistenDirectories?.();
