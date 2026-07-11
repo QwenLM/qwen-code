@@ -172,3 +172,13 @@ def test_rejects_mcp_servers() -> None:
         validate_query_options(
             QueryOptions(mcp_servers={"my-server": {"command": "node", "args": []}})
         )
+
+
+def test_rejects_invalid_effort() -> None:
+    with pytest.raises(ValidationError, match="Invalid effort"):
+        validate_query_options(QueryOptions(effort="invalid"))  # type: ignore[arg-type]
+
+
+def test_accepts_valid_effort() -> None:
+    for effort in ("low", "medium", "high", "xhigh", "max"):
+        validate_query_options(QueryOptions(effort=effort))  # type: ignore[arg-type]
