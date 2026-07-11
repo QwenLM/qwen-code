@@ -2247,6 +2247,8 @@ const SETTINGS_SCHEMA = {
           },
           defaultTimeoutMs: {
             type: 'number',
+            minimum: 0,
+            maximum: 600000,
             label: 'Default Command Timeout (ms)',
             category: 'Tools',
             requiresRestart: false,
