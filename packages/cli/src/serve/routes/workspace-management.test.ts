@@ -323,6 +323,27 @@ describe('POST /workspaces', () => {
     expect(registry.add).not.toHaveBeenCalled();
   });
 
+  it('preserves runtime creation failures before persistence begins', async () => {
+    const add = vi.fn();
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([makeRuntime('/some-other-dir')]),
+      createWorkspaceRuntime: vi
+        .fn()
+        .mockRejectedValue(new Error('runtime failed')),
+      workspaceRegistrationStore: {
+        add,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .post('/workspaces')
+      .send({ cwd: REAL_DIR, persist: true });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('runtime_creation_failed');
+    expect(add).not.toHaveBeenCalled();
+  });
+
   it('rolls back a newly persisted record when runtime registration fails', async () => {
     const runtime = makeRuntime(REAL_DIR);
     const registry = createMockRegistry([makeRuntime('/some-other-dir')]);

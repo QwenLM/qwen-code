@@ -65,6 +65,16 @@ describe('WorkspaceRegistrationStore', () => {
     await expect(store.read()).resolves.toMatchObject({ workspaces: [] });
   });
 
+  it('returns false when removing a missing workspace id', async () => {
+    const home = await tempHome();
+    const store = new WorkspaceRegistrationStore('/work/primary', home);
+    await expect(store.add('/work/secondary')).resolves.toBe(true);
+    await expect(store.removeById('missing')).resolves.toBe(false);
+    await expect(store.read()).resolves.toMatchObject({
+      workspaces: ['/work/secondary'],
+    });
+  });
+
   it.skipIf(process.platform !== 'win32')(
     'deduplicates workspace paths case-insensitively on Windows',
     async () => {
