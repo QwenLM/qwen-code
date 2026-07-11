@@ -256,6 +256,7 @@ export interface ChatRecord {
     | 'rewind'
     | 'turn_cancelled'
     | 'turn_resumed'
+    | 'turn_stopped'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
     | 'file_history_snapshot'
@@ -308,6 +309,7 @@ export interface ChatRecord {
     | NotificationRecordPayload
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
+    | TurnStopRecordPayload
     | FileHistorySnapshotRecordPayload
     | SessionArtifactEventRecordPayload
     | SessionArtifactSnapshotRecordPayload;
@@ -340,6 +342,17 @@ export interface ChatRecord {
     sessionId: string;
     messageUuid: string;
   };
+}
+
+export type TurnStopReason =
+  | 'end_turn'
+  | 'max_tokens'
+  | 'max_turn_requests'
+  | 'refusal'
+  | 'cancelled';
+
+export interface TurnStopRecordPayload {
+  stopReason: TurnStopReason;
 }
 
 export interface NotificationRecordPayload {
@@ -1270,6 +1283,18 @@ export class ChatRecordingService {
   /** Clears a prior cancellation boundary when the user explicitly retries. */
   async recordTurnResumption(): Promise<void> {
     await this.recordTurnBoundary('turn_resumed');
+  }
+
+  /** Records the terminal ACP result before the prompt response is acknowledged. */
+  async recordTurnStop(stopReason: TurnStopReason): Promise<void> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'turn_stopped',
+      systemPayload: { stopReason },
+    };
+
+    await this.appendRecordStrict(record);
   }
 
   private async recordTurnBoundary(

@@ -10,6 +10,8 @@ The recovery decision needs durable user intent without changing the ACP protoco
 
 Persist an append-only `system/turn_cancelled` record when a user explicitly stops a turn that is already present in the session JSONL.
 
+Persist an append-only `system/turn_stopped` record with the ACP `stopReason` whenever `session/prompt` returns normally. The value is preserved verbatim for all protocol terminal reasons: `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, and `cancelled`. The prompt response is not acknowledged until this terminal boundary reaches disk.
+
 - Daemon Cancel and running-prompt Remove use an acknowledged private ACP extension request. The child writes the boundary before the HTTP operation succeeds. Standard ACP Cancel remains available to direct ACP clients.
 - Internal aborts caused by transport loss, failed forwarding, teardown, or child cleanup use the standard ACP notification with a private metadata stamp marking them as non-user cancellations.
 - The cancellation write completes before the model request is aborted. Duplicate cancels share the in-flight write, and new prompts cannot append behind a boundary that may still fail.
@@ -17,6 +19,7 @@ Persist an append-only `system/turn_cancelled` record when a user explicitly sto
 - Restore derives the active cancellation state from the reconstructed JSONL branch. Assistant, tool, telemetry, cron, and notification records do not erase it.
 - A later user turn or rewind clears the state. Retry appends `system/turn_resumed` before re-running the persisted turn; cancellation and resumption writes are serialized so the latest user intent wins.
 - Continuation keeps its existing structural classification but returns `accepted: false` when the active branch ends behind a cancellation boundary.
+- A future automatic-recovery hook can distinguish a protocol-terminal turn from an unexpected process loss by the presence of `turn_stopped`; partial model text alone is not treated as proof of completion.
 
 An unexpected `SIGKILL` cannot append the boundary, so its unfinished user or tool history remains eligible for continuation.
 

@@ -263,6 +263,41 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordTurnStop', () => {
+    it.each([
+      'end_turn',
+      'max_tokens',
+      'max_turn_requests',
+      'refusal',
+      'cancelled',
+    ] as const)('durably records the ACP %s boundary', async (stopReason) => {
+      chatRecordingService.recordAssistantTurn({
+        model: 'qwen3-coder-plus',
+        message: [{ text: 'Done' }],
+      });
+
+      await chatRecordingService.recordTurnStop(stopReason);
+
+      const records = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(records[1]).toMatchObject({
+        type: 'system',
+        subtype: 'turn_stopped',
+        parentUuid: records[0]?.uuid,
+        systemPayload: { stopReason },
+      });
+    });
+
+    it('rejects when the terminal boundary cannot be persisted', async () => {
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+
+      await expect(
+        chatRecordingService.recordTurnStop('end_turn'),
+      ).rejects.toThrow('disk full');
+    });
+  });
+
   describe('rewindRecording', () => {
     it('preserves a resumed user turn parent when rebuilding rewind boundaries', async () => {
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({

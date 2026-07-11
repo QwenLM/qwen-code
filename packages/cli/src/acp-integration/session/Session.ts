@@ -1620,6 +1620,9 @@ export class Session implements SessionContext {
 
     try {
       const result = await this.#executePrompt(params, pendingSend);
+      await this.config
+        .getChatRecordingService()
+        ?.recordTurnStop(result.stopReason);
       this.pendingPrompt = null;
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
@@ -3106,6 +3109,7 @@ export class Session implements SessionContext {
   async #drainCronQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.cronProcessing) return;
+    if (this.turnCancellationInFlight) return;
     // Don't process cron while a user prompt is active — the queue will be
     // drained after the prompt completes (see end of prompt()).
     if (this.pendingPrompt) return;
@@ -3574,6 +3578,7 @@ export class Session implements SessionContext {
   async #drainNotificationQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.notificationProcessing) return;
+    if (this.turnCancellationInFlight) return;
     if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
       return;
     }
@@ -3589,6 +3594,7 @@ export class Session implements SessionContext {
       while (this.notificationQueue.length > 0) {
         if (
           this.pendingPrompt ||
+          this.turnCancellationInFlight ||
           this.cronProcessing ||
           this.cronAbortController
         ) {
@@ -3613,6 +3619,7 @@ export class Session implements SessionContext {
       if (
         this.notificationQueue.length > 0 &&
         !this.pendingPrompt &&
+        !this.turnCancellationInFlight &&
         !this.cronProcessing &&
         !this.cronAbortController
       ) {

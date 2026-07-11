@@ -264,6 +264,7 @@ describe('Session', () => {
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     recordTurnCancellation: ReturnType<typeof vi.fn>;
     recordTurnResumption: ReturnType<typeof vi.fn>;
+    recordTurnStop: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
   };
@@ -437,6 +438,7 @@ describe('Session', () => {
       recordFileHistorySnapshot: vi.fn(),
       recordTurnCancellation: vi.fn().mockResolvedValue(undefined),
       recordTurnResumption: vi.fn().mockResolvedValue(undefined),
+      recordTurnStop: vi.fn().mockResolvedValue(undefined),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
     };
@@ -2384,6 +2386,170 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    it('persists the ACP stop reason before resolving the prompt', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      let finishStopWrite!: () => void;
+      mockChatRecordingService.recordTurnStop.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          finishStopWrite = resolve;
+        }),
+      );
+
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+      let settled = false;
+      void prompt.finally(() => {
+        settled = true;
+      });
+
+      await vi.waitFor(() => {
+        expect(mockChatRecordingService.recordTurnStop).toHaveBeenCalledWith(
+          'end_turn',
+        );
+      });
+      expect(settled).toBe(false);
+
+      finishStopWrite();
+      await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(settled).toBe(true);
+    });
+
+    it('does not acknowledge the prompt when its stop reason cannot persist', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      mockChatRecordingService.recordTurnStop.mockRejectedValueOnce(
+        new Error('disk full'),
+      );
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        }),
+      ).rejects.toThrow('disk full');
+    });
+
+    it('does not start queued cron work while cancellation waits behind the stop boundary', async () => {
+      let fireCron!: (job: { prompt: string; cronExpr?: string }) => void;
+      const scheduler = {
+        hasPendingWork: true,
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(
+          (callback: (job: { prompt: string; cronExpr?: string }) => void) => {
+            fireCron = callback;
+          },
+        ),
+        stop: vi.fn(),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      let finishStopWrite!: () => void;
+      mockChatRecordingService.recordTurnStop.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          finishStopWrite = resolve;
+        }),
+      );
+      let finishCancellationWrite!: () => void;
+      mockChatRecordingService.recordTurnCancellation.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          finishCancellationWrite = resolve;
+        }),
+      );
+
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+      await vi.waitFor(() => {
+        expect(mockChatRecordingService.recordTurnStop).toHaveBeenCalledOnce();
+      });
+
+      const cancel = session.cancelPendingPrompt({
+        persistCancellation: true,
+      });
+      await vi.waitFor(() => {
+        expect(
+          mockChatRecordingService.recordTurnCancellation,
+        ).toHaveBeenCalledOnce();
+      });
+
+      finishStopWrite();
+      await vi.waitFor(() => {
+        expect(scheduler.start).toHaveBeenCalledOnce();
+      });
+      fireCron({ prompt: 'scheduled prompt', cronExpr: '*/5 * * * *' });
+      await Promise.resolve();
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+
+      finishCancellationWrite();
+      await Promise.all([prompt, cancel]);
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not start queued notifications while cancellation waits behind the stop boundary', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      let finishStopWrite!: () => void;
+      mockChatRecordingService.recordTurnStop.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          finishStopWrite = resolve;
+        }),
+      );
+      let finishCancellationWrite!: () => void;
+      mockChatRecordingService.recordTurnCancellation.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          finishCancellationWrite = resolve;
+        }),
+      );
+
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+      await vi.waitFor(() => {
+        expect(mockChatRecordingService.recordTurnStop).toHaveBeenCalledOnce();
+      });
+      const cancel = session.cancelPendingPrompt({
+        persistCancellation: true,
+      });
+      await vi.waitFor(() => {
+        expect(
+          mockChatRecordingService.recordTurnCancellation,
+        ).toHaveBeenCalledOnce();
+      });
+
+      finishStopWrite();
+      await prompt;
+      const notify = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0]?.[0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+      notify('Background complete', 'Use this result', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+      await Promise.resolve();
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+
+      finishCancellationWrite();
+      await cancel;
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
     it('records the latest file history snapshot after makeSnapshot', async () => {
       const latestSnapshot = {
         promptId: 'test-session-id########1',
