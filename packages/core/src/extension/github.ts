@@ -26,6 +26,7 @@ import {
   convertGeminiOrClaudeExtension,
   SUPPORTED_EXTENSION_MANIFESTS,
 } from './extension-converter.js';
+import { assertTarArchiveHasNoLinks } from './archive-safety.js';
 
 const debugLogger = createDebugLogger('EXT_GITHUB');
 const SUPPORTED_ARCHIVE_EXTENSIONS = ['.tar.gz', '.zip'] as const;
@@ -736,26 +737,6 @@ export async function extractFile(file: string, dest: string): Promise<void> {
     });
   } else {
     throw new Error(`Unsupported file extension for extraction: ${file}`);
-  }
-}
-
-async function assertTarArchiveHasNoLinks(file: string): Promise<void> {
-  let unsupportedLinkPath: string | undefined;
-  await tar.t({
-    file,
-    onReadEntry: (entry) => {
-      if (
-        !unsupportedLinkPath &&
-        (entry.type === 'SymbolicLink' || entry.type === 'Link')
-      ) {
-        unsupportedLinkPath = entry.path;
-      }
-    },
-  });
-  if (unsupportedLinkPath) {
-    throw new Error(
-      `Tar archive contains unsupported link entry: ${unsupportedLinkPath}`,
-    );
   }
 }
 

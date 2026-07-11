@@ -167,6 +167,7 @@ vi.mock('node:http', () => ({
 }));
 
 vi.mock('tar', () => ({
+  t: vi.fn(),
   x: vi.fn(),
 }));
 
@@ -213,6 +214,39 @@ function mockNpmRegistryStatus(statusCode: number) {
   );
 }
 
+function mockNpmDownload(tarballUrl: string) {
+  let requestCount = 0;
+  vi.mocked(https.get).mockImplementation(
+    (_url: unknown, _options: unknown, callback: unknown) => {
+      requestCount += 1;
+      const mockRes =
+        requestCount === 1
+          ? {
+              statusCode: 200,
+              headers: {},
+              on: vi.fn((event: string, handler: (data?: Buffer) => void) => {
+                if (event === 'data') {
+                  handler(
+                    Buffer.from(
+                      JSON.stringify({
+                        'dist-tags': { latest: '1.0.0' },
+                        versions: {
+                          '1.0.0': { dist: { tarball: tarballUrl } },
+                        },
+                      }),
+                    ),
+                  );
+                }
+                if (event === 'end') handler();
+              }),
+            }
+          : { statusCode: 200, headers: {}, pipe: vi.fn() };
+      if (typeof callback === 'function') callback(mockRes as never);
+      return { on: vi.fn() } as never;
+    },
+  );
+}
+
 describe('downloadFromNpmRegistry', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -225,6 +259,7 @@ describe('downloadFromNpmRegistry', () => {
       }),
       close: vi.fn((callback: () => void) => callback()),
     } as never);
+    vi.mocked(tar.t).mockResolvedValue(undefined);
     vi.mocked(tar.x).mockResolvedValue(undefined);
   });
 
@@ -246,54 +281,10 @@ describe('downloadFromNpmRegistry', () => {
   });
 
   it('uses the HTTPS client for uppercase HTTPS tarball URLs', async () => {
-    let requestCount = 0;
     vi.mocked(http.get).mockImplementation(() => {
       throw new Error('wrong client');
     });
-    vi.mocked(https.get).mockImplementation(
-      (_url: unknown, _options: unknown, callback: unknown) => {
-        requestCount += 1;
-        const mockRes =
-          requestCount === 1
-            ? {
-                statusCode: 200,
-                headers: {},
-                on: vi.fn(
-                  (event: string, handler: (data?: Buffer) => void) => {
-                    if (event === 'data') {
-                      handler(
-                        Buffer.from(
-                          JSON.stringify({
-                            'dist-tags': { latest: '1.0.0' },
-                            versions: {
-                              '1.0.0': {
-                                dist: {
-                                  tarball:
-                                    'HTTPS://registry.example.com/@scope/pkg/-/pkg-1.0.0.tgz',
-                                },
-                              },
-                            },
-                          }),
-                        ),
-                      );
-                    }
-                    if (event === 'end') {
-                      handler();
-                    }
-                  },
-                ),
-              }
-            : {
-                statusCode: 200,
-                headers: {},
-                pipe: vi.fn(),
-              };
-        if (typeof callback === 'function') {
-          callback(mockRes as never);
-        }
-        return { on: vi.fn() } as never;
-      },
-    );
+    mockNpmDownload('HTTPS://registry.example.com/@scope/pkg/-/pkg-1.0.0.tgz');
 
     await expect(
       downloadFromNpmRegistry(
@@ -307,6 +298,30 @@ describe('downloadFromNpmRegistry', () => {
     ).resolves.toEqual({ version: '1.0.0', type: 'npm' });
     expect(https.get).toHaveBeenCalledTimes(2);
     expect(http.get).not.toHaveBeenCalled();
+  });
+
+  it('rejects npm tarballs containing link entries before extraction', async () => {
+    mockNpmDownload('https://registry.example.com/pkg.tgz');
+    vi.mocked(tar.t).mockImplementationOnce(async (options) => {
+      options.onReadEntry?.({
+        type: 'SymbolicLink',
+        path: 'package/escape',
+      } as never);
+    });
+
+    await expect(
+      downloadFromNpmRegistry(
+        {
+          source: '@scope/pkg',
+          type: 'npm',
+          registryUrl: 'https://registry.example.com',
+        },
+        '/tmp/qwen-extension',
+      ),
+    ).rejects.toThrow(
+      'Tar archive contains unsupported link entry: package/escape',
+    );
+    expect(tar.x).not.toHaveBeenCalled();
   });
 });
 
