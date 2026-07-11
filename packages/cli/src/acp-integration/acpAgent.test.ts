@@ -8644,6 +8644,42 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('marks the artifact snapshot unavailable when rewind flush fails', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      flush: vi.fn().mockRejectedValue(new Error('flush failed')),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const response = await agent.extMethod('rewindSession', {
+      sessionId,
+      targetTurnIndex: 1,
+      cwd: '/tmp',
+    });
+
+    expect(response).toMatchObject({
+      success: true,
+      artifactSnapshotUnavailable: 'flush failed',
+    });
+    expect(response).not.toHaveProperty('artifactSnapshot');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('rewindSession extension method marks artifact snapshot unavailable when session reload is missing', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     await setupSessionMocks(sessionId);
@@ -9565,9 +9601,54 @@ describe('QwenAgent extMethod renameSession routing', () => {
     await agentPromise;
   });
 
+  it('propagates a live session title flush failure', async () => {
+    const recording = makeRecordingService();
+    recording.flush.mockRejectedValue(new Error('flush failed'));
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod('renameSession', {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+        title: 'New Title',
+      }),
+    ).rejects.toThrow('flush failed');
+    expect(recording.recordCustomTitle).toHaveBeenCalledWith(
+      'New Title',
+      'manual',
+    );
+    expect(SessionService).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not branch a live session when its recording flush fails', async () => {
+    const recording = makeRecordingService();
+    recording.flush.mockRejectedValue(new Error('flush failed'));
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+      }),
+    ).rejects.toThrow('flush failed');
+    expect(SessionService).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('keeps the live session open when strict session close flush fails', async () => {
     const recording = makeRecordingService();
-    recording.flush.mockRejectedValueOnce(new Error('flush failed'));
+    recording.flush.mockRejectedValue(new Error('flush failed'));
     const innerConfig = makeLiveSessionInnerConfig(recording);
     const toolRegistry = { stop: vi.fn().mockResolvedValue(undefined) };
     innerConfig.getToolRegistry.mockReturnValue(toolRegistry);
@@ -9598,6 +9679,16 @@ describe('QwenAgent extMethod renameSession routing', () => {
       agent.extMethod('qwen/control/session/close', {
         sessionId: liveSessionId,
         requireFlush: true,
+      }),
+    ).rejects.toThrow('flush failed');
+    expect(recording.flush).toHaveBeenCalledTimes(2);
+    expect(liveCancelPendingPrompt).not.toHaveBeenCalled();
+    expect(toolRegistry.stop).not.toHaveBeenCalled();
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+        requireFlush: false,
       }),
     ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
     expect(recording.flush).toHaveBeenCalledTimes(3);

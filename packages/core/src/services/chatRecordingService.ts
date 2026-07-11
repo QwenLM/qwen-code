@@ -484,9 +484,9 @@ export interface FileHistorySnapshotRecordPayload {
  * - Assistant thoughts and reasoning
  *
  * **API Design:**
- * - `recordUserMessage()` - Records a user message (immediate write)
- * - `recordAssistantTurn()` - Records an assistant turn with all data (immediate write)
- * - `recordToolResult()` - Records tool results (immediate write)
+ * - `recordUserMessage()` - Queues a user message for recording
+ * - `recordAssistantTurn()` - Queues an assistant turn with all data
+ * - `recordToolResult()` - Queues tool results for recording
  *
  * **Storage Format:** JSONL files with tree-structured records.
  * Each record has uuid/parentUuid fields enabling:
@@ -499,7 +499,7 @@ export interface FileHistorySnapshotRecordPayload {
  * For session management (list, load, remove), use SessionService.
  */
 export class ChatRecordingService {
-  /** UUID of the last written record in the chain */
+  /** UUID of the active logical tail, including records queued for writing. */
   private lastRecordUuid: string | null = null;
   private readonly config: Config;
   /**
@@ -508,10 +508,10 @@ export class ChatRecordingService {
    * rewound messages end up on a dead branch in the tree, making
    * `reconstructHistory()` skip them automatically on resume.
    *
-   * Index `i` holds the UUID of the last record written before the (i+1)th
-   * user message was appended. For example, `turnParentUuids[0]` is the UUID
-   * right before the very first user message (often `null` or the startup
-   * context record).
+   * Index `i` holds the active tail UUID observed before the (i+1)th user
+   * message was queued. For example, `turnParentUuids[0]` is the UUID right
+   * before the very first user message (often `null` or the startup context
+   * record).
    */
   private turnParentUuids: Array<string | null> = [];
   /**
@@ -522,12 +522,14 @@ export class ChatRecordingService {
   private chatsDirEnsured = false;
   private cachedConversationFile: string | undefined;
   /**
-   * Serialized async write queue for appendRecord. We update lastRecordUuid
-   * synchronously so the next createBaseRecord sees the right parentUuid,
-   * but the actual fs write runs in this chain so the event loop is not
-   * blocked. Must be flushed before process exit (see {@link flush}).
+   * Serialized async write queue for appendRecord. A rejected write leaves the
+   * canonical chain rejected so later queued records cannot be persisted with
+   * a parentUuid that never reached disk. Must be flushed before process exit
+   * (see {@link flush}).
    */
   private writeChain: Promise<void> = Promise.resolve();
+  /** First async JSONL write failure; permanently degrades this recorder. */
+  private writeFailure: Error | undefined;
   /** In-memory cache of the current session's custom title (for re-append on exit) */
   private currentCustomTitle: string | undefined;
   /**
@@ -563,8 +565,8 @@ export class ChatRecordingService {
   private autoTitleController: AbortController | undefined;
 
   /**
-   * JSON-serialized form of the most recent attribution snapshot we
-   * wrote, used to deduplicate identical writes on every non-retry
+   * JSON-serialized form of the most recent attribution snapshot accepted for
+   * recording, used to deduplicate identical writes on every non-retry
    * turn. Without this, sessions that touch many files would write a
    * full duplicate of the entire snapshot to the JSONL on every turn,
    * inflating the on-disk session and making `/resume` slower to
@@ -730,44 +732,44 @@ export class ChatRecordingService {
     return this.cachedGitBranch.branch;
   }
 
+  private enterWriteFailure(cause: unknown): Error {
+    if (!this.writeFailure) {
+      this.writeFailure =
+        cause instanceof Error ? cause : new Error(String(cause));
+      debugLogger.error('Error appending record (async):', this.writeFailure);
+    }
+    return this.writeFailure;
+  }
+
+  private enqueueRecordWrite(
+    conversationFile: string,
+    record: ChatRecord,
+  ): Promise<void> {
+    const pendingWrite = this.writeChain.then(async () => {
+      try {
+        await jsonl.writeLine(conversationFile, record);
+      } catch (error) {
+        throw this.enterWriteFailure(error);
+      }
+    });
+    this.writeChain = pendingWrite;
+    // Mark fire-and-forget writes as handled without replacing the canonical
+    // rejected chain that flush() and strict callers must continue to observe.
+    void pendingWrite.catch(() => {});
+    return pendingWrite;
+  }
+
   /**
-   * Appends a record to the session file and updates lastRecordUuid.
-   *
-   * lastRecordUuid is updated synchronously so the next createBaseRecord sees
-   * the correct parentUuid without waiting for the previous write. The actual
-   * fs write is enqueued on {@link writeChain} and runs async; per-file
-   * mutex inside {@link jsonl.writeLine} preserves on-disk ordering.
-   *
-   * **Known tradeoff (parentUuid chain integrity on write failure):** if the
-   * enqueued write rejects (e.g., disk full, permission dropped), the error
-   * is logged but subsequent records still claim the failed record's uuid
-   * as their parent. On resume, readers that walk parentUuid (e.g.
-   * sessionService.reconstructHistory) will silently drop records whose
-   * ancestor is missing on disk. This matches the sync version's behavior
-   * when its own throw was caught and logged by the caller — under normal
-   * local-disk writes failures are rare enough to accept the fire-and-forget
-   * simplification.
-   */
-  /**
-   * Fire-and-forget: queues a JSONL write on the internal writeChain
-   * and swallows async failures (logs them via debugLogger). All
-   * existing call sites — recordUserMessage, recordAssistantTurn,
-   * etc. — invoke this synchronously without awaiting, so the
-   * internal swallow keeps an unhandled-promise-rejection from
-   * surfacing on a single transient writeLine failure.
-   *
-   * Callers that need to react to per-record write FAILURE (e.g. the
-   * snapshot dedup-key rollback in `recordAttributionSnapshot`) pass
-   * an `onError` callback, which fires after the write rejects (and
-   * after the rejection has been logged + the chain re-armed). Sync
-   * throws still propagate so the caller's outer try/catch can roll
-   * back optimistic state — see the synchronous-failure test.
+   * Fire-and-forget: queues a JSONL write on the internal writeChain.
+   * A failed write permanently degrades this recorder; already-queued
+   * descendants are skipped and later fire-and-forget calls become no-ops.
    */
   private appendRecord(
     record: ChatRecord,
-    onError?: (err: unknown) => void,
     options?: { updateActiveTail?: boolean },
   ): void {
+    if (this.writeFailure) return;
+
     let conversationFile: string;
     try {
       conversationFile = this.ensureConversationFile();
@@ -778,19 +780,7 @@ export class ChatRecordingService {
     if (options?.updateActiveTail !== false) {
       this.lastRecordUuid = record.uuid;
     }
-    this.writeChain = this.writeChain
-      .catch(() => {})
-      .then(() => jsonl.writeLine(conversationFile, record))
-      .catch((err) => {
-        debugLogger.error('Error appending record (async):', err);
-        if (onError) {
-          try {
-            onError(err);
-          } catch (cbErr) {
-            debugLogger.error('appendRecord onError callback threw:', cbErr);
-          }
-        }
-      });
+    this.enqueueRecordWrite(conversationFile, record);
     this.updateTitleAnchorTracking(record);
   }
 
@@ -798,6 +788,8 @@ export class ChatRecordingService {
     record: ChatRecord,
     options?: { updateActiveTail?: boolean },
   ): Promise<void> {
+    if (this.writeFailure) throw this.writeFailure;
+
     const previousLastRecordUuid = this.lastRecordUuid;
     const updateActiveTail = options?.updateActiveTail !== false;
     let conversationFile: string;
@@ -811,18 +803,15 @@ export class ChatRecordingService {
     if (updateActiveTail) {
       this.lastRecordUuid = record.uuid;
     }
-    this.writeChain = this.writeChain
-      .catch(() => {})
-      .then(() => jsonl.writeLine(conversationFile, record));
+    const pendingWrite = this.enqueueRecordWrite(conversationFile, record);
 
     try {
-      await this.writeChain;
+      await pendingWrite;
       this.updateTitleAnchorTracking(record);
     } catch (error) {
       if (updateActiveTail && this.lastRecordUuid === record.uuid) {
         this.lastRecordUuid = previousLastRecordUuid;
       }
-      debugLogger.error('Error appending record (async):', error);
       throw error;
     }
   }
@@ -889,7 +878,7 @@ export class ChatRecordingService {
             : {}),
         },
       };
-      this.appendRecord(record, undefined, { updateActiveTail: false });
+      this.appendRecord(record, { updateActiveTail: false });
     } catch (error) {
       // Reset the counter even on failure: otherwise every subsequent
       // appendRecord re-fires reanchorTitle (counter still ≥ threshold)
@@ -921,7 +910,7 @@ export class ChatRecordingService {
 
   /**
    * Records a user message.
-   * Writes immediately to disk.
+   * Queues the write immediately on the serialized async writer.
    *
    * @param message The raw PartListUnion object as used with the API
    */
@@ -1001,7 +990,7 @@ export class ChatRecordingService {
 
   /**
    * Records an assistant turn with all available data.
-   * Writes immediately to disk.
+   * Queues the write immediately on the serialized async writer.
    *
    * @param data.message The raw PartListUnion object from the model response
    * @param data.model The model name
@@ -1133,7 +1122,7 @@ export class ChatRecordingService {
 
   /**
    * Records tool results (function responses) sent back to the model.
-   * Writes immediately to disk.
+   * Queues the write immediately on the serialized async writer.
    *
    * @param message The raw PartListUnion object with functionResponse parts
    * @param toolCallResult Optional tool call result info for UI recovery
@@ -1392,8 +1381,8 @@ export class ChatRecordingService {
    * @param parentSessionId Id of the spawning session.
    * @returns true once the record is durably written, false on I/O error.
    *   AWAITS the write (via the strict append path) rather than the
-   *   fire-and-forget `appendRecord`, whose swallowed rejection would let the
-   *   caller report `persisted: true` for a record that never reached disk.
+   *   fire-and-forget `appendRecord`, whose failure is only observable through
+   *   a later `flush()` and cannot determine this call's return value.
    */
   async recordParentSession(parentSessionId: string): Promise<boolean> {
     // Idempotent: the lineage is immutable and written once. A bridge retry
@@ -1411,7 +1400,9 @@ export class ChatRecordingService {
       this.currentParentSessionId = parentSessionId;
       return true;
     } catch (error) {
-      debugLogger.error('Error saving parent session record:', error);
+      if (error !== this.writeFailure) {
+        debugLogger.error('Error saving parent session record:', error);
+      }
       return false;
     }
   }
@@ -1489,11 +1480,10 @@ export class ChatRecordingService {
    * duplicate of the entire snapshot to the JSONL on every turn, even
    * when nothing changed — inflating session size and slowing /resume.
    *
-   * Set the dedup key optimistically and roll it back if the write
-   * fails. Synchronous identical calls (common during a tool-driven
-   * turn) all dedup correctly, but a transient write failure clears
-   * the key so the next identical snapshot retries the write rather
-   * than being permanently suppressed.
+   * Set the dedup key optimistically so synchronous identical calls (common
+   * during a tool-driven turn) dedup correctly. A synchronous setup failure
+   * rolls the key back; an async write failure permanently degrades this
+   * recorder, so the current instance never retries it.
    */
   recordAttributionSnapshot(snapshot: AttributionSnapshot): void {
     let json: string | undefined;
@@ -1511,22 +1501,11 @@ export class ChatRecordingService {
       };
 
       this.lastAttributionSnapshotJson = json;
-      this.appendRecord(record, () => {
-        // Async write failed — only roll back if the key still
-        // belongs to our snapshot (a later distinct write may have
-        // overwritten it).
-        if (this.lastAttributionSnapshotJson === json) {
-          this.lastAttributionSnapshotJson = undefined;
-        }
-      });
+      this.appendRecord(record);
     } catch (error) {
-      // appendRecord (and createBaseRecord/JSON.stringify) can throw
-      // synchronously — e.g. ensureConversationFile() fails because
-      // the project temp dir isn't writable. The .catch() handler
-      // attached to the promise never runs in that case, so we'd
-      // otherwise leave the dedup key set without a write ever
-      // having landed and permanently suppress identical retries.
-      // Roll back here too.
+      // Synchronous setup failures happen before an async write is queued and
+      // do not degrade the recorder, so roll back the optimistic dedup key to
+      // let the next identical snapshot retry.
       if (json !== undefined && this.lastAttributionSnapshotJson === json) {
         this.lastAttributionSnapshotJson = undefined;
       }
