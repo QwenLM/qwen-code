@@ -207,7 +207,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `session_close` and `session_metadata` advertise `DELETE /session/:id` and `PATCH /session/:id/metadata`. Older daemons return `404`; pre-flight these tags before exposing close or rename affordances.
 
-`session_organization` advertises custom session groups and pinning. It adds `GET/POST/PATCH/DELETE /workspace/:id/session-groups`, `PATCH /session/:id/organization`, and the opt-in organized list view `GET /workspace/:id/sessions?view=organized`. Older daemons return `404` for the mutation/group routes and ignore the organized view contract, so WebShell/SDK clients must pre-flight this tag before showing grouping or pinning UI.
+`session_organization` advertises custom session groups and pinning. It adds `GET/POST/PATCH/DELETE /workspace/:id/session-groups`, `PATCH /session/:id/organization`, and the opt-in organized list view `GET /workspace/:id/sessions?view=organized`. When both `session_organization` and `workspace_qualified_rest_core` are advertised, the workspace-qualified organization mutation `PATCH /workspaces/:workspace/session/:id/organization` is also available. The legacy mutation remains primary-workspace-only. Older daemons return `404` for the mutation/group routes and ignore the organized view contract, so WebShell/SDK clients must pre-flight these tags before showing the matching grouping or pinning UI.
 
 `session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived.
 
@@ -1401,7 +1401,7 @@ curl http://127.0.0.1:4170/workspace/$(jq -rn --arg c "$PWD" '$c|@uri')/sessions
 curl http://127.0.0.1:4170/workspaces/<workspace-id>/sessions
 ```
 
-When `workspace_qualified_rest_core` is advertised, workspace-scoped session batch operations and group CRUD are available under `/workspaces/:workspace/sessions/{delete,archive,unarchive}` and `/workspaces/:workspace/session-groups`. For an untrusted secondary, group GET remains available; every group and session mutation remains trust-gated. Workspace-less batch routes remain primary-workspace-only for compatibility.
+When `workspace_qualified_rest_core` is advertised, workspace-scoped session batch operations, group CRUD, and session organization mutation are available under `/workspaces/:workspace/sessions/{delete,archive,unarchive}`, `/workspaces/:workspace/session-groups`, and `/workspaces/:workspace/session/:id/organization`. For an untrusted secondary, group GET remains available; every group, session, and organization mutation remains trust-gated. Workspace-less batch and organization mutation routes remain primary-workspace-only for compatibility.
 
 Query parameters:
 
@@ -1662,9 +1662,9 @@ Response:
 
 Publishes a `session_metadata_updated` event on the session's SSE stream with `{ sessionId, displayName }`.
 
-### `PATCH /session/:id/organization`
+### `PATCH /session/:id/organization` and `PATCH /workspaces/:workspace/session/:id/organization`
 
-Update local session organization state. Strict mutation gate. Pre-flight `caps.features.includes('session_organization')`.
+Update local session organization state through the existing mutation gate. Pre-flight `caps.features.includes('session_organization')`; the plural route additionally requires `workspace_qualified_rest_core`. On the plural route, `:workspace` resolves as an exact registered workspace id first and then as a URL-encoded canonical absolute cwd. The selected runtime must be trusted. Session existence and non-null `groupId` validation are scoped to that runtime's active persisted, archived persisted, and live session state and group store, with no fallback to the primary or another workspace. The legacy route remains primary-workspace-only.
 
 Request:
 
@@ -1676,6 +1676,7 @@ Request:
 | ---------- | -------- | ---------------------------------------------------------------------------------------------------- |
 | `isPinned` | no       | Boolean. `true` sets `pinnedAt` if it was not already pinned; `false` clears `pinnedAt`.             |
 | `groupId`  | no       | Custom group id or `null` for ungrouped. Unknown group ids return `404 { code: "group_not_found" }`. |
+| `color`    | no       | A supported session color token, or `null` to clear the session color.                               |
 
 Response:
 
@@ -1683,6 +1684,7 @@ Response:
 {
   "sessionId": "<uuid>",
   "groupId": "018f...",
+  "color": "blue",
   "isPinned": true,
   "pinnedAt": "2026-07-04T12:00:00.000Z",
   "updatedAt": "2026-07-04T12:00:00.000Z"

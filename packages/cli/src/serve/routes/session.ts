@@ -2011,19 +2011,29 @@ export function registerSessionRoutes(
     }),
   );
 
-  app.patch('/session/:id/organization', mutate(), async (req, res) => {
+  type SessionOrganizationTarget = {
+    workspaceCwd: string;
+    bridge: AcpSessionBridge;
+    route: string;
+  };
+
+  const handleSessionOrganizationUpdate = async (
+    req: Request,
+    res: Response,
+    target: SessionOrganizationTarget,
+  ): Promise<void> => {
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;
     try {
       await archiveCoordinator.runSharedMany([sessionId], async () => {
         // Organization is workspace-scoped sidecar state, not live-session
         // metadata. It intentionally applies to persisted and archived sessions.
-        const sessionService = new SessionService(boundWorkspace);
+        const sessionService = new SessionService(target.workspaceCwd);
         let exists = await sessionService.sessionExistsInAnyState(sessionId);
         if (!exists) {
           try {
-            const summary = bridge.getSessionSummary(sessionId);
-            exists = summary.workspaceCwd === boundWorkspace;
+            const summary = target.bridge.getSessionSummary(sessionId);
+            exists = summary.workspaceCwd === target.workspaceCwd;
           } catch {
             exists = false;
           }
@@ -2075,7 +2085,7 @@ export function registerSessionRoutes(
         }
 
         const organization = await createSessionOrganizationService(
-          boundWorkspace,
+          target.workspaceCwd,
         ).updateSessionOrganization(sessionId, {
           ...(rawIsPinned !== undefined ? { isPinned: rawIsPinned } : {}),
           ...(rawGroupId !== undefined
@@ -2090,11 +2100,35 @@ export function registerSessionRoutes(
     } catch (err) {
       if (sendSessionOrganizationError(res, err)) return;
       sendBridgeError(res, err, {
-        route: 'PATCH /session/:id/organization',
+        route: target.route,
         sessionId,
+        workspaceCwd: target.workspaceCwd,
       });
     }
+  };
+
+  app.patch('/session/:id/organization', mutate(), async (req, res) => {
+    await handleSessionOrganizationUpdate(req, res, {
+      workspaceCwd: boundWorkspace,
+      bridge,
+      route: 'PATCH /session/:id/organization',
+    });
   });
+
+  app.patch(
+    '/workspaces/:workspace/session/:id/organization',
+    mutate(),
+    async (req, res) => {
+      const route = 'PATCH /workspaces/:workspace/session/:id/organization';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      await handleSessionOrganizationUpdate(req, res, {
+        workspaceCwd: runtime.workspaceCwd,
+        bridge: runtime.bridge,
+        route,
+      });
+    },
+  );
 
   app.get('/workspace/:id/session-groups', async (req, res) => {
     // Preserve the legacy singular-route behavior for an untrusted primary;
