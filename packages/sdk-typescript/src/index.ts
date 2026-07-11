@@ -65,6 +65,7 @@ export {
   type DaemonWorkspaceInitializedData,
   type DaemonWorkspaceInitializedEvent,
   type DaemonWorkspaceCapability,
+  type DaemonWorkspaceGitStatus,
   type DaemonAvailableCommand,
   type DaemonCapabilities,
   type DaemonEnvCell,

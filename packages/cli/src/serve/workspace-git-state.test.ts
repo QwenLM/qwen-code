@@ -82,4 +82,26 @@ describe('WorkspaceGitState', () => {
     expect(resolveBranchNameMock).toHaveBeenCalledOnce();
     expect(watchRepoBranchMock).toHaveBeenCalledOnce();
   });
+
+  it('retries after entry creation fails', async () => {
+    resolveBranchNameMock
+      .mockRejectedValueOnce(new Error('git unavailable'))
+      .mockResolvedValueOnce('main');
+    watchRepoBranchMock.mockResolvedValue(() => {});
+    const state = new WorkspaceGitState();
+    const bridge = {
+      publishWorkspaceEvent: vi.fn(),
+    } as unknown as AcpSessionBridge;
+
+    await expect(state.getStatus('/retry', bridge)).rejects.toThrow(
+      'git unavailable',
+    );
+    await expect(state.getStatus('/retry', bridge)).resolves.toEqual({
+      v: 1,
+      workspaceCwd: '/retry',
+      branch: 'main',
+    });
+    expect(resolveBranchNameMock).toHaveBeenCalledTimes(2);
+    expect(watchRepoBranchMock).toHaveBeenCalledOnce();
+  });
 });

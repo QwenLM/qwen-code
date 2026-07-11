@@ -862,9 +862,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             connectionRef.current.skills !== undefined &&
             connectionRef.current.supportedCommands !== undefined &&
             connectionRef.current.context !== undefined;
-          const gitPromise = client
-            .workspaceByCwd(activeSession.workspaceCwd)
-            .workspaceGit();
+          const gitPromise = activeSession.workspaceCwd
+            ? client.workspaceByCwd(activeSession.workspaceCwd).workspaceGit()
+            : client.workspaceGit();
           const [providerResult, commandResult, contextResult, gitResult] =
             await Promise.allSettled([
               canReuseSessionMetadata
@@ -962,7 +962,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               supportedCommands: supportedCommands ?? current.supportedCommands,
               context: context ?? current.context,
               gitBranch:
-                gitResult.status === 'fulfilled' ? gitBranch : undefined,
+                gitResult.status === 'fulfilled'
+                  ? gitBranch
+                  : current.gitBranch,
               capabilities: capabilities ?? current.capabilities,
               loadingTranscript: undefined,
               catchingUp:
