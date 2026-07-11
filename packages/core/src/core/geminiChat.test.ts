@@ -4607,12 +4607,20 @@ describe('GeminiChat', async () => {
         );
         await expectStreamExhaustion(stream);
 
-        // Should be called 3 times (1 initial + 2 transient retries)
+        // Should be called 5 times (1 initial + 4 transient retries)
         expect(
           mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(3);
-        expect(mockLogContentRetry).toHaveBeenCalledTimes(2);
+        ).toHaveBeenCalledTimes(5);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
         expect(mockLogContentRetryFailure).toHaveBeenCalledTimes(1);
+        expect(mockLogContentRetryFailure).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            total_attempts: 5,
+            final_error_type: 'NO_FINISH_REASON',
+            model: 'test-model',
+          }),
+        );
 
         // History should still contain the user message.
         const history = chat.getHistory();
@@ -4621,6 +4629,82 @@ describe('GeminiChat', async () => {
           role: 'user',
           parts: [{ text: 'test' }],
         });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should recover after four consecutive invalid streams', async () => {
+      vi.useFakeTimers();
+      try {
+        let callCount = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => {
+          callCount++;
+          if (callCount <= 4) {
+            return (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: { parts: [] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })();
+          }
+
+          return (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: { parts: [{ text: 'Recovered response' }] },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })();
+        });
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-four-invalid-streams',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 25_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+        for (const [index, retryDelayMs] of [
+          2000, 4000, 6000, 8000,
+        ].entries()) {
+          expect(mockLogContentRetry).toHaveBeenNthCalledWith(
+            index + 1,
+            mockConfig,
+            expect.objectContaining({
+              attempt_number: index,
+              error_type: 'NO_RESPONSE_TEXT',
+              retry_delay_ms: retryDelayMs,
+              model: 'test-model',
+            }),
+          );
+        }
+        expect(mockLogContentRetryFailure).not.toHaveBeenCalled();
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered response',
+          ),
+        ).toBe(true);
+        expect(chat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'test' }] },
+          { role: 'model', parts: [{ text: 'Recovered response' }] },
+        ]);
       } finally {
         vi.useRealTimers();
       }
