@@ -59,6 +59,7 @@ const {
       updateSessionGroup: vi.fn(),
       deleteSessionGroup: vi.fn(),
       updateSessionOrganization: vi.fn(),
+      addWorkspace: vi.fn().mockResolvedValue({ persisted: true }),
     },
     mockWorkspace: {
       client: {
@@ -224,6 +225,8 @@ beforeEach(() => {
   mockWorkspaceActions.updateSessionGroup.mockReset();
   mockWorkspaceActions.deleteSessionGroup.mockReset();
   mockWorkspaceActions.updateSessionOrganization.mockReset();
+  mockWorkspaceActions.addWorkspace.mockReset();
+  mockWorkspaceActions.addWorkspace.mockResolvedValue({ persisted: true });
 });
 
 afterEach(() => {
@@ -263,6 +266,33 @@ describe('WebShellSidebar — workspace picker', () => {
         b.textContent?.includes(name),
       ),
     );
+  }
+
+  async function submitAddWorkspace(container: HTMLElement): Promise<void> {
+    const addButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Add workspace'));
+    expect(addButton).toBeDefined();
+    act(() => {
+      addButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const input = document.body.querySelector<HTMLInputElement>(
+      '#add-workspace-path',
+    );
+    expect(input).not.toBeNull();
+    const setInputValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setInputValue?.call(input, '/tmp/new-workspace');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.form!.dispatchEvent(
+        new SubmitEvent('submit', { bubbles: true, cancelable: true }),
+      );
+    });
   }
 
   it('renders a workspace entry per registered workspace', () => {
@@ -604,6 +634,69 @@ describe('WebShellSidebar — workspace picker', () => {
       b.textContent?.includes('other'),
     );
     expect(secondary).toBeUndefined();
+  });
+
+  it('persists workspaces when the daemon advertises support', async () => {
+    mockWorkspace.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['persistent_workspace_registration'],
+      workspaces: [
+        { id: 'ws-primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    };
+    const { container } = renderSidebar(false);
+    await submitAddWorkspace(container);
+
+    expect(mockWorkspaceActions.addWorkspace).toHaveBeenCalledWith(
+      '/tmp/new-workspace',
+      { persist: true },
+    );
+  });
+
+  it('waits for capabilities before choosing persistence', async () => {
+    mockWorkspace.capabilities = undefined;
+    mockWorkspace.getCapabilities.mockResolvedValue({
+      qwenCodeVersion: '1.2.3',
+      features: ['persistent_workspace_registration'],
+      workspaces: [],
+    });
+    const { container } = renderSidebar(false);
+    await submitAddWorkspace(container);
+
+    expect(mockWorkspace.getCapabilities).toHaveBeenCalledTimes(1);
+    expect(mockWorkspaceActions.addWorkspace).toHaveBeenCalledWith(
+      '/tmp/new-workspace',
+      { persist: true },
+    );
+  });
+
+  it('keeps the legacy one-argument call when persistence is unsupported', async () => {
+    mockWorkspace.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: [],
+      workspaces: [],
+    };
+    const { container } = renderSidebar(false);
+    await submitAddWorkspace(container);
+
+    expect(mockWorkspaceActions.addWorkspace).toHaveBeenCalledWith(
+      '/tmp/new-workspace',
+    );
+  });
+
+  it('rejects success without the persisted confirmation marker', async () => {
+    mockWorkspace.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['persistent_workspace_registration'],
+      workspaces: [],
+    };
+    mockWorkspaceActions.addWorkspace.mockResolvedValue({});
+    const { container } = renderSidebar(false);
+    await submitAddWorkspace(container);
+
+    expect(document.body.textContent).toContain(
+      'The daemon did not confirm persistent workspace registration',
+    );
   });
 });
 

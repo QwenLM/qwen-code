@@ -167,6 +167,7 @@ import {
   registerWorkspaceQualifiedLifecycleRoutes,
 } from './routes/workspace-lifecycle.js';
 import { registerWorkspaceManagementRoutes } from './routes/workspace-management.js';
+import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   registerWorkspaceMcpControlRoutes,
   registerWorkspaceQualifiedMcpControlRoutes,
@@ -420,6 +421,7 @@ export interface ServeAppDeps {
   clientMcpSenderRegistry?: ClientMcpSenderRegistry;
   workspaceRegistry?: WorkspaceRegistry;
   createWorkspaceRuntime?: (cwd: string) => Promise<WorkspaceRuntime>;
+  workspaceRegistrationStore?: WorkspaceRegistrationStore;
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
@@ -633,8 +635,9 @@ export function createServeApp(
         deps.getChannelWorkerSnapshot !== undefined &&
         deps.reloadChannelWorker !== undefined,
       sessionShellCommandEnabled,
-      multiWorkspaceSessionsEnabled:
-        (injectedWorkspaceRegistry?.list().length ?? 1) > 1,
+      multiWorkspaceSessionsEnabled: () => workspaceRegistry.list().length > 1,
+      persistentWorkspaceRegistrationAvailable:
+        deps.workspaceRegistrationStore !== undefined,
       ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
     });
   const statusProvider =
@@ -800,8 +803,7 @@ export function createServeApp(
   const primaryBridge = primaryRuntime.bridge;
   const primaryWorkspace = primaryRuntime.workspaceService;
   const primaryRouteFileSystemFactory = primaryRuntime.routeFileSystemFactory;
-  const workspaceQualifiedAcpEnabled =
-    resolveAcpHttpEnabled() && workspaceRegistry.list().length > 1;
+  const workspaceQualifiedAcpEnabled = resolveAcpHttpEnabled();
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -1108,6 +1110,7 @@ export function createServeApp(
     mutate,
     safeBody,
     createWorkspaceRuntime: deps.createWorkspaceRuntime,
+    workspaceRegistrationStore: deps.workspaceRegistrationStore,
   });
 
   const broadcastSettingsChanged = (
