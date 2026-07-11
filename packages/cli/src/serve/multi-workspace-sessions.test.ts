@@ -282,7 +282,7 @@ function makeBridge(
         },
       ];
     },
-    removePendingPrompt(sessionId: string, promptId: string) {
+    async removePendingPrompt(sessionId: string, promptId: string) {
       if (!live.has(sessionId)) throw new SessionNotFoundError(sessionId);
       removePendingPromptCalls.push({ sessionId, promptId });
       return { removed: promptId === 'prompt-1' };

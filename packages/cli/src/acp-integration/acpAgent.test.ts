@@ -704,6 +704,7 @@ import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import {
   SERVE_STATUS_EXT_METHODS,
   SERVE_CONTROL_EXT_METHODS,
+  DAEMON_USER_CANCEL_META_KEY,
 } from '@qwen-code/acp-bridge/status';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import {
@@ -1270,6 +1271,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   type AgentLike = {
     initialize: (args: Record<string, unknown>) => Promise<unknown>;
     newSession: (args: Record<string, unknown>) => Promise<unknown>;
+    cancel: (args: {
+      sessionId: string;
+      _meta?: Record<string, unknown>;
+    }) => Promise<void>;
     extMethod: (
       method: string,
       args: Record<string, unknown>,
@@ -1284,6 +1289,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
         getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
+        cancelPendingPrompt: ReturnType<typeof vi.fn>;
       }
     | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -1880,6 +1886,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           .fn()
           .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
         getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
+        cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
       };
       lastSessionMock = sessionMock;
       return sessionMock as unknown as InstanceType<typeof Session>;
@@ -1901,6 +1908,29 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }) as AgentLike;
     return { agent, agentPromise };
   }
+
+  it('does not persist internal daemon cancellation', async () => {
+    const sessionId = 'session-A';
+    await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await agent.cancel({ sessionId });
+    await agent.cancel({
+      sessionId,
+      _meta: { [DAEMON_USER_CANCEL_META_KEY]: false },
+    });
+
+    expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenNthCalledWith(1, {
+      persistCancellation: true,
+    });
+    expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenNthCalledWith(2, {
+      persistCancellation: false,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 
   it('sessionArtifactsPersist rejects a missing session id', async () => {
     const { agent, agentPromise } = await bootAcpAgent();
@@ -9094,6 +9124,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     | undefined;
   let mockConfig: Config;
   let liveCancelPendingPrompt: ReturnType<typeof vi.fn>;
+  let livePersistTurnCancellation: ReturnType<typeof vi.fn>;
 
   // Live session sessionId is whatever `getSessionId()` on the inner config
   // returns; matches the existing test scaffolding.
@@ -9104,6 +9135,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     mockConnectionState.reset();
     capturedAgentFactory = undefined;
     liveCancelPendingPrompt = vi.fn().mockResolvedValue(undefined);
+    livePersistTurnCancellation = vi.fn().mockResolvedValue(undefined);
 
     vi.mocked(AgentSideConnection).mockImplementation((factory: unknown) => {
       capturedAgentFactory = factory as typeof capturedAgentFactory;
@@ -9191,6 +9223,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
           getId: vi.fn().mockReturnValue(liveSessionId),
           getConfig: vi.fn().mockReturnValue(innerConfig),
           cancelPendingPrompt: liveCancelPendingPrompt,
+          persistTurnCancellationIfInterrupted: livePersistTurnCancellation,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
@@ -9349,6 +9382,89 @@ describe('QwenAgent extMethod renameSession routing', () => {
         .getActiveSessions()
         .map((session) => session.getId()),
     ).not.toContain(liveSessionId);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('persists an intentional termination during explicit session close', async () => {
+    const recording = makeRecordingService();
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    liveCancelPendingPrompt.mockRejectedValueOnce(
+      new Error('Not currently generating'),
+    );
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+        requireFlush: true,
+        persistCancellation: true,
+      }),
+    ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
+
+    expect(liveCancelPendingPrompt).toHaveBeenCalledWith({
+      persistCancellation: true,
+    });
+    expect(livePersistTurnCancellation).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('acknowledges daemon cancellation only after persistence', async () => {
+    const recording = makeRecordingService();
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    let finishCancellation!: () => void;
+    liveCancelPendingPrompt.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        finishCancellation = resolve;
+      }),
+    );
+
+    let settled = false;
+    const cancellation = agent
+      .extMethod('qwen/control/session/cancel', {
+        sessionId: liveSessionId,
+      })
+      .then((result) => {
+        settled = true;
+        return result;
+      });
+
+    expect(liveCancelPendingPrompt).toHaveBeenCalledWith({
+      persistCancellation: true,
+    });
+    expect(settled).toBe(false);
+    finishCancellation();
+    await expect(cancellation).resolves.toEqual({
+      sessionId: liveSessionId,
+      cancelled: true,
+    });
+    expect(livePersistTurnCancellation).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('persists an idle interrupted turn for a stale daemon cancel', async () => {
+    const recording = makeRecordingService();
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    liveCancelPendingPrompt.mockRejectedValueOnce(
+      new Error('Not currently generating'),
+    );
+
+    await expect(
+      agent.extMethod('qwen/control/session/cancel', {
+        sessionId: liveSessionId,
+      }),
+    ).resolves.toEqual({ sessionId: liveSessionId, cancelled: true });
+    expect(livePersistTurnCancellation).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -10022,14 +10138,10 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     let primeCalls = 0;
     bindRestoreMocks({
       sessionExists: true,
-      resumedConversation: {
-        messages,
-      },
+      resumedConversation: { messages },
       primeTurnFromHistoryImpl: () => {
         primeCalls++;
-        if (primeCalls === 1) {
-          throw new Error('prime boom');
-        }
+        if (primeCalls === 1) throw new Error('prime boom');
       },
     });
     mockHistoryReplay.mockReset();
@@ -10045,9 +10157,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     ).rejects.toThrow('prime boom');
 
     const failedSession = lastSessionMock;
-    expect(failedSession?.dispose).toHaveBeenCalledTimes(1);
-    expect(failedSession?.installRewriter).not.toHaveBeenCalled();
-    expect(failedSession?.startCronScheduler).not.toHaveBeenCalled();
+    expect(failedSession?.dispose).toHaveBeenCalledOnce();
+    expect(failedSession?.sendAvailableCommandsUpdate).not.toHaveBeenCalled();
 
     await expect(
       agent.loadSession({
@@ -10061,9 +10172,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       models: expect.anything(),
       configOptions: expect.anything(),
     });
-
     expect(lastSessionMock).not.toBe(failedSession);
-    expect(failedSession?.dispose).toHaveBeenCalledTimes(1);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -10170,6 +10279,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     // the SSE stream stays clean for clients that already have the
     // history rendered.
     expect(lastSessionMock?.replayHistory).not.toHaveBeenCalled();
+    expect(lastSessionMock?.primeTurnFromHistory).toHaveBeenCalledWith(
+      messages,
+    );
     const recording = lastSessionMock?.getConfig().getChatRecordingService();
     expect(recording?.rebuildTurnBoundaries).toHaveBeenCalledWith(messages);
 

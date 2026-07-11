@@ -1362,25 +1362,23 @@ export class AcpDispatcher {
           // concurrent closes from this connection cannot both reach the bridge.
           conn.ownedSessions.delete(sessionId);
           conn.closingSessions.add(sessionId);
-          let closeStarted = false;
+          let bridgeCloseSucceeded = false;
           const closeSession = async () => {
-            closeStarted = true;
+            await this.bridge.closeSession(
+              sessionId,
+              this.sessionCtx(conn, sessionId, loopback),
+              { persistCancellation: true },
+            );
+            bridgeCloseSucceeded = true;
+            // Tear down the local binding only after the bridge confirms the
+            // durable close. A failed persistence must leave the prompt and
+            // ownership intact so the client can retry.
             try {
-              await this.bridge.closeSession(
-                sessionId,
-                this.sessionCtx(conn, sessionId, loopback),
+              conn.closeSessionStream(sessionId);
+            } catch (teardownErr) {
+              writeStderrLine(
+                `qwen serve: /acp session/close local teardown failed (${logSafe(sessionId)}): ${logSafe(errMsg(teardownErr))}`,
               );
-            } finally {
-              // Local teardown must run even if the bridge close throws —
-              // otherwise the SSE stream, abort controller, buffered frames and
-              // pending permissions leak until idle TTL.
-              try {
-                conn.closeSessionStream(sessionId);
-              } catch (teardownErr) {
-                writeStderrLine(
-                  `qwen serve: /acp session/close local teardown failed (${logSafe(sessionId)}): ${logSafe(errMsg(teardownErr))}`,
-                );
-              }
             }
           };
           try {
@@ -1405,7 +1403,7 @@ export class AcpDispatcher {
               }
             }
           } catch (err) {
-            if (!closeStarted) {
+            if (!bridgeCloseSucceeded) {
               conn.ownedSessions.add(sessionId);
             }
             throw err;
@@ -1463,10 +1461,6 @@ export class AcpDispatcher {
         case 'session/cancel': {
           const sessionId = String(params['sessionId'] ?? '');
           await this.withMutableOwned(conn, sessionId, id, async () => {
-            // Abort our local in-flight prompt controller too — cancelSession
-            // tells the agent to wind down, but the HTTP-side `sendPrompt`
-            // await must also be released so the session FIFO unblocks.
-            conn.sessions.get(sessionId)?.promptAbort?.abort();
             await this.bridge.cancelSession(
               sessionId,
               // Forward client-supplied cancel fields (reason/context) while
@@ -1476,6 +1470,10 @@ export class AcpDispatcher {
               >[1],
               this.sessionCtx(conn, sessionId, loopback),
             );
+            // Release the HTTP-side sendPrompt await only after the bridge has
+            // durably acknowledged user cancellation. Aborting first would
+            // race an internal transport cancel ahead of the user-intent write.
+            conn.sessions.get(sessionId)?.promptAbort?.abort();
             // `session/cancel` is normally a notification (no id), but answer
             // the request-form so a client that sent an id isn't left hanging.
             if (id !== undefined) this.replySession(conn, sessionId, id, {});

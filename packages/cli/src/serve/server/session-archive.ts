@@ -135,7 +135,9 @@ export async function deleteDaemonSessions(params: {
           let shouldRemove = false;
           try {
             // Intentional: batch delete bypasses per-tab ownership.
-            await bridge.closeSession(sessionId);
+            await bridge.closeSession(sessionId, undefined, {
+              persistCancellation: true,
+            });
             shouldRemove = true;
           } catch (closeErr) {
             if (

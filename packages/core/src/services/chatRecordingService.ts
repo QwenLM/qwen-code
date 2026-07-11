@@ -254,6 +254,8 @@ export interface ChatRecord {
     | 'custom_title'
     | 'parent_session'
     | 'rewind'
+    | 'turn_cancelled'
+    | 'turn_resumed'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
     | 'file_history_snapshot'
@@ -528,6 +530,8 @@ export class ChatRecordingService {
    * blocked. Must be flushed before process exit (see {@link flush}).
    */
   private writeChain: Promise<void> = Promise.resolve();
+  /** Records queued behind a strict append that may still need re-parenting. */
+  private readonly pendingWrites = new Set<ChatRecord>();
   /** In-memory cache of the current session's custom title (for re-append on exit) */
   private currentCustomTitle: string | undefined;
   /**
@@ -778,9 +782,16 @@ export class ChatRecordingService {
     if (options?.updateActiveTail !== false) {
       this.lastRecordUuid = record.uuid;
     }
+    this.pendingWrites.add(record);
     this.writeChain = this.writeChain
       .catch(() => {})
-      .then(() => jsonl.writeLine(conversationFile, record))
+      .then(async () => {
+        try {
+          await jsonl.writeLine(conversationFile, record);
+        } finally {
+          this.pendingWrites.delete(record);
+        }
+      })
       .catch((err) => {
         debugLogger.error('Error appending record (async):', err);
         if (onError) {
@@ -798,7 +809,6 @@ export class ChatRecordingService {
     record: ChatRecord,
     options?: { updateActiveTail?: boolean },
   ): Promise<void> {
-    const previousLastRecordUuid = this.lastRecordUuid;
     const updateActiveTail = options?.updateActiveTail !== false;
     let conversationFile: string;
     try {
@@ -811,19 +821,28 @@ export class ChatRecordingService {
     if (updateActiveTail) {
       this.lastRecordUuid = record.uuid;
     }
-    this.writeChain = this.writeChain
+    this.pendingWrites.add(record);
+    const strictWrite = this.writeChain
       .catch(() => {})
       .then(() => jsonl.writeLine(conversationFile, record));
+    this.writeChain = strictWrite;
 
     try {
-      await this.writeChain;
+      await strictWrite;
       this.updateTitleAnchorTracking(record);
     } catch (error) {
+      for (const pending of this.pendingWrites) {
+        if (pending !== record && pending.parentUuid === record.uuid) {
+          pending.parentUuid = record.parentUuid;
+        }
+      }
       if (updateActiveTail && this.lastRecordUuid === record.uuid) {
-        this.lastRecordUuid = previousLastRecordUuid;
+        this.lastRecordUuid = record.parentUuid;
       }
       debugLogger.error('Error appending record (async):', error);
       throw error;
+    } finally {
+      this.pendingWrites.delete(record);
     }
   }
 
@@ -1235,6 +1254,34 @@ export class ChatRecordingService {
     } catch (error) {
       debugLogger.error('Error saving ui telemetry record:', error);
     }
+  }
+
+  /**
+   * Records that the active turn was explicitly cancelled.
+   *
+   * Unlike telemetry, this is an authoritative recovery boundary: restore and
+   * continue paths use it to avoid re-running work the user stopped. Await the
+   * append so an acknowledged cancel survives an immediate daemon restart.
+   */
+  async recordTurnCancellation(): Promise<void> {
+    await this.recordTurnBoundary('turn_cancelled');
+  }
+
+  /** Clears a prior cancellation boundary when the user explicitly retries. */
+  async recordTurnResumption(): Promise<void> {
+    await this.recordTurnBoundary('turn_resumed');
+  }
+
+  private async recordTurnBoundary(
+    subtype: 'turn_cancelled' | 'turn_resumed',
+  ): Promise<void> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype,
+    };
+
+    await this.appendRecordStrict(record);
   }
 
   /**

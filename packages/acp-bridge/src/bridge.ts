@@ -11,7 +11,6 @@ import {
   PROTOCOL_VERSION,
 } from '@agentclientprotocol/sdk';
 import type {
-  CancelNotification,
   PromptRequest,
   SetSessionModelRequest,
   SetSessionModelResponse,
@@ -47,6 +46,7 @@ import {
   BridgeTimeoutError,
   createIdleWorkspaceExtensionsStatus,
   createIdleWorkspaceHooksStatus,
+  DAEMON_USER_CANCEL_META_KEY,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
@@ -396,6 +396,8 @@ interface SessionEntry {
   parentSessionId?: string;
   channel: AcpChannel;
   connection: ClientSideConnection;
+  /** Resolves true when an in-flight close succeeds, false when it rolls back. */
+  closeInFlight?: Promise<boolean>;
   /** Per-session event bus drives `GET /session/:id/events`. */
   events: EventBus;
   /** Per-session structured artifact registry. */
@@ -2752,7 +2754,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     entry: SessionEntry,
     ci: ChannelInfo | undefined,
     label: 'closeSession' | 'killSession',
-    opts?: { throwOnFailure?: boolean; requireFlush?: boolean },
+    opts?: {
+      throwOnFailure?: boolean;
+      requireFlush?: boolean;
+      persistCancellation?: boolean;
+    },
   ): Promise<void> => {
     if (!ci || ci.channel !== entry.channel) {
       if (opts?.throwOnFailure === true) {
@@ -2772,6 +2778,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
             sessionId: entry.sessionId,
             ...(opts?.requireFlush === true ? { requireFlush: true } : {}),
+            ...(opts?.persistCancellation === true
+              ? { persistCancellation: true }
+              : {}),
           }),
           initTimeoutMs,
           SERVE_CONTROL_EXT_METHODS.sessionClose,
@@ -3754,11 +3763,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   ): Promise<void> {
     const entry = byId.get(sessionId);
     if (!entry) throw new SessionNotFoundError(sessionId);
+    if (entry.closeInFlight) throw new SessionNotFoundError(sessionId);
     let originatorClientId: string | undefined;
     if (context?.clientId !== undefined) {
       originatorClientId = resolveTrustedClientId(entry, context.clientId);
     }
     const reason = closeOpts?.reason ?? 'client_close';
+    const userInitiated = closeOpts?.persistCancellation === true;
     writeStderrLine(
       `qwen serve: closing session ${JSON.stringify(sessionId)}` +
         ` (reason: ${reason})` +
@@ -3771,7 +3782,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       'session.id': sessionId,
       'session.close.reason': reason,
     });
-    if (defaultEntry === entry) defaultEntry = undefined;
+    let resolveClose!: (closed: boolean) => void;
+    const closeInFlight = new Promise<boolean>((resolve) => {
+      resolveClose = resolve;
+    });
+    entry.closeInFlight = closeInFlight;
     // HAZARD: Resolve the channel via `channelInfoForEntry(entry)` (search
     // `aliveChannels` for the entry's actual channel) instead of the
     // module-scoped `channelInfo` (the CURRENT attach target). The two
@@ -3790,12 +3805,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           `for session ${JSON.stringify(sessionId)} — channel cleanup skipped (entry's channel already torn down)`,
       );
     }
-    const requireAgentClose = closeOpts?.requireAgentClose === true;
-    if (requireAgentClose) {
-      await notifyAgentSessionClose(entry, ci, 'closeSession', {
-        throwOnFailure: true,
-        requireFlush: true,
-      });
+    const requireAgentClose =
+      closeOpts?.requireAgentClose === true || userInitiated;
+    try {
+      if (requireAgentClose) {
+        await notifyAgentSessionClose(entry, ci, 'closeSession', {
+          throwOnFailure: true,
+          requireFlush: true,
+          persistCancellation: userInitiated,
+        });
+      }
+    } catch (error) {
+      entry.closeInFlight = undefined;
+      resolveClose(false);
+      throw error;
     }
     if (ci && ci.channel === entry.channel) {
       ci.sessionIds.delete(sessionId);
@@ -3813,6 +3836,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       touchActivity();
     }
     byId.delete(sessionId);
+    resolveClose(true);
+    if (defaultEntry === entry) defaultEntry = undefined;
     telemetry.metrics?.sessionLifecycle('close');
     emitSessionLifecycle({
       type: 'removed',
@@ -3855,7 +3880,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             'session.close.cancel_active_prompt',
           'session.id': sessionId,
         },
-        async () => await entry.connection.cancel({ sessionId }),
+        async () =>
+          await entry.connection.cancel({
+            sessionId,
+            _meta: { [DAEMON_USER_CANCEL_META_KEY]: false },
+          }),
       );
     } catch {
       /* no active prompt or session already torn down */
@@ -4017,6 +4046,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (effectiveScope === 'single') {
         const existing = defaultEntry;
         if (existing) {
+          if (existing.closeInFlight) {
+            throw new SessionNotFoundError(existing.sessionId);
+          }
           // BRSCi: bump attach counter BEFORE any await so the
           // spawn-owner's disconnect reaper (server.ts:
           // `requireZeroAttaches: true`) sees this attach even when
@@ -4206,6 +4238,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const queuedAt = Date.now();
       const entry = byId.get(sessionId);
       if (!entry) return Promise.reject(new SessionNotFoundError(sessionId));
+      if (entry.closeInFlight) throw new SessionNotFoundError(sessionId);
       const originatorClientId = resolveTrustedClientId(
         entry,
         context?.clientId,
@@ -4285,6 +4318,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           if (pendingAbort.signal.aborted) {
             throw new DOMException('Prompt aborted', 'AbortError');
           }
+          const queuedBehindClose = entry.closeInFlight;
+          if (queuedBehindClose && (await queuedBehindClose)) {
+            throw new DOMException('Session closed', 'AbortError');
+          }
           // If this prompt was queued behind another, promote it to
           // 'running' and publish a started event now that it has
           // reached the head of the FIFO.
@@ -4319,6 +4356,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     sessionId,
                   },
                 );
+                const closeBeforeDispatch = entry.closeInFlight;
+                if (closeBeforeDispatch && (await closeBeforeDispatch)) {
+                  throw new DOMException('Session closed', 'AbortError');
+                }
                 assertLivePromptEntry(sessionId, entry);
                 const requestedRetry =
                   (req as unknown as { retry?: unknown }).retry === true;
@@ -4489,18 +4530,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                         'forward_failed',
                       );
                       cancelPendingForSession(sessionId);
-                      entry.connection.cancel({ sessionId }).catch((err) => {
-                        writeStderrLine(
-                          `[pending-prompt] cancel forward failed after prompt abort session=${sessionId}: ${extractErrorMessage(err)}`,
-                        );
-                      });
+                      entry.connection
+                        .cancel({
+                          sessionId,
+                          _meta: { [DAEMON_USER_CANCEL_META_KEY]: false },
+                        })
+                        .catch((err) => {
+                          writeStderrLine(
+                            `[pending-prompt] cancel forward failed after prompt abort session=${sessionId}: ${extractErrorMessage(err)}`,
+                          );
+                        });
                     },
                   )
                   .catch(() => {});
 
                 // Always wire `pendingAbort.signal` (not the caller's
-                // `signal` directly) so that `removePendingPrompt` can
-                // trigger the cancel path on running prompts too.
+                // `signal` directly) so queued-prompt removal and caller
+                // disconnects share one cancellation path.
                 const abortSignal = pendingAbort.signal;
                 const onAbort = () => {
                   broadcastPromptCancelledOnce(
@@ -4509,11 +4555,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     originatorClientId,
                   );
                   cancelPendingForSession(sessionId);
-                  entry.connection.cancel({ sessionId }).catch((err) => {
-                    writeStderrLine(
-                      `[pending-prompt] cancel forward failed after removePendingPrompt session=${sessionId}: ${extractErrorMessage(err)}`,
-                    );
-                  });
+                  entry.connection
+                    .cancel({
+                      sessionId,
+                      _meta: { [DAEMON_USER_CANCEL_META_KEY]: false },
+                    })
+                    .catch((err) => {
+                      writeStderrLine(
+                        `[pending-prompt] cancel forward failed after removePendingPrompt session=${sessionId}: ${extractErrorMessage(err)}`,
+                      );
+                    });
                 };
                 if (abortSignal.aborted) {
                   onAbort();
@@ -4629,38 +4680,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry,
         context?.clientId,
       );
-      // Broadcast `prompt_cancelled` so other SSE-subscribed clients see
-      // the cancel as a first-class event rather than inferring it from
-      // the absence of further `agent_message_chunk` frames. Mirrors
-      // `session_closed` — same audit gap (cross-client sync audit,
-      // 2026-05-24). Published before the ACP cancel forward (see the
-      // "cancel requested, not confirmed" semantic in
-      // `broadcastPromptCancelled`).
-      //
-      // Unconditional by design: not gated on `activePromptOriginatorClientId`
-      // because that field is only set when the active prompt carried an
-      // originator — gating on it would drop the broadcast for anonymous
-      // active prompts. A cancel against a genuinely idle session is a
-      // harmless no-op that consumers treat idempotently.
-      //
-      // The pending-permission resolution below intentionally omits the
-      // originator stamp (those resolutions are system-initiated, not
-      // user-voted); this top-level `prompt_cancelled` carries the
-      // cancelling client so peer UIs can attribute it.
-      //
-      // `...Once` dedups against the `sendPrompt` abort path so a client
-      // that POSTs /cancel and then drops its socket doesn't emit two
-      // `prompt_cancelled` frames for the same turn. The latch resets at
-      // the next prompt start, so a later turn still broadcasts.
-      broadcastPromptCancelledOnce(entry, sessionId, cancelOriginatorClientId);
-      // ACP spec: cancelling a prompt MUST resolve outstanding
-      // requestPermission calls with outcome.cancelled. Do this *before*
-      // forwarding the notification so the agent's wind-down sees the
-      // resolutions.
-      cancelPendingForSession(sessionId);
-      // Cancel intentionally bypasses the prompt queue: it's a notification
-      // that the agent uses to wind down the *currently active* prompt, not
-      // something to wait behind queued work.
+      const cancelTarget = entry.pendingPromptList.find(
+        (pending) => pending.state === 'running',
+      );
+      // Cancel intentionally bypasses the prompt queue. The daemon uses an
+      // acknowledged ACP extension request so the durable user-cancel boundary
+      // is written before this call resolves; direct ACP clients still use the
+      // standard cancel notification handled by QwenAgent.cancel().
       //
       // CONTRACT (multi-prompt clients): cancel affects ONLY the active
       // prompt. Any prompts the client previously POSTed and that are
@@ -4672,10 +4698,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // there. Clients that want a hard stop should stop posting new
       // prompts and call `cancelSession` after their last prompt
       // resolves, or kill the session via the channel-exit path.
-      const notif: CancelNotification = req
-        ? { ...req, sessionId }
-        : { sessionId };
-      telemetry.metrics?.cancelled();
+      let cancellationAcknowledged = true;
       await telemetry.withSpan(
         'session.cancel',
         {
@@ -4684,13 +4707,38 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         },
         async () => {
           try {
-            await entry.connection.cancel(notif);
+            await requestSessionStatus(
+              sessionId,
+              SERVE_CONTROL_EXT_METHODS.sessionCancel,
+              req ? { ...req } : {},
+            );
           } catch (err) {
-            if (isNotCurrentlyGeneratingCancelError(err)) return;
+            if (
+              isNotCurrentlyGeneratingCancelError(err) ||
+              /\bnot currently generating\b/i.test(extractErrorMessage(err))
+            ) {
+              cancellationAcknowledged = false;
+              return;
+            }
             throw err;
           }
         },
       );
+      if (
+        !cancellationAcknowledged ||
+        !cancelTarget ||
+        cancelTarget.state !== 'running' ||
+        !entry.pendingPromptList.includes(cancelTarget)
+      ) {
+        return;
+      }
+      telemetry.metrics?.cancelled();
+      // Publish only after the agent confirms the durable cancellation. If the
+      // original target settled while that write was in flight, its normal
+      // terminal event owns the turn and a later queued prompt must be left
+      // untouched.
+      broadcastPromptCancelledOnce(entry, sessionId, cancelOriginatorClientId);
+      cancelPendingForSession(sessionId);
     },
 
     subscribeEvents(sessionId, subOpts) {
@@ -6035,7 +6083,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }));
     },
 
-    removePendingPrompt(sessionId, promptId, context) {
+    async removePendingPrompt(sessionId, promptId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       // Authorize the caller BEFORE performing any mutation.
@@ -6048,14 +6096,30 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       writeStderrLine(
         `[pending-prompt] session=${sessionId} removing promptId=${promptId} state=${target.state}`,
       );
-      // Abort the prompt: for 'queued' prompts the FIFO will skip
-      // dispatch on the `signal.aborted` check; for 'running' prompts
-      // this triggers the cancel path.
-      target.abortController.abort(
-        new DOMException('Prompt removed by user', 'AbortError'),
-      );
-      // Remove from the list immediately so the API reflects the change.
-      entry.pendingPromptList.splice(idx, 1);
+      if (target.state === 'running') {
+        await requestSessionStatus(
+          sessionId,
+          SERVE_CONTROL_EXT_METHODS.sessionCancel,
+        );
+        if (entry.pendingPromptList.indexOf(target) === -1) {
+          return { removed: true };
+        }
+        broadcastPromptCancelledOnce(
+          entry,
+          sessionId,
+          target.originatorClientId,
+        );
+        cancelPendingForSession(sessionId);
+      } else {
+        target.abortController.abort(
+          new DOMException('Prompt removed by user', 'AbortError'),
+        );
+      }
+      // Remove from the list after a running prompt's cancellation boundary is
+      // durable so an acknowledged removal cannot be recovered after restart.
+      const currentIndex = entry.pendingPromptList.indexOf(target);
+      if (currentIndex === -1) return { removed: true };
+      entry.pendingPromptList.splice(currentIndex, 1);
       // Keep the admission slot until this prompt's FIFO node reaches the head
       // and settles through the original result.finally() path. Otherwise a
       // client could enqueue/delete queued prompts repeatedly while one turn is
