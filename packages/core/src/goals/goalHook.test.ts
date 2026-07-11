@@ -197,6 +197,31 @@ describe('createGoalStopHookCallback', () => {
     });
   });
 
+  it('resets deferred evaluations when a forced judge evaluation errors', async () => {
+    setActiveGoal('sess-1', {
+      condition: 'do x',
+      iterations: 0,
+      deferredEvaluations: MAX_GOAL_ITERATIONS,
+      setAt: 100,
+      tokensAtStart: 0,
+      hookId: 'h1',
+    });
+    judgeMock.mockResolvedValue({
+      kind: 'error',
+      message: 'Goal judge unavailable; the automatic /goal loop paused.',
+    });
+    const cb = createGoalStopHookCallback({
+      config: makeGoalConfig({ backgroundTask: true }),
+      sessionId: 'sess-1',
+      condition: 'do x',
+    });
+
+    await expect(cb(stopInput(), undefined)).resolves.toMatchObject({
+      continue: true,
+    });
+    expect(getActiveGoal('sess-1')?.deferredEvaluations).toBe(0);
+  });
+
   it('returns continue:true and clears the goal when judge says ok', async () => {
     setActiveGoal('sess-1', {
       condition: 'do x',

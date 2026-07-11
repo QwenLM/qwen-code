@@ -18,6 +18,7 @@ import {
   recordGoalDeferral,
   notifyGoalTerminal,
   recordGoalIteration,
+  resetGoalDeferrals,
   setActiveGoal,
   type ActiveGoal,
 } from './activeGoalStore.js';
@@ -195,6 +196,7 @@ export function createGoalStopHookCallback(args: {
     }
 
     if (verdict.kind === 'error') {
+      resetGoalDeferrals(sessionId);
       return { continue: true, systemMessage: verdict.message };
     }
 

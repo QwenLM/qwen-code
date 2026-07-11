@@ -33,6 +33,7 @@ export function activeGoalEquals(
 function stableActiveGoalKey(goal: ActiveGoal): string {
   const comparable: Record<string, unknown> = {};
   for (const key of Object.keys(goal).sort() as Array<keyof ActiveGoal>) {
+    if (key === 'deferredEvaluations') continue;
     const value = goal[key];
     if (value !== undefined) {
       comparable[key] = value;
@@ -78,6 +79,14 @@ export function recordGoalDeferral(sessionId: string): ActiveGoal | undefined {
     ...current,
     deferredEvaluations: (current.deferredEvaluations ?? 0) + 1,
   };
+  store.set(sessionId, updated);
+  return updated;
+}
+
+export function resetGoalDeferrals(sessionId: string): ActiveGoal | undefined {
+  const current = store.get(sessionId);
+  if (!current || current.deferredEvaluations === 0) return current;
+  const updated: ActiveGoal = { ...current, deferredEvaluations: 0 };
   store.set(sessionId, updated);
   return updated;
 }
