@@ -2376,6 +2376,60 @@ describe('DaemonClient', () => {
       );
     });
 
+    it('serializes parentSessionId into the sessions query', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessions: [
+            {
+              sessionId: 's-child',
+              workspaceCwd: '/work/a',
+              parentSessionId: 'P',
+            },
+          ],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const page = await client.listWorkspaceSessionsPage('/work/a', {
+        parentSessionId: 'P',
+      });
+
+      expect(page.sessions[0]).toMatchObject({
+        sessionId: 's-child',
+        parentSessionId: 'P',
+      });
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=20&parentSessionId=P',
+      );
+    });
+
+    it('WorkspaceDaemonClient serializes parentSessionId into the sessions query', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessions: [
+            {
+              sessionId: 's-child',
+              workspaceCwd: '/work/a',
+              parentSessionId: 'P',
+            },
+          ],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const page = await client
+        .workspaceByCwd('/work/a')
+        .listWorkspaceSessionsPage({ parentSessionId: 'P' });
+
+      expect(page.sessions[0]).toMatchObject({
+        sessionId: 's-child',
+        parentSessionId: 'P',
+      });
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Fwork%2Fa/sessions?size=20&parentSessionId=P',
+      );
+    });
+
     it('manages session groups and session organization', async () => {
       const { fetch, calls } = recordingFetch((request) => {
         if (

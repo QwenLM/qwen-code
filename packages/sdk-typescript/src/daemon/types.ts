@@ -532,6 +532,10 @@ export interface DaemonSessionSummary {
   createdAt?: string;
   updatedAt?: string;
   displayName?: string;
+  /** Id of the session that spawned this one (via `create_sub_session`), or
+   * absent for a top-level session. Lets a UI link a sub-session back to its
+   * parent. */
+  parentSessionId?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
   isWaitingForPermission?: boolean;
@@ -645,6 +649,14 @@ export interface DaemonSessionListPageOptions {
   archiveState?: DaemonSessionArchiveState;
   view?: DaemonSessionListView;
   group?: DaemonSessionGroupFilter;
+  /**
+   * Restrict the page to sessions spawned by this parent (via
+   * `create_sub_session`), matched against each session's `parentSessionId`.
+   * Cannot be combined with `view: 'organized'`. The whole workspace is
+   * gathered and filtered before pagination, and the returned `nextCursor` is
+   * opaque and activity-based.
+   */
+  parentSessionId?: string;
 }
 
 export interface DaemonSessionListPage {

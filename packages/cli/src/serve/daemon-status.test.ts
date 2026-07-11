@@ -6,7 +6,11 @@
 
 import type { RequestHandler } from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AcpHttpHandle } from './acp-http/index.js';
+import type {
+  AcpHttpConnectionDiagnostic,
+  AcpHttpHandle,
+  AcpHttpSnapshot,
+} from './acp-http/index.js';
 import type {
   AcpSessionBridge,
   BridgeDaemonStatusSnapshot,
@@ -192,6 +196,48 @@ describe('buildDaemonStatusResponse', () => {
         expect.objectContaining({ code: 'rate_limit_hits' }),
       ]),
     });
+  });
+
+  it('reports aggregate workspace-attributed ACP diagnostics in full status', async () => {
+    const primaryDiagnostic = makeAcpDiagnostic(null, BASE_WORKSPACE, true);
+    const secondaryDiagnostic = makeAcpDiagnostic(
+      'secondary-id',
+      '/work/secondary',
+      false,
+    );
+    const primaryRegistrySnapshot = {
+      connectionCount: 1,
+      connectionCap: 10,
+      connectionStreams: 1,
+      sessionStreams: 0,
+      sseStreams: 0,
+      wsStreams: 1,
+      pendingClientRequests: 0,
+      connections: [primaryDiagnostic],
+    };
+
+    const response = await buildDaemonStatusResponse(
+      'full',
+      makeOptions({
+        acpSnapshot: primaryRegistrySnapshot,
+        acpAggregate: {
+          connectionCount: 2,
+          connectionStreams: 2,
+          sessionStreams: 0,
+          sseStreams: 0,
+          wsStreams: 2,
+          pendingClientRequests: 0,
+          mounts: [],
+          connections: [primaryDiagnostic, secondaryDiagnostic],
+        },
+      }),
+    );
+
+    expect(response.runtime.transport.acp.connections).toBe(2);
+    expect(response.full?.acpConnections).toEqual([
+      primaryDiagnostic,
+      secondaryDiagnostic,
+    ]);
   });
 
   it('embeds runtime.metrics.series when getMetricsSeries is provided, and omits it otherwise', async () => {
@@ -783,9 +829,36 @@ describe('buildDaemonStatusResponse', () => {
   });
 });
 
+function makeAcpDiagnostic(
+  workspaceId: string | null,
+  workspaceCwd: string,
+  primary: boolean,
+): AcpHttpConnectionDiagnostic {
+  return {
+    connectionIdPrefix: primary ? 'primary' : 'secondary',
+    fromLoopback: true,
+    destroyed: false,
+    lastActiveMs: 0,
+    ownedSessionCount: 0,
+    sessionBindingCount: 0,
+    closingSessionCount: 0,
+    pendingClientRequests: 0,
+    connectionStreamOpen: true,
+    sessionStreams: 0,
+    sseStreams: 0,
+    wsStreams: 1,
+    bufferedConnectionFrames: 0,
+    bufferedSessionFrames: 0,
+    workspaceId,
+    workspaceCwd,
+    primary,
+  };
+}
+
 interface MakeOptionsInput {
   bridgeSnapshot?: BridgeDaemonStatusSnapshot;
   acpSnapshot?: ReturnType<AcpHttpHandle['registry']['getSnapshot']>;
+  acpAggregate?: AcpHttpSnapshot;
   rateLimitHits?: Record<RateLimitTier, number>;
   rateLimitEnabled?: boolean;
   mcpStatus?: unknown;
@@ -856,6 +929,24 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
       ? {
           acpHandle: {
             registry: { getSnapshot: () => input.acpSnapshot },
+            getSnapshot: () =>
+              input.acpAggregate ?? {
+                connectionCount: input.acpSnapshot!.connectionCount,
+                connectionStreams: input.acpSnapshot!.connectionStreams,
+                sessionStreams: input.acpSnapshot!.sessionStreams,
+                sseStreams: input.acpSnapshot!.sseStreams,
+                wsStreams: input.acpSnapshot!.wsStreams,
+                pendingClientRequests: input.acpSnapshot!.pendingClientRequests,
+                mounts: [
+                  {
+                    workspaceId: null,
+                    primary: true,
+                    connectionCount: input.acpSnapshot!.connectionCount,
+                    wsStreams: input.acpSnapshot!.wsStreams,
+                  },
+                ],
+                connections: [],
+              },
           } as unknown as AcpHttpHandle,
         }
       : {}),

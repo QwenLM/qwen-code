@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   useActions,
   useConnection,
@@ -12,9 +12,13 @@ import {
   useStreamingState,
   useTranscriptBlocks,
   useTranscriptStore,
+  useWorkspaceActions,
+  type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
 import { useMessages } from '../hooks/useMessages';
+import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptImage } from '../adapters/promptTypes';
 import type {
@@ -38,6 +42,16 @@ import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { QueuedPromptDisplay } from './QueuedPromptDisplay';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
+import type {
+  TurnOutputKind,
+  TurnOutputOpenRequest,
+} from './artifacts/TurnOutputs';
+import { TURN_OUTPUT_KINDS } from './artifacts/TurnOutputs';
+import {
+  getArtifactsByTurn,
+  getFileChangesByTurn,
+  getScheduledTasksByTurn,
+} from './artifacts/turnOutputSelectors';
 import styles from './ChatPane.module.css';
 
 // Split-view panes get the same interactive composer controls as the main chat,
@@ -55,6 +69,13 @@ export interface ChatPaneProps {
   title?: string;
   onClose?: () => void;
   onError?: (error: unknown, fallback: string) => void;
+  onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onPaneArtifactsChange?: (
+    sessionId: string,
+    artifacts: readonly DaemonSessionArtifact[],
+    workspaceActions: DaemonWorkspaceActions,
+  ) => void;
+  messageTurnOutputs?: readonly TurnOutputKind[];
 }
 
 /**
@@ -64,14 +85,36 @@ export interface ChatPaneProps {
  * state, approvals, and composer, and the browser scopes keyboard focus to the
  * pane the user clicks into — so there is no cross-pane approval arbitration.
  */
-export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
+export function ChatPane({
+  title,
+  onClose,
+  onError,
+  onRightPanelOpen,
+  onPaneArtifactsChange,
+  messageTurnOutputs,
+}: ChatPaneProps) {
   const { t } = useI18n();
   const connection = useConnection();
   const actions = useActions();
+  const workspaceActions = useWorkspaceActions();
   const messages = useMessages(t);
   const blocks = useTranscriptBlocks();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
+  const { artifacts } = useSessionArtifacts();
+  useEffect(() => {
+    const sessionId = connection.sessionId;
+    if (!sessionId) return;
+    onPaneArtifactsChange?.(sessionId, artifacts, workspaceActions);
+    return () => {
+      onPaneArtifactsChange?.(sessionId, [], workspaceActions);
+    };
+  }, [
+    artifacts,
+    connection.sessionId,
+    onPaneArtifactsChange,
+    workspaceActions,
+  ]);
   const streamingStateRef = useRef(streamingState);
   streamingStateRef.current = streamingState;
   const editorRef = useRef<EditorHandle | null>(null);
@@ -115,6 +158,28 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
   const approvalActive =
     pendingToolApproval !== null || pendingAskUserApproval !== null;
   const isResponding = streamingState !== 'idle';
+  const artifactsByTurn = useMemo(
+    () =>
+      getArtifactsByTurn(messages, artifacts, connection.workspaceCwd || ''),
+    [messages, artifacts, connection.workspaceCwd],
+  );
+  const fileChangesByTurn = useMemo(
+    () =>
+      getFileChangesByTurn(
+        messages,
+        artifactsByTurn,
+        connection.workspaceCwd || '',
+      ),
+    [messages, artifactsByTurn, connection.workspaceCwd],
+  );
+  const scheduledTasksByTurn = useMemo(
+    () => getScheduledTasksByTurn(messages),
+    [messages],
+  );
+  const visibleTurnOutputKinds = useMemo(
+    () => new Set<TurnOutputKind>(messageTurnOutputs ?? TURN_OUTPUT_KINDS),
+    [messageTurnOutputs],
+  );
   const {
     queuedPrompts,
     queuedTexts,
@@ -195,6 +260,18 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
         reportError(error, 'Failed to cancel request'),
       );
   }, [actions, reportError]);
+
+  const handleRightPanelOpen = useCallback(
+    (request: TurnOutputOpenRequest) => {
+      if (!onRightPanelOpen) return;
+      if (request.kind === 'artifact' || request.kind === 'scheduled_task') {
+        onRightPanelOpen({ ...request, workspaceActions });
+        return;
+      }
+      onRightPanelOpen(request);
+    },
+    [onRightPanelOpen, workspaceActions],
+  );
 
   // Composer wiring, all scoped to THIS pane's own DaemonSession context. The
   // slash menu lists the session's daemon commands — they run server-side when
@@ -325,6 +402,18 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
           isResponding={isResponding}
           workspaceCwd={connection.workspaceCwd || ''}
           hideSessionTimeline
+          turnFileChanges={
+            visibleTurnOutputKinds.has('file') ? fileChangesByTurn : undefined
+          }
+          turnArtifacts={
+            visibleTurnOutputKinds.has('artifact') ? artifactsByTurn : undefined
+          }
+          turnScheduledTasks={
+            visibleTurnOutputKinds.has('scheduled_task')
+              ? scheduledTasksByTurn
+              : undefined
+          }
+          onTurnOutputOpen={handleRightPanelOpen}
         />
       </div>
 

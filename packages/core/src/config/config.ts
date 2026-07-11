@@ -1486,14 +1486,17 @@ export interface SubSessionSpawnResult {
   sessionId: string;
   result?: string;
   stopReason?: string;
+  /** Whether the parent lineage was durably persisted to the sub-session's
+   * transcript. `false` = live-only (the parent link disappears from the
+   * persisted session list after a daemon restart). Absent when unknown. */
+  parentSessionPersisted?: boolean;
 }
 
 /**
  * Injected capability that spawns a sub-session. Used by the `create_sub_session`
- * tool and by the ACP session's `isolated` scheduled-task dispatch. Wired ONLY by
- * the daemon/ACP session layer (`Session.ts` → `this.client.extMethod`); absent in
- * interactive TUI / headless (no bridge), which is precisely the tool's
- * daemon-only gate.
+ * tool. Wired ONLY by the daemon/ACP session layer (`Session.ts` →
+ * `this.client.extMethod`); absent in interactive TUI / headless (no bridge),
+ * which is precisely the tool's daemon-only gate.
  */
 export type SubSessionSpawner = (
   req: SubSessionSpawnRequest,
