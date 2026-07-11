@@ -1228,6 +1228,7 @@ describe('DaemonChannelBridge', () => {
         reason: 'session_replaced',
       }),
     );
+    await waitFor(() => expect(firstSession.cancel).toHaveBeenCalledOnce());
     await expect(
       bridge.respondToPermission('req-1', {
         outcome: { outcome: 'selected', optionId: 'proceed_once' },

@@ -492,8 +492,17 @@ export class DaemonChannelBridge
     session: DaemonChannelSessionClient,
     bindingToken?: object,
   ): void {
-    if (this.sessions.has(session.sessionId)) {
-      this.dropSession(session.sessionId, 'session_replaced');
+    const replacedSession = this.removeSessionBinding(session.sessionId);
+    if (replacedSession) {
+      void this.releaseSessionClient(replacedSession).catch(
+        (error: unknown) => {
+          this.lastError = error;
+        },
+      );
+      this.emit('sessionDied', {
+        sessionId: session.sessionId,
+        reason: 'session_replaced',
+      });
     }
 
     this.sessions.set(session.sessionId, session);
