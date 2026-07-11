@@ -35,7 +35,7 @@ If there are no uncommitted changes, `/review` will let you know and stop — no
 | `medium` | Finder angles run sequentially in one context: line-by-line, removed-behavior, cross-file trace, quality/altitude, performance, project-rule conventions | 12 (unverified)     | None                                | Never            |
 | `high`   | Full pipeline: 12 parallel agents → sharded verification → iterative reverse audit                                                                       | Uncapped (verified) | Approve / Request changes / Comment | With `--comment` |
 
-Defaults: **high** for PR reviews, **medium** for local and file reviews. `--comment` always forces high — posted comments must survive verification. Quick passes are labeled unverified, never emit a verdict, and never write the incremental review cache, so a later `--effort high` run is never skipped as "already reviewed". Scope handling is identical at every level: PR reviews still use the isolated worktree and the same diff capture, so the review is always against the right base.
+Defaults: **high** for PR reviews, **medium** for local and file reviews. `--comment` always forces high — posted comments must survive verification. Quick passes are labeled unverified, never emit a verdict, and never write the incremental review cache, so a later `--effort high` run is never skipped as "already reviewed". The diff-obtaining mechanics are identical at every level — PR reviews always use the isolated worktree and the same base resolution, so the review is never against the wrong base. One scope difference remains: the incremental cache is high-only, so a high re-review may cover just the new commits (`lastCommitSha..HEAD`) while low/medium always review the full PR diff.
 
 ## How It Works
 
@@ -74,7 +74,7 @@ Step 3B: high, >500 source lines: territory x dimension    [N+4..6+3H calls]
            |-- Agent 8: Specialized finders (whole diff, 0-2)
            '-- Test coverage matrix         (whole diff)
 Step 4:  Deduplicate --> Sharded verify (<=8 findings each)
-           --> Aggregate                              [ceil(N/8) calls]
+           --> Aggregate                    [ceil(F/8) calls, F=findings]
 Step 5:  Iterative reverse audit, fanned out per chunk;
            stop after 2 consecutive dry rounds (cap 5)
 Step 6:  Present findings + verdict (high; quick passes: findings only)
@@ -107,7 +107,7 @@ Every finding must state a **failure scenario** — the concrete input, state, o
 
 Once a PR carries more than 500 lines of **source** change — or more than 3 200 diff lines in total, past which chunking needs fewer agents than the twelve-agent topology anyway — this dimension fan-out is replaced by a **territory × dimension** fan-out: the diff is split into ~400-line chunks — boundaries fall on hunk boundaries, and a hunk too large to fit is split only at a top-level declaration, never inside a function — and each chunk gets its own agent that applies every review dimension to that chunk alone.
 
-The gate deliberately counts source lines rather than diff lines. Test code, prose and lockfiles dominate diff size — across this repo's last 40 merged PRs the median diff is 41% tests — so a gate on raw size would carve a 173-line production change into territories just because it shipped 489 lines of new tests, leaving that production code with one reviewer instead of ten lenses. Chunking still covers every line either way, tests included; what the gate decides is how many reviewers there are and what each is asked to do. Twelve agents all reading one large diff read the same early hunks twelve times; one agent per chunk means every line of the diff has exactly one accountable reviewer. Each chunk agent returns a `Covered:` receipt, and a chunk with no receipt is re-reviewed before the run proceeds — so "no blockers" can never be reported over code that nobody read.
+The gate deliberately counts source lines rather than diff lines. Test code, prose and lockfiles dominate diff size — across this repo's last 40 merged PRs the median diff is 41% tests — so a gate on raw size would carve a 173-line production change into territories just because it shipped 489 lines of new tests, leaving that production code with one reviewer instead of ten lenses (the diff-reading dimension agents — twelve minus Issue Fidelity and Build & Test). Chunking still covers every line either way, tests included; what the gate decides is how many reviewers there are and what each is asked to do. Twelve agents all reading one large diff read the same early hunks twelve times; one agent per chunk means every line of the diff has exactly one accountable reviewer. Each chunk agent returns a `Covered:` receipt, and a chunk with no receipt is re-reviewed before the run proceeds — so "no blockers" can never be reported over code that nobody read.
 
 A **source** file that is largely rewritten (an existing file of 300+ lines that is now 40%+ new, or has 800+ changed lines) also gets **three whole-file invariant agents**. Test and generated files never qualify — the checklist asks about fields, timers, and error taxonomies, which a rewritten test file does not have. Its bugs are usually not inside any one hunk but _between_ the new lines — a timer armed near the top of the file and a teardown path two thousand lines below. Each agent reads the whole post-change file and walks two or three items of a fixed checklist: mutable fields cleared on every exit path, timers cancelled on every close (and cancellation not discarding captured data), map inserts matched by deletes, retry counters incremented at every entry, status return values actually checked, error codes exhaustively classified permanent vs transient, config fields honoured on every path, and early returns that skip a required side effect.
 
@@ -285,12 +285,12 @@ For large diffs (>10 modified symbols), the caller-direction analysis prioritize
 
 The high-effort pipeline uses a bounded number of LLM calls regardless of how many findings are produced:
 
-| Stage                            | LLM calls           | Notes                                                                                 |
-| -------------------------------- | ------------------- | ------------------------------------------------------------------------------------- |
-| Review agents (Step 3)           | 12 (+0-2)           | Run in parallel; cross-repo skips Agents 1c and 7 (10), local/file skips Agent 0 (11) |
-| Sharded verification (Step 4)    | ceil(N/8)           | At most 8 findings per verification agent, launched together                          |
-| Iterative reverse audit (Step 5) | 2-5                 | Stops after two consecutive dry rounds; 5-round hard cap                              |
-| **Total**                        | **~15-19 (~13-18)** | Same-repo: ~15-19; cross-repo or local/file: ~13-18                                   |
+| Stage                            | LLM calls                      | Notes                                                                                         |
+| -------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------- |
+| Review agents (Step 3)           | 12 (+0-2)                      | Run in parallel; cross-repo skips Agents 1c and 7 (10), local/file skips Agent 0 (11)         |
+| Sharded verification (Step 4)    | ceil(F/8)                      | F = findings; at most 8 per verification agent, launched together                             |
+| Iterative reverse audit (Step 5) | 2-5 (3A); rounds × chunks (3B) | Two consecutive dry rounds to stop (cap 5); 3B fans out one auditor per chunk per round       |
+| **Total**                        | **~15-19 (~13-18)**            | 3A same-repo: ~15-19; cross-repo or local/file: ~13-18; 3B scales with chunks (see DESIGN.md) |
 
 Most PRs converge to the lower end of the range; the caps prevent runaway cost on pathological cases. At `--effort low|medium` the review runs entirely inline — **0 subagent calls**.
 

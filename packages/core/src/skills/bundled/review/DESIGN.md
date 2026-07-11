@@ -14,7 +14,7 @@
 
 **Decision:** 12 agents. The marginal cost (12x vs 1x) is acceptable because:
 
-1. Parallel execution means time cost is ~1x (all 12 agents launch in one response)
+1. All 12 agents are submitted in one response and run concurrently up to the runtime's tool-call cap (default 10, `QWEN_CODE_MAX_TOOL_CONCURRENCY`) — wall time is bounded by roughly two waves at worst, still far below twelve sequential agents
 2. Dimensional focus produces higher recall (fewer missed issues)
 3. Three undirected personas (attacker / 3am-oncall / maintainer) catch cross-dimensional issues that a single undirected agent's prompt-induced bias would miss
 4. Issue Fidelity prevents a common false approval mode: a PR can be internally well-tested while solving only the author's mistaken diagnosis, not the linked issue's original failure
@@ -61,9 +61,9 @@ Domains have failure grammars — a reconnect state machine, a module loader, a 
 
 - **N independent agents (original design):** One verification agent per finding. Each reads code independently. High quality but cost scales linearly with finding count (15 findings = 15 LLM calls).
 - **1 batch agent (original):** Single agent receives all findings, verifies each one. Fixed cost.
-- **Sharded batches, ≤8 findings each (chosen):** `ceil(N/8)` agents, launched together.
+- **Sharded batches, ≤8 findings each (chosen):** `ceil(F/8)` agents (F = finding count), launched together.
 
-**Decision:** Shard. One batch agent was right when a review produced 15 findings — it saw cross-finding relationships and cost O(1). But a Step 3B review of a large PR produces 30-60 findings, and one agent re-reading code for each of them inside a single context window degrades on the tail of the list. Sharding costs `ceil(N/8)` calls instead of 1, still far below one-agent-per-finding, and keeps each verifier's job small enough to do properly.
+**Decision:** Shard. One batch agent was right when a review produced 15 findings — it saw cross-finding relationships and cost O(1). But a Step 3B review of a large PR produces 30-60 findings, and one agent re-reading code for each of them inside a single context window degrades on the tail of the list. Sharding costs `ceil(F/8)` calls instead of 1, still far below one-agent-per-finding, and keeps each verifier's job small enough to do properly.
 
 **A verifier may never reject a Critical.** It may downgrade to low confidence, with specific contradicting code cited. A rejected Critical is deleted from both the PR and the terminal and no later stage revisits it; a downgraded one still reaches a human under "Needs Human Review". The asymmetry between a false positive (noise) and a deleted true positive (a shipped bug plus another `/review` round) is not close.
 
@@ -92,11 +92,11 @@ The original design gave one agent the whole diff plus a growing cumulative find
 
 ### Why the topology gate counts source lines, not diff lines
 
-Diff size is a bad proxy for review risk, because tests dominate it. Across this repo's last 40 merged PRs the median diff is **41% test code**, and 14 of the 40 are more than half tests. A gate on raw diff lines sends a change of 173 production lines that ships 489 lines of new tests into the territory fan-out, where the production code ends up owned by a single chunk agent — while under the dimension fan-out it would have been read by ten lenses.
+Diff size is a bad proxy for review risk, because tests dominate it. Across this repo's last 40 merged PRs the median diff is **41% test code**, and 14 of the 40 are more than half tests. A gate on raw diff lines sends a change of 173 production lines that ships 489 lines of new tests into the territory fan-out, where the production code ends up owned by a single chunk agent — while under the dimension fan-out it would have been read by ten lenses (the diff-reading dimension agents: twelve minus Issue Fidelity and Build & Test).
 
 Territory fan-out is worth it when there is a lot of _risky_ code to divide, not a lot of _lines_. So the gate is `srcDiffLines > 500`, with a second clause `diffLines > 3200` as a delivery bound: past that point `ceil(diffLines / 400) + 4 > 12`, so chunking uses fewer agents than the twelve-agent topology anyway, and asking twelve agents each to read a diff that large dilutes all of them. On the 40-PR sample the second clause never fires; it exists for a changeset dominated by tests or generated files.
 
-Re-gating moves 6 of those 40 PRs from 3B back to 3A and cost 22 extra agents in total across all 40 — about 5% — when measured under the earlier 10-agent 3A roster; under the current 12-agent roster the same six PRs cost 2 more each, ~34 extra (~7%). It buys those six PRs ten review lenses on their production code instead of one.
+Re-gating moved 6 of those 40 PRs from 3B back to 3A and cost 22 extra agents in total across all 40 — about 5% — measured under the earlier 10-agent 3A roster; under the current 12-agent roster the same six PRs cost 2 more each, ~34 extra (~7%). It buys those six PRs ten review lenses on their production code instead of one.
 
 Chunking itself is unchanged: the plan still tiles every line, tests and generated files included. Only the count of reviewers and their brief change. `heavy` is likewise restricted to `source` files — the invariant checklist asks about fields, timers, collections, and error taxonomies, and a rewritten test file has none of those.
 
@@ -319,13 +319,13 @@ The countermeasure is cheap and needs no new machinery: before Step 4, sanity-ch
 | Stage                   | Calls               | Why                                                                                                                                                                                                                                |
 | ----------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Review agents           | 12 (+0-2)           | issue fidelity + 3 procedural correctness walks (1a/1b/1c) + security/quality/perf/tests + 3 undirected personas + build&test, plus 0-2 diff-specialized finders; cross-repo skips Agents 7 and 1c (10), non-PR skips Agent 0 (11) |
-| Sharded verification    | `ceil(N/8)`         | typically 1-2; keeps each verifier's job small on high-finding reviews                                                                                                                                                             |
+| Sharded verification    | `ceil(F/8)`         | F = findings; typically 1-2; keeps each verifier's job small on high-finding reviews                                                                                                                                               |
 | Iterative reverse audit | 2-5                 | loop ends after two consecutive dry rounds; 5-round hard cap                                                                                                                                                                       |
 | **Total**               | **~15-19 (~13-18)** | Same-repo PR: ~15-19; cross-repo lightweight PR or local/file: ~13-18. **Low/medium effort: 0 subagent calls** — the inline pass runs in the orchestrator's own context                                                            |
 
-**Large diffs (> 500 source lines, Step 3B, high effort) — `ceil(diffLines / 400)` chunk agents + 4-6 whole-diff agents + `ceil(N/8)` verify + 2-5 reverse.** PR #6457 (5801 diff lines) plans to 19 chunks, so ~28-30 calls.
+**Large diffs (> 500 source lines, Step 3B, high effort) — `ceil(diffLines / 400)` chunk agents + `4..6` whole-diff agents + `3H` invariant agents (H = heavy files) + `ceil(F/8)` verify (F = findings) + `rounds × chunks` reverse audit.** The reverse audit dominates: it fans out one auditor per chunk per round, and the stop rule needs two consecutive dry rounds. PR #6457 (5801 diff lines, 19 chunks, 1 heavy file) costs ~26-28 first-wave calls, then at least `2 × 19 = 38` reverse auditors — ~70 calls in a clean run, more if early rounds keep finding.
 
-That is roughly 2x the small-diff budget, and it buys the thing the small-diff topology cannot deliver at that size: coverage. Ten dimension agents on a 5801-line diff each read the same truncated 14% window (see "Why the diff is a file, not a command"), so nine of the ten calls are redundant reads of the same hunks. Nineteen chunk agents each read a distinct ~390-line territory, and every line of the diff has exactly one accountable owner. The comparison to make is not 27 calls vs 14: PR #6457 took **eight** review rounds at 12-14 calls each — over 100 calls — and was still surfacing Criticals in code that had been in the diff since the first commit.
+That is roughly 4x the small-diff budget, and it buys the thing the small-diff topology cannot deliver at that size: coverage. Ten dimension agents (the roster of the day; twelve now) on a 5801-line diff each read the same truncated 14% window (see "Why the diff is a file, not a command"), so nine of the ten calls were redundant reads of the same hunks. Nineteen chunk agents each read a distinct ~390-line territory, and every line of the diff has exactly one accountable owner. The comparison to make is not ~70 calls vs ~17: PR #6457 took **eight** review rounds at 12-14 calls each — over 100 calls — and was still surfacing Criticals in code that had been in the diff since the first commit.
 
 Competitors: Copilot uses 1 call, Gemini uses 2, Claude /ultrareview uses 5-20 (cloud). Ours biases toward higher recall — the assumption is that "find more issues per round" is more valuable than minimizing per-run cost, because every missed issue forces the user into another `/review` iteration.
 
@@ -409,16 +409,16 @@ The convergence concern that motivated the summary is real but narrower than it 
 
 For a PR with 15 findings:
 
-| Approach                                            | LLM calls            | Notes                                                                                       |
-| --------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------- |
-| Copilot (1 agent)                                   | 1                    | Lowest cost, lowest coverage                                                                |
-| Gemini (2 LLM tasks)                                | 2                    | Good cost, medium coverage                                                                  |
-| Our design (5 agents, N verify)                     | 21                   | 5+15+1 — too expensive                                                                      |
-| Our design (5 agents, batch verify, single reverse) | 7                    | 5+1+1 — original design                                                                     |
-| Our design (9 agents, iterative reverse)            | 11-13                | 9+1+(1-3) — +50% cost for meaningfully higher recall                                        |
-| Our design (10 agents)                              | 12-14                | 10+1+(1-3) — adds issue-fidelity/root-cause gate                                            |
-| Our design (12 agents + effort levels, current)     | 15-19 high / 0 quick | 12(+0-2)+ceil(N/8)+(2-5); low/medium run inline with no subagents — cost scales with intent |
-| Claude /ultrareview                                 | 5-20                 | Cloud-hosted, cost on Anthropic                                                             |
+| Approach                                            | LLM calls            | Notes                                                                                                |
+| --------------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------- |
+| Copilot (1 agent)                                   | 1                    | Lowest cost, lowest coverage                                                                         |
+| Gemini (2 LLM tasks)                                | 2                    | Good cost, medium coverage                                                                           |
+| Our design (5 agents, N verify)                     | 21                   | 5+15+1 — too expensive                                                                               |
+| Our design (5 agents, batch verify, single reverse) | 7                    | 5+1+1 — original design                                                                              |
+| Our design (9 agents, iterative reverse)            | 11-13                | 9+1+(1-3) — +50% cost for meaningfully higher recall                                                 |
+| Our design (10 agents)                              | 12-14                | 10+1+(1-3) — adds issue-fidelity/root-cause gate                                                     |
+| Our design (12 agents + effort levels, current)     | 15-19 high / 0 quick | 12(+0-2)+ceil(F/8)+(2-5) under 3A; low/medium run inline with no subagents — cost scales with intent |
+| Claude /ultrareview                                 | 5-20                 | Cloud-hosted, cost on Anthropic                                                                      |
 
 ## Future optimization: Fork Subagent
 
