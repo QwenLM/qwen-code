@@ -2477,9 +2477,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/model',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/model',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const modelId = body['modelId'];
         if (typeof modelId !== 'string' || !modelId) {
@@ -2490,7 +2490,7 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const response = await bridge.setSessionModel(
+        const response = await runtime.bridge.setSessionModel(
           sessionId,
           {
             ...(body as object),
@@ -2810,9 +2810,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/approval-mode',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/approval-mode',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         // Validates `mode` against `APPROVAL_MODES` and an optional
         // `persist: boolean` flag.
         const body = safeBody(req);
@@ -2838,7 +2838,7 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const response = await bridge.setSessionApprovalMode(
+        const response = await runtime.bridge.setSessionApprovalMode(
           sessionId,
           mode as ApprovalMode,
           { persist: persist === true },

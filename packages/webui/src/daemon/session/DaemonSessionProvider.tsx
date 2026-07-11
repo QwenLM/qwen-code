@@ -24,6 +24,7 @@ import {
   extractServerTimestamp,
   matchTurnEvent,
   normalizeDaemonEvent,
+  type CreateSessionRequest,
   type DaemonEvent,
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
@@ -1681,7 +1682,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           workspaceCwd:
             activeWorkspaceCwdRef.current ?? sessionRef.current?.workspaceCwd,
         }),
-        createDetachedSession: (workspaceCwd?: string) => {
+        createDetachedSession: (
+          workspaceCwd?: string,
+          overrides?: Pick<CreateSessionRequest, 'approvalMode'>,
+        ) => {
           const client =
             workspaceClientRef.current ??
             new DaemonClient({
@@ -1695,6 +1699,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               workspaceCwd ??
               activeWorkspaceCwdRef.current ??
               sessionRef.current?.workspaceCwd,
+            ...(overrides?.approvalMode !== undefined
+              ? { approvalMode: overrides.approvalMode }
+              : {}),
           };
           const requestClientId = clientId
             ? clientIdRef.current
