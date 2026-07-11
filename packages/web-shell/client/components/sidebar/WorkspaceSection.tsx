@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, type ReactNode } from 'react';
 import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import type {
   DaemonSessionSummary,
@@ -13,11 +13,6 @@ function cx(...classes: Array<string | false | undefined>): string {
 function getWorkspaceName(cwd: string): string {
   const parts = cwd.split(/[\\/]+/).filter(Boolean);
   return parts.at(-1) ?? cwd;
-}
-
-function getSessionLabel(session: DaemonSessionSummary): string {
-  const displayName = session.displayName?.trim();
-  return displayName || session.sessionId.slice(0, 8);
 }
 
 function FolderIcon({ open }: { open: boolean }) {
@@ -51,28 +46,30 @@ interface WorkspaceSectionProps {
   workspace: DaemonWorkspaceCapability;
   client: DaemonClient;
   isActive: boolean;
-  currentSessionId?: string;
   reloadToken: number;
   primaryLabel: string;
   untrustedLabel: string;
   noSessionsLabel: string;
-  formatTime: (iso: string) => string;
   onSelectWorkspace: (cwd: string | undefined) => void;
-  onLoadSession: (sessionId: string) => void;
+  /**
+   * Render one session row. The sidebar passes its shared `renderSessionRow`
+   * so per-workspace sessions match the single-workspace list exactly — same
+   * type scale, hover actions (pin, archive, export, more…), and states —
+   * instead of a bespoke, feature-poor row.
+   */
+  renderSession: (session: DaemonSessionSummary) => ReactNode;
 }
 
 export function WorkspaceSection({
   workspace,
   client,
   isActive,
-  currentSessionId,
   reloadToken,
   primaryLabel,
   untrustedLabel,
   noSessionsLabel,
-  formatTime,
   onSelectWorkspace,
-  onLoadSession,
+  renderSession,
 }: WorkspaceSectionProps) {
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
   const [expanded, setExpanded] = useState(workspace.primary);
@@ -135,27 +132,7 @@ export function WorkspaceSection({
           {sessions.length === 0 ? (
             <div className={styles.empty}>{noSessionsLabel}</div>
           ) : (
-            sessions.map((session) => (
-              <button
-                key={session.sessionId}
-                className={cx(
-                  styles.sessionItem,
-                  session.sessionId === currentSessionId &&
-                    styles.sessionItemActive,
-                )}
-                onClick={() => onLoadSession(session.sessionId)}
-                title={getSessionLabel(session)}
-              >
-                <span className={styles.sessionName}>
-                  {getSessionLabel(session)}
-                </span>
-                {session.createdAt && (
-                  <span className={styles.sessionTime}>
-                    {formatTime(session.createdAt)}
-                  </span>
-                )}
-              </button>
-            ))
+            sessions.map((session) => renderSession(session))
           )}
         </div>
       )}
