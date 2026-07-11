@@ -27,28 +27,40 @@ function resolveEntry(relativePathWithoutExt) {
   return path.join(projectRoot, `${relativePathWithoutExt}.js`);
 }
 
-const entryPoints = [resolveEntry('src/background/service-worker')];
+const builds = [
+  {
+    entryPoints: [resolveEntry('src/background/service-worker')],
+  },
+  {
+    entryPoints: [resolveEntry('src/sidepanel/capability-status')],
+    globalName: 'QwenCapabilityStatus',
+  },
+];
 
 async function build() {
-  const ctx = await esbuild.context({
-    entryPoints,
-    bundle: true,
-    platform: 'browser',
-    format: 'iife',
-    target: ['chrome115'],
-    minify: isProduction,
-    sourcemap: !isProduction,
-    outdir: path.join(projectRoot, outDir),
-    outbase: path.join(projectRoot, 'src'),
-    logLevel: 'info',
-  });
+  const contexts = await Promise.all(
+    builds.map((buildOptions) =>
+      esbuild.context({
+        ...buildOptions,
+        bundle: true,
+        platform: 'browser',
+        format: 'iife',
+        target: ['chrome115'],
+        minify: isProduction,
+        sourcemap: !isProduction,
+        outdir: path.join(projectRoot, outDir),
+        outbase: path.join(projectRoot, 'src'),
+        logLevel: 'info',
+      }),
+    ),
+  );
 
   if (isWatch) {
     console.log('Watching background/content scripts...');
-    await ctx.watch();
+    await Promise.all(contexts.map((ctx) => ctx.watch()));
   } else {
-    await ctx.rebuild();
-    await ctx.dispose();
+    await Promise.all(contexts.map((ctx) => ctx.rebuild()));
+    await Promise.all(contexts.map((ctx) => ctx.dispose()));
     console.log('Background/content build complete!');
   }
 }

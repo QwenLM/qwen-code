@@ -11,6 +11,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 import { watch } from 'fs';
+import { toChromeManifestVersion } from './manifest-version.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,6 +28,17 @@ const targetDir = path.resolve(
 );
 
 const staticSrcDir = path.join(projectRoot, 'public');
+async function syncManifestVersion() {
+  const packageJson = JSON.parse(
+    await fs.readFile(path.join(projectRoot, 'package.json'), 'utf8'),
+  );
+  const manifestPath = path.join(targetDir, 'manifest.json');
+  const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+  manifest.version = toChromeManifestVersion(packageJson.version);
+  manifest.version_name = packageJson.version;
+  await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
 async function copyStatic(clean = false) {
   if (clean) {
     await fs.rm(targetDir, { recursive: true, force: true });
@@ -34,6 +46,7 @@ async function copyStatic(clean = false) {
   await fs.mkdir(targetDir, { recursive: true });
 
   await fs.cp(staticSrcDir, targetDir, { recursive: true });
+  await syncManifestVersion();
   console.log(
     `Static assets synced -> ${path.relative(projectRoot, targetDir)}`,
   );
