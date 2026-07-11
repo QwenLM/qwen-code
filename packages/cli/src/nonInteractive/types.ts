@@ -388,6 +388,11 @@ export interface CLIControlInitializeRequest {
    */
   mcpServers?: Record<string, CLIMcpServerConfig>;
   agents?: SubagentConfig[];
+  /**
+   * Initial reasoning effort tier: 'low' | 'medium' | 'high' | 'xhigh' | 'max'.
+   * Applied at session start via config.setReasoningEffort().
+   */
+  effort?: string;
 }
 
 export interface CLIControlSetPermissionModeRequest {
@@ -418,6 +423,20 @@ export interface CLIControlSetModelRequest {
   model: string;
 }
 
+export interface CLIControlSetEffortRequest {
+  subtype: 'set_effort';
+  effort: string;
+}
+
+export interface CLIControlGetAvailableModelsRequest {
+  subtype: 'get_available_models';
+}
+
+export interface CLIControlGetUsageInfoRequest {
+  subtype: 'get_usage_info';
+  range?: 'today' | 'week' | 'month' | 'all';
+}
+
 export interface CLIControlMcpStatusRequest {
   subtype: 'mcp_server_status';
 }
@@ -440,9 +459,12 @@ export type ControlRequestPayload =
   | CLIHookCallbackRequest
   | CLIControlMcpMessageRequest
   | CLIControlSetModelRequest
+  | CLIControlSetEffortRequest
   | CLIControlMcpStatusRequest
   | CLIControlSupportedCommandsRequest
-  | CLIControlGetContextUsageRequest;
+  | CLIControlGetContextUsageRequest
+  | CLIControlGetAvailableModelsRequest
+  | CLIControlGetUsageInfoRequest;
 
 export interface CLIControlRequest {
   type: 'control_request';
