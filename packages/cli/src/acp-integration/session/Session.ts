@@ -36,7 +36,6 @@ import type {
   ToolArtifact,
   VisionBridgeResult,
   MemoryWriteCandidate,
-  SubSessionSpawner,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
