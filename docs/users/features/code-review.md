@@ -35,7 +35,7 @@ If there are no uncommitted changes, `/review` will let you know and stop — no
 | `medium` | Finder angles run sequentially in one context: line-by-line, removed-behavior, cross-file trace, quality/altitude, performance, project-rule conventions | 12 (unverified)     | None                                | Never            |
 | `high`   | Full pipeline: 12 parallel agents → sharded verification → iterative reverse audit                                                                       | Uncapped (verified) | Approve / Request changes / Comment | With `--comment` |
 
-Defaults: **high** for PR reviews, **medium** for local and file reviews. `--comment` always forces high — posted comments must survive verification. Quick passes are labeled unverified, never emit a verdict, and never write the incremental review cache, so a later `--effort high` run is never skipped as "already reviewed". The diff-obtaining mechanics are identical at every level — PR reviews always use the isolated worktree and the same base resolution, so the review is never against the wrong base. One scope difference remains: the incremental cache is high-only, so a high re-review may cover just the new commits (`lastCommitSha..HEAD`) while low/medium always review the full PR diff.
+Defaults: **high** for PR reviews, **medium** for local and file reviews. An effective `--comment` forces high (posted comments must survive verification) — on a non-PR target `--comment` is ignored with a warning and does **not** change the effort. Medium runs no dedicated security or test-coverage pass — use `--effort high` for security-sensitive changes. Worktree isolation applies to same-repo PR reviews; cross-repo PRs run in lightweight mode (diff-only, no worktree or build/test). Quick passes are labeled unverified, never emit a verdict, and never write the incremental review cache, so a later `--effort high` run is never skipped as "already reviewed". The diff-obtaining mechanics are identical at every level — PR reviews always use the isolated worktree and the same base resolution, so the review is never against the wrong base. One scope difference remains: the incremental cache is high-only, so a high re-review may cover just the new commits (`lastCommitSha..HEAD`) while low/medium always review the full PR diff.
 
 ## How It Works
 
@@ -46,7 +46,7 @@ Step 1:  Determine scope + effort level (local diff / PR worktree / file)
          Capture the diff to a file + partition it into chunks
 Step 2:  Load project review rules (medium/high)
 Step 3C: low/medium effort: inline pass, no subagents      [0 LLM calls]
-Step 3A: high, <=500 source lines: 12 parallel agents      [12+ LLM calls]
+Step 3A: high, <=500 src AND <=3200 total: 12 agents       [12+ LLM calls]
            |-- Agent 0: Issue Fidelity & Root-Cause Ownership
            |-- Agent 1a: Correctness — line-by-line scan
            |     (incl. language-pitfall + wrapper-routing checks)
@@ -60,7 +60,7 @@ Step 3A: high, <=500 source lines: 12 parallel agents      [12+ LLM calls]
            |-- Agent 8: Diff-specialized finders (0-2, only when
            |     the diff's domain calls for them)
            '-- Agent 7: Build & Test (runs shell commands)
-Step 3B: high, >500 source lines: territory x dimension    [N+4..6+3H calls]
+Step 3B: high, >500 src OR >3200 total: territory x dim.   [N+4..6+3H calls]
            (N chunks, 4-6 whole-diff agents, 3 invariant
             agents per heavy file H)
            |-- 1 chunk agent per ~400 diff lines (all dimensions,
@@ -105,9 +105,9 @@ The three Correctness agents are **procedural**: each is defined by how it walks
 
 Every finding must state a **failure scenario** — the concrete input, state, or timing that triggers it and the wrong outcome that results (for quality findings, the concrete cost instead). A finding that cannot name its scenario is dropped at the source, and verification re-traces the claimed scenario through the real code rather than judging the finding's prose.
 
-Once a PR carries more than 500 lines of **source** change — or more than 3 200 diff lines in total, past which chunking needs fewer agents than the twelve-agent topology anyway — this dimension fan-out is replaced by a **territory × dimension** fan-out: the diff is split into ~400-line chunks — boundaries fall on hunk boundaries, and a hunk too large to fit is split only at a top-level declaration, never inside a function — and each chunk gets its own agent that applies every review dimension to that chunk alone.
+Once a PR carries more than 500 lines of **source** change — or more than 3 200 diff lines in total, past which twelve whole-diff readers are each too diluted to read carefully (an attention bound, not a promise of fewer calls — heavy files and specialized finders can make 3B cost more) — this dimension fan-out is replaced by a **territory × dimension** fan-out: the diff is split into ~400-line chunks — boundaries fall on hunk boundaries, and a hunk too large to fit is split only at a top-level declaration, never inside a function — and each chunk gets its own agent that applies every review dimension to that chunk alone.
 
-The gate deliberately counts source lines rather than diff lines. Test code, prose and lockfiles dominate diff size — across this repo's last 40 merged PRs the median diff is 41% tests — so a gate on raw size would carve a 173-line production change into territories just because it shipped 489 lines of new tests, leaving that production code with one reviewer instead of ten lenses (the diff-reading dimension agents — twelve minus Issue Fidelity and Build & Test). Chunking still covers every line either way, tests included; what the gate decides is how many reviewers there are and what each is asked to do. Twelve agents all reading one large diff read the same early hunks twelve times; one agent per chunk means every line of the diff has exactly one accountable reviewer. Each chunk agent returns a `Covered:` receipt, and a chunk with no receipt is re-reviewed before the run proceeds — so "no blockers" can never be reported over code that nobody read.
+The gate deliberately counts source lines rather than diff lines. Test code, prose and lockfiles dominate diff size — across this repo's last 40 merged PRs the median diff is 41% tests — so a gate on raw size would carve a 173-line production change into territories just because it shipped 489 lines of new tests, leaving that production code with one reviewer instead of ten lenses (the diff-reading dimension agents — twelve minus Issue Fidelity and Build & Test). Chunking still covers every line either way, tests included; what the gate decides is how many reviewers there are and what each is asked to do. Ten diff-reading lenses all walking one large diff read the same early hunks ten times over; one agent per chunk means every line of the diff has exactly one accountable reviewer. Each chunk agent returns a `Covered:` receipt, and a chunk with no receipt is re-reviewed before the run proceeds — so "no blockers" can never be reported over code that nobody read.
 
 A **source** file that is largely rewritten (an existing file of 300+ lines that is now 40%+ new, or has 800+ changed lines) also gets **three whole-file invariant agents**. Test and generated files never qualify — the checklist asks about fields, timers, and error taxonomies, which a rewritten test file does not have. Its bugs are usually not inside any one hunk but _between_ the new lines — a timer armed near the top of the file and a teardown path two thousand lines below. Each agent reads the whole post-change file and walks two or three items of a fixed checklist: mutable fields cleared on every exit path, timers cancelled on every close (and cancellation not discarding captured data), map inserts matched by deletes, retry counters incremented at every entry, status return values actually checked, error codes exhaustively classified permanent vs transient, config fields honoured on every path, and early returns that skip a required side effect.
 
@@ -283,7 +283,7 @@ For large diffs (>10 modified symbols), the caller-direction analysis prioritize
 
 ## Token Efficiency
 
-The high-effort pipeline uses a bounded number of LLM calls regardless of how many findings are produced:
+The high-effort pipeline bounds each stage (shard size, audit rounds), but total calls scale with findings — `ceil(F/8)` verification shards — and, under 3B, with chunk count (reverse audit runs per chunk per round). Typical 3A profile:
 
 | Stage                            | LLM calls                      | Notes                                                                                         |
 | -------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------- |
