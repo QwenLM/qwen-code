@@ -424,11 +424,30 @@ number of restart attempts made by this serve process; a running worker with
 whose `requestedChannels` include names missing from `channels` reports
 `channel_worker_partial_connect`.
 
+On a multi-workspace daemon (`--workspace` repeated), `runtime` additionally
+includes `channelWorkers[]` — one entry per owning workspace, each a
+`channelWorker` snapshot annotated with `workspaceId`, `workspaceCwd`, and
+`primary`. `channelWorker` stays populated as the primary workspace's snapshot
+for compatibility. Single-workspace daemons omit `channelWorkers[]`.
+
+`POST /workspace/channel/reload` remains an intentionally daemon-wide control
+route even in multi-workspace mode. It restarts every selected channel worker
+group as one fail-closed operation; it is not scoped by the legacy
+`/workspace` prefix. Concurrent calls share one in-flight restart. A failure
+stops the full group and returns an error rather than leaving workspaces on
+different configuration generations. Clients should use
+`runtime.channelWorkers` afterward to inspect each workspace's resulting
+state.
+
 `qwen channel status` continues to read pidfile metadata. During a restart
 window the serve-owned pidfile remains reserved, but `workerPid` is omitted so
-clients do not display a stale worker process. Worker stdout/stderr are
-forwarded into the daemon log with bearer tokens, sensitive worker environment
-values, and proxy URL credentials redacted.
+clients do not display a stale worker process. On a multi-workspace daemon the
+pidfile also carries an additive `workers[]` array (per-workspace
+`workspaceId` / `workspaceCwd` / `channels` / live `workerPid`) while the
+top-level `channels` (union) and `workerPid` (primary) stay populated for older
+readers; single-workspace daemons keep the original single-worker shape. Worker
+stdout/stderr are forwarded into the daemon log with bearer tokens, sensitive
+worker environment values, and proxy URL credentials redacted.
 
 Security: the response never includes bearer tokens, client ids, full ACP
 connection ids, device-flow user codes, or verification URLs. `summary` omits
@@ -637,7 +656,7 @@ vars only; proxy URLs are stripped of credentials and reduced to
 
 `disabledReason` on per-server cells distinguishes operator-disabled (`'config'` — `disabledMcpServers` config list) from budget-refused (`'budget'` — discovered but never connected due to `enforce` mode). Refusals are deterministic by `Object.entries(mcpServers)` declaration order. The per-server `status: 'error', errorKind: 'budget_exhausted'` shadows the raw `mcpStatus: 'disconnected'` (which is true but not the operator-facing severity).
 
-Budget enforcement in PR 14 v1 is **per-session, not per-workspace**. Although Mode B daemons are `1 daemon = 1 workspace × N sessions` post-#4113 at the process level, the `McpClientManager` is constructed inside each ACP session's `Config` via `acpAgent.newSessionConfig`, so N sessions each enforce their own copy of the cap. The snapshot represents the bootstrap session's view. Wave 5 PR 23 introduces a workspace-scoped shared MCP pool that graduates this to true per-workspace enforcement.
+Budget enforcement in PR 14 v1 is **per-session, not per-workspace**. Each registered workspace runtime may host N sessions, and the `McpClientManager` is constructed inside each ACP session's `Config` via `acpAgent.newSessionConfig`, so N sessions each enforce their own copy of the cap. The snapshot represents the bootstrap session's view. Wave 5 PR 23 introduces a workspace-scoped shared MCP pool that graduates this to true per-workspace enforcement.
 
 **Detecting budget pressure.** Two surfaces, both populated post-PR-14b:
 

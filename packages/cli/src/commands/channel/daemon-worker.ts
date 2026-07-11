@@ -57,6 +57,16 @@ const WEBHOOK_TASK_SHUTDOWN_DRAIN_MS = 10_000;
 interface DaemonCapabilitiesLike {
   features: string[];
   workspaceCwd?: string;
+  /**
+   * Registered runtimes on a multi-workspace daemon (Phase 2a `/capabilities`).
+   * Absent on legacy single-workspace daemons, where `workspaceCwd` is used.
+   */
+  workspaces?: Array<{
+    cwd: string;
+    id: string;
+    primary: boolean;
+    trusted: boolean;
+  }>;
 }
 
 interface DaemonClientLike {
@@ -285,14 +295,37 @@ export async function runChannelDaemonWorker(
     client.capabilities(),
     startupSignal,
   );
-  const daemonWorkspace = canonicalizeWorkspace(
-    capabilities.workspaceCwd ?? opts.workspace,
-  );
   const requestedWorkspace = canonicalizeWorkspace(opts.workspace);
-  if (requestedWorkspace !== daemonWorkspace) {
-    throw new Error(
-      `Daemon workspace "${daemonWorkspace}" does not match worker workspace "${requestedWorkspace}".`,
+  let daemonWorkspace: string;
+  if (capabilities.workspaces && capabilities.workspaces.length > 0) {
+    // Multi-workspace daemon: the worker must target one of the registered
+    // workspaces (matched on canonical cwd), and that workspace must be trusted
+    // before it can create sessions.
+    const match = capabilities.workspaces.find(
+      (workspace) =>
+        canonicalizeWorkspace(workspace.cwd) === requestedWorkspace,
     );
+    if (!match) {
+      throw new Error(
+        `Worker workspace "${requestedWorkspace}" is not registered on the daemon.`,
+      );
+    }
+    if (!match.trusted) {
+      throw new Error(
+        `Worker workspace "${requestedWorkspace}" is not trusted; channels cannot run there.`,
+      );
+    }
+    daemonWorkspace = requestedWorkspace;
+  } else {
+    // Legacy single-workspace daemon: validate against the primary workspace.
+    daemonWorkspace = canonicalizeWorkspace(
+      capabilities.workspaceCwd ?? opts.workspace,
+    );
+    if (requestedWorkspace !== daemonWorkspace) {
+      throw new Error(
+        `Daemon workspace "${daemonWorkspace}" does not match worker workspace "${requestedWorkspace}".`,
+      );
+    }
   }
 
   await abortableStartup(loadChannelsFromExtensions(), startupSignal);
