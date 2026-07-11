@@ -5857,7 +5857,7 @@ describe('useGeminiStream', () => {
 
   describe('Memory Refresh on save_memory', () => {
     it('should call performMemoryRefresh when a save_memory tool call completes successfully', async () => {
-      const mockPerformMemoryRefresh = vi.fn();
+      const mockPerformMemoryRefresh = vi.fn().mockResolvedValue(undefined);
       const completedToolCall: TrackedCompletedToolCall = {
         request: {
           callId: 'save-mem-call-1',
