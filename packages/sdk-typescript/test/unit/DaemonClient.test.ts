@@ -5090,4 +5090,46 @@ describe('DaemonClient', () => {
       expect(a).toBe(b);
     });
   });
+
+  describe('workspace registration persistence', () => {
+    it('forwards persist:true and returns the persisted marker', async () => {
+      const response = {
+        id: 'workspace-id',
+        cwd: '/work/secondary',
+        primary: false,
+        trusted: true,
+        persisted: true,
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(201, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.addWorkspace('/work/secondary', { persist: true }),
+      ).resolves.toEqual(response);
+      expect(calls[0]?.url).toBe('http://daemon/workspaces');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        cwd: '/work/secondary',
+        persist: true,
+      });
+    });
+
+    it('keeps the existing ephemeral request shape by default', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(201, {
+          id: 'workspace-id',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.addWorkspace('/work/secondary');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        cwd: '/work/secondary',
+      });
+    });
+  });
 });

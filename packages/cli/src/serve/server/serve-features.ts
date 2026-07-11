@@ -46,7 +46,8 @@ interface CreateServeFeaturesDeps {
   reloadAvailable: boolean;
   channelReloadAvailable: boolean;
   sessionShellCommandEnabled: boolean;
-  multiWorkspaceSessionsEnabled: boolean;
+  multiWorkspaceSessionsEnabled: () => boolean;
+  persistentWorkspaceRegistrationAvailable: boolean;
   env?: Readonly<Record<string, string | undefined>>;
 }
 
@@ -68,6 +69,7 @@ export function createServeFeatures(
     channelReloadAvailable,
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
+    persistentWorkspaceRegistrationAvailable,
   } = deps;
   const env = deps.env ?? process.env;
   let cachedVoiceTranscriptionAvailable: boolean | undefined;
@@ -101,7 +103,8 @@ export function createServeFeatures(
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
         channelReloadAvailable,
-        multiWorkspaceSessionsEnabled,
+        multiWorkspaceSessionsEnabled: multiWorkspaceSessionsEnabled(),
+        persistentWorkspaceRegistrationAvailable,
         acpHttpEnabled: resolveAcpHttpEnabled(),
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,

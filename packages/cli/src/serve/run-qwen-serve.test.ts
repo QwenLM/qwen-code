@@ -48,6 +48,7 @@ import type {
 } from '../commands/channel/pidfile.js';
 import { LARGE_PIPE_FRAME_THRESHOLD_BYTES } from './large-pipe-frame-observer.js';
 import type { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
+import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 
 const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   limits: {
@@ -1926,6 +1927,256 @@ describe('runQwenServe runtime startup failures', () => {
       expect(env.envFilePaths).toBe(envFilePaths);
       expect(env.envFileReadFailures).toBe(envFileReadFailures);
       expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe('reloaded');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('restores persisted workspaces through the normal secondary runtime path', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-restored-workspace-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const explicitSecondary = path.join(tmpDir, 'explicit-secondary');
+    const restoredSecondary = path.join(tmpDir, 'restored-secondary');
+    const nestedSecondary = path.join(explicitSecondary, 'nested');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(explicitSecondary);
+    fs.mkdirSync(restoredSecondary);
+    fs.mkdirSync(nestedSecondary);
+    const canonicalPrimary = canonicalizeWorkspace(primary);
+    const canonicalExplicitSecondary = canonicalizeWorkspace(explicitSecondary);
+    const canonicalRestoredSecondary = canonicalizeWorkspace(restoredSecondary);
+    const missingPersistedWorkspace = path.join(tmpDir, 'missing-secondary');
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+    let restoredCwds: string[] = [];
+    let advertisedMaxTotalSessions: number | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(
+      (opts, _getPort, deps) => {
+        restoredCwds =
+          deps?.workspaceRegistry
+            ?.list()
+            .map((runtime) => runtime.workspaceCwd) ?? [];
+        advertisedMaxTotalSessions = opts.maxTotalSessions;
+        return express();
+      },
+    );
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        primaryWorkspace: canonicalPrimary,
+        workspaces: [
+          missingPersistedWorkspace,
+          canonicalExplicitSecondary,
+          nestedSecondary,
+          canonicalRestoredSecondary,
+        ],
+      }),
+    } as unknown as WorkspaceRegistrationStore;
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, explicitSecondary],
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        workspaceRegistrationStore: store,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(store.read).toHaveBeenCalledTimes(1);
+      expect(restoredCwds).toEqual([
+        canonicalPrimary,
+        canonicalExplicitSecondary,
+        canonicalRestoredSecondary,
+      ]);
+      expect(createBridge).toHaveBeenCalledTimes(3);
+      expect(advertisedMaxTotalSessions).toBe(3);
+      expect(
+        stderrWrite.mock.calls.some(([message]) =>
+          String(message).includes(
+            `skipping persisted workspace registration ${JSON.stringify(
+              missingPersistedWorkspace,
+            )}`,
+          ),
+        ),
+      ).toBe(true);
+      expect(
+        stderrWrite.mock.calls.some(([message]) =>
+          String(message).includes('path nests with an explicit'),
+        ),
+      ).toBe(true);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('continues with explicit workspaces when the registration store read fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-restored-read-error-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    fs.mkdirSync(primary);
+    const canonicalPrimary = canonicalizeWorkspace(primary);
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+    let restoredCwds: string[] = [];
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(
+      (_opts, _getPort, deps) => {
+        restoredCwds =
+          deps?.workspaceRegistry
+            ?.list()
+            .map((runtime) => runtime.workspaceCwd) ?? [];
+        return express();
+      },
+    );
+    const store = {
+      read: vi.fn().mockRejectedValue(new Error('store unavailable')),
+    } as unknown as WorkspaceRegistrationStore;
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: primary,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        workspaceRegistrationStore: store,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(restoredCwds).toEqual([canonicalPrimary]);
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      expect(
+        stderrWrite.mock.calls.some(([message]) =>
+          String(message).includes(
+            'failed to read persisted workspace registrations',
+          ),
+        ),
+      ).toBe(true);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('skips persisted workspaces after the runtime limit is reached', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-restored-limit-')),
+    );
+    const explicitWorkspaces = Array.from({ length: 25 }, (_, index) => {
+      const workspace = path.join(tmpDir, `explicit-${index}`);
+      fs.mkdirSync(workspace);
+      return workspace;
+    });
+    const overflow = path.join(tmpDir, 'persisted-overflow');
+    fs.mkdirSync(overflow);
+    const canonicalExplicit = explicitWorkspaces.map((workspace) =>
+      canonicalizeWorkspace(workspace),
+    );
+    const canonicalOverflow = canonicalizeWorkspace(overflow);
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+    let restoredCwds: string[] = [];
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(
+      (_opts, _getPort, deps) => {
+        restoredCwds =
+          deps?.workspaceRegistry
+            ?.list()
+            .map((runtime) => runtime.workspaceCwd) ?? [];
+        return express();
+      },
+    );
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        primaryWorkspace: canonicalExplicit[0],
+        workspaces: [canonicalOverflow],
+      }),
+    } as unknown as WorkspaceRegistrationStore;
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: explicitWorkspaces,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        workspaceRegistrationStore: store,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(restoredCwds).toEqual(canonicalExplicit);
+      expect(createBridge).toHaveBeenCalledTimes(25);
+      expect(
+        stderrWrite.mock.calls.some(([message]) =>
+          String(message).includes('workspace limit reached'),
+        ),
+      ).toBe(true);
     } finally {
       await handle.close();
     }

@@ -270,6 +270,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Multi-workspace sessions closed loop (issue #6378 Phase 2a). Advertised
   // only when one daemon hosts more than one registered workspace runtime.
   multi_workspace_sessions: { since: 'v1' },
+  persistent_workspace_registration: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
   // Covers core file/status/permissions/trust/lifecycle/MCP/tool, memory,
   // workspace agent CRUD, and persisted session organization surfaces.
@@ -365,6 +366,7 @@ export interface AdvertiseFeatureToggles {
   browserAutomationMcpAvailable?: boolean;
   voiceWsAvailable?: boolean;
   multiWorkspaceSessionsEnabled?: boolean;
+  persistentWorkspaceRegistrationAvailable?: boolean;
   /**
    * Whether the HTTP ACP surface is enabled (default on; opts out via
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
@@ -446,7 +448,15 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
   ],
   [
+    'persistent_workspace_registration',
+    (toggles) => toggles.persistentWorkspaceRegistrationAvailable === true,
+  ],
+  [
     'workspace_qualified_acp',
+    // The plural routes are pre-mounted for workspaces registered after app
+    // creation, but the capability becomes meaningful only once a secondary
+    // runtime exists. Until then the qualified primary route is only an alias
+    // for the always-available legacy `/acp` surface.
     (toggles) =>
       toggles.acpHttpEnabled === true &&
       toggles.multiWorkspaceSessionsEnabled === true,
