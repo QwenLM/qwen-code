@@ -10257,6 +10257,75 @@ describe('createServeApp', () => {
       expect(reloadChannelWorker).not.toHaveBeenCalled();
     });
 
+    it('returns 409 when every workspace worker is disabled', async () => {
+      const reloadChannelWorker = vi.fn(async () => disabledSnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        getChannelWorkerSnapshots: () => [
+          {
+            ...disabledSnapshot,
+            workspaceId: 'primary',
+            workspaceCwd: WS_BOUND,
+            primary: true,
+          },
+        ],
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('channel_worker_not_enabled');
+      expect(reloadChannelWorker).not.toHaveBeenCalled();
+    });
+
+    it('reloads when only a non-primary workspace worker is enabled', async () => {
+      const secondarySnapshot = {
+        ...runningSnapshot,
+        workspaceId: 'secondary',
+        workspaceCwd: '/work/secondary',
+        primary: false,
+      };
+      const reloadChannelWorker = vi.fn(async () => secondarySnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => disabledSnapshot,
+        getChannelWorkerSnapshots: () => [secondarySnapshot],
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ reloaded: true, worker: secondarySnapshot });
+      expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back to the legacy snapshot when the worker list is empty', async () => {
+      const reloadChannelWorker = vi.fn(async () => runningSnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        getChannelWorkerSnapshots: () => [],
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(200);
+      expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
+    });
+
     it('maps relaunch failures through sendBridgeError', async () => {
       const reloadChannelWorker = vi.fn(async () => {
         throw new Error('relaunch failed');
@@ -14031,6 +14100,117 @@ describe('createServeApp', () => {
   });
 
   describe('POST /channels/:channelName/webhooks/:source', () => {
+    it('isolates webhook configs across workspace sources', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-multi-home-'),
+      );
+      const primary = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-primary-'),
+      );
+      const secondary = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-secondary-'),
+      );
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        for (const [workspace, channel, secret] of [
+          [primary, 'primary-channel', 'primary-secret'],
+          [secondary, 'secondary-channel', 'secondary-secret'],
+        ]) {
+          const qwenDir = path.join(workspace, '.qwen');
+          await fsp.mkdir(qwenDir);
+          await fsp.writeFile(
+            path.join(qwenDir, 'settings.json'),
+            JSON.stringify({
+              channels: {
+                [channel]: {
+                  type: 'dingtalk',
+                  webhooks: {
+                    sources: {
+                      ci: {
+                        secret,
+                        targets: {
+                          default: {
+                            chatId: `${channel}-chat`,
+                            senderId: 'webhook:ci',
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            }),
+            'utf8',
+          );
+        }
+        resetHomeEnvBootstrapForTesting();
+
+        const enqueueChannelWebhookTask = vi.fn(async () => ({
+          accepted: true as const,
+        }));
+        const app = createServeApp(
+          { ...baseOpts, workspace: primary },
+          undefined,
+          {
+            bridge: fakeBridge(),
+            enqueueChannelWebhookTask,
+            channelWebhookConfigSources: [
+              { workspaceCwd: primary, channelNames: ['primary-channel'] },
+              {
+                workspaceCwd: secondary,
+                channelNames: ['secondary-channel'],
+              },
+            ],
+          },
+        );
+
+        const primaryResponse = await request(app)
+          .post('/channels/primary-channel/webhooks/ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'primary-secret')
+          .send({ eventType: 'ci', targetRef: 'default', title: 'Primary' });
+        const secondaryResponse = await request(app)
+          .post('/channels/secondary-channel/webhooks/ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secondary-secret')
+          .send({ eventType: 'ci', targetRef: 'default', title: 'Secondary' });
+        const leakedSecretResponse = await request(app)
+          .post('/channels/secondary-channel/webhooks/ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'primary-secret')
+          .send({ eventType: 'ci', targetRef: 'default', title: 'Wrong' });
+
+        expect(primaryResponse.status).toBe(202);
+        expect(secondaryResponse.status).toBe(202);
+        expect(leakedSecretResponse.status).toBe(401);
+        expect(enqueueChannelWebhookTask).toHaveBeenNthCalledWith(1, {
+          channelName: 'primary-channel',
+          source: 'ci',
+          eventType: 'ci',
+          targetRef: 'default',
+          title: 'Primary',
+          payload: {},
+        });
+        expect(enqueueChannelWebhookTask).toHaveBeenNthCalledWith(2, {
+          channelName: 'secondary-channel',
+          source: 'ci',
+          eventType: 'ci',
+          targetRef: 'default',
+          title: 'Secondary',
+          payload: {},
+        });
+      } finally {
+        await Promise.all([
+          fsp.rm(tempHome, { recursive: true, force: true }),
+          fsp.rm(primary, { recursive: true, force: true }),
+          fsp.rm(secondary, { recursive: true, force: true }),
+        ]);
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+
     it('is only mounted when enqueueChannelWebhookTask is available', async () => {
       const previousQwenHome = process.env['QWEN_HOME'];
       const tempHome = await fsp.mkdtemp(
