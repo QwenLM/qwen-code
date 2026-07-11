@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Message, TurnCollapseHead } from '../adapters/types';
 import {
+  attachTurnOutputs,
   applyTurnCollapse,
   findDisplayItemIndex,
   findTurnIdForIndex,
@@ -15,6 +16,7 @@ import {
   VIRTUAL_SCROLL_THRESHOLD,
   type DisplayItem,
 } from './MessageList';
+import type { TurnOutputFileChange } from './artifacts/TurnOutputs';
 
 function messageRow(
   item: DisplayItem,
@@ -312,6 +314,67 @@ describe('groupParallelAgents', () => {
     if (items[1].type === 'message') {
       expect(items[1].message.id).toBe('t2');
     }
+  });
+});
+
+describe('attachTurnOutputs', () => {
+  it('keeps outputs for a transcript that starts before a user turn', () => {
+    const message = makeMultiToolGroup('tg1');
+    const changes: TurnOutputFileChange[] = [
+      {
+        path: 'src/app.ts',
+        status: 'modified',
+        toolCallId: 'call-tg1-a',
+        diffs: [{ oldText: 'one\n', newText: 'two\n' }],
+      },
+    ];
+
+    const items = attachTurnOutputs(
+      [{ type: 'message', key: message.id, message }],
+      false,
+      new Map([[message.id, changes]]),
+    );
+
+    expect(items).toHaveLength(2);
+    expect(items[1]).toMatchObject({
+      type: 'turn_outputs',
+      key: message.id,
+      turnId: message.id,
+      changes,
+    });
+  });
+
+  it('keeps outputs for a leading grouped parallel-agent row', () => {
+    const items = groupParallelAgents([
+      makeAgentToolGroup('x1'),
+      makeAgentToolGroup('x2'),
+    ]);
+    const changes: TurnOutputFileChange[] = [
+      {
+        path: 'src/app.ts',
+        status: 'modified',
+        toolCallId: 'call-x1-a',
+        diffs: [{ oldText: 'one\n', newText: 'two\n' }],
+      },
+    ];
+
+    const outputItems = attachTurnOutputs(
+      items,
+      false,
+      new Map([['x1', changes]]),
+    );
+
+    expect(outputItems).toHaveLength(2);
+    expect(outputItems[0]).toMatchObject({
+      type: 'parallel_agents',
+      turnId: 'x1',
+    });
+    expect(outputItems[1]).toMatchObject({
+      type: 'turn_outputs',
+      key: 'x1',
+      turnId: 'x1',
+      changes,
+    });
   });
 });
 
@@ -725,6 +788,7 @@ describe('getDisplayItemVirtualKey', () => {
       getDisplayItemVirtualKey({
         type: 'parallel_agents',
         key: 'header',
+        turnId: 'header',
         agents: [makeAgentToolGroup('a').tools[0]],
       }),
     ).toBe('group:header');
