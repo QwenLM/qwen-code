@@ -127,6 +127,7 @@ export interface ExtensionsController {
   }>;
   getOperation(operationId: string): ExtensionOperationStatus | undefined;
   preparationQueue: FifoTaskQueue;
+  acquireOperationSlot(res: Response): (() => void) | undefined;
   validateExtensionMutationClient(
     req: Request,
     res: Response,
@@ -168,6 +169,23 @@ export function createExtensionsController(
   );
   const commitQueue = createFifoTaskQueue(1);
   let unfinishedOperationCount = 0;
+
+  const acquireOperationSlot = (res: Response): (() => void) | undefined => {
+    if (unfinishedOperationCount >= MAX_UNFINISHED_EXTENSION_OPERATIONS) {
+      res.status(429).json({
+        error: EXTENSION_QUEUE_FULL_MESSAGE,
+        code: 'extension_queue_full',
+      });
+      return undefined;
+    }
+    unfinishedOperationCount += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      unfinishedOperationCount -= 1;
+    };
+  };
 
   const createExtensionManager = (
     workspaceDir = boundWorkspace,
@@ -325,13 +343,8 @@ export function createExtensionsController(
       ) => void;
     } = {},
   ): void => {
-    if (unfinishedOperationCount >= MAX_UNFINISHED_EXTENSION_OPERATIONS) {
-      res.status(429).json({
-        error: EXTENSION_QUEUE_FULL_MESSAGE,
-        code: 'extension_queue_full',
-      });
-      return;
-    }
+    const releaseOperationSlot = acquireOperationSlot(res);
+    if (!releaseOperationSlot) return;
     const operationId = crypto.randomUUID();
     const now = Date.now();
     rememberExtensionOperation({
@@ -353,7 +366,6 @@ export function createExtensionsController(
       .location(`${operationBasePath}/${operationId}`)
       .set('Retry-After', '1')
       .json({ accepted: true, operationId });
-    unfinishedOperationCount += 1;
     void (async () => {
       let deadline: ReturnType<typeof setTimeout> | undefined;
       let committedGeneration: number | undefined;
@@ -711,7 +723,7 @@ export function createExtensionsController(
         }
       } finally {
         if (deadline) clearTimeout(deadline);
-        unfinishedOperationCount -= 1;
+        releaseOperationSlot();
       }
     })();
   };
@@ -790,7 +802,7 @@ export function createExtensionsController(
         extensions: entries,
       };
       extensionsStatusCache = {
-        expiresAt: now + 2_000,
+        expiresAt: Date.now() + 2_000,
         value: status,
       };
       return status;
@@ -808,6 +820,7 @@ export function createExtensionsController(
     refreshExtensionsForAllSessions,
     getOperation: (operationId) => extensionOperations.get(operationId),
     preparationQueue,
+    acquireOperationSlot,
     validateExtensionMutationClient,
     runQueuedExtensionMutation,
   };

@@ -1002,6 +1002,37 @@ describe('extension tests', () => {
       expect(manager.getLoadedExtensions()[0]?.isActive).toBe(false);
     });
 
+    it('refreshes runtime tools after V2 activation changes', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+      });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+      const refreshTools = vi
+        .spyOn(manager, 'refreshTools')
+        .mockResolvedValue();
+
+      await manager.setExtensionDefaultActivation(extension.id, 'disabled');
+      await manager.setExtensionActivationScope(extension.id, {
+        scope: 'workspace',
+        workspacePath: tempWorkspaceDir,
+      });
+      await manager.setExtensionWorkspaceActivation(
+        extension.id,
+        tempWorkspaceDir,
+        'disabled',
+      );
+      await manager.clearExtensionWorkspaceActivation(
+        extension.id,
+        tempWorkspaceDir,
+      );
+
+      expect(refreshTools).toHaveBeenCalledTimes(4);
+    });
+
     it('changes activation scope in one policy mutation', async () => {
       createExtension({
         extensionsDir: userExtensionsDir,
@@ -1409,6 +1440,55 @@ describe('extension tests', () => {
           ),
         ),
       ).toMatchObject({ version: 'concurrent' });
+    });
+
+    it('marks a direct update reload failure as already committed', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'direct-reload.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      const extensionPath = createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+        installMetadata: {
+          type: 'local',
+          source: archivePath,
+          originSource: 'QwenCode',
+        },
+      });
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          fs.mkdirSync(destination, { recursive: true });
+          fs.writeFileSync(
+            path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+            JSON.stringify({ name: 'my-extension', version: '2.0.0' }),
+          );
+        },
+      );
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+      vi.spyOn(manager, 'loadExtension').mockResolvedValue(null);
+
+      await expect(
+        manager.installExtension(
+          { type: 'local', source: archivePath },
+          async () => {},
+          undefined,
+          tempWorkspaceDir,
+          extension.config,
+        ),
+      ).rejects.toMatchObject({
+        code: 'extension_committed_with_warnings',
+        committed: true,
+      });
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(extensionPath, EXTENSIONS_CONFIG_FILENAME),
+            'utf8',
+          ),
+        ),
+      ).toMatchObject({ version: '2.0.0' });
     });
 
     it('reports a committed update reload failure as needing restart', async () => {

@@ -5,6 +5,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ExtensionManager } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { createExtensionsController } from './workspace-extensions-controller.js';
@@ -12,6 +13,7 @@ import { createExtensionsController } from './workspace-extensions-controller.js
 describe('createExtensionsController', () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it('times out a manual refresh without releasing its commit lane', async () => {
@@ -61,5 +63,28 @@ describe('createExtensionsController', () => {
     releaseRefresh?.({ refreshed: 0, failed: 0 });
     await expect(nextOutcome).resolves.toEqual({ refreshed: 1, failed: 0 });
     expect(refreshCalls).toBe(2);
+  });
+
+  it('starts the status cache lifetime after a slow refresh completes', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const refreshCache = vi
+      .spyOn(ExtensionManager.prototype, 'refreshCache')
+      .mockImplementation(async () => {
+        vi.setSystemTime(3_000);
+      });
+    vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue(
+      [],
+    );
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {} as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+    });
+
+    await controller.buildLocalExtensionsStatus();
+    await controller.buildLocalExtensionsStatus();
+
+    expect(refreshCache).toHaveBeenCalledOnce();
   });
 });

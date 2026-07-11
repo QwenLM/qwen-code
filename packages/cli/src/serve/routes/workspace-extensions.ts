@@ -476,6 +476,7 @@ export function registerWorkspaceExtensionRoutes(
         const ctrl = resolve(req, res, true);
         if (!ctrl) return;
         let timer: ReturnType<typeof setTimeout> | undefined;
+        let releaseOperationSlot: (() => void) | undefined;
         try {
           if (
             !ctrl.validateExtensionMutationClient(
@@ -486,6 +487,8 @@ export function registerWorkspaceExtensionRoutes(
           ) {
             return;
           }
+          releaseOperationSlot = ctrl.acquireOperationSlot(res);
+          if (!releaseOperationSlot) return;
           const extensionManager = ctrl.createExtensionManager();
           await extensionManager.refreshCache();
           const updateStates: Record<string, string> = {};
@@ -517,6 +520,7 @@ export function registerWorkspaceExtensionRoutes(
           sendBridgeError(res, err, { route: `POST ${base}/check-updates` });
         } finally {
           if (timer) clearTimeout(timer);
+          releaseOperationSlot?.();
         }
       },
     );
@@ -534,8 +538,14 @@ export function registerWorkspaceExtensionRoutes(
         ) {
           return;
         }
-        const result = await ctrl.refreshExtensionsForAllSessions();
-        res.status(200).json(result);
+        const releaseOperationSlot = ctrl.acquireOperationSlot(res);
+        if (!releaseOperationSlot) return;
+        try {
+          const result = await ctrl.refreshExtensionsForAllSessions();
+          res.status(200).json(result);
+        } finally {
+          releaseOperationSlot();
+        }
       } catch (err) {
         sendBridgeError(res, err, { route: `POST ${base}/refresh` });
       }

@@ -707,6 +707,7 @@ export class ExtensionManager {
         activation,
       );
       this.applyStoreActivation(snapshot);
+      await this.refreshToolsAfterActivation(extension.name);
       return snapshot;
     } finally {
       endMutation();
@@ -725,6 +726,7 @@ export class ExtensionManager {
         activation,
       );
       this.applyStoreActivation(snapshot);
+      await this.refreshToolsAfterActivation(extension.name);
       return snapshot;
     } finally {
       endMutation();
@@ -745,6 +747,7 @@ export class ExtensionManager {
         activation,
       );
       this.applyStoreActivation(snapshot);
+      await this.refreshToolsAfterActivation(extension.name);
       return snapshot;
     } finally {
       endMutation();
@@ -763,6 +766,7 @@ export class ExtensionManager {
         workspacePath,
       );
       this.applyStoreActivation(snapshot);
+      await this.refreshToolsAfterActivation(extension.name);
       return snapshot;
     } finally {
       endMutation();
@@ -793,6 +797,14 @@ export class ExtensionManager {
           this.workspaceDir,
         ).effective === 'enabled';
     }
+  }
+
+  private async refreshToolsAfterActivation(name: string): Promise<void> {
+    await this.refreshTools().catch((error) => {
+      debugLogger.warn(
+        `Extension "${name}" activation changed, but runtime refresh failed: ${getErrorMessage(error)}`,
+      );
+    });
   }
 
   // ==========================================================================
@@ -1752,7 +1764,7 @@ export class ExtensionManager {
           ownershipTransferred = true;
           return prepared;
         }
-        await this.extensionStore.commitArtifact({
+        const snapshot = await this.extensionStore.commitArtifact({
           operation: isUpdate ? 'update' : 'install',
           identity: { id: extensionId, name: newExtensionName },
           stagingDirectory: stagingPath,
@@ -1764,9 +1776,26 @@ export class ExtensionManager {
         });
         stagingPath = undefined;
 
-        extension = await this.loadExtension({ extensionDir: destinationPath });
-        if (!extension) {
-          throw new Error(`Extension not found`);
+        try {
+          extension = await this.loadExtension({
+            extensionDir: destinationPath,
+          });
+          if (!extension) throw new Error('Extension not found after commit.');
+        } catch (reloadError) {
+          this.extensionCache?.delete(newExtensionName);
+          this.applyStoreActivation(snapshot);
+          await this.refreshTools().catch((error) => {
+            debugLogger.warn(
+              `Extension "${newExtensionName}" was committed, but runtime refresh failed: ${getErrorMessage(error)}`,
+            );
+          });
+          const error = new Error(
+            `Extension "${newExtensionName}" committed but could not be reloaded: ${getErrorMessage(reloadError)}`,
+            { cause: reloadError },
+          ) as ExtensionCommittedWithWarningsError;
+          error.code = 'extension_committed_with_warnings';
+          error.committed = true;
+          throw error;
         }
 
         if (this.extensionCache) {
@@ -1796,10 +1825,7 @@ export class ExtensionManager {
             ),
           );
         }
-        if (this.extensionCache) {
-          const snapshot = await this.extensionStore.readSnapshot();
-          this.applyStoreActivation(snapshot);
-        }
+        if (this.extensionCache) this.applyStoreActivation(snapshot);
         await this.refreshTools().catch((error) => {
           debugLogger.warn(
             `Extension "${newExtensionName}" was installed, but runtime refresh failed: ${getErrorMessage(error)}`,
@@ -1874,7 +1900,7 @@ export class ExtensionManager {
             newExtensionConfig?.version ?? '',
             previousExtensionConfig.version,
             installMetadata.type,
-            'error',
+            isExtensionCommittedWithWarningsError(error) ? 'success' : 'error',
           ),
         );
       } else {
