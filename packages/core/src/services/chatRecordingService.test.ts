@@ -976,6 +976,85 @@ describe('ChatRecordingService', () => {
       expect(firstFailure).toEqual(new Error('disk full'));
       await expect(chatRecordingService.flush()).rejects.toBe(firstFailure);
     });
+
+    it('notifies once with the failed record session id', async () => {
+      let rejectWrite!: (error: Error) => void;
+      vi.mocked(jsonl.writeLine).mockReturnValueOnce(
+        new Promise<void>((_resolve, reject) => {
+          rejectWrite = reject;
+        }),
+      );
+      const listener = vi.fn();
+      const service = new ChatRecordingService(mockConfig, listener);
+
+      service.recordUserMessage([{ text: 'first' }]);
+      service.recordUserMessage([{ text: 'queued descendant' }]);
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session-id');
+      const writeError = new Error('disk full');
+      rejectWrite(writeError);
+
+      await expect(service.flush()).rejects.toBe(writeError);
+      service.recordUserMessage([{ text: 'after failure' }]);
+      await expect(service.flush()).rejects.toBe(writeError);
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        error: writeError,
+      });
+    });
+
+    it('allows a replacement recorder to notify independently', async () => {
+      const firstListener = vi.fn();
+      const secondListener = vi.fn();
+      vi.mocked(jsonl.writeLine)
+        .mockRejectedValueOnce(new Error('first failure'))
+        .mockRejectedValueOnce(new Error('second failure'));
+
+      const first = new ChatRecordingService(mockConfig, firstListener);
+      first.recordUserMessage([{ text: 'first' }]);
+      await expect(first.flush()).rejects.toThrow('first failure');
+
+      const second = new ChatRecordingService(mockConfig, secondListener);
+      second.recordUserMessage([{ text: 'second' }]);
+      await expect(second.flush()).rejects.toThrow('second failure');
+
+      expect(firstListener).toHaveBeenCalledOnce();
+      expect(secondListener).toHaveBeenCalledOnce();
+    });
+
+    it('isolates synchronous and asynchronous listener failures', async () => {
+      const unhandled: unknown[] = [];
+      const handler = (error: unknown) => unhandled.push(error);
+      process.on('unhandledRejection', handler);
+      try {
+        const syncFailure = new ChatRecordingService(mockConfig, () => {
+          throw new Error('listener threw');
+        });
+        vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
+          new Error('sync observer write failure'),
+        );
+        syncFailure.recordUserMessage([{ text: 'first' }]);
+        await expect(syncFailure.flush()).rejects.toThrow(
+          'sync observer write failure',
+        );
+
+        const asyncFailure = new ChatRecordingService(mockConfig, async () => {
+          throw new Error('listener rejected');
+        });
+        vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
+          new Error('async observer write failure'),
+        );
+        asyncFailure.recordUserMessage([{ text: 'second' }]);
+        await expect(asyncFailure.flush()).rejects.toThrow(
+          'async observer write failure',
+        );
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', handler);
+      }
+    });
   });
 
   describe('ensureChatsDir caching', () => {
@@ -1007,6 +1086,19 @@ describe('ChatRecordingService', () => {
       expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
       const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
       expect(record.parentUuid).toBeNull();
+    });
+
+    it('does not notify for a synchronous conversation-file failure', () => {
+      const listener = vi.fn();
+      const service = new ChatRecordingService(mockConfig, listener);
+      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      });
+
+      service.recordUserMessage([{ text: 'retry me' }]);
+
+      expect(listener).not.toHaveBeenCalled();
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
 
     it('caches after a successful mkdir so steady-state writes skip the syscall', async () => {

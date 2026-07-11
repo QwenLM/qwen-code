@@ -268,6 +268,8 @@ export type {
   DaemonSessionEvent,
   DaemonSessionMetadataUpdatedData,
   DaemonSessionMetadataUpdatedEvent,
+  DaemonSessionRecordingDegradedData,
+  DaemonSessionRecordingDegradedEvent,
   DaemonMidTurnMessageInjectedData,
   DaemonMidTurnMessageInjectedEvent,
   DaemonPendingPromptAddedData,

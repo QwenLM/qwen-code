@@ -354,9 +354,9 @@ function resolutionToAcpResponse(
  * Bounded buffering for ACP `extNotification` frames that arrive on
  * `BridgeClient` before the matching session has been registered in
  * `byId`. The bridge populates `byId` only AFTER `connection.newSession`
- * returns, but the child's MCP discovery runs INSIDE `newSession` and
- * may fire budget events synchronously before the response makes it
- * back. Without buffering, those frames are silently dropped.
+ * returns, but child initialization may fire notifications synchronously
+ * before the response makes it back. Without buffering, those frames are
+ * silently dropped.
  *
  * The triple bound (max sessions x max events per session x TTL)
  * caps worst-case heap retention even if a malicious / buggy child
@@ -450,6 +450,7 @@ export interface BridgeClientSessionEntry {
   sessionId: string;
   events: EventBus;
   artifacts: SessionArtifactStore;
+  recordingDegraded?: boolean;
   pendingPermissionIds: Set<string>;
   /** Pollable pending human interactions, keyed by permission request id. */
   pendingInteractions: Map<string, BridgePendingInteraction>;
@@ -923,7 +924,7 @@ export class BridgeClient implements Client {
   /**
    * Allow-list of sessionIds currently being restored via
    * `session/load` / `session/resume`. Bypasses the tombstone check
-   * in `bufferEarlyEvent` so restore-time guardrail events for a
+   * in `bufferEarlyEvent` so restore-time events for a
    * previously-closed id flow through to the future
    * `createSessionEntry -> drainEarlyEvents` call.
    *
@@ -1160,6 +1161,7 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/model-update`,
    * `qwen/notify/session/mode-update`,
    * `qwen/notify/session/title-update` (auto/in-process session titles),
+   * `qwen/notify/session/recording-degraded`,
    * `qwen/notify/session/prompt-suggestion` (followup assist),
    * `qwen/notify/session/artifact-event` (hook artifacts),
    * `qwen/notify/session/terminal-sequence`, and
@@ -1205,6 +1207,27 @@ export class BridgeClient implements Client {
       } catch {
         /* bus already closed */
       }
+      return;
+    }
+    if (method === 'qwen/notify/session/recording-degraded') {
+      const sessionId = params['sessionId'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        params['reason'] !== 'write_failed'
+      ) {
+        writeStderrLine(
+          `[demux] session=${typeof sessionId === 'string' ? sessionId : '<missing>'} type=session_recording_degraded action=dropped reason=malformed`,
+        );
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (entry) entry.recordingDegraded = true;
+      this.publishExtNotification(sessionId, 'session_recording_degraded', {
+        sessionId,
+        reason: 'write_failed',
+      });
       return;
     }
     if (method === 'qwen/notify/session/prompt-suggestion') {
@@ -1373,7 +1396,7 @@ export class BridgeClient implements Client {
     // No entry yet — buffer for `drainEarlyEvents`. The bridge calls
     // `drainEarlyEvents` immediately after `byId.set(sessionId, entry)`
     // in `createSessionEntry`; if the session never registers (spawn
-    // failure), the entry is GC'd by TTL after EARLY_EVENT_TTL_MS.
+    // failure), the event is GC'd by TTL after EARLY_EVENT_TTL_MS.
     this.bufferEarlyEvent(sessionId, frame);
   }
 
@@ -1576,14 +1599,14 @@ export class BridgeClient implements Client {
     //
     // Skip the tombstone check for ids currently being restored so a
     // `close -> load same id` sequence within 60s doesn't lose
-    // restore-time guardrail events.
+    // restore-time early events.
     this.sweepExpiredTombstones(now);
     if (
       this.tombstonedSessionIds.has(sessionId) &&
       !this.inFlightRestoreIds.has(sessionId)
     ) {
       writeStderrLine(
-        `qwen serve: dropping mcp guardrail extNotification ` +
+        `qwen serve: dropping early extNotification ` +
           `for tombstoned session ${JSON.stringify(sessionId)} ` +
           `(post-close stale event)`,
       );
@@ -1596,7 +1619,7 @@ export class BridgeClient implements Client {
         // Hitting this cap means the daemon is under notification
         // pressure from 64+ concurrent sessions — worth surfacing.
         writeStderrLine(
-          `qwen serve: dropping mcp guardrail extNotification — ` +
+          `qwen serve: dropping early extNotification — ` +
             `early-event buffer at MAX_EARLY_EVENT_SESSIONS ` +
             `(${MAX_EARLY_EVENT_SESSIONS}); possible session-id fanout abuse`,
         );
@@ -1607,7 +1630,7 @@ export class BridgeClient implements Client {
     }
     if (buf.frames.length >= MAX_EARLY_EVENTS_PER_SESSION) {
       writeStderrLine(
-        `qwen serve: dropping mcp guardrail extNotification ` +
+        `qwen serve: dropping early extNotification ` +
           `for session ${JSON.stringify(sessionId)} — per-session ` +
           `cap (${MAX_EARLY_EVENTS_PER_SESSION}) reached`,
       );
@@ -1654,7 +1677,7 @@ export class BridgeClient implements Client {
    * Mark a sessionId as currently being restored via `session/load` /
    * `session/resume`. While in this set, `bufferEarlyEvent` accepts
    * frames for the id even if it's tombstoned — so restore-time
-   * guardrail events from the freshly-restored child reach
+   * early events from the freshly-restored child reach
    * `drainEarlyEvents` instead of being rejected by the tombstone.
    *
    * Bridge factory calls this BEFORE awaiting the ACP restore call.
@@ -1696,7 +1719,12 @@ export class BridgeClient implements Client {
     this.tombstonedSessionIds.delete(sessionId);
     const buf = this.earlyEvents.get(sessionId);
     if (!buf) return;
-    for (const frame of buf.frames) entry.events.publish(frame);
+    for (const frame of buf.frames) {
+      if (frame.type === 'session_recording_degraded') {
+        entry.recordingDegraded = true;
+      }
+      entry.events.publish(frame);
+    }
     this.earlyEvents.delete(sessionId);
   }
 

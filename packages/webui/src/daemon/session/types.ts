@@ -180,6 +180,7 @@ export type DaemonNoticeOperation =
   | 'btw_session'
   | 'branch_session'
   | 'fork_session'
+  | 'record_session'
   | 'stream'
   | 'normalize_event';
 

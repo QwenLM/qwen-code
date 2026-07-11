@@ -74,6 +74,7 @@ import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
+import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -2020,6 +2021,93 @@ describe('Server Config (config.ts)', () => {
 
       expect(finalize).toHaveBeenCalledTimes(1);
       expect(flush).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('chat recording failure listeners', () => {
+    const notify = (config: Config, event: ChatRecordingFailureEvent) => {
+      (
+        config as unknown as {
+          notifyChatRecordingFailure: (
+            failure: ChatRecordingFailureEvent,
+          ) => void;
+        }
+      ).notifyChatRecordingFailure(event);
+    };
+
+    it('notifies multiple listeners and disposes them independently', () => {
+      const config = new Config(baseParams);
+      const first = vi.fn();
+      const second = vi.fn();
+      const disposeFirst = config.onChatRecordingFailure(first);
+      config.onChatRecordingFailure(second);
+      const event = { sessionId: 's-1', error: new Error('write failed') };
+
+      notify(config, event);
+      disposeFirst();
+      notify(config, event);
+
+      expect(first).toHaveBeenCalledTimes(1);
+      expect(second).toHaveBeenCalledTimes(2);
+    });
+
+    it('isolates synchronous throws and asynchronous listener rejections', async () => {
+      const config = new Config(baseParams);
+      const unhandled: unknown[] = [];
+      const onUnhandled = (error: unknown) => unhandled.push(error);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        config.onChatRecordingFailure(() => {
+          throw new Error('listener threw');
+        });
+        config.onChatRecordingFailure(async () => {
+          throw new Error('listener rejected');
+        });
+
+        notify(config, {
+          sessionId: 's-1',
+          error: new Error('write failed'),
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    });
+
+    it('keeps listeners through shutdown flush and clears them afterward', async () => {
+      const config = new Config(baseParams);
+      const listener = vi.fn();
+      config.onChatRecordingFailure(listener);
+      const event = { sessionId: 's-1', error: new Error('write failed') };
+      (
+        config as unknown as {
+          initialized: boolean;
+          chatRecordingService: {
+            finalize: () => void;
+            flush: () => Promise<void>;
+          };
+        }
+      ).initialized = true;
+      (
+        config as unknown as {
+          chatRecordingService: {
+            finalize: () => void;
+            flush: () => Promise<void>;
+          };
+        }
+      ).chatRecordingService = {
+        finalize: vi.fn(),
+        flush: async () => {
+          notify(config, event);
+        },
+      };
+
+      await config.shutdown();
+      notify(config, event);
+
+      expect(listener).toHaveBeenCalledOnce();
     });
   });
 

@@ -198,6 +198,8 @@ export {
   type DaemonWorkspacePreflightStatus,
   type DaemonSessionUpdateData,
   type DaemonSessionUpdateEvent,
+  type DaemonSessionRecordingDegradedData,
+  type DaemonSessionRecordingDegradedEvent,
   type DaemonSessionViewState,
   type DaemonSlowClientWarningData,
   type DaemonSlowClientWarningEvent,

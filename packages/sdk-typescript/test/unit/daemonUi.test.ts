@@ -7497,4 +7497,52 @@ describe('parallel subAgent text interleaving fix', () => {
     expect(state.activeAssistantBlockId).toBeUndefined();
     expect(state.activeAssistantBlockByParent).toEqual({});
   });
+
+  it('normalizes live and snapshot recording degradation as recoverable errors', () => {
+    const live = normalizeDaemonEvent({
+      id: 80,
+      v: 1,
+      type: 'session_recording_degraded',
+      data: { sessionId: 's-1', reason: 'write_failed' },
+    });
+    const snapshot = normalizeDaemonEvent({
+      id: 81,
+      v: 1,
+      type: 'session_snapshot',
+      data: { sessionId: 's-1', recordingDegraded: true },
+    });
+
+    expect(live).toMatchObject([
+      {
+        type: 'error',
+        code: 'session_recording_degraded',
+        recoverable: true,
+      },
+    ]);
+    expect(snapshot).toMatchObject([
+      {
+        type: 'error',
+        code: 'session_recording_degraded',
+        recoverable: true,
+      },
+    ]);
+  });
+
+  it('does not turn a healthy recording snapshot into a warning', () => {
+    const events = normalizeDaemonEvent({
+      id: 82,
+      v: 1,
+      type: 'session_snapshot',
+      data: { sessionId: 's-1', recordingDegraded: false },
+    });
+
+    expect(events).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'error',
+          code: 'session_recording_degraded',
+        }),
+      ]),
+    );
+  });
 });

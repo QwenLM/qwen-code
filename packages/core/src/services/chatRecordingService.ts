@@ -474,6 +474,15 @@ export interface FileHistorySnapshotRecordPayload {
   snapshots: SerializedFileHistorySnapshot[];
 }
 
+export interface ChatRecordingFailureEvent {
+  sessionId: string;
+  error: Error;
+}
+
+export type ChatRecordingFailureListener = (
+  event: ChatRecordingFailureEvent,
+) => void | Promise<void>;
+
 /**
  * Service for recording the current chat session to disk.
  *
@@ -593,7 +602,10 @@ export class ChatRecordingService {
   private bytesSinceTitleAnchor = 0;
   private hasNonTitleContentSinceTitleAnchor = false;
 
-  constructor(config: Config) {
+  constructor(
+    config: Config,
+    private readonly onWriteFailure?: ChatRecordingFailureListener,
+  ) {
     this.config = config;
     this.lastRecordUuid =
       config.getResumedSessionData()?.lastCompletedUuid ?? null;
@@ -732,11 +744,27 @@ export class ChatRecordingService {
     return this.cachedGitBranch.branch;
   }
 
-  private enterWriteFailure(cause: unknown): Error {
+  private enterWriteFailure(cause: unknown, sessionId: string): Error {
     if (!this.writeFailure) {
       this.writeFailure =
         cause instanceof Error ? cause : new Error(String(cause));
       debugLogger.error('Error appending record (async):', this.writeFailure);
+      try {
+        const notification = this.onWriteFailure?.({
+          sessionId,
+          error: this.writeFailure,
+        });
+        if (notification) {
+          void notification.catch((error) => {
+            debugLogger.debug(
+              'Chat recording failure listener rejected:',
+              error,
+            );
+          });
+        }
+      } catch (error) {
+        debugLogger.debug('Chat recording failure listener threw:', error);
+      }
     }
     return this.writeFailure;
   }
@@ -749,7 +777,7 @@ export class ChatRecordingService {
       try {
         await jsonl.writeLine(conversationFile, record);
       } catch (error) {
-        throw this.enterWriteFailure(error);
+        throw this.enterWriteFailure(error, record.sessionId);
       }
     });
     this.writeChain = pendingWrite;
