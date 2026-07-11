@@ -318,7 +318,14 @@ export class WorkspaceRegistrationStore {
       );
     }
     return this.update((snapshot) => {
-      if (snapshot.workspaces.includes(workspace)) return false;
+      const normalizedWorkspace = normalizedScopePath(workspace);
+      if (
+        snapshot.workspaces.some(
+          (stored) => normalizedScopePath(stored) === normalizedWorkspace,
+        )
+      ) {
+        return false;
+      }
       if (snapshot.workspaces.length >= MAX_SECONDARY_WORKSPACES) {
         throw new WorkspaceRegistrationStoreError(
           `Workspace registration store limit of ${MAX_SECONDARY_WORKSPACES} reached`,

@@ -194,6 +194,7 @@ describe('POST /workspaces', () => {
     const { app } = createApp({
       workspaceRegistrationStore: {
         add,
+        read: vi.fn().mockResolvedValue({ workspaces: [REAL_DIR] }),
       } as unknown as WorkspaceRegistrationStore,
     });
     const res = await request(app)
@@ -210,6 +211,7 @@ describe('POST /workspaces', () => {
       createWorkspaceRuntime: undefined,
       workspaceRegistrationStore: {
         add,
+        read: vi.fn().mockResolvedValue({ workspaces: [] }),
       } as unknown as WorkspaceRegistrationStore,
     });
     const res = await request(app)
@@ -219,6 +221,58 @@ describe('POST /workspaces', () => {
     expect(res.status).toBe(200);
     expect(res.body.persisted).toBe(true);
     expect(add).toHaveBeenCalledWith(REAL_DIR);
+  });
+
+  it('rejects persistence for the primary workspace', async () => {
+    const primary = { ...makeRuntime(REAL_DIR), primary: true };
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([primary]),
+      workspaceRegistrationStore: {} as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .post('/workspaces')
+      .send({ cwd: REAL_DIR, persist: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_persist_target');
+  });
+
+  it('rejects promotion of a nested active workspace', async () => {
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([
+        makeRuntime(realpathSync.native('/')),
+        makeRuntime(REAL_DIR),
+      ]),
+      workspaceRegistrationStore: {} as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .post('/workspaces')
+      .send({ cwd: REAL_DIR, persist: true });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('workspace_nested');
+  });
+
+  it('returns the documented limit error when promoting at store capacity', async () => {
+    const add = vi.fn();
+    const { app } = createApp({
+      workspaceRegistrationStore: {
+        add,
+        read: vi.fn().mockResolvedValue({
+          workspaces: Array.from({ length: 24 }, (_, index) => `/w/${index}`),
+        }),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .post('/workspaces')
+      .send({ cwd: REAL_DIR, persist: true });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('workspace_limit_reached');
+    expect(add).not.toHaveBeenCalled();
   });
 
   it('rejects persist when no registration store is available', async () => {
@@ -244,7 +298,7 @@ describe('POST /workspaces', () => {
       .send({ cwd: REAL_DIR, persist: true });
 
     expect(res.status).toBe(500);
-    expect(res.body.code).toBe('workspace_persist_failed');
+    expect(res.body.code).toBe('workspace_registration_store_error');
     expect(registry.add).not.toHaveBeenCalled();
   });
 
@@ -357,5 +411,31 @@ describe('persistent workspace registrations', () => {
 
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('workspace_registration_not_found');
+  });
+
+  it('returns a store error when registrations cannot be read', async () => {
+    const { app } = createApp({
+      workspaceRegistrationStore: {
+        read: vi.fn().mockRejectedValue(new Error('read failed')),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app).get('/workspace-registrations');
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('workspace_registration_store_error');
+  });
+
+  it('returns a store error when a registration cannot be forgotten', async () => {
+    const { app } = createApp({
+      workspaceRegistrationStore: {
+        removeById: vi.fn().mockRejectedValue(new Error('write failed')),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app).delete('/workspace-registrations/id');
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('workspace_registration_store_error');
   });
 });

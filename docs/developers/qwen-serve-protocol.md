@@ -489,6 +489,8 @@ Stable contract: when `v` increments the frame layout has changed in a backwards
 
 > **`workspaces[]`** is present only when `features` contains `multi_workspace_sessions`. Each entry is `{ id, cwd, primary, trusted }`. The first/primary workspace remains mirrored by `workspaceCwd`; new clients choose a non-primary runtime by passing that entry's `cwd` to `POST /session`. Untrusted workspaces are advertised for diagnostics but reject fresh session creation with `403 untrusted_workspace` until trust changes.
 
+The workspace feature tags and `workspaces[]` are dynamic. Clients that add a workspace must fetch `/capabilities` again after the mutation completes; the daemon does not broadcast capability changes to clients that cached an earlier response. Forgetting persistence does not unload an active runtime, so that runtime remains advertised until restart.
+
 ### `POST /workspaces`
 
 Register an additional workspace runtime. The path must be an existing, accessible, absolute directory that does not duplicate or nest with another registered workspace. Registration is process-local unless the client sends `persist: true`; clients must pre-flight `persistent_workspace_registration` before requesting persistence.
@@ -509,7 +511,7 @@ A newly created runtime returns `201`; promoting an already-active secondary wor
 }
 ```
 
-Errors include `400 invalid_path` / `invalid_persist_flag`, `409 workspace_exists` / `workspace_nested` / `workspace_limit_reached`, `500 workspace_persist_failed` / `runtime_creation_failed`, and `501 persistence_not_available` / `not_implemented`.
+Errors include `400 invalid_path` / `invalid_persist_flag` / `invalid_persist_target`, `409 workspace_exists` / `workspace_nested` / `workspace_limit_reached`, `500 workspace_registration_store_error` / `runtime_creation_failed`, and `501 persistence_not_available` / `not_implemented`.
 
 ### `GET /workspace-registrations`
 
@@ -530,7 +532,7 @@ List the persisted desired workspace set for this primary workspace. Entries rem
 }
 ```
 
-Returns `501 persistence_not_available` when no registration store is configured and `500 workspace_registration_store_unavailable` when the store cannot be read.
+Returns `501 persistence_not_available` when no registration store is configured and `500 workspace_registration_store_error` when the store cannot be read.
 
 ### `DELETE /workspace-registrations/:id`
 
@@ -540,7 +542,7 @@ Forget one persisted registration. This does not unload an active runtime or ter
 { "removed": true, "active": true, "restartRequired": true }
 ```
 
-Returns `404 workspace_registration_not_found`, `500 workspace_persist_failed`, or `501 persistence_not_available`. Like other mutation routes, this endpoint requires mutation authentication when daemon authentication is enabled.
+Returns `404 workspace_registration_not_found`, `500 workspace_registration_store_error`, or `501 persistence_not_available`. Like other mutation routes, this endpoint requires mutation authentication when daemon authentication is enabled.
 
 ### Read-only runtime status routes
 

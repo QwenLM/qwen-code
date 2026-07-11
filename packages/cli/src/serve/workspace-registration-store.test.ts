@@ -65,6 +65,19 @@ describe('WorkspaceRegistrationStore', () => {
     await expect(store.read()).resolves.toMatchObject({ workspaces: [] });
   });
 
+  it.skipIf(process.platform !== 'win32')(
+    'deduplicates workspace paths case-insensitively on Windows',
+    async () => {
+      const home = await tempHome();
+      const store = new WorkspaceRegistrationStore('C:\\work\\primary', home);
+      await expect(store.add('C:\\Work\\Secondary')).resolves.toBe(true);
+      await expect(store.add('c:\\work\\secondary')).resolves.toBe(false);
+      await expect(store.read()).resolves.toMatchObject({
+        workspaces: ['C:\\Work\\Secondary'],
+      });
+    },
+  );
+
   it('rejects invalid primary and primary-as-secondary inputs', async () => {
     const home = await tempHome();
     expect(() => new WorkspaceRegistrationStore('relative', home)).toThrow(

@@ -143,8 +143,47 @@ export function registerWorkspaceManagementRoutes(
       // generic and never echo a resolved path (which could reveal symlink
       // targets or another workspace's location).
       const existingRuntime = workspaceRegistry.getByWorkspaceCwd(canonical);
+      if (existingRuntime?.primary && persist) {
+        res.status(400).json({
+          error: 'Primary workspace cannot be persisted',
+          code: 'invalid_persist_target',
+        });
+        return;
+      }
       if (existingRuntime && persist && !existingRuntime.primary) {
+        const nested = [
+          ...workspaceRegistry.list().map((runtime) => runtime.workspaceCwd),
+          ...inFlight,
+        ].some(
+          (boundCwd) =>
+            boundCwd !== canonical &&
+            (isWithinRoot(canonical, boundCwd) ||
+              isWithinRoot(boundCwd, canonical)),
+        );
+        if (nested) {
+          res.status(409).json({
+            error: 'Workspace path nests with an existing workspace',
+            code: 'workspace_nested',
+          });
+          return;
+        }
         try {
+          const snapshot = await workspaceRegistrationStore!.read();
+          const alreadyPersisted = snapshot.workspaces.some((stored) =>
+            process.platform === 'win32'
+              ? stored.toLowerCase() === canonical.toLowerCase()
+              : stored === canonical,
+          );
+          if (
+            !alreadyPersisted &&
+            snapshot.workspaces.length >= MAX_REGISTERED_WORKSPACES - 1
+          ) {
+            res.status(409).json({
+              error: 'Workspace registration limit reached',
+              code: 'workspace_limit_reached',
+            });
+            return;
+          }
           await workspaceRegistrationStore!.add(canonical);
           res.status(200).json({
             id: existingRuntime.workspaceId,
@@ -161,7 +200,7 @@ export function registerWorkspaceManagementRoutes(
           );
           res.status(500).json({
             error: 'Failed to persist workspace registration',
-            code: 'workspace_persist_failed',
+            code: 'workspace_registration_store_error',
           });
         }
         return;
@@ -266,7 +305,7 @@ export function registerWorkspaceManagementRoutes(
         if (persistenceFailed) {
           res.status(500).json({
             error: 'Failed to persist workspace registration',
-            code: 'workspace_persist_failed',
+            code: 'workspace_registration_store_error',
           });
         } else {
           res.status(500).json({
@@ -311,7 +350,7 @@ export function registerWorkspaceManagementRoutes(
       );
       res.status(500).json({
         error: 'Failed to read workspace registrations',
-        code: 'workspace_registration_store_unavailable',
+        code: 'workspace_registration_store_error',
       });
     }
   });
@@ -357,7 +396,7 @@ export function registerWorkspaceManagementRoutes(
         );
         res.status(500).json({
           error: 'Failed to forget workspace registration',
-          code: 'workspace_persist_failed',
+          code: 'workspace_registration_store_error',
         });
       }
     },

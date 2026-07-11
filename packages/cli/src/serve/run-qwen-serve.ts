@@ -1950,7 +1950,7 @@ export async function runQwenServe(
   let workspaceRegistrationStore = deps.workspaceRegistrationStore;
   if (
     workspaceRegistrationStore === undefined &&
-    process.env['VITEST_WORKER_ID'] === undefined
+    process.env['QWEN_SERVE_NO_PERSISTENT_REGISTRATION'] !== '1'
   ) {
     const { WorkspaceRegistrationStore } = await import(
       './workspace-registration-store.js'
