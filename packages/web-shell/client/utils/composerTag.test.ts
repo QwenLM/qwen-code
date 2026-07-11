@@ -453,6 +453,19 @@ describe('composer tag input annotations', () => {
     ).toEqual([{ type: 'text', text: 'list @.qwen/ files' }]);
   });
 
+  it('leaves malformed reference annotations as text', () => {
+    expect(
+      splitComposerTagContentByAnnotations('list @.qwen/ files', [
+        {
+          type: 'reference',
+          start: 5,
+          end: 12,
+          text: '@.qwen/',
+        } as unknown as DaemonInputAnnotation,
+      ]),
+    ).toEqual([{ type: 'text', text: 'list @.qwen/ files' }]);
+  });
+
   it('skips overlapping annotations', () => {
     expect(
       splitComposerTagContentByAnnotations('open @one @two', [

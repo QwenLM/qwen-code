@@ -102,8 +102,12 @@ export function splitComposerTagContentByAnnotations(
   let cursor = 0;
   for (const annotation of inputAnnotations) {
     if (annotation.type !== 'reference') continue;
-    const { start, end, reference, text } = annotation;
+    const { start, end, text } = annotation;
+    const reference: DaemonInputAnnotation['reference'] | undefined =
+      annotation.reference;
     if (
+      !reference ||
+      typeof reference.id !== 'string' ||
       start < cursor ||
       end <= start ||
       end > content.length ||
