@@ -78,9 +78,7 @@ import {
   getArenaSystemReminder,
   getStartupContextLength,
   isSystemReminderContent,
-  detectTurnInterruption,
-  buildSyntheticToolResponseParts,
-  ORPHAN_TOOL_USE_REPAIR_REASON,
+  buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
   getEffectivePermissionForConfirmation,
@@ -1524,17 +1522,23 @@ export class Session implements SessionContext {
     // not need to structuredClone the whole history. The authoritative
     // re-detection inside the fired prompt() reads full history for the strip.
     const chat = this.#getCurrentChat();
-    const detection = detectTurnInterruption(
-      chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+    const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
+      sessionId: this.sessionId,
+      apiHistory:
+        chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
         chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT),
-    );
-    if (detection.kind === 'none') {
+    });
+    if (!recoveryPlan.continuation) {
       return { accepted: false, interruption: 'none' };
     }
+    const interruption =
+      recoveryPlan.kind === 'interrupted_prompt'
+        ? 'interrupted_prompt'
+        : 'interrupted_turn';
     // A prompt (or an earlier continuation) is still in flight: there is no
     // settled turn to continue. Reject rather than abort the live turn.
     if (this.pendingPrompt && !this.pendingPrompt.signal.aborted) {
-      return { accepted: false, interruption: detection.kind };
+      return { accepted: false, interruption };
     }
 
     // Accepted. This method only classifies — the daemon bridge drives the
@@ -1545,7 +1549,7 @@ export class Session implements SessionContext {
     // daemon would report the session idle and a racing prompt could abort the
     // continuation), which is exactly what routing through the bridge fixes.
 
-    return { accepted: true, interruption: detection.kind };
+    return { accepted: true, interruption };
   }
 
   /**
@@ -1727,10 +1731,11 @@ export class Session implements SessionContext {
             let strippedOrphanEntries: Content[] | null = null;
             let orphanPushCountSnapshot = 0;
             if (isContinue) {
-              const detection = detectTurnInterruption(
-                this.#getCurrentChat().getHistory(),
-              );
-              if (detection.kind === 'none') {
+              const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
+                sessionId: this.sessionId,
+                apiHistory: this.#getCurrentChat().getHistory(),
+              });
+              if (!recoveryPlan.continuation) {
                 // History moved between continueLastTurn()'s accept and this
                 // re-detection (e.g. a concurrent turn settled it). Nothing to
                 // continue; log so an abandoned continuation is diagnosable.
@@ -1749,18 +1754,15 @@ export class Session implements SessionContext {
                 );
                 return { stopReason: 'end_turn' };
               }
-              if (detection.kind === 'interrupted_prompt') {
+              if (recoveryPlan.continuation.mode === 'retry_user_parts') {
                 strippedOrphanEntries =
                   this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
                   null;
                 orphanPushCountSnapshot =
                   this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
-                continuationParts = detection.parts;
+                continuationParts = recoveryPlan.continuation.parts;
               } else {
-                continuationParts = buildSyntheticToolResponseParts(
-                  detection.danglingCalls,
-                  ORPHAN_TOOL_USE_REPAIR_REASON,
-                );
+                continuationParts = recoveryPlan.continuation.parts;
               }
             }
 
