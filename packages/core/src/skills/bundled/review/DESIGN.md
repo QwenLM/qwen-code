@@ -65,7 +65,7 @@ Domains have failure grammars — a reconnect state machine, a module loader, a 
 
 **Decision:** Shard. One batch agent was right when a review produced 15 findings — it saw cross-finding relationships and cost O(1). But a Step 3B review of a large PR produces 30-60 findings, and one agent re-reading code for each of them inside a single context window degrades on the tail of the list. Sharding costs `ceil(F/8)` calls instead of 1, still far below one-agent-per-finding, and keeps each verifier's job small enough to do properly.
 
-**A verifier may never reject a Critical.** It may downgrade to low confidence, with specific contradicting code cited. A rejected Critical is deleted from both the PR and the terminal and no later stage revisits it; a downgraded one still reaches a human under "Needs Human Review". The asymmetry between a false positive (noise) and a deleted true positive (a shipped bug plus another `/review` round) is not close.
+**Rejecting a Critical requires quoted contradiction.** A verifier may reject a Critical only when it can quote the specific code that contradicts the claim (the finding describes behavior the code demonstrably does not have) or when the finding merely re-describes a change the diff's own text documents as deliberate; anything less certain is downgraded to low confidence, never deleted. A rejected Critical is deleted from both the PR and the terminal and no later stage revisits it; a downgraded one still reaches a human under "Needs Human Review". The asymmetry between a false positive (noise) and a wrongly deleted true positive (a shipped bug plus another `/review` round) is why the bar for rejection is quoted evidence, not judgment.
 
 ## Why reverse audit is a separate step, and why iterative
 
