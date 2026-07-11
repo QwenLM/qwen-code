@@ -235,7 +235,15 @@ export function GoalsDialog({
             </label>
             <div className={styles.formHint}>{t('goals.newHint')}</div>
 
-            {formError && <div className={styles.formError}>{formError}</div>}
+            {/* `role="alert"` so the rejection is announced when it appears —
+                a sighted user sees it land under the field they just submitted,
+                but without this a screen-reader user gets no signal at all and
+                is left believing the goal was created. */}
+            {formError && (
+              <div className={styles.formError} role="alert">
+                {formError}
+              </div>
+            )}
 
             <div className={styles.formActions}>
               <button
@@ -259,7 +267,14 @@ export function GoalsDialog({
         </DialogShell>
       )}
 
-      {loadError && <div className={styles.loadError}>{loadError}</div>}
+      {/* Likewise: this appears on a poll that failed after the page was already
+          up, so nothing else on screen changes to hint that the list went
+          stale. */}
+      {loadError && (
+        <div className={styles.loadError} role="alert">
+          {loadError}
+        </div>
+      )}
 
       {droppedCount > 0 && (
         <div className={styles.degraded} data-testid="goals-dropped">

@@ -56,6 +56,15 @@
   color: var(--foreground);
 }
 
+/* Same ring the form controls use (`.textarea:focus` below), but offset
+   outwards: `.primaryButton` is already filled with `--primary`, so an inset
+   ring in that colour would be invisible on it. */
+.primaryButton:focus-visible,
+.secondaryButton:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
 .primaryButton:disabled,
 .secondaryButton:disabled {
   opacity: 0.55;

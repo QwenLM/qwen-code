@@ -242,6 +242,10 @@ describe('GoalsDialog', () => {
 
     expect(onCreateGoal).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain('Enter a condition');
+    // Announced, not just painted: a screen-reader user gets no other signal
+    // that the submit was rejected, and would believe the goal was created.
+    const alert = document.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain('Enter a condition');
   });
 
   it('accepts a condition far longer than the old 4,000-char cap', async () => {
@@ -441,6 +445,11 @@ describe('GoalsDialog', () => {
     await flush();
 
     expect(document.body.textContent).toContain('daemon unreachable');
+    // The list goes stale on a poll that fails after the page is already up;
+    // nothing else on screen changes, so this has to announce itself.
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'daemon unreachable',
+    );
   });
 
   it('drops a stale dropped-session count when the next load fails outright', async () => {
