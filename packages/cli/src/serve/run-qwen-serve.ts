@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { X509Certificate } from 'node:crypto';
+import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs';
 import type { Server } from 'node:http';
 import * as https from 'node:https';
@@ -103,13 +103,14 @@ import type {
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
 import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
+import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import { channelSelectionNames } from './channel-selection.js';
 import {
   finalizeStartupProfile,
   profileCheckpoint,
 } from '../utils/startupProfiler.js';
 import type { ServiceInfo } from '../commands/channel/pidfile.js';
-import { findCliEntryPath } from '../commands/channel/cli-entry-path.js';
+import { sanitizeLogText } from '@qwen-code/channel-base';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 
 // Reverse MCP channel; enabled only by explicit option or env opt-in.
@@ -173,6 +174,10 @@ type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
 };
 type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
+type ChannelWebhookConfigRuntime = {
+  loadChannelsConfig: typeof import('../commands/channel/runtime.js').loadChannelsConfig;
+  parseChannelWebhookConfig: typeof import('../commands/channel/config-utils.js').parseChannelWebhookConfig;
+};
 
 function isPositiveIntegerMs(value: number): boolean {
   return Number.isFinite(value) && Number.isInteger(value) && value > 0;
@@ -542,6 +547,7 @@ type ChannelWorkerRuntime = {
     opts: CreateChannelWorkerSupervisorOptions,
   ): ChannelWorkerSupervisor;
   channelServicePidfile: ChannelServicePidfile;
+  findCliEntryPath(): string;
 };
 
 let channelWorkerRuntimePromise: Promise<ChannelWorkerRuntime> | undefined;
@@ -549,10 +555,12 @@ async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
   channelWorkerRuntimePromise ??= Promise.all([
     import('./channel-worker-supervisor.js'),
     import('../commands/channel/pidfile.js'),
+    import('../commands/channel/cli-entry-path.js'),
   ])
-    .then(([supervisor, pidfile]) => ({
+    .then(([supervisor, pidfile, cliEntryPath]) => ({
       createChannelWorkerSupervisor: supervisor.createChannelWorkerSupervisor,
       channelServicePidfile: pidfile,
+      findCliEntryPath: cliEntryPath.findCliEntryPath,
     }))
     .catch((err: unknown) => {
       channelWorkerRuntimePromise = undefined;
@@ -561,7 +569,7 @@ async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
   return channelWorkerRuntimePromise;
 }
 
-function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
+export function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
   const snapshot = {
     enabled: false,
     state: 'disabled' as const,
@@ -575,6 +583,12 @@ function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
     },
     killAllSync() {},
     snapshot: () => ({ ...snapshot, channels: [] }),
+    async enqueueWebhookTask() {
+      throw new ChannelWebhookEnqueueError(
+        'channel_worker_unavailable',
+        'Channel worker is not running.',
+      );
+    },
   };
 }
 
@@ -768,6 +782,25 @@ function loadSettingsRuntimeModules(): Promise<{
   return settingsRuntimePromise;
 }
 
+let channelWebhookConfigRuntimePromise:
+  | Promise<ChannelWebhookConfigRuntime>
+  | undefined;
+function loadChannelWebhookConfigRuntime(): Promise<ChannelWebhookConfigRuntime> {
+  channelWebhookConfigRuntimePromise ??= Promise.all([
+    import('../commands/channel/runtime.js'),
+    import('../commands/channel/config-utils.js'),
+  ])
+    .then(([channelRuntime, configUtils]) => ({
+      loadChannelsConfig: channelRuntime.loadChannelsConfig,
+      parseChannelWebhookConfig: configUtils.parseChannelWebhookConfig,
+    }))
+    .catch((err: unknown) => {
+      channelWebhookConfigRuntimePromise = undefined;
+      throw err;
+    });
+  return channelWebhookConfigRuntimePromise;
+}
+
 async function loadServeRuntimeModules() {
   const [
     serverModule,
@@ -847,6 +880,7 @@ function currentServeFeaturesForRunQwenServe(
   opts: ServeOptions,
   sessionShellCommandEnabled: boolean,
   sessionArtifactsPersistenceAvailable: boolean,
+  env: Readonly<Record<string, string | undefined>>,
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
     requireAuth: opts.requireAuth === true,
@@ -869,10 +903,7 @@ function currentServeFeaturesForRunQwenServe(
     // so the bootstrap `/capabilities` window doesn't briefly under-report them.
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
-    browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
-      opts,
-      process.env,
-    ),
+    browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts, env),
   });
 }
 
@@ -883,6 +914,7 @@ function createBootstrapCapabilities(input: {
   sessionShellCommandEnabled: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
+  env: Readonly<Record<string, string | undefined>>;
 }): CapabilitiesEnvelope {
   return {
     v: CAPABILITIES_SCHEMA_VERSION,
@@ -895,6 +927,7 @@ function createBootstrapCapabilities(input: {
       input.opts,
       input.sessionShellCommandEnabled,
       input.sessionArtifactsPersistenceAvailable,
+      input.env,
     ),
     modelServices: [],
     workspaceCwd: input.boundWorkspace,
@@ -1155,6 +1188,7 @@ function createBootstrapServeApp(input: {
         sessionShellCommandEnabled,
         sessionArtifactsPersistenceAvailable,
         permissionPolicy,
+        env: process.env,
       }),
     );
   });
@@ -1236,6 +1270,7 @@ function createBootstrapServeApp(input: {
           opts,
           sessionShellCommandEnabled,
           sessionArtifactsPersistenceAvailable,
+          process.env,
         ),
       },
       runtime: {
@@ -1316,6 +1351,7 @@ function createDelegatingServeApp(
     startRuntime?: () => void;
     runtimeReady?: Promise<void>;
     authenticateDeferredRuntimeRequest?: RequestHandler;
+    authenticateDeferredChannelWebhookRequest?: RequestHandler;
   } = {},
 ): Application {
   const app = express();
@@ -1330,16 +1366,15 @@ function createDelegatingServeApp(
         options.startRuntime &&
         options.runtimeReady
       ) {
-        if (
-          options.authenticateDeferredRuntimeRequest &&
-          !runSynchronousRequestGate(
-            options.authenticateDeferredRuntimeRequest,
-            req,
-            res,
-            next,
-          )
-        ) {
-          return;
+        const webhookRequest = isChannelWebhookRequest(req);
+        const authGate = webhookRequest
+          ? (options.authenticateDeferredChannelWebhookRequest ??
+            options.authenticateDeferredRuntimeRequest)
+          : options.authenticateDeferredRuntimeRequest;
+        if (authGate) {
+          if (!runSynchronousRequestGate(authGate, req, res, next)) {
+            return;
+          }
         }
         options.startRuntime();
         try {
@@ -1367,6 +1402,104 @@ function isBootstrapServeRoute(req: Request): boolean {
       ? req.path.slice(0, -1)
       : req.path;
   return BOOTSTRAP_SERVE_PATHS.has(path);
+}
+
+function isChannelWebhookRequest(req: Request): boolean {
+  return (
+    req.method === 'POST' &&
+    /^\/channels\/[^/]+\/webhooks\/[^/]+\/?$/u.test(req.path)
+  );
+}
+
+function createDeferredChannelWebhookAuth(
+  workspace: string,
+  runtime: ChannelWebhookConfigRuntime,
+  daemonLog: Pick<DaemonLogger, 'warn'>,
+): RequestHandler {
+  return (req, res, next) => {
+    const match = /^\/channels\/([^/]+)\/webhooks\/([^/]+)\/?$/u.exec(req.path);
+    const channelName = decodeDeferredWebhookPathSegment(match?.[1]);
+    const source = decodeDeferredWebhookPathSegment(match?.[2]);
+    if (!channelName || !source) {
+      daemonLog.warn('deferred webhook auth failed', {
+        channelName: channelName ?? 'unknown',
+        source: source ?? 'unknown',
+        reason: 'invalid webhook path',
+      });
+      res.status(401).json({ error: 'Invalid webhook secret' });
+      return;
+    }
+
+    const secret = readDeferredWebhookSecret(
+      runtime,
+      workspace,
+      channelName,
+      source,
+    );
+    if (!matchesWebhookSecret(req.get('x-qwen-webhook-secret'), secret)) {
+      daemonLog.warn('deferred webhook auth failed', {
+        channelName,
+        source,
+        reason: secret ? 'secret mismatch' : 'source not configured',
+      });
+      res.status(401).json({ error: 'Invalid webhook secret' });
+      return;
+    }
+
+    next();
+  };
+}
+
+function decodeDeferredWebhookPathSegment(
+  segment: string | undefined,
+): string | undefined {
+  if (segment === undefined) return undefined;
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return undefined;
+  }
+}
+
+function readDeferredWebhookSecret(
+  runtime: ChannelWebhookConfigRuntime,
+  workspace: string,
+  channelName: string,
+  source: string,
+): string | undefined {
+  try {
+    const rawConfig = runtime.loadChannelsConfig(workspace)[channelName];
+    if (typeof rawConfig !== 'object' || rawConfig === null) {
+      return undefined;
+    }
+    return runtime.parseChannelWebhookConfig(
+      channelName,
+      rawConfig as Record<string, unknown>,
+    )?.sources[source]?.secret;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    writeStderrLine(
+      `[webhook-secret] failed to read deferred webhook secret for ${sanitizeLogText(channelName, 128)}/${sanitizeLogText(source, 128)}: ${sanitizeLogText(reason, 512)}`,
+    );
+    return undefined;
+  }
+}
+
+function matchesWebhookSecret(
+  candidate: string | undefined,
+  expected: string | undefined,
+): boolean {
+  if (
+    typeof candidate !== 'string' ||
+    typeof expected !== 'string' ||
+    expected.length === 0
+  ) {
+    return false;
+  }
+
+  const expectedDigest = createHash('sha256').update(expected).digest();
+  const candidateDigest = createHash('sha256').update(candidate).digest();
+  return timingSafeEqual(expectedDigest, candidateDigest);
 }
 
 function isCorsPreflightRequest(req: Request): boolean {
@@ -2855,8 +2988,8 @@ export async function runQwenServe(
       });
       const secondaryClientMcpSenderRegistry = new ClientMcpSenderRegistry();
       // Wire sub-session support for the secondary workspace too — without
-      // this, isolated scheduled tasks and create_sub_session calls from
-      // sessions bound to a secondary workspace hit methodNotFound.
+      // this, create_sub_session calls from sessions bound to a secondary
+      // workspace hit methodNotFound.
       // eslint-disable-next-line prefer-const -- assigned once after bridge creation; `let` required because the launcher closure captures it before the assignment.
       let secondaryBridgeRef:
         | ReturnType<typeof runtime.createAcpSessionBridge>
@@ -3068,7 +3201,7 @@ export async function runQwenServe(
         // limiter are both toggleable).
         const acp = (
           app.locals?.['acpHandle'] as AcpHttpHandle | undefined
-        )?.registry.getSnapshot();
+        )?.getSnapshot();
         const hits = getRateLimiter(app)?.getHitCounts();
         const rejectedTotal = hits
           ? hits.prompt + hits.mutation + hits.read
@@ -3163,8 +3296,211 @@ export async function runQwenServe(
       },
     };
 
+    // Factory for dynamically creating workspace runtimes (POST /workspaces).
+    const createDynamicWorkspaceRuntime = async (
+      cwd: string,
+    ): Promise<import('./workspace-registry.js').WorkspaceRuntime> => {
+      let wsSettings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
+      try {
+        wsSettings = settingsRuntime.settings.loadSettings(cwd);
+      } catch (err) {
+        // Match the startup secondary-workspace path: surface why full settings
+        // couldn't be read instead of silently falling back to defaults.
+        writeStderrLine(
+          `qwen serve: could not read full settings for dynamic workspace ` +
+            `${cwd} (${err instanceof Error ? err.message : String(err)}); ` +
+            `falling back to defaults.`,
+        );
+      }
+      const trusted = wsSettings
+        ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
+            wsSettings.merged,
+            cwd,
+          ).effective.state === 'trusted'
+        : false;
+      const wsEnv = createRuntimeEnvMetadata(cwd, wsSettings);
+      const wsHash = core.hashDaemonWorkspace(cwd);
+      const wsFsFactory = runtime.resolveBridgeFsFactory({
+        boundWorkspaces: [cwd],
+        trusted,
+        emit: deps.fsAuditEmit,
+        pathLocks: sharedPathLocks,
+        ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
+      });
+      const wsChannelFactory = runtime.createSpawnChannelFactory({
+        sourceEnv: wsEnv.effectiveEnv,
+        onDiagnosticLine: diagnosticSink,
+        pipeHooks: {
+          onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
+          onMessageReceived: (bytes) => recordPipeMessage('inbound', bytes),
+          onMessageObserved: ({ direction, bytes, message }) =>
+            observeLargePipeFrame({
+              direction: daemonPipeDirection(direction),
+              bytes,
+              message,
+            }),
+        },
+        ...(opts.experimentalLsp === true
+          ? { extraArgs: ['--experimental-lsp'] }
+          : {}),
+      });
+      const wsClientMcpRegistry = new ClientMcpSenderRegistry();
+      // eslint-disable-next-line prefer-const
+      let wsBridgeRef:
+        | ReturnType<typeof runtime.createAcpSessionBridge>
+        | undefined;
+      const wsSubSessionLauncher = createSubSessionLauncher({
+        getBridge: () => wsBridgeRef,
+        boundWorkspace: cwd,
+      });
+      const wsBridge = runtime.createAcpSessionBridge({
+        clientMcpSender: wsClientMcpRegistry.lookup,
+        onCreateSubSession: wsSubSessionLauncher.launch,
+        maxSessions: opts.maxSessions,
+        freshSessionAdmission: totalSessionAdmission.admit,
+        sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
+        ...(opts.maxPendingPromptsPerSession !== undefined
+          ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
+          : {}),
+        ...(opts.eventRingSize !== undefined
+          ? { eventRingSize: opts.eventRingSize }
+          : {}),
+        ...(opts.compactedReplayMaxBytes !== undefined
+          ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
+          : {}),
+        ...(opts.channelIdleTimeoutMs !== undefined
+          ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
+          : {}),
+        ...(opts.sessionReapIntervalMs !== undefined
+          ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
+          : {}),
+        ...(opts.sessionIdleTimeoutMs !== undefined
+          ? { sessionIdleTimeoutMs: opts.sessionIdleTimeoutMs }
+          : {}),
+        ...(opts.permissionResponseTimeoutMs !== undefined
+          ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
+          : {}),
+        boundWorkspace: cwd,
+        sessionShellCommandEnabled,
+        childEnvOverrides,
+        channelFactory: wsChannelFactory,
+        onDiagnosticLine: diagnosticSink,
+        telemetry: createRuntimeBridgeTelemetry(wsHash),
+        ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+        ...(permissionConsensusQuorum !== undefined
+          ? { permissionConsensusQuorum }
+          : {}),
+        permissionAudit: permissionAuditPublisher,
+        statusProvider: runtime.createDaemonStatusProvider({
+          env: wsEnv.effectiveEnv,
+        }),
+        fileSystem: createBridgeFileSystemAdapter(wsFsFactory),
+        persistApprovalMode: (workspace, mode) =>
+          withSettingsLock(workspace, async () => {
+            const fresh = settingsRuntime.settings.loadSettings(workspace);
+            fresh.setValue(WORKSPACE_SETTING_SCOPE, 'tools.approvalMode', mode);
+          }),
+      });
+      wsBridgeRef = wsBridge;
+      const wsService = runtime.createDaemonWorkspaceService({
+        boundWorkspace: cwd,
+        contextFilename: contextFilenameForInit ?? 'QWEN.md',
+        statusProvider: runtime.createDaemonStatusProvider({
+          env: wsEnv.effectiveEnv,
+        }),
+        workspaceProvidersStatusProvider:
+          runtime.createWorkspaceProvidersStatusProvider({
+            env: wsEnv.effectiveEnv,
+          }),
+        workspaceSkillsStatusProvider:
+          runtime.createWorkspaceSkillsStatusProvider(),
+        isChannelLive: () => wsBridge.isChannelLive(),
+        preheatAcpChild: () => wsBridge.preheat(),
+        persistDisabledTools: persistDisabledToolsFn,
+        persistSetting: persistSettingFn,
+        persistSettings: persistSettingsFn,
+        reloadDaemonEnv: (workspace) =>
+          withSettingsLock(workspace, async () => {
+            const fresh = settingsRuntime.settings.loadSettings(workspace, {
+              skipLoadEnvironment: true,
+            });
+            const result = settingsRuntime.settings.reloadEnvironment(
+              fresh.merged,
+              workspace,
+            );
+            // Mirror the startup secondary-workspace path: rebuild the runtime
+            // env snapshot and update the metadata so `.env` changes actually
+            // propagate to child processes spawned by this workspace's bridge.
+            try {
+              const refreshedRuntimeEnv =
+                settingsRuntime.environment.buildRuntimeEnvironment(
+                  fresh.merged,
+                  workspace,
+                  daemonRuntimeBaseEnv,
+                );
+              logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
+              wsEnv.replace(refreshedRuntimeEnv.effectiveEnv);
+              wsEnv.metadata.envFileReadFailed =
+                refreshedRuntimeEnv.envFileReadFailed;
+              wsEnv.metadata.envFileReadFailures.splice(
+                0,
+                wsEnv.metadata.envFileReadFailures.length,
+                ...refreshedRuntimeEnv.envFileReadFailures,
+              );
+              wsEnv.metadata.overlayKeys.splice(
+                0,
+                wsEnv.metadata.overlayKeys.length,
+                ...refreshedRuntimeEnv.overlayKeys,
+              );
+              wsEnv.metadata.envFilePaths.splice(
+                0,
+                wsEnv.metadata.envFilePaths.length,
+                ...refreshedRuntimeEnv.envFilePaths,
+              );
+              delete wsEnv.metadata.fallbackReason;
+            } catch (err) {
+              wsEnv.metadata.fallbackReason =
+                err instanceof Error ? err.message : String(err);
+              daemonLog.warn(
+                'failed to rebuild dynamic runtime env snapshot after daemon env reload; preserving previous runtime env',
+                {
+                  workspace,
+                  error: wsEnv.metadata.fallbackReason,
+                },
+              );
+            }
+            return result;
+          }),
+        queryWorkspaceStatus: (method, idle) =>
+          wsBridge.queryWorkspaceStatus(method, idle),
+        invokeWorkspaceCommand: (method, params, invokeOpts) =>
+          wsBridge.invokeWorkspaceCommand(method, params, invokeOpts),
+        refreshExtensionsForAllSessions: () =>
+          wsBridge.refreshExtensionsForAllSessions(),
+        publishWorkspaceEvent: (event) => wsBridge.publishWorkspaceEvent(event),
+      });
+      // Register shared-array cleanup only after the runtime is fully built, so
+      // a throw during createDaemonWorkspaceService (or any later step) can't
+      // leave an orphaned bridge/channel in the shutdown arrays.
+      runtimeBridges.push(wsBridge);
+      internalRuntimeBridgesForCleanup.push(wsBridge);
+      subSessionStoppers.push(wsSubSessionLauncher.stop);
+      return {
+        workspaceId: wsHash,
+        workspaceCwd: cwd,
+        primary: false,
+        trusted,
+        env: wsEnv.metadata,
+        bridge: wsBridge,
+        workspaceService: wsService,
+        routeFileSystemFactory: wsFsFactory,
+        clientMcpSenderRegistry: wsClientMcpRegistry,
+      };
+    };
+
     const app = runtime.createServeApp(opts, () => actualPort, {
       workspaceRegistry,
+      createWorkspaceRuntime: createDynamicWorkspaceRuntime,
       bridge,
       webShellDir,
       boundWorkspace,
@@ -3179,6 +3515,8 @@ export async function runQwenServe(
       primaryRuntimeEnv,
       daemonLog,
       getChannelWorkerSnapshot,
+      enqueueChannelWebhookTask: (task) =>
+        channelWorker.enqueueWebhookTask(task),
       // Gate both the `channel_reload` capability and the reload route on the
       // presence of this dep, so it is advertised only when a channel worker
       // exists to reload.
@@ -3300,6 +3638,13 @@ export async function runQwenServe(
       ? () => startRuntimeAfterHealth?.()
       : undefined,
   });
+  const deferredChannelWebhookAuth = deferRuntimeUntilFirstHealth
+    ? createDeferredChannelWebhookAuth(
+        boundWorkspace,
+        await loadChannelWebhookConfigRuntime(),
+        daemonLog,
+      )
+    : undefined;
   const app =
     runtimeApp ??
     createDelegatingServeApp(bootstrapApp, () => runtimeApp, {
@@ -3307,6 +3652,7 @@ export async function runQwenServe(
       startRuntime: () => startRuntimeForRequest?.(),
       runtimeReady,
       authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
+      authenticateDeferredChannelWebhookRequest: deferredChannelWebhookAuth,
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
@@ -3408,7 +3754,8 @@ export async function runQwenServe(
           const createSupervisor =
             deps.channelWorkerSupervisorFactory ??
             channelRuntime?.createChannelWorkerSupervisor;
-          if (!createSupervisor) {
+          const findCliEntryPath = channelRuntime?.findCliEntryPath;
+          if (!createSupervisor || !findCliEntryPath) {
             throw new Error(
               'Channel worker supervisor runtime is not available.',
             );

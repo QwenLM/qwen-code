@@ -17,6 +17,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { Message, ACPToolCall, TurnCollapseHead } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
 import {
@@ -24,16 +25,27 @@ import {
   isSubAgentToolCall,
 } from '../adapters/toolClassification';
 import { CompactModeContext } from '../App';
-import { useWebShellCustomization } from '../customization';
+import {
+  useWebShellCustomization,
+  type WebShellAssistantTurnFooterRenderInfo,
+} from '../customization';
 import { useI18n } from '../i18n';
 import { MessageItem } from './MessageItem';
 import { MessageTimestamp } from './MessageTimestamp';
+import {
+  TurnOutputs,
+  type TurnOutputFileChange,
+  type TurnOutputOpenRequest,
+  type TurnOutputScheduledTask,
+} from './artifacts/TurnOutputs';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { useSharedNow } from '../hooks/useSharedNow';
 import { toolContainsCallId } from './messages/toolFormatting';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
+
+const noopTurnOutputAction = () => undefined;
 
 interface MessageListProps {
   messages: Message[];
@@ -48,6 +60,7 @@ interface MessageListProps {
    */
   isResponding?: boolean;
   welcomeHeader?: ReactNode;
+  centerWelcomeHeader?: boolean;
   workspaceCwd?: string;
   tailContent?: ReactNode;
   tailKey?: string;
@@ -59,11 +72,27 @@ interface MessageListProps {
    * panels don't yank the reader to the bottom. Defaults to false.
    */
   autoScrollTailIntoView?: boolean;
+  /**
+   * Height reserved for app-level floating UI below the transcript, such as the
+   * bottom todo/status panel. When it changes while the transcript is following
+   * the bottom, perform one more bottom alignment after layout settles.
+   */
+  bottomOverlayInset?: number;
   hideSessionTimeline?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   onBranchSession?: () => void;
   onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
+  turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
+  turnArtifacts?: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
+  turnScheduledTasks?: ReadonlyMap<string, readonly TurnOutputScheduledTask[]>;
+  onReviewChanges?: (
+    changes: readonly TurnOutputFileChange[],
+    selectedPath?: string,
+  ) => void;
+  onOpenArtifact?: (artifactId: string, previewContent?: string) => void;
+  onOpenScheduledTask?: (task: TurnOutputScheduledTask) => void;
+  onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
 }
 
 function getLastUserMessageId(messages: Message[]): string | null {
@@ -109,12 +138,21 @@ export type DisplayItem =
   | {
       type: 'parallel_agents';
       key: string;
+      turnId: string;
       agents: ACPToolCall[];
       /**
        * Wall-clock time of the first grouped launch, carried so the grouped
        * box reveals its time on hover exactly like a standalone message row.
        */
       timestamp?: number;
+    }
+  | {
+      type: 'turn_outputs';
+      key: string;
+      turnId: string;
+      changes: readonly TurnOutputFileChange[];
+      artifacts: readonly DaemonSessionArtifact[];
+      scheduledTasks: readonly TurnOutputScheduledTask[];
     };
 
 interface LocateFlashTarget {
@@ -295,6 +333,7 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
         items.push({
           type: 'parallel_agents',
           key: `par-${grouped[0].id}`,
+          turnId: grouped[0].id,
           agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
           timestamp: grouped[0].timestamp,
         });
@@ -311,6 +350,7 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
         items.push({
           type: 'parallel_agents',
           key: `par-${grouped[0].id}`,
+          turnId: grouped[0].id,
           agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
           timestamp: grouped[0].timestamp,
         });
@@ -335,6 +375,7 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
 
 export function getDisplayItemVirtualKey(item: DisplayItem): string {
   if (item.type === 'parallel_agents') return `group:${item.key}`;
+  if (item.type === 'turn_outputs') return `outputs:${item.key}`;
   if (item.type === 'turn_collapse') {
     const liveKey = item.turnCollapse.liveStartedAt;
     return liveKey === undefined
@@ -343,6 +384,61 @@ export function getDisplayItemVirtualKey(item: DisplayItem): string {
   }
   if (item.type === 'turn_content') return `turn-content:${item.key}`;
   return `msg:${item.key}`;
+}
+
+export function attachTurnOutputs(
+  items: DisplayItem[],
+  isResponding: boolean,
+  turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>,
+  turnArtifacts?: ReadonlyMap<string, readonly DaemonSessionArtifact[]>,
+  turnScheduledTasks?: ReadonlyMap<string, readonly TurnOutputScheduledTask[]>,
+): DisplayItem[] {
+  if (
+    (!turnFileChanges || turnFileChanges.size === 0) &&
+    (!turnArtifacts || turnArtifacts.size === 0) &&
+    (!turnScheduledTasks || turnScheduledTasks.size === 0)
+  ) {
+    return items;
+  }
+
+  const result: DisplayItem[] = [];
+  let currentTurnId: string | null = null;
+  const pushTurnOutputs = (turnId: string | null, isFinalTurn: boolean) => {
+    if (isFinalTurn && isResponding) return;
+    if (!turnId) return;
+    const changes = turnFileChanges?.get(turnId) ?? [];
+    const artifacts = turnArtifacts?.get(turnId) ?? [];
+    const scheduledTasks = turnScheduledTasks?.get(turnId) ?? [];
+    if (
+      changes.length === 0 &&
+      artifacts.length === 0 &&
+      scheduledTasks.length === 0
+    ) {
+      return;
+    }
+    result.push({
+      type: 'turn_outputs',
+      key: turnId,
+      turnId,
+      changes,
+      artifacts,
+      scheduledTasks,
+    });
+  };
+
+  for (const item of items) {
+    if (item.type === 'message' && isTurnStartMessage(item.message)) {
+      pushTurnOutputs(currentTurnId, false);
+      currentTurnId = item.message.id;
+    } else if (!currentTurnId && item.type === 'message') {
+      currentTurnId = item.message.id;
+    } else if (!currentTurnId && item.type === 'parallel_agents') {
+      currentTurnId = item.turnId;
+    }
+    result.push(item);
+  }
+  pushTurnOutputs(currentTurnId, true);
+  return result;
 }
 
 export interface ApplyTurnCollapseOptions {
@@ -399,10 +495,10 @@ function findFinalAnswerIndex(
   return -1;
 }
 
-function collectFinalAssistantIdsByTurn(
+function collectFinalAssistantTurnIds(
   items: readonly DisplayItem[],
   isResponding: boolean,
-): ReadonlySet<string> {
+): ReadonlyMap<string, string> {
   const userIdxs: number[] = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
@@ -411,19 +507,24 @@ function collectFinalAssistantIdsByTurn(
     }
   }
 
-  const ids = new Set<string>();
+  const turnIdByAssistantId = new Map<string, string>();
   for (let k = 0; k < userIdxs.length; k++) {
     if (k === userIdxs.length - 1 && isResponding) continue;
     const start = userIdxs[k];
     const end = (k + 1 < userIdxs.length ? userIdxs[k + 1] : items.length) - 1;
+    const turnHead = items[start];
     const answerIdx = findFinalAnswerIndex(items, start, end);
     if (answerIdx < 0) continue;
     const item = items[answerIdx];
-    if (item.type === 'message' && item.message.role === 'assistant') {
-      ids.add(item.message.id);
+    if (
+      turnHead?.type === 'message' &&
+      item.type === 'message' &&
+      item.message.role === 'assistant'
+    ) {
+      turnIdByAssistantId.set(item.message.id, turnHead.message.id);
     }
   }
-  return ids;
+  return turnIdByAssistantId;
 }
 
 /**
@@ -433,6 +534,7 @@ function collectFinalAssistantIdsByTurn(
  */
 function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   if (item.type === 'parallel_agents') return true;
+  if (item.type === 'turn_outputs') return false;
   if (item.type === 'turn_collapse') return false;
   if (item.type === 'turn_content') {
     return item.items.some((child) => isHideableStep(child, isFinalAnswer));
@@ -488,6 +590,7 @@ export function getTurnTimelineNode(
       label: t ? t('timeline.parallelAgents') : 'Parallel agents',
     };
   }
+  if (item.type === 'turn_outputs') return { kind: 'none' };
   if (item.type !== 'message') return { kind: 'none' };
 
   const { message } = item;
@@ -696,6 +799,7 @@ function timelineDetailSnippetForItem(
       ? t('timeline.parallelAgentsDetail', { count })
       : `${count} parallel agent${count === 1 ? '' : 's'}`;
   }
+  if (item.type === 'turn_outputs') return '';
   if (item.type !== 'message') return '';
   return timelineDetailSnippetForMessage(item.message, t);
 }
@@ -892,6 +996,7 @@ export function getSessionTimelineSignature(
 
 function isExecutionWorkStep(item: DisplayItem): boolean {
   if (item.type === 'parallel_agents') return true;
+  if (item.type === 'turn_outputs') return false;
   if (item.type === 'turn_collapse') return false;
   if (item.type === 'turn_content') return item.items.some(isExecutionWorkStep);
   return item.message.role === 'tool_group' || item.message.role === 'plan';
@@ -911,6 +1016,8 @@ function activeExecutionKey(item: DisplayItem): string | null {
     }
     return null;
   }
+
+  if (item.type === 'turn_outputs') return null;
 
   if (item.type === 'turn_collapse') {
     if (item.turnCollapse.liveStartedAt === undefined) return null;
@@ -994,6 +1101,7 @@ function itemAssistantUsage(item: DisplayItem):
 
 function itemToolCallCount(item: DisplayItem): number {
   if (item.type === 'parallel_agents') return item.agents.length;
+  if (item.type === 'turn_outputs') return 0;
   if (item.type === 'turn_collapse') return 0;
   if (item.type === 'turn_content') {
     return item.items.reduce((sum, child) => sum + itemToolCallCount(child), 0);
@@ -1379,6 +1487,8 @@ export function findDisplayItemIndex(
       findDisplayItemIndex(item.items, messageId, callId) >= 0
     ) {
       return i;
+    } else if (item.type === 'turn_outputs') {
+      continue;
     }
   }
   return -1;
@@ -1408,6 +1518,7 @@ function displayItemMatchesLocateTarget(
       displayItemMatchesLocateTarget(child, target),
     );
   }
+  if (item.type === 'turn_outputs') return false;
   return false;
 }
 
@@ -1634,6 +1745,7 @@ const TurnCollapseRow = memo(function TurnCollapseRow({
 
 function getChatRowClassName(item: DisplayItem): string | undefined {
   if (item.type === 'turn_collapse') return styles.turnStatusRow;
+  if (item.type === 'turn_outputs') return styles.turnContentRow;
   if (item.type === 'turn_content') {
     return styles.turnContentRow;
   }
@@ -2061,16 +2173,25 @@ export const MessageList = memo(
       isResponding = false,
       activeTurnStartedAt,
       welcomeHeader,
+      centerWelcomeHeader = false,
       workspaceCwd,
       tailContent,
       tailKey = 'tail',
       virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
       autoScrollTailIntoView = false,
+      bottomOverlayInset = 0,
       hideSessionTimeline = false,
       showRetryHint = false,
       onRetryClick,
       onBranchSession,
       onCanScrollToBottomChange,
+      turnFileChanges,
+      turnArtifacts,
+      turnScheduledTasks,
+      onReviewChanges,
+      onOpenArtifact,
+      onOpenScheduledTask,
+      onTurnOutputOpen,
     },
     ref,
   ) {
@@ -2084,8 +2205,21 @@ export const MessageList = memo(
       [compactMode, messages, pendingApproval],
     );
     const displayItems = useMemo(
-      () => groupParallelAgents(mergedMessages),
-      [mergedMessages],
+      () =>
+        attachTurnOutputs(
+          groupParallelAgents(mergedMessages),
+          isResponding,
+          turnFileChanges,
+          turnArtifacts,
+          turnScheduledTasks,
+        ),
+      [
+        mergedMessages,
+        isResponding,
+        turnFileChanges,
+        turnArtifacts,
+        turnScheduledTasks,
+      ],
     );
     const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
       useState(false);
@@ -2149,8 +2283,8 @@ export const MessageList = memo(
       }
       return null;
     }, [isResponding, mergedMessages]);
-    const finalAssistantIdsByTurn = useMemo(
-      () => collectFinalAssistantIdsByTurn(displayItems, isResponding),
+    const finalAssistantTurnIdByAssistantId = useMemo(
+      () => collectFinalAssistantTurnIds(displayItems, isResponding),
       [displayItems, isResponding],
     );
 
@@ -2167,6 +2301,8 @@ export const MessageList = memo(
       ReadonlyMap<string, boolean>
     >(() => new Map());
     const shouldFollow = useRef(true);
+    const followPausedByUserRef = useRef(false);
+    const userScrollIntentUntil = useRef(0);
     const lastScrollTop = useRef(0);
     const scrollCooldown = useRef(false);
     const scrollCooldownCount = useRef(0);
@@ -2176,6 +2312,12 @@ export const MessageList = memo(
     const prevLastUserMsgId = useRef<string | null>(null);
     const pendingNewUserSmoothScroll = useRef(false);
     const prevLoadingTranscript = useRef(loadingTranscript);
+    const pendingTranscriptBottomScroll = useRef(Boolean(loadingTranscript));
+    const transcriptBottomScrollFrame = useRef<number | undefined>(undefined);
+    const transcriptBottomScrollSettleFrame = useRef<number | undefined>(
+      undefined,
+    );
+    const prevBottomOverlayInset = useRef(bottomOverlayInset);
     const prevActiveExecutionKey = useRef<string | null>(null);
     const prevCatchingUp: MutableRefObject<boolean | undefined> =
       useRef(catchingUp);
@@ -2331,9 +2473,15 @@ export const MessageList = memo(
       if (!el) return;
       const distanceFromBottom =
         el.scrollHeight - el.scrollTop - el.clientHeight;
-      setShouldFollow(distanceFromBottom < FOLLOW_BOTTOM_THRESHOLD_PX);
+      const isNearBottom = distanceFromBottom < FOLLOW_BOTTOM_THRESHOLD_PX;
+      followPausedByUserRef.current = !isNearBottom;
+      setShouldFollow(isNearBottom);
       scheduleScrollOverflowReport();
     }, [scheduleScrollOverflowReport, setShouldFollow]);
+
+    const markUserScrollIntent = useCallback(() => {
+      userScrollIntentUntil.current = Date.now() + 1000;
+    }, []);
 
     const scheduleFollowRecheck = useCallback(() => {
       pendingFollowRecheck.current = true;
@@ -2368,6 +2516,14 @@ export const MessageList = memo(
         if (pendingOverflowFrame.current !== undefined) {
           window.cancelAnimationFrame(pendingOverflowFrame.current);
         }
+        if (transcriptBottomScrollFrame.current !== undefined) {
+          window.cancelAnimationFrame(transcriptBottomScrollFrame.current);
+        }
+        if (transcriptBottomScrollSettleFrame.current !== undefined) {
+          window.cancelAnimationFrame(
+            transcriptBottomScrollSettleFrame.current,
+          );
+        }
       },
       [],
     );
@@ -2382,6 +2538,7 @@ export const MessageList = memo(
         // bottom" state to report. The toggle may create overflow though, so
         // re-check after the expanded/collapsed rows have been laid out.
         if (!el || el.scrollHeight > el.clientHeight + 1) {
+          followPausedByUserRef.current = true;
           setShouldFollow(false);
         }
         scheduleFollowRecheck();
@@ -2399,6 +2556,7 @@ export const MessageList = memo(
         const target = event.target;
         if (!(target instanceof HTMLElement)) return;
         if (!target.closest('[aria-expanded]')) return;
+        followPausedByUserRef.current = true;
         setShouldFollow(false);
         scheduleFollowRecheck();
       },
@@ -2457,6 +2615,7 @@ export const MessageList = memo(
 
     const resumeBottomFollow = useCallback(
       (behavior: ScrollBehavior = 'smooth') => {
+        followPausedByUserRef.current = false;
         setShouldFollow(true);
         scrollToBottom(behavior);
       },
@@ -2623,6 +2782,7 @@ export const MessageList = memo(
         // target sits near the bottom, and the next streaming height change
         // would pull the viewport back to the tail. An instant (non-smooth)
         // scroll keeps that cooldown window short and deterministic.
+        followPausedByUserRef.current = true;
         setShouldFollow(false);
         scrollCooldownCount.current += 1;
         const gen = scrollCooldownCount.current;
@@ -2764,13 +2924,24 @@ export const MessageList = memo(
       if (curr < prev - 1) {
         // Container resizes can clamp scrollTop downward while the viewport is
         // still at the tail. Treat that as follow mode, not a manual scroll-up.
-        setShouldFollow(distanceFromBottom < FOLLOW_BOTTOM_THRESHOLD_PX);
+        const isNearBottom = distanceFromBottom < FOLLOW_BOTTOM_THRESHOLD_PX;
+        const hasUserScrollIntent = Date.now() <= userScrollIntentUntil.current;
+        if (isNearBottom) {
+          followPausedByUserRef.current = false;
+          setShouldFollow(true);
+        } else if (hasUserScrollIntent) {
+          followPausedByUserRef.current = true;
+          setShouldFollow(false);
+        } else if (!followPausedByUserRef.current) {
+          setShouldFollow(false);
+        }
         return;
       }
       // Rule 3: near bottom → resume follow
       // Run only after non-upward scrolls. Otherwise a tiny wheel-up near the
       // tail would pause follow and immediately re-enable it in the same event.
       if (distanceFromBottom < FOLLOW_BOTTOM_THRESHOLD_PX) {
+        followPausedByUserRef.current = false;
         setShouldFollow(true);
       }
     }, [
@@ -2786,6 +2957,46 @@ export const MessageList = memo(
       el.addEventListener('scroll', handleScroll, { passive: true });
       return () => el.removeEventListener('scroll', handleScroll);
     }, [getScrollElement, handleScroll]);
+
+    useEffect(() => {
+      const el = getScrollElement();
+      if (!el) return;
+      const markFromPointer = (event: PointerEvent) => {
+        const rect = el.getBoundingClientRect();
+        const scrollbarEdge = 20;
+        if (
+          event.clientX >= rect.right - scrollbarEdge ||
+          event.clientY >= rect.bottom - scrollbarEdge
+        ) {
+          markUserScrollIntent();
+        }
+      };
+      const markFromKey = (event: KeyboardEvent) => {
+        if (
+          event.key === 'ArrowUp' ||
+          event.key === 'ArrowDown' ||
+          event.key === 'PageUp' ||
+          event.key === 'PageDown' ||
+          event.key === 'Home' ||
+          event.key === 'End' ||
+          event.key === ' '
+        ) {
+          markUserScrollIntent();
+        }
+      };
+      el.addEventListener('wheel', markUserScrollIntent, { passive: true });
+      el.addEventListener('touchstart', markUserScrollIntent, {
+        passive: true,
+      });
+      el.addEventListener('pointerdown', markFromPointer, { passive: true });
+      el.addEventListener('keydown', markFromKey, { passive: true });
+      return () => {
+        el.removeEventListener('wheel', markUserScrollIntent);
+        el.removeEventListener('touchstart', markUserScrollIntent);
+        el.removeEventListener('pointerdown', markFromPointer);
+        el.removeEventListener('keydown', markFromKey);
+      };
+    }, [getScrollElement, markUserScrollIntent]);
 
     useEffect(() => {
       const el = getScrollElement();
@@ -2819,6 +3030,7 @@ export const MessageList = memo(
     // against the next session.
     useEffect(() => {
       if (messages.length === 0) {
+        followPausedByUserRef.current = false;
         setShouldFollow(true);
         pendingScrollRef.current = null;
         setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
@@ -2835,16 +3047,17 @@ export const MessageList = memo(
       const observer = new ResizeObserver(() => {
         scheduleSessionTimelineRangeUpdate();
         if (catchingUpRef.current) return;
-        if (!shouldFollow.current) return;
+        if (followPausedByUserRef.current) return;
+        setShouldFollow(true);
         requestAnimationFrame(() => {
-          if (!catchingUpRef.current && shouldFollow.current) {
+          if (!catchingUpRef.current && !followPausedByUserRef.current) {
             scrollToBottom();
           }
         });
       });
       observer.observe(el);
       return () => observer.disconnect();
-    }, [scrollToBottom, scheduleSessionTimelineRangeUpdate]);
+    }, [scrollToBottom, scheduleSessionTimelineRangeUpdate, setShouldFollow]);
 
     // Rule 4: new user message → force follow on so the model's reply
     // scrolls into view as it streams in.
@@ -2870,6 +3083,7 @@ export const MessageList = memo(
         lastMessage?.role === 'user' &&
         lastId !== prevLastUserMsgId.current
       ) {
+        followPausedByUserRef.current = false;
         setShouldFollow(true);
         // A new prompt supersedes any pending "Show in transcript" scroll.
         pendingScrollRef.current = null;
@@ -2885,11 +3099,69 @@ export const MessageList = memo(
     // latest content without the viewport fighting the replay.
     useLayoutEffect(() => {
       if (prevCatchingUp.current && !catchingUp) {
+        followPausedByUserRef.current = false;
         setShouldFollow(true);
         scrollToBottom('auto');
       }
       prevCatchingUp.current = catchingUp;
     }, [catchingUp, scrollToBottom, setShouldFollow]);
+
+    useLayoutEffect(() => {
+      if (loadingTranscript) {
+        pendingTranscriptBottomScroll.current = true;
+        return;
+      }
+      if (!pendingTranscriptBottomScroll.current) return;
+      if (catchingUp || messages.length === 0) return;
+
+      pendingTranscriptBottomScroll.current = false;
+      followPausedByUserRef.current = false;
+      setShouldFollow(true);
+      pendingScrollRef.current = null;
+
+      if (transcriptBottomScrollFrame.current !== undefined) {
+        window.cancelAnimationFrame(transcriptBottomScrollFrame.current);
+      }
+      if (transcriptBottomScrollSettleFrame.current !== undefined) {
+        window.cancelAnimationFrame(transcriptBottomScrollSettleFrame.current);
+      }
+      const scrollIfStillFollowing = () => {
+        if (catchingUpRef.current || followPausedByUserRef.current) return;
+        setShouldFollow(true);
+        scrollToBottom('auto');
+      };
+
+      transcriptBottomScrollFrame.current = window.requestAnimationFrame(() => {
+        transcriptBottomScrollFrame.current = undefined;
+        scrollIfStillFollowing();
+        transcriptBottomScrollSettleFrame.current =
+          window.requestAnimationFrame(() => {
+            transcriptBottomScrollSettleFrame.current = undefined;
+            scrollIfStillFollowing();
+          });
+      });
+    }, [
+      catchingUp,
+      loadingTranscript,
+      messages.length,
+      scrollToBottom,
+      setShouldFollow,
+    ]);
+
+    useLayoutEffect(() => {
+      const insetChanged =
+        prevBottomOverlayInset.current !== bottomOverlayInset;
+      prevBottomOverlayInset.current = bottomOverlayInset;
+      if (!insetChanged) return;
+      if (catchingUp) return;
+      if (followPausedByUserRef.current) return;
+      setShouldFollow(true);
+      requestAnimationFrame(() => {
+        if (!catchingUpRef.current && !followPausedByUserRef.current) {
+          scrollToBottom('auto');
+        }
+      });
+    }, [bottomOverlayInset, catchingUp, scrollToBottom, setShouldFollow]);
 
     const runningExecutionKey = useMemo(
       () => latestActiveExecutionKey(visibleItems),
@@ -2909,14 +3181,15 @@ export const MessageList = memo(
       }
       if (runningExecutionKey === prevActiveExecutionKey.current) return;
       prevActiveExecutionKey.current = runningExecutionKey;
-      if (shouldFollow.current) {
+      if (shouldFollow.current || !followPausedByUserRef.current) {
         requestAnimationFrame(() => {
-          if (shouldFollow.current) {
+          if (!followPausedByUserRef.current) {
+            setShouldFollow(true);
             scrollToBottom();
           }
         });
       }
-    }, [catchingUp, runningExecutionKey, scrollToBottom]);
+    }, [catchingUp, runningExecutionKey, scrollToBottom, setShouldFollow]);
 
     // Rule 6: an inline picker/dialog (tailContent) just appeared. It renders
     // at the very bottom of the virtualized list, so if the user had scrolled
@@ -2929,11 +3202,12 @@ export const MessageList = memo(
         hasTailContent &&
         !prevHasTailContent.current
       ) {
+        followPausedByUserRef.current = false;
         setShouldFollow(true);
         // Re-check follow inside the frame: if the user scrolls up in the gap
         // before it fires (Rule 2 clears the flag), don't fight them.
         requestAnimationFrame(() => {
-          if (shouldFollow.current) scrollToBottom();
+          if (!followPausedByUserRef.current) scrollToBottom();
         });
       }
       prevHasTailContent.current = hasTailContent;
@@ -2969,6 +3243,24 @@ export const MessageList = memo(
             );
           }
 
+          if (displayItem.type === 'turn_outputs') {
+            return (
+              <TurnOutputs
+                changes={displayItem.changes}
+                turnId={displayItem.turnId}
+                artifacts={displayItem.artifacts}
+                scheduledTasks={displayItem.scheduledTasks}
+                workspaceCwd={workspaceCwd}
+                onOpenRequest={onTurnOutputOpen}
+                onReviewChanges={onReviewChanges ?? noopTurnOutputAction}
+                onOpenArtifact={onOpenArtifact ?? noopTurnOutputAction}
+                onOpenScheduledTask={
+                  onOpenScheduledTask ?? noopTurnOutputAction
+                }
+              />
+            );
+          }
+
           if (displayItem.type === 'turn_collapse') {
             return (
               <TurnCollapseRow
@@ -2993,6 +3285,28 @@ export const MessageList = memo(
             );
           }
 
+          const finalAssistantTurnId =
+            displayItem.message.role === 'assistant'
+              ? finalAssistantTurnIdByAssistantId.get(displayItem.message.id)
+              : undefined;
+          let assistantTurnFooterInfo:
+            | WebShellAssistantTurnFooterRenderInfo
+            | undefined;
+          if (
+            displayItem.message.role === 'assistant' &&
+            finalAssistantTurnId
+          ) {
+            assistantTurnFooterInfo = {
+              turnId: finalAssistantTurnId,
+              message: {
+                id: displayItem.message.id,
+                content: displayItem.message.content,
+                isStreaming: displayItem.message.isStreaming,
+                timestamp: displayItem.message.timestamp,
+              },
+            };
+          }
+
           return (
             <MessageItem
               message={displayItem.message}
@@ -3005,7 +3319,7 @@ export const MessageList = memo(
               onBranchSession={onBranchSession}
               showAssistantActions={
                 displayItem.message.role === 'assistant' &&
-                finalAssistantIdsByTurn.has(displayItem.message.id)
+                finalAssistantTurnIdByAssistantId.has(displayItem.message.id)
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
@@ -3015,6 +3329,7 @@ export const MessageList = memo(
                 displayItem,
                 flashTarget,
               )}
+              assistantTurnFooterInfo={assistantTurnFooterInfo}
             />
           );
         };
@@ -3044,13 +3359,17 @@ export const MessageList = memo(
         headerOffset,
         visibleItems,
         flashTarget,
-        finalAssistantIdsByTurn,
+        finalAssistantTurnIdByAssistantId,
         lastCompletedAssistantId,
         workspaceCwd,
         showRetryHint,
         onRetryClick,
         onBranchSession,
         handleToggleCollapse,
+        onOpenArtifact,
+        onOpenScheduledTask,
+        onReviewChanges,
+        onTurnOutputOpen,
       ],
     );
 
@@ -3078,11 +3397,25 @@ export const MessageList = memo(
       // Preserve the new-prompt scroll even if a previous disclosure resize is
       // still settling; it targets the latest virtualizer size from this render.
       if (pendingFollowRecheck.current && !isNewUserMessage) return;
-      if (shouldFollow.current || isNewUserMessage) {
+      if (
+        shouldFollow.current ||
+        isNewUserMessage ||
+        !followPausedByUserRef.current
+      ) {
+        if (!followPausedByUserRef.current) {
+          setShouldFollow(true);
+        }
         scrollToBottom(isNewUserMessage ? 'smooth' : 'auto');
         pendingNewUserSmoothScroll.current = false;
       }
-    }, [totalVirtualSize, messages, totalCount, catchingUp, scrollToBottom]);
+    }, [
+      totalVirtualSize,
+      messages,
+      totalCount,
+      catchingUp,
+      scrollToBottom,
+      setShouldFollow,
+    ]);
 
     useLayoutEffect(() => {
       scheduleScrollOverflowReport();
@@ -3091,7 +3424,12 @@ export const MessageList = memo(
     return (
       <div
         ref={containerRef}
-        className={styles.list}
+        className={joinClassNames(
+          styles.list,
+          hasHeader && centerWelcomeHeader
+            ? styles.listWithWelcomeHeader
+            : undefined,
+        )}
         data-web-shell-message-list
         onClickCapture={handleDisclosureClickCapture}
       >

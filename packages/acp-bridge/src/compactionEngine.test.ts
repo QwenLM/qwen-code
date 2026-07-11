@@ -364,7 +364,7 @@ describe('TurnBoundaryCompactionEngine', () => {
           truncatedEvents: 2,
           retainedEvents: 1,
           maxBytes: 128,
-          fullTranscriptAvailable: false,
+          fullTranscriptAvailable: true,
         },
       };
       const engine = new TurnBoundaryCompactionEngine();
@@ -420,7 +420,7 @@ describe('TurnBoundaryCompactionEngine', () => {
         truncatedTurns: 2,
         retainedEvents: 2,
         maxBytes: 512,
-        fullTranscriptAvailable: false,
+        fullTranscriptAvailable: true,
       });
     });
 
@@ -696,7 +696,7 @@ describe('TurnBoundaryCompactionEngine', () => {
         truncatedEvents: 1,
         retainedEvents: 1,
         maxBytes: 512,
-        fullTranscriptAvailable: false,
+        fullTranscriptAvailable: true,
       });
     });
 
@@ -723,7 +723,7 @@ describe('TurnBoundaryCompactionEngine', () => {
         truncatedEvents: 1,
         retainedEvents: 2,
         maxBytes: 512,
-        fullTranscriptAvailable: false,
+        fullTranscriptAvailable: true,
       });
       expect(
         (snap.compactedTurns[0]?.data as Record<string, unknown>)[
@@ -923,7 +923,7 @@ describe('EventBus + CompactionEngine integration', () => {
       truncatedEvents: 1,
       retainedEvents: 1,
       maxBytes: 512,
-      fullTranscriptAvailable: false,
+      fullTranscriptAvailable: true,
     });
     expect(
       (snapshot.compactedTurns[0]?.data as Record<string, unknown>)[

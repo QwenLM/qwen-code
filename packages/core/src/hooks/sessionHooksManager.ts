@@ -12,7 +12,8 @@ import type {
   FunctionHookCallback,
   HookConfig,
   HookExecutionResult,
- HookEventName} from './types.js';
+  HookEventName,
+} from './types.js';
 import { HookType } from './types.js';
 import { getHookMatcherTarget, getToolMatcherTargets } from './hookPlanner.js';
 

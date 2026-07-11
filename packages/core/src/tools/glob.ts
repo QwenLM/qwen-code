@@ -33,6 +33,10 @@ const debugLogger = createDebugLogger('GLOB');
 
 const MAX_FILE_COUNT = 100;
 const MAX_GLOB_COLLECTED_ENTRIES = MAX_FILE_COUNT * 10;
+const normalizePathForComparison = (p: string) =>
+  process.platform === 'win32' || process.platform === 'darwin'
+    ? p.toLowerCase()
+    : p;
 
 // Subset of 'Path' interface provided by 'glob' that we can implement for testing
 export interface GlobPath {
@@ -206,7 +210,7 @@ class GlobToolInvocation extends BaseToolInvocation<
         ignored: isTraversalIgnored,
         childrenIgnored: isTraversalIgnored,
       },
-    }) as AsyncIterable<GlobPath>;
+    }) as AsyncIterable<GlobPath> & { destroy?: () => void };
 
     const entries: GlobPath[] = [];
     let hitLimit = false;
@@ -219,6 +223,9 @@ class GlobToolInvocation extends BaseToolInvocation<
         break;
       }
       entries.push(entry);
+    }
+    if (hitLimit) {
+      stream.destroy?.();
     }
 
     return { entries, hitLimit };
@@ -273,7 +280,7 @@ class GlobToolInvocation extends BaseToolInvocation<
         hitCollectionLimit ||= hitLimit;
         for (const entry of entries) {
           // Deduplicate entries that might appear in overlapping directories
-          const normalized = entry.fullpath();
+          const normalized = normalizePathForComparison(entry.fullpath());
           if (!seenPaths.has(normalized)) {
             seenPaths.add(normalized);
             allFilteredEntries.push(entry);

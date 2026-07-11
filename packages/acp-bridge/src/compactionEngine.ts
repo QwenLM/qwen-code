@@ -452,7 +452,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         ...(this.truncatedTurns > 0
           ? { truncatedTurns: this.truncatedTurns }
           : {}),
-        fullTranscriptAvailable: false,
+        fullTranscriptAvailable: true,
       },
     };
   }
