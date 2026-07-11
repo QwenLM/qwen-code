@@ -1809,10 +1809,13 @@ export class Session implements SessionContext {
                 return { stopReason: 'end_turn' };
               }
             } else {
-              // Normal processing for non-slash commands
+              // Normal processing for non-slash commands. promptLast keeps the
+              // user's instruction the final, prominent part when referenced
+              // file/editor content is appended (issue: ACP + local qwen).
               parts = await this.#resolvePrompt(
                 params.prompt,
                 pendingSend.signal,
+                { promptLast: true },
               );
             }
 
@@ -5551,10 +5554,12 @@ export class Session implements SessionContext {
 
       case 'no_command':
         // No command was found or executed, resolve the original prompt
-        // through the standard path that handles all block types
+        // through the standard path that handles all block types. promptLast
+        // keeps the user's instruction prominent (matches the normal path).
         return this.#resolvePrompt(
           originalPrompt,
           new AbortController().signal,
+          { promptLast: true },
         );
 
       default: {
@@ -5569,6 +5574,12 @@ export class Session implements SessionContext {
   async #resolvePrompt(
     message: ContentBlock[],
     abortSignal: AbortSignal,
+    // When true, the user's actual instruction text is placed AFTER any
+    // referenced/file content so it stays the final, prominent directive
+    // (see the assembly comment below). Only genuine user prompts pass this;
+    // the mid-turn drain path leaves it false so its synthetic `@uri` marker
+    // stays first and keeps carrying the "[User message received...]" prefix.
+    options: { promptLast?: boolean } = {},
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
 
@@ -5680,7 +5691,19 @@ export class Session implements SessionContext {
       }
     }
 
-    const processedQueryParts: Part[] = [];
+    // Reference/file content is collected separately from the user's actual
+    // instruction so the caller can keep the instruction prominent. When
+    // `options.promptLast` is set (genuine user prompts), the instruction is
+    // placed AFTER this content — mirroring the interactive path, which keeps
+    // the prompt prominent by merging IDE editor context in FRONT of the
+    // prompt via prependToFirstTextPart (client.ts), leaving the instruction
+    // last. Recency-biased providers (e.g. local Ollama qwen models) otherwise
+    // latch onto trailing file content and answer as if it were the task,
+    // ignoring a prompt buried before it. The model correlates each @reference
+    // with its content block by the "@path" token left in the prompt text and
+    // the "--- Content from ... ---" delimiter labels, not by position, so
+    // leading with the content is safe.
+    const referenceParts: Part[] = [...extensionParts, ...mcpServerParts];
 
     // Read files using readManyFiles utility
     if (pathSpecsToRead.length > 0) {
@@ -5696,32 +5719,23 @@ export class Session implements SessionContext {
         ? readResult.contentParts
         : [readResult.contentParts];
 
-      // Add initial query text first
-      processedQueryParts.push({ text: initialQueryText });
-      processedQueryParts.push(...extensionParts);
-      processedQueryParts.push(...mcpServerParts);
-
-      // Then add content parts (preserving binary files as inlineData)
+      // Add content parts (preserving binary files as inlineData)
       for (const part of contentParts) {
         if (typeof part === 'string') {
-          processedQueryParts.push({ text: part });
+          referenceParts.push({ text: part });
         } else if (preserveUnsupportedImageForBridge && hasImageParts([part])) {
-          processedQueryParts.push(part);
+          referenceParts.push(part);
         } else {
-          processedQueryParts.push(clampInlineMediaPart(part));
+          referenceParts.push(clampInlineMediaPart(part));
         }
       }
-    } else {
-      processedQueryParts.push({ text: initialQueryText.trim() });
-      processedQueryParts.push(...extensionParts);
-      processedQueryParts.push(...mcpServerParts);
     }
 
     // Process embedded context from resource blocks
     for (const contextPart of embeddedContext) {
       // Type guard for text resources
       if ('text' in contextPart && contextPart.text) {
-        processedQueryParts.push({
+        referenceParts.push({
           text: `File: ${contextPart.uri}\n${contextPart.text}`,
         });
       }
@@ -5733,13 +5747,26 @@ export class Session implements SessionContext {
             data: contextPart.blob,
           },
         };
-        processedQueryParts.push(
+        referenceParts.push(
           preserveUnsupportedImageForBridge && hasImageParts([inlinePart])
             ? inlinePart
             : clampInlineMediaPart(inlinePart),
         );
       }
     }
+
+    // `initialQueryText` keeps its inline @path tokens (untrimmed) when files
+    // were read so the spacing around them is preserved; the no-file path
+    // trims as before.
+    const promptText =
+      pathSpecsToRead.length > 0 ? initialQueryText : initialQueryText.trim();
+    const promptPart: Part = { text: promptText };
+    // promptLast → instruction trails the reference content (prominence fix).
+    // Default → original order (instruction first), byte-identical to the
+    // pre-change behaviour the mid-turn drain path depends on.
+    const processedQueryParts: Part[] = options.promptLast
+      ? [...referenceParts, promptPart]
+      : [promptPart, ...referenceParts];
 
     return this.#applyBridgeConversionsIfNeeded(
       processedQueryParts,

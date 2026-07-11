@@ -35,7 +35,11 @@ import { executeToolCall } from '../../core/nonInteractiveToolExecutor.js';
 import { getInitialChatHistory } from '../../utils/environmentContext.js';
 import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { type AnyDeclarativeTool } from '../../tools/tools.js';
-import { ContextState, AgentHeadless } from './agent-headless.js';
+import {
+  ContextState,
+  AgentHeadless,
+  templateString,
+} from './agent-headless.js';
 import {
   AgentEventEmitter,
   AgentEventType,
@@ -242,6 +246,62 @@ describe('subagent.ts', () => {
     it('should return undefined for missing keys', () => {
       const context = new ContextState();
       expect(context.get('missing')).toBeUndefined();
+    });
+  });
+
+  describe('templateString', () => {
+    it('should replace valid identifier placeholders', () => {
+      const context = new ContextState();
+      context.set('name', 'Agent');
+      context.set('task', 'Testing');
+      const result = templateString(
+        'Hello ${name}, your task is ${task}.',
+        context,
+      );
+      expect(result).toBe('Hello Agent, your task is Testing.');
+    });
+
+    it('should treat ${0} as literal text, not as a placeholder', () => {
+      const context = new ContextState();
+      const result = templateString('Do not write ${0} in your code.', context);
+      expect(result).toBe('Do not write ${0} in your code.');
+    });
+
+    it('should treat ${1} and ${2} as literal text', () => {
+      const context = new ContextState();
+      const result = templateString(
+        'Use {0} and {1}, not ${0} or ${1}.',
+        context,
+      );
+      expect(result).toBe('Use {0} and {1}, not ${0} or ${1}.');
+    });
+
+    it('should still throw for missing valid identifier placeholders', () => {
+      const context = new ContextState();
+      context.set('name', 'Agent');
+      expect(() =>
+        templateString('Hello ${name}, missing ${missing}.', context),
+      ).toThrow('Missing context values for the following keys: missing');
+    });
+
+    it('should handle mixed numeric and identifier placeholders', () => {
+      const context = new ContextState();
+      context.set('var', 'value');
+      // ${var} and ${_private} are valid identifiers; ${0} is literal
+      // ${_private} is missing from context, so it should throw
+      expect(() =>
+        templateString('${var} and ${0} and ${_private}', context),
+      ).toThrow('Missing context values for the following keys: _private');
+    });
+
+    it('should handle ${0} alongside valid placeholders without error', () => {
+      const context = new ContextState();
+      context.set('name', 'Agent');
+      const result = templateString(
+        'Hello ${name}. Do not write ${0} or ${1}.',
+        context,
+      );
+      expect(result).toBe('Hello Agent. Do not write ${0} or ${1}.');
     });
   });
 
