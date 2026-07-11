@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -79,6 +80,35 @@ describe('resolveChannelWorkspaceGroups', () => {
       groups: [
         {
           workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['telegram'] },
+        },
+      ],
+    });
+  });
+
+  it('assigns a home-relative channel to its registered workspace', () => {
+    const homeWorkspace = path.join(os.homedir(), 'qwen-channel-workspace');
+    const result = resolveChannelWorkspaceGroups({
+      workspaces: [
+        { workspaceCwd: PRIMARY, primary: true, trusted: true },
+        { workspaceCwd: homeWorkspace, primary: false, trusted: true },
+      ],
+      selection: { mode: 'names', names: ['telegram'] },
+      loadChannelsConfig: loader({
+        [PRIMARY]: {
+          telegram: { type: 'telegram', cwd: '~/qwen-channel-workspace' },
+        },
+        [homeWorkspace]: {
+          telegram: { type: 'telegram', cwd: '~/qwen-channel-workspace' },
+        },
+      }),
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      groups: [
+        {
+          workspaceCwd: homeWorkspace,
           selection: { mode: 'names', names: ['telegram'] },
         },
       ],

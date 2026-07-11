@@ -803,6 +803,27 @@ describe('runChannelDaemonWorker', () => {
     expect(mockLoadSettings).not.toHaveBeenCalled();
   });
 
+  it('uses the legacy workspace fallback when capabilities workspaces are empty', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/workspace',
+      workspaces: [],
+    });
+
+    await expect(
+      runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      }),
+    ).resolves.toBeDefined();
+  });
+
   it('accepts a trusted registered non-primary workspace', async () => {
     const sdk = createSdk();
     sdk.client.capabilities.mockResolvedValueOnce({

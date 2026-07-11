@@ -311,7 +311,16 @@ describe('buildDaemonStatusResponse', () => {
 
   it('omits channelWorkers for single-workspace and empty multi-workspace snapshots', async () => {
     const single = makeOptions();
-    single.getChannelWorkerSnapshots = () => [];
+    single.getChannelWorkerSnapshots = () => [
+      {
+        enabled: true,
+        state: 'running',
+        channels: ['telegram'],
+        workspaceId: 'primary',
+        workspaceCwd: BASE_WORKSPACE,
+        primary: true,
+      },
+    ];
     expect(
       (await buildDaemonStatusResponse('summary', single)).runtime
         .channelWorkers,
