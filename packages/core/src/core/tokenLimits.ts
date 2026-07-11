@@ -245,7 +245,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^o\d/, LIMITS['128k']], // o-series: 128K
 
   // Anthropic Claude
-  [/^claude-opus-4-(?:6|7|8)/, LIMITS['128k']], // Opus 4.6-4.8: 128K
+  [/^claude-opus-4-(?:6|7|8)/, 128_000 as TokenCount], // Opus 4.6-4.8: 128K
   [/^claude-sonnet-4-6/, LIMITS['64k']], // Sonnet 4.6: 64K
   [/^claude-/, LIMITS['64k']], // Claude fallback: 64K
 

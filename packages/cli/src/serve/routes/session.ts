@@ -14,6 +14,7 @@ import {
   SessionOrganizationError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   addDaemonRequestAttribute,
+  runWithoutDebugLogSession,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionArchiveState,
@@ -87,6 +88,19 @@ interface RegisterSessionRoutesDeps {
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
   languageCodes: string[];
+}
+
+function isReadOnlyWorkspaceCatalog(runtime: WorkspaceRuntime): boolean {
+  return !runtime.primary && !runtime.trusted;
+}
+
+function runCatalogReadWithWorkspaceLogPolicy<T>(
+  runtime: WorkspaceRuntime,
+  read: () => Promise<T>,
+): Promise<T> {
+  return isReadOnlyWorkspaceCatalog(runtime)
+    ? runWithoutDebugLogSession(read)
+    : read();
 }
 
 function requireSessionArtifactClientId(
@@ -355,6 +369,33 @@ export function registerSessionRoutes(
     const runtime = workspaceRegistry.getByWorkspaceCwd(key);
     if (!runtime) {
       sendWorkspaceMismatch(res, key);
+      return null;
+    }
+    return runtime;
+  };
+
+  const resolveRuntimeForCatalogRoute = (
+    req: Request,
+    res: Response,
+    paramName: 'id' | 'workspace',
+    route: string,
+  ): WorkspaceRuntime | null => {
+    const runtime =
+      paramName === 'workspace'
+        ? resolveWorkspaceRuntimeFromParam(
+            workspaceRegistry,
+            req,
+            res,
+            'workspace',
+          )
+        : resolveRuntimeFromWorkspaceParam(req, res, paramName);
+    if (runtime === null) return null;
+    if (paramName === 'workspace' && runtime.primary && !runtime.trusted) {
+      logSessionRoutingFailure(route, 'untrusted_workspace', {
+        workspaceId: runtime.workspaceId,
+        workspaceCwd: runtime.workspaceCwd,
+      });
+      sendUntrustedWorkspaceResponse(res);
       return null;
     }
     return runtime;
@@ -2090,12 +2131,18 @@ export function registerSessionRoutes(
   );
 
   app.get('/workspace/:id/session-groups', async (req, res) => {
-    const key = resolveWorkspaceParam(req, res);
-    if (key === null) return;
+    // Preserve the legacy singular-route behavior for an untrusted primary;
+    // plural catalog routes intentionally retain their trust gate.
+    const runtime = resolveRuntimeFromWorkspaceParam(req, res);
+    if (runtime === null) return;
     try {
       res
         .status(200)
-        .json(await createSessionOrganizationService(key).listGroups());
+        .json(
+          await runCatalogReadWithWorkspaceLogPolicy(runtime, () =>
+            createSessionOrganizationService(runtime.workspaceCwd).listGroups(),
+          ),
+        );
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /workspace/:id/session-groups',
@@ -2175,15 +2222,15 @@ export function registerSessionRoutes(
 
   app.get('/workspaces/:workspace/session-groups', async (req, res) => {
     const route = 'GET /workspaces/:workspace/session-groups';
-    const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+    const runtime = resolveRuntimeForCatalogRoute(req, res, 'workspace', route);
     if (!runtime) return;
     try {
       res
         .status(200)
         .json(
-          await createSessionOrganizationService(
-            runtime.workspaceCwd,
-          ).listGroups(),
+          await runCatalogReadWithWorkspaceLogPolicy(runtime, () =>
+            createSessionOrganizationService(runtime.workspaceCwd).listGroups(),
+          ),
         );
     } catch (err) {
       sendBridgeError(res, err, { route });
@@ -2263,7 +2310,7 @@ export function registerSessionRoutes(
   );
 
   const listWorkspaceSessionsHandler =
-    (paramName: string): RequestHandler =>
+    (paramName: 'id' | 'workspace'): RequestHandler =>
     async (req, res) => {
       const route =
         paramName === 'workspace'
@@ -2272,29 +2319,10 @@ export function registerSessionRoutes(
       // Express decodes URL-encoded path params automatically; clients pass
       // the absolute workspace cwd encoded (e.g.
       // GET /workspace/%2Fwork%2Fa/sessions).
-      const runtime =
-        paramName === 'workspace'
-          ? resolveWorkspaceRuntimeFromParam(
-              workspaceRegistry,
-              req,
-              res,
-              'workspace',
-            )
-          : resolveRuntimeFromWorkspaceParam(req, res, paramName);
+      const runtime = resolveRuntimeForCatalogRoute(req, res, paramName, route);
       if (runtime === null) return;
-      if (
-        paramName === 'workspace'
-          ? !runtime.trusted
-          : !runtime.primary && !runtime.trusted
-      ) {
-        logSessionRoutingFailure(route, 'untrusted_workspace', {
-          workspaceId: runtime.workspaceId,
-          workspaceCwd: runtime.workspaceCwd,
-        });
-        sendUntrustedWorkspaceResponse(res);
-        return;
-      }
       const key = runtime.workspaceCwd;
+      const readOnlySecondary = isReadOnlyWorkspaceCatalog(runtime);
       try {
         const cursor =
           typeof req.query['cursor'] === 'string'
@@ -2376,6 +2404,7 @@ export function registerSessionRoutes(
         // (persisted + live) to filter completely and paginates with an opaque
         // activity cursor, so the numeric-cursor live fallback can't serve it.
         const usePersisted =
+          readOnlySecondary ||
           runtime.primary ||
           view === 'organized' ||
           archiveState === 'archived' ||
@@ -2396,7 +2425,11 @@ export function registerSessionRoutes(
           );
         }
         const result = usePersisted
-          ? await listWorkspaceSessionsForResponse(runtime.bridge, key, options)
+          ? await runCatalogReadWithWorkspaceLogPolicy(runtime, () =>
+              listWorkspaceSessionsForResponse(runtime.bridge, key, options, {
+                mergeLive: !readOnlySecondary,
+              }),
+            )
           : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
         res.status(200).json({
           sessions: result.sessions,
@@ -2444,9 +2477,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/model',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/model',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const modelId = body['modelId'];
         if (typeof modelId !== 'string' || !modelId) {
@@ -2457,7 +2490,7 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const response = await bridge.setSessionModel(
+        const response = await runtime.bridge.setSessionModel(
           sessionId,
           {
             ...(body as object),
@@ -2777,9 +2810,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/approval-mode',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/approval-mode',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         // Validates `mode` against `APPROVAL_MODES` and an optional
         // `persist: boolean` flag.
         const body = safeBody(req);
@@ -2805,7 +2838,7 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const response = await bridge.setSessionApprovalMode(
+        const response = await runtime.bridge.setSessionApprovalMode(
           sessionId,
           mode as ApprovalMode,
           { persist: persist === true },

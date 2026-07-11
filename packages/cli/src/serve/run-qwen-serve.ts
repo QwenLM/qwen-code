@@ -19,6 +19,7 @@ import express, {
   type Response,
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
+import { isWithinRoot } from '../config/path-comparison.js';
 import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   normalizeCompactedReplayMaxBytes,
@@ -31,7 +32,10 @@ import {
   preResolveServeFastPathHomeEnvOverrides,
   type ServeFastPathSettings,
 } from './fast-path-settings.js';
-import { resolveWorkspaceInputs } from './workspace-inputs.js';
+import {
+  MAX_REGISTERED_WORKSPACES,
+  resolveWorkspaceInputs,
+} from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
@@ -83,6 +87,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
+import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
@@ -764,6 +769,7 @@ export interface RunQwenServeDeps {
     opts: CreateChannelWorkerSupervisorOptions,
   ) => ChannelWorkerSupervisor;
   channelServicePidfile?: ChannelServicePidfile;
+  workspaceRegistrationStore?: WorkspaceRegistrationStore;
 }
 
 function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
@@ -2009,6 +2015,70 @@ export async function runQwenServe(
             `${JSON.stringify(first)} is inside ${JSON.stringify(second)}.`,
         );
       }
+    }
+  }
+  if (workspaceInputs.length > MAX_REGISTERED_WORKSPACES) {
+    throw new Error(
+      `At most ${MAX_REGISTERED_WORKSPACES} --workspace values may be registered.`,
+    );
+  }
+  let workspaceRegistrationStore = deps.workspaceRegistrationStore;
+  if (
+    workspaceRegistrationStore === undefined &&
+    process.env['QWEN_SERVE_NO_PERSISTENT_REGISTRATION'] !== '1'
+  ) {
+    const { WorkspaceRegistrationStore } = await import(
+      './workspace-registration-store.js'
+    );
+    workspaceRegistrationStore = new WorkspaceRegistrationStore(boundWorkspace);
+  }
+  if (workspaceRegistrationStore) {
+    try {
+      const stored = await workspaceRegistrationStore.read();
+      for (const storedWorkspace of stored.workspaces) {
+        let cwd: string;
+        try {
+          cwd = validateAndCanonicalizeWorkspace(storedWorkspace);
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: skipping persisted workspace registration ${JSON.stringify(
+              storedWorkspace,
+            )}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          continue;
+        }
+        if (workspaceInputs.some((workspace) => workspace.cwd === cwd)) {
+          continue;
+        }
+        const nested = workspaceInputs.some(
+          (workspace) =>
+            isWithinRoot(cwd, workspace.cwd) ||
+            isWithinRoot(workspace.cwd, cwd),
+        );
+        if (nested) {
+          writeStderrLine(
+            `qwen serve: skipping persisted workspace registration ${JSON.stringify(
+              storedWorkspace,
+            )}: path nests with an explicit or earlier restored workspace`,
+          );
+          continue;
+        }
+        if (workspaceInputs.length >= MAX_REGISTERED_WORKSPACES) {
+          writeStderrLine(
+            `qwen serve: skipping persisted workspace registration ${JSON.stringify(
+              storedWorkspace,
+            )}: workspace limit reached`,
+          );
+          continue;
+        }
+        workspaceInputs.push({ raw: storedWorkspace, cwd });
+      }
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: failed to read persisted workspace registrations: ${
+          err instanceof Error ? err.message : String(err)
+        }; continuing with explicit workspaces only`,
+      );
     }
   }
   if (workspaceInputs.length > 1 && deps.bridge) {
@@ -3670,6 +3740,7 @@ export async function runQwenServe(
     const app = runtime.createServeApp(opts, () => actualPort, {
       workspaceRegistry,
       createWorkspaceRuntime: createDynamicWorkspaceRuntime,
+      workspaceRegistrationStore,
       bridge,
       webShellDir,
       boundWorkspace,

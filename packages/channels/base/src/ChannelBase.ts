@@ -1430,7 +1430,7 @@ export abstract class ChannelBase {
   onToolCall(_chatId: string, _event: ToolCallEvent): void {}
 
   onSessionDied(sessionId: string): void {
-    this.router.removeSessionId(sessionId);
+    this.router.handleSessionDied(sessionId);
     this.instructedSessions.delete(sessionId);
     this.removePendingPermissionsForSession(sessionId);
   }
