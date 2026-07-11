@@ -2660,9 +2660,11 @@ export class GeminiChat {
               if (!(error instanceof InvalidStreamError)) throw error;
 
               attemptState.rollback();
-              if (
-                retryCount >= INVALID_STREAM_RETRY_CONFIG.transientMaxRetries
-              ) {
+              const maxContinuationRetries =
+                error.type === 'PROTOCOL_TAG_LEAK'
+                  ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
+                  : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
+              if (retryCount >= maxContinuationRetries) {
                 throw error;
               }
 
@@ -2671,7 +2673,7 @@ export class GeminiChat {
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs * retryCount;
               debugLogger.warn(
                 `Invalid stream [${error.type}] during output continuation ` +
-                  `(retry ${retryCount}/${INVALID_STREAM_RETRY_CONFIG.transientMaxRetries}). ` +
+                  `(retry ${retryCount}/${maxContinuationRetries}). ` +
                   `Waiting ${delayMs / 1000}s before retrying...`,
               );
               logContentRetry(

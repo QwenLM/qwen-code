@@ -9767,6 +9767,65 @@ describe('GeminiChat', async () => {
       ).toBe(true);
     });
 
+    it('keeps protocol tag leak budget during output continuation', async () => {
+      vi.useFakeTimers();
+      try {
+        const protocolLeak = () =>
+          ({
+            [Symbol.asyncIterator]() {
+              return this;
+            },
+            async next() {
+              throw new InvalidStreamError(
+                'Protocol tag leaked during continuation.',
+                'PROTOCOL_TAG_LEAK',
+              );
+            },
+            async return() {
+              return { done: true, value: undefined };
+            },
+            async throw(error?: unknown) {
+              throw error;
+            },
+          }) as AsyncGenerator<GenerateContentResponse>;
+        const streams = [
+          makeStream([makeChunk([{ text: 'initial' }], 'MAX_TOKENS')]),
+          makeStream([makeChunk([{ text: 'escalated' }], 'MAX_TOKENS')]),
+          protocolLeak(),
+          protocolLeak(),
+          protocolLeak(),
+          protocolLeak(),
+          protocolLeak(),
+        ];
+        let callIndex = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streams[callIndex++]!);
+
+        const stream = await chat.sendMessageStream(
+          'gemini-pro',
+          { message: 'essay' },
+          'prompt-recovery-protocol-leak-budget',
+        );
+
+        await collectStreamWithFakeTimers(stream, 35_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(2);
+        expect(mockLogContentRetry).toHaveBeenLastCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            attempt_number: 1,
+            error_type: 'PROTOCOL_TAG_LEAK',
+          }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should cap recovery attempts at MAX_OUTPUT_RECOVERY_ATTEMPTS (3)', async () => {
       // Every stream returns MAX_TOKENS with text (no functionCall).
       vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
