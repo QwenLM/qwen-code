@@ -389,15 +389,20 @@ const SubagentExecutionRenderer: React.FC<{
     // ANSI control sequences; escape before rendering into Ink Text
     // (matches LiveAgentPanel + SubagentScrollbackSummary).
     const agentLabel = escapeAnsiCtrlCodes(data.subagentName || 'agent');
-    // The context block adds one sibling line per prior call. Reserve
-    // that height out of the confirmation's budget so the question and
-    // its options never get clipped off-screen in a short terminal —
-    // approving blind is the exact failure this context is meant to
-    // prevent, so the confirmation prompt must always win.
+    // Reserve height for everything this component renders above the
+    // confirmation prompt — the "Approval requested by" header (1 line)
+    // plus one sibling line per prior call — out of the confirmation's
+    // budget, so the question and its options never get clipped off-screen
+    // in a short terminal. Approving blind is the exact failure this context
+    // is meant to prevent, so the confirmation prompt must always win.
+    const HEADER_LINES = 1;
     const contextLines = priorApprovalCalls(data).length;
     const confirmationHeight =
       availableHeight !== undefined
-        ? Math.max(MINIMUM_MAX_HEIGHT, availableHeight - contextLines)
+        ? Math.max(
+            MINIMUM_MAX_HEIGHT,
+            availableHeight - contextLines - HEADER_LINES,
+          )
         : availableHeight;
     return (
       <Box flexDirection="column" paddingLeft={1}>

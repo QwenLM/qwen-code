@@ -1049,13 +1049,13 @@ describe('<ToolMessage />', () => {
       expect(output).toContain('✔ Glob');
     });
 
-    it('reserves the context lines out of the confirmation height budget', () => {
-      // Regression for the short-terminal approval clip: the context
-      // block adds one line per prior call, so that height must be
+    it('reserves the header and context lines out of the confirmation height budget', () => {
+      // Regression for the short-terminal approval clip: the "Approval
+      // requested by" header (1 line) plus one line per prior call must be
       // subtracted from what the confirmation prompt gets — otherwise the
       // options scroll off-screen and Enter approves blind (issue #6569).
       // availableHeight = max(2, availableTerminalHeight(20) - 6) = 14;
-      // two prior calls → confirmation gets 14 - 2 = 12.
+      // two prior calls + header → confirmation gets 14 - 2 - 1 = 11.
       const { lastFrame } = renderWithContext(
         <ToolMessage
           {...buildProps({
@@ -1093,7 +1093,7 @@ describe('<ToolMessage />', () => {
         StreamingState.Responding,
       );
       const output = lastFrame() ?? '';
-      expect(output).toContain('MockApprovalPrompt:height=12');
+      expect(output).toContain('MockApprovalPrompt:height=11');
     });
 
     it('pendingConfirmation && !isFocused → renders queued marker (one-line)', () => {
