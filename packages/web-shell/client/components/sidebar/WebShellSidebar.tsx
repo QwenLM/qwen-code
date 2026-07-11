@@ -1181,6 +1181,7 @@ export function WebShellSidebar({
                 { groupId: group.id, color: null },
               );
               void reload().catch(() => undefined);
+              bumpWorkspaceReload();
             } catch (err) {
               setGroupEditor(null);
               setGroupName('');
@@ -1205,6 +1206,7 @@ export function WebShellSidebar({
       }
     })();
   }, [
+    bumpWorkspaceReload,
     groupColor,
     groupEditor,
     groupName,
@@ -1769,7 +1771,7 @@ export function WebShellSidebar({
           onBlur={hideTooltip}
           onClick={() => handleLoadSession(session.sessionId)}
           onDoubleClick={() => {
-            if (isCurrent && !collapsed) startRename(session);
+            if (!readOnly && isCurrent && !collapsed) startRename(session);
           }}
           onKeyDown={(event) => {
             if (event.key === 'Enter') handleLoadSession(session.sessionId);
@@ -1787,7 +1789,7 @@ export function WebShellSidebar({
                   </span>
                 )}
               </span>
-              {isEditing ? (
+              {isEditing && !readOnly ? (
                 <form
                   className={styles.renameForm}
                   onClick={(event) => event.stopPropagation()}
