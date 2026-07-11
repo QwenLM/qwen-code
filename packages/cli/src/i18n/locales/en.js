@@ -233,6 +233,8 @@ export default {
   'Shell mode': 'Shell mode',
   'YOLO mode': 'YOLO mode',
   'Auto mode': 'Auto mode',
+  'auto_mode.entry_notice':
+    'Auto mode enabled.\n   An LLM classifier evaluates each tool call — safe actions auto-approve,\n   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.',
   'plan mode': 'plan mode',
   'auto-accept edits': 'auto-accept edits',
   'Accepting edits': 'Accepting edits',
@@ -2663,4 +2665,17 @@ export default {
     'Failed to refresh extension content. Run /reload-plugins to apply updates.',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Precondition check': 'Precondition check',
+  'Precondition not met — this scheduled run was skipped.':
+    'Precondition not met — this scheduled run was skipped.',
+  'The precondition check was cancelled — this scheduled run was skipped.':
+    'The precondition check was cancelled — this scheduled run was skipped.',
+  'The precondition check was interrupted — this scheduled run was skipped.':
+    'The precondition check was interrupted — this scheduled run was skipped.',
+  'The precondition check failed — this scheduled run was skipped.':
+    'The precondition check failed — this scheduled run was skipped.',
+  'Running this scheduled task in a new session: {{link}}':
+    'Running this scheduled task in a new session: {{link}}',
+  'This scheduled run could not be started: {{error}}':
+    'This scheduled run could not be started: {{error}}',
 };

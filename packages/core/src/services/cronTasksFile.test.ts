@@ -170,31 +170,6 @@ describe('cronTasksFile', () => {
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
     });
 
-    it('round-trips the optional runMode field', async () => {
-      const isolated = makeTask({ id: 'iso', runMode: 'isolated' });
-      const shared = makeTask({ id: 'sh', runMode: 'shared' });
-      await writeCronTasks(tmpDir, [isolated, shared]);
-      const result = await readCronTasks(tmpDir);
-      expect(result).toEqual([isolated, shared]);
-    });
-
-    it('accepts legacy tasks with no runMode field', async () => {
-      const legacy = makeTask();
-      await seedTasksFile(tmpDir, JSON.stringify([legacy]));
-      const result = await readCronTasks(tmpDir);
-      expect(result[0]!.runMode).toBeUndefined();
-    });
-
-    it('rejects a task whose runMode is an unknown string', async () => {
-      // A typo must route through fix-or-delete rather than being silently
-      // treated as 'shared' — otherwise per-run isolation would quietly turn off.
-      await seedTasksFile(
-        tmpDir,
-        JSON.stringify([{ ...makeTask(), runMode: 'per-run' }]),
-      );
-      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
-    });
-
     it('round-trips the optional runs history', async () => {
       const task = makeTask({
         lastFiredAt: 1718000300000,
@@ -244,6 +219,25 @@ describe('cronTasksFile', () => {
         tmpDir,
         JSON.stringify([
           { ...makeTask(), runs: [{ at: 1718000240000, kind: 7 }] },
+        ]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('round-trips a run entry with the legacy withheld marker', async () => {
+      const task = makeTask({
+        lastFiredAt: 1718000300000,
+        runs: [{ at: 1718000300000, kind: 'scheduled', withheld: true }],
+      });
+      await writeCronTasks(tmpDir, [task]);
+      expect(await readCronTasks(tmpDir)).toEqual([task]);
+    });
+
+    it('rejects a run entry whose withheld is not a boolean', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([
+          { ...makeTask(), runs: [{ at: 1718000240000, withheld: 'yes' }] },
         ]),
       );
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);

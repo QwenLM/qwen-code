@@ -54,6 +54,7 @@ export interface DaemonChannelSessionFactoryRequest {
   modelServiceId?: string;
   sessionId?: string;
   sessionScope?: SessionScope;
+  approvalMode?: string;
 }
 
 export type DaemonChannelSessionFactory = (
@@ -247,22 +248,31 @@ export class DaemonChannelBridge
     this.connected = true;
   }
 
-  async newSession(cwd: string): Promise<string> {
+  async newSession(
+    cwd: string,
+    options?: { approvalMode?: string },
+  ): Promise<string> {
     const session = await this.options.sessionFactory({
       workspaceCwd: cwd || this.options.cwd,
       modelServiceId: this.options.modelServiceId,
       sessionScope: this.options.sessionScope ?? 'thread',
+      ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
     });
     this.attachSession(session);
     return session.sessionId;
   }
 
-  async loadSession(sessionId: string, cwd: string): Promise<string> {
+  async loadSession(
+    sessionId: string,
+    cwd: string,
+    options?: { approvalMode?: string },
+  ): Promise<string> {
     const session = await this.options.sessionFactory({
       workspaceCwd: cwd || this.options.cwd,
       modelServiceId: this.options.modelServiceId,
       sessionId,
       sessionScope: this.options.sessionScope ?? 'thread',
+      ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
     });
     if (session.sessionId !== sessionId) {
       throw new Error(
@@ -300,12 +310,18 @@ export class DaemonChannelBridge
         chunks.push(chunk);
       }
     };
+    const clearChunks = (sid: string) => {
+      if (sid === sessionId) {
+        chunks.length = 0;
+      }
+    };
     const onSessionDied = (info: { sessionId: string }) => {
       if (info.sessionId === sessionId) {
         controller.abort();
       }
     };
     this.on('textChunk', onChunk);
+    this.on('responseBoundary', clearChunks);
     this.on('sessionDied', onSessionDied);
     const turnBarrier = this.createTurnBarrier(sessionId);
 
@@ -338,6 +354,7 @@ export class DaemonChannelBridge
     } finally {
       this.clearTurnBarrier(sessionId);
       this.off('textChunk', onChunk);
+      this.off('responseBoundary', clearChunks);
       this.off('sessionDied', onSessionDied);
       this.activePrompts.delete(sessionId);
       controllers.delete(controller);
@@ -543,6 +560,10 @@ export class DaemonChannelBridge
     const type = getString(update['sessionUpdate']);
     switch (type) {
       case 'agent_message_chunk': {
+        const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+        if (typeof meta?.['parentToolCallId'] === 'string') {
+          break;
+        }
         const text = getTextContent(update['content']);
         if (text) {
           this.emit('textChunk', sessionId, text);
@@ -574,7 +595,14 @@ export class DaemonChannelBridge
             ? update['rawInput']
             : undefined,
         };
+        if (event.status === 'pending' || event.status === 'in_progress') {
+          this.emitResponseBoundary(sessionId);
+        }
         this.emit('toolCall', event);
+        break;
+      }
+      case 'plan': {
+        this.emitResponseBoundary(sessionId);
         break;
       }
       case 'available_commands_update': {
@@ -609,6 +637,7 @@ export class DaemonChannelBridge
     }
     const requestId = data['requestId'];
     this.requestToSession.set(requestId, sessionId);
+    this.emitResponseBoundary(sessionId);
     this.emit('permissionRequest', {
       requestId,
       sessionId,
@@ -761,6 +790,10 @@ export class DaemonChannelBridge
       controller.abort();
     }
     this.activePromptControllers.delete(sessionId);
+  }
+
+  private emitResponseBoundary(sessionId: string): void {
+    this.emit('responseBoundary', sessionId);
   }
 
   private createTurnBarrier(sessionId: string): Promise<void> {

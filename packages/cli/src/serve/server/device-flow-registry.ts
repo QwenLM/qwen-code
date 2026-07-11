@@ -21,6 +21,7 @@ interface SetupDeviceFlowRegistryDeps {
   bridge: AcpSessionBridge;
   registry?: DeviceFlowRegistry;
   providers?: DeviceFlowProvider[];
+  resolveEventBridges?: () => AcpSessionBridge[];
 }
 
 export interface ServeDeviceFlowRuntime {
@@ -28,9 +29,17 @@ export interface ServeDeviceFlowRuntime {
   getSupportedDeviceFlowProviders: () => DeviceFlowProviderId[];
 }
 
-export function setupDeviceFlowRegistry(
-  deps: SetupDeviceFlowRegistryDeps,
-): ServeDeviceFlowRuntime {
+export function createDeviceFlowRegistry(deps: {
+  bridge: AcpSessionBridge;
+  registry?: DeviceFlowRegistry;
+  providers?: DeviceFlowProvider[];
+  /**
+   * Phase 4: the set of bridges each device-flow event should fan out to
+   * (primary + trusted secondary runtimes), resolved lazily on every publish.
+   * Defaults to the single `bridge` when omitted, preserving prior behavior.
+   */
+  resolveEventBridges?: () => AcpSessionBridge[];
+}): ServeDeviceFlowRuntime {
   const deviceFlowProviderMap = new Map<
     DeviceFlowProviderId,
     DeviceFlowProvider
@@ -44,11 +53,28 @@ export function setupDeviceFlowRegistry(
 
   const deviceFlowEventSink: DeviceFlowEventSink = {
     publish(emission, originatorClientId) {
-      deps.bridge.publishWorkspaceEvent({
-        type: `auth_device_flow_${emission.type}`,
-        data: emission.data,
-        ...(originatorClientId ? { originatorClientId } : {}),
-      });
+      // Phase 4: fan out to every trusted runtime's bridge (primary + trusted
+      // secondaries) so a workspace-qualified ACP client sees its own flow's
+      // events. The registry stays a daemon singleton; only delivery is
+      // multiplexed. Best-effort per the DeviceFlowEventSink contract: one
+      // bridge failing must not block the others or the registry state machine.
+      const bridges = deps.resolveEventBridges
+        ? deps.resolveEventBridges()
+        : [deps.bridge];
+      for (const bridge of bridges) {
+        try {
+          bridge.publishWorkspaceEvent({
+            type: `auth_device_flow_${emission.type}`,
+            data: emission.data,
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          writeStderrLine(
+            `[serve] auth.device-flow: event delivery failed error=${JSON.stringify(message)}`,
+          );
+        }
+      }
     },
   };
   const deviceFlowRegistry =
@@ -89,11 +115,29 @@ export function setupDeviceFlowRegistry(
       resolveProvider: (providerId) => deviceFlowProviderMap.get(providerId),
     });
 
-  setDeviceFlowRegistry(deps.app, deviceFlowRegistry);
-
   return {
     deviceFlowRegistry,
     getSupportedDeviceFlowProviders: () =>
       Array.from(deviceFlowProviderMap.keys()),
   };
+}
+
+/**
+ * Set up the daemon-global device-flow registry: builds the registry via
+ * {@link createDeviceFlowRegistry} and exposes it on `app.locals` for the REST
+ * auth routes. Secondary ACP mounts share this single registry (OAuth
+ * credentials are process-global); auth-flow events fan out best-effort to every
+ * trusted runtime's bridge via `resolveEventBridges`.
+ */
+export function setupDeviceFlowRegistry(
+  deps: SetupDeviceFlowRegistryDeps,
+): ServeDeviceFlowRuntime {
+  const runtime = createDeviceFlowRegistry({
+    bridge: deps.bridge,
+    registry: deps.registry,
+    providers: deps.providers,
+    resolveEventBridges: deps.resolveEventBridges,
+  });
+  setDeviceFlowRegistry(deps.app, runtime.deviceFlowRegistry);
+  return runtime;
 }

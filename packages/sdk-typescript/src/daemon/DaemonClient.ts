@@ -36,6 +36,8 @@ import type {
   DaemonSessionArchiveState,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,
+  DaemonSessionTranscriptPage,
+  DaemonSessionTranscriptPageOptions,
   DaemonSessionGroup,
   DaemonSessionGroupCatalog,
   DaemonSessionGroupInput,
@@ -356,6 +358,7 @@ export interface CreateSessionRequest {
    * `caps.features.session_scope_override` before sending.
    */
   sessionScope?: 'single' | 'thread';
+  approvalMode?: string;
 }
 
 export interface RestoreSessionRequest {
@@ -364,6 +367,7 @@ export interface RestoreSessionRequest {
    * its advertised primary workspace, mirroring `createOrAttachSession`.
    */
   workspaceCwd?: string;
+  approvalMode?: string;
 }
 
 export interface PromptRequest {
@@ -654,6 +658,7 @@ export class DaemonClient {
       body?: unknown;
       clientId?: string;
       timeoutMs?: number;
+      mode?: 'transport' | 'rest';
     } = {},
   ): Promise<T> {
     const hasBody = opts.body !== undefined;
@@ -672,6 +677,7 @@ export class DaemonClient {
         return (await res.json()) as T;
       },
       opts.timeoutMs,
+      opts.mode,
     );
   }
 
@@ -1644,6 +1650,9 @@ export class DaemonClient {
           ...(req.sessionScope !== undefined
             ? { sessionScope: req.sessionScope }
             : {}),
+          ...(req.approvalMode !== undefined
+            ? { approvalMode: req.approvalMode }
+            : {}),
         }),
       },
       async (res) => {
@@ -1662,6 +1671,7 @@ export class DaemonClient {
     options?: {
       pageSize?: number;
       archiveState?: DaemonSessionArchiveState;
+      parentSessionId?: string;
     },
   ): Promise<DaemonSessionSummary[]> {
     const page = await this.listWorkspaceSessionsPage(workspaceCwd, options);
@@ -1697,6 +1707,9 @@ export class DaemonClient {
     }
     if (options?.group !== undefined) {
       query.set('group', options.group);
+    }
+    if (options?.parentSessionId !== undefined) {
+      query.set('parentSessionId', options.parentSessionId);
     }
     return await this.jsonRequest<DaemonSessionListPage>(
       `/workspace/${urlEncode(workspaceCwd)}/sessions?${query.toString()}`,
@@ -1803,6 +1816,24 @@ export class DaemonClient {
     );
   }
 
+  async getSessionTranscriptPage(
+    sessionId: string,
+    opts: DaemonSessionTranscriptPageOptions = {},
+  ): Promise<DaemonSessionTranscriptPage> {
+    const params = new URLSearchParams();
+    if (opts.cursor !== undefined) params.set('cursor', opts.cursor);
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    const query = params.toString();
+    return await this.jsonRequest<DaemonSessionTranscriptPage>(
+      `/session/${urlEncode(sessionId)}/transcript${query ? `?${query}` : ''}`,
+      'GET /session/:id/transcript',
+      {
+        clientId: opts.clientId,
+        mode: 'rest',
+      },
+    );
+  }
+
   async resumeSession(
     sessionId: string,
     req: RestoreSessionRequest = {},
@@ -1865,6 +1896,25 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /session/:id/context');
         }
         return (await res.json()) as DaemonSessionContextStatus;
+      },
+    );
+  }
+
+  /**
+   * Read the current in-memory runtime status for one live daemon session.
+   */
+  async sessionStatus(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionSummary> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/status`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/status');
+        }
+        return (await res.json()) as DaemonSessionSummary;
       },
     );
   }
@@ -2021,7 +2071,12 @@ export class DaemonClient {
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ cwd: req.workspaceCwd }),
+        body: JSON.stringify({
+          cwd: req.workspaceCwd,
+          ...(req.approvalMode !== undefined
+            ? { approvalMode: req.approvalMode }
+            : {}),
+        }),
       },
       async (res) => {
         if (!res.ok) {
@@ -3416,6 +3471,30 @@ export class DaemonClient {
     );
   }
 
+  async addWorkspace(
+    cwd: string,
+  ): Promise<{ id: string; cwd: string; primary: boolean; trusted: boolean }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspaces`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ cwd }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspaces');
+        }
+        return (await res.json()) as {
+          id: string;
+          cwd: string;
+          primary: boolean;
+          trusted: boolean;
+        };
+      },
+    );
+  }
+
   // -- Lifecycle / disposal ------------------------------------------------
 
   /**
@@ -3633,6 +3712,9 @@ export class WorkspaceDaemonClient {
     }
     if (options?.view !== undefined) query.set('view', options.view);
     if (options?.group !== undefined) query.set('group', options.group);
+    if (options?.parentSessionId !== undefined) {
+      query.set('parentSessionId', options.parentSessionId);
+    }
     return this.get(
       `/sessions?${query.toString()}`,
       'GET /workspaces/:workspace/sessions',

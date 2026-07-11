@@ -67,6 +67,17 @@ describe('SessionRouter', () => {
       expect(new Set([s1, s2, s3]).size).toBe(3);
     });
 
+    it('passes channel approval mode when creating sessions', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      router.setChannelApprovalMode('ch', 'yolo');
+
+      await router.resolve('ch', 'alice', 'chat1');
+
+      expect(bridge.newSession).toHaveBeenCalledWith('/tmp', {
+        approvalMode: 'yolo',
+      });
+    });
+
     it('user scope: same sender+chat reuses session', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       const s1 = await router.resolve('ch', 'alice', 'chat1');
@@ -562,6 +573,24 @@ describe('SessionRouter', () => {
   });
 
   describe('restoreSessions', () => {
+    it('passes channel approval mode when restoring sessions', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      writePersistedSession(persistPath);
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      router.setChannelApprovalMode('ch', 'yolo');
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 1,
+        failed: 0,
+      });
+
+      expect(bridge.loadSession).toHaveBeenCalledWith('old-session', '/tmp', {
+        approvalMode: 'yolo',
+      });
+    });
+
     it('logs malformed persisted session files', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
       tempDirs.push(dir);

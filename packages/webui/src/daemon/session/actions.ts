@@ -17,6 +17,7 @@ import type {
   DaemonSessionRecapResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionTaskStatus,
+  DaemonSessionArtifactsEnvelope,
   DaemonTranscriptStore,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
@@ -56,7 +57,9 @@ export interface CreateDaemonSessionActionsArgs {
   skipNextCleanupDetachSessionIdRef: RefBox<string | undefined>;
   passiveAssistantDoneTimerRef: TimerRef;
   getCreateSessionRequest: () => CreateSessionRequest;
-  createDetachedSession: () => Promise<DaemonSessionClient>;
+  createDetachedSession: (
+    workspaceCwd?: string,
+  ) => Promise<DaemonSessionClient>;
   getConnection: () => DaemonConnectionState;
   hasSessionActivePrompt: () => boolean;
   resetCurrentSessionActivePrompt: () => void;
@@ -577,7 +580,7 @@ export function createDaemonSessionActions({
       return startSessionSwitch(sessionId, 'resume');
     },
 
-    async createSession() {
+    async createSession(options?: { workspaceCwd?: string }) {
       try {
         manualSessionClearRef.current = false;
         const session = sessionRef.current;
@@ -587,9 +590,12 @@ export function createDaemonSessionActions({
             : undefined;
         if (activeSession) {
           const nextSession = await withActionTimeout(
-            activeSession.client.createOrAttachSession(
-              getCreateSessionRequest(),
-            ),
+            activeSession.client.createOrAttachSession({
+              ...getCreateSessionRequest(),
+              ...(options?.workspaceCwd !== undefined
+                ? { workspaceCwd: options.workspaceCwd }
+                : {}),
+            }),
             'Create session timed out',
           );
           persistStableClientId(nextSession.clientId, nextSession.sessionId);
@@ -597,7 +603,7 @@ export function createDaemonSessionActions({
         }
 
         const nextSession = await withActionTimeout(
-          createDetachedSession(),
+          createDetachedSession(options?.workspaceCwd),
           'Create session timed out',
         );
         if (manualSessionClearRef.current) {
@@ -631,7 +637,9 @@ export function createDaemonSessionActions({
       } catch (error) {
         throw dispatchActionError(
           addNotice,
-          'Create session failed',
+          `Create session failed${
+            options?.workspaceCwd ? ` (workspace: ${options.workspaceCwd})` : ''
+          }`,
           error,
           'create_session',
         );
@@ -1086,6 +1094,28 @@ export function createDaemonSessionActions({
           'Load stats failed',
           error,
           'load_stats',
+        );
+      }
+    },
+
+    async loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope> {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Load artifacts failed',
+        'load_artifacts',
+      );
+      try {
+        return await withActionTimeout(
+          session.artifacts(),
+          'Load artifacts timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Load artifacts failed',
+          error,
+          'load_artifacts',
         );
       }
     },
