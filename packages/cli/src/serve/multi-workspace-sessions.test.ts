@@ -1303,14 +1303,36 @@ describe('multi-workspace session dispatch', () => {
         expect.objectContaining({ sessionId, groupId, color: 'purple' }),
       ]);
 
+      const ungrouped = await request(app)
+        .patch(`/workspaces/secondary-id/session/${sessionId}/organization`)
+        .set('Host', host())
+        .send({ groupId: null })
+        .expect(200);
+      expect(ungrouped.body).toMatchObject({
+        sessionId,
+        groupId: null,
+        color: 'purple',
+      });
+
+      const clearedColor = await request(app)
+        .patch(`/workspaces/secondary-id/session/${sessionId}/organization`)
+        .set('Host', host())
+        .send({ color: null })
+        .expect(200);
+      expect(clearedColor.body).toMatchObject({
+        sessionId,
+        groupId: null,
+        color: null,
+      });
+
       const secondarySnapshot =
         await createSessionOrganizationService(SECONDARY_CWD).readSnapshot();
       const primarySnapshot =
         await createSessionOrganizationService(PRIMARY_CWD).readSnapshot();
       expect(secondarySnapshot.sessions.get(sessionId)).toMatchObject({
         isPinned: true,
-        groupId,
-        color: 'purple',
+        groupId: null,
+        color: null,
       });
       expect(primarySnapshot.sessions.has(sessionId)).toBe(false);
     });
