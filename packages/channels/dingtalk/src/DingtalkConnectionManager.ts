@@ -7,7 +7,6 @@ export interface DingtalkManagedSocket {
 
 export interface DingtalkManagedClient {
   connected: boolean;
-  registered: boolean;
   connect(): Promise<void>;
   disconnect(): void;
 }
@@ -194,7 +193,6 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
       }
       if (
         client.connected &&
-        client.registered &&
         this.options.getSocket(client)?.readyState === SOCKET_OPEN
       ) {
         this.healthFailures = 0;
@@ -322,7 +320,6 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
     while (this.running && generation === this.generation) {
       if (
         client.connected &&
-        client.registered &&
         this.options.getSocket(client)?.readyState === SOCKET_OPEN
       ) {
         return;
