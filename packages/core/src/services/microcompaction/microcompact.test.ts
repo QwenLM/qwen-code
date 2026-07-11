@@ -70,6 +70,21 @@ function makeFileToolResult(id: string, output: string): Content {
   };
 }
 
+function makeFileToolErrorResult(id: string, error: string): Content {
+  return {
+    role: 'user',
+    parts: [
+      {
+        functionResponse: {
+          id,
+          name: 'read_file',
+          response: { error },
+        },
+      },
+    ],
+  };
+}
+
 function makeUserMessage(text: string): Content {
   return { role: 'user', parts: [{ text }] };
 }
@@ -332,6 +347,26 @@ describe('microcompactHistory', () => {
       '/memory/project/context.md',
       '/project/src/example.ts',
     ]);
+  });
+
+  it('does not preserve error responses for managed-memory reads', () => {
+    const history: Content[] = [
+      makeFileToolCall('err', '/memory/project/context.md'),
+      makeFileToolErrorResult('err', 'ENOENT'),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', 'recent grep output'),
+    ];
+
+    const result = microcompactHistory(history, twoHoursAgo, DEFAULT_SETTINGS, {
+      preserveReadFileResult: () => {
+        throw new Error('error responses should not be preserved');
+      },
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['error'],
+    ).toBe('ENOENT');
   });
 
   it('should not clear non-compactable tools', () => {
