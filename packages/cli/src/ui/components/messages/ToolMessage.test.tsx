@@ -104,10 +104,20 @@ vi.mock('../../utils/MarkdownDisplay.js', () => ({
   },
 }));
 vi.mock('./ToolConfirmationMessage.js', () => ({
-  ToolConfirmationMessage: function MockToolConfirmationMessage() {
+  ToolConfirmationMessage: function MockToolConfirmationMessage({
+    availableTerminalHeight,
+  }: {
+    availableTerminalHeight?: number;
+  }) {
     // Sentinel string lets the focus-routed approval tests assert
-    // the banner renders (instead of being suppressed).
-    return <Text>MockApprovalPrompt</Text>;
+    // the banner renders (instead of being suppressed). The height is
+    // echoed so the budget test can verify the context lines are
+    // reserved out of the confirmation's height.
+    return (
+      <Text>
+        MockApprovalPrompt:height={availableTerminalHeight ?? 'undef'}
+      </Text>
+    );
   },
 }));
 
@@ -598,6 +608,12 @@ describe('<ToolMessage />', () => {
         pendingConfirmation?: object;
         terminateReason?: string;
         executionSummary?: object;
+        toolCalls?: Array<{
+          callId: string;
+          name: string;
+          status: 'executing' | 'awaiting_approval' | 'success' | 'failed';
+          description?: string;
+        }>;
       };
       isFocused?: boolean;
       isPending?: boolean;
@@ -831,6 +847,253 @@ describe('<ToolMessage />', () => {
       expect(output).toContain('Approval requested by');
       expect(output).toContain('fg-agent');
       expect(output).toContain('MockApprovalPrompt');
+    });
+
+    it('focused approval shows the last three prior tool calls as context', () => {
+      // Permission-context ask of issue #6569: the user should see what
+      // the subagent was doing before it parked this request, not an
+      // isolated command. The call awaiting approval itself is excluded
+      // (the confirmation prompt below already shows it in full).
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fg-agent',
+              taskDescription: 'Investigate flaky test',
+              taskPrompt: 'Investigate',
+              status: 'running',
+              pendingConfirmation: {} as object,
+              toolCalls: [
+                {
+                  callId: 'c1',
+                  name: 'read_file',
+                  status: 'success',
+                  description: 'vitest.config.ts',
+                },
+                {
+                  callId: 'c2',
+                  name: 'read_file',
+                  status: 'success',
+                  description: 'flaky.test.ts',
+                },
+                {
+                  callId: 'c3',
+                  name: 'run_shell_command',
+                  status: 'failed',
+                  description: 'npx vitest run flaky.test.ts',
+                },
+                {
+                  callId: 'c4',
+                  name: 'run_shell_command',
+                  status: 'success',
+                  description: 'git log --oneline -5',
+                },
+                {
+                  callId: 'c5',
+                  name: 'run_shell_command',
+                  status: 'awaiting_approval',
+                  description: 'git checkout HEAD~1',
+                },
+              ],
+            },
+            isFocused: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('Approval requested by');
+      // Last three prior calls, oldest dropped.
+      expect(output).not.toContain('vitest.config.ts');
+      expect(output).toContain('flaky.test.ts');
+      expect(output).toContain('✖');
+      expect(output).toContain('npx vitest run flaky.test.ts');
+      expect(output).toContain('git log --oneline -5');
+      // The awaiting call is not repeated above the prompt.
+      expect(output).not.toContain('git checkout HEAD~1');
+    });
+
+    it('renders no context block when the only tool call is the awaiting one', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fresh-agent',
+              taskDescription: 'First action needs approval',
+              taskPrompt: 'Go',
+              status: 'running',
+              pendingConfirmation: {} as object,
+              toolCalls: [
+                {
+                  callId: 'c1',
+                  name: 'run_shell_command',
+                  status: 'awaiting_approval',
+                  description: 'rm -rf build',
+                },
+              ],
+            },
+            isFocused: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('Approval requested by');
+      // The awaiting call is never echoed as context, and with no prior
+      // calls there are no glyph rows at all.
+      expect(output).not.toContain('rm -rf build');
+      expect(output).not.toContain('✔');
+      expect(output).not.toContain('○');
+    });
+
+    it('renders an executing prior call with the ○ glyph', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fg-agent',
+              taskDescription: 'Parallel work',
+              taskPrompt: 'Go',
+              status: 'running',
+              pendingConfirmation: {} as object,
+              toolCalls: [
+                {
+                  callId: 'c1',
+                  name: 'run_shell_command',
+                  status: 'executing',
+                  description: 'npm run build',
+                },
+                {
+                  callId: 'c2',
+                  name: 'write_file',
+                  status: 'awaiting_approval',
+                  description: '/etc/hosts',
+                },
+              ],
+            },
+            isFocused: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('○');
+      expect(output).toContain('npm run build');
+    });
+
+    it('falls back to the raw tool name for tools outside the display map', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fg-agent',
+              taskDescription: 'MCP work',
+              taskPrompt: 'Go',
+              status: 'running',
+              pendingConfirmation: {} as object,
+              toolCalls: [
+                {
+                  callId: 'c1',
+                  name: 'mcp__custom__frobnicate',
+                  status: 'success',
+                  description: 'widget-7',
+                },
+                {
+                  callId: 'c2',
+                  name: 'run_shell_command',
+                  status: 'awaiting_approval',
+                  description: 'sudo frob',
+                },
+              ],
+            },
+            isFocused: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('mcp__custom__frobnicate widget-7');
+    });
+
+    it('renders the display name alone when a prior call has no description', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fg-agent',
+              taskDescription: 'Sparse metadata',
+              taskPrompt: 'Go',
+              status: 'running',
+              pendingConfirmation: {} as object,
+              toolCalls: [
+                {
+                  callId: 'c1',
+                  name: 'glob',
+                  status: 'success',
+                  description: '',
+                },
+                {
+                  callId: 'c2',
+                  name: 'run_shell_command',
+                  status: 'awaiting_approval',
+                  description: 'sudo frob',
+                },
+              ],
+            },
+            isFocused: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('✔ Glob');
+    });
+
+    it('reserves the header and context lines out of the confirmation height budget', () => {
+      // Regression for the short-terminal approval clip: the "Approval
+      // requested by" header (1 line) plus one line per prior call must be
+      // subtracted from what the confirmation prompt gets — otherwise the
+      // options scroll off-screen and Enter approves blind (issue #6569).
+      // availableHeight = max(2, availableTerminalHeight(20) - 6) = 14;
+      // two prior calls + header → confirmation gets 14 - 2 - 1 = 11.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fg-agent',
+              taskDescription: 'Investigate',
+              taskPrompt: 'Investigate',
+              status: 'running',
+              pendingConfirmation: {} as object,
+              toolCalls: [
+                {
+                  callId: 'c1',
+                  name: 'read_file',
+                  status: 'success',
+                  description: 'a.ts',
+                },
+                {
+                  callId: 'c2',
+                  name: 'read_file',
+                  status: 'success',
+                  description: 'b.ts',
+                },
+                {
+                  callId: 'c3',
+                  name: 'run_shell_command',
+                  status: 'awaiting_approval',
+                  description: 'rm -rf build',
+                },
+              ],
+            },
+            isFocused: true,
+          })}
+          availableTerminalHeight={20}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('MockApprovalPrompt:height=11');
     });
 
     it('pendingConfirmation && !isFocused → renders queued marker (one-line)', () => {

@@ -69,6 +69,7 @@ export * from './core/insightProtocol.js';
 export * from './core/logger.js';
 export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
+export * from './core/session-recovery.js';
 export * from './core/tokenLimits.js';
 export * from './core/toolCallIdUtils.js';
 export * from './core/turn.js';

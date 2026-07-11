@@ -1,45 +1,37 @@
-.label {
-  font-size: 0.8125rem;
-  color: var(--text-secondary, #a0a0a0);
-  margin-bottom: 4px;
+/* Field styling (label + input + buttons) comes from the shared dialog
+   primitives (`.dialog-form`, `.dialog-inline-button`, `.dialog-primary-button`)
+   so the dialog tracks the active theme. Only the field grouping and the helper
+   text / error line are local. */
+
+/* Group the label, input, hint, and error tightly. They are siblings (not a
+   label wrapping the input) so the hint/error text stays out of the input's
+   accessible name — they're associated as descriptions via aria-describedby.
+   The shared `.dialog-form` gap is larger and meant for separating whole
+   fields. */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
-.input {
-  width: 100%;
-  padding: 8px 12px;
-  border-radius: 6px;
-  border: 1px solid var(--border-color, #333);
-  background: var(--input-bg, #1a1a1a);
-  color: var(--text-primary, #e0e0e0);
-  font-size: 0.875rem;
-  font-family: var(--font-mono, monospace);
-  outline: none;
+.hint {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
-.input:focus {
-  border-color: var(--accent-color, #7c5cff);
-}
-
-.input:disabled {
-  opacity: 0.5;
+/* Applied alongside the shared `dialog-footer-actions`. That primitive adds side
+   padding for standalone (picker) footers; here the footer lives inside
+   `.dialog-form`, which already pads its sides, so drop the horizontal padding to
+   line the buttons up with the input. The selector is doubled so it outranks the
+   primitive regardless of stylesheet order. */
+.footer.footer {
+  padding-left: 0;
+  padding-right: 0;
 }
 
 .error {
-  color: var(--error-color, #f44);
-  font-size: 0.8125rem;
-  margin-top: 4px;
-}
-
-.cancelButton {
-  padding: 6px 14px;
-  border-radius: 6px;
-  border: 1px solid var(--border-color, #333);
-  background: transparent;
-  color: var(--text-secondary, #a0a0a0);
-  cursor: pointer;
-  font-size: 0.8125rem;
-}
-
-.cancelButton:hover {
-  background: var(--hover-bg, #252525);
+  color: var(--error-color);
+  font-size: 12px;
+  line-height: 1.4;
 }
