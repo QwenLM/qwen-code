@@ -164,6 +164,8 @@ export interface ServerDetailStepProps {
   onViewResources?: () => void;
   /** 重新连接回调 */
   onReconnect?: () => void;
+  /** 审批服务器回调（解除 needs-approval 门控） */
+  onApprove?: () => void;
   /** 禁用服务器回调 */
   onDisable?: () => void;
   /** OAuth 认证回调 */

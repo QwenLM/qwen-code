@@ -28,6 +28,7 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import { isDaemonTurnError } from '@qwen-code/sdk/daemon';
 import type {
+  DaemonInputAnnotation,
   DaemonTranscriptBlock,
   DaemonSessionTaskStatus,
   DaemonSessionArtifact,
@@ -180,6 +181,7 @@ import {
   type TodoSnapshotDiff,
 } from './utils/todos';
 import { ThemeProvider } from './themeContext';
+import { InteractionBlockContext } from './interactionBlockContext';
 import {
   WebShellThemeId,
   THEME_SETTING_KEY,
@@ -201,6 +203,7 @@ import {
   type ComposerToolbarStartRenderer,
   type ComposerToolbarEndRenderer,
   type ComposerToolbarRightRenderer,
+  type ComposerHeaderRenderer,
   type FooterRenderer,
   type LoadingPhrasesResolver,
   type MarkdownTableMode,
@@ -335,6 +338,7 @@ interface ActiveGoalStatus {
 interface SendPromptOptionsWithRetry {
   optimisticUserMessage?: boolean;
   images?: PromptImage[];
+  inputAnnotations?: DaemonInputAnnotation[];
   retry?: boolean;
   clearComposerOnPromptStart?: boolean;
   commitComposerAccepted?: ComposerSubmitCommit;
@@ -479,6 +483,12 @@ export interface WebShellProps {
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
   renderWelcomeFooter?: WelcomeFooterRenderer;
+  /**
+   * Show renderWelcomeFooter between the welcome header and composer on
+   * mobile empty state. Requires renderWelcomeFooter to be provided for the
+   * mobile CSS reordering to take effect.
+   */
+  mobileWelcomeFooterMiddle?: boolean;
   /** Parse user-message text into display parts such as chips. */
   parseUserMessageContent?: UserMessageContentParser;
   /** Custom renderer for the inside of user chat bubbles. Defaults to plain text. */
@@ -497,6 +507,8 @@ export interface WebShellProps {
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   /** Custom renderer inserted into the composer toolbar's right-side action area. */
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;
+  /** Custom renderer shown directly above the chat composer input. */
+  renderComposerHeader?: ComposerHeaderRenderer;
   /** Custom component for the footer area below the Editor. Replaces the built-in StatusBar. */
   renderFooter?: FooterRenderer;
   /** Extra status items shown in the floating bottom panel beside the TODO summary. */
@@ -910,6 +922,7 @@ export function App({
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
+  mobileWelcomeFooterMiddle = false,
   parseUserMessageContent,
   renderUserMessageContent,
   renderComposerTag,
@@ -919,6 +932,7 @@ export function App({
   renderComposerToolbarStart,
   renderComposerToolbarEnd,
   renderComposerToolbarRight,
+  renderComposerHeader,
   renderFooter,
   bottomStatusItems,
   chatMaxWidth,
@@ -1030,12 +1044,12 @@ export function App({
   }, []);
   const customization = useMemo(
     () => ({
+      composerTagIcons,
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
       parseUserMessageContent,
       renderUserMessageContent,
-      composerTagIcons,
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
@@ -1043,6 +1057,7 @@ export function App({
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
+      renderComposerHeader,
       renderFooter,
       compactThinking,
       collapseCompletedTurns,
@@ -1051,12 +1066,12 @@ export function App({
       loadingPhrases,
     }),
     [
+      composerTagIcons,
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
       parseUserMessageContent,
       renderUserMessageContent,
-      composerTagIcons,
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
@@ -1064,6 +1079,7 @@ export function App({
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
+      renderComposerHeader,
       renderFooter,
       compactThinking,
       collapseCompletedTurns,
@@ -1073,6 +1089,7 @@ export function App({
     ],
   );
   const CustomFooter = renderFooter;
+  const CustomComposerHeader = renderComposerHeader;
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
@@ -2167,6 +2184,17 @@ export function App({
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
+  const [externalInteractionBlockCount, setExternalInteractionBlockCount] =
+    useState(0);
+  const registerInteractionBlocker = useCallback(() => {
+    let released = false;
+    setExternalInteractionBlockCount((count) => count + 1);
+    return () => {
+      if (released) return;
+      released = true;
+      setExternalInteractionBlockCount((count) => Math.max(0, count - 1));
+    };
+  }, []);
 
   // Refresh commands when extensions change (install/uninstall/update).
   const workspaceEventSignals = useWorkspaceEventSignals();
@@ -2340,6 +2368,7 @@ export function App({
       opts?: {
         optimisticUserMessage?: boolean;
         retry?: boolean;
+        inputAnnotations?: DaemonInputAnnotation[];
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
         onAdmitted?: () => void;
@@ -2397,6 +2426,7 @@ export function App({
       }
       const promptOptions: SendPromptOptionsWithRetry = {
         images,
+        inputAnnotations: opts?.inputAnnotations,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
         ...(opts?.onAdmitted ? { onAdmitted: opts.onAdmitted } : {}),
@@ -2458,6 +2488,7 @@ export function App({
     agentsDialogMode !== null ||
     showMemoryDialog ||
     showAuthDialog ||
+    externalInteractionBlockCount > 0 ||
     // The Settings / Daemon Status panel replaces the chat surface, so — like a
     // modal — it must suppress chat-only global shortcuts (Ctrl+L/O/Y, the
     // Shift+Tab mode cycle, the btw hotkey). Escape is intercepted earlier and
@@ -2517,6 +2548,7 @@ export function App({
       images?: PromptImage[],
       onComplete?: () => void,
       commitComposerAccepted?: ComposerSubmitCommit,
+      inputAnnotations?: DaemonInputAnnotation[],
     ) => {
       if (onSubmitBeforeRef.current) {
         onSubmitBeforeRef
@@ -2525,7 +2557,12 @@ export function App({
             prompt: text,
           })
           .then(() => {
-            const result = rawEnqueuePrompt(text, images, onComplete);
+            const result = rawEnqueuePrompt(
+              text,
+              images,
+              onComplete,
+              inputAnnotations,
+            );
             if (result !== false) {
               if (commitComposerAccepted) {
                 commitComposerAccepted();
@@ -2551,7 +2588,12 @@ export function App({
           });
         return false;
       }
-      const result = rawEnqueuePrompt(text, images, onComplete);
+      const result = rawEnqueuePrompt(
+        text,
+        images,
+        onComplete,
+        inputAnnotations,
+      );
       const sessionId = connectionRef.current.sessionId;
       if (sessionId && text.trim()) {
         dispatchSessionChangeRef.current?.({
@@ -3637,6 +3679,7 @@ export function App({
       text: string,
       images?: PromptImage[],
       commitComposerAccepted?: ComposerSubmitCommit,
+      metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
       if (connectionRef.current.loadingTranscript) {
         pushToast('warning', t('editor.sessionLoading'));
@@ -3655,7 +3698,11 @@ export function App({
         promptText: string,
         promptImages: PromptImage[] | undefined,
         errorMessage: string,
-        opts?: { optimisticUserMessage?: boolean; retry?: boolean },
+        opts?: {
+          optimisticUserMessage?: boolean;
+          retry?: boolean;
+          inputAnnotations?: DaemonInputAnnotation[];
+        },
       ) => {
         const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
         const clearComposerOnPromptStart =
@@ -3680,12 +3727,14 @@ export function App({
                 images,
                 undefined,
                 commitComposerAccepted,
+                metadata?.inputAnnotations,
               );
             }
             return submitPromptFromEditor(
               text,
               images,
               'Failed to send hidden slash command',
+              { inputAnnotations: metadata?.inputAnnotations },
             );
           }
           if (cmd === 'help') {
@@ -3865,12 +3914,14 @@ export function App({
                   images,
                   undefined,
                   commitComposerAccepted,
+                  metadata?.inputAnnotations,
                 );
               }
               return submitPromptFromEditor(
                 text,
                 images,
                 'Failed to send /model --fast',
+                { inputAnnotations: metadata?.inputAnnotations },
               );
             }
             if (modelArg === '--voice') {
@@ -3940,6 +3991,7 @@ export function App({
                   prompt,
                   images,
                   'Failed to send plan prompt',
+                  { inputAnnotations: metadata?.inputAnnotations },
                 );
               }
               return true;
@@ -3952,6 +4004,7 @@ export function App({
                 if (prompt) {
                   return sendPrompt(prompt, images, {
                     clearComposerOnPromptStart: true,
+                    inputAnnotations: metadata?.inputAnnotations,
                   }).catch((error: unknown) =>
                     reportError(error, 'Failed to send plan prompt'),
                   );
@@ -4040,12 +4093,14 @@ export function App({
                   images,
                   undefined,
                   commitComposerAccepted,
+                  metadata?.inputAnnotations,
                 );
               }
               return submitPromptFromEditor(
                 text,
                 images,
                 'Failed to send /skills command',
+                { inputAnnotations: metadata?.inputAnnotations },
               );
             } else {
               if (echoOrDeferLocalCommand(text, images)) return true;
@@ -4292,12 +4347,14 @@ export function App({
                   images,
                   undefined,
                   commitComposerAccepted,
+                  metadata?.inputAnnotations,
                 );
               }
               return submitPromptFromEditor(
                 text,
                 images,
                 'Failed to send /rename command',
+                { inputAnnotations: metadata?.inputAnnotations },
               );
             }
             const displayName = renameArg.displayName;
@@ -4487,9 +4544,17 @@ export function App({
         }
         // Forward slash commands as prompts
         if (promptBlocked) {
-          return enqueuePrompt(text, images, undefined, commitComposerAccepted);
+          return enqueuePrompt(
+            text,
+            images,
+            undefined,
+            commitComposerAccepted,
+            metadata?.inputAnnotations,
+          );
         }
-        return submitPromptFromEditor(text, images, 'Failed to send command');
+        return submitPromptFromEditor(text, images, 'Failed to send command', {
+          inputAnnotations: metadata?.inputAnnotations,
+        });
       } else if (text.startsWith('!')) {
         if (promptBlocked) {
           pushToast('error', t('queue.shellBlocked'));
@@ -4504,9 +4569,17 @@ export function App({
         return true;
       } else {
         if (promptBlocked) {
-          return enqueuePrompt(text, images, undefined, commitComposerAccepted);
+          return enqueuePrompt(
+            text,
+            images,
+            undefined,
+            commitComposerAccepted,
+            metadata?.inputAnnotations,
+          );
         }
-        return submitPromptFromEditor(text, images, 'Failed to send message');
+        return submitPromptFromEditor(text, images, 'Failed to send message', {
+          inputAnnotations: metadata?.inputAnnotations,
+        });
       }
     },
     [
@@ -4550,8 +4623,14 @@ export function App({
       text: string,
       images?: PromptImage[],
       commitComposerAccepted?: ComposerSubmitCommit,
+      metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
-      const accepted = handleSubmit(text, images, commitComposerAccepted);
+      const accepted = handleSubmit(
+        text,
+        images,
+        commitComposerAccepted,
+        metadata,
+      );
       if (accepted !== false) {
         resumeChatBottomFollow('smooth');
       }
@@ -4942,6 +5021,13 @@ export function App({
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
+  const useMobileWelcomeMiddleLayout =
+    isChatEmptyState && mobileWelcomeFooterMiddle;
+  const showMobileWelcomeFooterMiddle =
+    useMobileWelcomeMiddleLayout && Boolean(welcomeFooter);
+  const hasWelcomeMiddle = isChatEmptyState && showMobileWelcomeFooterMiddle;
+  const hasMobileComposerBottom =
+    isChatEmptyState && useMobileWelcomeMiddleLayout;
   const missingSession =
     connection.status !== 'connecting' &&
     !connection.sessionId &&
@@ -5326,11 +5412,15 @@ export function App({
             )}
             <div
               ref={chatPaneRef}
-              className={
-                mainView !== 'chat'
-                  ? `${styles.chatPane} ${styles.chatPaneShowingPage}`
-                  : styles.chatPane
-              }
+              className={[
+                styles.chatPane,
+                mainView !== 'chat' ? styles.chatPaneShowingPage : undefined,
+                hasMobileComposerBottom
+                  ? styles.chatPaneWithMobileComposerBottom
+                  : undefined,
+              ]
+                .filter(Boolean)
+                .join(' ')}
             >
               {sidebarOptions.enabled &&
                 !activePanel &&
@@ -5554,11 +5644,20 @@ export function App({
                 </div>
               )}
               <div
-                className={
+                className={[
+                  styles.chatViewWrap,
+                  hasMobileComposerBottom
+                    ? styles.chatViewWithMobileComposerBottom
+                    : undefined,
+                  hasWelcomeMiddle
+                    ? styles.chatViewWithWelcomeMiddle
+                    : undefined,
                   activePanel || mainView !== 'chat'
-                    ? `${styles.chatViewWrap} ${styles.chatViewHidden}`
-                    : styles.chatViewWrap
-                }
+                    ? styles.chatViewHidden
+                    : undefined,
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
                 // Hide the outer chat whenever a panel or a full-page view (split
                 // / scheduled tasks) is up. `display:none` drops the subtree from
                 // layout and the tab order, and aria-hidden keeps AT out — so no
@@ -5596,82 +5695,125 @@ export function App({
                         timeline={todoTimeline}
                         details={todoDetails}
                       >
-                        <div
-                          style={contentStyle}
-                          className={[
-                            styles.content,
-                            showFloatingTodos ||
-                            displayMessages.length > 0 ||
-                            pendingApproval
-                              ? styles.contentHasMessages
-                              : undefined,
-                          ]
-                            .filter(Boolean)
-                            .join(' ')}
+                        <InteractionBlockContext.Provider
+                          value={registerInteractionBlocker}
                         >
-                          <MessageList
-                            ref={messageListRef}
-                            messages={displayMessages}
-                            pendingApproval={pendingToolApproval}
-                            onShowContextDetail={handleShowContextDetail}
-                            loadingTranscript={connection.loadingTranscript}
-                            catchingUp={connection.catchingUp}
-                            isResponding={streamingState !== 'idle'}
-                            activeTurnStartedAt={activeTurnStartedAt}
-                            workspaceCwd={connection.workspaceCwd || ''}
-                            hideSessionTimeline={
-                              effectiveChatWidthMode === 'wide'
+                          {(() => {
+                            const contentClassName = [
+                              styles.content,
+                              showFloatingTodos ||
+                              displayMessages.length > 0 ||
+                              pendingApproval
+                                ? styles.contentHasMessages
+                                : undefined,
+                            ]
+                              .filter(Boolean)
+                              .join(' ');
+
+                            const messageList = (
+                            <MessageList
+                              ref={messageListRef}
+                              messages={displayMessages}
+                              pendingApproval={pendingToolApproval}
+                              onShowContextDetail={handleShowContextDetail}
+                              loadingTranscript={connection.loadingTranscript}
+                              catchingUp={connection.catchingUp}
+                              isResponding={streamingState !== 'idle'}
+                              activeTurnStartedAt={activeTurnStartedAt}
+                              workspaceCwd={connection.workspaceCwd || ''}
+                              hideSessionTimeline={
+                                effectiveChatWidthMode === 'wide'
+                              }
+                              showRetryHint={showRetryHint}
+                              onRetryClick={handleRetry}
+                              onBranchSession={handleBranchCurrentSession}
+                              bottomOverlayInset={bottomPanelInset}
+                              welcomeHeader={
+                                isChatEmptyState ? welcomeHeader : undefined
+                              }
+                              centerWelcomeHeader={
+                                showMobileWelcomeFooterMiddle || undefined
+                              }
+                              tailContent={undefined}
+                              tailKey={undefined}
+                              onCanScrollToBottomChange={
+                                handleCanScrollToBottomChange
+                              }
+                              virtualScrollThreshold={virtualScrollThreshold}
+                              turnFileChanges={
+                                visibleTurnOutputKinds.has('file')
+                                  ? fileChangesByTurn
+                                  : undefined
+                              }
+                              turnArtifacts={
+                                visibleTurnOutputKinds.has('artifact')
+                                  ? artifactsByTurn
+                                  : undefined
+                              }
+                              turnScheduledTasks={
+                                visibleTurnOutputKinds.has('scheduled_task')
+                                  ? scheduledTasksByTurn
+                                  : undefined
+                              }
+                              onTurnOutputOpen={handleTurnOutputOpen}
+                              onReviewChanges={openReviewPanel}
+                              onOpenArtifact={openArtifactPanel}
+                              onOpenScheduledTask={openScheduledTaskPanel}
+                            />
+                            );
+
+                            const btwPanel =
+                              !showMobileWelcomeFooterMiddle &&
+                              btwMessage?.role === 'btw' ? (
+                              <div className={styles.btwPanel}>
+                                <BtwMessage
+                                  question={btwMessage.question}
+                                  answer={btwMessage.answer}
+                                  isPending={btwMessage.isPending}
+                                />
+                              </div>
+                              ) : null;
+
+                            if (showMobileWelcomeFooterMiddle) {
+                              return (
+                                <div className={styles.mobileWelcomeGroup}>
+                                  <div
+                                    style={contentStyle}
+                                    className={contentClassName}
+                                  >
+                                    {messageList}
+                                    {btwPanel}
+                                  </div>
+                                  <div
+                                    className={styles.mobileWelcomeFooterMiddle}
+                                  >
+                                    {welcomeFooter}
+                                  </div>
+                                </div>
+                              );
                             }
-                            showRetryHint={showRetryHint}
-                            onRetryClick={handleRetry}
-                            onBranchSession={handleBranchCurrentSession}
-                            bottomOverlayInset={bottomPanelInset}
-                            welcomeHeader={
-                              isChatEmptyState ? welcomeHeader : undefined
-                            }
-                            tailContent={undefined}
-                            tailKey={undefined}
-                            onCanScrollToBottomChange={
-                              handleCanScrollToBottomChange
-                            }
-                            virtualScrollThreshold={virtualScrollThreshold}
-                            turnFileChanges={
-                              visibleTurnOutputKinds.has('file')
-                                ? fileChangesByTurn
-                                : undefined
-                            }
-                            turnArtifacts={
-                              visibleTurnOutputKinds.has('artifact')
-                                ? artifactsByTurn
-                                : undefined
-                            }
-                            turnScheduledTasks={
-                              visibleTurnOutputKinds.has('scheduled_task')
-                                ? scheduledTasksByTurn
-                                : undefined
-                            }
-                            onTurnOutputOpen={handleTurnOutputOpen}
-                            onReviewChanges={openReviewPanel}
-                            onOpenArtifact={openArtifactPanel}
-                            onOpenScheduledTask={openScheduledTaskPanel}
-                          />
-                          {btwMessage?.role === 'btw' && (
-                            <div className={styles.btwPanel}>
-                              <BtwMessage
-                                question={btwMessage.question}
-                                answer={btwMessage.answer}
-                                isPending={btwMessage.isPending}
-                              />
-                            </div>
-                          )}
-                        </div>
+                            return (
+                              <div
+                                style={contentStyle}
+                                className={contentClassName}
+                              >
+                                {messageList}
+                                {btwPanel}
+                              </div>
+                            );
+                          })()}
+                        </InteractionBlockContext.Provider>
                       </TodoContextsProvider>
                     </CompactModeContext.Provider>
 
                     <div
                       ref={footerRef}
                       style={contentStyle}
-                      className={styles.footer}
+                      className={
+                        CustomFooter
+                          ? `${styles.footer} ${styles.footerWithCustomFooter}`
+                          : styles.footer
+                      }
                     >
                       {canScrollMessageListToBottom && (
                         <div
@@ -5761,6 +5903,17 @@ export function App({
                           onInsert={insertQueuedPrompt}
                           onEdit={editQueuedPrompt}
                         />
+                        {CustomComposerHeader && (
+                          <div className={styles.composerHeader}>
+                            <CustomComposerHeader
+                              disabled={isDisabled}
+                              isRunning={streamingState !== 'idle'}
+                              currentMode={currentMode}
+                              currentModel={currentModel}
+                              sessionName={sessionDisplayName}
+                            />
+                          </div>
+                        )}
                         <ChatEditor
                           ref={setEditorHandle}
                           onSubmit={handleEditorSubmit}
@@ -5810,31 +5963,61 @@ export function App({
                         />
                       </div>
                       {CustomFooter ? (
-                        <CustomFooter
-                          connected={connected}
-                          mode={currentMode}
-                          model={currentModel}
-                          streamingState={streamingState}
-                          contextUsageRatio={
-                            (connection.contextWindow ?? 0) > 0
-                              ? (connection.tokenCount ?? 0) /
-                                (connection.contextWindow ?? 0)
-                              : 0
-                          }
-                          activeGoal={activeGoal}
-                          tasks={footerTasks}
-                          availableModes={MODES_CYCLE}
-                          availableModels={(connection.models ?? [])
-                            .filter(isVisibleComposerModel)
-                            .map((m) => ({
-                              id: m.id,
-                              label: getModelDisplayName(m.label || m.id),
-                              contextWindow: m.contextWindow,
-                            }))}
-                          skills={loadedSkills}
-                          onSelectMode={handleSetMode}
-                          onSelectModel={handleModelSelect}
-                        />
+                        hasMobileComposerBottom ? (
+                          <div className={styles.customFooter}>
+                            <CustomFooter
+                              connected={connected}
+                              mode={currentMode}
+                              model={currentModel}
+                              streamingState={streamingState}
+                              contextUsageRatio={
+                                (connection.contextWindow ?? 0) > 0
+                                  ? (connection.tokenCount ?? 0) /
+                                    (connection.contextWindow ?? 0)
+                                  : 0
+                              }
+                              activeGoal={activeGoal}
+                              tasks={footerTasks}
+                              availableModes={MODES_CYCLE}
+                              availableModels={(connection.models ?? [])
+                                .filter(isVisibleComposerModel)
+                                .map((m) => ({
+                                  id: m.id,
+                                  label: getModelDisplayName(m.label || m.id),
+                                  contextWindow: m.contextWindow,
+                                }))}
+                              skills={loadedSkills}
+                              onSelectMode={handleSetMode}
+                              onSelectModel={handleModelSelect}
+                            />
+                          </div>
+                        ) : (
+                          <CustomFooter
+                            connected={connected}
+                            mode={currentMode}
+                            model={currentModel}
+                            streamingState={streamingState}
+                            contextUsageRatio={
+                              (connection.contextWindow ?? 0) > 0
+                                ? (connection.tokenCount ?? 0) /
+                                  (connection.contextWindow ?? 0)
+                                : 0
+                            }
+                            activeGoal={activeGoal}
+                            tasks={footerTasks}
+                            availableModes={MODES_CYCLE}
+                            availableModels={(connection.models ?? [])
+                              .filter(isVisibleComposerModel)
+                              .map((m) => ({
+                                id: m.id,
+                                label: getModelDisplayName(m.label || m.id),
+                                contextWindow: m.contextWindow,
+                              }))}
+                            skills={loadedSkills}
+                            onSelectMode={handleSetMode}
+                            onSelectModel={handleModelSelect}
+                          />
+                        )
                       ) : (
                         <StatusBar
                           onSelectMode={() =>
@@ -5858,7 +6041,16 @@ export function App({
                         />
                       )}
                       {isChatEmptyState && welcomeFooter && (
-                        <div className={styles.emptyWelcomeFooter}>
+                        <div
+                          className={[
+                            styles.emptyWelcomeFooter,
+                            showMobileWelcomeFooterMiddle
+                              ? styles.desktopWelcomeFooter
+                              : undefined,
+                          ]
+                            .filter(Boolean)
+                            .join(' ')}
+                        >
                           {welcomeFooter}
                         </div>
                       )}

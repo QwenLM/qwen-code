@@ -121,6 +121,7 @@ export interface Key {
   sequence: string;
   kittyProtocol?: boolean;
   pasteImage?: boolean;
+  clipboardImageUnavailable?: boolean;
 }
 
 export type KeypressHandler = (key: Key) => void;
@@ -857,7 +858,10 @@ export function KeypressProvider({
             sequence: pasteBuffer.toString(),
           });
         } else {
-          const hasImage = await clipboardHasImage();
+          let clipboardImageUnavailable = false;
+          const hasImage = await clipboardHasImage(() => {
+            clipboardImageUnavailable = true;
+          });
           broadcast({
             name: '',
             ctrl: false,
@@ -865,6 +869,7 @@ export function KeypressProvider({
             shift: false,
             paste: true,
             pasteImage: hasImage,
+            clipboardImageUnavailable,
             sequence: pasteBuffer.toString(),
           });
         }

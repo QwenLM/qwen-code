@@ -230,6 +230,7 @@ import { useAttentionNotifications } from './hooks/useAttentionNotifications.js'
 import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
+import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
 import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 import {
@@ -1038,6 +1039,17 @@ export const AppContainer = (props: AppContainerProps) => {
     shellModeActive,
     preferredEditor,
   });
+  const restoredPromptStashTargetsRef = useRef(new Set<string>());
+  const promptStashTargetDir = config.getTargetDir();
+  useEffect(() => {
+    if (restoredPromptStashTargetsRef.current.has(promptStashTargetDir)) {
+      return;
+    }
+    restoredPromptStashTargetsRef.current.add(promptStashTargetDir);
+    restorePromptStash(promptStashTargetDir, buffer.text, (text) =>
+      buffer.setText(text),
+    );
+  }, [buffer, promptStashTargetDir]);
 
   useEffect(() => {
     const fetchUserMessages = async () => {
@@ -3743,6 +3755,7 @@ export const AppContainer = (props: AppContainerProps) => {
         handleSlashCommand('/ide status');
       } else if (
         keyMatchers[Command.SHOW_MORE_LINES](key) &&
+        buffer.text.length === 0 &&
         !enteringConstrainHeightMode
       ) {
         setConstrainHeight(false);

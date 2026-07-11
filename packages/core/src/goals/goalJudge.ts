@@ -48,34 +48,47 @@ const userJudgementPrompt = (condition: string): string =>
   `condition been satisfied? Answer based on transcript evidence only.\n` +
   `Condition JSON string: ${JSON.stringify(condition)}`;
 
+interface JudgeWireResult {
+  ok: boolean;
+  reason: string;
+  impossible?: boolean;
+}
+
 export interface JudgeResult {
   ok: boolean;
   reason: string;
-  /**
-   * Whether the goal is genuinely impossible in this session.
-   * Only meaningful when `ok` is false. If `ok` is true, this field is always
-   * absent from the parsed verdict.
-   */
   impossible?: boolean;
 }
+
+export type GoalJudgeOutcome =
+  | { kind: 'met'; ok: true; reason: string; impossible?: false }
+  | { kind: 'not_met'; ok: false; reason: string; impossible?: false }
+  | { kind: 'impossible'; ok: false; reason: string; impossible: true }
+  | {
+      kind: 'error';
+      ok: false;
+      reason: string;
+      impossible?: false;
+      message: string;
+    };
 
 export const JUDGE_RESULT_SCHEMA_KEYS = [
   'ok',
   'reason',
   'impossible',
-] as const satisfies ReadonlyArray<keyof JudgeResult>;
+] as const satisfies ReadonlyArray<keyof JudgeWireResult>;
 
-type SchemaCoversJudgeResult =
+type SchemaCoversJudgeWireResult =
   Exclude<
-    keyof JudgeResult,
+    keyof JudgeWireResult,
     (typeof JUDGE_RESULT_SCHEMA_KEYS)[number]
   > extends never
     ? true
     : never;
 
-// Compile-time only: fails if JudgeResult grows a key that the response schema
-// key list does not include.
-const JUDGE_RESULT_SCHEMA_COVERS_INTERFACE: SchemaCoversJudgeResult = true;
+// Compile-time only: fails if the model wire result grows a key that the
+// response schema key list does not include.
+const JUDGE_RESULT_SCHEMA_COVERS_INTERFACE: SchemaCoversJudgeWireResult = true;
 void JUDGE_RESULT_SCHEMA_COVERS_INTERFACE;
 
 const RESPONSE_SCHEMA: Schema & { additionalProperties: boolean } = {
@@ -93,9 +106,20 @@ const RESPONSE_SCHEMA: Schema & { additionalProperties: boolean } = {
   additionalProperties: false,
 };
 
+const JUDGE_ERROR_MESSAGE =
+  'Goal judge unavailable; the automatic /goal loop paused. The goal remains active.';
 const JUDGE_REASON_FALLBACK =
   'Goal judge unavailable; continue working toward the goal and run `/goal clear` to stop early.';
 const MAX_REASON_LEN = 240;
+
+function judgeErrorResult(): GoalJudgeOutcome {
+  return {
+    kind: 'error',
+    ok: false,
+    reason: JUDGE_REASON_FALLBACK,
+    message: JUDGE_ERROR_MESSAGE,
+  };
+}
 
 function reportGoalJudgeFailure(error: unknown, stage: string): void {
   void reportError(
@@ -127,10 +151,8 @@ const TRANSCRIPT_PART_CHAR_CAP = 4_000;
  * Calls a small fast model (or the main model if no fast model is configured)
  * to evaluate whether the goal condition holds after the latest turn.
  *
- * Any failure — timeout, non-JSON response, missing fields, aborted signal —
- * is converted into `{ok:false, reason:<fallback>}` so the /goal loop can keep
- * running and the user retains control via `/goal clear`. We deliberately fail
- * "not met" so a flaky judge never short-circuits a real goal.
+ * Failures are returned separately from model verdicts so a flaky evaluator
+ * cannot trigger another main-model turn.
  */
 export async function judgeGoal(
   config: Config,
@@ -139,10 +161,11 @@ export async function judgeGoal(
     lastAssistantText: string;
     signal: AbortSignal;
   },
-): Promise<JudgeResult> {
+): Promise<GoalJudgeOutcome> {
   const condition = args.condition.trim();
-  if (!condition) return { ok: false, reason: JUDGE_REASON_FALLBACK };
-  if (args.signal.aborted) return { ok: false, reason: JUDGE_REASON_FALLBACK };
+  if (!condition || args.signal.aborted) {
+    return judgeErrorResult();
+  }
 
   // Feed the conversation transcript (trailing N messages) plus the framed
   // judgement prompt. The hook input's `last_assistant_message` is appended
@@ -175,14 +198,12 @@ export async function judgeGoal(
 
     const text = extractText(response);
     if (!text) {
-      debugLogger.debug(
-        'Goal judge returned empty content; defaulting to not-met',
-      );
+      debugLogger.debug('Goal judge returned empty content; returning error');
       reportGoalJudgeFailure(
         new Error('Empty judge response'),
         'empty-response',
       );
-      return { ok: false, reason: JUDGE_REASON_FALLBACK };
+      return judgeErrorResult();
     }
     const parsed = parseJudgeReply(text);
     if (!parsed) {
@@ -193,15 +214,15 @@ export async function judgeGoal(
         new Error('Judge response was not parseable as JSON'),
         'parse',
       );
-      return { ok: false, reason: JUDGE_REASON_FALLBACK };
+      return judgeErrorResult();
     }
-    return parsed;
+    return toJudgeResult(parsed);
   } catch (err) {
     debugLogger.debug(
       `Goal judge threw: ${err instanceof Error ? err.message : String(err)}`,
     );
     reportGoalJudgeFailure(err, 'generate-content');
-    return { ok: false, reason: JUDGE_REASON_FALLBACK };
+    return judgeErrorResult();
   }
 }
 
@@ -343,7 +364,7 @@ function extractText(response: unknown): string {
     .trim();
 }
 
-function parseJudgeReply(text: string): JudgeResult | null {
+function parseJudgeReply(text: string): JudgeWireResult | null {
   const cleaned = stripCodeFence(text).trim();
   // Accept the JSON anywhere in the reply: tolerant to chatty preambles when
   // the model ignores structured-output mode.
@@ -359,19 +380,33 @@ function parseJudgeReply(text: string): JudgeResult | null {
   if (!payload || typeof payload !== 'object') return null;
   const ok = (payload as { ok?: unknown }).ok;
   const reason = (payload as { reason?: unknown }).reason;
-  if (typeof ok !== 'boolean') return null;
-  const reasonText =
-    typeof reason === 'string' && reason.trim()
-      ? reason.trim().slice(0, MAX_REASON_LEN)
-      : ok
-        ? 'Goal condition reported as met.'
-        : JUDGE_REASON_FALLBACK;
-  const impossible = (payload as { impossible?: unknown }).impossible === true;
+  const impossibleValue = (payload as { impossible?: unknown }).impossible;
+  if (typeof ok !== 'boolean' || typeof reason !== 'string' || !reason.trim()) {
+    return null;
+  }
+  if (impossibleValue !== undefined && typeof impossibleValue !== 'boolean') {
+    return null;
+  }
+  const reasonText = reason.trim().slice(0, MAX_REASON_LEN);
+  const impossible = impossibleValue === true;
   return {
     ok,
     reason: reasonText,
     ...(impossible && !ok ? { impossible: true } : {}),
   };
+}
+
+function toJudgeResult(result: JudgeWireResult): GoalJudgeOutcome {
+  if (result.ok) return { kind: 'met', ok: true, reason: result.reason };
+  if (result.impossible) {
+    return {
+      kind: 'impossible',
+      ok: false,
+      reason: result.reason,
+      impossible: true,
+    };
+  }
+  return { kind: 'not_met', ok: false, reason: result.reason };
 }
 
 function stripCodeFence(s: string): string {

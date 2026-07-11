@@ -84,6 +84,10 @@ import { openQwenAsrRealtimeStream } from '../voice/qwen-asr-realtime-session.js
 import { openVoiceStream } from '../voice/voice-stream-session.js';
 import { openVoiceStreamWithRetry } from '../voice/voice-stream-retry.js';
 import { VoiceIndicator } from './VoiceIndicator.js';
+import {
+  clearPromptStash,
+  savePromptStash,
+} from '../../services/prompt-stash.js';
 
 /**
  * Represents an attachment (e.g., pasted image) displayed above the input prompt
@@ -138,6 +142,27 @@ export function classifyPastedImagePaths(pasted: string): {
 
 const debugLogger = createDebugLogger('INPUT_PROMPT');
 
+export function expandPendingPastePlaceholders(
+  value: string,
+  pendingPastes: ReadonlyMap<string, string>,
+): string {
+  if (pendingPastes.size === 0) {
+    return value;
+  }
+  const placeholders = Array.from(pendingPastes.keys()).sort(
+    (a, b) => b.length - a.length,
+  );
+  const escapedPlaceholders = placeholders.map((placeholderValue) =>
+    placeholderValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+  );
+  const placeholderRegex = new RegExp(escapedPlaceholders.join('|'), 'g');
+  return value.replace(
+    placeholderRegex,
+    (matchedPlaceholder) =>
+      pendingPastes.get(matchedPlaceholder) ?? matchedPlaceholder,
+  );
+}
+
 export interface InputPromptProps {
   buffer: TextBuffer;
   onSubmit: (value: string) => void;
@@ -179,6 +204,7 @@ export interface InputPromptProps {
   promptSuggestion?: string | null;
   /** Called when prompt suggestion is dismissed (user typed) */
   onPromptSuggestionDismiss?: () => void;
+  clipboardUnavailableShownRef?: React.MutableRefObject<boolean>;
 }
 
 // Re-export from shared utils for backwards compatibility
@@ -212,6 +238,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   isEmbeddedShellFocused,
   promptSuggestion,
   onPromptSuggestionDismiss,
+  clipboardUnavailableShownRef: sessionClipboardUnavailableShownRef,
 }) => {
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
@@ -274,6 +301,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isAttachmentMode, setIsAttachmentMode] = useState(false);
   const [selectedAttachmentIndex, setSelectedAttachmentIndex] = useState(-1);
+  const localClipboardUnavailableShownRef = useRef(false);
+  const clipboardUnavailableShownRef =
+    sessionClipboardUnavailableShownRef ?? localClipboardUnavailableShownRef;
   // Large paste placeholder handling
   const [pendingPastes, setPendingPastes] = useState<Map<string, string>>(
     new Map(),
@@ -500,6 +530,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const showCursor =
     focus && isShellFocused && !isEmbeddedShellFocused && !agentTabBarFocused;
 
+  const targetDir = config.getTargetDir();
   const resetEscapeState = useCallback(() => {
     if (escapeTimerRef.current) {
       clearTimeout(escapeTimerRef.current);
@@ -559,18 +590,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Expand any large paste placeholders to their full content before submitting
       let finalValue = submittedValue;
       if (pendingPastes.size > 0) {
-        const placeholders = Array.from(pendingPastes.keys()).sort(
-          (a, b) => b.length - a.length,
-        );
-        const escapedPlaceholders = placeholders.map((placeholderValue) =>
-          placeholderValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-        );
-        const placeholderRegex = new RegExp(escapedPlaceholders.join('|'), 'g');
-        finalValue = finalValue.replace(
-          placeholderRegex,
-          (matchedPlaceholder) =>
-            pendingPastes.get(matchedPlaceholder) ?? matchedPlaceholder,
-        );
+        finalValue = expandPendingPastePlaceholders(finalValue, pendingPastes);
         setPendingPastes(new Map());
         activePlaceholderIds.current.clear();
       }
@@ -589,6 +609,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Clear the buffer *before* calling onSubmit to prevent potential re-submission
       // if onSubmit triggers a re-render while the buffer still holds the old value.
       buffer.setText('');
+      clearPromptStash(targetDir);
       onSubmit(finalValue);
 
       // Reset history navigation so the next Up-arrow starts from the newest
@@ -621,6 +642,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       resetReverseSearchCompletionState,
       attachments,
       config,
+      targetDir,
       pendingPastes,
       followup,
       onPromptSuggestionDismiss,
@@ -686,32 +708,54 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     resetCommandSearchCompletionState,
   ]);
 
-  // Handle clipboard image pasting with Ctrl+V
-  const handleClipboardImage = useCallback(async (validated = false) => {
-    try {
-      const hasImage = validated || (await clipboardHasImage());
-      if (hasImage) {
-        const imagePath = await saveClipboardImage(Storage.getGlobalTempDir());
-        if (imagePath) {
-          // Clean up old images
-          cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {
-            // Ignore cleanup errors
-          });
-
-          // Add as attachment instead of inserting @reference into text
-          const filename = path.basename(imagePath);
-          const newAttachment: Attachment = {
-            id: String(Date.now()),
-            path: imagePath,
-            filename,
-          };
-          setAttachments((prev) => [...prev, newAttachment]);
-        }
-      }
-    } catch (error) {
-      debugLogger.error('Error handling clipboard image:', error);
+  const reportClipboardUnavailable = useCallback(() => {
+    if (clipboardUnavailableShownRef.current) {
+      return;
     }
-  }, []);
+    clipboardUnavailableShownRef.current = true;
+    uiState.historyManager?.addItem(
+      {
+        type: 'error',
+        text: t(
+          'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+        ),
+      },
+      Date.now(),
+    );
+  }, [clipboardUnavailableShownRef, uiState.historyManager]);
+
+  // Handle clipboard image pasting with Ctrl+V
+  const handleClipboardImage = useCallback(
+    async (validated = false) => {
+      try {
+        const hasImage =
+          validated || (await clipboardHasImage(reportClipboardUnavailable));
+        if (hasImage) {
+          const imagePath = await saveClipboardImage(
+            Storage.getGlobalTempDir(),
+          );
+          if (imagePath) {
+            // Clean up old images
+            cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {
+              // Ignore cleanup errors
+            });
+
+            // Add as attachment instead of inserting @reference into text
+            const filename = path.basename(imagePath);
+            const newAttachment: Attachment = {
+              id: String(Date.now()),
+              path: imagePath,
+              filename,
+            };
+            setAttachments((prev) => [...prev, newAttachment]);
+          }
+        }
+      } catch (error) {
+        debugLogger.error('Error handling clipboard image:', error);
+      }
+    },
+    [reportClipboardUnavailable],
+  );
 
   // Promote a paste that is purely image-file path(s) (e.g. a terminal/clipboard
   // helper that injects `@<path>` text on Cmd+V) into attachment chips, so the
@@ -967,6 +1011,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
         // Ensure we never accidentally interpret paste as regular input.
         const pastedImagePaths = classifyPastedImagePaths(pasted);
+        if (key.clipboardImageUnavailable) {
+          reportClipboardUnavailable();
+        }
         if (key.pasteImage) {
           handleClipboardImage(true);
         } else if (
@@ -992,6 +1039,24 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           // Normal paste handling for small content
           buffer.handleInput(key);
         }
+        return true;
+      }
+
+      if (keyMatchers[Command.SHOW_MORE_LINES](key) && buffer.text.length > 0) {
+        const textToStash = expandPendingPastePlaceholders(
+          buffer.text,
+          pendingPastes,
+        );
+        const saved = savePromptStash(targetDir, textToStash);
+        uiState.historyManager?.addItem(
+          {
+            type: saved ? 'info' : 'error',
+            text: saved
+              ? t('Prompt stashed. It will be restored next time.')
+              : t('Failed to stash prompt.'),
+          },
+          Date.now(),
+        );
         return true;
       }
 
@@ -1705,6 +1770,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       shellHistory,
       reverseSearchCompletion,
       handleClipboardImage,
+      reportClipboardUnavailable,
       promotePastedImagePaths,
       resetCompletionState,
       dismissCompletion,
@@ -1754,6 +1820,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       isHistoryRestoredText,
       showCompletionSuggestions,
       voiceInput,
+      targetDir,
     ],
   );
 

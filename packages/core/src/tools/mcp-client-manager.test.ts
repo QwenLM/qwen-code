@@ -1471,6 +1471,72 @@ describe('McpClientManager', () => {
     neverResolve();
   });
 
+  it('runs automatic OAuth outside the discovery timeout before reconnecting', async () => {
+    const order: string[] = [];
+    const connect = vi.fn().mockImplementation(async () => {
+      order.push('connect');
+    });
+    const discover = vi.fn().mockImplementation(async () => {
+      order.push('discover');
+    });
+    vi.mocked(McpClient).mockImplementation(
+      () =>
+        ({
+          connect,
+          discover,
+          disconnect: vi.fn().mockResolvedValue(undefined),
+          getStatus: vi.fn(),
+        }) as unknown as McpClient,
+    );
+    const mcpClientModule = await import('./mcp-client.js');
+    const authenticate = vi
+      .spyOn(mcpClientModule, 'attemptAutomaticMcpOAuth')
+      .mockImplementation(async () => {
+        order.push('authenticate');
+        return true;
+      });
+    const probe = vi
+      .spyOn(mcpClientModule, 'probeMcpServerForOAuth')
+      .mockImplementation(async () => {
+        order.push('probe');
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        return true;
+      });
+    const serverConfig = {
+      httpUrl: 'https://example.com/mcp',
+      discoveryTimeoutMs: 50,
+    };
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ oauth: serverConfig }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () =>
+        ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+      isInteractive: () => true,
+      isBrowserLaunchSuppressed: () => false,
+    } as unknown as Config;
+    const manager = mkManager({ config: mockConfig });
+
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+
+    expect(probe).toHaveBeenCalledWith('oauth', serverConfig);
+    expect(authenticate).toHaveBeenCalledWith('oauth', serverConfig, true);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(discover).toHaveBeenCalledTimes(2);
+    expect(order).toEqual([
+      'connect',
+      'discover',
+      'probe',
+      'authenticate',
+      'connect',
+      'discover',
+    ]);
+  });
+
   it('discoverAllMcpToolsIncremental skips servers flagged as disabled', async () => {
     // PR-A regression guard: the new incremental path used to iterate
     // `Object.entries(servers)` without consulting `isMcpServerDisabled`,
