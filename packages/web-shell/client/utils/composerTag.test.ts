@@ -216,6 +216,88 @@ describe('composer tag input annotations', () => {
     ]);
   });
 
+  it('returns no annotations for empty tags', () => {
+    expect(
+      createInputAnnotationsFromComposerTags('show @Makefile', []),
+    ).toEqual([]);
+  });
+
+  it('skips tags whose serialized text is absent from the prompt', () => {
+    expect(
+      createInputAnnotationsFromComposerTags('show @Makefile', [
+        {
+          id: 'file:@LICENSE',
+          kind: 'file',
+          value: 'LICENSE',
+          serialized: '@LICENSE',
+        },
+        {
+          id: 'file:@Makefile',
+          kind: 'file',
+          value: 'Makefile',
+          serialized: '@Makefile',
+        },
+      ]),
+    ).toEqual([
+      {
+        type: 'reference',
+        start: 5,
+        end: 14,
+        text: '@Makefile',
+        reference: {
+          id: 'file:@Makefile',
+          kind: 'file',
+          value: 'Makefile',
+          serialized: '@Makefile',
+        },
+      },
+    ]);
+  });
+
+  it('matches repeated serialized references in order', () => {
+    expect(
+      createInputAnnotationsFromComposerTags('@file @file', [
+        {
+          id: 'file:first',
+          kind: 'file',
+          value: 'first',
+          serialized: '@file',
+        },
+        {
+          id: 'file:second',
+          kind: 'file',
+          value: 'second',
+          serialized: '@file',
+        },
+      ]),
+    ).toEqual([
+      {
+        type: 'reference',
+        start: 0,
+        end: 5,
+        text: '@file',
+        reference: {
+          id: 'file:first',
+          kind: 'file',
+          value: 'first',
+          serialized: '@file',
+        },
+      },
+      {
+        type: 'reference',
+        start: 6,
+        end: 11,
+        text: '@file',
+        reference: {
+          id: 'file:second',
+          kind: 'file',
+          value: 'second',
+          serialized: '@file',
+        },
+      },
+    ]);
+  });
+
   it('uses annotations for custom provider references', () => {
     expect(
       splitComposerTagContentByAnnotations('open @dataset:users now', [
@@ -369,5 +451,48 @@ describe('composer tag input annotations', () => {
         },
       ]),
     ).toEqual([{ type: 'text', text: 'list @.qwen/ files' }]);
+  });
+
+  it('skips overlapping annotations', () => {
+    expect(
+      splitComposerTagContentByAnnotations('open @one @two', [
+        {
+          type: 'reference',
+          start: 5,
+          end: 9,
+          text: '@one',
+          reference: {
+            id: 'file:@one',
+            kind: 'file',
+            value: 'one',
+            serialized: '@one',
+          },
+        },
+        {
+          type: 'reference',
+          start: 8,
+          end: 13,
+          text: 'e @tw',
+          reference: {
+            id: 'file:overlap',
+            kind: 'file',
+            value: 'overlap',
+            serialized: 'e @tw',
+          },
+        },
+      ]),
+    ).toEqual([
+      { type: 'text', text: 'open ' },
+      {
+        type: 'reference',
+        tag: {
+          id: 'file:@one',
+          kind: 'file',
+          value: 'one',
+          serialized: '@one',
+        },
+      },
+      { type: 'text', text: ' @two' },
+    ]);
   });
 });

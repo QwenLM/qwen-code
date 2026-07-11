@@ -438,12 +438,15 @@ export function useQueuedPrompts({
       const submitAbort = new AbortController();
       submitAbortControllersRef.current.add(submitAbort);
       const queuedImages = images ? [...images] : undefined;
+      const queuedAnnotations = inputAnnotations
+        ? [...inputAnnotations]
+        : undefined;
       const nextPrompt: QueuedPrompt = {
         id: localId,
         sessionId: targetSessionId,
         text: trimmed,
         images: queuedImages,
-        inputAnnotations,
+        inputAnnotations: queuedAnnotations,
         onComplete,
         serverState: 'submitting',
       };
@@ -453,7 +456,7 @@ export function useQueuedPrompts({
       sessionActions
         .submitPrompt(trimmed, {
           images,
-          inputAnnotations,
+          inputAnnotations: queuedAnnotations,
           optimisticUserMessage: false,
           sessionId: targetSessionId,
           signal: submitAbort.signal,
@@ -479,7 +482,9 @@ export function useQueuedPrompts({
               store.appendLocalUserMessage(
                 trimmed,
                 toStoreImages(queuedImages),
-                inputAnnotations?.length ? { inputAnnotations } : undefined,
+                queuedAnnotations?.length
+                  ? { inputAnnotations: queuedAnnotations }
+                  : undefined,
               );
             }
             const next = queuedPromptsRef.current.filter(
