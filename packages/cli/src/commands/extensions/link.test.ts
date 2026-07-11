@@ -111,7 +111,7 @@ describe('handleLink', () => {
     await handleLink({ path: '/some/local/path' });
 
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
-      'Link committed but could not be reloaded.',
+      'Warning: Link committed but could not be reloaded.',
     );
     expect(processExitSpy).not.toHaveBeenCalled();
 

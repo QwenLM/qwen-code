@@ -41,7 +41,11 @@ export interface ExtensionActivationResult {
   default: ExtensionActivation;
   workspace: WorkspaceActivation;
   effective: ExtensionActivation;
-  source: 'workspace_override' | 'legacy_path_rule' | 'default';
+  source:
+    | 'cli_override'
+    | 'workspace_override'
+    | 'legacy_path_rule'
+    | 'default';
 }
 
 export interface ExtensionStoreOptions {

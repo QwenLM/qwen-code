@@ -679,12 +679,20 @@ export class ExtensionManager {
   ): Promise<ExtensionActivationResult> {
     const extension = this.findExtensionById(extensionId);
     const snapshot = await this.extensionStore.readSnapshot();
-    return this.extensionStore.getActivation(
+    const activation = this.extensionStore.getActivation(
       snapshot,
       extension.id,
       extension.name,
       workspacePath,
     );
+    if (this.enabledExtensionNamesOverride.length === 0) {
+      return activation;
+    }
+    return {
+      ...activation,
+      effective: this.isEnabled(extension.name) ? 'enabled' : 'disabled',
+      source: 'cli_override',
+    };
   }
 
   async setExtensionDefaultActivation(

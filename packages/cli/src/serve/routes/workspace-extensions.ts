@@ -257,6 +257,14 @@ export function registerWorkspaceExtensionRoutes(
                 generation,
               ),
             );
+          } else {
+            writeStderrLine(
+              `qwen serve: extension generation reconciliation failed for workspace ${runtimes[index]!.workspaceId}: ${redactUrlCredentials(
+                result.reason instanceof Error
+                  ? result.reason.message
+                  : String(result.reason),
+              )}`,
+            );
           }
         });
         if (results.every((result) => result.status === 'fulfilled')) {

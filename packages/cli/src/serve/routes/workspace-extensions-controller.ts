@@ -601,7 +601,10 @@ export function createExtensionsController(
               },
               warnings: [
                 ...commitWarnings,
-                { workspaceCwd: boundWorkspace, error: message },
+                {
+                  workspaceCwd: boundWorkspace,
+                  error: message.slice(0, 500),
+                },
               ],
             });
             try {
@@ -665,6 +668,9 @@ export function createExtensionsController(
           }
           updateExtensionOperation(operationId, {
             status: 'succeeded_with_warnings',
+            ...(mutationEvent
+              ? { result: redactExtensionOperationResult(mutationEvent) }
+              : {}),
             warnings,
           });
           try {

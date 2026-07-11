@@ -2879,7 +2879,11 @@ export interface WorkspaceExtensionProjectionEntry {
   defaultActivation: ExtensionActivationState;
   workspaceActivation: ExtensionWorkspaceActivation;
   effectiveActivation: ExtensionActivationState;
-  activationSource: 'workspace_override' | 'legacy_path_rule' | 'default';
+  activationSource:
+    | 'cli_override'
+    | 'workspace_override'
+    | 'legacy_path_rule'
+    | 'default';
 }
 
 export interface WorkspaceExtensionProjection {

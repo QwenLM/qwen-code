@@ -1684,6 +1684,12 @@ describe('extension tests', () => {
       const extensions = manager.getLoadedExtensions();
 
       expect(extensions.every((e) => !e.isActive)).toBe(true);
+      await expect(
+        manager.getExtensionActivation(extensions[0]!.id),
+      ).resolves.toMatchObject({
+        effective: 'disabled',
+        source: 'cli_override',
+      });
     });
 
     it('should treat "none" as disabling all only when it is the sole override', async () => {

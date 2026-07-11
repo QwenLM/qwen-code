@@ -435,7 +435,10 @@ describe('extension management v2 REST', () => {
 
       await expect(
         pollOperation(h.app, started.body.operationId),
-      ).resolves.toMatchObject({ status: 'succeeded_with_warnings' });
+      ).resolves.toMatchObject({
+        status: 'succeeded_with_warnings',
+        result: { status: 'disabled', name: 'demo' },
+      });
       expect(h.primary.bridge.broadcastExtensionsChanged).toHaveBeenCalledWith(
         expect.objectContaining({ status: 'disabled', failed: 1 }),
       );
@@ -463,6 +466,11 @@ describe('extension management v2 REST', () => {
       expect(
         h.secondary.bridge.refreshExtensionsForAllSessions,
       ).toHaveBeenCalledTimes(2);
+      expect(process.stderr.write).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `extension generation reconciliation failed for workspace ${h.secondary.workspaceId}`,
+        ),
+      );
     } finally {
       (
         h.app.locals as { stopExtensionGenerationReconciler?: () => void }
