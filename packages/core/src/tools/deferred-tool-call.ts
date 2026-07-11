@@ -9,6 +9,13 @@ import type { ToolInvocation, ToolResult } from './tools.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
 
+/**
+ * Provider-facing envelope for calling a hidden deferred tool.
+ *
+ * `name` is the real deferred tool name returned by `tool_search`; `arguments`
+ * is passed through to that target after the scheduler validates that the
+ * target schema was already presented in the current conversation.
+ */
 export interface DeferredToolCallParams {
   name: string;
   arguments: Record<string, unknown>;
@@ -23,6 +30,9 @@ class DeferredToolCallInvocation extends BaseToolInvocation<
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
+    // This invocation is a defensive fallback. In normal operation,
+    // CoreToolScheduler.normalizeDeferredToolCall rewrites the request to the
+    // real target tool before build/execute, so this wrapper should never run.
     const message =
       '`deferred_tool_call` is a transport wrapper and must be normalized by the scheduler before execution. Use `tool_search` to fetch a deferred tool schema, then call `deferred_tool_call` with that real target name.';
     return {
@@ -41,6 +51,9 @@ export class DeferredToolCallTool extends BaseDeclarativeTool<
   ToolResult
 > {
   constructor() {
+    // Keep this schema stable in the provider's function-declaration list. The
+    // actual deferred tool schemas are returned as text by ToolSearch and routed
+    // through this wrapper, avoiding provider-side tool-list mutations.
     super(
       ToolNames.DEFERRED_TOOL_CALL,
       ToolDisplayNames.DEFERRED_TOOL_CALL,

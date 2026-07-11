@@ -11885,6 +11885,10 @@ describe('CoreToolScheduler validation retry loop detection', () => {
       getAllTools: () => [],
       getAllToolNames: () => [StrictStringTool.Name],
       getToolsByServer: () => [],
+      isProxyEligibleDeferredTool: (name: string) =>
+        name === StrictStringTool.Name,
+      hasPresentedProxySchema: (name: string) => name === StrictStringTool.Name,
+      markProxySchemaPresented: () => true,
     } as unknown as ToolRegistry;
 
     const mockConfig = {
@@ -11990,6 +11994,38 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     // Turn 3: same bad params — should trigger directive
     await scheduler.schedule(
       [makeRequest('c3', 'strictStringTool', { value: {} })],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('should keep validation retry counts for proxied deferred target failures', async () => {
+    const tool = new StrictStringTool();
+    const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
+
+    const proxyArgs = {
+      name: StrictStringTool.Name,
+      arguments: { value: {} },
+    };
+
+    await scheduler.schedule(
+      [makeRequest('p1', ToolNames.DEFERRED_TOOL_CALL, proxyArgs)],
+      new AbortController().signal,
+    );
+    let msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toBeDefined();
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    await scheduler.schedule(
+      [makeRequest('p2', ToolNames.DEFERRED_TOOL_CALL, proxyArgs)],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    await scheduler.schedule(
+      [makeRequest('p3', ToolNames.DEFERRED_TOOL_CALL, proxyArgs)],
       new AbortController().signal,
     );
     msg = getLastErrorMessage(onToolCallsUpdate);

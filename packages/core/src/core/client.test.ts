@@ -502,6 +502,7 @@ describe('Gemini Client (client.ts)', () => {
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       clearRevealedDeferredTools: vi.fn(),
       revealDeferredTool: vi.fn(),
+      markProxySchemaPresented: vi.fn(),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getTool: vi.fn().mockReturnValue(null),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
@@ -1180,6 +1181,7 @@ describe('Gemini Client (client.ts)', () => {
         getTool: ReturnType<typeof vi.fn>;
         isDeferredToolRevealed: ReturnType<typeof vi.fn>;
         revealDeferredTool: ReturnType<typeof vi.fn>;
+        markProxySchemaPresented: ReturnType<typeof vi.fn>;
       };
     }
 
@@ -1214,6 +1216,40 @@ describe('Gemini Client (client.ts)', () => {
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_create');
       // cron_list NOT in history → must NOT be revealed by the resume scan.
       expect(reg.revealDeferredTool).not.toHaveBeenCalledWith('cron_list');
+    });
+
+    it('restores proxy presentations that appear in resumed deferred_tool_call history', async () => {
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+        { name: 'cron_list', description: 'list' },
+      ]);
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.markProxySchemaPresented.mockClear();
+
+      await client.startChat([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                args: {
+                  name: 'cron_create',
+                  arguments: { schedule: '0 9 * * *' },
+                },
+              },
+            } as never,
+          ],
+        },
+      ]);
+
+      expect(reg.markProxySchemaPresented).toHaveBeenCalledWith('cron_create');
+      expect(reg.markProxySchemaPresented).not.toHaveBeenCalledWith(
+        'cron_list',
+      );
     });
 
     it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {

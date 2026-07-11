@@ -148,6 +148,11 @@ export interface ToolCallResponseInfo {
   contentLength?: number;
   modelOverride?: string;
   artifacts?: ToolArtifact[];
+  /**
+   * Deferred tool schemas that were shown to the model by this response and
+   * can be committed after the response is accepted into the conversation.
+   * Used by ToolSearch + deferred_tool_call routing; not sent to the provider.
+   */
   deferredToolPresentations?: string[];
 }
 

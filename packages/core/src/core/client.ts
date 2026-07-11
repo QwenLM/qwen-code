@@ -1265,6 +1265,13 @@ export class GeminiClient {
                 const callName = part.functionCall?.name;
                 if (callName && deferredNames.has(callName)) {
                   toolRegistry.revealDeferredTool(callName);
+                  continue;
+                }
+                if (callName === ToolNames.DEFERRED_TOOL_CALL) {
+                  const targetName = part.functionCall?.args?.['name'];
+                  if (typeof targetName === 'string') {
+                    toolRegistry.markProxySchemaPresented(targetName);
+                  }
                 }
               }
             }

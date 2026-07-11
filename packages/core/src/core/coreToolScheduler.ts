@@ -1787,6 +1787,13 @@ export class CoreToolScheduler {
     return `Tool "${unknownToolName}" not found in registry. Tools must use the exact names that are registered.${suggestion}`;
   }
 
+  /**
+   * Convert the stable provider-facing `deferred_tool_call` wrapper into the
+   * real deferred tool request used internally. The scheduler should run
+   * permissions, validation, hooks, execution, and telemetry against the real
+   * target, while function responses still use `providerName` so the provider
+   * sees the declared wrapper tool name.
+   */
   private async normalizeDeferredToolCall(
     request: ToolCallRequestInfo,
   ): Promise<ToolCallRequestInfo | Error> {
@@ -1829,6 +1836,9 @@ export class CoreToolScheduler {
         `Tool "${canonicalTarget}" is not eligible for deferred_tool_call. Call directly if it is visible, or use tool_search for deferred tools.`,
       );
     }
+    // The proxy may only route to schemas already shown in this active context.
+    // This prevents the model from guessing hidden tool names/params and also
+    // invalidates stale presentations when a tool's schema fingerprint changes.
     if (!this.toolRegistry.hasPresentedProxySchema(canonicalTarget)) {
       return new Error(
         `Schema for deferred tool "${canonicalTarget}" has not been fetched in the active context. Use tool_search first, then call deferred_tool_call on a later turn.`,
@@ -1839,6 +1849,9 @@ export class CoreToolScheduler {
       ...request,
       name: canonicalTarget,
       args: targetArgs as Record<string, unknown>,
+      // Function responses must match the declared provider tool name. The real
+      // target remains internal because hidden deferred tools are intentionally
+      // absent from the provider's function-declaration list.
       providerName: ToolNames.DEFERRED_TOOL_CALL,
       providerArgs: request.args,
     };
@@ -2031,7 +2044,16 @@ export class CoreToolScheduler {
       // unrelated tools to survive and fire RETRY LOOP DETECTED prematurely
       // the next time those tools were used.
       if (this.validationRetryCounts.size > 0) {
-        const currentToolNames = new Set(requestsToProcess.map((r) => r.name));
+        const currentToolNames = new Set<string>();
+        for (const requestToProcess of requestsToProcess) {
+          currentToolNames.add(requestToProcess.name);
+          if (requestToProcess.name === ToolNames.DEFERRED_TOOL_CALL) {
+            const targetName = requestToProcess.args['name'];
+            if (typeof targetName === 'string') {
+              currentToolNames.add(canonicalToolName(targetName));
+            }
+          }
+        }
         for (const key of [...this.validationRetryCounts.keys()]) {
           const sep = key.indexOf(':');
           const toolName = sep === -1 ? key : key.slice(0, sep);
@@ -4779,6 +4801,12 @@ export class CoreToolScheduler {
     }
   }
 
+  /**
+   * Commit deferred tool schemas that were actually delivered to the model in
+   * successful tool results. `tool_search` returns these names on its ToolResult;
+   * once the result has been accepted into the conversation flow, the registry
+   * can allow later `deferred_tool_call` requests to route to those real tools.
+   */
   private commitDeferredToolPresentations(
     completedCalls: CompletedToolCall[],
   ): void {
