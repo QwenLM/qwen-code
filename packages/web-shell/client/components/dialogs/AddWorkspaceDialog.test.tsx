@@ -145,4 +145,30 @@ describe('AddWorkspaceDialog', () => {
     expect(alert()?.textContent).toBe('Failed to add workspace');
     expect(onClose).not.toHaveBeenCalled();
   });
+
+  it('shows the adding state and disables controls while submitting', async () => {
+    let resolveAdd!: () => void;
+    const onAdd = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveAdd = resolve;
+        }),
+    );
+    mount(<AddWorkspaceDialog onClose={vi.fn()} onAdd={onAdd} />);
+
+    type('/abs/project');
+    submit();
+
+    // The awaited onAdd is still pending, so the dialog stays in its submitting
+    // state: the button shows the localized "Adding…" label and the controls
+    // are disabled.
+    expect(submitButton().textContent).toBe('Adding…');
+    expect(submitButton().disabled).toBe(true);
+    expect(input().disabled).toBe(true);
+
+    resolveAdd();
+    await act(async () => {
+      await Promise.resolve();
+    });
+  });
 });

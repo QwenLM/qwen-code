@@ -385,6 +385,40 @@ describe('WebShellSidebar — workspace picker', () => {
     ).toBeGreaterThan(callsBefore);
   });
 
+  it('does not open the inline rename form on a read-only (non-primary) row', async () => {
+    mockConnection.sessionId = 'shared';
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([
+      makeSession('shared'),
+    ]);
+    const { container } = renderSidebar(false);
+    await flushSessionPoll();
+
+    // Expand the non-primary workspace so its read-only copy of the shared
+    // session renders too.
+    const other = workspaceButtons(container).find((b) =>
+      b.textContent?.includes('other'),
+    );
+    act(() => {
+      other?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSessionPoll();
+
+    const rows = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).filter((el) => el.textContent?.includes('Session shared'));
+    expect(rows).toHaveLength(2);
+
+    // Double-click the primary (current-session) row to start a rename.
+    act(() => {
+      rows[0].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+
+    // Only the primary row opens the rename input; the read-only row stays
+    // plain, even though it holds the same (now-editing) session id.
+    expect(container.querySelectorAll('input')).toHaveLength(1);
+  });
+
   it('does not render secondary workspace entries with a single workspace', () => {
     mockWorkspace.capabilities = {
       qwenCodeVersion: '1.2.3',
