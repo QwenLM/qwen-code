@@ -1879,6 +1879,16 @@ export class BridgeClient implements Client {
     if (typeof params.limit === 'number' && params.limit <= 0) {
       return { content: '' };
     }
+    if (
+      typeof params.limit === 'number' &&
+      params.limit > 0 &&
+      !Number.isSafeInteger(params.limit)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`limit` must be a positive integer.',
+      );
+    }
     // BSA0E: cap the file size we'll buffer into RSS at 100 MiB so a
     // request like `{ line: 1, limit: 10 }` against a 500 MB log
     // doesn't cost the daemon 500 MB of memory just to return 10
