@@ -52,8 +52,8 @@
 
 **Files:**
 
-- Create: `packages/chrome-extension/scripts/manifest-version.ts`
-- Create: `packages/chrome-extension/scripts/manifest-version.test.ts`
+- Create: `packages/chrome-extension/scripts/manifest-version.js`
+- Create: `packages/chrome-extension/scripts/manifest-version.test.js`
 - Modify: `packages/chrome-extension/scripts/sync-extension.js`
 - Modify: `packages/chrome-extension/package.json`
 
@@ -73,3 +73,43 @@
 2. Remove stale claims about content scripts and an extension-hosted MCP server.
 3. Run Prettier, extension tests, typecheck, production build, package, and `git diff --check`.
 4. Review the final diff for scope and regressions before commit/PR handoff.
+
+### Task 6: Runtime MCP diagnostics
+
+**Files:**
+
+- Modify: `packages/chrome-extension/src/sidepanel/capability-status.ts`
+- Modify: `packages/chrome-extension/src/sidepanel/capability-status.test.ts`
+- Modify: `packages/chrome-extension/public/sidepanel.js`
+
+1. Add failing reducer tests for a connected `/cdp` runtime MCP, a pending runtime MCP, and an existing static `chrome-devtools` configuration that shadows the extension route.
+2. Extend the reducer with the minimum MCP snapshot shape needed to distinguish those states.
+3. Probe `/workspace/mcp` only when browser automation is configured and feed the snapshot into the reducer.
+4. Re-run focused tests and the extension build.
+
+### Task 7: Repeatable real-Chrome acceptance
+
+**Files:**
+
+- Create: `packages/cli/src/serve/cdp-tunnel/acceptance/fixture-server.mjs`
+- Create: `packages/cli/src/serve/cdp-tunnel/acceptance/full-tools-smoke.mjs`
+- Modify: `packages/chrome-extension/package.json`
+- Modify: `packages/chrome-extension/README.md`
+
+1. Add a local fixture with deterministic DOM, console, network, button, and link behavior.
+2. Add an MCP smoke client that navigates the attached tab to the fixture, exercises the browser tools, and restores the original URL.
+3. Add a package script and document prerequisites and expected PASS output.
+4. Run it against a real loaded extension and repeat after restarting the daemon.
+
+### Task 8: Artifact safety scan
+
+**Files:**
+
+- Create: `packages/chrome-extension/scripts/artifact-scan.js`
+- Create: `packages/chrome-extension/scripts/artifact-scan.test.js`
+- Modify: `packages/chrome-extension/package.json`
+
+1. Write failing tests for clean payloads and payloads containing external Chrome DevTools MCP signatures.
+2. Implement a recursive scan of the generated extension and main `dist/` payloads.
+3. Add `scan:artifacts` and `test:release` package scripts.
+4. Build/package, run the scan, and confirm the generated zip and worktree remain clean.

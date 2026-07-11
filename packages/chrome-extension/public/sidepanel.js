@@ -95,7 +95,10 @@ async function probeState(baseUrl, token) {
   if (!health) return deriveCapabilityStatus(false, []);
   const caps = await probeJson(`${baseUrl}/capabilities`, token);
   const features = Array.isArray(caps?.features) ? caps.features : [];
-  return deriveCapabilityStatus(true, features);
+  const mcpSnapshot = features.includes('browser_automation_mcp')
+    ? await probeJson(`${baseUrl}/workspace/mcp`, token)
+    : undefined;
+  return deriveCapabilityStatus(true, features, mcpSnapshot);
 }
 
 /** Render the welcome screen for a non-ready state. */

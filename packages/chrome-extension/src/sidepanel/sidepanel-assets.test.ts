@@ -47,4 +47,17 @@ describe('side panel capability status assets', () => {
     expect(script).toContain('status.shellReady');
     expect(script).toContain('status.warning');
   });
+
+  it('probes runtime MCP state when browser automation is configured', () => {
+    const script = readFileSync(
+      path.join(packageRoot, 'public/sidepanel.js'),
+      'utf8',
+    );
+
+    expect(script).toContain("features.includes('browser_automation_mcp')");
+    expect(script).toContain('probeJson(`${baseUrl}/workspace/mcp`, token)');
+    expect(script).toContain(
+      'deriveCapabilityStatus(true, features, mcpSnapshot)',
+    );
+  });
 });
