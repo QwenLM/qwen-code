@@ -309,6 +309,82 @@ describe('WebShellSidebar — workspace picker', () => {
     expect(onSelectWorkspace).toHaveBeenCalledWith(undefined);
   });
 
+  // Flush the WorkspaceSection async session poll (a resolved promise +
+  // the setState it drives).
+  async function flushSessionPoll(): Promise<void> {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  const moreActionButtons = (container: HTMLElement): HTMLButtonElement[] =>
+    Array.from(container.querySelectorAll<HTMLButtonElement>('button')).filter(
+      (b) => b.getAttribute('aria-label') === 'More actions',
+    );
+
+  it('gives primary-workspace sessions full actions but keeps non-primary rows read-only', async () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([
+      makeSession('shared'),
+    ]);
+    const { container } = renderSidebar(false);
+    await flushSessionPoll();
+
+    const sessionSpans = () =>
+      Array.from(container.querySelectorAll('span')).filter(
+        (el) => el.textContent === 'Session shared',
+      );
+
+    // The primary workspace is expanded by default: its row renders with the
+    // full action set.
+    expect(sessionSpans().length).toBe(1);
+    expect(moreActionButtons(container)).toHaveLength(1);
+
+    // Expand the non-primary ("other") workspace.
+    const other = workspaceButtons(container).find((b) =>
+      b.textContent?.includes('other'),
+    );
+    act(() => {
+      other?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSessionPoll();
+
+    // The non-primary section now renders the same session (so the row is
+    // present)...
+    expect(sessionSpans().length).toBe(2);
+    // ...but it stays read-only — no extra action button was added, because the
+    // daemon (bound to the primary workspace) can't service mutations for it.
+    expect(moreActionButtons(container)).toHaveLength(1);
+  });
+
+  it('re-polls the workspace session list after a mutation', async () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([
+      makeSession('shared'),
+    ]);
+    const { container } = renderSidebar(false);
+    await flushSessionPoll();
+    const callsBefore =
+      mockWorkspace.client.listWorkspaceSessions.mock.calls.length;
+
+    // Archive the primary workspace's session via its row action button.
+    const archiveButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((b) => b.getAttribute('aria-label') === 'Archive');
+    expect(archiveButton).toBeTruthy();
+    act(() => {
+      archiveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSessionPoll();
+
+    // The mutation bumps the shared reload token, so the section re-polls
+    // instead of waiting for the 10s interval.
+    expect(
+      mockWorkspace.client.listWorkspaceSessions.mock.calls.length,
+    ).toBeGreaterThan(callsBefore);
+  });
+
   it('does not render secondary workspace entries with a single workspace', () => {
     mockWorkspace.capabilities = {
       qwenCodeVersion: '1.2.3',
