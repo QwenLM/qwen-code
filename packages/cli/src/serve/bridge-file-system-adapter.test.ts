@@ -366,7 +366,7 @@ describe('createBridgeFileSystemAdapter', () => {
       expect(response.content).toBe('x\ny\n');
     });
 
-    it('propagates parse_error for fractional positive limits', async () => {
+    it('readText surfaces workspace-file-system parse_error for fractional positive limits', async () => {
       const target = path.join(tmpDir, 'fractional-limit.txt');
       await fsp.writeFile(target, 'x\ny\nz\n', 'utf8');
       const adapter = createBridgeFileSystemAdapter(

@@ -320,7 +320,8 @@ function isTrustedArtifactToolUpdate(
  */
 function preserveFsErrorOverAcp(err: unknown): never {
   if (isFsErrorShape(err)) {
-    throw new RequestError(-32603, err.message, {
+    const code = err.kind === 'parse_error' ? -32602 : -32603;
+    throw new RequestError(code, err.message, {
       errorKind: err.kind,
       ...(err.hint !== undefined ? { hint: err.hint } : {}),
       ...(err.status !== undefined ? { status: err.status } : {}),
@@ -1886,7 +1887,17 @@ export class BridgeClient implements Client {
     ) {
       throw RequestError.invalidParams(
         undefined,
-        '`limit` must be a positive integer.',
+        `\`limit\` must be a positive integer, got ${params.limit}`,
+      );
+    }
+    if (
+      typeof params.line === 'number' &&
+      params.line > 0 &&
+      !Number.isSafeInteger(params.line)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`line\` must be a positive integer, got ${params.line}`,
       );
     }
     // BSA0E: cap the file size we'll buffer into RSS at 100 MiB so a

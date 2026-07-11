@@ -268,6 +268,28 @@ describe('BridgeClient — BridgeFileSystem injection seam (F1 step 5)', () => {
       expect((err.data as { hint?: unknown }).hint).toBeUndefined();
     });
 
+    it('readTextFile maps parse_error FsError to invalid params', async () => {
+      const readText = vi.fn(async (): Promise<ReadTextFileResponse> => {
+        throw makeFsError(
+          'parse_error',
+          'limit must be a positive integer, got 1.5',
+          { status: 400 },
+        );
+      });
+      const client = makeClient({ writeText: vi.fn(), readText });
+
+      const err = (await client
+        .readTextFile({ path: '/x', sessionId: 'sess:test', limit: 1.5 })
+        .catch((e) => e)) as Error & { code?: number; data?: unknown };
+
+      expect(err.name).toBe('RequestError');
+      expect(err.code).toBe(-32602);
+      expect(err.data).toMatchObject({
+        errorKind: 'parse_error',
+        status: 400,
+      });
+    });
+
     it('passes non-FsError errors through unchanged (no RequestError wrap)', async () => {
       // Plain Error → bridgeClient must NOT wrap it. Only structured
       // FsError gets the reshape. ACP's default serialization is
@@ -418,7 +440,27 @@ describe('BridgeClient — BridgeFileSystem injection seam (F1 step 5)', () => {
 
       expect(err).toBeInstanceOf(RequestError);
       expect((err as Error).message).toContain(
-        '`limit` must be a positive integer.',
+        '`limit` must be a positive integer, got 1.5',
+      );
+    });
+
+    it('readTextFile rejects fractional positive lines before slicing inline content', async () => {
+      const client = makeClient(/* no fileSystem */);
+      const target = path.join(tmpDir, 'lines.txt');
+      await fsp.writeFile(target, 'a\nb\nc\n', 'utf8');
+
+      const err = await client
+        .readTextFile({
+          path: target,
+          sessionId: 'sess:test',
+          line: 1.5,
+          limit: 1,
+        })
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(RequestError);
+      expect((err as Error).message).toContain(
+        '`line` must be a positive integer, got 1.5',
       );
     });
   });
