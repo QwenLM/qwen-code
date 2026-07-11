@@ -28,6 +28,7 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import { isDaemonTurnError } from '@qwen-code/sdk/daemon';
 import type {
+  DaemonInputAnnotation,
   DaemonTranscriptBlock,
   DaemonSessionTaskStatus,
   DaemonSessionArtifact,
@@ -337,6 +338,7 @@ interface ActiveGoalStatus {
 interface SendPromptOptionsWithRetry {
   optimisticUserMessage?: boolean;
   images?: PromptImage[];
+  inputAnnotations?: DaemonInputAnnotation[];
   retry?: boolean;
   clearComposerOnPromptStart?: boolean;
   commitComposerAccepted?: ComposerSubmitCommit;
@@ -1039,12 +1041,12 @@ export function App({
   }, []);
   const customization = useMemo(
     () => ({
+      composerTagIcons,
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
       parseUserMessageContent,
       renderUserMessageContent,
-      composerTagIcons,
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
@@ -1061,12 +1063,12 @@ export function App({
       loadingPhrases,
     }),
     [
+      composerTagIcons,
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
       parseUserMessageContent,
       renderUserMessageContent,
-      composerTagIcons,
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
@@ -2362,6 +2364,7 @@ export function App({
       opts?: {
         optimisticUserMessage?: boolean;
         retry?: boolean;
+        inputAnnotations?: DaemonInputAnnotation[];
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
         onAdmitted?: () => void;
@@ -2419,6 +2422,7 @@ export function App({
       }
       const promptOptions: SendPromptOptionsWithRetry = {
         images,
+        inputAnnotations: opts?.inputAnnotations,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
         ...(opts?.onAdmitted ? { onAdmitted: opts.onAdmitted } : {}),
@@ -2540,6 +2544,7 @@ export function App({
       images?: PromptImage[],
       onComplete?: () => void,
       commitComposerAccepted?: ComposerSubmitCommit,
+      inputAnnotations?: DaemonInputAnnotation[],
     ) => {
       if (onSubmitBeforeRef.current) {
         onSubmitBeforeRef
@@ -2548,7 +2553,12 @@ export function App({
             prompt: text,
           })
           .then(() => {
-            const result = rawEnqueuePrompt(text, images, onComplete);
+            const result = rawEnqueuePrompt(
+              text,
+              images,
+              onComplete,
+              inputAnnotations,
+            );
             if (result !== false) {
               if (commitComposerAccepted) {
                 commitComposerAccepted();
@@ -2574,7 +2584,12 @@ export function App({
           });
         return false;
       }
-      const result = rawEnqueuePrompt(text, images, onComplete);
+      const result = rawEnqueuePrompt(
+        text,
+        images,
+        onComplete,
+        inputAnnotations,
+      );
       const sessionId = connectionRef.current.sessionId;
       if (sessionId && text.trim()) {
         dispatchSessionChangeRef.current?.({
@@ -3660,6 +3675,7 @@ export function App({
       text: string,
       images?: PromptImage[],
       commitComposerAccepted?: ComposerSubmitCommit,
+      metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
       if (connectionRef.current.loadingTranscript) {
         pushToast('warning', t('editor.sessionLoading'));
@@ -3678,7 +3694,11 @@ export function App({
         promptText: string,
         promptImages: PromptImage[] | undefined,
         errorMessage: string,
-        opts?: { optimisticUserMessage?: boolean; retry?: boolean },
+        opts?: {
+          optimisticUserMessage?: boolean;
+          retry?: boolean;
+          inputAnnotations?: DaemonInputAnnotation[];
+        },
       ) => {
         const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
         const clearComposerOnPromptStart =
@@ -3703,12 +3723,14 @@ export function App({
                 images,
                 undefined,
                 commitComposerAccepted,
+                metadata?.inputAnnotations,
               );
             }
             return submitPromptFromEditor(
               text,
               images,
               'Failed to send hidden slash command',
+              { inputAnnotations: metadata?.inputAnnotations },
             );
           }
           if (cmd === 'help') {
@@ -3888,12 +3910,14 @@ export function App({
                   images,
                   undefined,
                   commitComposerAccepted,
+                  metadata?.inputAnnotations,
                 );
               }
               return submitPromptFromEditor(
                 text,
                 images,
                 'Failed to send /model --fast',
+                { inputAnnotations: metadata?.inputAnnotations },
               );
             }
             if (modelArg === '--voice') {
@@ -3963,6 +3987,7 @@ export function App({
                   prompt,
                   images,
                   'Failed to send plan prompt',
+                  { inputAnnotations: metadata?.inputAnnotations },
                 );
               }
               return true;
@@ -3975,6 +4000,7 @@ export function App({
                 if (prompt) {
                   return sendPrompt(prompt, images, {
                     clearComposerOnPromptStart: true,
+                    inputAnnotations: metadata?.inputAnnotations,
                   }).catch((error: unknown) =>
                     reportError(error, 'Failed to send plan prompt'),
                   );
@@ -4063,12 +4089,14 @@ export function App({
                   images,
                   undefined,
                   commitComposerAccepted,
+                  metadata?.inputAnnotations,
                 );
               }
               return submitPromptFromEditor(
                 text,
                 images,
                 'Failed to send /skills command',
+                { inputAnnotations: metadata?.inputAnnotations },
               );
             } else {
               if (echoOrDeferLocalCommand(text, images)) return true;
@@ -4315,12 +4343,14 @@ export function App({
                   images,
                   undefined,
                   commitComposerAccepted,
+                  metadata?.inputAnnotations,
                 );
               }
               return submitPromptFromEditor(
                 text,
                 images,
                 'Failed to send /rename command',
+                { inputAnnotations: metadata?.inputAnnotations },
               );
             }
             const displayName = renameArg.displayName;
@@ -4510,9 +4540,17 @@ export function App({
         }
         // Forward slash commands as prompts
         if (promptBlocked) {
-          return enqueuePrompt(text, images, undefined, commitComposerAccepted);
+          return enqueuePrompt(
+            text,
+            images,
+            undefined,
+            commitComposerAccepted,
+            metadata?.inputAnnotations,
+          );
         }
-        return submitPromptFromEditor(text, images, 'Failed to send command');
+        return submitPromptFromEditor(text, images, 'Failed to send command', {
+          inputAnnotations: metadata?.inputAnnotations,
+        });
       } else if (text.startsWith('!')) {
         if (promptBlocked) {
           pushToast('error', t('queue.shellBlocked'));
@@ -4527,9 +4565,17 @@ export function App({
         return true;
       } else {
         if (promptBlocked) {
-          return enqueuePrompt(text, images, undefined, commitComposerAccepted);
+          return enqueuePrompt(
+            text,
+            images,
+            undefined,
+            commitComposerAccepted,
+            metadata?.inputAnnotations,
+          );
         }
-        return submitPromptFromEditor(text, images, 'Failed to send message');
+        return submitPromptFromEditor(text, images, 'Failed to send message', {
+          inputAnnotations: metadata?.inputAnnotations,
+        });
       }
     },
     [
@@ -4573,8 +4619,14 @@ export function App({
       text: string,
       images?: PromptImage[],
       commitComposerAccepted?: ComposerSubmitCommit,
+      metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
-      const accepted = handleSubmit(text, images, commitComposerAccepted);
+      const accepted = handleSubmit(
+        text,
+        images,
+        commitComposerAccepted,
+        metadata,
+      );
       if (accepted !== false) {
         resumeChatBottomFollow('smooth');
       }

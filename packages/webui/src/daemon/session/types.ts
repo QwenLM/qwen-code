@@ -12,6 +12,7 @@ import type {
   DaemonApprovalModeResult,
   DaemonAvailableCommand,
   DaemonForkSessionResult,
+  DaemonInputAnnotation,
   DaemonSessionBtwResult,
   DaemonMidTurnMessageResult,
   DaemonPendingPromptsResult,
@@ -234,6 +235,7 @@ export interface DaemonCommandInfo {
 export interface SendPromptOptions {
   optimisticUserMessage?: boolean;
   images?: DaemonPromptImage[];
+  inputAnnotations?: DaemonInputAnnotation[];
   /**
    * When true, the daemon strips orphaned user entries from the chat
    * history before re-sending, and skips recording a duplicate user
