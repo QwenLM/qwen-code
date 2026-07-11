@@ -633,12 +633,6 @@ class ComposerTagWidget extends WidgetType {
     const publicTag = toPublicComposerTag(this.tag);
     chip.style.cssText =
       'position:relative;display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border);border-radius:4px;background:var(--secondary);color:var(--foreground);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
-    if (
-      this.tag.tooltipText &&
-      (this.tag.tooltip === undefined || this.tag.tooltip === null)
-    ) {
-      chip.title = this.tag.tooltipText;
-    }
     if (this.tag.onClick) {
       chip.setAttribute('role', 'button');
       chip.tabIndex = 0;
@@ -764,6 +758,21 @@ class ComposerTagWidget extends WidgetType {
     tooltipElement.setAttribute('role', 'tooltip');
     tooltipElement.style.cssText =
       'position:absolute;z-index:calc(var(--web-shell-tooltip-z-index,1000) + 1);top:calc(100% + 6px);left:0;display:none;min-width:160px;max-width:min(320px,80vw);padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--background);box-shadow:0 8px 24px rgba(0,0,0,0.18);color:var(--foreground);font-family:var(--font-sans,system-ui,sans-serif);font-size:12px;line-height:1.5;white-space:normal;';
+    try {
+      this.tooltipRoot = createRoot(tooltipElement);
+      this.tooltipRoot.render(tooltip);
+      chip.appendChild(tooltipElement);
+      tooltipElement.id = `composer-tag-tooltip-${++nextComposerTagTooltipId}`;
+      chip.setAttribute('aria-describedby', tooltipElement.id);
+    } catch (error) {
+      this.tooltipRoot?.unmount();
+      this.tooltipRoot = null;
+      if (this.tag.tooltipText) {
+        chip.title = this.tag.tooltipText;
+      }
+      console.warn('[WebShell] inline tag tooltip render failed', error);
+      return;
+    }
     const show = () => {
       tooltipElement.style.display = 'block';
     };
@@ -774,17 +783,6 @@ class ComposerTagWidget extends WidgetType {
     chip.addEventListener('mouseleave', hide);
     chip.addEventListener('focusin', show);
     chip.addEventListener('focusout', hide);
-    try {
-      this.tooltipRoot = createRoot(tooltipElement);
-      this.tooltipRoot.render(tooltip);
-      chip.appendChild(tooltipElement);
-      tooltipElement.id = `composer-tag-tooltip-${++nextComposerTagTooltipId}`;
-      chip.setAttribute('aria-describedby', tooltipElement.id);
-    } catch (error) {
-      this.tooltipRoot?.unmount();
-      this.tooltipRoot = null;
-      console.warn('[WebShell] inline tag tooltip render failed', error);
-    }
   }
 
   private appendRemoveButton(chip: HTMLElement, view: EditorView) {
