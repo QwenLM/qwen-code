@@ -601,6 +601,12 @@ export function WebShellSidebar({
   const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
   const [workspaceSessionsReloadToken, setWorkspaceSessionsReloadToken] =
     useState(0);
+  // Bump the token WorkspaceSection instances watch, so the per-workspace
+  // session lists re-poll immediately after a mutation instead of waiting for
+  // their 10s interval. Stable identity — safe (and required) in consumer deps.
+  const bumpWorkspaceReload = useCallback(() => {
+    setWorkspaceSessionsReloadToken((v) => v + 1);
+  }, []);
   const [searchQuery, setSearchQuery] = useState('');
   const [isResizing, setIsResizing] = useState(false);
   const [tooltip, setTooltip] = useState<{
@@ -928,7 +934,7 @@ export function WebShellSidebar({
         const created = await onNewSession();
         if (created) {
           void reload().catch(() => undefined);
-          setWorkspaceSessionsReloadToken((v) => v + 1);
+          bumpWorkspaceReload();
         }
       } catch (err) {
         if (!isAbortError(err)) {
@@ -939,7 +945,7 @@ export function WebShellSidebar({
         setCreatingSession(false);
       }
     })();
-  }, [onError, onNewSession, reload, t]);
+  }, [bumpWorkspaceReload, onError, onNewSession, reload, t]);
 
   const handleLoadSession = useCallback(
     (sessionId: string) => {
@@ -995,8 +1001,7 @@ export function WebShellSidebar({
       .then(() => {
         cancelRename();
         reload();
-        // Also refresh the multi-workspace section lists, which poll separately.
-        setWorkspaceSessionsReloadToken((v) => v + 1);
+        bumpWorkspaceReload();
       })
       .catch((err: unknown) => {
         onError(err, t('sidebar.renameFailed'));
@@ -1007,6 +1012,7 @@ export function WebShellSidebar({
       });
   }, [
     actions,
+    bumpWorkspaceReload,
     cancelRename,
     currentSessionId,
     editingName,
@@ -1091,14 +1097,14 @@ export function WebShellSidebar({
         // archived directories, so resync both lists regardless of origin.
         void reload();
         void reloadArchived();
-        // Also refresh the multi-workspace section lists, which poll separately.
-        setWorkspaceSessionsReloadToken((v) => v + 1);
+        bumpWorkspaceReload();
       })
       .catch((err: unknown) => onError(err, t('sidebar.deleteFailed')))
       .finally(() => {
         setSessionBusy(sessionId, false);
       });
   }, [
+    bumpWorkspaceReload,
     currentSessionId,
     deleteArchivedSession,
     deleteCandidate,
@@ -1247,15 +1253,22 @@ export function WebShellSidebar({
         })
         .then(() => {
           void reload().catch(() => undefined);
-          // Also refresh the multi-workspace section lists, which poll separately.
-          setWorkspaceSessionsReloadToken((v) => v + 1);
+          bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
           setSessionBusy(sessionId, false);
         });
     },
-    [onError, organizationEnabled, reload, setSessionBusy, t, workspaceActions],
+    [
+      bumpWorkspaceReload,
+      onError,
+      organizationEnabled,
+      reload,
+      setSessionBusy,
+      t,
+      workspaceActions,
+    ],
   );
 
   const handleArchive = useCallback(
@@ -1269,8 +1282,7 @@ export function WebShellSidebar({
       archiveSession(sessionId)
         .then(() => {
           void reloadArchived();
-          // Also refresh the multi-workspace section lists, which poll separately.
-          setWorkspaceSessionsReloadToken((v) => v + 1);
+          bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.archiveFailed')))
         .finally(() => {
@@ -1279,6 +1291,7 @@ export function WebShellSidebar({
     },
     [
       archiveSession,
+      bumpWorkspaceReload,
       currentSessionId,
       onError,
       reloadArchived,
@@ -1295,15 +1308,14 @@ export function WebShellSidebar({
       unarchiveSession(sessionId)
         .then(() => {
           void reload();
-          // Also refresh the multi-workspace section lists, which poll separately.
-          setWorkspaceSessionsReloadToken((v) => v + 1);
+          bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.unarchiveFailed')))
         .finally(() => {
           setSessionBusy(sessionId, false);
         });
     },
-    [onError, reload, setSessionBusy, t, unarchiveSession],
+    [bumpWorkspaceReload, onError, reload, setSessionBusy, t, unarchiveSession],
   );
 
   const closeMenu = useCallback(() => setMenuState(null), []);
@@ -1389,13 +1401,22 @@ export function WebShellSidebar({
         .updateSessionOrganization(sessionId, { groupId, color: null })
         .then(() => {
           void reload().catch(() => undefined);
+          bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
           setSessionBusy(sessionId, false);
         });
     },
-    [onError, organizationEnabled, reload, setSessionBusy, t, workspaceActions],
+    [
+      bumpWorkspaceReload,
+      onError,
+      organizationEnabled,
+      reload,
+      setSessionBusy,
+      t,
+      workspaceActions,
+    ],
   );
 
   const assignSessionColor = useCallback(
@@ -1411,13 +1432,22 @@ export function WebShellSidebar({
         .updateSessionOrganization(sessionId, { color, groupId: null })
         .then(() => {
           void reload().catch(() => undefined);
+          bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
           setSessionBusy(sessionId, false);
         });
     },
-    [onError, organizationEnabled, reload, setSessionBusy, t, workspaceActions],
+    [
+      bumpWorkspaceReload,
+      onError,
+      organizationEnabled,
+      reload,
+      setSessionBusy,
+      t,
+      workspaceActions,
+    ],
   );
 
   const filteredSessions = useMemo(() => {
