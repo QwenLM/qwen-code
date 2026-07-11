@@ -55,7 +55,7 @@ import { OAuthUtils } from '../mcp/oauth-utils.js';
 import type { OAuthCredentials } from '../mcp/token-storage/types.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { ResourceRegistry } from '../resources/resource-registry.js';
-import { getErrorMessage } from '../utils/errors.js';
+import { getErrorMessage, getErrorStatus } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { retryWithBackoff } from './mcp-retry.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
@@ -76,6 +76,7 @@ export type SendSdkMcpMessage = (
 export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
 
 const debugLogger = createDebugLogger('MCP');
+const AUTOMATIC_MCP_OAUTH_TIMEOUT_MS = 60_000;
 
 const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400]);
 const STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT = 512;
@@ -312,6 +313,7 @@ export class McpClient {
    */
   async connect(): Promise<void> {
     this.isDisconnecting = false;
+    clearMcpOAuthRequirement(this.serverName, this.serverConfig);
     // clear stale upstream error from
     // any prior connect/disconnect cycle. The silent-drop reader
     // is otherwise satisfied by `undefined` and falls back to the
@@ -369,6 +371,22 @@ export class McpClient {
       this.updateStatus(MCPServerStatus.CONNECTED);
     } catch (error) {
       this.instructions = undefined;
+      if (
+        hasNetworkTransport(this.serverConfig) &&
+        supportsMcpOAuth(this.serverConfig)
+      ) {
+        const key = oauthRecoveryKey(this.serverName, this.serverConfig);
+        const oauthChallenge = getMcpOAuthChallengeFromError(error);
+        if (oauthChallenge.confirmed401) {
+          setMcpOAuthRequirement(
+            this.serverName,
+            this.serverConfig,
+            oauthChallenge.wwwAuthenticate,
+          );
+        } else {
+          mcpServerOAuthProbeCandidates.add(key);
+        }
+      }
       this.updateStatus(MCPServerStatus.DISCONNECTED);
       throw error;
     }
@@ -574,6 +592,10 @@ export class McpClient {
     return this.instructions;
   }
 
+  clearOAuthState(): void {
+    clearMcpOAuthRequirement(this.serverName, this.serverConfig);
+  }
+
   async readResource(
     uri: string,
     options?: { signal?: AbortSignal },
@@ -630,6 +652,14 @@ let mcpDiscoveryState: MCPDiscoveryState = MCPDiscoveryState.NOT_STARTED;
  */
 export const mcpServerRequiresOAuth: Map<string, boolean> = new Map();
 
+const mcpServerOAuthChallenges = new Map<string, string>();
+const mcpServerOAuthRequirements = new Set<string>();
+const mcpServerOAuthProbeCandidates = new Set<string>();
+const mcpServerOAuthProbeInFlight = new Map<string, Promise<boolean>>();
+const mcpServerOAuthProbeVersions = new Map<string, number>();
+const automaticOAuthInFlight = new Map<string, Promise<boolean>>();
+let automaticOAuthQueue: Promise<void> = Promise.resolve();
+
 /**
  * Get the current MCP discovery state
  */
@@ -677,6 +707,148 @@ function extractWWWAuthenticateHeader(errorString: string): string | null {
   }
 
   return null;
+}
+
+function oauthRecoveryKey(
+  mcpServerName: string,
+  mcpServerConfig: MCPServerConfig,
+): string {
+  return `${mcpServerName}\0${mcpServerConfig.httpUrl ?? mcpServerConfig.url ?? ''}`;
+}
+
+function supportsMcpOAuth(mcpServerConfig: MCPServerConfig): boolean {
+  return (
+    !mcpServerConfig.authProviderType ||
+    mcpServerConfig.authProviderType === AuthProviderType.DYNAMIC_DISCOVERY
+  );
+}
+
+function getMcpOAuthChallengeFromError(error: unknown): {
+  confirmed401: boolean;
+  wwwAuthenticate: string;
+} {
+  const errorString = getErrorMessage(error);
+  return {
+    confirmed401:
+      getErrorStatus(error) === 401 || /(^|\D)401(\D|$)/.test(errorString),
+    wwwAuthenticate: extractWWWAuthenticateHeader(errorString) ?? '',
+  };
+}
+
+function setMcpOAuthRequirement(
+  mcpServerName: string,
+  mcpServerConfig: MCPServerConfig,
+  wwwAuthenticate: string,
+): void {
+  const key = oauthRecoveryKey(mcpServerName, mcpServerConfig);
+  mcpServerOAuthProbeCandidates.delete(key);
+  mcpServerOAuthRequirements.add(key);
+  mcpServerOAuthChallenges.set(key, wwwAuthenticate);
+  mcpServerRequiresOAuth.set(mcpServerName, true);
+}
+
+function clearMcpOAuthRequirement(
+  mcpServerName: string,
+  mcpServerConfig: MCPServerConfig,
+): void {
+  const key = oauthRecoveryKey(mcpServerName, mcpServerConfig);
+  mcpServerOAuthProbeVersions.set(
+    key,
+    (mcpServerOAuthProbeVersions.get(key) ?? 0) + 1,
+  );
+  mcpServerOAuthProbeCandidates.delete(key);
+  mcpServerOAuthRequirements.delete(key);
+  mcpServerOAuthChallenges.delete(key);
+  const serverPrefix = `${mcpServerName}\0`;
+  if (
+    ![...mcpServerOAuthRequirements].some((candidate) =>
+      candidate.startsWith(serverPrefix),
+    )
+  ) {
+    mcpServerRequiresOAuth.delete(mcpServerName);
+  }
+}
+
+export async function probeMcpServerForOAuth(
+  mcpServerName: string,
+  mcpServerConfig: MCPServerConfig,
+  error?: unknown,
+): Promise<boolean> {
+  if (
+    !hasNetworkTransport(mcpServerConfig) ||
+    !supportsMcpOAuth(mcpServerConfig)
+  ) {
+    return false;
+  }
+
+  const key = oauthRecoveryKey(mcpServerName, mcpServerConfig);
+  if (error !== undefined) {
+    const challenge = getMcpOAuthChallengeFromError(error);
+    if (challenge.confirmed401) {
+      setMcpOAuthRequirement(
+        mcpServerName,
+        mcpServerConfig,
+        challenge.wwwAuthenticate,
+      );
+      return true;
+    }
+  } else if (
+    !mcpServerOAuthProbeCandidates.has(key) &&
+    !mcpServerOAuthRequirements.has(key)
+  ) {
+    return false;
+  }
+
+  if (mcpServerOAuthRequirements.has(key)) {
+    return true;
+  }
+
+  const existingProbe = mcpServerOAuthProbeInFlight.get(key);
+  if (existingProbe) {
+    return existingProbe;
+  }
+  const probeVersion = mcpServerOAuthProbeVersions.get(key) ?? 0;
+
+  const probe = (async () => {
+    try {
+      const response = await fetch(
+        mcpServerConfig.httpUrl || mcpServerConfig.url!,
+        {
+          method: 'HEAD',
+          headers: {
+            ...mcpServerConfig.headers,
+            Accept: mcpServerConfig.httpUrl
+              ? 'application/json'
+              : 'text/event-stream',
+          },
+          redirect: 'manual',
+          signal: AbortSignal.timeout(5000),
+        },
+      );
+      if (response.status === 401) {
+        if ((mcpServerOAuthProbeVersions.get(key) ?? 0) !== probeVersion) {
+          return false;
+        }
+        setMcpOAuthRequirement(
+          mcpServerName,
+          mcpServerConfig,
+          response.headers.get('www-authenticate') ?? '',
+        );
+        return true;
+      }
+    } catch (fetchError) {
+      debugLogger.debug(
+        `Failed to probe MCP server for OAuth challenge: ${getErrorMessage(fetchError)}`,
+      );
+    }
+
+    mcpServerOAuthProbeCandidates.delete(key);
+    return false;
+  })().finally(() => {
+    mcpServerOAuthProbeInFlight.delete(key);
+  });
+  mcpServerOAuthProbeInFlight.set(key, probe);
+  return probe;
 }
 
 /**
@@ -755,6 +927,74 @@ async function handleAutomaticOAuth(
     );
     return false;
   }
+}
+
+async function withAutomaticOAuthTimeout(
+  recovery: Promise<boolean>,
+  mcpServerName: string,
+): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<boolean>((resolve) => {
+    timeout = setTimeout(() => {
+      debugLogger.error(
+        `Timed out handling automatic OAuth for server '${mcpServerName}'. ` +
+          getMcpOAuthDialogInstruction('authenticate', mcpServerName),
+      );
+      resolve(false);
+    }, AUTOMATIC_MCP_OAUTH_TIMEOUT_MS);
+  });
+
+  try {
+    return await Promise.race([recovery, timedOut]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+export async function attemptAutomaticMcpOAuth(
+  mcpServerName: string,
+  mcpServerConfig: MCPServerConfig,
+  allowBrowserLaunch: boolean,
+): Promise<boolean> {
+  if (
+    !allowBrowserLaunch ||
+    !supportsMcpOAuth(mcpServerConfig) ||
+    (!mcpServerConfig.httpUrl && !mcpServerConfig.oauth?.enabled)
+  ) {
+    return false;
+  }
+
+  const key = oauthRecoveryKey(mcpServerName, mcpServerConfig);
+  if (!mcpServerOAuthRequirements.has(key)) {
+    return false;
+  }
+  const existing = automaticOAuthInFlight.get(key);
+  if (existing) {
+    return existing;
+  }
+
+  const recovery = automaticOAuthQueue
+    .then(() =>
+      withAutomaticOAuthTimeout(
+        handleAutomaticOAuth(
+          mcpServerName,
+          mcpServerConfig,
+          mcpServerOAuthChallenges.get(key) ?? '',
+        ),
+        mcpServerName,
+      ),
+    )
+    .finally(() => {
+      automaticOAuthInFlight.delete(key);
+    });
+  automaticOAuthInFlight.set(key, recovery);
+  automaticOAuthQueue = recovery.then(
+    () => undefined,
+    () => undefined,
+  );
+  return recovery;
 }
 
 /**
@@ -935,7 +1175,7 @@ export async function connectAndDiscover(
     updateMCPServerStatus(mcpServerName, MCPServerStatus.CONNECTED);
     // A successful connect proves authentication works now — clear the sticky
     // 401 marker so later unrelated outages aren't mislabeled as auth failures.
-    mcpServerRequiresOAuth.delete(mcpServerName);
+    clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
 
     // Register any discovered tools
     for (const tool of tools) {
@@ -1301,6 +1541,7 @@ export async function connectToMcpServer(
   workspaceContext: WorkspaceContext,
   sendSdkMcpMessage?: SendSdkMcpMessage,
 ): Promise<Client> {
+  clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
   const mcpClient = new Client({
     name: 'qwen-code-mcp-client',
     version: '0.0.1',
@@ -1385,6 +1626,7 @@ export async function connectToMcpServer(
       await mcpClient.connect(transport, {
         timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
       });
+      clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
       return mcpClient;
     } catch (error) {
       unlistenDirectories?.();
@@ -1395,10 +1637,12 @@ export async function connectToMcpServer(
   } catch (error) {
     unlistenDirectories?.();
     unlistenDirectories = undefined;
-    // Check if this is a 401 error that might indicate OAuth is required
-    const errorString = String(error);
-    if (errorString.includes('401') && hasNetworkTransport(mcpServerConfig)) {
-      mcpServerRequiresOAuth.set(mcpServerName, true);
+    const requiresOAuth = await probeMcpServerForOAuth(
+      mcpServerName,
+      mcpServerConfig,
+      error,
+    );
+    if (requiresOAuth) {
       // Only trigger automatic OAuth discovery for HTTP servers or when OAuth is explicitly configured
       // For SSE servers, we should not trigger new OAuth flows automatically
       const shouldTriggerOAuth =
@@ -1439,42 +1683,10 @@ export async function connectToMcpServer(
         throw new Error(oauthMessage);
       }
 
-      // Try to extract www-authenticate header from the error
-      let wwwAuthenticate = extractWWWAuthenticateHeader(errorString);
-
-      // If we didn't get the header from the error string, try to get it from the server
-      if (!wwwAuthenticate && hasNetworkTransport(mcpServerConfig)) {
-        debugLogger.debug(
-          `No www-authenticate header in error, trying to fetch it from server...`,
-        );
-        try {
-          const urlToFetch = mcpServerConfig.httpUrl || mcpServerConfig.url!;
-          const response = await fetch(urlToFetch, {
-            method: 'HEAD',
-            headers: {
-              Accept: mcpServerConfig.httpUrl
-                ? 'application/json'
-                : 'text/event-stream',
-            },
-            signal: AbortSignal.timeout(5000),
-          });
-
-          if (response.status === 401) {
-            wwwAuthenticate = response.headers.get('www-authenticate');
-            if (wwwAuthenticate) {
-              debugLogger.debug(
-                `Found www-authenticate header from server: ${wwwAuthenticate}`,
-              );
-            }
-          }
-        } catch (fetchError) {
-          debugLogger.debug(
-            `Failed to fetch www-authenticate header: ${getErrorMessage(
-              fetchError,
-            )}`,
-          );
-        }
-      }
+      const wwwAuthenticate =
+        mcpServerOAuthChallenges.get(
+          oauthRecoveryKey(mcpServerName, mcpServerConfig),
+        ) ?? '';
 
       if (wwwAuthenticate) {
         debugLogger.debug(
@@ -1521,6 +1733,7 @@ export async function connectToMcpServer(
                       mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
                   });
                   // Connection successful with OAuth
+                  clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
                   return mcpClient;
                 } catch (retryError) {
                   debugLogger.error(
@@ -1651,6 +1864,7 @@ export async function connectToMcpServer(
                         mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
                     });
                     // Connection successful with OAuth
+                    clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
                     return mcpClient;
                   } catch (retryError) {
                     debugLogger.error(
