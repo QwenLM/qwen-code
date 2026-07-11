@@ -1190,6 +1190,7 @@ export function registerWorkspaceExtensionRoutes(
             throw new Error(`Extension "${extensionId}" not found`);
           if (
             extension.installMetadata?.type !== 'git' &&
+            extension.installMetadata?.type !== 'archive-url' &&
             extension.installMetadata?.type !== 'github-release' &&
             extension.installMetadata?.type !== 'npm'
           ) {

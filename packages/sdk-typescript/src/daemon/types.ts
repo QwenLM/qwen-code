@@ -2783,6 +2783,7 @@ export type DaemonExtensionInstallType =
   | 'git'
   | 'local'
   | 'link'
+  | 'archive-url'
   | 'github-release'
   | 'npm';
 

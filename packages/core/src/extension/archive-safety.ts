@@ -5,6 +5,15 @@
  */
 
 import * as tar from 'tar';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
+
+const MAX_REPORTED_ENTRY_PATH_LENGTH = 200;
+
+function formatEntryPath(entryPath: string): string {
+  const sanitized = stripAnsiAndControl(entryPath);
+  if (sanitized.length <= MAX_REPORTED_ENTRY_PATH_LENGTH) return sanitized;
+  return `${sanitized.slice(0, MAX_REPORTED_ENTRY_PATH_LENGTH - 3)}...`;
+}
 
 export async function assertTarArchiveHasNoLinks(file: string): Promise<void> {
   let unsupportedLinkPath: string | undefined;
@@ -15,7 +24,7 @@ export async function assertTarArchiveHasNoLinks(file: string): Promise<void> {
         !unsupportedLinkPath &&
         (entry.type === 'SymbolicLink' || entry.type === 'Link')
       ) {
-        unsupportedLinkPath = entry.path;
+        unsupportedLinkPath = formatEntryPath(entry.path);
       }
     },
   });

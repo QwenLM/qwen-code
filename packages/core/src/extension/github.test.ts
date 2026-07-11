@@ -1052,6 +1052,34 @@ describe('git extension helpers', () => {
       expect(request.destroy).toHaveBeenCalled();
     });
 
+    it('preserves the caller abort reason for archive URL downloads', async () => {
+      let errorHandler: ((error: Error) => void) | undefined;
+      const request = {
+        on: vi.fn((event: string, handler: (error: Error) => void) => {
+          if (event === 'error') errorHandler = handler;
+          return request;
+        }),
+        setTimeout: vi.fn().mockReturnThis(),
+        destroy: vi.fn().mockReturnThis(),
+      } as unknown as ReturnType<typeof https.get>;
+      mockHttpsGet.mockImplementationOnce(() => request);
+      const controller = new AbortController();
+      const reason = new Error('download cancelled');
+
+      const download = downloadFromArchiveUrl(
+        {
+          source: 'https://example.com/releases/extension.zip',
+          type: 'archive-url',
+        },
+        tempDir,
+        controller.signal,
+      );
+      controller.abort(reason);
+      errorHandler?.(reason);
+
+      await expect(download).rejects.toBe(reason);
+    });
+
     it('should reject oversized archive URL downloads', async () => {
       let dataHandler: ((chunk: Buffer) => void) | undefined;
       const response = {

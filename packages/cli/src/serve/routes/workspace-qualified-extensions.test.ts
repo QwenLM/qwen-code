@@ -152,6 +152,10 @@ function mockExtensionManager(): void {
     path: '/extensions/demo',
     isActive: true,
     config: { name: 'demo', version: '1.0.0' },
+    installMetadata: {
+      type: 'archive-url',
+      source: 'https://example.com/demo.zip',
+    },
     contextFiles: [],
   } as Extension;
   const snapshot: ExtensionStoreSnapshot = {
@@ -251,6 +255,7 @@ describe('extension management v2 REST', () => {
           {
             id: extensionId,
             name: 'demo',
+            installType: 'archive-url',
             defaultActivation: 'disabled',
             workspaceOverrideCount: 0,
           },

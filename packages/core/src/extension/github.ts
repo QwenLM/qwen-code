@@ -494,6 +494,7 @@ export async function downloadFromArchiveUrl(
       signal,
     );
   } catch (error) {
+    signal?.throwIfAborted();
     throw new Error(
       `Failed to download archive from ${redactUrlCredentials(installMetadata.source)}: ${redactUrlCredentials(getErrorMessage(error))}`,
     );

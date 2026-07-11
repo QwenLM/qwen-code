@@ -346,6 +346,40 @@ describe('downloadFromNpmRegistry', () => {
     },
   );
 
+  it('sanitizes and bounds rejected tar entry paths', async () => {
+    mockNpmDownload('https://registry.example.com/pkg.tgz');
+    vi.mocked(tar.t).mockImplementationOnce(async (options) => {
+      options.onReadEntry?.({
+        type: 'SymbolicLink',
+        path: `escape\n\u001b]8;;https://example.com\u0007${'x'.repeat(300)}`,
+      } as never);
+    });
+
+    let message = '';
+    try {
+      await downloadFromNpmRegistry(
+        {
+          source: '@scope/pkg',
+          type: 'npm',
+          registryUrl: 'https://registry.example.com',
+        },
+        '/tmp/qwen-extension',
+      );
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).not.toContain('\n');
+    expect(message).not.toContain('\r');
+    expect(message).not.toContain('\u001b');
+    expect(message).not.toContain('\u0007');
+    expect(message).toContain('Tar archive contains unsupported link entry:');
+    expect(message).toHaveLength(
+      'Tar archive contains unsupported link entry: '.length + 200,
+    );
+    expect(message.endsWith('...')).toBe(true);
+  });
+
   it('rejects npm tarballs larger than 100 MB', async () => {
     mockNpmDownload(
       'https://registry.example.com/pkg.tgz',
