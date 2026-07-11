@@ -299,6 +299,90 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('reports and diagnoses non-primary channel workers', async () => {
+    const options = makeOptions({
+      channelWorkerSnapshot: {
+        enabled: false,
+        state: 'disabled',
+        channels: [],
+      },
+    });
+    options.workspaceRegistry = {
+      list: () => [
+        {
+          workspaceId: 'primary',
+          workspaceCwd: BASE_WORKSPACE,
+          primary: true,
+          trusted: true,
+          bridge: options.bridge,
+        },
+        {
+          workspaceId: 'secondary',
+          workspaceCwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+          bridge: options.bridge,
+        },
+      ],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    options.getChannelWorkerSnapshots = () => [
+      {
+        enabled: true,
+        state: 'failed',
+        channels: ['telegram'],
+        error: 'secondary failed',
+        workspaceId: 'secondary',
+        workspaceCwd: '/work/secondary',
+        primary: false,
+      },
+    ];
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.channelWorkers).toEqual(
+      options.getChannelWorkerSnapshots(),
+    );
+    expect(response).toMatchObject({
+      status: 'error',
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'channel_worker_exited',
+          severity: 'error',
+          section: 'runtime.channelWorkers',
+          message: expect.stringContaining('/work/secondary'),
+        }),
+      ]),
+    });
+  });
+
+  it('omits channelWorkers for single-workspace and empty multi-workspace snapshots', async () => {
+    const single = makeOptions();
+    single.getChannelWorkerSnapshots = () => [
+      {
+        enabled: true,
+        state: 'running',
+        channels: ['telegram'],
+        workspaceId: 'primary',
+        workspaceCwd: BASE_WORKSPACE,
+        primary: true,
+      },
+    ];
+    expect(
+      (await buildDaemonStatusResponse('summary', single)).runtime
+        .channelWorkers,
+    ).toBeUndefined();
+
+    const multi = makeOptions();
+    multi.workspaceRegistry = {
+      list: () => [{ bridge: multi.bridge }, { bridge: multi.bridge }],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    multi.getChannelWorkerSnapshots = () => [];
+    expect(
+      (await buildDaemonStatusResponse('summary', multi)).runtime
+        .channelWorkers,
+    ).toBeUndefined();
+  });
+
   it('warns for failed channel worker snapshots that still have a scheduled restart', async () => {
     const response = await buildDaemonStatusResponse(
       'summary',

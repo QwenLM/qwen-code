@@ -51,11 +51,12 @@ if (
 }
 
 // jsdom implements getClientRects()/getBoundingClientRect() on Element but not
-// on Range. CodeMirror's async measure pass (scheduled via requestAnimationFrame)
-// calls them on a text Range, so without this stub it throws
-// "textRange(...).getClientRects is not a function" from a rAF callback after a
-// test has completed — an unhandled error that flakes the whole run even though
-// every assertion passed.
+// on Range. CodeMirror's `measureTextSize` calls them on a text Range from a
+// `requestAnimationFrame` measure pass, so in jsdom that async callback throws
+// `TypeError: getClientRects is not a function`. Vitest surfaces it as an
+// *unhandled error* that fails the whole run (exit 1) even when every test
+// passes — and because it depends on rAF timing, it's flaky. Return empty
+// geometry (CodeMirror already handles the no-layout case).
 if (typeof globalWithDom.Range !== 'undefined') {
   const rangePrototype = globalWithDom.Range.prototype as Range & {
     getBoundingClientRect?: () => DOMRect;
