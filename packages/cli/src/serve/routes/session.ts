@@ -94,7 +94,7 @@ function isReadOnlyWorkspaceCatalog(runtime: WorkspaceRuntime): boolean {
   return !runtime.primary && !runtime.trusted;
 }
 
-function readWorkspaceCatalog<T>(
+function runCatalogReadWithWorkspaceLogPolicy<T>(
   runtime: WorkspaceRuntime,
   read: () => Promise<T>,
 ): Promise<T> {
@@ -2139,7 +2139,7 @@ export function registerSessionRoutes(
       res
         .status(200)
         .json(
-          await readWorkspaceCatalog(runtime, () =>
+          await runCatalogReadWithWorkspaceLogPolicy(runtime, () =>
             createSessionOrganizationService(runtime.workspaceCwd).listGroups(),
           ),
         );
@@ -2228,7 +2228,7 @@ export function registerSessionRoutes(
       res
         .status(200)
         .json(
-          await readWorkspaceCatalog(runtime, () =>
+          await runCatalogReadWithWorkspaceLogPolicy(runtime, () =>
             createSessionOrganizationService(runtime.workspaceCwd).listGroups(),
           ),
         );
@@ -2425,7 +2425,7 @@ export function registerSessionRoutes(
           );
         }
         const result = usePersisted
-          ? await readWorkspaceCatalog(runtime, () =>
+          ? await runCatalogReadWithWorkspaceLogPolicy(runtime, () =>
               listWorkspaceSessionsForResponse(runtime.bridge, key, options, {
                 mergeLive: !readOnlySecondary,
               }),

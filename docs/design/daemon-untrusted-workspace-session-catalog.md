@@ -90,12 +90,12 @@ An untrusted secondary workspace remains expandable and is labeled both
 disabled because this daemon cannot create sessions in that workspace.
 
 Expanding does not select or activate the workspace. Persisted sessions are
-rendered as non-interactive rows with `aria-disabled="true"` and an explanation
-that the workspace must be trusted before a session can be opened. The row uses
-a non-interactive `note` semantic with a complete accessible name; it does not
-bind mouse or keyboard activation or receive active-session styling. Trusted
-workspace behavior is unchanged. An untrusted primary remains disabled pending
-a separate primary safe-mode design.
+rendered as non-interactive rows with `role="note"` and an accessible name that
+includes the session name, date, and an explanation that the workspace must be
+trusted before a session can be opened. The row does not bind mouse or keyboard
+activation or receive active-session styling. Trusted workspace behavior is
+unchanged. An untrusted primary remains disabled pending a separate primary
+safe-mode design.
 
 ## Failure and Compatibility Behavior
 
