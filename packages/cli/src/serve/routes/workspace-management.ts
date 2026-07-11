@@ -18,6 +18,7 @@ import type {
 } from '../workspace-registry.js';
 import {
   workspaceRegistrationId,
+  WorkspaceRegistrationStoreLimitError,
   type WorkspaceRegistrationStore,
 } from '../workspace-registration-store.js';
 
@@ -193,6 +194,13 @@ export function registerWorkspaceManagementRoutes(
             persisted: true,
           });
         } catch (err) {
+          if (err instanceof WorkspaceRegistrationStoreLimitError) {
+            res.status(409).json({
+              error: 'Workspace registration limit reached',
+              code: 'workspace_limit_reached',
+            });
+            return;
+          }
           writeStderrLine(
             `qwen serve: failed to persist existing workspace registration: ${
               err instanceof Error ? err.message : String(err)

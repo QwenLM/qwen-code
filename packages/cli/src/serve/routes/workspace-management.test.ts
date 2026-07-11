@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { realpathSync } from 'node:fs';
 import {
   workspaceRegistrationId,
+  WorkspaceRegistrationStoreLimitError,
   type WorkspaceRegistrationStore,
 } from '../workspace-registration-store.js';
 
@@ -273,6 +274,26 @@ describe('POST /workspaces', () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('workspace_limit_reached');
     expect(add).not.toHaveBeenCalled();
+  });
+
+  it('returns the limit error when a concurrent writer fills the store', async () => {
+    const { app } = createApp({
+      workspaceRegistrationStore: {
+        read: vi.fn().mockResolvedValue({ workspaces: [] }),
+        add: vi
+          .fn()
+          .mockRejectedValue(
+            new WorkspaceRegistrationStoreLimitError('limit reached'),
+          ),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .post('/workspaces')
+      .send({ cwd: REAL_DIR, persist: true });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('workspace_limit_reached');
   });
 
   it('rejects persist when no registration store is available', async () => {

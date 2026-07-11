@@ -22,7 +22,7 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
   stale: 10_000,
   update: 2_000,
   retries: {
-    retries: 30,
+    retries: 120,
     minTimeout: 10,
     maxTimeout: 100,
     factor: 1.2,
@@ -42,6 +42,8 @@ export class WorkspaceRegistrationStoreError extends Error {
     this.name = 'WorkspaceRegistrationStoreError';
   }
 }
+
+export class WorkspaceRegistrationStoreLimitError extends WorkspaceRegistrationStoreError {}
 
 function normalizedScopePath(primaryWorkspace: string): string {
   return os.platform() === 'win32'
@@ -225,6 +227,7 @@ export class WorkspaceRegistrationStore {
     );
   }
 
+  /** Returns an unlocked point-in-time snapshot; mutations re-read under lock. */
   async read(): Promise<WorkspaceRegistrationSnapshot> {
     try {
       const entry = await fs.lstat(this.filePath);
@@ -327,7 +330,7 @@ export class WorkspaceRegistrationStore {
         return false;
       }
       if (snapshot.workspaces.length >= MAX_SECONDARY_WORKSPACES) {
-        throw new WorkspaceRegistrationStoreError(
+        throw new WorkspaceRegistrationStoreLimitError(
           `Workspace registration store limit of ${MAX_SECONDARY_WORKSPACES} reached`,
         );
       }
