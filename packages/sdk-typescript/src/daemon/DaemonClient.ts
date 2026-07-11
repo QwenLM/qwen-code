@@ -66,6 +66,7 @@ import type {
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
   DaemonWorkspaceEnvStatus,
+  DaemonWorkspaceGitStatus,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
@@ -687,6 +688,7 @@ export class DaemonClient {
       body?: unknown;
       clientId?: string;
       timeoutMs?: number;
+      mode?: 'transport' | 'rest';
     } = {},
   ): Promise<T> {
     return await this.jsonRequest<T>(
@@ -812,6 +814,14 @@ export class DaemonClient {
         if (!res.ok) throw await this.failOnError(res, 'GET /workspace/mcp');
         return (await res.json()) as DaemonWorkspaceMcpStatus;
       },
+    );
+  }
+
+  async workspaceGit(): Promise<DaemonWorkspaceGitStatus> {
+    return await this.jsonRequest<DaemonWorkspaceGitStatus>(
+      '/workspace/git',
+      'GET /workspace/git',
+      { mode: 'rest' },
     );
   }
 
@@ -3473,6 +3483,15 @@ export class WorkspaceDaemonClient {
 
   workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
+  }
+
+  workspaceGit(): Promise<DaemonWorkspaceGitStatus> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceGitStatus>(
+      this.workspaceSelector,
+      '/git',
+      'GET /workspaces/:workspace/git',
+      { mode: 'rest' },
+    );
   }
 
   workspaceSkills(): Promise<DaemonWorkspaceSkillsStatus> {

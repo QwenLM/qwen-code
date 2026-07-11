@@ -58,6 +58,8 @@ export interface DaemonConnectionState {
    */
   clientId?: string;
   workspaceCwd?: string;
+  /** Current Git branch, short detached-HEAD hash, or undefined outside Git. */
+  gitBranch?: string;
   commands?: DaemonCommandInfo[];
   skills?: string[];
   models?: DaemonModelInfo[];

@@ -41,10 +41,12 @@ import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
+import { GitBranchIndicator } from './GitBranchIndicator';
 import styles from './ChatEditor.module.css';
 
 export type ComposerToolbarAction =
   | 'approvalMode'
+  | 'gitBranch'
   | 'model'
   | 'commands'
   | 'files'
@@ -53,6 +55,7 @@ export type ComposerToolbarAction =
 
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
+  'gitBranch',
   'model',
   'widthMode',
   'voice',
@@ -84,6 +87,7 @@ interface ChatEditorProps {
   onClearQueuedMessages?: () => boolean;
   currentMode?: string;
   currentModel?: string;
+  gitBranch?: string;
   chatWidthMode?: '1000' | 'wide';
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
@@ -911,6 +915,7 @@ export const ChatEditor = memo(
       onPopQueuedMessages,
       currentMode = 'default',
       currentModel = '',
+      gitBranch,
       chatWidthMode = '1000',
       showChatWidthToggle = true,
       chatWidthToggleMin,
@@ -1545,6 +1550,12 @@ export const ChatEditor = memo(
                   </div>
                 )}
                 <div className={styles.toolbarLeft}>
+                  {gitBranch && showToolbarAction('gitBranch') && (
+                    <GitBranchIndicator
+                      branch={gitBranch}
+                      ariaLabel={t('git.currentBranch', { branch: gitBranch })}
+                    />
+                  )}
                   {showToolbarAction('approvalMode') && (
                     <div className={styles.dropdownWrapper}>
                       <ToolbarDropdown

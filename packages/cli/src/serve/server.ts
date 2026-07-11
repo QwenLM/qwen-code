@@ -167,6 +167,11 @@ import {
 } from './routes/workspace-lifecycle.js';
 import { registerWorkspaceManagementRoutes } from './routes/workspace-management.js';
 import {
+  registerWorkspaceGitRoutes,
+  registerWorkspaceQualifiedGitRoutes,
+} from './routes/workspace-git.js';
+import { WorkspaceGitState } from './workspace-git-state.js';
+import {
   registerWorkspaceMcpControlRoutes,
   registerWorkspaceQualifiedMcpControlRoutes,
 } from './routes/workspace-mcp-control.js';
@@ -782,6 +787,9 @@ export function createServeApp(
   const primaryBridge = primaryRuntime.bridge;
   const primaryWorkspace = primaryRuntime.workspaceService;
   const primaryRouteFileSystemFactory = primaryRuntime.routeFileSystemFactory;
+  const workspaceGitState = new WorkspaceGitState();
+  (app.locals as { stopWorkspaceGitState?: () => void }).stopWorkspaceGitState =
+    () => workspaceGitState.dispose();
   const workspaceQualifiedAcpEnabled =
     resolveAcpHttpEnabled() && workspaceRegistry.list().length > 1;
 
@@ -976,6 +984,15 @@ export function createServeApp(
   registerWorkspaceQualifiedStatusRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
+  });
+  registerWorkspaceGitRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    gitState: workspaceGitState,
+  });
+  registerWorkspaceQualifiedGitRoutes(app, {
+    workspaceRegistry,
+    gitState: workspaceGitState,
   });
 
   // Workspace memory + agents CRUD routes.

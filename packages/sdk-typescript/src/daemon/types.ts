@@ -33,6 +33,14 @@ export interface DaemonWorkspaceCapability {
   trusted: boolean;
 }
 
+/** Current Git branch metadata returned from a workspace Git status route. */
+export interface DaemonWorkspaceGitStatus {
+  v: 1;
+  workspaceCwd: string;
+  /** Branch name, short detached-HEAD hash, or null outside a Git repository. */
+  branch: string | null;
+}
+
 /** Capabilities envelope returned from `GET /capabilities`. */
 export interface DaemonCapabilities {
   v: 1;
