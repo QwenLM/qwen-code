@@ -114,4 +114,35 @@ describe('AddWorkspaceDialog', () => {
     expect(alert()?.textContent).toBe('daemon unreachable');
     expect(onClose).not.toHaveBeenCalled();
   });
+
+  it('accepts a Windows-style absolute path', async () => {
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    mount(<AddWorkspaceDialog onClose={onClose} onAdd={onAdd} />);
+
+    type('C:\\Users\\me\\project');
+    submit();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onAdd).toHaveBeenCalledWith('C:\\Users\\me\\project');
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(alert()).toBeNull();
+  });
+
+  it('falls back to the generic error when onAdd rejects with a non-Error', async () => {
+    const onAdd = vi.fn().mockRejectedValue('boom');
+    const onClose = vi.fn();
+    mount(<AddWorkspaceDialog onClose={onClose} onAdd={onAdd} />);
+
+    type('/abs/project');
+    submit();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(alert()?.textContent).toBe('Failed to add workspace');
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });
