@@ -128,6 +128,7 @@ import {
 import { partToString } from '../utils/partUtils.js';
 import { createHookOutput, SessionStartSource } from '../hooks/types.js';
 import fsPromises from 'node:fs/promises';
+import { MessageDisplayDispatcher } from './message-display-dispatcher.js';
 
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
@@ -1971,6 +1972,10 @@ export class GeminiClient {
     // early-return) leaves this `false`, and the `finally` block aborts the
     // prefetch as a safety net.
     let normalCompletion = false;
+    // Declared outside the try so the finally block can close it out on
+    // uncaught-exception exits too; created (when the hook is registered)
+    // right before the turn's streaming loop below.
+    let messageDisplay: MessageDisplayDispatcher | null = null;
     try {
       if (
         messageType === SendMessageType.UserQuery ||
@@ -2358,137 +2363,176 @@ export class GeminiClient {
         };
       };
 
+      // MessageDisplay hook: fires repeatedly as this turn's reply streams
+      // (before Stop, which fires once at the end). One dispatcher — one
+      // message_id and one debounce accumulator — per turn.run() call;
+      // recursion into sendMessageStream (tool continuations, hook-forced
+      // continuations) naturally gets its own since this local is re-created
+      // on each invocation. `finish()` is awaited at every exit out of the
+      // `for await` loop below (normal completion and each early `return
+      // turn`) plus the outer finally, so a hook script's `is_final: true`
+      // completion signal is neither skipped when the turn ends via loop
+      // detection or a stream error, nor silently dropped by a process that
+      // exits (headless `-p`) before a slow hook's queue drained. Not gated
+      // on !turn.pendingToolCalls the way the Stop hook below is, since a
+      // message boundary and a Stop-worthy end-of-turn are different things.
+      // The dispatcher mirrors warnings to console.warn itself; this sink
+      // only adds them to the debug-log file.
+      messageDisplay =
+        hooksEnabled &&
+        messageBus &&
+        this.config.hasHooksForEvent('MessageDisplay')
+          ? new MessageDisplayDispatcher(messageBus, signal, (message) =>
+              this.config.getDebugLogger().warn(message),
+            )
+          : null;
+
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
-      for await (const event of resultStream) {
-        if (shouldUpdateIdeContextState && !didUpdateIdeContextState) {
-          this.lastSentIdeContext = nextIdeContext;
-          this.forceFullIdeContext = false;
-          didUpdateIdeContextState = true;
-        }
-
-        // Always-on safety checks (consecutive-identical tool-call guard,
-        // shell inspection stagnation, and per-turn tool-call cap). These fire
-        // before the skipLoopDetection gate so they cannot be bypassed by
-        // configuration.
-        const alwaysOnLoop = this.loopDetector.checkAlwaysOnSafeties(event);
-        if (alwaysOnLoop) {
-          // Drop every tool call collected before the guard fired so the run
-          // halts here instead of spawning a continuation that re-trips it.
-          // turn.pendingToolCalls is internal to this loop and is not read
-          // after the early return — stream consumers (the TUI scheduler and
-          // the non-interactive runner) build their own list from the yielded
-          // ToolCallRequest events and stop on LoopDetected.
-          turn.pendingToolCalls.length = 0;
-          const loopType = this.loopDetector.getLastLoopType();
-          yield {
-            type: GeminiEventType.LoopDetected,
-            ...(loopType && { value: { loopType } }),
-          };
-          if (arenaAgentClient) {
-            await arenaAgentClient.reportError('Loop detected');
+      try {
+        for await (const event of resultStream) {
+          if (messageDisplay && event.type === GeminiEventType.Content) {
+            messageDisplay.addChunk(event.value);
           }
-          this.lastApiCompletionTimestamp = Date.now();
-          if (isTopLevelInteraction)
-            endInteractionSpan('error', { errorMessage: 'loop detected' });
-          this.cancelPendingMemoryPrefetch();
-          return turn;
-        }
-
-        // Heuristic loop detection is opt-in: `model.skipLoopDetection`
-        // defaults to true (see settingsSchema) to avoid false-positive
-        // interruptions. Only the historically false-positive-prone heuristics
-        // (content/thought repetition, read-file and action stagnation,
-        // global-duplicate and alternating tool-call patterns) sit behind this
-        // flag. The precise consecutive-identical guard, shell inspection
-        // stagnation guard, and per-turn cap run unconditionally in
-        // checkAlwaysOnSafeties above, so the documented escape hatch only
-        // relaxes the heuristics (see nonInteractiveCli.ts).
-        const skipLoopDetection = this.config.getSkipLoopDetection();
-        const heuristicLoop =
-          !skipLoopDetection &&
-          this.loopDetector.addAndCheckHeuristicLoops(event);
-        if (heuristicLoop) {
-          const loopType = this.loopDetector.getLastLoopType();
-          yield {
-            type: GeminiEventType.LoopDetected,
-            ...(loopType && { value: { loopType } }),
-          };
-          if (arenaAgentClient) {
-            await arenaAgentClient.reportError('Loop detected');
+          if (shouldUpdateIdeContextState && !didUpdateIdeContextState) {
+            this.lastSentIdeContext = nextIdeContext;
+            this.forceFullIdeContext = false;
+            didUpdateIdeContextState = true;
           }
-          this.lastApiCompletionTimestamp = Date.now();
-          if (isTopLevelInteraction)
-            endInteractionSpan('error', { errorMessage: 'loop detected' });
-          // finally cleanup catches this, but cancel explicitly to match
-          // the cleanup pattern at other early-return sites.
-          this.cancelPendingMemoryPrefetch();
-          return turn;
-        }
-        // Update arena status on Finished events — stats are derived
-        // automatically from uiTelemetryService by the reporter.
-        if (arenaAgentClient && event.type === GeminiEventType.Finished) {
-          await arenaAgentClient.updateStatus();
-        }
 
-        // Re-send a full IDE context blob on the next regular message — auto
-        // compaction inside chat.sendMessageStream may have summarized away
-        // the previous merged IDE context.
-        if (event.type === GeminiEventType.ChatCompressed) {
-          this.forceFullIdeContext = true;
-          // Auto-compaction summarized away the startup prelude. Rebuild it
-          // before the next turn so env/tool/MCP context isn't lost for the
-          // rest of the session (manual /compress gets this via startChat).
-          try {
-            await this.restoreStartupContextAfterCompaction();
-          } catch (error) {
-            this.config
-              .getDebugLogger()
-              .warn(
-                `Failed to restore startup context after compaction: ${error}`,
-              );
+          // Always-on safety checks (consecutive-identical tool-call guard,
+          // shell inspection stagnation, and per-turn tool-call cap). These fire
+          // before the skipLoopDetection gate so they cannot be bypassed by
+          // configuration.
+          const alwaysOnLoop = this.loopDetector.checkAlwaysOnSafeties(event);
+          if (alwaysOnLoop) {
+            // Drop every tool call collected before the guard fired so the run
+            // halts here instead of spawning a continuation that re-trips it.
+            // turn.pendingToolCalls is internal to this loop and is not read
+            // after the early return — stream consumers (the TUI scheduler and
+            // the non-interactive runner) build their own list from the yielded
+            // ToolCallRequest events and stop on LoopDetected.
+            turn.pendingToolCalls.length = 0;
+            const loopType = this.loopDetector.getLastLoopType();
+            yield {
+              type: GeminiEventType.LoopDetected,
+              ...(loopType && { value: { loopType } }),
+            };
+            if (arenaAgentClient) {
+              await arenaAgentClient.reportError('Loop detected');
+            }
+            this.lastApiCompletionTimestamp = Date.now();
+            if (isTopLevelInteraction)
+              endInteractionSpan('error', { errorMessage: 'loop detected' });
+            this.cancelPendingMemoryPrefetch();
+            return turn;
           }
-          void this.fireSessionStartHook(SessionStartSource.Compact)
-            .then((compactAdditionalContext) => {
-              if (!compactAdditionalContext || !this.chat) {
-                return;
-              }
-              this.lastSessionStartContext = compactAdditionalContext;
-              this.lastSessionStartSource = SessionStartSource.Compact;
-              this.chat.applySessionStartContext(
-                compactAdditionalContext,
-                SessionStartSource.Compact,
-              );
-            })
-            .catch((error) => {
+
+          // Heuristic loop detection is opt-in: `model.skipLoopDetection`
+          // defaults to true (see settingsSchema) to avoid false-positive
+          // interruptions. Only the historically false-positive-prone heuristics
+          // (content/thought repetition, read-file and action stagnation,
+          // global-duplicate and alternating tool-call patterns) sit behind this
+          // flag. The precise consecutive-identical guard, shell inspection
+          // stagnation guard, and per-turn cap run unconditionally in
+          // checkAlwaysOnSafeties above, so the documented escape hatch only
+          // relaxes the heuristics (see nonInteractiveCli.ts).
+          const skipLoopDetection = this.config.getSkipLoopDetection();
+          const heuristicLoop =
+            !skipLoopDetection &&
+            this.loopDetector.addAndCheckHeuristicLoops(event);
+          if (heuristicLoop) {
+            const loopType = this.loopDetector.getLastLoopType();
+            yield {
+              type: GeminiEventType.LoopDetected,
+              ...(loopType && { value: { loopType } }),
+            };
+            if (arenaAgentClient) {
+              await arenaAgentClient.reportError('Loop detected');
+            }
+            this.lastApiCompletionTimestamp = Date.now();
+            if (isTopLevelInteraction)
+              endInteractionSpan('error', { errorMessage: 'loop detected' });
+            // finally cleanup catches this, but cancel explicitly to match
+            // the cleanup pattern at other early-return sites.
+            this.cancelPendingMemoryPrefetch();
+            return turn;
+          }
+          // Update arena status on Finished events — stats are derived
+          // automatically from uiTelemetryService by the reporter.
+          if (arenaAgentClient && event.type === GeminiEventType.Finished) {
+            await arenaAgentClient.updateStatus();
+          }
+
+          // Re-send a full IDE context blob on the next regular message — auto
+          // compaction inside chat.sendMessageStream may have summarized away
+          // the previous merged IDE context.
+          if (event.type === GeminiEventType.ChatCompressed) {
+            this.forceFullIdeContext = true;
+            // Auto-compaction summarized away the startup prelude. Rebuild it
+            // before the next turn so env/tool/MCP context isn't lost for the
+            // rest of the session (manual /compress gets this via startChat).
+            try {
+              await this.restoreStartupContextAfterCompaction();
+            } catch (error) {
               this.config
                 .getDebugLogger()
-                .warn(`SessionStart hook failed: ${error}`);
-            });
-        }
+                .warn(
+                  `Failed to restore startup context after compaction: ${error}`,
+                );
+            }
+            void this.fireSessionStartHook(SessionStartSource.Compact)
+              .then((compactAdditionalContext) => {
+                if (!compactAdditionalContext || !this.chat) {
+                  return;
+                }
+                this.lastSessionStartContext = compactAdditionalContext;
+                this.lastSessionStartSource = SessionStartSource.Compact;
+                this.chat.applySessionStartContext(
+                  compactAdditionalContext,
+                  SessionStartSource.Compact,
+                );
+              })
+              .catch((error) => {
+                this.config
+                  .getDebugLogger()
+                  .warn(`SessionStart hook failed: ${error}`);
+              });
+          }
 
-        yield event;
-        if (event.type === GeminiEventType.Error) {
-          this.forceFullIdeContext = true;
-          if (arenaAgentClient) {
-            const errorMsg =
-              event.value instanceof Error
-                ? event.value.message
-                : 'Unknown error';
-            await arenaAgentClient.reportError(errorMsg);
+          yield event;
+          if (event.type === GeminiEventType.Error) {
+            this.forceFullIdeContext = true;
+            if (arenaAgentClient) {
+              const errorMsg =
+                event.value instanceof Error
+                  ? event.value.message
+                  : 'Unknown error';
+              await arenaAgentClient.reportError(errorMsg);
+            }
+            this.lastApiCompletionTimestamp = Date.now();
+            if (isTopLevelInteraction) {
+              // Sanitize: do not pass raw API error messages to span status
+              const errMsg =
+                event.value instanceof Error ? '[API error]' : 'unknown error';
+              endInteractionSpan('error', { errorMessage: errMsg });
+            }
+            // finally cleanup catches this, but cancel explicitly to match
+            // the cleanup pattern at other early-return sites.
+            this.cancelPendingMemoryPrefetch();
+            return turn;
           }
-          this.lastApiCompletionTimestamp = Date.now();
-          if (isTopLevelInteraction) {
-            // Sanitize: do not pass raw API error messages to span status
-            const errMsg =
-              event.value instanceof Error ? '[API error]' : 'unknown error';
-            endInteractionSpan('error', { errorMessage: errMsg });
-          }
-          // finally cleanup catches this, but cancel explicitly to match
-          // the cleanup pattern at other early-return sites.
-          this.cancelPendingMemoryPrefetch();
-          return turn;
         }
+      } finally {
+        // Fires on every exit from the loop above: normal completion, any of
+        // the three early returns, or an uncaught exception -- instead of one
+        // explicit call duplicated at each site. This is the pattern the four
+        // raw-stream loops in Session.ts already use for the same dispatcher.
+        // finish() is idempotent and dispatches is_final (bounded by the
+        // shared drain budget) BEFORE the Stop hook below fires; the
+        // belt-and-suspenders call in the outer finally further down is then
+        // a no-op.
+        await messageDisplay?.finish();
       }
 
       // Track API completion time for thinking block idle cleanup
@@ -2768,9 +2812,15 @@ export class GeminiClient {
       return turn;
     } finally {
       restoreStrippedRetryEntries();
-      // Belt-and-suspenders: abort the prefetch on any exit other than the
-      // bottom-of-try `return turn`. Catches uncaught exceptions and guards
-      // against future early-return sites that forget to call cancel.
+      // Belt-and-suspenders: close out the MessageDisplay dispatcher on any
+      // exit the explicit finish() sites above didn't cover (an uncaught
+      // exception thrown out of the streaming loop still ends the message,
+      // and buffering hook consumers need the is_final signal). finish() is
+      // idempotent, so on the normal paths this resolves immediately.
+      await messageDisplay?.finish();
+      // Abort the prefetch on any exit other than the bottom-of-try
+      // `return turn`. Catches uncaught exceptions and guards against
+      // future early-return sites that forget to call cancel.
       if (!normalCompletion) {
         this.cancelPendingMemoryPrefetch();
       }

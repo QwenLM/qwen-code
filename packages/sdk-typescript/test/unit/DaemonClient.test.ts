@@ -23,6 +23,7 @@ import type {
   DaemonCapabilities,
   DaemonSessionContextStatus,
   DaemonSessionLspStatus,
+  DaemonSessionOrganizationResult,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTasksStatus,
   DaemonWorkspaceEnvStatus,
@@ -4766,6 +4767,58 @@ describe('DaemonClient', () => {
       expect(calls[0]?.method).toBe('DELETE');
       expect(calls[0]?.url).toBe(
         'http://daemon/workspaces/%2Ftmp%2Fwork%20space/session-groups/group%2F1',
+      );
+    });
+
+    it('workspaceById updates session organization on the workspace-qualified route', async () => {
+      const reply: DaemonSessionOrganizationResult = {
+        sessionId: 'session/1',
+        isPinned: true,
+        groupId: 'group/1',
+        color: 'purple',
+        updatedAt: '2026-07-11T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result: DaemonSessionOrganizationResult = await client
+        .workspaceById('workspace/id')
+        .updateSessionOrganization(
+          'session/1',
+          { isPinned: true, groupId: 'group/1', color: 'purple' },
+          'client-1',
+        );
+
+      expect(result).toEqual(reply);
+      expect(calls[0]?.method).toBe('PATCH');
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/workspace%2Fid/session/session%2F1/organization',
+      );
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        isPinned: true,
+        groupId: 'group/1',
+        color: 'purple',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('workspaceByCwd encodes the selector when updating session organization', async () => {
+      const reply: DaemonSessionOrganizationResult = {
+        sessionId: 'session-1',
+        isPinned: false,
+        groupId: null,
+        updatedAt: '2026-07-11T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result: DaemonSessionOrganizationResult = await client
+        .workspaceByCwd('/tmp/work space')
+        .updateSessionOrganization('session-1', { isPinned: false });
+
+      expect(result).toEqual(reply);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Ftmp%2Fwork%20space/session/session-1/organization',
       );
     });
   });

@@ -14,6 +14,7 @@ import {
   SessionOrganizationError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   addDaemonRequestAttribute,
+  runWithoutDebugLogSession,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionArchiveState,
@@ -87,6 +88,19 @@ interface RegisterSessionRoutesDeps {
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
   languageCodes: string[];
+}
+
+function isReadOnlyWorkspaceCatalog(runtime: WorkspaceRuntime): boolean {
+  return !runtime.primary && !runtime.trusted;
+}
+
+function runCatalogReadWithWorkspaceLogPolicy<T>(
+  runtime: WorkspaceRuntime,
+  read: () => Promise<T>,
+): Promise<T> {
+  return isReadOnlyWorkspaceCatalog(runtime)
+    ? runWithoutDebugLogSession(read)
+    : read();
 }
 
 function requireSessionArtifactClientId(
@@ -355,6 +369,33 @@ export function registerSessionRoutes(
     const runtime = workspaceRegistry.getByWorkspaceCwd(key);
     if (!runtime) {
       sendWorkspaceMismatch(res, key);
+      return null;
+    }
+    return runtime;
+  };
+
+  const resolveRuntimeForCatalogRoute = (
+    req: Request,
+    res: Response,
+    paramName: 'id' | 'workspace',
+    route: string,
+  ): WorkspaceRuntime | null => {
+    const runtime =
+      paramName === 'workspace'
+        ? resolveWorkspaceRuntimeFromParam(
+            workspaceRegistry,
+            req,
+            res,
+            'workspace',
+          )
+        : resolveRuntimeFromWorkspaceParam(req, res, paramName);
+    if (runtime === null) return null;
+    if (paramName === 'workspace' && runtime.primary && !runtime.trusted) {
+      logSessionRoutingFailure(route, 'untrusted_workspace', {
+        workspaceId: runtime.workspaceId,
+        workspaceCwd: runtime.workspaceCwd,
+      });
+      sendUntrustedWorkspaceResponse(res);
       return null;
     }
     return runtime;
@@ -1970,19 +2011,29 @@ export function registerSessionRoutes(
     }),
   );
 
-  app.patch('/session/:id/organization', mutate(), async (req, res) => {
+  type SessionOrganizationTarget = {
+    workspaceCwd: string;
+    bridge: AcpSessionBridge;
+    route: string;
+  };
+
+  const handleSessionOrganizationUpdate = async (
+    req: Request,
+    res: Response,
+    target: SessionOrganizationTarget,
+  ): Promise<void> => {
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;
     try {
       await archiveCoordinator.runSharedMany([sessionId], async () => {
         // Organization is workspace-scoped sidecar state, not live-session
         // metadata. It intentionally applies to persisted and archived sessions.
-        const sessionService = new SessionService(boundWorkspace);
+        const sessionService = new SessionService(target.workspaceCwd);
         let exists = await sessionService.sessionExistsInAnyState(sessionId);
         if (!exists) {
           try {
-            const summary = bridge.getSessionSummary(sessionId);
-            exists = summary.workspaceCwd === boundWorkspace;
+            const summary = target.bridge.getSessionSummary(sessionId);
+            exists = summary.workspaceCwd === target.workspaceCwd;
           } catch {
             exists = false;
           }
@@ -2034,7 +2085,7 @@ export function registerSessionRoutes(
         }
 
         const organization = await createSessionOrganizationService(
-          boundWorkspace,
+          target.workspaceCwd,
         ).updateSessionOrganization(sessionId, {
           ...(rawIsPinned !== undefined ? { isPinned: rawIsPinned } : {}),
           ...(rawGroupId !== undefined
@@ -2049,19 +2100,49 @@ export function registerSessionRoutes(
     } catch (err) {
       if (sendSessionOrganizationError(res, err)) return;
       sendBridgeError(res, err, {
-        route: 'PATCH /session/:id/organization',
+        route: target.route,
         sessionId,
+        workspaceCwd: target.workspaceCwd,
       });
     }
+  };
+
+  app.patch('/session/:id/organization', mutate(), async (req, res) => {
+    await handleSessionOrganizationUpdate(req, res, {
+      workspaceCwd: boundWorkspace,
+      bridge,
+      route: 'PATCH /session/:id/organization',
+    });
   });
 
+  app.patch(
+    '/workspaces/:workspace/session/:id/organization',
+    mutate(),
+    async (req, res) => {
+      const route = 'PATCH /workspaces/:workspace/session/:id/organization';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      await handleSessionOrganizationUpdate(req, res, {
+        workspaceCwd: runtime.workspaceCwd,
+        bridge: runtime.bridge,
+        route,
+      });
+    },
+  );
+
   app.get('/workspace/:id/session-groups', async (req, res) => {
-    const key = resolveWorkspaceParam(req, res);
-    if (key === null) return;
+    // Preserve the legacy singular-route behavior for an untrusted primary;
+    // plural catalog routes intentionally retain their trust gate.
+    const runtime = resolveRuntimeFromWorkspaceParam(req, res);
+    if (runtime === null) return;
     try {
       res
         .status(200)
-        .json(await createSessionOrganizationService(key).listGroups());
+        .json(
+          await runCatalogReadWithWorkspaceLogPolicy(runtime, () =>
+            createSessionOrganizationService(runtime.workspaceCwd).listGroups(),
+          ),
+        );
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /workspace/:id/session-groups',
@@ -2141,15 +2222,15 @@ export function registerSessionRoutes(
 
   app.get('/workspaces/:workspace/session-groups', async (req, res) => {
     const route = 'GET /workspaces/:workspace/session-groups';
-    const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+    const runtime = resolveRuntimeForCatalogRoute(req, res, 'workspace', route);
     if (!runtime) return;
     try {
       res
         .status(200)
         .json(
-          await createSessionOrganizationService(
-            runtime.workspaceCwd,
-          ).listGroups(),
+          await runCatalogReadWithWorkspaceLogPolicy(runtime, () =>
+            createSessionOrganizationService(runtime.workspaceCwd).listGroups(),
+          ),
         );
     } catch (err) {
       sendBridgeError(res, err, { route });
@@ -2229,7 +2310,7 @@ export function registerSessionRoutes(
   );
 
   const listWorkspaceSessionsHandler =
-    (paramName: string): RequestHandler =>
+    (paramName: 'id' | 'workspace'): RequestHandler =>
     async (req, res) => {
       const route =
         paramName === 'workspace'
@@ -2238,29 +2319,10 @@ export function registerSessionRoutes(
       // Express decodes URL-encoded path params automatically; clients pass
       // the absolute workspace cwd encoded (e.g.
       // GET /workspace/%2Fwork%2Fa/sessions).
-      const runtime =
-        paramName === 'workspace'
-          ? resolveWorkspaceRuntimeFromParam(
-              workspaceRegistry,
-              req,
-              res,
-              'workspace',
-            )
-          : resolveRuntimeFromWorkspaceParam(req, res, paramName);
+      const runtime = resolveRuntimeForCatalogRoute(req, res, paramName, route);
       if (runtime === null) return;
-      if (
-        paramName === 'workspace'
-          ? !runtime.trusted
-          : !runtime.primary && !runtime.trusted
-      ) {
-        logSessionRoutingFailure(route, 'untrusted_workspace', {
-          workspaceId: runtime.workspaceId,
-          workspaceCwd: runtime.workspaceCwd,
-        });
-        sendUntrustedWorkspaceResponse(res);
-        return;
-      }
       const key = runtime.workspaceCwd;
+      const readOnlySecondary = isReadOnlyWorkspaceCatalog(runtime);
       try {
         const cursor =
           typeof req.query['cursor'] === 'string'
@@ -2342,6 +2404,7 @@ export function registerSessionRoutes(
         // (persisted + live) to filter completely and paginates with an opaque
         // activity cursor, so the numeric-cursor live fallback can't serve it.
         const usePersisted =
+          readOnlySecondary ||
           runtime.primary ||
           view === 'organized' ||
           archiveState === 'archived' ||
@@ -2362,7 +2425,11 @@ export function registerSessionRoutes(
           );
         }
         const result = usePersisted
-          ? await listWorkspaceSessionsForResponse(runtime.bridge, key, options)
+          ? await runCatalogReadWithWorkspaceLogPolicy(runtime, () =>
+              listWorkspaceSessionsForResponse(runtime.bridge, key, options, {
+                mergeLive: !readOnlySecondary,
+              }),
+            )
           : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
         res.status(200).json({
           sessions: result.sessions,

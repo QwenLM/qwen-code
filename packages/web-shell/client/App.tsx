@@ -180,6 +180,7 @@ import {
   type TodoSnapshotDiff,
 } from './utils/todos';
 import { ThemeProvider } from './themeContext';
+import { InteractionBlockContext } from './interactionBlockContext';
 import {
   WebShellThemeId,
   THEME_SETTING_KEY,
@@ -2178,6 +2179,17 @@ export function App({
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
+  const [externalInteractionBlockCount, setExternalInteractionBlockCount] =
+    useState(0);
+  const registerInteractionBlocker = useCallback(() => {
+    let released = false;
+    setExternalInteractionBlockCount((count) => count + 1);
+    return () => {
+      if (released) return;
+      released = true;
+      setExternalInteractionBlockCount((count) => Math.max(0, count - 1));
+    };
+  }, []);
 
   // Refresh commands when extensions change (install/uninstall/update).
   const workspaceEventSignals = useWorkspaceEventSignals();
@@ -2468,6 +2480,7 @@ export function App({
     agentsDialogMode !== null ||
     showMemoryDialog ||
     showAuthDialog ||
+    externalInteractionBlockCount > 0 ||
     // The Settings / Daemon Status panel replaces the chat surface, so — like a
     // modal — it must suppress chat-only global shortcuts (Ctrl+L/O/Y, the
     // Shift+Tab mode cycle, the btw hotkey). Escape is intercepted earlier and
@@ -5626,110 +5639,114 @@ export function App({
                         timeline={todoTimeline}
                         details={todoDetails}
                       >
-                        {(() => {
-                          const contentClassName = [
-                            styles.content,
-                            showFloatingTodos ||
-                            displayMessages.length > 0 ||
-                            pendingApproval
-                              ? styles.contentHasMessages
-                              : undefined,
-                          ]
-                            .filter(Boolean)
-                            .join(' ');
+                        <InteractionBlockContext.Provider
+                          value={registerInteractionBlocker}
+                        >
+                          {(() => {
+                            const contentClassName = [
+                              styles.content,
+                              showFloatingTodos ||
+                              displayMessages.length > 0 ||
+                              pendingApproval
+                                ? styles.contentHasMessages
+                                : undefined,
+                            ]
+                              .filter(Boolean)
+                              .join(' ');
 
-                          const messageList = (
-                            <MessageList
-                              ref={messageListRef}
-                              messages={displayMessages}
-                              pendingApproval={pendingToolApproval}
-                              onShowContextDetail={handleShowContextDetail}
-                              loadingTranscript={connection.loadingTranscript}
-                              catchingUp={connection.catchingUp}
-                              isResponding={streamingState !== 'idle'}
-                              activeTurnStartedAt={activeTurnStartedAt}
-                              workspaceCwd={connection.workspaceCwd || ''}
-                              hideSessionTimeline={
-                                effectiveChatWidthMode === 'wide'
-                              }
-                              showRetryHint={showRetryHint}
-                              onRetryClick={handleRetry}
-                              onBranchSession={handleBranchCurrentSession}
-                              bottomOverlayInset={bottomPanelInset}
-                              welcomeHeader={
-                                isChatEmptyState ? welcomeHeader : undefined
-                              }
-                              centerWelcomeHeader={
-                                showMobileWelcomeFooterMiddle || undefined
-                              }
-                              tailContent={undefined}
-                              tailKey={undefined}
-                              onCanScrollToBottomChange={
-                                handleCanScrollToBottomChange
-                              }
-                              virtualScrollThreshold={virtualScrollThreshold}
-                              turnFileChanges={
-                                visibleTurnOutputKinds.has('file')
-                                  ? fileChangesByTurn
-                                  : undefined
-                              }
-                              turnArtifacts={
-                                visibleTurnOutputKinds.has('artifact')
-                                  ? artifactsByTurn
-                                  : undefined
-                              }
-                              turnScheduledTasks={
-                                visibleTurnOutputKinds.has('scheduled_task')
-                                  ? scheduledTasksByTurn
-                                  : undefined
-                              }
-                              onTurnOutputOpen={handleTurnOutputOpen}
-                              onReviewChanges={openReviewPanel}
-                              onOpenArtifact={openArtifactPanel}
-                              onOpenScheduledTask={openScheduledTaskPanel}
-                            />
-                          );
+                            const messageList = (
+                              <MessageList
+                                ref={messageListRef}
+                                messages={displayMessages}
+                                pendingApproval={pendingToolApproval}
+                                onShowContextDetail={handleShowContextDetail}
+                                loadingTranscript={connection.loadingTranscript}
+                                catchingUp={connection.catchingUp}
+                                isResponding={streamingState !== 'idle'}
+                                activeTurnStartedAt={activeTurnStartedAt}
+                                workspaceCwd={connection.workspaceCwd || ''}
+                                hideSessionTimeline={
+                                  effectiveChatWidthMode === 'wide'
+                                }
+                                showRetryHint={showRetryHint}
+                                onRetryClick={handleRetry}
+                                onBranchSession={handleBranchCurrentSession}
+                                bottomOverlayInset={bottomPanelInset}
+                                welcomeHeader={
+                                  isChatEmptyState ? welcomeHeader : undefined
+                                }
+                                centerWelcomeHeader={
+                                  showMobileWelcomeFooterMiddle || undefined
+                                }
+                                tailContent={undefined}
+                                tailKey={undefined}
+                                onCanScrollToBottomChange={
+                                  handleCanScrollToBottomChange
+                                }
+                                virtualScrollThreshold={virtualScrollThreshold}
+                                turnFileChanges={
+                                  visibleTurnOutputKinds.has('file')
+                                    ? fileChangesByTurn
+                                    : undefined
+                                }
+                                turnArtifacts={
+                                  visibleTurnOutputKinds.has('artifact')
+                                    ? artifactsByTurn
+                                    : undefined
+                                }
+                                turnScheduledTasks={
+                                  visibleTurnOutputKinds.has('scheduled_task')
+                                    ? scheduledTasksByTurn
+                                    : undefined
+                                }
+                                onTurnOutputOpen={handleTurnOutputOpen}
+                                onReviewChanges={openReviewPanel}
+                                onOpenArtifact={openArtifactPanel}
+                                onOpenScheduledTask={openScheduledTaskPanel}
+                              />
+                            );
 
-                          const btwPanel =
-                            !showMobileWelcomeFooterMiddle &&
-                            btwMessage?.role === 'btw' ? (
-                              <div className={styles.btwPanel}>
-                                <BtwMessage
-                                  question={btwMessage.question}
-                                  answer={btwMessage.answer}
-                                  isPending={btwMessage.isPending}
-                                />
-                              </div>
-                            ) : null;
+                            const btwPanel =
+                              !showMobileWelcomeFooterMiddle &&
+                              btwMessage?.role === 'btw' ? (
+                                <div className={styles.btwPanel}>
+                                  <BtwMessage
+                                    question={btwMessage.question}
+                                    answer={btwMessage.answer}
+                                    isPending={btwMessage.isPending}
+                                  />
+                                </div>
+                              ) : null;
 
-                          if (showMobileWelcomeFooterMiddle) {
+                            if (showMobileWelcomeFooterMiddle) {
+                              return (
+                                <div className={styles.mobileWelcomeGroup}>
+                                  <div
+                                    style={contentStyle}
+                                    className={contentClassName}
+                                  >
+                                    {messageList}
+                                    {btwPanel}
+                                  </div>
+                                  <div
+                                    className={styles.mobileWelcomeFooterMiddle}
+                                  >
+                                    {welcomeFooter}
+                                  </div>
+                                </div>
+                              );
+                            }
                             return (
-                              <div className={styles.mobileWelcomeGroup}>
-                                <div
-                                  style={contentStyle}
-                                  className={contentClassName}
-                                >
-                                  {messageList}
-                                  {btwPanel}
-                                </div>
-                                <div
-                                  className={styles.mobileWelcomeFooterMiddle}
-                                >
-                                  {welcomeFooter}
-                                </div>
+                              <div
+                                style={contentStyle}
+                                className={contentClassName}
+                              >
+                                {messageList}
+                                {btwPanel}
                               </div>
                             );
-                          }
-                          return (
-                            <div
-                              style={contentStyle}
-                              className={contentClassName}
-                            >
-                              {messageList}
-                              {btwPanel}
-                            </div>
-                          );
-                        })()}
+                          })()}
+                        </InteractionBlockContext.Provider>
                       </TodoContextsProvider>
                     </CompactModeContext.Provider>
 

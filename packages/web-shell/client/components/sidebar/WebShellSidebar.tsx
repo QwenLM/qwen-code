@@ -601,6 +601,12 @@ export function WebShellSidebar({
   const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
   const [workspaceSessionsReloadToken, setWorkspaceSessionsReloadToken] =
     useState(0);
+  // Bump the token WorkspaceSection instances watch, so the per-workspace
+  // session lists re-poll immediately after a mutation instead of waiting for
+  // their 10s interval. Stable identity — safe (and required) in consumer deps.
+  const bumpWorkspaceReload = useCallback(() => {
+    setWorkspaceSessionsReloadToken((v) => v + 1);
+  }, []);
   const [searchQuery, setSearchQuery] = useState('');
   const [isResizing, setIsResizing] = useState(false);
   const [tooltip, setTooltip] = useState<{
@@ -928,7 +934,7 @@ export function WebShellSidebar({
         const created = await onNewSession();
         if (created) {
           void reload().catch(() => undefined);
-          setWorkspaceSessionsReloadToken((v) => v + 1);
+          bumpWorkspaceReload();
         }
       } catch (err) {
         if (!isAbortError(err)) {
@@ -939,7 +945,7 @@ export function WebShellSidebar({
         setCreatingSession(false);
       }
     })();
-  }, [onError, onNewSession, reload, t]);
+  }, [bumpWorkspaceReload, onError, onNewSession, reload, t]);
 
   const handleLoadSession = useCallback(
     (sessionId: string) => {
@@ -995,6 +1001,7 @@ export function WebShellSidebar({
       .then(() => {
         cancelRename();
         reload();
+        bumpWorkspaceReload();
       })
       .catch((err: unknown) => {
         onError(err, t('sidebar.renameFailed'));
@@ -1005,6 +1012,7 @@ export function WebShellSidebar({
       });
   }, [
     actions,
+    bumpWorkspaceReload,
     cancelRename,
     currentSessionId,
     editingName,
@@ -1089,12 +1097,14 @@ export function WebShellSidebar({
         // archived directories, so resync both lists regardless of origin.
         void reload();
         void reloadArchived();
+        bumpWorkspaceReload();
       })
       .catch((err: unknown) => onError(err, t('sidebar.deleteFailed')))
       .finally(() => {
         setSessionBusy(sessionId, false);
       });
   }, [
+    bumpWorkspaceReload,
     currentSessionId,
     deleteArchivedSession,
     deleteCandidate,
@@ -1171,6 +1181,7 @@ export function WebShellSidebar({
                 { groupId: group.id, color: null },
               );
               void reload().catch(() => undefined);
+              bumpWorkspaceReload();
             } catch (err) {
               setGroupEditor(null);
               setGroupName('');
@@ -1195,6 +1206,7 @@ export function WebShellSidebar({
       }
     })();
   }, [
+    bumpWorkspaceReload,
     groupColor,
     groupEditor,
     groupName,
@@ -1243,13 +1255,22 @@ export function WebShellSidebar({
         })
         .then(() => {
           void reload().catch(() => undefined);
+          bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
           setSessionBusy(sessionId, false);
         });
     },
-    [onError, organizationEnabled, reload, setSessionBusy, t, workspaceActions],
+    [
+      bumpWorkspaceReload,
+      onError,
+      organizationEnabled,
+      reload,
+      setSessionBusy,
+      t,
+      workspaceActions,
+    ],
   );
 
   const handleArchive = useCallback(
@@ -1263,6 +1284,7 @@ export function WebShellSidebar({
       archiveSession(sessionId)
         .then(() => {
           void reloadArchived();
+          bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.archiveFailed')))
         .finally(() => {
@@ -1271,6 +1293,7 @@ export function WebShellSidebar({
     },
     [
       archiveSession,
+      bumpWorkspaceReload,
       currentSessionId,
       onError,
       reloadArchived,
@@ -1287,13 +1310,14 @@ export function WebShellSidebar({
       unarchiveSession(sessionId)
         .then(() => {
           void reload();
+          bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.unarchiveFailed')))
         .finally(() => {
           setSessionBusy(sessionId, false);
         });
     },
-    [onError, reload, setSessionBusy, t, unarchiveSession],
+    [bumpWorkspaceReload, onError, reload, setSessionBusy, t, unarchiveSession],
   );
 
   const closeMenu = useCallback(() => setMenuState(null), []);
@@ -1379,13 +1403,22 @@ export function WebShellSidebar({
         .updateSessionOrganization(sessionId, { groupId, color: null })
         .then(() => {
           void reload().catch(() => undefined);
+          bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
           setSessionBusy(sessionId, false);
         });
     },
-    [onError, organizationEnabled, reload, setSessionBusy, t, workspaceActions],
+    [
+      bumpWorkspaceReload,
+      onError,
+      organizationEnabled,
+      reload,
+      setSessionBusy,
+      t,
+      workspaceActions,
+    ],
   );
 
   const assignSessionColor = useCallback(
@@ -1401,13 +1434,22 @@ export function WebShellSidebar({
         .updateSessionOrganization(sessionId, { color, groupId: null })
         .then(() => {
           void reload().catch(() => undefined);
+          bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
           setSessionBusy(sessionId, false);
         });
     },
-    [onError, organizationEnabled, reload, setSessionBusy, t, workspaceActions],
+    [
+      bumpWorkspaceReload,
+      onError,
+      organizationEnabled,
+      reload,
+      setSessionBusy,
+      t,
+      workspaceActions,
+    ],
   );
 
   const filteredSessions = useMemo(() => {
@@ -1630,9 +1672,17 @@ export function WebShellSidebar({
   const renderSessionRow = useCallback(
     (
       session: DaemonSessionSummary,
-      options: { isArchived?: boolean; grouped?: boolean } = {},
+      options: {
+        isArchived?: boolean;
+        grouped?: boolean;
+        // Suppress the per-session mutation actions (pin/group/archive/export/
+        // more). Used for non-primary workspace rows: the daemon is bound to the
+        // primary workspace, so those routes can't resolve another workspace's
+        // session (they 404 or silently no-op). Such rows stay load-only.
+        readOnly?: boolean;
+      } = {},
     ) => {
-      const { isArchived = false, grouped = false } = options;
+      const { isArchived = false, grouped = false, readOnly = false } = options;
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
       const time = stamp ? formatRelativeTime(stamp, t) : '';
@@ -1721,7 +1771,7 @@ export function WebShellSidebar({
           onBlur={hideTooltip}
           onClick={() => handleLoadSession(session.sessionId)}
           onDoubleClick={() => {
-            if (isCurrent && !collapsed) startRename(session);
+            if (!readOnly && isCurrent && !collapsed) startRename(session);
           }}
           onKeyDown={(event) => {
             if (event.key === 'Enter') handleLoadSession(session.sessionId);
@@ -1739,7 +1789,7 @@ export function WebShellSidebar({
                   </span>
                 )}
               </span>
-              {isEditing ? (
+              {isEditing && !readOnly ? (
                 <form
                   className={styles.renameForm}
                   onClick={(event) => event.stopPropagation()}
@@ -1781,92 +1831,94 @@ export function WebShellSidebar({
                     ) : (
                       <span className={styles.sessionTime}>{time}</span>
                     )}
-                    <div
-                      className={styles.sessionActions}
-                      onClick={(event) => event.stopPropagation()}
-                      onKeyDown={(event) => event.stopPropagation()}
-                      onMouseEnter={(event) => {
-                        event.stopPropagation();
-                        setTooltip(null);
-                      }}
-                    >
-                      {organizationEnabled && (
-                        <>
-                          <button
-                            className={cx(
-                              styles.sessionActionButton,
-                              session.isPinned &&
-                                styles.activeSessionActionButton,
-                            )}
-                            type="button"
-                            disabled={busy}
-                            title={
-                              session.isPinned
-                                ? t('sidebar.unpin')
-                                : t('sidebar.pin')
-                            }
-                            aria-label={
-                              session.isPinned
-                                ? t('sidebar.unpin')
-                                : t('sidebar.pin')
-                            }
-                            onClick={() => handleTogglePin(session)}
-                          >
-                            <IconPin />
-                          </button>
-                          <button
-                            className={styles.sessionActionButton}
-                            type="button"
-                            disabled={busy}
-                            title={t('sidebar.sessionGroup')}
-                            aria-label={t('sidebar.sessionGroup')}
-                            onClick={(event) => openGroupMenu(event, session)}
-                          >
-                            <IconGroup />
-                          </button>
-                        </>
-                      )}
-                      <button
-                        className={styles.sessionActionButton}
-                        type="button"
-                        disabled={isCurrent}
-                        title={
-                          isCurrent
-                            ? t('sidebar.archiveCurrentDisabled')
-                            : t('sidebar.archive')
-                        }
-                        aria-label={t('sidebar.archive')}
-                        onClick={() => handleArchive(session)}
+                    {!readOnly && (
+                      <div
+                        className={styles.sessionActions}
+                        onClick={(event) => event.stopPropagation()}
+                        onKeyDown={(event) => event.stopPropagation()}
+                        onMouseEnter={(event) => {
+                          event.stopPropagation();
+                          setTooltip(null);
+                        }}
                       >
-                        <IconArchive />
-                      </button>
-                      {canExportSessions && (
+                        {organizationEnabled && (
+                          <>
+                            <button
+                              className={cx(
+                                styles.sessionActionButton,
+                                session.isPinned &&
+                                  styles.activeSessionActionButton,
+                              )}
+                              type="button"
+                              disabled={busy}
+                              title={
+                                session.isPinned
+                                  ? t('sidebar.unpin')
+                                  : t('sidebar.pin')
+                              }
+                              aria-label={
+                                session.isPinned
+                                  ? t('sidebar.unpin')
+                                  : t('sidebar.pin')
+                              }
+                              onClick={() => handleTogglePin(session)}
+                            >
+                              <IconPin />
+                            </button>
+                            <button
+                              className={styles.sessionActionButton}
+                              type="button"
+                              disabled={busy}
+                              title={t('sidebar.sessionGroup')}
+                              aria-label={t('sidebar.sessionGroup')}
+                              onClick={(event) => openGroupMenu(event, session)}
+                            >
+                              <IconGroup />
+                            </button>
+                          </>
+                        )}
                         <button
                           className={styles.sessionActionButton}
                           type="button"
-                          disabled={exporting}
-                          title={t('sidebar.export')}
-                          aria-label={t('sidebar.export')}
-                          onClick={() => handleExportSession(session)}
+                          disabled={isCurrent}
+                          title={
+                            isCurrent
+                              ? t('sidebar.archiveCurrentDisabled')
+                              : t('sidebar.archive')
+                          }
+                          aria-label={t('sidebar.archive')}
+                          onClick={() => handleArchive(session)}
                         >
-                          <IconDownload />
+                          <IconArchive />
                         </button>
-                      )}
-                      <button
-                        className={cx(
-                          styles.sessionActionButton,
-                          isMenuOpen && styles.sessionActionButtonActive,
+                        {canExportSessions && (
+                          <button
+                            className={styles.sessionActionButton}
+                            type="button"
+                            disabled={exporting}
+                            title={t('sidebar.export')}
+                            aria-label={t('sidebar.export')}
+                            onClick={() => handleExportSession(session)}
+                          >
+                            <IconDownload />
+                          </button>
                         )}
-                        type="button"
-                        aria-label={t('sidebar.moreActions')}
-                        aria-haspopup="menu"
-                        aria-expanded={isMenuOpen}
-                        title={t('sidebar.moreActions')}
-                        onClick={(event) => openMenu(event, session, false)}
-                      >
-                        <IconMore />
-                      </button>
-                    </div>
+                        <button
+                          className={cx(
+                            styles.sessionActionButton,
+                            isMenuOpen && styles.sessionActionButtonActive,
+                          )}
+                          type="button"
+                          aria-label={t('sidebar.moreActions')}
+                          aria-haspopup="menu"
+                          aria-expanded={isMenuOpen}
+                          title={t('sidebar.moreActions')}
+                          onClick={(event) => openMenu(event, session, false)}
+                        >
+                          <IconMore />
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </>
               )}
@@ -2501,14 +2553,17 @@ export function WebShellSidebar({
                       ? selectedWorkspaceCwd === undefined
                       : selectedWorkspaceCwd === ws.cwd
                   }
-                  currentSessionId={currentSessionId}
                   reloadToken={workspaceSessionsReloadToken}
                   primaryLabel={t('sidebar.workspacePrimary')}
                   untrustedLabel={t('sidebar.workspaceUntrusted')}
+                  readOnlyLabel={t('sidebar.workspaceReadOnly')}
+                  trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
                   noSessionsLabel={t('sidebar.noSessions')}
                   formatTime={(iso) => formatRelativeTime(iso, t)}
                   onSelectWorkspace={(cwd) => onSelectWorkspace?.(cwd)}
-                  onLoadSession={handleLoadSession}
+                  renderSession={(session) =>
+                    renderSessionRow(session, { readOnly: !ws.primary })
+                  }
                 />
               ))}
             </div>

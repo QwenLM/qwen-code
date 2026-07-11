@@ -330,6 +330,7 @@ export type {
   DaemonMcpRestartResult,
   DaemonReloadResponse,
   DaemonChannelReloadResult,
+  DaemonChannelWorkerGroupSnapshot,
   DaemonChannelWorkerSnapshot,
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,

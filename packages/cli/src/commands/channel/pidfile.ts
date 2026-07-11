@@ -13,6 +13,13 @@ import {
 import * as path from 'node:path';
 import { Storage } from '@qwen-code/qwen-code-core';
 
+export interface ServiceInfoWorker {
+  workspaceId?: string;
+  workspaceCwd?: string;
+  channels: string[];
+  workerPid?: number;
+}
+
 export interface ServiceInfo {
   owner: 'channel' | 'serve';
   pid: number;
@@ -20,6 +27,12 @@ export interface ServiceInfo {
   channels: string[];
   servePid?: number;
   workerPid?: number;
+  /**
+   * Per-workspace channel workers for a multi-workspace `qwen serve`. Additive
+   * to the single-worker `channels` / `workerPid` fields, which stay populated
+   * (union of channels; primary worker pid) for older readers.
+   */
+  workers?: ServiceInfoWorker[];
 }
 
 function pidFilePath(): string {
@@ -50,6 +63,9 @@ function parseServiceInfo(value: unknown): ServiceInfo | null {
   if (info.servePid !== undefined && !isValidPid(info.servePid)) return null;
   if (info.workerPid !== undefined && !isValidPid(info.workerPid)) return null;
 
+  const workers = parseServiceInfoWorkers(info.workers);
+  if (workers === null) return null;
+
   return {
     owner,
     pid: info.pid,
@@ -57,7 +73,60 @@ function parseServiceInfo(value: unknown): ServiceInfo | null {
     channels: info.channels,
     ...(info.servePid !== undefined ? { servePid: info.servePid } : {}),
     ...(info.workerPid !== undefined ? { workerPid: info.workerPid } : {}),
+    ...(workers !== undefined ? { workers } : {}),
   };
+}
+
+/**
+ * Validate the additive `workers[]` list. Returns `undefined` when absent,
+ * `null` when malformed (rejects the whole pidfile), or the parsed list.
+ */
+function parseServiceInfoWorkers(
+  value: unknown,
+): ServiceInfoWorker[] | null | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return null;
+  const workers: ServiceInfoWorker[] = [];
+  for (const raw of value) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      return null;
+    }
+    const worker = raw as Partial<ServiceInfoWorker>;
+    if (
+      !Array.isArray(worker.channels) ||
+      !worker.channels.every((channel) => typeof channel === 'string')
+    ) {
+      return null;
+    }
+    if (
+      worker.workspaceId !== undefined &&
+      typeof worker.workspaceId !== 'string'
+    ) {
+      return null;
+    }
+    if (
+      worker.workspaceCwd !== undefined &&
+      typeof worker.workspaceCwd !== 'string'
+    ) {
+      return null;
+    }
+    if (worker.workerPid !== undefined && !isValidPid(worker.workerPid)) {
+      return null;
+    }
+    workers.push({
+      channels: worker.channels,
+      ...(worker.workspaceId !== undefined
+        ? { workspaceId: worker.workspaceId }
+        : {}),
+      ...(worker.workspaceCwd !== undefined
+        ? { workspaceCwd: worker.workspaceCwd }
+        : {}),
+      ...(worker.workerPid !== undefined
+        ? { workerPid: worker.workerPid }
+        : {}),
+    });
+  }
+  return workers;
 }
 
 function unlinkPidFile(filePath: string): void {
@@ -151,10 +220,12 @@ export function writeServeServiceInfo({
   channels,
   servePid = process.pid,
   workerPid,
+  workers,
 }: {
   channels: string[];
   servePid?: number;
   workerPid?: number;
+  workers?: ServiceInfoWorker[];
 }): void {
   const buildInfo = (startedAt: string): ServiceInfo => ({
     owner: 'serve',
@@ -163,6 +234,7 @@ export function writeServeServiceInfo({
     channels,
     servePid,
     ...(workerPid !== undefined ? { workerPid } : {}),
+    ...(workers !== undefined ? { workers } : {}),
   });
 
   const filePath = pidFilePath();

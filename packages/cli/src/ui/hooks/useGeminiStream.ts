@@ -64,6 +64,7 @@ import {
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
   AutonomousLoopTickResolver,
+  refreshMemoryAfterManagedWrite,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -2925,20 +2926,33 @@ export const useGeminiStream = (
           !processedMemoryToolsRef.current.has(t.request.callId),
       );
 
-      if (newSuccessfulMemorySaves.length > 0) {
-        // Perform the refresh only if there are new ones.
-        void performMemoryRefresh();
-        // Mark them as processed so we don't do this again on the next render.
-        newSuccessfulMemorySaves.forEach((t) =>
-          processedMemoryToolsRef.current.add(t.request.callId),
-        );
-      }
-
       const geminiTools = completedAndReadyToSubmitTools.filter(
         (t) =>
           !t.request.isClientInitiated &&
           !historyCallIdsWithResponse.has(t.request.callId),
       );
+      const didRefreshManagedMemory = await refreshMemoryAfterManagedWrite(
+        config,
+        completedAndReadyToSubmitTools.map((toolCall) => ({
+          toolName: toolCall.request.name,
+          args: toolCall.request.args as Record<string, unknown>,
+          status: toolCall.status,
+        })),
+        { logContext: 'interactive memory tool batch' },
+      );
+      if (newSuccessfulMemorySaves.length > 0) {
+        if (!didRefreshManagedMemory) {
+          // Perform the legacy save_memory refresh only when the managed-memory
+          // write refresh did not already rebuild and publish a fresher state.
+          void performMemoryRefresh().catch((err) => {
+            debugLogger.warn(`save_memory refresh failed: ${err}`);
+          });
+        }
+        // Mark them as processed so we don't do this again on the next render.
+        newSuccessfulMemorySaves.forEach((t) =>
+          processedMemoryToolsRef.current.add(t.request.callId),
+        );
+      }
       const completedCallIds = new Set(
         completedAndReadyToSubmitTools.map(
           (toolCall) => toolCall.request.callId,

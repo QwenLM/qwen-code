@@ -96,6 +96,7 @@ const {
     },
     mockStore: {
       dispatch: vi.fn(),
+      reset: vi.fn(),
       appendLocalUserMessage: vi.fn(),
       appendLocalAssistantMessage: vi.fn(),
     },
@@ -155,8 +156,8 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   }),
 }));
 
-vi.mock('@qwen-code/sdk/daemon', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@qwen-code/sdk/daemon')>()),
+vi.mock('@qwen-code/sdk/daemon', () => ({
+  DAEMON_GOAL_STATUS_SENTINEL_PREFIX: 'qwen-goal-status:',
   isDaemonTurnError: () => false,
 }));
 
@@ -221,6 +222,27 @@ vi.mock('./components/ChatEditor', async () => {
 
 vi.mock('./components/MessageList', async () => {
   const React = await import('react');
+  const { useInteractionBlocker } = await import('./interactionBlockContext');
+  function InteractionBlockerProbe() {
+    const registerInteractionBlocker = useInteractionBlocker();
+    const releaseRef = React.useRef<(() => void) | null>(null);
+    return React.createElement(
+      'button',
+      {
+        'data-testid': 'interaction-blocker',
+        onClick: () => {
+          if (releaseRef.current) {
+            releaseRef.current();
+            releaseRef.current = null;
+          } else {
+            releaseRef.current = registerInteractionBlocker();
+          }
+        },
+        type: 'button',
+      },
+      releaseRef.current ? 'release blocker' : 'register blocker',
+    );
+  }
   return {
     MessageList: React.forwardRef(function MessageList(
       props: { showRetryHint?: boolean; onRetryClick?: () => void },
@@ -230,6 +252,7 @@ vi.mock('./components/MessageList', async () => {
       return React.createElement(
         'div',
         { 'data-testid': 'messages' },
+        React.createElement(InteractionBlockerProbe),
         props.showRetryHint
           ? React.createElement(
               'button',
@@ -659,6 +682,8 @@ beforeEach(() => {
   mockSessionActions.sendShellCommand.mockResolvedValue(undefined);
   mockSessionActions.getStats.mockResolvedValue({});
   mockSessionActions.loadSession.mockResolvedValue(undefined);
+  mockStore.reset.mockClear();
+  mockStore.dispatch.mockClear();
   mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({ skills: [] });
   mockWorkspaceActions.loadProviders.mockResolvedValue({ current: null });
   mockWorkspaceActions.loadPreflight.mockResolvedValue(null);
@@ -2074,6 +2099,43 @@ describe('App session callbacks', () => {
     await clickSubmit(container);
     await flush();
     expect(testState.latestChatEditorProps?.dialogOpen).toBe(true);
+  });
+
+  it('blocks app-level shortcuts while an external modal is registered', async () => {
+    const { container } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(false);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="interaction-blocker"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(true);
+
+    act(() => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+          key: 'l',
+        }),
+      );
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+          key: 'y',
+        }),
+      );
+    });
+
+    expect(mockStore.reset).not.toHaveBeenCalled();
+    expect(mockStore.dispatch).not.toHaveBeenCalled();
   });
 
   it('restores composer focus after an approval resolves following a panel auto-close', async () => {

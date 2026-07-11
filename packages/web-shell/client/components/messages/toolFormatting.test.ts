@@ -7,6 +7,7 @@ import {
   getToolResultSummary,
   getToolSummaryDescription,
   localizeToolDisplayName,
+  sanitizeControlChars,
   TOOL_DISPLAY_NAMES,
 } from './toolFormatting';
 import { getTranslator } from '../../i18n';
@@ -24,6 +25,29 @@ describe('toolFormatting', () => {
   it('matches CLI-style user shell command display names', () => {
     expect(formatToolDisplayName('shell')).toBe('Shell Command');
     expect(formatToolDisplayName('run_shell_command')).toBe('Shell');
+  });
+
+  describe('sanitizeControlChars', () => {
+    it('escapes bare C0 controls (CR, BS, BEL, ESC, DEL) to visible text', () => {
+      expect(sanitizeControlChars('a\rb')).toBe('a\\rb');
+      expect(sanitizeControlChars('a\bb')).toBe('a\\bb');
+      expect(sanitizeControlChars('a\x07b')).toBe('a\\u0007b'); // BEL
+      expect(sanitizeControlChars('a\x1bb')).toBe('a\\u001bb'); // ESC
+      expect(sanitizeControlChars('a\x7fb')).toBe('a\\u007fb'); // DEL
+    });
+
+    it('neutralizes an ANSI color sequence via its ESC byte', () => {
+      expect(sanitizeControlChars('\x1b[31mred\x1b[0m')).toBe(
+        '\\u001b[31mred\\u001b[0m',
+      );
+    });
+
+    it('leaves ordinary text, tabs, and newlines untouched', () => {
+      expect(sanitizeControlChars('git log --oneline')).toBe(
+        'git log --oneline',
+      );
+      expect(sanitizeControlChars('a\tb\nc')).toBe('a\tb\nc');
+    });
   });
 
   it('normalizes web fetch display names', () => {

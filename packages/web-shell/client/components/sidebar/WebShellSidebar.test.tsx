@@ -231,6 +231,7 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -273,14 +274,175 @@ describe('WebShellSidebar — workspace picker', () => {
     expect(labels.some((l) => l.includes('danger'))).toBe(true);
   });
 
-  it('disables the untrusted workspace and enables trusted ones', () => {
+  it('lets an untrusted secondary expand as read-only without selecting or loading it', async () => {
     mockWorkspace.capabilities = multiWorkspaceCaps;
-    const { container } = renderSidebar(false);
+    mockWorkspace.client.listWorkspaceSessions.mockImplementation(
+      async (cwd: string) =>
+        cwd === '/tmp/danger'
+          ? [makeSession('danger-session', { workspaceCwd: cwd })]
+          : [],
+    );
+    const onSelectWorkspace = vi.fn();
+    const onLoadSession = vi.fn();
+    const { container } = renderSidebar(false, {
+      onSelectWorkspace,
+      onLoadSession,
+    });
     const buttons = workspaceButtons(container);
     const untrusted = buttons.find((b) => b.textContent?.includes('danger'));
     const trusted = buttons.find((b) => b.textContent?.includes('other'));
-    expect(untrusted?.disabled).toBe(true);
+    expect(untrusted?.disabled).toBe(false);
+    expect(untrusted?.textContent).toContain('untrusted');
+    expect(untrusted?.textContent).toContain('read-only');
     expect(trusted?.disabled).toBe(false);
+
+    await act(async () => {
+      untrusted?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await vi.waitFor(() =>
+      expect(mockWorkspace.client.listWorkspaceSessions).toHaveBeenCalledWith(
+        '/tmp/danger',
+        { archiveState: 'active' },
+      ),
+    );
+    expect(onSelectWorkspace).not.toHaveBeenCalled();
+
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector<HTMLElement>('[role="note"]'),
+      ).not.toBeNull(),
+    );
+    const session = container.querySelector<HTMLElement>('[role="note"]')!;
+    expect(session.textContent).toContain('Session danger-session');
+    expect(session.title).toBe('');
+    expect(session.getAttribute('role')).toBe('note');
+    expect(session.getAttribute('aria-disabled')).toBeNull();
+    expect(session.getAttribute('aria-label')).toBe(
+      `Session danger-session, ${new Date(
+        '2026-01-01T00:00:00.000Z',
+      ).toLocaleDateString()}. Trust this workspace to open the session.`,
+    );
+    act(() => {
+      session.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      session.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      session.dispatchEvent(
+        new KeyboardEvent('keydown', { key: ' ', bubbles: true }),
+      );
+    });
+    expect(onLoadSession).not.toHaveBeenCalled();
+  });
+
+  it('does not poll an expanded read-only workspace and reloads on token change', async () => {
+    vi.useFakeTimers();
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    mockActive.reload.mockResolvedValue(undefined);
+    const onNewSession = vi.fn().mockResolvedValue(true);
+    const { container } = renderSidebar(false, {
+      onSelectWorkspace: vi.fn(),
+      onNewSession,
+    });
+    const untrusted = workspaceButtons(container).find((button) =>
+      button.textContent?.includes('danger'),
+    );
+    await act(async () => {
+      untrusted?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const countWorkspaceCalls = (cwd: string) =>
+      mockWorkspace.client.listWorkspaceSessions.mock.calls.filter(
+        ([calledCwd]) => calledCwd === cwd,
+      ).length;
+    expect(countWorkspaceCalls('/tmp/danger')).toBe(1);
+    expect(countWorkspaceCalls('/tmp/project')).toBe(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(countWorkspaceCalls('/tmp/danger')).toBe(1);
+    expect(countWorkspaceCalls('/tmp/project')).toBe(2);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="New chat"]')
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onNewSession).toHaveBeenCalledOnce();
+    expect(countWorkspaceCalls('/tmp/danger')).toBe(2);
+  });
+
+  it('shows an empty read-only catalog after a dynamically registered workspace appears', async () => {
+    mockWorkspace.capabilities = {
+      ...multiWorkspaceCaps,
+      workspaces: [multiWorkspaceCaps.workspaces[0]!],
+    };
+    const { container, rerender } = renderSidebar(false);
+    expect(
+      workspaceButtons(container).some((button) =>
+        button.textContent?.includes('danger'),
+      ),
+    ).toBe(false);
+
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    rerender({});
+    const untrusted = workspaceButtons(container).find((button) =>
+      button.textContent?.includes('danger'),
+    );
+    expect(untrusted?.disabled).toBe(false);
+    await act(async () => {
+      untrusted?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await vi.waitFor(() =>
+      expect(mockWorkspace.client.listWorkspaceSessions).toHaveBeenCalledWith(
+        '/tmp/danger',
+        { archiveState: 'active' },
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(untrusted?.parentElement?.textContent).toContain('No sessions.'),
+    );
+  });
+
+  it('keeps the read-only empty state when the catalog request fails', async () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    const failure = new Error('catalog unavailable');
+    mockWorkspace.client.listWorkspaceSessions.mockRejectedValue(failure);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container } = renderSidebar(false);
+    const untrusted = workspaceButtons(container).find((button) =>
+      button.textContent?.includes('danger'),
+    );
+
+    await act(async () => {
+      untrusted?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await vi.waitFor(() =>
+      expect(warn).toHaveBeenCalledWith(
+        '[WorkspaceSection] session poll failed:',
+        failure,
+      ),
+    );
+    expect(untrusted?.parentElement?.textContent).toContain('No sessions.');
+  });
+
+  it('keeps an untrusted primary workspace disabled', () => {
+    mockWorkspace.capabilities = {
+      ...multiWorkspaceCaps,
+      workspaces: [
+        {
+          id: 'ws-primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: false,
+        },
+        ...multiWorkspaceCaps.workspaces.slice(1),
+      ],
+    };
+    const { container } = renderSidebar(false);
+    const primary = workspaceButtons(container).find((button) =>
+      button.textContent?.includes('project'),
+    );
+    expect(primary?.disabled).toBe(true);
   });
 
   it('calls onSelectWorkspace with the chosen cwd for a secondary workspace', () => {
@@ -307,6 +469,116 @@ describe('WebShellSidebar — workspace picker', () => {
       primary?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(onSelectWorkspace).toHaveBeenCalledWith(undefined);
+  });
+
+  // Flush the WorkspaceSection async session poll (a resolved promise +
+  // the setState it drives).
+  async function flushSessionPoll(): Promise<void> {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  const moreActionButtons = (container: HTMLElement): HTMLButtonElement[] =>
+    Array.from(container.querySelectorAll<HTMLButtonElement>('button')).filter(
+      (b) => b.getAttribute('aria-label') === 'More actions',
+    );
+
+  it('gives primary-workspace sessions full actions but keeps non-primary rows read-only', async () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([
+      makeSession('shared'),
+    ]);
+    const { container } = renderSidebar(false);
+    await flushSessionPoll();
+
+    const sessionSpans = () =>
+      Array.from(container.querySelectorAll('span')).filter(
+        (el) => el.textContent === 'Session shared',
+      );
+
+    // The primary workspace is expanded by default: its row renders with the
+    // full action set.
+    expect(sessionSpans().length).toBe(1);
+    expect(moreActionButtons(container)).toHaveLength(1);
+
+    // Expand the non-primary ("other") workspace.
+    const other = workspaceButtons(container).find((b) =>
+      b.textContent?.includes('other'),
+    );
+    act(() => {
+      other?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSessionPoll();
+
+    // The non-primary section now renders the same session (so the row is
+    // present)...
+    expect(sessionSpans().length).toBe(2);
+    // ...but it stays read-only — no extra action button was added, because the
+    // daemon (bound to the primary workspace) can't service mutations for it.
+    expect(moreActionButtons(container)).toHaveLength(1);
+  });
+
+  it('re-polls the workspace session list after a mutation', async () => {
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([
+      makeSession('shared'),
+    ]);
+    const { container } = renderSidebar(false);
+    await flushSessionPoll();
+    const callsBefore =
+      mockWorkspace.client.listWorkspaceSessions.mock.calls.length;
+
+    // Archive the primary workspace's session via its row action button.
+    const archiveButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((b) => b.getAttribute('aria-label') === 'Archive');
+    expect(archiveButton).toBeTruthy();
+    act(() => {
+      archiveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSessionPoll();
+
+    // The mutation bumps the shared reload token, so the section re-polls
+    // instead of waiting for the 10s interval.
+    expect(
+      mockWorkspace.client.listWorkspaceSessions.mock.calls.length,
+    ).toBeGreaterThan(callsBefore);
+  });
+
+  it('does not open the inline rename form on a read-only (non-primary) row', async () => {
+    mockConnection.sessionId = 'shared';
+    mockWorkspace.capabilities = multiWorkspaceCaps;
+    mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([
+      makeSession('shared'),
+    ]);
+    const { container } = renderSidebar(false);
+    await flushSessionPoll();
+
+    // Expand the non-primary workspace so its read-only copy of the shared
+    // session renders too.
+    const other = workspaceButtons(container).find((b) =>
+      b.textContent?.includes('other'),
+    );
+    act(() => {
+      other?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSessionPoll();
+
+    const rows = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).filter((el) => el.textContent?.includes('Session shared'));
+    expect(rows).toHaveLength(2);
+
+    // Double-click the primary (current-session) row to start a rename.
+    act(() => {
+      rows[0].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+
+    // Only the primary row opens the rename input; the read-only row stays
+    // plain, even though it holds the same (now-editing) session id.
+    expect(container.querySelectorAll('input')).toHaveLength(1);
   });
 
   it('does not render secondary workspace entries with a single workspace', () => {
