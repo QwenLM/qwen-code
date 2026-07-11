@@ -13,7 +13,7 @@ describe('sandbox-env', () => {
     }
   });
 
-  it('strips credentials from untrusted sandbox subprocesses', () => {
+  it('strips Qwen internal vars and keeps user credentials', () => {
     const base: NodeJS.ProcessEnv = {
       SAFE_VAR: 'ok',
       QWEN_SERVER_TOKEN: 'daemon-bearer',
@@ -35,16 +35,16 @@ describe('sandbox-env', () => {
 
     expect(sanitized.SAFE_VAR).toBe('ok');
     expect(sanitized.QWEN_SERVER_TOKEN).toBeUndefined();
-    expect(sanitized.LLM_API_KEY).toBeUndefined();
-    expect(sanitized.QWEN_API_KEY).toBeUndefined();
-    expect(sanitized.AWS_ACCESS_KEY_ID).toBeUndefined();
-    expect(sanitized.AWS_SECRET_ACCESS_KEY).toBeUndefined();
-    expect(sanitized.AWS_SESSION_TOKEN).toBeUndefined();
-    expect(sanitized.GITHUB_TOKEN).toBeUndefined();
-    expect(sanitized.GH_TOKEN).toBeUndefined();
-    expect(sanitized.GOOGLE_API_KEY).toBeUndefined();
-    expect(sanitized.STRIPE_SECRET_KEY).toBeUndefined();
-    expect(sanitized.NPM_TOKEN).toBeUndefined();
+    expect(sanitized.LLM_API_KEY).toBe('llm-key');
+    expect(sanitized.QWEN_API_KEY).toBe('qwen-key');
+    expect(sanitized.AWS_ACCESS_KEY_ID).toBe('AKIAEXAMPLE');
+    expect(sanitized.AWS_SECRET_ACCESS_KEY).toBe('aws-secret');
+    expect(sanitized.AWS_SESSION_TOKEN).toBe('aws-session');
+    expect(sanitized.GITHUB_TOKEN).toBe('gh-token');
+    expect(sanitized.GH_TOKEN).toBe('gh-token');
+    expect(sanitized.GOOGLE_API_KEY).toBe('google-key');
+    expect(sanitized.STRIPE_SECRET_KEY).toBe('stripe-key');
+    expect(sanitized.NPM_TOKEN).toBe('npm-token');
     expect(sanitized.DB_PASSWORD).toBe('db-password');
     expect(sanitized.SSH_PRIVATE_KEY).toBe('private-key');
   });
@@ -62,7 +62,7 @@ describe('sandbox-env', () => {
     });
 
     expect(env.SAFE_VAR).toBe('ok');
-    expect(env.QWEN_API_KEY).toBeUndefined();
+    expect(env.QWEN_API_KEY).toBe('secret');
 
     expect(env.TMPDIR).toBe(join(dataDir, '.tmp'));
     expect(env.TMP).toBe(join(dataDir, '.tmp'));
