@@ -2940,7 +2940,7 @@ export interface ExtensionOperationResult {
   error?: string;
   updated?: boolean;
   reason?: string;
-  states?: Record<string, string>;
+  states?: Record<string, DaemonExtensionUpdateState>;
 }
 
 export interface ExtensionOperationStatus {

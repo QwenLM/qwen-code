@@ -116,8 +116,8 @@ POST   /workspaces/:workspace/extensions/refresh
 ```
 
 It intentionally has no workspace artifact mutation routes. Projection entries
-include default, exact workspace value, effective value, source, desired
-generation, and locally applied generation.
+include default, exact workspace value, effective value, and source. Desired
+generation and locally applied generation are top-level response fields.
 
 Potentially slow mutations return `202`, `Location`, and `Retry-After`. The
 operation record is daemon-local memory, retains at most 100 terminal records,
@@ -131,9 +131,10 @@ or single-extension update checks at once. Install and update use an explicit
 does not change the store, cache, or runtime. Prepared mutations enter a
 separate single-concurrency FIFO commit queue in the order preparation
 finishes. Activation and uninstall enter only the commit queue; check-updates
-enters only the preparation queue; refresh enters neither. Cleanup and runtime
-reconciliation do not occupy either slot, so later commits may proceed while an
-earlier generation is reconciling.
+enters only the preparation queue. Manual refresh is serialized through the
+commit queue, while post-commit runtime reconciliation enters neither queue.
+Cleanup and runtime reconciliation do not occupy either slot, so later commits
+may proceed while an earlier generation is reconciling.
 
 The preparation deadline starts when an operation first acquires a preparation
 slot, not while it waits. Abort is propagated to network operations. A started
