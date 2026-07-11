@@ -309,15 +309,14 @@ describe('WebShellSidebar — workspace picker', () => {
 
     await vi.waitFor(() =>
       expect(
-        container.querySelector<HTMLElement>('[aria-disabled="true"]'),
+        container.querySelector<HTMLElement>('[role="note"]'),
       ).not.toBeNull(),
     );
-    const session = container.querySelector<HTMLElement>(
-      '[aria-disabled="true"]',
-    )!;
+    const session = container.querySelector<HTMLElement>('[role="note"]')!;
     expect(session.textContent).toContain('Session danger-session');
     expect(session.title).toBe('');
     expect(session.getAttribute('role')).toBe('note');
+    expect(session.getAttribute('aria-disabled')).toBeNull();
     expect(session.getAttribute('aria-label')).toBe(
       'Session danger-session. Trust this workspace to open the session.',
     );

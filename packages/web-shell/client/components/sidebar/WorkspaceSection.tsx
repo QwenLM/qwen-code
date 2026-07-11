@@ -163,7 +163,6 @@ export function WorkspaceSection({
                   key={session.sessionId}
                   className={cx(styles.sessionItem, styles.sessionItemReadOnly)}
                   role="note"
-                  aria-disabled="true"
                   aria-label={`${getSessionLabel(session)}. ${trustToOpenLabel}`}
                 >
                   {content}
