@@ -1764,7 +1764,7 @@ export class GeminiClient {
         this.getHistoryShallow(),
         lastCompletionTimestamp,
         this.config.getClearContextOnIdle(),
-        opts,
+        { ...opts, projectRoot: this.config.getTargetDir() },
       );
       if (!mcResult.meta) {
         return false;

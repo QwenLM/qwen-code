@@ -8,6 +8,7 @@ import type { Content, Part } from '@google/genai';
 
 import type { ClearContextOnIdleSettings } from '../../config/config.js';
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearContextDefaults.js';
+import { isAnyAutoMemPath } from '../../memory/paths.js';
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames } from '../../tools/tool-names.js';
 
@@ -149,17 +150,37 @@ function hasNestedMedia(part: Part): boolean {
  * `toolResultsNumToKeep: 1` keeps 1 tool result AND 1 media item, not
  * 1 entry total across the combined list.
  */
-function collectCompactablePartRefs(history: Content[]): CollectedRefs {
+function isManagedMemoryRead(
+  part: Part,
+  callIdToFilePath: Map<string, string[]>,
+  projectRoot: string | undefined,
+): boolean {
+  if (!projectRoot || part.functionResponse?.name !== ToolNames.READ_FILE) {
+    return false;
+  }
+  const paths = getFilePathsForResponse(part, callIdToFilePath);
+  return paths?.length === 1 && isAnyAutoMemPath(paths[0]!, projectRoot);
+}
+
+function collectCompactablePartRefs(
+  history: Content[],
+  projectRoot?: string,
+): CollectedRefs {
   const tool: PartRef[] = [];
   const media: PartRef[] = [];
   const nestedMedia: PartRef[] = [];
+  const callIdToFilePath = buildCallIdToFilePath(history);
   for (let ci = 0; ci < history.length; ci++) {
     const content = history[ci]!;
     if (content.role !== 'user' || !content.parts) continue;
     for (let pi = 0; pi < content.parts.length; pi++) {
       const part = content.parts[pi]!;
       const fnName = part.functionResponse?.name;
-      if (fnName && COMPACTABLE_TOOLS.has(fnName)) {
+      if (
+        fnName &&
+        COMPACTABLE_TOOLS.has(fnName) &&
+        !isManagedMemoryRead(part, callIdToFilePath, projectRoot)
+      ) {
         tool.push({ contentIndex: ci, partIndex: pi, kind: 'tool' });
       } else if (part.functionResponse && hasNestedMedia(part)) {
         // Non-compactable tool result with media attached — clear only
@@ -347,6 +368,7 @@ function planSizeBasedClearing(
   settings: ClearContextOnIdleSettings,
   keepRecent: number,
   pendingContent: Content | Content[] | undefined,
+  projectRoot?: string,
 ): SizeClearPlan | null {
   const threshold = getToolResultsTotalCharsThreshold(settings);
   if (!Number.isFinite(threshold) || threshold < 0) {
@@ -356,7 +378,7 @@ function planSizeBasedClearing(
   const pending = normalizePendingContent(pendingContent);
   const virtualHistory =
     pending.length > 0 ? [...history, ...pending] : history;
-  const { tool } = collectCompactablePartRefs(virtualHistory);
+  const { tool } = collectCompactablePartRefs(virtualHistory, projectRoot);
   const charsByRef = new Map<string, number>();
   let totalChars = 0;
   let pendingChars = 0;
@@ -412,6 +434,7 @@ export interface MicrocompactOptions {
   force?: boolean;
   sizeOnly?: boolean;
   pendingContent?: Content | Content[];
+  projectRoot?: string;
 }
 
 export interface MicrocompactMeta {
@@ -494,7 +517,10 @@ export function microcompactHistory(
   }
 
   if (triggerReason === 'force' || triggerReason === 'idle') {
-    ({ tool, media, nestedMedia } = collectCompactablePartRefs(history));
+    ({ tool, media, nestedMedia } = collectCompactablePartRefs(
+      history,
+      opts?.projectRoot,
+    ));
     // Each kind gets its own keepRecent budget: setting
     // `toolResultsNumToKeep: 1` keeps 1 of each, not 1 total. This
     // matches what users typically expect when they configure the
@@ -514,6 +540,7 @@ export function microcompactHistory(
       settings,
       keepRecent,
       pending,
+      opts?.projectRoot,
     );
     if (!sizePlan) {
       return { history };

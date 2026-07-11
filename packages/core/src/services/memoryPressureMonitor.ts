@@ -716,13 +716,18 @@ export class MemoryPressureMonitor extends EventEmitter {
           const chat = client.getChat();
           const history = chat.getHistoryShallow?.() ?? chat.getHistory();
           const settings = this.coreConfig.getClearContextOnIdle();
-          const result = microcompactHistory(history, Date.now() - 1, {
-            ...settings,
-            toolResultsThresholdMinutes:
-              (settings.toolResultsThresholdMinutes ?? 0) < 0
-                ? settings.toolResultsThresholdMinutes
-                : 0,
-          });
+          const result = microcompactHistory(
+            history,
+            Date.now() - 1,
+            {
+              ...settings,
+              toolResultsThresholdMinutes:
+                (settings.toolResultsThresholdMinutes ?? 0) < 0
+                  ? settings.toolResultsThresholdMinutes
+                  : 0,
+            },
+            { projectRoot: this.coreConfig.getTargetDir() },
+          );
           if (result.meta) {
             chat.setHistory(result.history);
             // Explicitly clear fileReadCache here instead of relying on

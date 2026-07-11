@@ -1775,7 +1775,7 @@ export class GeminiChat {
       this.history,
       null,
       this.config.getClearContextOnIdle(),
-      { force: true },
+      { force: true, projectRoot: this.config.getTargetDir() },
     );
     const mcMeta = mcResult.meta;
 

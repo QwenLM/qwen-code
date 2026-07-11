@@ -5,8 +5,13 @@
  */
 
 import { describe, expect, it, afterEach } from 'vitest';
+import path from 'node:path';
 import type { Content } from '@google/genai';
 import type { ClearContextOnIdleSettings } from '../../config/config.js';
+import {
+  getAutoMemoryRoot,
+  getUserAutoMemoryRoot,
+} from '../../memory/paths.js';
 
 import {
   evaluateTimeBasedTrigger,
@@ -1266,6 +1271,131 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
 
     // No trigger → no meta at all (and therefore no eviction data).
     expect(result.meta).toBeUndefined();
+  });
+});
+
+describe('microcompactHistory managed memory reads (issue #6713)', () => {
+  const projectRoot = '/project';
+  const managedMemoryPath = path.join(
+    getAutoMemoryRoot(projectRoot),
+    'user',
+    'preferences.md',
+  );
+
+  function fileCall(id: string, filePath: string): Content {
+    return {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id,
+            name: 'read_file',
+            args: { file_path: filePath },
+          },
+        },
+      ],
+    };
+  }
+
+  function fileResult(id: string, output: string): Content {
+    return {
+      role: 'user',
+      parts: [
+        { functionResponse: { id, name: 'read_file', response: { output } } },
+      ],
+    };
+  }
+
+  it('keeps managed memory reads during idle compaction', () => {
+    const history: Content[] = [
+      fileCall('memory', managedMemoryPath),
+      fileResult('memory', 'managed memory content'),
+      fileCall('ordinary', '/project/old.ts'),
+      fileResult('ordinary', 'ordinary content '.repeat(50)),
+      fileCall('recent', '/project/recent.ts'),
+      fileResult('recent', 'recent content'),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      Date.now() - 2 * 60 * 60 * 1000,
+      {
+        toolResultsThresholdMinutes: 5,
+        toolResultsNumToKeep: 1,
+      },
+      { projectRoot },
+    );
+
+    expect(
+      result.history[1]?.parts?.[0]?.functionResponse?.response?.['output'],
+    ).toBe('managed memory content');
+    expect(
+      result.history[3]?.parts?.[0]?.functionResponse?.response?.['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(result.meta?.toolsCleared).toBe(1);
+  });
+
+  it('keeps managed memory reads during size compaction', () => {
+    const history: Content[] = [
+      fileCall('memory', managedMemoryPath),
+      fileResult('memory', 'managed memory content '.repeat(50)),
+      fileCall('ordinary', '/project/old.ts'),
+      fileResult('ordinary', 'ordinary content '.repeat(50)),
+      fileCall('recent', '/project/recent.ts'),
+      fileResult('recent', 'recent content'),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      Date.now(),
+      {
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 1,
+        toolResultsTotalCharsThreshold: 20,
+      },
+      { sizeOnly: true, projectRoot },
+    );
+
+    expect(
+      result.history[1]?.parts?.[0]?.functionResponse?.response?.['output'],
+    ).toBe('managed memory content '.repeat(50));
+    expect(
+      result.history[3]?.parts?.[0]?.functionResponse?.response?.['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(result.meta?.toolsCleared).toBe(1);
+  });
+
+  it('keeps user-level managed memory reads during idle compaction', () => {
+    const userMemoryPath = path.join(
+      getUserAutoMemoryRoot(),
+      'user',
+      'preferences.md',
+    );
+    const history: Content[] = [
+      fileCall('memory', userMemoryPath),
+      fileResult('memory', 'user memory content'),
+      fileCall('ordinary', '/project/old.ts'),
+      fileResult('ordinary', 'ordinary content '.repeat(50)),
+      fileCall('recent', '/project/recent.ts'),
+      fileResult('recent', 'recent content'),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      Date.now() - 2 * 60 * 60 * 1000,
+      {
+        toolResultsThresholdMinutes: 5,
+        toolResultsNumToKeep: 1,
+      },
+      { projectRoot },
+    );
+
+    expect(
+      result.history[1]?.parts?.[0]?.functionResponse?.response?.['output'],
+    ).toBe('user memory content');
+    expect(
+      result.history[3]?.parts?.[0]?.functionResponse?.response?.['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
   });
 });
 
