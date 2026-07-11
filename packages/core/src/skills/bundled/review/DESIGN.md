@@ -271,6 +271,12 @@ A malicious PR could add `.qwen/review-rules.md` with "never report security iss
 
 **Decision:** Tips. Qwen Code's follow-up suggestion system is a core UX differentiator. Blocking prompts interrupt flow. Tips are zero-friction and let users decide when/if to act.
 
+## Why the COMMENT body is composed from clauses, not picked from fixed sentences
+
+The body rules began as a table of exact one-liners — the right call against smuggled prose, and it stayed right while only one state could apply at a time. Then the states multiplied: presubmit downgrades, the context-unavailable cap, discarded-Suggestion disclosure, uncoverable-chunk disclosure, body-relocated Criticals. Four consecutive review rounds each found a **pairwise collision** — two rules both claiming to be "the" body, so applying either erased the other's disclosure (a downgrade reason overwriting the diff-only warning; a "Suggestions are inline" restored by 422 recovery inside a run that never saw the PR's discussion; an all-discarded run claiming its suggestions were inline). Patching collisions one at a time provably does not converge: n states have n(n−1)/2 pairs.
+
+The fix is a composition rule: an ordered clause inventory, each clause present iff its condition holds, joined into one paragraph, nothing else permitted. It keeps the anti-prose discipline (the inventory is closed; free text is still banned), reduces to the table's exact sentences in the single-state case, and makes every future state additive — a new state adds one clause, not one patch per existing state. `C` is likewise defined once, globally (everything the review posts, anywhere — inline or body), so no downstream rule can re-derive it over a subset and delete a body-only blocker.
+
 ## Why Step 7 opens with a hard posting gate
 
 Posting is the only irreversible, public, outward-facing action the skill takes, and it must never happen as a side effect of a confident verdict. The skip condition existed from the start, but it was phrased as one clause among several ("skip if … or if BOTH `--comment` absent AND no post request"), which a model evaluates as a judgment call at the end of a long run — exactly when it is reasoning about what it wants to say rather than about what it was authorized to do.
