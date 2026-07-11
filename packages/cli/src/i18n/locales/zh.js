@@ -223,7 +223,9 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell 模式',
   'YOLO mode': 'YOLO 模式',
-  'Auto mode': 'Auto 模式',
+  'Auto mode': '自动模式',
+  'auto_mode.entry_notice':
+    '已启用自动模式。\n   LLM 分类器会评估每次工具调用 — 安全操作将自动批准，\n   有风险的操作将被阻止。退出：Shift+Tab 或 /approval-mode default。',
   'plan mode': '规划模式',
   'auto-accept edits': '自动接受编辑',
   'Accepting edits': '接受编辑',

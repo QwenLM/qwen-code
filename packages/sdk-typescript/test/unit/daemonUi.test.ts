@@ -6651,6 +6651,71 @@ describe('parallel subAgent text interleaving — normalizer', () => {
   });
 });
 
+describe('daemon UI normalizer — artifact events', () => {
+  it('normalizes artifact_changed as a structured session event', () => {
+    const events = normalizeDaemonEvent({
+      type: 'artifact_changed',
+      data: {
+        sessionId: 'session-1',
+        change: {
+          action: 'updated',
+          artifactId: 'artifact-1',
+          artifact: {
+            id: 'artifact-1',
+            title: 'Report',
+            kind: 'html',
+            storage: 'workspace',
+            source: 'tool',
+            status: 'available',
+          },
+        },
+      },
+    } as never);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'session.artifact.changed',
+        sessionId: 'session-1',
+        change: expect.objectContaining({
+          action: 'updated',
+          artifactId: 'artifact-1',
+        }),
+      }),
+    ]);
+  });
+
+  it('falls back to debug for malformed artifact_changed payloads', () => {
+    const events = normalizeDaemonEvent({
+      type: 'artifact_changed',
+      data: { sessionId: 'session-1' },
+    } as never);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        text: 'artifact_changed: malformed artifact_changed payload',
+      }),
+    ]);
+  });
+
+  it('falls back to debug when artifact_changed change misses required fields', () => {
+    const events = normalizeDaemonEvent({
+      type: 'artifact_changed',
+      data: {
+        sessionId: 'session-1',
+        change: {},
+      },
+    } as never);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        text: 'artifact_changed: missing action or artifactId',
+      }),
+    ]);
+  });
+});
+
 describe('parallel subAgent text interleaving fix', () => {
   it('T1: separates text chunks by parentToolCallId into independent blocks', () => {
     let state = createDaemonTranscriptState({ now: 1 });
