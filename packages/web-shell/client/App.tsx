@@ -201,6 +201,7 @@ import {
   type ComposerToolbarStartRenderer,
   type ComposerToolbarEndRenderer,
   type ComposerToolbarRightRenderer,
+  type ComposerHeaderRenderer,
   type FooterRenderer,
   type LoadingPhrasesResolver,
   type MarkdownTableMode,
@@ -477,6 +478,12 @@ export interface WebShellProps {
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
   renderWelcomeFooter?: WelcomeFooterRenderer;
+  /**
+   * Show renderWelcomeFooter between the welcome header and composer on
+   * mobile empty state. Requires renderWelcomeFooter to be provided for the
+   * mobile CSS reordering to take effect.
+   */
+  mobileWelcomeFooterMiddle?: boolean;
   /** Parse user-message text into display parts such as chips. */
   parseUserMessageContent?: UserMessageContentParser;
   /** Custom renderer for the inside of user chat bubbles. Defaults to plain text. */
@@ -495,6 +502,8 @@ export interface WebShellProps {
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   /** Custom renderer inserted into the composer toolbar's right-side action area. */
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;
+  /** Custom renderer shown directly above the chat composer input. */
+  renderComposerHeader?: ComposerHeaderRenderer;
   /** Custom component for the footer area below the Editor. Replaces the built-in StatusBar. */
   renderFooter?: FooterRenderer;
   /** Extra status items shown in the floating bottom panel beside the TODO summary. */
@@ -907,6 +916,7 @@ export function App({
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
+  mobileWelcomeFooterMiddle = false,
   parseUserMessageContent,
   renderUserMessageContent,
   renderComposerTag,
@@ -916,6 +926,7 @@ export function App({
   renderComposerToolbarStart,
   renderComposerToolbarEnd,
   renderComposerToolbarRight,
+  renderComposerHeader,
   renderFooter,
   bottomStatusItems,
   chatMaxWidth,
@@ -1040,6 +1051,7 @@ export function App({
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
+      renderComposerHeader,
       renderFooter,
       compactThinking,
       collapseCompletedTurns,
@@ -1061,6 +1073,7 @@ export function App({
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
+      renderComposerHeader,
       renderFooter,
       compactThinking,
       collapseCompletedTurns,
@@ -1070,6 +1083,7 @@ export function App({
     ],
   );
   const CustomFooter = renderFooter;
+  const CustomComposerHeader = renderComposerHeader;
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
@@ -4938,6 +4952,13 @@ export function App({
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
+  const useMobileWelcomeMiddleLayout =
+    isChatEmptyState && mobileWelcomeFooterMiddle;
+  const showMobileWelcomeFooterMiddle =
+    useMobileWelcomeMiddleLayout && Boolean(welcomeFooter);
+  const hasWelcomeMiddle = isChatEmptyState && showMobileWelcomeFooterMiddle;
+  const hasMobileComposerBottom =
+    isChatEmptyState && useMobileWelcomeMiddleLayout;
   const missingSession =
     connection.status !== 'connecting' &&
     !connection.sessionId &&
@@ -5322,11 +5343,15 @@ export function App({
             )}
             <div
               ref={chatPaneRef}
-              className={
-                mainView !== 'chat'
-                  ? `${styles.chatPane} ${styles.chatPaneShowingPage}`
-                  : styles.chatPane
-              }
+              className={[
+                styles.chatPane,
+                mainView !== 'chat' ? styles.chatPaneShowingPage : undefined,
+                hasMobileComposerBottom
+                  ? styles.chatPaneWithMobileComposerBottom
+                  : undefined,
+              ]
+                .filter(Boolean)
+                .join(' ')}
             >
               {sidebarOptions.enabled &&
                 !activePanel &&
@@ -5550,11 +5575,20 @@ export function App({
                 </div>
               )}
               <div
-                className={
+                className={[
+                  styles.chatViewWrap,
+                  hasMobileComposerBottom
+                    ? styles.chatViewWithMobileComposerBottom
+                    : undefined,
+                  hasWelcomeMiddle
+                    ? styles.chatViewWithWelcomeMiddle
+                    : undefined,
                   activePanel || mainView !== 'chat'
-                    ? `${styles.chatViewWrap} ${styles.chatViewHidden}`
-                    : styles.chatViewWrap
-                }
+                    ? styles.chatViewHidden
+                    : undefined,
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
                 // Hide the outer chat whenever a panel or a full-page view (split
                 // / scheduled tasks) is up. `display:none` drops the subtree from
                 // layout and the tab order, and aria-hidden keeps AT out — so no
@@ -5592,9 +5626,8 @@ export function App({
                         timeline={todoTimeline}
                         details={todoDetails}
                       >
-                        <div
-                          style={contentStyle}
-                          className={[
+                        {(() => {
+                          const contentClassName = [
                             styles.content,
                             showFloatingTodos ||
                             displayMessages.length > 0 ||
@@ -5603,71 +5636,111 @@ export function App({
                               : undefined,
                           ]
                             .filter(Boolean)
-                            .join(' ')}
-                        >
-                          <MessageList
-                            ref={messageListRef}
-                            messages={displayMessages}
-                            pendingApproval={pendingToolApproval}
-                            onShowContextDetail={handleShowContextDetail}
-                            loadingTranscript={connection.loadingTranscript}
-                            catchingUp={connection.catchingUp}
-                            isResponding={streamingState !== 'idle'}
-                            activeTurnStartedAt={activeTurnStartedAt}
-                            workspaceCwd={connection.workspaceCwd || ''}
-                            hideSessionTimeline={
-                              effectiveChatWidthMode === 'wide'
-                            }
-                            showRetryHint={showRetryHint}
-                            onRetryClick={handleRetry}
-                            onBranchSession={handleBranchCurrentSession}
-                            bottomOverlayInset={bottomPanelInset}
-                            welcomeHeader={
-                              isChatEmptyState ? welcomeHeader : undefined
-                            }
-                            tailContent={undefined}
-                            tailKey={undefined}
-                            onCanScrollToBottomChange={
-                              handleCanScrollToBottomChange
-                            }
-                            virtualScrollThreshold={virtualScrollThreshold}
-                            turnFileChanges={
-                              visibleTurnOutputKinds.has('file')
-                                ? fileChangesByTurn
-                                : undefined
-                            }
-                            turnArtifacts={
-                              visibleTurnOutputKinds.has('artifact')
-                                ? artifactsByTurn
-                                : undefined
-                            }
-                            turnScheduledTasks={
-                              visibleTurnOutputKinds.has('scheduled_task')
-                                ? scheduledTasksByTurn
-                                : undefined
-                            }
-                            onTurnOutputOpen={handleTurnOutputOpen}
-                            onReviewChanges={openReviewPanel}
-                            onOpenArtifact={openArtifactPanel}
-                            onOpenScheduledTask={openScheduledTaskPanel}
-                          />
-                          {btwMessage?.role === 'btw' && (
-                            <div className={styles.btwPanel}>
-                              <BtwMessage
-                                question={btwMessage.question}
-                                answer={btwMessage.answer}
-                                isPending={btwMessage.isPending}
-                              />
+                            .join(' ');
+
+                          const messageList = (
+                            <MessageList
+                              ref={messageListRef}
+                              messages={displayMessages}
+                              pendingApproval={pendingToolApproval}
+                              onShowContextDetail={handleShowContextDetail}
+                              loadingTranscript={connection.loadingTranscript}
+                              catchingUp={connection.catchingUp}
+                              isResponding={streamingState !== 'idle'}
+                              activeTurnStartedAt={activeTurnStartedAt}
+                              workspaceCwd={connection.workspaceCwd || ''}
+                              hideSessionTimeline={
+                                effectiveChatWidthMode === 'wide'
+                              }
+                              showRetryHint={showRetryHint}
+                              onRetryClick={handleRetry}
+                              onBranchSession={handleBranchCurrentSession}
+                              bottomOverlayInset={bottomPanelInset}
+                              welcomeHeader={
+                                isChatEmptyState ? welcomeHeader : undefined
+                              }
+                              centerWelcomeHeader={
+                                showMobileWelcomeFooterMiddle || undefined
+                              }
+                              tailContent={undefined}
+                              tailKey={undefined}
+                              onCanScrollToBottomChange={
+                                handleCanScrollToBottomChange
+                              }
+                              virtualScrollThreshold={virtualScrollThreshold}
+                              turnFileChanges={
+                                visibleTurnOutputKinds.has('file')
+                                  ? fileChangesByTurn
+                                  : undefined
+                              }
+                              turnArtifacts={
+                                visibleTurnOutputKinds.has('artifact')
+                                  ? artifactsByTurn
+                                  : undefined
+                              }
+                              turnScheduledTasks={
+                                visibleTurnOutputKinds.has('scheduled_task')
+                                  ? scheduledTasksByTurn
+                                  : undefined
+                              }
+                              onTurnOutputOpen={handleTurnOutputOpen}
+                              onReviewChanges={openReviewPanel}
+                              onOpenArtifact={openArtifactPanel}
+                              onOpenScheduledTask={openScheduledTaskPanel}
+                            />
+                          );
+
+                          const btwPanel =
+                            !showMobileWelcomeFooterMiddle &&
+                            btwMessage?.role === 'btw' ? (
+                              <div className={styles.btwPanel}>
+                                <BtwMessage
+                                  question={btwMessage.question}
+                                  answer={btwMessage.answer}
+                                  isPending={btwMessage.isPending}
+                                />
+                              </div>
+                            ) : null;
+
+                          if (showMobileWelcomeFooterMiddle) {
+                            return (
+                              <div className={styles.mobileWelcomeGroup}>
+                                <div
+                                  style={contentStyle}
+                                  className={contentClassName}
+                                >
+                                  {messageList}
+                                  {btwPanel}
+                                </div>
+                                <div
+                                  className={styles.mobileWelcomeFooterMiddle}
+                                >
+                                  {welcomeFooter}
+                                </div>
+                              </div>
+                            );
+                          }
+                          return (
+                            <div
+                              style={contentStyle}
+                              className={contentClassName}
+                            >
+                              {messageList}
+                              {btwPanel}
                             </div>
-                          )}
-                        </div>
+                          );
+                        })()}
                       </TodoContextsProvider>
                     </CompactModeContext.Provider>
 
                     <div
                       ref={footerRef}
                       style={contentStyle}
-                      className={styles.footer}
+                      className={
+                        CustomFooter
+                          ? `${styles.footer} ${styles.footerWithCustomFooter}`
+                          : styles.footer
+                      }
                     >
                       {canScrollMessageListToBottom && (
                         <div
@@ -5757,6 +5830,17 @@ export function App({
                           onInsert={insertQueuedPrompt}
                           onEdit={editQueuedPrompt}
                         />
+                        {CustomComposerHeader && (
+                          <div className={styles.composerHeader}>
+                            <CustomComposerHeader
+                              disabled={isDisabled}
+                              isRunning={streamingState !== 'idle'}
+                              currentMode={currentMode}
+                              currentModel={currentModel}
+                              sessionName={sessionDisplayName}
+                            />
+                          </div>
+                        )}
                         <ChatEditor
                           ref={setEditorHandle}
                           onSubmit={handleEditorSubmit}
@@ -5806,31 +5890,61 @@ export function App({
                         />
                       </div>
                       {CustomFooter ? (
-                        <CustomFooter
-                          connected={connected}
-                          mode={currentMode}
-                          model={currentModel}
-                          streamingState={streamingState}
-                          contextUsageRatio={
-                            (connection.contextWindow ?? 0) > 0
-                              ? (connection.tokenCount ?? 0) /
-                                (connection.contextWindow ?? 0)
-                              : 0
-                          }
-                          activeGoal={activeGoal}
-                          tasks={footerTasks}
-                          availableModes={MODES_CYCLE}
-                          availableModels={(connection.models ?? [])
-                            .filter(isVisibleComposerModel)
-                            .map((m) => ({
-                              id: m.id,
-                              label: getModelDisplayName(m.label || m.id),
-                              contextWindow: m.contextWindow,
-                            }))}
-                          skills={loadedSkills}
-                          onSelectMode={handleSetMode}
-                          onSelectModel={handleModelSelect}
-                        />
+                        hasMobileComposerBottom ? (
+                          <div className={styles.customFooter}>
+                            <CustomFooter
+                              connected={connected}
+                              mode={currentMode}
+                              model={currentModel}
+                              streamingState={streamingState}
+                              contextUsageRatio={
+                                (connection.contextWindow ?? 0) > 0
+                                  ? (connection.tokenCount ?? 0) /
+                                    (connection.contextWindow ?? 0)
+                                  : 0
+                              }
+                              activeGoal={activeGoal}
+                              tasks={footerTasks}
+                              availableModes={MODES_CYCLE}
+                              availableModels={(connection.models ?? [])
+                                .filter(isVisibleComposerModel)
+                                .map((m) => ({
+                                  id: m.id,
+                                  label: getModelDisplayName(m.label || m.id),
+                                  contextWindow: m.contextWindow,
+                                }))}
+                              skills={loadedSkills}
+                              onSelectMode={handleSetMode}
+                              onSelectModel={handleModelSelect}
+                            />
+                          </div>
+                        ) : (
+                          <CustomFooter
+                            connected={connected}
+                            mode={currentMode}
+                            model={currentModel}
+                            streamingState={streamingState}
+                            contextUsageRatio={
+                              (connection.contextWindow ?? 0) > 0
+                                ? (connection.tokenCount ?? 0) /
+                                  (connection.contextWindow ?? 0)
+                                : 0
+                            }
+                            activeGoal={activeGoal}
+                            tasks={footerTasks}
+                            availableModes={MODES_CYCLE}
+                            availableModels={(connection.models ?? [])
+                              .filter(isVisibleComposerModel)
+                              .map((m) => ({
+                                id: m.id,
+                                label: getModelDisplayName(m.label || m.id),
+                                contextWindow: m.contextWindow,
+                              }))}
+                            skills={loadedSkills}
+                            onSelectMode={handleSetMode}
+                            onSelectModel={handleModelSelect}
+                          />
+                        )
                       ) : (
                         <StatusBar
                           onSelectMode={() =>
@@ -5854,7 +5968,16 @@ export function App({
                         />
                       )}
                       {isChatEmptyState && welcomeFooter && (
-                        <div className={styles.emptyWelcomeFooter}>
+                        <div
+                          className={[
+                            styles.emptyWelcomeFooter,
+                            showMobileWelcomeFooterMiddle
+                              ? styles.desktopWelcomeFooter
+                              : undefined,
+                          ]
+                            .filter(Boolean)
+                            .join(' ')}
+                        >
                           {welcomeFooter}
                         </div>
                       )}
