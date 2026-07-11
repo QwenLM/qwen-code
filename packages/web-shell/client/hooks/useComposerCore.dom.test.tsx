@@ -160,6 +160,21 @@ describe('useComposerCore inline tags', () => {
       '<table /> explain',
       undefined,
       expect.any(Function),
+      {
+        inputAnnotations: [
+          {
+            end: 9,
+            reference: {
+              id: 'orders',
+              serialized: '<table />',
+              value: 'orders',
+            },
+            start: 0,
+            text: '<table />',
+            type: 'reference',
+          },
+        ],
+      },
     );
   });
 });

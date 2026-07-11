@@ -3428,6 +3428,7 @@ export function App({
                 if (prompt) {
                   return sendPrompt(prompt, images, {
                     clearComposerOnPromptStart: true,
+                    inputAnnotations: metadata?.inputAnnotations,
                   }).catch((error: unknown) =>
                     reportError(error, 'Failed to send plan prompt'),
                   );

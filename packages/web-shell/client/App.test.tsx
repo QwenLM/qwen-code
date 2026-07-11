@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
 
 type StreamingState = 'idle' | 'responding';
@@ -29,6 +30,7 @@ type ChatEditorTestProps = {
     text: string,
     images?: undefined,
     commitAccepted?: () => void,
+    metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
   ) => boolean | void;
   skills?: Array<{ name: string; description: string }>;
   isPreparing?: boolean;
@@ -105,6 +107,7 @@ const {
     },
     testState: {
       prompt: 'hello',
+      inputAnnotations: undefined as DaemonInputAnnotation[] | undefined,
       streamingState: 'idle' as StreamingState,
       blocks: [] as unknown[],
       latestChatEditorProps: null as ChatEditorTestProps | null,
@@ -204,8 +207,15 @@ vi.mock('./components/ChatEditor', async () => {
         {
           'data-testid': 'submit',
           'data-preparing': props.isPreparing ? 'true' : 'false',
-          onClick: () =>
-            props.onSubmit(testState.prompt, undefined, editorCommit),
+          onClick: () => {
+            if (testState.inputAnnotations) {
+              props.onSubmit(testState.prompt, undefined, editorCommit, {
+                inputAnnotations: testState.inputAnnotations,
+              });
+              return;
+            }
+            props.onSubmit(testState.prompt, undefined, editorCommit);
+          },
           type: 'button',
         },
         'submit',
@@ -536,6 +546,7 @@ beforeEach(() => {
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
   testState.prompt = 'hello';
+  testState.inputAnnotations = undefined;
   testState.streamingState = 'idle';
   testState.blocks = [];
   testState.latestChatEditorProps = null;
@@ -919,6 +930,7 @@ describe('App session callbacks', () => {
       'queued',
       undefined,
       undefined,
+      undefined,
     );
     expect(onSessionChange).toHaveBeenCalledWith({
       type: 'submit',
@@ -963,6 +975,35 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(editorCommit).not.toHaveBeenCalled();
     expect(editorClear).not.toHaveBeenCalled();
+  });
+
+  it('forwards input annotations for /plan prompts in active sessions', async () => {
+    const annotation: DaemonInputAnnotation = {
+      type: 'reference',
+      text: '@.husky/',
+      start: 0,
+      end: 8,
+      reference: {
+        id: '.husky/',
+        value: '.husky/',
+        serialized: '@.husky/',
+      },
+    };
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/plan @.husky/ explain';
+    testState.inputAnnotations = [annotation];
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('plan');
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '@.husky/ explain',
+      expect.objectContaining({
+        inputAnnotations: [annotation],
+      }),
+    );
   });
 
   it('dispatches turn_complete only for the session that was streaming', async () => {
