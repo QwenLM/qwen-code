@@ -12,8 +12,8 @@ import type {
   SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
-import { HistoryReplayer } from './HistoryReplayer.js';
-import type { PendingReplayToolCall } from './HistoryReplayer.js';
+import { HistoryReplayer } from './history-replayer.js';
+import type { PendingReplayToolCall } from './history-replayer.js';
 import type { CumulativeUsage, SessionEmitterContext } from './types.js';
 
 interface ReplayLogger {

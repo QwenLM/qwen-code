@@ -17,7 +17,7 @@ import type {
 } from '@google/genai';
 import type { SessionEmitterContext } from './types.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
-import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
+import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { getToolResultCallId } from '../../utils/chat-record-tool-call-id.js';
 import {
   formatHistoryGapNotice,

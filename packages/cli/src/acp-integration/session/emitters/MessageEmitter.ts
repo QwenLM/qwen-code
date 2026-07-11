@@ -11,7 +11,7 @@ import {
   getActiveGoal,
   type GoalTerminalEvent,
 } from '@qwen-code/qwen-code-core';
-import { BaseEmitter } from './BaseEmitter.js';
+import { BaseEmitter } from './base-emitter.js';
 import type { HistoryItemGoalStatus } from '../../../ui/types.js';
 
 /**

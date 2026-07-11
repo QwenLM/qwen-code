@@ -244,7 +244,7 @@ Events triggered by a request that carried a registered `X-Qwen-Client-Id` may s
 
 ## Tool-call `_meta` (provenance / serverId)
 
-This is separate from envelope `_meta`: ACP `session/update` payloads can carry their own `_meta` in `event.data._meta`. `ToolCallEmitter` (`packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts`) stamps two fields on `emitStart`, `emitResult`, and `emitError`:
+This is separate from envelope `_meta`: ACP `session/update` payloads can carry their own `_meta` in `event.data._meta`. `ToolCallEmitter` (`packages/cli/src/acp-integration/session/emitters/tool-call-emitter.ts`) stamps two fields on `emitStart`, `emitResult`, and `emitError`:
 
 | Field        | Type                                      | Resolution rule                                                                                                                                                            |
 | ------------ | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

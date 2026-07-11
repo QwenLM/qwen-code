@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { BaseEmitter } from './BaseEmitter.js';
+import { BaseEmitter } from './base-emitter.js';
 import { PlanEmitter } from './PlanEmitter.js';
 import type {
   SessionEmitterContext,

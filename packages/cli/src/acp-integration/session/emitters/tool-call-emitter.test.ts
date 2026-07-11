@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ToolCallEmitter } from './ToolCallEmitter.js';
+import { ToolCallEmitter } from './tool-call-emitter.js';
 import type {
   SessionContext,
   SessionEmitterContext,

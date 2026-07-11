@@ -537,7 +537,7 @@ type MockPendingToolCall = {
 const { mockHistoryPendingToolCalls } = vi.hoisted(() => ({
   mockHistoryPendingToolCalls: vi.fn((): MockPendingToolCall[] => []),
 }));
-vi.mock('./session/HistoryReplayer.js', () => ({
+vi.mock('./session/history-replayer.js', () => ({
   HistoryReplayer: vi.fn().mockImplementation((context: unknown) => ({
     replay: (messages: unknown, gaps: unknown) =>
       mockHistoryReplay(context, messages, gaps),
