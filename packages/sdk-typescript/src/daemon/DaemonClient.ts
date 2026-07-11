@@ -2107,14 +2107,18 @@ export class DaemonClient {
 
   async continueSession(
     sessionId: string,
-    clientId?: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<DaemonSessionContinueResult> {
     const res = await this.transport.fetch(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/continue`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
         body: '{}',
+        signal: opts?.signal,
       },
     );
     if (!res.ok) {

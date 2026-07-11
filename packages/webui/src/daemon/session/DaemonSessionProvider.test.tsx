@@ -56,9 +56,11 @@ interface MockSession {
     req: unknown,
     signal?: AbortSignal,
   ) => Promise<NonBlockingPromptAccepted>;
-  continue: () => Promise<{
+  continue: (opts?: { signal?: AbortSignal }) => Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+    promptId?: string;
+    lastEventId?: number;
   }>;
   removePendingPrompt: (promptId: string) => Promise<{ removed: boolean }>;
   cancel: () => Promise<void>;
@@ -4996,15 +4998,19 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('asks ACP to continue a stopped session after explicit load', async () => {
+    const setLastEventId = vi.fn();
     const continueSession = vi.fn(async () => ({
       accepted: true,
       interruption: 'interrupted_prompt' as const,
+      promptId: 'continued-prompt',
+      lastEventId: 42,
     }));
     sdkMocks.sessions.push(
       createMockSession({
         sessionId: 'session-a',
         hasActivePrompt: false,
         continue: continueSession,
+        setLastEventId,
         replaySnapshot: {
           compactedReplay: [
             {
@@ -5033,6 +5039,10 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(continueSession).toHaveBeenCalledTimes(1);
+    expect(continueSession).toHaveBeenCalledWith({
+      signal: expect.any(AbortSignal),
+    });
+    expect(setLastEventId).toHaveBeenCalledWith(42);
   });
 
   it('lets ACP reject continuation for a stopped completed session', async () => {
@@ -5108,6 +5118,89 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(continueSession).not.toHaveBeenCalled();
+  });
+
+  it('does not continue a stopped session without an ACP user turn', async () => {
+    const continueSession = vi.fn(async () => ({
+      accepted: false,
+      interruption: 'none' as const,
+    }));
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-a',
+        hasActivePrompt: false,
+        continue: continueSession,
+        replaySnapshot: createTextReplaySnapshot('assistant only'),
+      }),
+    );
+
+    await renderWithProvider(null, {
+      autoConnect: true,
+      sessionId: 'session-a',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(continueSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps session loading usable when automatic continuation fails', async () => {
+    const continueSession = vi.fn(async () => {
+      throw new Error('continue unavailable');
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-a',
+        hasActivePrompt: false,
+        continue: continueSession,
+        replaySnapshot: {
+          compactedReplay: [
+            {
+              id: 1,
+              v: 1,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'finish the task' },
+                },
+              },
+            },
+          ],
+          liveJournal: [],
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+    let notices: readonly DaemonSessionNotice[] = [];
+
+    function Harness() {
+      connection = useDaemonConnection();
+      notices = useDaemonSessionNotices().notices;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-a',
+    });
+    expect(notices).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'daemon.session_continue_failed',
+          recoverable: true,
+        }),
+      ]),
+    );
   });
 
   it('reuses the branched session client when switching after branch', async () => {

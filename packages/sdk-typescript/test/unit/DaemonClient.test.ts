@@ -2742,7 +2742,11 @@ describe('DaemonClient', () => {
       );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
 
-      const result = await client.continueSession('s/1', 'client-1');
+      const controller = new AbortController();
+      const result = await client.continueSession('s/1', {
+        clientId: 'client-1',
+        signal: controller.signal,
+      });
 
       expect(result).toMatchObject({
         accepted: true,
@@ -2754,6 +2758,7 @@ describe('DaemonClient', () => {
         body: '{}',
       });
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(calls[0]?.signal).toBe(controller.signal);
     });
   });
 

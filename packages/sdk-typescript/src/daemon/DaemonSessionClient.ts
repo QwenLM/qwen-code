@@ -493,9 +493,14 @@ export class DaemonSessionClient {
     });
   }
 
-  async continue(): Promise<DaemonSessionContinueResult> {
+  async continue(opts?: {
+    signal?: AbortSignal;
+  }): Promise<DaemonSessionContinueResult> {
     return await this.withClientIdSelfHeal(() =>
-      this.client.continueSession(this.sessionId, this.clientId),
+      this.client.continueSession(this.sessionId, {
+        ...(opts?.signal ? { signal: opts.signal } : {}),
+        ...(this.clientId ? { clientId: this.clientId } : {}),
+      }),
     );
   }
 

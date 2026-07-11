@@ -805,20 +805,31 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             setConnection((c) => ({ ...c, catchingUp: undefined }));
           }
           if (
+            shouldInjectReplaySnapshot &&
             restoreSessionId &&
             !activeSession.hasActivePrompt &&
             hasAcpUserTurn(replayEvents)
           ) {
             try {
-              const continuation = await activeSession.continue();
+              const continuation = await activeSession.continue({
+                signal: abort.signal,
+              });
+              if (disposed || abort.signal.aborted) break;
               if (continuation.accepted) {
                 if (continuation.lastEventId !== undefined) {
                   activeSession.setLastEventId(continuation.lastEventId);
+                }
+                if (continuation.promptId) {
+                  activePromptsRef.current.set(activeSession.sessionId, {
+                    controller: new AbortController(),
+                    promptId: continuation.promptId,
+                  });
                 }
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                 setPromptStatus('waiting');
               }
             } catch (error) {
+              if (disposed || abort.signal.aborted) break;
               const message =
                 error instanceof Error ? error.message : String(error);
               addNotice({
