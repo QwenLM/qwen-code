@@ -15,6 +15,7 @@ import {
   clearActiveGoal,
   clearGoalTerminalObserver,
   getActiveGoal,
+  recordGoalDeferral,
   notifyGoalTerminal,
   recordGoalIteration,
   setActiveGoal,
@@ -171,7 +172,11 @@ export function createGoalStopHookCallback(args: {
       return { continue: true };
     }
 
-    if (hasGoalBlockingBackgroundWork(config)) {
+    if (
+      hasGoalBlockingBackgroundWork(config) &&
+      (current.deferredEvaluations ?? 0) < MAX_GOAL_ITERATIONS
+    ) {
+      recordGoalDeferral(sessionId);
       return { continue: true };
     }
 

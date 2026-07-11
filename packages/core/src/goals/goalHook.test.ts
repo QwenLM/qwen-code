@@ -119,6 +119,35 @@ describe('createGoalStopHookCallback', () => {
     },
   );
 
+  it('forces evaluation after the background-work deferral cap', async () => {
+    setActiveGoal('sess-1', {
+      condition: 'do x',
+      iterations: 0,
+      setAt: 100,
+      tokensAtStart: 0,
+      hookId: 'h1',
+    });
+    judgeMock.mockResolvedValue({ kind: 'not_met', reason: 'still running' });
+    const cb = createGoalStopHookCallback({
+      config: makeGoalConfig({ backgroundTask: true }),
+      sessionId: 'sess-1',
+      condition: 'do x',
+    });
+
+    for (let index = 0; index < MAX_GOAL_ITERATIONS; index += 1) {
+      await expect(cb(stopInput(), undefined)).resolves.toEqual({
+        continue: true,
+      });
+    }
+
+    await expect(cb(stopInput(), undefined)).resolves.toEqual({
+      decision: 'block',
+      reason: expect.stringContaining('do x'),
+    });
+    expect(judgeMock).toHaveBeenCalledTimes(1);
+    expect(getActiveGoal('sess-1')?.iterations).toBe(1);
+  });
+
   it('does not defer evaluation for a long-lived monitor', async () => {
     setActiveGoal('sess-1', {
       condition: 'do x',

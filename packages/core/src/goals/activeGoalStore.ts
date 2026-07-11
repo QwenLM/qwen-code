@@ -12,6 +12,7 @@
 export interface ActiveGoal {
   condition: string;
   iterations: number;
+  deferredEvaluations?: number;
   setAt: number;
   tokensAtStart: number;
   lastReason?: string;
@@ -63,7 +64,19 @@ export function recordGoalIteration(
   const updated: ActiveGoal = {
     ...current,
     iterations: current.iterations + 1,
+    deferredEvaluations: 0,
     lastReason,
+  };
+  store.set(sessionId, updated);
+  return updated;
+}
+
+export function recordGoalDeferral(sessionId: string): ActiveGoal | undefined {
+  const current = store.get(sessionId);
+  if (!current) return undefined;
+  const updated: ActiveGoal = {
+    ...current,
+    deferredEvaluations: (current.deferredEvaluations ?? 0) + 1,
   };
   store.set(sessionId, updated);
   return updated;
