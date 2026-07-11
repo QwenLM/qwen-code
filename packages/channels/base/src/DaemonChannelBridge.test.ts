@@ -2074,6 +2074,31 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('releases a session client when the daemon reports it dead', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const detach = vi.fn().mockResolvedValue(undefined);
+    session.detach = detach;
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    await bridge.start();
+
+    await bridge.newSession('/repo');
+    events.push({
+      id: 1,
+      v: 1,
+      type: 'session_died',
+      data: { reason: 'gone' },
+    });
+
+    await waitFor(() => expect(detach).toHaveBeenCalledOnce());
+
+    events.close();
+    bridge.stop();
+  });
+
   it('listSessions shows hasActivePrompt false after cancelSession', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

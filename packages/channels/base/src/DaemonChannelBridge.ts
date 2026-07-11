@@ -478,7 +478,7 @@ export class DaemonChannelBridge
           this.lastError = error;
         });
       }
-      this.dropSession(sessionId, 'bridge_stopped');
+      this.dropSession(sessionId, 'bridge_stopped', false);
     }
     this.latestAvailableCommandsSessionId = undefined;
     this.connected = false;
@@ -810,8 +810,18 @@ export class DaemonChannelBridge
     );
   }
 
-  private dropSession(sessionId: string, reason: string): void {
-    if (!this.removeSessionBinding(sessionId)) return;
+  private dropSession(
+    sessionId: string,
+    reason: string,
+    releaseClient = true,
+  ): void {
+    const session = this.removeSessionBinding(sessionId);
+    if (!session) return;
+    if (releaseClient) {
+      void this.releaseSessionClient(session).catch((error: unknown) => {
+        this.lastError = error;
+      });
+    }
     this.emit('sessionDied', { sessionId, reason });
   }
 
