@@ -179,6 +179,7 @@ export interface InputPromptProps {
   promptSuggestion?: string | null;
   /** Called when prompt suggestion is dismissed (user typed) */
   onPromptSuggestionDismiss?: () => void;
+  clipboardUnavailableShownRef?: React.MutableRefObject<boolean>;
 }
 
 // Re-export from shared utils for backwards compatibility
@@ -212,6 +213,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   isEmbeddedShellFocused,
   promptSuggestion,
   onPromptSuggestionDismiss,
+  clipboardUnavailableShownRef: sessionClipboardUnavailableShownRef,
 }) => {
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
@@ -274,6 +276,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isAttachmentMode, setIsAttachmentMode] = useState(false);
   const [selectedAttachmentIndex, setSelectedAttachmentIndex] = useState(-1);
+  const localClipboardUnavailableShownRef = useRef(false);
+  const clipboardUnavailableShownRef =
+    sessionClipboardUnavailableShownRef ?? localClipboardUnavailableShownRef;
   // Large paste placeholder handling
   const [pendingPastes, setPendingPastes] = useState<Map<string, string>>(
     new Map(),
@@ -686,32 +691,54 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     resetCommandSearchCompletionState,
   ]);
 
-  // Handle clipboard image pasting with Ctrl+V
-  const handleClipboardImage = useCallback(async (validated = false) => {
-    try {
-      const hasImage = validated || (await clipboardHasImage());
-      if (hasImage) {
-        const imagePath = await saveClipboardImage(Storage.getGlobalTempDir());
-        if (imagePath) {
-          // Clean up old images
-          cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {
-            // Ignore cleanup errors
-          });
-
-          // Add as attachment instead of inserting @reference into text
-          const filename = path.basename(imagePath);
-          const newAttachment: Attachment = {
-            id: String(Date.now()),
-            path: imagePath,
-            filename,
-          };
-          setAttachments((prev) => [...prev, newAttachment]);
-        }
-      }
-    } catch (error) {
-      debugLogger.error('Error handling clipboard image:', error);
+  const reportClipboardUnavailable = useCallback(() => {
+    if (clipboardUnavailableShownRef.current) {
+      return;
     }
-  }, []);
+    clipboardUnavailableShownRef.current = true;
+    uiState.historyManager?.addItem(
+      {
+        type: 'error',
+        text: t(
+          'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+        ),
+      },
+      Date.now(),
+    );
+  }, [clipboardUnavailableShownRef, uiState.historyManager]);
+
+  // Handle clipboard image pasting with Ctrl+V
+  const handleClipboardImage = useCallback(
+    async (validated = false) => {
+      try {
+        const hasImage =
+          validated || (await clipboardHasImage(reportClipboardUnavailable));
+        if (hasImage) {
+          const imagePath = await saveClipboardImage(
+            Storage.getGlobalTempDir(),
+          );
+          if (imagePath) {
+            // Clean up old images
+            cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {
+              // Ignore cleanup errors
+            });
+
+            // Add as attachment instead of inserting @reference into text
+            const filename = path.basename(imagePath);
+            const newAttachment: Attachment = {
+              id: String(Date.now()),
+              path: imagePath,
+              filename,
+            };
+            setAttachments((prev) => [...prev, newAttachment]);
+          }
+        }
+      } catch (error) {
+        debugLogger.error('Error handling clipboard image:', error);
+      }
+    },
+    [reportClipboardUnavailable],
+  );
 
   // Promote a paste that is purely image-file path(s) (e.g. a terminal/clipboard
   // helper that injects `@<path>` text on Cmd+V) into attachment chips, so the
@@ -967,6 +994,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
         // Ensure we never accidentally interpret paste as regular input.
         const pastedImagePaths = classifyPastedImagePaths(pasted);
+        if (key.clipboardImageUnavailable) {
+          reportClipboardUnavailable();
+        }
         if (key.pasteImage) {
           handleClipboardImage(true);
         } else if (
@@ -1705,6 +1735,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       shellHistory,
       reverseSearchCompletion,
       handleClipboardImage,
+      reportClipboardUnavailable,
       promotePastedImagePaths,
       resetCompletionState,
       dismissCompletion,
