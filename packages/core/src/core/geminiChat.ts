@@ -2223,7 +2223,10 @@ export class GeminiChat {
 
         let lastError: unknown = new Error('Request failed after all retries.');
         let rateLimitRetryCount = 0;
-        let invalidStreamRetryCount = 0;
+        let transientInvalidStreamRetryCount = 0;
+        let protocolTagLeakRetryCount = 0;
+        const totalInvalidStreamRetryCount = () =>
+          transientInvalidStreamRetryCount + protocolTagLeakRetryCount;
         let transportStreamRetryCount = 0;
         let reactiveCompressionAttempted = false;
         let suppressNextRetryEvent = false;
@@ -2260,7 +2263,7 @@ export class GeminiChat {
             } else if (
               attempt > 0 ||
               rateLimitRetryCount > 0 ||
-              invalidStreamRetryCount > 0 ||
+              totalInvalidStreamRetryCount() > 0 ||
               transportStreamRetryCount > 0
             ) {
               yield { type: StreamEventType.RETRY };
@@ -2515,24 +2518,33 @@ export class GeminiChat {
               isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
                 ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
                 : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
+            const invalidStreamRetryCount =
+              isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
+                ? protocolTagLeakRetryCount
+                : transientInvalidStreamRetryCount;
             if (
               isInvalidStreamError &&
               invalidStreamRetryCount < maxInvalidStreamRetries
             ) {
               self.popPendingPartialAssistantTurn();
-              invalidStreamRetryCount++;
+              const nextInvalidStreamRetryCount = invalidStreamRetryCount + 1;
+              if (error.type === 'PROTOCOL_TAG_LEAK') {
+                protocolTagLeakRetryCount = nextInvalidStreamRetryCount;
+              } else {
+                transientInvalidStreamRetryCount = nextInvalidStreamRetryCount;
+              }
               const delayMs =
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
-                invalidStreamRetryCount;
+                nextInvalidStreamRetryCount;
               debugLogger.warn(
                 `Invalid stream [${(error as InvalidStreamError).type}] ` +
-                  `(retry ${invalidStreamRetryCount}/${maxInvalidStreamRetries}). ` +
+                  `(retry ${nextInvalidStreamRetryCount}/${maxInvalidStreamRetries}). ` +
                   `Waiting ${delayMs / 1000}s before retrying...`,
               );
               logContentRetry(
                 self.config,
                 new ContentRetryEvent(
-                  invalidStreamRetryCount - 1,
+                  nextInvalidStreamRetryCount - 1,
                   (error as InvalidStreamError).type,
                   delayMs,
                   model,
@@ -2927,7 +2939,7 @@ export class GeminiChat {
 
         if (lastError) {
           if (lastError instanceof InvalidStreamError) {
-            const totalAttempts = invalidStreamRetryCount + 1;
+            const totalAttempts = totalInvalidStreamRetryCount() + 1;
             logContentRetryFailure(
               self.config,
               new ContentRetryFailureEvent(

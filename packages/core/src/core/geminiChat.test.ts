@@ -238,6 +238,25 @@ describe('GeminiChat', async () => {
     return collecting;
   }
 
+  function streamResponse(
+    response: GenerateContentResponse,
+  ): AsyncGenerator<GenerateContentResponse> {
+    return (async function* () {
+      yield response;
+    })();
+  }
+
+  function stopResponse(parts: Part[]): GenerateContentResponse {
+    return {
+      candidates: [
+        {
+          content: { parts },
+          finishReason: 'STOP',
+        },
+      ],
+    } as unknown as GenerateContentResponse;
+  }
+
   describe('system instruction helpers', () => {
     it('replaces prior session-start context instead of appending indefinitely', () => {
       const isolatedChat = new GeminiChat(
@@ -4753,6 +4772,99 @@ describe('GeminiChat', async () => {
             model: 'test-model',
           }),
         );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps invalid stream retry budgets independent across error types', async () => {
+      vi.useFakeTimers();
+      try {
+        let callCount = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => {
+          callCount++;
+          if (callCount <= 2) {
+            return streamResponse(stopResponse([]));
+          }
+          if (callCount === 3) {
+            return streamResponse(
+              stopResponse([
+                {
+                  text: '<analysis>hidden</analysis><summary>leaked</summary>',
+                },
+              ]),
+            );
+          }
+
+          return streamResponse(stopResponse([{ text: 'Recovered response' }]));
+        });
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-mixed-invalid-streams',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 15_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(4);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(3);
+        expect(mockLogContentRetry).toHaveBeenLastCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            attempt_number: 0,
+            error_type: 'PROTOCOL_TAG_LEAK',
+            retry_delay_ms: 2000,
+            model: 'test-model',
+          }),
+        );
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered response',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('surfaces an abort fired during the invalid-stream retry delay without retrying again', async () => {
+      vi.useFakeTimers();
+      try {
+        const abortController = new AbortController();
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streamResponse(stopResponse([])));
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test', config: { abortSignal: abortController.signal } },
+          'prompt-id-invalid-stream-abort-delay',
+        );
+
+        const iterator = stream[Symbol.asyncIterator]();
+        let next = await iterator.next();
+        while (!next.done && next.value.type !== StreamEventType.RETRY) {
+          next = await iterator.next();
+        }
+        if (next.done) {
+          throw new Error('Expected invalid stream retry event.');
+        }
+        expect(next.value.type).toBe(StreamEventType.RETRY);
+
+        const nextPromise = iterator.next();
+        abortController.abort();
+        await expect(nextPromise).rejects.toThrow();
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
       } finally {
         vi.useRealTimers();
       }
