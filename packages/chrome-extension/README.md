@@ -11,6 +11,9 @@ It does two things:
 - **Service worker** — a CDP-tunnel pipe. It connects to the daemon's `/acp`
   WebSocket and bridges `cdp_*` frames into `chrome.debugger`, so the agent can
   drive the real browser when an external CDP MCP adapter is configured.
+- **Readiness warning** — the framed Web Shell stays usable for chat while a
+  small status message distinguishes a disabled CDP tunnel from a missing
+  browser automation adapter.
 
 ## Build
 
@@ -65,11 +68,13 @@ Clients can distinguish the states through `/capabilities`:
 
 The side panel probes `GET /health` and `GET /capabilities` and shows one of:
 
-| State                | Meaning                                | Shown                            |
-| -------------------- | -------------------------------------- | -------------------------------- |
-| `down`               | no daemon reachable                    | "Start qwen serve" + command     |
-| `needs-allow-origin` | daemon up but `--allow-origin` not set | "Allow this extension" + command |
-| `ready`              | daemon up and framing permitted        | the Web Shell (chat)             |
+| State                   | Meaning                                | Shown                            |
+| ----------------------- | -------------------------------------- | -------------------------------- |
+| `down`                  | no daemon reachable                    | "Start qwen serve" + command     |
+| `needs-allow-origin`    | daemon up but `--allow-origin` not set | "Allow this extension" + command |
+| `chat-only`             | Web Shell ready, CDP tunnel disabled   | chat + bridge warning            |
+| `tunnel-only`           | CDP tunnel ready, adapter missing      | chat + adapter warning           |
+| `automation-configured` | browser automation adapter configured  | the Web Shell                    |
 
 ## Packaging for the Chrome Web Store
 
@@ -77,6 +82,7 @@ The side panel probes `GET /health` and `GET /capabilities` and shows one of:
 npm run package      # -> chrome-extension.zip (manifest at the zip root)
 ```
 
-Upload the zip to the Chrome Web Store Developer Dashboard. Note that the
-`debugger` and `<all_urls>` permissions will draw manual review — justify them
-in the store listing.
+The generated manifest version follows this package's version. Upload the zip
+to a GitHub prerelease for alpha side-loading, or to the Chrome Web Store
+Developer Dashboard for managed distribution. The `debugger` permission will
+draw manual review and must be justified in the store listing.

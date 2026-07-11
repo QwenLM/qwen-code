@@ -56,6 +56,8 @@
         height: 100%;
       }
       body {
+        display: flex;
+        flex-direction: column;
         overflow: hidden;
         background-color: var(--bg);
         /* faint dotted-grid texture so it reads as a surface, not a flat fill */
@@ -74,9 +76,23 @@
 
       #ui {
         display: block;
+        flex: 1;
+        min-height: 0;
         width: 100%;
-        height: 100vh;
         border: 0;
+      }
+
+      .capability-warning {
+        flex: none;
+        margin: 8px 10px 10px;
+        padding: 8px 10px;
+        color: var(--text);
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        box-shadow: var(--shadow);
+        font-size: 11px;
+        line-height: 1.4;
       }
 
       #welcome {
@@ -441,6 +457,13 @@
       title="Qwen Code"
       allow="clipboard-read; clipboard-write"
     ></iframe>
+    <div
+      id="capability-warning"
+      class="capability-warning hidden"
+      role="status"
+      aria-live="polite"
+    ></div>
+    <script src="sidepanel/capability-status.js"></script>
     <script type="module" src="sidepanel.js"></script>
   </body>
 </html>
