@@ -466,6 +466,9 @@ describe('extension management v2 REST', () => {
       expect(
         h.secondary.bridge.refreshExtensionsForAllSessions,
       ).toHaveBeenCalledTimes(2);
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
       expect(process.stderr.write).toHaveBeenCalledWith(
         expect.stringContaining(
           `extension generation reconciliation failed for workspace ${h.secondary.workspaceId}`,

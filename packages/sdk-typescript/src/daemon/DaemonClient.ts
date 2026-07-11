@@ -659,6 +659,7 @@ export class DaemonClient {
       clientId?: string;
       timeoutMs?: number;
       mode?: 'transport' | 'rest';
+      signal?: AbortSignal;
     } = {},
   ): Promise<T> {
     const hasBody = opts.body !== undefined;
@@ -671,6 +672,7 @@ export class DaemonClient {
           opts.clientId,
         ),
         ...(hasBody ? { body: JSON.stringify(opts.body) } : {}),
+        ...(opts.signal ? { signal: opts.signal } : {}),
       },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, label);
@@ -1104,29 +1106,39 @@ export class DaemonClient {
 
   async extensionOperation(
     operationId: string,
+    signal?: AbortSignal,
   ): Promise<ExtensionOperationStatus> {
     return await this.jsonRequest<ExtensionOperationStatus>(
       `/extensions/operations/${urlEncode(operationId)}`,
       'GET /extensions/operations/:operationId',
+      signal ? { signal } : {},
     );
   }
 
   async waitForExtensionOperation(
     handle: ExtensionInstallResponse,
-    options: { pollIntervalMs?: number; timeoutMs?: number } = {},
+    options: {
+      pollIntervalMs?: number;
+      timeoutMs?: number;
+      signal?: AbortSignal;
+    } = {},
   ): Promise<ExtensionOperationStatus> {
     const pollIntervalMs = options.pollIntervalMs ?? 1_000;
     const timeoutMs = options.timeoutMs ?? 10 * 60_000;
     const deadline = Date.now() + timeoutMs;
     let firstPoll = true;
     for (;;) {
+      options.signal?.throwIfAborted();
       if (!firstPoll && Date.now() >= deadline) {
         throw new Error(
           `Timed out waiting for extension operation ${handle.operationId}. The server operation was not cancelled.`,
         );
       }
       firstPoll = false;
-      const operation = await this.extensionOperation(handle.operationId);
+      const operation = await this.extensionOperation(
+        handle.operationId,
+        options.signal,
+      );
       if (operation.status !== 'queued' && operation.status !== 'running') {
         return operation;
       }
@@ -1136,9 +1148,22 @@ export class DaemonClient {
           `Timed out waiting for extension operation ${handle.operationId}. The server operation was not cancelled.`,
         );
       }
-      await new Promise((resolve) =>
-        setTimeout(resolve, Math.min(pollIntervalMs, remainingMs)),
-      );
+      await new Promise<void>((resolve, reject) => {
+        const finish = () => {
+          options.signal?.removeEventListener('abort', onAbort);
+          resolve();
+        };
+        const timer = setTimeout(finish, Math.min(pollIntervalMs, remainingMs));
+        const onAbort = () => {
+          clearTimeout(timer);
+          options.signal?.removeEventListener('abort', onAbort);
+          reject(
+            options.signal?.reason ?? new DOMException('Aborted', 'AbortError'),
+          );
+        };
+        options.signal?.addEventListener('abort', onAbort, { once: true });
+        if (options.signal?.aborted) onAbort();
+      });
     }
   }
 

@@ -252,7 +252,11 @@ function mockNpmDownload(tarballUrl: string, tarballBytes?: number) {
               destroy: vi.fn(),
             };
       if (typeof callback === 'function') callback(mockRes as never);
-      return { on: vi.fn() } as never;
+      return {
+        on: vi.fn().mockReturnThis(),
+        setTimeout: vi.fn(),
+        destroy: vi.fn(),
+      } as never;
     },
   );
 }
@@ -272,6 +276,10 @@ describe('downloadFromNpmRegistry', () => {
     } as never);
     vi.mocked(tar.t).mockResolvedValue(undefined);
     vi.mocked(tar.x).mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('redacts credentialed registry URLs in metadata request errors', async () => {
@@ -357,6 +365,62 @@ describe('downloadFromNpmRegistry', () => {
       'npm extension archive download exceeded maximum size of 104857600 bytes',
     );
     expect(tar.t).not.toHaveBeenCalled();
+  });
+
+  it('times out a stalled npm tarball download', async () => {
+    vi.useFakeTimers();
+    let requestCount = 0;
+    const destroy = vi.fn();
+    vi.mocked(https.get).mockImplementation(
+      (_url: unknown, _options: unknown, callback: unknown) => {
+        requestCount += 1;
+        if (requestCount === 1 && typeof callback === 'function') {
+          callback({
+            statusCode: 200,
+            headers: {},
+            on: vi.fn((event: string, handler: (data?: Buffer) => void) => {
+              if (event === 'data') {
+                handler(
+                  Buffer.from(
+                    JSON.stringify({
+                      'dist-tags': { latest: '1.0.0' },
+                      versions: {
+                        '1.0.0': {
+                          dist: {
+                            tarball: 'https://registry.example.com/pkg.tgz',
+                          },
+                        },
+                      },
+                    }),
+                  ),
+                );
+              }
+              if (event === 'end') handler();
+            }),
+          } as never);
+        }
+        return {
+          on: vi.fn().mockReturnThis(),
+          setTimeout: vi.fn(),
+          destroy,
+        } as never;
+      },
+    );
+
+    const outcome = downloadFromNpmRegistry(
+      {
+        source: '@scope/pkg',
+        type: 'npm',
+        registryUrl: 'https://registry.example.com',
+      },
+      '/tmp/qwen-extension',
+    ).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    await expect(outcome).resolves.toMatchObject({
+      message: 'npm tarball download timed out after 120000ms',
+    });
+    expect(destroy).toHaveBeenCalledOnce();
   });
 });
 

@@ -220,7 +220,13 @@ export function registerWorkspaceExtensionRoutes(
         ) {
           return;
         }
-        const runtimes = workspaceRegistry.list();
+        const runtimes = workspaceRegistry
+          .list()
+          .filter(
+            (runtime) =>
+              (appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0) <
+              generation,
+          );
         const results = await Promise.allSettled(
           runtimes.map(async (runtime) => {
             runtime.workspaceService.invalidateWorkspaceSkillsStatus();

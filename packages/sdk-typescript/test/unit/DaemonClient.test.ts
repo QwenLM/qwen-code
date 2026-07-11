@@ -3534,6 +3534,34 @@ describe('DaemonClient', () => {
       expect(polls).toBe(1);
     });
 
+    it('stops polling when the caller aborts', async () => {
+      let polls = 0;
+      const { fetch } = recordingFetch(() => {
+        polls += 1;
+        return jsonResponse(200, {
+          v: 1,
+          operationId: 'op-1',
+          operation: 'install',
+          status: 'running',
+          createdAt: 1,
+          updatedAt: 2,
+        });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const controller = new AbortController();
+      const reason = new Error('navigation cancelled');
+
+      const waiting = client.waitForExtensionOperation(
+        { accepted: true, operationId: 'op-1' },
+        { pollIntervalMs: 60_000, signal: controller.signal },
+      );
+      await vi.waitFor(() => expect(polls).toBe(1));
+      controller.abort(reason);
+
+      await expect(waiting).rejects.toBe(reason);
+      expect(polls).toBe(1);
+    });
+
     it('routes global extension methods through /extensions/*', async () => {
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url === 'http://daemon/extensions') {

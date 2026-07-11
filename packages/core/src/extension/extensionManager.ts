@@ -1341,8 +1341,16 @@ export class ExtensionManager {
           false,
         );
         if (!committed.extension) {
+          const reloadWarning = committed.warnings?.find(
+            (warning) => warning.code === 'extension_reload_failed',
+          );
           const error = new Error(
-            `Extension "${prepared.identity.name}" committed but could not be reloaded.`,
+            `Extension "${prepared.identity.name}" committed but could not be reloaded${
+              reloadWarning ? `: ${reloadWarning.error}` : '.'
+            }`,
+            reloadWarning
+              ? { cause: new Error(reloadWarning.error) }
+              : undefined,
           ) as ExtensionCommittedWithWarningsError;
           error.code = 'extension_committed_with_warnings';
           error.committed = true;
@@ -2252,6 +2260,11 @@ export class ExtensionManager {
         false,
       );
       if (!committed.extension) {
+        for (const warning of committed.warnings ?? []) {
+          debugLogger.warn(
+            `Update of "${extension.name}" warning: ${warning.code}: ${warning.error}`,
+          );
+        }
         callback(extension.name, ExtensionUpdateState.UPDATED_NEEDS_RESTART);
         return {
           name: extension.name,

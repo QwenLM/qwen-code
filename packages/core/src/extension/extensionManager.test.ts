@@ -1525,6 +1525,43 @@ describe('extension tests', () => {
       ).toMatchObject({ version: '2.0.0' });
     });
 
+    it('preserves reload failure diagnostics after a prepared install commits', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'install-reload.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          fs.mkdirSync(destination, { recursive: true });
+          fs.writeFileSync(
+            path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+            JSON.stringify({ name: 'my-extension', version: '1.0.0' }),
+          );
+        },
+      );
+      const manager = createExtensionManager();
+      vi.spyOn(manager, 'loadExtension').mockRejectedValue(
+        new Error('invalid extension config'),
+      );
+
+      let installError: unknown;
+      try {
+        await manager.installExtension(
+          { type: 'local', source: archivePath },
+          async () => {},
+          undefined,
+          tempWorkspaceDir,
+        );
+      } catch (error) {
+        installError = error;
+      }
+
+      expect(installError).toMatchObject({
+        code: 'extension_committed_with_warnings',
+        committed: true,
+        message: expect.stringContaining('invalid extension config'),
+        cause: expect.objectContaining({ message: 'invalid extension config' }),
+      });
+    });
+
     it('reports a committed update reload failure as needing restart', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'reload-failure.zip');
       fs.writeFileSync(archivePath, 'archive');

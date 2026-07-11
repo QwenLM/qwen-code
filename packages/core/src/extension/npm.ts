@@ -14,6 +14,7 @@ import { clientForUrl } from './http-client.js';
 import { assertTarArchiveHasNoLinks } from './archive-safety.js';
 
 const debugLogger = createDebugLogger('EXT_NPM');
+const NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS = 120_000;
 const NPM_ARCHIVE_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024;
 
 export interface NpmDownloadResult {
@@ -249,17 +250,23 @@ function downloadNpmFile(
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    let hardDeadline: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      if (hardDeadline) clearTimeout(hardDeadline);
+    };
     const finish = () => {
       if (settled) return;
       settled = true;
+      cleanup();
       resolve();
     };
     const fail = (error: Error) => {
       if (settled) return;
       settled = true;
+      cleanup();
       reject(error);
     };
-    client
+    const req = client
       .get(url, { headers, signal }, (res) => {
         if (res.statusCode === 301 || res.statusCode === 302) {
           if (res.headers.location) {
@@ -307,6 +314,19 @@ function downloadNpmFile(
         file.on('finish', () => file.close(finish));
       })
       .on('error', fail);
+    if (!settled) {
+      const timeout = () => {
+        req.destroy();
+        fail(
+          new Error(
+            `npm tarball download timed out after ${NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS}ms`,
+          ),
+        );
+      };
+      hardDeadline = setTimeout(timeout, NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS);
+      hardDeadline.unref();
+      req.setTimeout(NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS, timeout);
+    }
   });
 }
 
