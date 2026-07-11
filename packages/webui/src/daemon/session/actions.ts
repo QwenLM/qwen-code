@@ -6,6 +6,7 @@
 
 import type { Dispatch, SetStateAction } from 'react';
 import type {
+  DaemonApprovalMode,
   DaemonSessionContextStatus,
   DaemonSessionClient,
   DaemonSessionBtwResult,
@@ -59,6 +60,7 @@ export interface CreateDaemonSessionActionsArgs {
   getCreateSessionRequest: () => CreateSessionRequest;
   createDetachedSession: (
     workspaceCwd?: string,
+    overrides?: Pick<CreateSessionRequest, 'approvalMode'>,
   ) => Promise<DaemonSessionClient>;
   getConnection: () => DaemonConnectionState;
   hasSessionActivePrompt: () => boolean;
@@ -580,9 +582,22 @@ export function createDaemonSessionActions({
       return startSessionSwitch(sessionId, 'resume');
     },
 
-    async createSession(options?: { workspaceCwd?: string }) {
+    async createSession(options?: {
+      workspaceCwd?: string;
+      approvalMode?: DaemonApprovalMode;
+    }) {
       try {
         manualSessionClearRef.current = false;
+        // Fold the initial approval mode into the create request so the daemon
+        // applies it atomically at spawn (`POST /session` →
+        // `spawnOrAttach({ approvalMode })`), avoiding a follow-up
+        // `setApprovalMode` round-trip. Approval mode is fail-closed at spawn:
+        // an application failure aborts creation (this call rejects) rather than
+        // leaving the session in a different mode than the caller requested.
+        const approvalOverride =
+          options?.approvalMode !== undefined
+            ? { approvalMode: options.approvalMode }
+            : {};
         const session = sessionRef.current;
         const activeSession =
           session && getConnection().sessionId === session.sessionId
@@ -595,6 +610,7 @@ export function createDaemonSessionActions({
               ...(options?.workspaceCwd !== undefined
                 ? { workspaceCwd: options.workspaceCwd }
                 : {}),
+              ...approvalOverride,
             }),
             'Create session timed out',
           );
@@ -603,7 +619,7 @@ export function createDaemonSessionActions({
         }
 
         const nextSession = await withActionTimeout(
-          createDetachedSession(options?.workspaceCwd),
+          createDetachedSession(options?.workspaceCwd, approvalOverride),
           'Create session timed out',
         );
         if (manualSessionClearRef.current) {

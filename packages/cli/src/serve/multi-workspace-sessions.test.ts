@@ -69,6 +69,17 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   readonly listCalls: string[];
   readonly summaryCalls: string[];
+  readonly setModelCalls: Array<{
+    sessionId: string;
+    req: { modelId?: unknown; sessionId?: unknown };
+    context?: BridgeClientRequestContext;
+  }>;
+  readonly setApprovalModeCalls: Array<{
+    sessionId: string;
+    mode: string;
+    opts: { persist?: boolean };
+    context?: BridgeClientRequestContext;
+  }>;
 }
 
 function makeSummary(
@@ -150,6 +161,8 @@ function makeBridge(
   const restoreCalls: FakeBridge['restoreCalls'] = [];
   const listCalls: string[] = [];
   const summaryCalls: string[] = [];
+  const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const setApprovalModeCalls: FakeBridge['setApprovalModeCalls'] = [];
   const bridge = {
     permissionPolicy: 'first-responder' as const,
     spawnCalls,
@@ -165,6 +178,8 @@ function makeBridge(
     restoreCalls,
     listCalls,
     summaryCalls,
+    setModelCalls,
+    setApprovalModeCalls,
     get sessionCount() {
       return live.size;
     },
@@ -259,6 +274,33 @@ function makeBridge(
     ) {
       promptCalls.push({ sessionId, ...(context ? { context } : {}) });
       return Promise.resolve({ stopReason: 'end_turn' });
+    },
+    async setSessionModel(
+      sessionId: string,
+      req: { modelId?: unknown; sessionId?: unknown },
+      context?: BridgeClientRequestContext,
+    ) {
+      setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
+      return { sessionId, modelId: req.modelId, _meta: { applied: true } };
+    },
+    async setSessionApprovalMode(
+      sessionId: string,
+      mode: string,
+      opts: { persist?: boolean },
+      context?: BridgeClientRequestContext,
+    ) {
+      setApprovalModeCalls.push({
+        sessionId,
+        mode,
+        opts,
+        ...(context ? { context } : {}),
+      });
+      return {
+        sessionId,
+        mode,
+        previous: 'default',
+        persisted: opts?.persist === true,
+      };
     },
     async cancelSession(sessionId: string) {
       cancelCalls.push(sessionId);
@@ -482,6 +524,24 @@ describe('multi-workspace session dispatch', () => {
       workspaceCwd: SECONDARY_CWD,
     });
     expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
+  });
+
+  it('applies a creation-time approvalMode on the owning non-primary runtime', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+    const res = await request(app)
+      .post('/session')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD, approvalMode: 'yolo' });
+
+    expect(res.status).toBe(200);
+    expect(primaryBridge.spawnCalls).toEqual([]);
+    expect(secondaryBridge.spawnCalls).toHaveLength(1);
+    // The approval mode rides along with creation on the non-primary runtime,
+    // so no follow-up primary-only approval-mode round-trip is required.
+    expect(secondaryBridge.spawnCalls[0]).toMatchObject({
+      workspaceCwd: SECONDARY_CWD,
+      approvalMode: 'yolo',
+    });
   });
 
   it('rejects unknown and untrusted workspace session creation before touching a bridge', async () => {
@@ -776,6 +836,75 @@ describe('multi-workspace session dispatch', () => {
     expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
     expect(primaryBridge.restoreCalls).toEqual([]);
     expect(secondaryBridge.restoreCalls).toEqual([]);
+  });
+
+  it('routes POST /session/:id/model to the owning non-primary workspace bridge', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+
+    const res = await request(app)
+      .post('/session/secondary-session/model')
+      .set('Host', host())
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ modelId: 'qwen3-coder' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ _meta: { applied: true } });
+    expect(secondaryBridge.setModelCalls).toHaveLength(1);
+    expect(secondaryBridge.setModelCalls[0]?.sessionId).toBe(
+      'secondary-session',
+    );
+    expect(secondaryBridge.setModelCalls[0]?.req.modelId).toBe('qwen3-coder');
+    expect(secondaryBridge.setModelCalls[0]?.context).toEqual({
+      clientId: 'client-1',
+    });
+    // Owner-scoped: the mutation must land on the secondary bridge only, never
+    // the primary one.
+    expect(primaryBridge.setModelCalls).toEqual([]);
+  });
+
+  it('routes POST /session/:id/approval-mode to the owning non-primary workspace bridge', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+
+    const res = await request(app)
+      .post('/session/secondary-session/approval-mode')
+      .set('Host', host())
+      .send({ mode: 'yolo', persist: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      sessionId: 'secondary-session',
+      mode: 'yolo',
+      persisted: true,
+    });
+    expect(secondaryBridge.setApprovalModeCalls).toHaveLength(1);
+    expect(secondaryBridge.setApprovalModeCalls[0]).toMatchObject({
+      sessionId: 'secondary-session',
+      mode: 'yolo',
+      opts: { persist: true },
+    });
+    expect(primaryBridge.setApprovalModeCalls).toEqual([]);
+  });
+
+  it('still rejects model/approval-mode mutations on an untrusted non-primary session', async () => {
+    // Opening these routes to non-primary owners must not bypass the trust
+    // gate: an untrusted workspace runtime is refused before the bridge runs.
+    const { app, secondaryBridge } = makeHarness({ secondaryTrusted: false });
+
+    const modelRes = await request(app)
+      .post('/session/secondary-session/model')
+      .set('Host', host())
+      .send({ modelId: 'qwen3-coder' });
+    expect(modelRes.status).toBe(403);
+    expect(modelRes.body.code).toBe('untrusted_workspace');
+    expect(secondaryBridge.setModelCalls).toEqual([]);
+
+    const approvalRes = await request(app)
+      .post('/session/secondary-session/approval-mode')
+      .set('Host', host())
+      .send({ mode: 'yolo' });
+    expect(approvalRes.status).toBe(403);
+    expect(approvalRes.body.code).toBe('untrusted_workspace');
+    expect(secondaryBridge.setApprovalModeCalls).toEqual([]);
   });
 
   it('lists active persisted and live non-primary workspace sessions by workspace id', async () => {
