@@ -16,6 +16,7 @@ import type {
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
 } from './acp-session-bridge.js';
+import { WorkspaceDrainingError } from './acp-session-bridge.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   mountWorkspaceMemoryRememberRoutes,
@@ -647,6 +648,54 @@ describe('workspace memory remember routes', () => {
     });
 
     expect(lane.get(first.taskId)).toBeUndefined();
+  });
+
+  it('rolls back the enqueue gate and fails queued tasks on disposal', async () => {
+    const first = deferred<BridgeWorkspaceMemoryRememberResult>();
+    const bridge = buildBridgeStub({
+      rememberImpl: vi.fn(async () => first.promise),
+    });
+    const lane = new WorkspaceRememberTaskLane(bridge, '/work/remove-me');
+    const running = lane.enqueue({
+      content: 'running',
+      contextMode: 'workspace',
+    });
+    const queued = lane.enqueue({
+      content: 'queued',
+      contextMode: 'workspace',
+    });
+    await waitFor(() => lane.get(running.taskId)?.status === 'running');
+
+    lane.beginDrain();
+    expect(() =>
+      lane.enqueue({ content: 'blocked', contextMode: 'workspace' }),
+    ).toThrow(WorkspaceDrainingError);
+    lane.cancelDrain();
+    const queuedAfterRollback = lane.enqueue({
+      content: 'queued after rollback',
+      contextMode: 'workspace',
+    });
+
+    lane.dispose();
+    expect(lane.get(queued.taskId)).toMatchObject({
+      status: 'failed',
+      error: { code: 'workspace_removed' },
+    });
+    expect(lane.get(queuedAfterRollback.taskId)).toMatchObject({
+      status: 'failed',
+      error: { code: 'workspace_removed' },
+    });
+    expect(lane.pendingCount()).toBe(1);
+
+    first.resolve({ filesTouched: [], touchedScopes: [] });
+    await waitFor(() => lane.get(running.taskId)?.status === 'failed');
+    expect(lane.get(running.taskId)).toMatchObject({
+      error: { code: 'workspace_removed' },
+    });
+    expect(bridge.events).toEqual([]);
+    expect(bridge.rememberCalls.map((call) => call.content)).toEqual([
+      'running',
+    ]);
   });
 
   it('runs hidden remember tasks serially within the remember lane', async () => {

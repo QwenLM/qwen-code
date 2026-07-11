@@ -827,6 +827,27 @@ const EN: Messages = {
   'sidebar.addWorkspacePersistHint':
     'Persist this workspace registration in the daemon configuration.',
   'sidebar.addWorkspaceAdding': 'Adding…',
+  'sidebar.removeWorkspace': 'Remove workspace',
+  'sidebar.workspaceActions': 'Workspace actions',
+  'sidebar.forceRemoveWorkspace': 'Force remove',
+  'sidebar.removeWorkspaceTitle': 'Remove Workspace',
+  'sidebar.removeWorkspaceConfirm': (v) =>
+    `Remove the runtime and persistent registration for “${v?.name ?? ''}”? Files, settings, and session history will not be deleted.`,
+  'sidebar.removeWorkspaceBusy': (v) =>
+    `“${v?.name ?? ''}” still has active runtime resources. Force removal will terminate them.`,
+  'sidebar.removeWorkspaceCurrentSession':
+    'Switch to another workspace or close the current session before forcing removal.',
+  'sidebar.removeWorkspaceInProgress':
+    'Another client is already removing this workspace. Refresh after that operation finishes.',
+  'sidebar.removeWorkspaceError': 'Failed to remove workspace',
+  'sidebar.removeWorkspaceSessions': (v) => `Sessions: ${v?.count ?? 0}`,
+  'sidebar.removeWorkspacePrompts': (v) => `Active prompts: ${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceStarts': (v) =>
+    `Pending session starts: ${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceConnections': (v) =>
+    `ACP connections: ${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceMemoryTasks': (v) => `Memory tasks: ${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceWorkers': (v) => `Channel workers: ${v?.count ?? 0}`,
   'sidebar.noSessions': 'No sessions.',
   'sidebar.projectFallback': 'Project',
   'sidebar.sessionsOverview': 'Session Overview',
@@ -2667,6 +2688,25 @@ const ZH: Messages = {
   'sidebar.addWorkspacePersist': '服务重启后保留',
   'sidebar.addWorkspacePersistHint': '将此工作区注册持久化到守护进程配置中。',
   'sidebar.addWorkspaceAdding': '添加中…',
+  'sidebar.removeWorkspace': '移除工作区',
+  'sidebar.workspaceActions': '工作区操作',
+  'sidebar.forceRemoveWorkspace': '强制移除',
+  'sidebar.removeWorkspaceTitle': '移除工作区',
+  'sidebar.removeWorkspaceConfirm': (v) =>
+    `确定移除“${v?.name ?? ''}”的运行时和持久化注册吗？文件、设置和会话历史不会被删除。`,
+  'sidebar.removeWorkspaceBusy': (v) =>
+    `“${v?.name ?? ''}”仍有活动运行时资源。强制移除会终止这些资源。`,
+  'sidebar.removeWorkspaceCurrentSession':
+    '请先切换到其他工作区或关闭当前会话，再执行强制移除。',
+  'sidebar.removeWorkspaceInProgress':
+    '另一个客户端正在移除此工作区，请在操作完成后刷新。',
+  'sidebar.removeWorkspaceError': '移除工作区失败',
+  'sidebar.removeWorkspaceSessions': (v) => `会话：${v?.count ?? 0}`,
+  'sidebar.removeWorkspacePrompts': (v) => `活动提示：${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceStarts': (v) => `待启动会话：${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceConnections': (v) => `ACP 连接：${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceMemoryTasks': (v) => `Memory 任务：${v?.count ?? 0}`,
+  'sidebar.removeWorkspaceWorkers': (v) => `Channel worker：${v?.count ?? 0}`,
   'sidebar.noSessions': '暂无会话',
   'sidebar.projectFallback': '项目',
   'sidebar.sessionsOverview': '会话总览',

@@ -16,6 +16,11 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import type { AcpHttpHandle } from '../acp-http/index.js';
+import {
+  isPortableAbsolutePath,
+  resolveManagedWorkspaceRuntimeByPathSelector,
+} from '../workspace-route-runtime.js';
 import {
   workspaceRegistrationId,
   WorkspaceRegistrationStoreLimitError,
@@ -33,23 +38,72 @@ export interface WorkspaceManagementRouteDeps {
   safeBody: (req: Request) => Record<string, unknown>;
   createWorkspaceRuntime?: (cwd: string) => Promise<WorkspaceRuntime>;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
+  getAcpHandle?: () => AcpHttpHandle | undefined;
+  runtimeRemoval?: WorkspaceRuntimeRemovalController;
+}
+
+export interface WorkspaceRemovalActivity {
+  sessions: number;
+  activePrompts: number;
+  pendingSessionStarts: number;
+  acpConnections: number;
+  memoryTasks: number;
+  channelWorkers: number;
+}
+
+export interface WorkspaceRuntimeRemovalController {
+  beginDrain(runtime: WorkspaceRuntime): void;
+  cancelDrain(runtime: WorkspaceRuntime): void;
+  completeDrain(runtime: WorkspaceRuntime): void;
+  getActivity(runtime: WorkspaceRuntime): {
+    pendingSessionStarts: number;
+    channelWorkers: number;
+  };
+  disposeRuntime(
+    runtime: WorkspaceRuntime,
+    reason?: 'daemon_shutdown' | 'workspace_removed',
+  ): Promise<void>;
+}
+
+export interface WorkspaceManagementHandle {
+  sealAndWait(): Promise<void>;
 }
 
 export function registerWorkspaceManagementRoutes(
   app: Application,
   deps: WorkspaceManagementRouteDeps,
-): void {
+): WorkspaceManagementHandle {
   const {
     workspaceRegistry,
     mutate,
     safeBody,
     createWorkspaceRuntime,
     workspaceRegistrationStore,
+    getAcpHandle,
+    runtimeRemoval,
   } = deps;
   // Canonical cwds with a registration in flight, so two concurrent POSTs for
   // the same directory can't both pass the duplicate check and both build
   // runtime infrastructure before one add() throws.
-  const inFlight = new Set<string>();
+  const inFlight = new Map<string, 'addition' | 'promotion' | 'removal'>();
+  let sealed = false;
+  let activeOperations = 0;
+  const idleWaiters = new Set<() => void>();
+  const operationStarted = (): void => {
+    activeOperations++;
+  };
+  const operationFinished = (): void => {
+    activeOperations--;
+    if (activeOperations !== 0) return;
+    for (const resolveIdle of idleWaiters) resolveIdle();
+    idleWaiters.clear();
+  };
+  const sendSealed = (res: Response): void => {
+    res.status(503).json({
+      error: 'Daemon is shutting down',
+      code: 'daemon_shutting_down',
+    });
+  };
 
   app.post(
     '/workspaces',
@@ -121,6 +175,11 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
 
+      if (sealed) {
+        sendSealed(res);
+        return;
+      }
+
       try {
         const s = await stat(canonical);
         if (!s.isDirectory()) {
@@ -138,12 +197,28 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
 
+      // `stat` yields. Shutdown may seal management after the earlier fast
+      // check, so re-check immediately before claiming the cwd operation.
+      if (sealed) {
+        sendSealed(res);
+        return;
+      }
+
       // The duplicate / in-flight / nesting checks and `inFlight.add` below run
       // synchronously (no `await` between them), so concurrent POSTs for the
       // same canonical cwd can't race past registration. Error messages stay
       // generic and never echo a resolved path (which could reveal symlink
       // targets or another workspace's location).
-      const existingRuntime = workspaceRegistry.getByWorkspaceCwd(canonical);
+      const activeOperation = inFlight.get(canonical);
+      if (activeOperation === 'removal') {
+        res.status(409).json({
+          error: 'Workspace removal is in progress',
+          code: 'workspace_removal_in_progress',
+        });
+        return;
+      }
+      const existingRuntime =
+        workspaceRegistry.getManagedByWorkspaceCwd(canonical);
       if (existingRuntime?.primary && persist) {
         res.status(400).json({
           error: 'Primary workspace cannot be persisted',
@@ -152,9 +227,18 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
       if (existingRuntime && persist && !existingRuntime.primary) {
+        if (activeOperation) {
+          res.status(409).json({
+            error: 'Workspace registration is in progress',
+            code: 'workspace_registration_in_progress',
+          });
+          return;
+        }
         const nested = [
-          ...workspaceRegistry.list().map((runtime) => runtime.workspaceCwd),
-          ...inFlight,
+          ...workspaceRegistry
+            .listManaged()
+            .map((runtime) => runtime.workspaceCwd),
+          ...inFlight.keys(),
         ].some(
           (boundCwd) =>
             boundCwd !== canonical &&
@@ -168,6 +252,8 @@ export function registerWorkspaceManagementRoutes(
           });
           return;
         }
+        inFlight.set(canonical, 'promotion');
+        operationStarted();
         try {
           const snapshot = await workspaceRegistrationStore!.read();
           const alreadyPersisted = snapshot.workspaces.some((stored) =>
@@ -210,10 +296,13 @@ export function registerWorkspaceManagementRoutes(
             error: 'Failed to persist workspace registration',
             code: 'workspace_registration_store_error',
           });
+        } finally {
+          inFlight.delete(canonical);
+          operationFinished();
         }
         return;
       }
-      if (existingRuntime || inFlight.has(canonical)) {
+      if (existingRuntime || activeOperation) {
         res.status(409).json({
           error: 'Workspace already registered',
           code: 'workspace_exists',
@@ -232,8 +321,10 @@ export function registerWorkspaceManagementRoutes(
       // so two concurrent POSTs for parent/child paths (e.g. /project and
       // /project/sub) can't both pass while neither is in the registry yet.
       const boundCwds = [
-        ...workspaceRegistry.list().map((r) => r.workspaceCwd),
-        ...inFlight,
+        ...workspaceRegistry.listManaged().map((r) => r.workspaceCwd),
+        ...[...inFlight].flatMap(([cwd, operation]) =>
+          operation === 'addition' ? [cwd] : [],
+        ),
       ];
       for (const existing of boundCwds) {
         if (
@@ -250,7 +341,9 @@ export function registerWorkspaceManagementRoutes(
       }
 
       if (
-        workspaceRegistry.list().length + inFlight.size >=
+        workspaceRegistry.listManaged().length +
+          [...inFlight.values()].filter((operation) => operation === 'addition')
+            .length >=
         MAX_REGISTERED_WORKSPACES
       ) {
         res.status(409).json({
@@ -260,7 +353,8 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
 
-      inFlight.add(canonical);
+      inFlight.set(canonical, 'addition');
+      operationStarted();
       let persistenceFailed = false;
       try {
         const runtime = await createWorkspaceRuntime(canonical);
@@ -292,7 +386,19 @@ export function registerWorkspaceManagementRoutes(
               );
             }
           }
-          await runtime.bridge.shutdown().catch(() => undefined);
+          if (runtimeRemoval) {
+            await runtimeRemoval
+              .disposeRuntime(runtime, 'workspace_removed')
+              .catch(() => {
+                try {
+                  runtime.bridge.killAllSync();
+                } catch {
+                  // Preserve the original registration failure.
+                }
+              });
+          } else {
+            await runtime.bridge.shutdown().catch(() => undefined);
+          }
           throw err;
         }
         res.status(201).json({
@@ -323,9 +429,290 @@ export function registerWorkspaceManagementRoutes(
         }
       } finally {
         inFlight.delete(canonical);
+        operationFinished();
       }
     },
   );
+
+  const workspaceActivity = (
+    runtime: WorkspaceRuntime,
+  ): WorkspaceRemovalActivity => {
+    const controllerActivity = runtimeRemoval?.getActivity(runtime) ?? {
+      pendingSessionStarts: 0,
+      channelWorkers: 0,
+    };
+    const acpActivity = getAcpHandle?.()?.getWorkspaceActivity(
+      runtime.workspaceId,
+    ) ?? { acpConnections: 0, memoryTasks: 0 };
+    return {
+      pendingSessionStarts: controllerActivity.pendingSessionStarts,
+      sessions: runtime.bridge.sessionCount,
+      activePrompts: runtime.bridge.activePromptCount,
+      acpConnections: acpActivity.acpConnections,
+      memoryTasks: acpActivity.memoryTasks,
+      channelWorkers: controllerActivity.channelWorkers,
+    };
+  };
+  const isBusy = (activity: WorkspaceRemovalActivity): boolean =>
+    Object.values(activity).some((count) => count > 0);
+  const resolveManagedRuntime = (
+    req: Request,
+    res: Response,
+  ): WorkspaceRuntime | undefined => {
+    const selector = String(req.params['workspace'] ?? '');
+    const byId = workspaceRegistry.getManagedByWorkspaceId(selector);
+    if (byId) return byId;
+    if (!isPortableAbsolutePath(selector)) {
+      res.status(400).json({
+        error: '`workspace` must decode to a workspace id or absolute path',
+        code: 'workspace_mismatch',
+      });
+      return undefined;
+    }
+    const runtime = resolveManagedWorkspaceRuntimeByPathSelector(
+      workspaceRegistry,
+      selector,
+    );
+    if (runtime) return runtime;
+    res.status(400).json({
+      error:
+        'Workspace mismatch: the requested workspace is not registered with this daemon.',
+      code: 'workspace_mismatch',
+      workspaceCount: workspaceRegistry.list().length,
+    });
+    return undefined;
+  };
+
+  app.delete(
+    '/workspaces/:workspace',
+    mutate({ strict: true }),
+    async (req: Request, res: Response) => {
+      const body = safeBody(req);
+      const force = body['force'];
+      if (force !== undefined && typeof force !== 'boolean') {
+        res.status(400).json({
+          error: '`force` must be a boolean when provided',
+          code: 'invalid_force_flag',
+        });
+        return;
+      }
+      if (sealed) {
+        sendSealed(res);
+        return;
+      }
+      const runtime = resolveManagedRuntime(req, res);
+      if (!runtime) return;
+      if (runtime.primary) {
+        res.status(409).json({
+          error: 'The primary workspace cannot be removed at runtime',
+          code: 'primary_workspace_removal_forbidden',
+        });
+        return;
+      }
+      if (runtime.removable !== true) {
+        res.status(409).json({
+          error: 'Startup workspaces cannot be removed at runtime',
+          code: 'static_workspace_removal_forbidden',
+        });
+        return;
+      }
+      if (!runtimeRemoval) {
+        res.status(501).json({
+          error: 'Workspace runtime removal is not available',
+          code: 'workspace_runtime_removal_unsupported',
+        });
+        return;
+      }
+
+      const operation = inFlight.get(runtime.workspaceCwd);
+      if (operation) {
+        res.status(409).json({
+          error:
+            operation === 'removal'
+              ? 'Workspace removal is in progress'
+              : 'Workspace registration is in progress',
+          code:
+            operation === 'removal'
+              ? 'workspace_removal_in_progress'
+              : 'workspace_registration_in_progress',
+        });
+        return;
+      }
+
+      const initialActivity = workspaceActivity(runtime);
+      if (force !== true && isBusy(initialActivity)) {
+        res.status(409).json({
+          error: 'Workspace has active runtime resources',
+          code: 'workspace_busy',
+          activity: initialActivity,
+        });
+        return;
+      }
+
+      inFlight.set(runtime.workspaceCwd, 'removal');
+      operationStarted();
+      let registryDraining = false;
+      let controllerDraining = false;
+      let acpDraining = false;
+      const rollbackDrain = (): void => {
+        if (acpDraining) {
+          getAcpHandle?.()?.cancelWorkspaceDrain(runtime.workspaceId);
+          acpDraining = false;
+        }
+        if (controllerDraining) {
+          runtimeRemoval.cancelDrain(runtime);
+          controllerDraining = false;
+        }
+        if (registryDraining) {
+          workspaceRegistry.cancelDrain(runtime);
+          registryDraining = false;
+        }
+      };
+      const convergeCommittedRemoval = async (): Promise<void> => {
+        try {
+          getAcpHandle?.()?.commitWorkspaceRemoval(runtime.workspaceId);
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: failed to commit workspace ACP removal: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+        await runtimeRemoval
+          .disposeRuntime(runtime, 'workspace_removed')
+          .catch((err) => {
+            writeStderrLine(
+              `qwen serve: workspace runtime cleanup failed: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+            try {
+              runtime.bridge.killAllSync();
+            } catch {
+              // Logical removal must still converge after persistence commits.
+            }
+          });
+        try {
+          getAcpHandle?.()?.disposeWorkspace(runtime.workspaceId);
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: failed to dispose workspace ACP mount: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+        try {
+          runtimeRemoval.completeDrain(runtime);
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: failed to complete workspace admission drain: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+        try {
+          workspaceRegistry.completeDrain(runtime);
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: failed to complete workspace registry drain: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+        registryDraining = false;
+        controllerDraining = false;
+        acpDraining = false;
+      };
+
+      try {
+        registryDraining = workspaceRegistry.beginDrain(runtime);
+        if (!registryDraining) {
+          res.status(409).json({
+            error: 'Workspace removal is in progress',
+            code: 'workspace_removal_in_progress',
+          });
+          return;
+        }
+        runtimeRemoval.beginDrain(runtime);
+        controllerDraining = true;
+        getAcpHandle?.()?.beginWorkspaceDrain(runtime.workspaceId);
+        acpDraining = true;
+
+        const activity = workspaceActivity(runtime);
+        if (force !== true && isBusy(activity)) {
+          rollbackDrain();
+          res.status(409).json({
+            error: 'Workspace has active runtime resources',
+            code: 'workspace_busy',
+            activity,
+          });
+          return;
+        }
+
+        let persistedRegistrationRemoved = false;
+        if (workspaceRegistrationStore) {
+          try {
+            const registrationIds = new Set([
+              ...(runtime.registrationIds ?? []),
+              workspaceRegistrationId(runtime.workspaceCwd),
+            ]);
+            persistedRegistrationRemoved =
+              (await workspaceRegistrationStore.removeByIds([
+                ...registrationIds,
+              ])) > 0;
+          } catch (err) {
+            rollbackDrain();
+            writeStderrLine(
+              `qwen serve: failed to remove workspace persistence: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+            res.status(500).json({
+              error: 'Failed to persist workspace removal',
+              code: 'workspace_persist_failed',
+            });
+            return;
+          }
+        }
+
+        // Persistence is the commit point. Every cleanup step after it is
+        // best-effort and logical removal must never roll back to active.
+        await convergeCommittedRemoval();
+
+        res.status(200).json({
+          removed: true,
+          workspaceId: runtime.workspaceId,
+          workspaceCwd: runtime.workspaceCwd,
+          forced: force === true,
+          persistedRegistrationRemoved,
+          activity,
+        });
+      } catch (err) {
+        rollbackDrain();
+        writeStderrLine(
+          `qwen serve: DELETE /workspaces/:workspace failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        if (!res.headersSent) {
+          res.status(500).json({
+            error: 'Failed to remove workspace runtime',
+          });
+        }
+      } finally {
+        inFlight.delete(runtime.workspaceCwd);
+        operationFinished();
+      }
+    },
+  );
+
+  const registrationIsActive = (registrationId: string): boolean =>
+    workspaceRegistry.list().some((runtime) => {
+      if (workspaceRegistrationId(runtime.workspaceCwd) === registrationId) {
+        return true;
+      }
+      return runtime.registrationIds?.includes(registrationId) === true;
+    });
 
   app.get('/workspace-registrations', async (_req, res) => {
     if (!workspaceRegistrationStore) {
@@ -345,7 +732,9 @@ export function registerWorkspaceManagementRoutes(
           return {
             id: workspaceRegistrationId(cwd),
             cwd,
-            active: runtime !== undefined,
+            active:
+              runtime !== undefined ||
+              registrationIsActive(workspaceRegistrationId(cwd)),
             persisted: true,
           };
         }),
@@ -376,12 +765,7 @@ export function registerWorkspaceManagementRoutes(
       }
       try {
         const registrationId = String(req.params['id']);
-        const active = workspaceRegistry
-          .list()
-          .some(
-            (runtime) =>
-              workspaceRegistrationId(runtime.workspaceCwd) === registrationId,
-          );
+        const active = registrationIsActive(registrationId);
         const removed =
           await workspaceRegistrationStore.removeById(registrationId);
         if (!removed) {
@@ -409,4 +793,12 @@ export function registerWorkspaceManagementRoutes(
       }
     },
   );
+
+  return {
+    async sealAndWait() {
+      sealed = true;
+      if (activeOperations === 0) return;
+      await new Promise<void>((resolveIdle) => idleWaiters.add(resolveIdle));
+    },
+  };
 }

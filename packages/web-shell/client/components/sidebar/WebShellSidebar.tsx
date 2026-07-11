@@ -17,6 +17,7 @@ import {
   useWorkspace,
   useWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import type {
   DaemonSessionGroup,
   DaemonSessionGroupColor,
@@ -24,6 +25,7 @@ import type {
   DaemonSessionGroupPresetColor,
   DaemonSessionSummary,
   DaemonWorkspaceCapability,
+  DaemonWorkspaceRemovalActivity,
 } from '@qwen-code/sdk/daemon';
 import {
   ActivityIcon,
@@ -509,6 +511,16 @@ export function WebShellSidebar({
   const [projectsExpanded, setProjectsExpanded] = useState(true);
   const [searchOpen, setSearchOpen] = useState(false);
   const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
+  const [workspaceRemovalCandidate, setWorkspaceRemovalCandidate] =
+    useState<DaemonWorkspaceCapability | null>(null);
+  const [workspaceRemovalActivity, setWorkspaceRemovalActivity] =
+    useState<DaemonWorkspaceRemovalActivity | null>(null);
+  const [workspaceRemovalSubmitting, setWorkspaceRemovalSubmitting] =
+    useState(false);
+  const [
+    workspaceRemovalRemoteInProgress,
+    setWorkspaceRemovalRemoteInProgress,
+  ] = useState(false);
   const [workspaceSessionsReloadToken, setWorkspaceSessionsReloadToken] =
     useState(0);
   const [autoExpandWorkspace, setAutoExpandWorkspace] = useState<{
@@ -535,6 +547,9 @@ export function WebShellSidebar({
     null,
   );
   const currentSessionId = connection.sessionId;
+  const workspaceRemovalEnabled = Boolean(
+    connection.capabilities?.features?.includes('workspace_runtime_removal'),
+  );
   const canExportSessions =
     connection.capabilities?.features?.includes('session_export') ?? false;
   const projectName =
@@ -975,6 +990,97 @@ export function WebShellSidebar({
     },
     [t, workspaceActions, workspace],
   );
+
+  const reconcileRemovedWorkspace = useCallback(
+    async (removed: DaemonWorkspaceCapability) => {
+      if (selectedWorkspaceCwd === removed.cwd) {
+        onSelectWorkspace?.(undefined);
+      }
+      setWorkspaceRemovalCandidate(null);
+      setWorkspaceRemovalActivity(null);
+      setWorkspaceRemovalRemoteInProgress(false);
+      setWorkspaceSessionsReloadToken((token) => token + 1);
+      try {
+        await workspace.refreshCapabilities?.();
+      } catch {
+        // The mutation already converged; a later refresh will reconcile.
+      }
+      void reload().catch(() => undefined);
+      void reloadArchived().catch(() => undefined);
+    },
+    [
+      onSelectWorkspace,
+      reload,
+      reloadArchived,
+      selectedWorkspaceCwd,
+      workspace,
+    ],
+  );
+
+  const requestWorkspaceRemoval = useCallback(
+    (candidate: DaemonWorkspaceCapability) => {
+      if (workspaceRemovalSubmitting) return;
+      setWorkspaceRemovalActivity(null);
+      setWorkspaceRemovalRemoteInProgress(false);
+      setWorkspaceRemovalCandidate(candidate);
+    },
+    [workspaceRemovalSubmitting],
+  );
+
+  const confirmWorkspaceRemoval = useCallback(async () => {
+    const candidate = workspaceRemovalCandidate;
+    if (!candidate || workspaceRemovalSubmitting) return;
+    const force = workspaceRemovalActivity !== null;
+    if (force && connection.workspaceCwd === candidate.cwd) return;
+    setWorkspaceRemovalSubmitting(true);
+    try {
+      await workspaceActions.removeWorkspace(candidate.id, { force });
+      await reconcileRemovedWorkspace(candidate);
+    } catch (error) {
+      if (error instanceof DaemonHttpError) {
+        const body = error.body as
+          | {
+              code?: unknown;
+              activity?: DaemonWorkspaceRemovalActivity;
+            }
+          | undefined;
+        if (
+          error.status === 409 &&
+          body?.code === 'workspace_busy' &&
+          body.activity
+        ) {
+          setWorkspaceRemovalActivity(body.activity);
+          return;
+        }
+        if (body?.code === 'workspace_mismatch') {
+          await reconcileRemovedWorkspace(candidate);
+          return;
+        }
+        if (body?.code === 'workspace_removal_in_progress') {
+          setWorkspaceRemovalRemoteInProgress(true);
+          try {
+            await workspace.refreshCapabilities?.();
+          } catch {
+            // The other removal operation remains authoritative.
+          }
+          return;
+        }
+      }
+      onError(error, t('sidebar.removeWorkspaceError'));
+    } finally {
+      setWorkspaceRemovalSubmitting(false);
+    }
+  }, [
+    connection.workspaceCwd,
+    onError,
+    reconcileRemovedWorkspace,
+    t,
+    workspaceActions,
+    workspace,
+    workspaceRemovalActivity,
+    workspaceRemovalCandidate,
+    workspaceRemovalSubmitting,
+  ]);
 
   const handleNewSession = useCallback(
     (workspaceCwd?: string) => {
@@ -2495,6 +2601,105 @@ export function WebShellSidebar({
             </div>
           </DialogShell>
         )}
+        {workspaceRemovalCandidate && (
+          <DialogShell
+            title={t('sidebar.removeWorkspaceTitle')}
+            size="sm"
+            onClose={() => {
+              if (!workspaceRemovalSubmitting) {
+                setWorkspaceRemovalCandidate(null);
+                setWorkspaceRemovalActivity(null);
+                setWorkspaceRemovalRemoteInProgress(false);
+              }
+            }}
+          >
+            <div className={styles.confirmContent}>
+              <p className={styles.confirmDescription}>
+                {workspaceRemovalActivity
+                  ? t('sidebar.removeWorkspaceBusy', {
+                      name: getWorkspaceName(workspaceRemovalCandidate.cwd),
+                    })
+                  : t('sidebar.removeWorkspaceConfirm', {
+                      name: getWorkspaceName(workspaceRemovalCandidate.cwd),
+                    })}
+              </p>
+              {workspaceRemovalActivity && (
+                <ul className={styles.workspaceRemovalActivityList}>
+                  <li>
+                    {t('sidebar.removeWorkspaceSessions', {
+                      count: workspaceRemovalActivity.sessions,
+                    })}
+                  </li>
+                  <li>
+                    {t('sidebar.removeWorkspacePrompts', {
+                      count: workspaceRemovalActivity.activePrompts,
+                    })}
+                  </li>
+                  <li>
+                    {t('sidebar.removeWorkspaceStarts', {
+                      count: workspaceRemovalActivity.pendingSessionStarts,
+                    })}
+                  </li>
+                  <li>
+                    {t('sidebar.removeWorkspaceConnections', {
+                      count: workspaceRemovalActivity.acpConnections,
+                    })}
+                  </li>
+                  <li>
+                    {t('sidebar.removeWorkspaceMemoryTasks', {
+                      count: workspaceRemovalActivity.memoryTasks,
+                    })}
+                  </li>
+                  <li>
+                    {t('sidebar.removeWorkspaceWorkers', {
+                      count: workspaceRemovalActivity.channelWorkers,
+                    })}
+                  </li>
+                </ul>
+              )}
+              {workspaceRemovalActivity &&
+                connection.workspaceCwd === workspaceRemovalCandidate.cwd && (
+                  <p className={styles.confirmDescription}>
+                    {t('sidebar.removeWorkspaceCurrentSession')}
+                  </p>
+                )}
+              {workspaceRemovalRemoteInProgress && (
+                <p className={styles.confirmDescription}>
+                  {t('sidebar.removeWorkspaceInProgress')}
+                </p>
+              )}
+              <div className={styles.confirmActions}>
+                <button
+                  className={styles.secondaryButton}
+                  type="button"
+                  disabled={workspaceRemovalSubmitting}
+                  onClick={() => {
+                    setWorkspaceRemovalCandidate(null);
+                    setWorkspaceRemovalActivity(null);
+                    setWorkspaceRemovalRemoteInProgress(false);
+                  }}
+                >
+                  {t('common.cancel')}
+                </button>
+                <button
+                  className={styles.dangerButton}
+                  type="button"
+                  disabled={
+                    workspaceRemovalSubmitting ||
+                    workspaceRemovalRemoteInProgress ||
+                    (workspaceRemovalActivity !== null &&
+                      connection.workspaceCwd === workspaceRemovalCandidate.cwd)
+                  }
+                  onClick={() => void confirmWorkspaceRemoval()}
+                >
+                  {workspaceRemovalActivity
+                    ? t('sidebar.forceRemoveWorkspace')
+                    : t('sidebar.removeWorkspace')}
+                </button>
+              </div>
+            </div>
+          </DialogShell>
+        )}
         {groupEditor && (
           <DialogShell
             title={groupEditorTitle}
@@ -2836,46 +3041,96 @@ export function WebShellSidebar({
                                 options,
                               )
                             }
-                            headerActions={(visible) => (
-                              <div
-                                className={styles.workspaceHeaderActions}
-                                style={{
-                                  visibility: visible ? 'visible' : 'hidden',
-                                }}
-                              >
-                                <button
-                                  className={styles.workspaceHeaderAction}
-                                  type="button"
-                                  aria-label={t('sidebar.groupCreate')}
-                                  onClick={(event) => {
-                                    event.preventDefault();
-                                    event.stopPropagation();
-                                    if (ws.primary) {
-                                      handleCreateGroup();
-                                    } else {
-                                      handleCreateWorkspaceGroup(ws.cwd);
-                                    }
+                            headerActions={(visible) => {
+                              const canRemove =
+                                workspaceRemovalEnabled &&
+                                !ws.primary &&
+                                ws.removable === true;
+                              if (!ws.trusted && !canRemove) return null;
+                              return (
+                                <div
+                                  className={styles.workspaceHeaderActions}
+                                  style={{
+                                    visibility: visible ? 'visible' : 'hidden',
                                   }}
                                 >
-                                  <PlusIcon size={16} strokeWidth={1.2} />
-                                </button>
-                                <button
-                                  className={styles.workspaceHeaderAction}
-                                  type="button"
-                                  title={t('sidebar.newTask')}
-                                  aria-label={t('sidebar.newTask')}
-                                  onClick={(event) => {
-                                    event.preventDefault();
-                                    event.stopPropagation();
-                                    handleNewSession(
-                                      ws.primary ? undefined : ws.cwd,
-                                    );
-                                  }}
-                                >
-                                  <SquarePenIcon size={16} strokeWidth={1.2} />
-                                </button>
-                              </div>
-                            )}
+                                  {ws.trusted && (
+                                    <>
+                                      <button
+                                        className={styles.workspaceHeaderAction}
+                                        type="button"
+                                        aria-label={t('sidebar.groupCreate')}
+                                        onClick={(event) => {
+                                          event.preventDefault();
+                                          event.stopPropagation();
+                                          if (ws.primary) {
+                                            handleCreateGroup();
+                                          } else {
+                                            handleCreateWorkspaceGroup(ws.cwd);
+                                          }
+                                        }}
+                                      >
+                                        <PlusIcon size={16} strokeWidth={1.2} />
+                                      </button>
+                                      <button
+                                        className={styles.workspaceHeaderAction}
+                                        type="button"
+                                        title={t('sidebar.newTask')}
+                                        aria-label={t('sidebar.newTask')}
+                                        onClick={(event) => {
+                                          event.preventDefault();
+                                          event.stopPropagation();
+                                          handleNewSession(
+                                            ws.primary ? undefined : ws.cwd,
+                                          );
+                                        }}
+                                      >
+                                        <SquarePenIcon
+                                          size={16}
+                                          strokeWidth={1.2}
+                                        />
+                                      </button>
+                                    </>
+                                  )}
+                                  {canRemove && (
+                                    <DropdownMenu>
+                                      <DropdownMenuTrigger asChild>
+                                        <button
+                                          className={
+                                            styles.workspaceHeaderAction
+                                          }
+                                          type="button"
+                                          aria-label={t(
+                                            'sidebar.workspaceActions',
+                                          )}
+                                          disabled={
+                                            workspaceRemovalSubmitting &&
+                                            workspaceRemovalCandidate?.id ===
+                                              ws.id
+                                          }
+                                        >
+                                          <EllipsisVerticalIcon
+                                            size={16}
+                                            strokeWidth={1.2}
+                                          />
+                                        </button>
+                                      </DropdownMenuTrigger>
+                                      <DropdownMenuContent align="end">
+                                        <DropdownMenuItem
+                                          variant="destructive"
+                                          onSelect={() =>
+                                            requestWorkspaceRemoval(ws)
+                                          }
+                                        >
+                                          <Trash2Icon />
+                                          {t('sidebar.removeWorkspace')}
+                                        </DropdownMenuItem>
+                                      </DropdownMenuContent>
+                                    </DropdownMenu>
+                                  )}
+                                </div>
+                              );
+                            }}
                           />
                           {ws.primary &&
                           (projectExpanded || searchQuery.trim()) ? (

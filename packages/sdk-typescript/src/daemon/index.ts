@@ -380,6 +380,8 @@ export type {
   DaemonWorkspaceTrustStatus,
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
+  DaemonWorkspaceRemovalActivity,
+  DaemonWorkspaceRemovalResult,
   DaemonAvailableCommand,
   DaemonArchiveSessionsResult,
   DaemonCapabilities,

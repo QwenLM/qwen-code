@@ -15,6 +15,7 @@ import type {
   BridgeWorkspaceMemoryRememberContextMode,
   BridgeWorkspaceMemoryRememberResult,
 } from './acp-session-bridge.js';
+import { WorkspaceDrainingError } from './acp-session-bridge.js';
 import {
   createWorkspaceMemoryExtractionErrorLogger,
   shouldSuppressRememberErrorDetails,
@@ -216,8 +217,53 @@ export class WorkspaceRememberTaskLane {
   );
   private readonly tasks = new Map<string, WorkspaceMemoryTaskRecord>();
   private tail: Promise<void> = Promise.resolve();
+  private draining = false;
+  private disposed = false;
 
-  constructor(private readonly bridge: AcpSessionBridge) {}
+  constructor(
+    private readonly bridge: AcpSessionBridge,
+    private readonly workspaceCwd = 'workspace',
+  ) {}
+
+  beginDrain(): void {
+    this.draining = true;
+  }
+
+  cancelDrain(): void {
+    if (!this.disposed) this.draining = false;
+  }
+
+  pendingCount(): number {
+    return this.pendingCounts().total;
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.draining = true;
+    for (const task of this.tasks.values()) {
+      if (task.status !== 'queued') continue;
+      task.status = 'failed';
+      task.updatedAt = nowIso();
+      task.error = createTaskError(
+        'workspace_removed',
+        task.kind,
+        'Workspace runtime was removed before the task started.',
+      );
+    }
+  }
+
+  private failRunningTaskAfterRemoval(task: WorkspaceMemoryTaskRecord): void {
+    if (!this.disposed || task.status === 'failed') return;
+    task.status = 'failed';
+    delete task.result;
+    task.updatedAt = nowIso();
+    task.error = createTaskError(
+      'workspace_removed',
+      task.kind,
+      'Workspace runtime was removed while the task was running.',
+    );
+  }
 
   private pendingCounts(): { total: number; nonRemember: number } {
     let total = 0;
@@ -260,6 +306,9 @@ export class WorkspaceRememberTaskLane {
   }
 
   private assertCapacity(kind: WorkspaceMemoryTaskRecord['kind']): void {
+    if (this.draining || this.disposed) {
+      throw new WorkspaceDrainingError(this.workspaceCwd);
+    }
     const pending = this.pendingCounts();
     if (pending.total >= WorkspaceRememberTaskLane.MAX_PENDING) {
       throw Object.assign(new Error('Workspace memory task queue is full'), {
@@ -288,7 +337,11 @@ export class WorkspaceRememberTaskLane {
     this.tasks.set(task.taskId, task);
     this.evictTerminalTasks();
 
-    this.tail = this.tail.then(run, run);
+    const runIfQueued = async () => {
+      if (task.status !== 'queued') return;
+      await run();
+    };
+    this.tail = this.tail.then(runIfQueued, runIfQueued);
     void this.tail.catch((err: unknown) => {
       debugLogger.error('Unhandled task lane error:', err);
     });
@@ -375,6 +428,7 @@ export class WorkspaceRememberTaskLane {
         task.error = createTaskError(code, task.kind, diagnostics.details);
         task.updatedAt = nowIso();
       }
+      this.failRunningTaskAfterRemoval(task);
       try {
         if (task.status === 'completed' && task.result) {
           this.publishManagedMemoryChanged({
@@ -447,6 +501,7 @@ export class WorkspaceRememberTaskLane {
         task.error = createTaskError(code, task.kind, diagnostics.details);
         task.updatedAt = nowIso();
       }
+      this.failRunningTaskAfterRemoval(task);
       try {
         if (task.status === 'completed' && task.result) {
           this.publishManagedMemoryChanged({
@@ -515,6 +570,7 @@ export class WorkspaceRememberTaskLane {
         task.error = createTaskError(code, task.kind, diagnostics.details);
         task.updatedAt = nowIso();
       }
+      this.failRunningTaskAfterRemoval(task);
       try {
         if (task.status === 'completed' && task.result) {
           this.publishManagedMemoryChanged({

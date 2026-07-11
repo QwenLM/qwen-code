@@ -69,6 +69,39 @@ export function resolveRegisteredWorkspaceRuntimeByPathSelector(
     );
 }
 
+export function resolveManagedWorkspaceRuntimeByPathSelector(
+  registry: WorkspaceRegistry,
+  selector: string,
+): WorkspaceRuntime | undefined {
+  const exact = registry.getManagedByWorkspaceCwd(selector);
+  if (exact) return exact;
+
+  if (path.isAbsolute(selector) && !isUncPath(selector)) {
+    try {
+      const canonicalSelector = canonicalizeWorkspace(selector);
+      const canonicalMatch =
+        registry.getManagedByWorkspaceCwd(canonicalSelector);
+      if (canonicalMatch) return canonicalMatch;
+      for (const runtime of registry.listManaged()) {
+        if (canonicalizeWorkspace(runtime.workspaceCwd) === canonicalSelector) {
+          return runtime;
+        }
+      }
+    } catch {
+      // Fall through to lexical matching for unavailable paths.
+    }
+  }
+
+  const normalizedSelector = normalizePortableAbsolutePath(selector);
+  return registry
+    .listManaged()
+    .find(
+      (runtime) =>
+        normalizePortableAbsolutePath(runtime.workspaceCwd) ===
+        normalizedSelector,
+    );
+}
+
 export function resolveWorkspaceRuntimeFromParam(
   registry: WorkspaceRegistry,
   req: Request,

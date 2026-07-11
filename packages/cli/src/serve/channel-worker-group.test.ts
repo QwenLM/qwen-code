@@ -45,16 +45,24 @@ function fakeRegistry(runtimes: WorkspaceRuntime[]): WorkspaceRegistry {
   return {
     primary: runtimes.find((runtime) => runtime.primary)!,
     list: () => runtimes,
+    listManaged: () => runtimes,
     add: vi.fn(),
     getByWorkspaceCwd: (cwd) =>
       runtimes.find((runtime) => runtime.workspaceCwd === cwd),
     getByWorkspaceId: (id) =>
+      runtimes.find((runtime) => runtime.workspaceId === id),
+    getManagedByWorkspaceCwd: (cwd) =>
+      runtimes.find((runtime) => runtime.workspaceCwd === cwd),
+    getManagedByWorkspaceId: (id) =>
       runtimes.find((runtime) => runtime.workspaceId === id),
     resolveWorkspaceCwd: (cwd) =>
       cwd === undefined
         ? runtimes.find((runtime) => runtime.primary)
         : runtimes.find((runtime) => runtime.workspaceCwd === cwd),
     resolveLiveSessionOwner: () => ({ kind: 'not_found' }),
+    beginDrain: vi.fn(() => true),
+    cancelDrain: vi.fn(),
+    completeDrain: vi.fn(),
   };
 }
 
@@ -143,6 +151,91 @@ describe('createChannelWorkerGroup', () => {
     expect(recorded[1]!.supervisor.enqueueWebhookTask).toHaveBeenCalledWith(
       webhookTask,
     );
+  });
+
+  it('drains and removes only the target workspace worker', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+
+    expect(group.workspaceActivity(SECONDARY)).toBe(1);
+    group.beginWorkspaceDrain(SECONDARY);
+    await expect(group.enqueueWebhookTask(webhookTask)).rejects.toMatchObject({
+      code: 'channel_worker_unavailable',
+    });
+    await group.restart();
+    expect(recorded[0]!.supervisor.restart).toHaveBeenCalledOnce();
+    expect(recorded[1]!.supervisor.restart).not.toHaveBeenCalled();
+
+    group.cancelWorkspaceDrain(SECONDARY);
+    recorded[1]!.supervisor.enqueueWebhookTask.mockResolvedValueOnce({
+      accepted: true,
+    });
+    await expect(group.enqueueWebhookTask(webhookTask)).resolves.toEqual({
+      accepted: true,
+    });
+
+    group.beginWorkspaceDrain(SECONDARY);
+    const firstRemoval = group.removeWorkspace(SECONDARY);
+    const secondRemoval = group.removeWorkspace(SECONDARY);
+    expect(firstRemoval).toBe(secondRemoval);
+    await firstRemoval;
+
+    expect(recorded[1]!.supervisor.stop).toHaveBeenCalledOnce();
+    expect(recorded[0]!.supervisor.stop).not.toHaveBeenCalled();
+    expect(group.workspaceActivity(SECONDARY)).toBe(0);
+    expect(group.snapshots()).toEqual([
+      expect.objectContaining({ workspaceCwd: PRIMARY }),
+    ]);
+    await expect(group.enqueueWebhookTask(webhookTask)).rejects.toMatchObject({
+      code: 'channel_worker_unavailable',
+    });
+
+    await group.stop();
+    expect(recorded[0]!.supervisor.stop).toHaveBeenCalledOnce();
+    expect(recorded[1]!.supervisor.stop).toHaveBeenCalledOnce();
+  });
+
+  it('falls back to synchronous kill when target worker stop fails', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    recorded[1]!.supervisor.stop.mockRejectedValueOnce(
+      new Error('stop failed'),
+    );
+
+    await expect(group.removeWorkspace(SECONDARY)).resolves.toBeUndefined();
+
+    expect(recorded[1]!.supervisor.killAllSync).toHaveBeenCalledOnce();
+    expect(group.snapshots()).toEqual([
+      expect.objectContaining({ workspaceCwd: PRIMARY }),
+    ]);
   });
 
   it('routes --channel all webhook tasks to the primary supervisor', async () => {

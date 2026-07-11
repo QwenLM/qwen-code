@@ -304,4 +304,43 @@ describe('createWorkspaceRegistry', () => {
     expect(primarySummary).toHaveBeenCalledTimes(2);
     expect(secondarySummary).toHaveBeenCalledTimes(2);
   });
+
+  it('hides draining runtimes, rolls back, and releases cwd ownership on completion', () => {
+    const primary = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+    });
+    const secondary = makeRuntime('/work/secondary', {
+      workspaceId: 'ws-secondary',
+      removable: true,
+    });
+    const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
+    sessionOwnerIndex.register('session-secondary', secondary.workspaceCwd);
+    const registry = createWorkspaceRegistry([primary, secondary], {
+      sessionOwnerIndex,
+    });
+
+    expect(registry.beginDrain(primary)).toBe(false);
+    expect(registry.beginDrain(secondary)).toBe(true);
+    expect(registry.list()).toEqual([primary]);
+    expect(registry.listManaged()).toEqual([primary, secondary]);
+    expect(registry.getByWorkspaceId(secondary.workspaceId)).toBeUndefined();
+    expect(registry.getManagedByWorkspaceId(secondary.workspaceId)).toBe(
+      secondary,
+    );
+
+    registry.cancelDrain(secondary);
+    expect(registry.list()).toEqual([primary, secondary]);
+    expect(registry.beginDrain(secondary)).toBe(true);
+    registry.completeDrain(secondary);
+    expect(registry.listManaged()).toEqual([primary]);
+    expect(sessionOwnerIndex.getWorkspaceCwds('session-secondary')).toEqual([]);
+
+    const replacement = makeRuntime('/work/secondary', {
+      workspaceId: 'ws-secondary',
+      removable: true,
+    });
+    registry.add(replacement);
+    expect(registry.getByWorkspaceCwd('/work/secondary')).toBe(replacement);
+  });
 });

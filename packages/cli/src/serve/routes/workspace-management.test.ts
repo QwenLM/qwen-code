@@ -10,6 +10,7 @@ import request from 'supertest';
 import {
   registerWorkspaceManagementRoutes,
   type WorkspaceManagementRouteDeps,
+  type WorkspaceRuntimeRemovalController,
 } from './workspace-management.js';
 import type {
   WorkspaceRegistry,
@@ -17,6 +18,8 @@ import type {
 } from '../workspace-registry.js';
 import { tmpdir } from 'node:os';
 import { realpathSync } from 'node:fs';
+import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { join } from 'node:path';
 import {
   workspaceRegistrationId,
   WorkspaceRegistrationStoreLimitError,
@@ -35,6 +38,7 @@ function createMockRegistry(
 ): WorkspaceRegistry {
   const byCwd = new Map(runtimes.map((r) => [r.workspaceCwd, r]));
   const byId = new Map(runtimes.map((r) => [r.workspaceId, r]));
+  const draining = new Set<WorkspaceRuntime>();
   const add = vi.fn((runtime: WorkspaceRuntime) => {
     runtimes.push(runtime);
     byCwd.set(runtime.workspaceCwd, runtime);
@@ -42,24 +46,60 @@ function createMockRegistry(
   });
   return {
     primary: runtimes[0]!,
-    list: () => Object.freeze([...runtimes]) as readonly WorkspaceRuntime[],
-    getByWorkspaceCwd: (cwd: string) => byCwd.get(cwd),
-    getByWorkspaceId: (id: string) => byId.get(id),
+    list: () =>
+      Object.freeze(
+        runtimes.filter((runtime) => !draining.has(runtime)),
+      ) as readonly WorkspaceRuntime[],
+    listManaged: () =>
+      Object.freeze([...runtimes]) as readonly WorkspaceRuntime[],
+    getByWorkspaceCwd: (cwd: string) => {
+      const runtime = byCwd.get(cwd);
+      return runtime && !draining.has(runtime) ? runtime : undefined;
+    },
+    getManagedByWorkspaceCwd: (cwd: string) => byCwd.get(cwd),
+    getByWorkspaceId: (id: string) => {
+      const runtime = byId.get(id);
+      return runtime && !draining.has(runtime) ? runtime : undefined;
+    },
+    getManagedByWorkspaceId: (id: string) => byId.get(id),
     resolveWorkspaceCwd: () => undefined,
     resolveLiveSessionOwner: () => ({ kind: 'not_found' }),
+    beginDrain: vi.fn((runtime: WorkspaceRuntime) => {
+      if (draining.has(runtime)) return false;
+      draining.add(runtime);
+      return true;
+    }),
+    cancelDrain: vi.fn((runtime: WorkspaceRuntime) => draining.delete(runtime)),
+    completeDrain: vi.fn((runtime: WorkspaceRuntime) => {
+      draining.delete(runtime);
+      const index = runtimes.indexOf(runtime);
+      if (index < 0) return false;
+      runtimes.splice(index, 1);
+      byCwd.delete(runtime.workspaceCwd);
+      byId.delete(runtime.workspaceId);
+      return true;
+    }),
     add,
   } as unknown as WorkspaceRegistry;
 }
 
-function makeRuntime(cwd: string): WorkspaceRuntime {
+function makeRuntime(
+  cwd: string,
+  overrides: Partial<WorkspaceRuntime> = {},
+): WorkspaceRuntime {
   return {
     workspaceId: `id-${cwd}`,
     workspaceCwd: cwd,
     primary: false,
     trusted: true,
+    removable: true,
     bridge: {
+      sessionCount: 0,
+      activePromptCount: 0,
       shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
     },
+    ...overrides,
   } as unknown as WorkspaceRuntime;
 }
 
@@ -75,8 +115,20 @@ function createApp(overrides?: Partial<WorkspaceManagementRouteDeps>) {
       .mockImplementation((cwd: string) => Promise.resolve(makeRuntime(cwd))),
     ...overrides,
   };
-  registerWorkspaceManagementRoutes(app, deps);
-  return { app, deps };
+  const handle = registerWorkspaceManagementRoutes(app, deps);
+  return { app, deps, handle };
+}
+
+function createRemovalController(
+  pendingSessionStarts = 0,
+): WorkspaceRuntimeRemovalController {
+  return {
+    beginDrain: vi.fn(),
+    cancelDrain: vi.fn(),
+    completeDrain: vi.fn(),
+    getActivity: vi.fn(() => ({ pendingSessionStarts, channelWorkers: 0 })),
+    disposeRuntime: vi.fn().mockResolvedValue(undefined),
+  };
 }
 
 describe('POST /workspaces', () => {
@@ -373,6 +425,342 @@ describe('POST /workspaces', () => {
   });
 });
 
+describe('DELETE /workspaces/:workspace', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('validates force and protects primary and static runtimes', async () => {
+    const primary = makeRuntime(REAL_DIR, {
+      primary: true,
+      removable: false,
+    });
+    const runtimeRemoval = createRemovalController();
+    const primaryApp = createApp({
+      workspaceRegistry: createMockRegistry([primary]),
+      runtimeRemoval,
+    }).app;
+
+    const invalid = await request(primaryApp)
+      .delete(`/workspaces/${encodeURIComponent(primary.workspaceId)}`)
+      .send({ force: 'yes' });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.code).toBe('invalid_force_flag');
+
+    const forbidden = await request(primaryApp).delete(
+      `/workspaces/${encodeURIComponent(primary.workspaceId)}`,
+    );
+    expect(forbidden.status).toBe(409);
+    expect(forbidden.body.code).toBe('primary_workspace_removal_forbidden');
+
+    const staticRuntime = makeRuntime(REAL_DIR, { removable: false });
+    const staticApp = createApp({
+      workspaceRegistry: createMockRegistry([staticRuntime]),
+      runtimeRemoval,
+    }).app;
+    const staticResult = await request(staticApp).delete(
+      `/workspaces/${encodeURIComponent(staticRuntime.workspaceId)}`,
+    );
+    expect(staticResult.status).toBe(409);
+    expect(staticResult.body.code).toBe('static_workspace_removal_forbidden');
+  });
+
+  it('returns the fast busy snapshot without disturbing runtime gates', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    Object.assign(runtime.bridge, { sessionCount: 1, activePromptCount: 1 });
+    const runtimeRemoval = createRemovalController();
+    const { app, deps } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval,
+    });
+
+    const res = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      code: 'workspace_busy',
+      activity: { sessions: 1, activePrompts: 1 },
+    });
+    expect(runtimeRemoval.beginDrain).not.toHaveBeenCalled();
+    expect(deps.workspaceRegistry.beginDrain).not.toHaveBeenCalled();
+  });
+
+  it('rolls every gate back when the final frozen snapshot becomes busy', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    const runtimeRemoval = createRemovalController();
+    vi.mocked(runtimeRemoval.getActivity)
+      .mockReturnValueOnce({ pendingSessionStarts: 0, channelWorkers: 0 })
+      .mockReturnValueOnce({ pendingSessionStarts: 1, channelWorkers: 0 });
+    const acpHandle = {
+      beginWorkspaceDrain: vi.fn(),
+      cancelWorkspaceDrain: vi.fn(),
+      getWorkspaceActivity: vi.fn(() => ({
+        acpConnections: 0,
+        memoryTasks: 0,
+      })),
+    };
+    const { app, deps } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval,
+      getAcpHandle: () => acpHandle as never,
+    });
+
+    const res = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.activity.pendingSessionStarts).toBe(1);
+    expect(acpHandle.beginWorkspaceDrain).toHaveBeenCalledWith(
+      runtime.workspaceId,
+    );
+    expect(acpHandle.cancelWorkspaceDrain).toHaveBeenCalledWith(
+      runtime.workspaceId,
+    );
+    expect(runtimeRemoval.cancelDrain).toHaveBeenCalledWith(runtime);
+    expect(deps.workspaceRegistry.cancelDrain).toHaveBeenCalledWith(runtime);
+    expect(deps.workspaceRegistry.getByWorkspaceId(runtime.workspaceId)).toBe(
+      runtime,
+    );
+  });
+
+  it('rolls drain back when persistent identity removal fails', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    const runtimeRemoval = createRemovalController();
+    const { app, deps } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval,
+      workspaceRegistrationStore: {
+        removeByIds: vi.fn().mockRejectedValue(new Error('disk full')),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('workspace_persist_failed');
+    expect(runtimeRemoval.cancelDrain).toHaveBeenCalledWith(runtime);
+    expect(runtimeRemoval.disposeRuntime).not.toHaveBeenCalled();
+    expect(deps.workspaceRegistry.getByWorkspaceId(runtime.workspaceId)).toBe(
+      runtime,
+    );
+  });
+
+  it('force-removes activity, aliases, runtime resources, and registry state', async () => {
+    const runtime = makeRuntime(REAL_DIR, {
+      registrationIds: ['raw-alias-a', 'raw-alias-b'],
+    });
+    Object.assign(runtime.bridge, { sessionCount: 2, activePromptCount: 1 });
+    const runtimeRemoval = createRemovalController(1);
+    const removeByIds = vi.fn().mockResolvedValue(2);
+    const acpHandle = {
+      beginWorkspaceDrain: vi.fn(),
+      cancelWorkspaceDrain: vi.fn(),
+      getWorkspaceActivity: vi.fn(() => ({
+        acpConnections: 1,
+        memoryTasks: 1,
+      })),
+      commitWorkspaceRemoval: vi.fn(),
+      disposeWorkspace: vi.fn(),
+    };
+    const { app, deps } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval,
+      getAcpHandle: () => acpHandle as never,
+      workspaceRegistrationStore: {
+        removeByIds,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .delete(`/workspaces/${encodeURIComponent(runtime.workspaceId)}`)
+      .send({ force: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      removed: true,
+      workspaceId: runtime.workspaceId,
+      forced: true,
+      persistedRegistrationRemoved: true,
+      activity: {
+        sessions: 2,
+        activePrompts: 1,
+        pendingSessionStarts: 1,
+        acpConnections: 1,
+        memoryTasks: 1,
+      },
+    });
+    expect(removeByIds).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        'raw-alias-a',
+        'raw-alias-b',
+        workspaceRegistrationId(runtime.workspaceCwd),
+      ]),
+    );
+    expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
+      runtime,
+      'workspace_removed',
+    );
+    expect(runtimeRemoval.completeDrain).toHaveBeenCalledWith(runtime);
+    expect(acpHandle.commitWorkspaceRemoval).toHaveBeenCalledWith(
+      runtime.workspaceId,
+    );
+    expect(acpHandle.disposeWorkspace).toHaveBeenCalledWith(
+      runtime.workspaceId,
+    );
+    expect(
+      deps.workspaceRegistry.getManagedByWorkspaceId(runtime.workspaceId),
+    ).toBeUndefined();
+  });
+
+  it('does not reactivate a runtime when cleanup fails after persistence commits', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    Object.assign(runtime.bridge, { sessionCount: 1 });
+    const runtimeRemoval = createRemovalController();
+    const acpHandle = {
+      beginWorkspaceDrain: vi.fn(),
+      cancelWorkspaceDrain: vi.fn(),
+      getWorkspaceActivity: vi.fn(() => ({
+        acpConnections: 0,
+        memoryTasks: 0,
+      })),
+      commitWorkspaceRemoval: vi.fn(() => {
+        throw new Error('commit cleanup failed');
+      }),
+      disposeWorkspace: vi.fn(() => {
+        throw new Error('mount cleanup failed');
+      }),
+    };
+    const { app, deps } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval,
+      getAcpHandle: () => acpHandle as never,
+      workspaceRegistrationStore: {
+        removeByIds: vi.fn().mockResolvedValue(1),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .delete(`/workspaces/${encodeURIComponent(runtime.workspaceId)}`)
+      .send({ force: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.forced).toBe(true);
+    expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
+      runtime,
+      'workspace_removed',
+    );
+    expect(runtimeRemoval.cancelDrain).not.toHaveBeenCalled();
+    expect(deps.workspaceRegistry.cancelDrain).not.toHaveBeenCalled();
+    expect(
+      deps.workspaceRegistry.getManagedByWorkspaceId(runtime.workspaceId),
+    ).toBeUndefined();
+  });
+
+  it('accepts a URL-encoded absolute cwd selector', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    const { app, deps } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval: createRemovalController(),
+    });
+
+    const res = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceCwd)}`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.workspaceCwd).toBe(runtime.workspaceCwd);
+    expect(
+      deps.workspaceRegistry.getManagedByWorkspaceCwd(runtime.workspaceCwd),
+    ).toBeUndefined();
+  });
+
+  it('canonicalizes a symlink cwd selector before removal', async () => {
+    const selectorRoot = await mkdtemp(join(REAL_DIR, 'qws-selector-'));
+    const selector = join(selectorRoot, 'workspace-alias');
+    await symlink(REAL_DIR, selector, 'dir');
+    const runtime = makeRuntime(REAL_DIR);
+    const { app, deps } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval: createRemovalController(),
+    });
+
+    try {
+      const res = await request(app).delete(
+        `/workspaces/${encodeURIComponent(selector)}`,
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body.workspaceCwd).toBe(runtime.workspaceCwd);
+      expect(
+        deps.workspaceRegistry.getManagedByWorkspaceCwd(runtime.workspaceCwd),
+      ).toBeUndefined();
+    } finally {
+      await rm(selectorRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('reserves the cwd against concurrent remove and add operations', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    let finishCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    const runtimeRemoval = createRemovalController();
+    vi.mocked(runtimeRemoval.disposeRuntime).mockReturnValue(cleanup);
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval,
+    });
+
+    const firstRemoval = request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+    const firstResult = firstRemoval.then((res) => res);
+    await vi.waitFor(() => {
+      expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
+        runtime,
+        'workspace_removed',
+      );
+    });
+
+    const duplicateRemoval = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+    expect(duplicateRemoval.status).toBe(409);
+    expect(duplicateRemoval.body.code).toBe('workspace_removal_in_progress');
+
+    const concurrentAdd = await request(app)
+      .post('/workspaces')
+      .send({ cwd: runtime.workspaceCwd });
+    expect(concurrentAdd.status).toBe(409);
+    expect(concurrentAdd.body.code).toBe('workspace_removal_in_progress');
+
+    finishCleanup();
+    expect((await firstResult).status).toBe(200);
+  });
+
+  it('rejects removal after workspace management is sealed', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    const { app, handle } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval: createRemovalController(),
+    });
+    await handle.sealAndWait();
+
+    const res = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('daemon_shutting_down');
+  });
+});
+
 describe('persistent workspace registrations', () => {
   it('returns 501 for registration management without a store', async () => {
     const { app } = createApp();
@@ -389,12 +777,17 @@ describe('persistent workspace registrations', () => {
   });
 
   it('lists desired registrations and whether they are active', async () => {
+    const alias = '/raw/symlink-alias';
+    const aliasId = workspaceRegistrationId(alias);
     const read = vi.fn().mockResolvedValue({
       schemaVersion: 1,
       primaryWorkspace: '/primary',
-      workspaces: [REAL_DIR, '/currently-unavailable'],
+      workspaces: [REAL_DIR, alias, '/currently-unavailable'],
     });
     const { app } = createApp({
+      workspaceRegistry: createMockRegistry([
+        makeRuntime(REAL_DIR, { registrationIds: [aliasId] }),
+      ]),
       workspaceRegistrationStore: {
         read,
       } as unknown as WorkspaceRegistrationStore,
@@ -411,6 +804,12 @@ describe('persistent workspace registrations', () => {
         persisted: true,
       }),
       expect.objectContaining({
+        id: aliasId,
+        cwd: alias,
+        active: true,
+        persisted: true,
+      }),
+      expect.objectContaining({
         cwd: '/currently-unavailable',
         active: false,
         persisted: true,
@@ -419,7 +818,8 @@ describe('persistent workspace registrations', () => {
   });
 
   it('forgets persistence without unloading an active runtime', async () => {
-    const active = makeRuntime(REAL_DIR);
+    const aliasId = workspaceRegistrationId('/raw/symlink-alias');
+    const active = makeRuntime(REAL_DIR, { registrationIds: [aliasId] });
     const removeById = vi.fn().mockResolvedValue(true);
     const { app } = createApp({
       workspaceRegistry: createMockRegistry([active]),
@@ -436,6 +836,16 @@ describe('persistent workspace registrations', () => {
     expect(res.status).toBe(200);
     expect(removeById).toHaveBeenCalledWith(registrationId);
     expect(res.body).toEqual({
+      removed: true,
+      active: true,
+      restartRequired: true,
+    });
+
+    const aliasResult = await request(app).delete(
+      `/workspace-registrations/${aliasId}`,
+    );
+    expect(aliasResult.status).toBe(200);
+    expect(aliasResult.body).toMatchObject({
       removed: true,
       active: true,
       restartRequired: true,

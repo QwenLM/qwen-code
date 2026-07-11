@@ -176,7 +176,11 @@ import {
   registerWorkspaceLifecycleRoutes,
   registerWorkspaceQualifiedLifecycleRoutes,
 } from './routes/workspace-lifecycle.js';
-import { registerWorkspaceManagementRoutes } from './routes/workspace-management.js';
+import {
+  registerWorkspaceManagementRoutes,
+  type WorkspaceManagementHandle,
+  type WorkspaceRuntimeRemovalController,
+} from './routes/workspace-management.js';
 import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   registerWorkspaceGitRoutes,
@@ -452,6 +456,7 @@ export interface ServeAppDeps {
   workspaceRegistry?: WorkspaceRegistry;
   createWorkspaceRuntime?: (cwd: string) => Promise<WorkspaceRuntime>;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
+  workspaceRuntimeRemoval?: WorkspaceRuntimeRemovalController;
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
@@ -682,6 +687,8 @@ export function createServeApp(
       multiWorkspaceSessionsEnabled: () => workspaceRegistry.list().length > 1,
       persistentWorkspaceRegistrationAvailable:
         deps.workspaceRegistrationStore !== undefined,
+      workspaceRuntimeRemovalAvailable:
+        deps.workspaceRuntimeRemoval !== undefined,
       ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
     });
   const statusProvider =
@@ -1025,7 +1032,10 @@ export function createServeApp(
   const buildWorkspaceCtx = createBuildWorkspaceCtx(primaryBoundWorkspace);
 
   const acpHandleRef: { current?: AcpHttpHandle } = {};
-  const workspaceRememberLane = new WorkspaceRememberTaskLane(primaryBridge);
+  const workspaceRememberLane = new WorkspaceRememberTaskLane(
+    primaryBridge,
+    primaryBoundWorkspace,
+  );
 
   // Plan C CDP tunnel (issue #5626): process-scoped registry pairing the
   // extension `/acp` connection with the `/cdp` puppeteer endpoint. Inert until
@@ -1195,13 +1205,23 @@ export function createServeApp(
   });
 
   // Dynamic workspace registration.
-  registerWorkspaceManagementRoutes(app, {
+  const workspaceManagementHandle = registerWorkspaceManagementRoutes(app, {
     workspaceRegistry,
     mutate,
     safeBody,
     createWorkspaceRuntime: deps.createWorkspaceRuntime,
     workspaceRegistrationStore: deps.workspaceRegistrationStore,
+    getAcpHandle: () => acpHandleRef.current,
+    runtimeRemoval: deps.workspaceRuntimeRemoval,
   });
+  (
+    app.locals as { workspaceManagementHandle?: WorkspaceManagementHandle }
+  ).workspaceManagementHandle = workspaceManagementHandle;
+  (
+    app.locals as {
+      workspaceRuntimeRemoval?: WorkspaceRuntimeRemovalController;
+    }
+  ).workspaceRuntimeRemoval = deps.workspaceRuntimeRemoval;
 
   const broadcastSettingsChanged = (
     key: string,

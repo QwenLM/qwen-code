@@ -531,6 +531,15 @@ export class SessionBusyError extends Error {
   }
 }
 
+export class WorkspaceDrainingError extends Error {
+  readonly workspaceCwd: string;
+  constructor(workspaceCwd: string) {
+    super(`Workspace ${JSON.stringify(workspaceCwd)} is being removed`);
+    this.name = 'WorkspaceDrainingError';
+    this.workspaceCwd = workspaceCwd;
+  }
+}
+
 export class InvalidRewindTargetError extends Error {
   readonly sessionId: string;
   constructor(sessionId: string, message?: string) {

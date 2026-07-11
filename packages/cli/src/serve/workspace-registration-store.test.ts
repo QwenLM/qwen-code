@@ -88,6 +88,26 @@ describe('WorkspaceRegistrationStore', () => {
     },
   );
 
+  it('removes multiple raw and canonical registration identities atomically', async () => {
+    const home = await tempHome();
+    const store = new WorkspaceRegistrationStore('/work/primary', home);
+    await store.add('/work/raw-alias-a');
+    await store.add('/work/raw-alias-b');
+    await store.add('/work/other');
+
+    await expect(
+      store.removeByIds([
+        workspaceRegistrationId('/work/raw-alias-a'),
+        workspaceRegistrationId('/work/raw-alias-b'),
+        'missing',
+      ]),
+    ).resolves.toBe(2);
+    await expect(store.read()).resolves.toMatchObject({
+      workspaces: ['/work/other'],
+    });
+    await expect(store.removeByIds([])).resolves.toBe(0);
+  });
+
   it('rejects invalid primary and primary-as-secondary inputs', async () => {
     const home = await tempHome();
     expect(() => new WorkspaceRegistrationStore('relative', home)).toThrow(

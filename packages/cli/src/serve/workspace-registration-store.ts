@@ -340,14 +340,24 @@ export class WorkspaceRegistrationStore {
   }
 
   async removeById(id: string): Promise<boolean> {
-    return this.update((snapshot) => {
-      const index = snapshot.workspaces.findIndex(
-        (workspace) => workspaceRegistrationId(workspace) === id,
-      );
-      if (index < 0) return false;
-      snapshot.workspaces.splice(index, 1);
+    return (await this.removeByIds([id])) > 0;
+  }
+
+  async removeByIds(ids: readonly string[]): Promise<number> {
+    const requested = new Set(ids);
+    if (requested.size === 0) return 0;
+    let removed = 0;
+    await this.update((snapshot) => {
+      const retained = snapshot.workspaces.filter((workspace) => {
+        if (!requested.has(workspaceRegistrationId(workspace))) return true;
+        removed++;
+        return false;
+      });
+      if (removed === 0) return false;
+      snapshot.workspaces.splice(0, snapshot.workspaces.length, ...retained);
       return true;
     });
+    return removed;
   }
 
   private async update(

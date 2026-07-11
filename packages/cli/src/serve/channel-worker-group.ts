@@ -64,6 +64,11 @@ export interface ChannelWorkerGroup {
   snapshots(): ChannelWorkerGroupSnapshot[];
   /** Primary workspace snapshot, backing the legacy single-worker fields. */
   primarySnapshot(): ChannelWorkerSnapshot;
+  beginWorkspaceDrain(workspaceCwd: string): void;
+  cancelWorkspaceDrain(workspaceCwd: string): void;
+  workspaceActivity(workspaceCwd: string): number;
+  removeWorkspace(workspaceCwd: string): Promise<void>;
+  restoreWorkspace(workspaceCwd: string): Promise<void>;
   enqueueWebhookTask: ChannelWorkerSupervisor['enqueueWebhookTask'];
 }
 
@@ -102,6 +107,7 @@ interface ChannelWorkerGroupEntry {
   selection: ChannelWorkspaceGroup['selection'];
   generation: number;
   supervisor: ChannelWorkerSupervisor;
+  stopPromise?: Promise<void>;
 }
 
 function selectionsEqual(
@@ -125,10 +131,16 @@ export function createChannelWorkerGroup(
 ): ChannelWorkerGroup {
   let generation = 0;
   let entries = new Map<string, ChannelWorkerGroupEntry>();
+  const groupsByWorkspace = new Map(
+    opts.groups.map((group) => [group.workspaceCwd, group]),
+  );
   const pendingEntries = new Set<ChannelWorkerGroupEntry>();
   const pendingGenerations = new Map<string, number>();
+  const drainingWorkspaces = new Set<string>();
+  const removalPromises = new Map<string, Promise<void>>();
   let reconciling: Promise<ChannelWorkerGroupReconcileResult> | undefined;
   let stopping = false;
+  let groupStarted = false;
 
   const withMeta = (
     entry: ChannelWorkerGroupEntry,
@@ -260,12 +272,22 @@ export function createChannelWorkerGroup(
       withMeta(entry, entry.supervisor.snapshot()),
     );
 
-  const stopEntry = async (entry: ChannelWorkerGroupEntry): Promise<void> => {
-    try {
-      await entry.supervisor.stop();
-    } finally {
-      opts.onStateChange?.();
+  const stopEntry = (entry: ChannelWorkerGroupEntry): Promise<void> => {
+    if (!entry.stopPromise) {
+      const stopPromise = entry.supervisor
+        .stop()
+        .finally(() => opts.onStateChange?.());
+      entry.stopPromise = stopPromise;
+      void stopPromise.then(
+        () => {
+          if (entry.stopPromise === stopPromise) entry.stopPromise = undefined;
+        },
+        () => {
+          if (entry.stopPromise === stopPromise) entry.stopPromise = undefined;
+        },
+      );
     }
+    return entry.stopPromise;
   };
 
   const stopEntriesBestEffort = async (
@@ -338,6 +360,16 @@ export function createChannelWorkerGroup(
     return undefined;
   };
 
+  const detachEntry = (entry: ChannelWorkerGroupEntry): void => {
+    if (entries.get(entry.workspaceCwd)?.generation === entry.generation) {
+      entries.delete(entry.workspaceCwd);
+    }
+    pendingEntries.delete(entry);
+    if (pendingGenerations.get(entry.workspaceCwd) === entry.generation) {
+      pendingGenerations.delete(entry.workspaceCwd);
+    }
+  };
+
   const group: ChannelWorkerGroup = {
     async start() {
       // Start sequentially so a failing initial launch can roll back every
@@ -346,6 +378,7 @@ export function createChannelWorkerGroup(
       const started: ChannelWorkerGroupEntry[] = [];
       try {
         for (const entry of entries.values()) {
+          if (drainingWorkspaces.has(entry.workspaceCwd)) continue;
           if (stopping) {
             throw new Error('Channel worker group stopped during startup.');
           }
@@ -355,13 +388,16 @@ export function createChannelWorkerGroup(
             throw new Error('Channel worker group stopped during startup.');
           }
         }
+        groupStarted = true;
       } catch (error) {
+        groupStarted = false;
         await stopEntriesBestEffort(started);
         throw error;
       }
     },
     async stop() {
       stopping = true;
+      groupStarted = false;
       await reconciling?.catch(() => {});
       await stopAllEntries([...entries.values()]);
     },
@@ -377,7 +413,11 @@ export function createChannelWorkerGroup(
       if (reconciling) return reconciling;
       reconciling = (async () => {
         const targets = new Map(
-          targetGroups.map((target) => [target.workspaceCwd, target]),
+          targetGroups
+            .filter(
+              (target) => !drainingWorkspaces.has(target.workspaceCwd),
+            )
+            .map((target) => [target.workspaceCwd, target]),
         );
         const unchanged = new Map<string, ChannelWorkerGroupEntry>();
         const oldAffected: ChannelWorkerGroupEntry[] = [];
@@ -479,6 +519,7 @@ export function createChannelWorkerGroup(
     },
     killAllSync() {
       stopping = true;
+      groupStarted = false;
       for (const entry of entries.values()) {
         entry.supervisor.killAllSync();
       }
@@ -491,9 +532,97 @@ export function createChannelWorkerGroup(
       const primary = [...entries.values()].find((entry) => entry.primary);
       return primary?.supervisor.snapshot() ?? { ...DISABLED_SNAPSHOT };
     },
+    beginWorkspaceDrain(workspaceCwd) {
+      drainingWorkspaces.add(workspaceCwd);
+    },
+    cancelWorkspaceDrain(workspaceCwd) {
+      drainingWorkspaces.delete(workspaceCwd);
+    },
+    workspaceActivity(workspaceCwd) {
+      if (pendingGenerations.has(workspaceCwd)) return 1;
+      const entry = entries.get(workspaceCwd);
+      if (!entry) return 0;
+      const state = entry.supervisor.snapshot().state;
+      return state === 'starting' || state === 'running' ? 1 : 0;
+    },
+    removeWorkspace(workspaceCwd) {
+      const existing = removalPromises.get(workspaceCwd);
+      if (existing) return existing;
+      drainingWorkspaces.add(workspaceCwd);
+      const removal = (async () => {
+        try {
+          await reconciling?.catch(() => {});
+          const entry = entries.get(workspaceCwd);
+          if (!entry) return;
+          let killError: unknown;
+          try {
+            await stopEntry(entry);
+          } catch {
+            try {
+              entry.supervisor.killAllSync();
+            } catch (err) {
+              killError = err;
+            }
+          } finally {
+            detachEntry(entry);
+          }
+          if (killError) throw killError;
+        } finally {
+          drainingWorkspaces.delete(workspaceCwd);
+        }
+      })();
+      removalPromises.set(workspaceCwd, removal);
+      void removal.then(
+        () => {
+          if (removalPromises.get(workspaceCwd) === removal) {
+            removalPromises.delete(workspaceCwd);
+          }
+        },
+        () => {
+          if (removalPromises.get(workspaceCwd) === removal) {
+            removalPromises.delete(workspaceCwd);
+          }
+        },
+      );
+      return removal;
+    },
+    async restoreWorkspace(workspaceCwd) {
+      if (entries.has(workspaceCwd)) return;
+      const target = groupsByWorkspace.get(workspaceCwd);
+      if (!target) return;
+      const entry = createEntry(target);
+      entries.set(workspaceCwd, entry);
+      if (!groupStarted || stopping) {
+        detachEntry(entry);
+        return;
+      }
+      try {
+        await entry.supervisor.start();
+        if (stopping || !groupStarted) {
+          await stopEntry(entry).catch(() => {
+            try {
+              entry.supervisor.killAllSync();
+            } catch {
+              // Best-effort cleanup after the group stopped concurrently.
+            }
+          });
+          detachEntry(entry);
+        }
+      } catch (err) {
+        await stopEntry(entry).catch(() => {
+          try {
+            entry.supervisor.killAllSync();
+          } catch {
+            // Preserve the start failure that caused the rollback.
+          }
+        });
+        detachEntry(entry);
+        throw err;
+      }
+    },
     async enqueueWebhookTask(task) {
       const entry = routeEntry(task.channelName);
-      if (!entry) {
+      if (!entry || drainingWorkspaces.has(entry.workspaceCwd)) {
         throw new ChannelWebhookEnqueueError(
           'channel_worker_unavailable',
           `No channel worker owns channel "${task.channelName}".`,

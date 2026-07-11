@@ -432,11 +432,14 @@ interface RuntimeAcpMount {
   /** Whether this mount is the daemon's primary runtime. CDP-tunnel claims and
    *  chrome-devtools MCP wiring are primary-only. */
   readonly primary: boolean;
+  readonly workspaceId: string | null;
   readonly workspaceCwd: string;
   readonly routeLabel: string;
   readonly rateLimitScope: string;
   readonly registry: ConnectionRegistry;
   readonly dispatcher: AcpDispatcher;
+  readonly workspaceRememberLane: WorkspaceRememberTaskLane;
+  draining: boolean;
   readonly ensureChromeDevToolsMcpRegistered: (
     localPort: number | undefined,
     originatorClientId: string,
@@ -492,6 +495,14 @@ export interface AcpHttpHandle {
    * connections, not just the primary's.
    */
   getSnapshot(): AcpHttpSnapshot;
+  beginWorkspaceDrain(workspaceId: string): void;
+  cancelWorkspaceDrain(workspaceId: string): void;
+  getWorkspaceActivity(workspaceId: string): {
+    acpConnections: number;
+    memoryTasks: number;
+  };
+  commitWorkspaceRemoval(workspaceId: string): void;
+  disposeWorkspace(workspaceId: string): void;
   /** Attach HTTP server post-listen to enable WebSocket upgrade. */
   attachServer(server: import('node:http').Server): void;
 }
@@ -526,6 +537,19 @@ export function mountAcpHttp(
     res.status(503).json({
       error: 'ACP HTTP transport has been disposed',
       code: 'server_disposed',
+    });
+    return true;
+  };
+  const rejectIfUnavailable = (
+    mount: RuntimeAcpMount,
+    res: Response,
+  ): boolean => {
+    if (rejectIfDisposed(res)) return true;
+    if (!mount.draining) return false;
+    res.status(503).json({
+      error: 'Workspace runtime is being removed',
+      code: 'workspace_draining',
+      workspaceCwd: mount.workspaceCwd,
     });
     return true;
   };
@@ -698,11 +722,14 @@ export function mountAcpHttp(
   // by URL path and delegate to these same helpers.
   const primaryMount: RuntimeAcpMount = {
     primary: true,
+    workspaceId: opts.workspaceRegistry?.primary.workspaceId ?? null,
     workspaceCwd: opts.boundWorkspace,
     routeLabel: logSafe(path),
     rateLimitScope: opts.workspaceRegistry?.primary.workspaceId ?? 'primary',
     registry,
     dispatcher,
+    workspaceRememberLane: opts.workspaceRememberLane,
+    draining: false,
     ensureChromeDevToolsMcpRegistered,
     removeChromeDevToolsMcpIfUnused,
     clientMcpProviderFactory: opts.clientMcpProviderFactory,
@@ -715,7 +742,7 @@ export function mountAcpHttp(
     req: Request,
     res: Response,
   ): void => {
-    if (rejectIfDisposed(res)) return;
+    if (rejectIfUnavailable(mount, res)) return;
     const connectionId = headerOf(req, ACP_CONNECTION_HEADER);
     if (!connectionId) {
       res.status(400).json({ error: 'Missing Acp-Connection-Id' });
@@ -742,7 +769,7 @@ export function mountAcpHttp(
     req: Request,
     res: Response,
   ): Promise<void> => {
-    if (rejectIfDisposed(res)) return;
+    if (rejectIfUnavailable(mount, res)) return;
     // RFD: Content-Type MUST be application/json; otherwise 415.
     const ct = req.headers['content-type'];
     if (!ct || !ct.startsWith('application/json')) {
@@ -893,7 +920,7 @@ export function mountAcpHttp(
     req: Request,
     res: Response,
   ): void => {
-    if (rejectIfDisposed(res)) return;
+    if (rejectIfUnavailable(mount, res)) return;
     // RFD: Accept MUST include text/event-stream; otherwise 406.
     const accept = req.headers['accept'] ?? '';
     if (!accept.includes('text/event-stream')) {
@@ -1103,11 +1130,15 @@ export function mountAcpHttp(
       },
       opts.maxConnections,
     );
+    const workspaceRememberLane = new WorkspaceRememberTaskLane(
+      rt.bridge,
+      rt.workspaceCwd,
+    );
     const secondaryDispatcher = new AcpDispatcher(
       rt.bridge,
       rt.workspaceCwd,
       rt.workspaceService,
-      new WorkspaceRememberTaskLane(rt.bridge),
+      workspaceRememberLane,
       rt.routeFileSystemFactory,
       // Phase 4: secondary mounts share the daemon-global device-flow registry
       // (single instance per daemon; OAuth credentials are global state). The
@@ -1122,11 +1153,14 @@ export function mountAcpHttp(
     secondaryDispatcherRef.current = secondaryDispatcher;
     return {
       primary: false,
+      workspaceId: rt.workspaceId,
       workspaceCwd: rt.workspaceCwd,
       routeLabel: `/workspaces/${logSafe(rt.workspaceId)}/acp`,
       rateLimitScope: rt.workspaceId,
       registry: secondaryRegistry,
       dispatcher: secondaryDispatcher,
+      workspaceRememberLane,
+      draining: false,
       ensureChromeDevToolsMcpRegistered: () => {},
       removeChromeDevToolsMcpIfUnused: () => {},
       // Reverse client-MCP over WS is per-runtime: a connection on this
@@ -1562,6 +1596,23 @@ export function mountAcpHttp(
             return;
           }
 
+          if (activeMount.draining) {
+            ws.send(
+              JSON.stringify(
+                rpcError(
+                  isRequest(parsed) ? parsed.id : null,
+                  RPC.INTERNAL_ERROR,
+                  'Workspace runtime is being removed',
+                  {
+                    code: 'workspace_draining',
+                    workspaceCwd: activeMount.workspaceCwd,
+                  },
+                ),
+              ),
+            );
+            return;
+          }
+
           // ── Client-hosted MCP frames (issue #5626) ───────────────────
           // These are NOT JSON-RPC envelopes — they carry a `type`
           // discriminator (`mcp_register` / `mcp_message` / `mcp_unregister`)
@@ -1980,9 +2031,11 @@ export function mountAcpHttp(
         upgradeServer = undefined;
       }
       registry.dispose();
+      opts.workspaceRememberLane.dispose();
       // Phase 4: dispose every non-primary runtime's ACP connection registry too,
       // so their sweep timers + live connections are torn down on shutdown.
       for (const mount of secondaryMounts.values()) {
+        mount.workspaceRememberLane.dispose();
         mount.registry.dispose();
       }
       if (wss) {
@@ -1994,6 +2047,35 @@ export function mountAcpHttp(
       }
     },
     registry,
+    beginWorkspaceDrain: (workspaceId) => {
+      const mount = secondaryMounts.get(workspaceId);
+      if (!mount) return;
+      mount.draining = true;
+      mount.workspaceRememberLane.beginDrain();
+    },
+    cancelWorkspaceDrain: (workspaceId) => {
+      const mount = secondaryMounts.get(workspaceId);
+      if (!mount) return;
+      mount.draining = false;
+      mount.workspaceRememberLane.cancelDrain();
+    },
+    getWorkspaceActivity: (workspaceId) => {
+      const mount = secondaryMounts.get(workspaceId);
+      return {
+        acpConnections: mount?.registry.size ?? 0,
+        memoryTasks: mount?.workspaceRememberLane.pendingCount() ?? 0,
+      };
+    },
+    commitWorkspaceRemoval: (workspaceId) => {
+      secondaryMounts.get(workspaceId)?.workspaceRememberLane.dispose();
+    },
+    disposeWorkspace: (workspaceId) => {
+      const mount = secondaryMounts.get(workspaceId);
+      if (!mount) return;
+      mount.workspaceRememberLane.dispose();
+      mount.registry.dispose();
+      secondaryMounts.delete(workspaceId);
+    },
     getSnapshot: () => {
       const perMount = [
         {
