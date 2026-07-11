@@ -63,6 +63,7 @@ import { CommitAttributionService } from '../services/commitAttribution.js';
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
+import { isManagedMemoryPath } from '../memory/paths.js';
 import { DEFAULT_AUTO_SKILL_MAX_TURNS } from '../memory/skillReviewAgentPlanner.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -1760,11 +1761,17 @@ export class GeminiClient {
     opts?: MicrocompactOptions,
   ): Promise<boolean> {
     try {
+      const projectRoot = this.config.getProjectRoot();
+      const targetDir = this.config.getTargetDir?.() ?? projectRoot;
       const mcResult = microcompactHistory(
         this.getHistoryShallow(),
         lastCompletionTimestamp,
         this.config.getClearContextOnIdle(),
-        opts,
+        {
+          ...opts,
+          preserveReadFileResult: (filePath) =>
+            isManagedMemoryPath(filePath, projectRoot, targetDir),
+        },
       );
       if (!mcResult.meta) {
         return false;
