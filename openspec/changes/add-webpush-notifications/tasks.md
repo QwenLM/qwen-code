@@ -136,15 +136,8 @@ State machine and alignment pattern: see
 - [ ] **2.4 Quiet hours + rate limit + coalescing**
   - **Status:** not-started
   - **Effort:** ~1 day
-  - **Prompt:**
-    > Implement per-subscription quiet hours with IANA tz, midnight
-    > wrap. Implement `maxPerHour` rolling-window rate limiter
-    > sharing the quota-WAL pattern from `add-policy-engine`.
-    > Implement 5-second same-kind coalescing keyed by
-    > `(subscriptionId, kind, sessionId)`. Implement quiet-hours
-    > digest sent at end of window. Acceptance: all 3 scenarios
-    > under `Requirement: Per-subscription preferences and quiet
-    > hours` and the burst coalescing scenario.
+  - **Prompt:** > Implement per-subscription quiet hours with IANA tz, midnight > wrap. Implement `maxPerHour` rolling-window rate limiter > sharing the quota-WAL pattern from `add-policy-engine`. > Implement 5-second same-kind coalescing keyed by > `(subscriptionId, kind, sessionId)`. Implement quiet-hours > digest sent at end of window. Acceptance: all 3 scenarios > under `Requirement: Per-subscription preferences and quiet
+hours` and the burst coalescing scenario.
 
 ## Phase 3 — Service worker
 
@@ -225,11 +218,11 @@ State machine and alignment pattern: see
 
 ## Effort summary
 
-| Phase | Description               | Estimate (days) |
-|-------|---------------------------|------------------|
-| 0     | Foundation                | 0.5              |
-| 1     | VAPID + subscriptions     | 2                |
-| 2     | Send pipeline             | 2–3              |
-| 3     | Service worker            | 1.5              |
-| 4     | Polish                    | 1                |
-| **Total** |                       | **7–8**          |
+| Phase     | Description           | Estimate (days) |
+| --------- | --------------------- | --------------- |
+| 0         | Foundation            | 0.5             |
+| 1         | VAPID + subscriptions | 2               |
+| 2         | Send pipeline         | 2–3             |
+| 3         | Service worker        | 1.5             |
+| 4         | Polish                | 1               |
+| **Total** |                       | **7–8**         |

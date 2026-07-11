@@ -27,6 +27,7 @@ otherwise have to be designed.
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Fast retrospective lookup across all sessions in a workspace.
 - Ranked results with snippets.
 - Scope-respecting: tokens see results only for sessions they have
@@ -41,6 +42,7 @@ otherwise have to be designed.
   multi-workspace client.
 
 **Non-Goals:**
+
 - Cross-daemon coordination.
 - Semantic / vector embeddings.
 - Regex queries.
@@ -49,7 +51,7 @@ otherwise have to be designed.
 - Live as-you-type latency goals. ~300 ms post-debounce is fine.
 - Edits to the underlying JSONL through the search interface (the
   index is read-only from the operator's perspective).
-- A search-driven UI for *navigating* a single session (existing
+- A search-driven UI for _navigating_ a single session (existing
   per-session scroll already does that).
 
 ## Architecture
@@ -172,11 +174,11 @@ canonicalisation step:
 - `user` text: the raw user message.
 - `assistant` text: the raw text (without tool call envelope).
 - `tool` (call): `<tool name> <args canonicalized to flat space-
-  separated string with JSON path hints, e.g.,
-  "edit_file path=src/auth/login.ts line_start=45 line_end=67">`.
+separated string with JSON path hints, e.g.,
+"edit_file path=src/auth/login.ts line_start=45 line_end=67">`.
   Args that are large blobs are truncated at 4 KiB.
 - `tool_result`: a short outcome description, e.g., `ok`, `error
-  <stderr first 4 KiB>`. Big files indexed are truncated.
+<stderr first 4 KiB>`. Big files indexed are truncated.
 
 The transformation is implemented in
 `packages/cli/src/serve/remoteControl/search/canonicalize.ts` and
@@ -187,14 +189,14 @@ same JSONL produces byte-identical `text` values.
 
 The `visibleSessionIds` set for a caller is computed once per query:
 
-| Scope     | Visible sessions                                                 |
-|-----------|------------------------------------------------------------------|
-| `owner`   | All sessions in the workspace                                    |
-| `write`   | Sessions where this token has an entry in `token_session_history`|
-| `approve` | Same as `write`                                                  |
-| `read`    | Same as `write`                                                  |
-| `share`   | The single `session_lock_id` only                                |
-| `bridge`  | Sessions the bridge has subscribed to (history table)            |
+| Scope     | Visible sessions                                                  |
+| --------- | ----------------------------------------------------------------- |
+| `owner`   | All sessions in the workspace                                     |
+| `write`   | Sessions where this token has an entry in `token_session_history` |
+| `approve` | Same as `write`                                                   |
+| `read`    | Same as `write`                                                   |
+| `share`   | The single `session_lock_id` only                                 |
+| `bridge`  | Sessions the bridge has subscribed to (history table)             |
 
 `token_session_history` is updated on first attach to any
 session's events. The first SSE subscribe inserts a row; this is
@@ -290,6 +292,7 @@ store; no new dependency.
 vector search). Acceptable; we noted those in non-goals.
 
 ### D2 — Ingest from session manager in-process, not from
+
 fsnotify only
 
 **Choice**: The primary ingestion path is a direct subscription
@@ -309,6 +312,7 @@ edits or external writers.
 `UNIQUE (session_id, event_id)` constraint.
 
 ### D3 — Scope-based filtering on `token_session_history`, not
+
 on per-session ACL
 
 **Choice**: A token can search sessions it has attached to.
@@ -397,41 +401,41 @@ Mitigation: query length cap, a per-query timeout (default
 
 ## Persistence
 
-| Artifact                                          | Format       | Notes                                                |
-|---------------------------------------------------|--------------|------------------------------------------------------|
-| `~/.qwen/rc/search/<sanitized-cwd>.db`            | SQLite+FTS5  | One per workspace. Single file.                      |
-| `~/.qwen/rc/config.toml` `[search]` section       | TOML         | Eviction knobs, query timeout, debounce window.      |
-| Reindex job state                                 | In-memory    | Restart resets jobs (callers retry).                 |
+| Artifact                                    | Format      | Notes                                           |
+| ------------------------------------------- | ----------- | ----------------------------------------------- |
+| `~/.qwen/rc/search/<sanitized-cwd>.db`      | SQLite+FTS5 | One per workspace. Single file.                 |
+| `~/.qwen/rc/config.toml` `[search]` section | TOML        | Eviction knobs, query timeout, debounce window. |
+| Reindex job state                           | In-memory   | Restart resets jobs (callers retry).            |
 
 ## Threat model
 
-| Attacker                              | Capability                              | Mitigation                                                                                |
-|---------------------------------------|------------------------------------------|-------------------------------------------------------------------------------------------|
-| Read-scope token enumerates sessions  | Discover sessions by snippet leak        | Hard filter on `token_session_history`; sessions never attached → never searchable.       |
-| Share-token searches across workspace | Bypass session lock                      | `visibleSessionIds = [session_lock_id]`; SQL hard filter.                                 |
-| Malicious query DoS                   | Pathological regex-like patterns         | FTS5 syntax only; query length cap; per-query timeout 2 s.                                |
-| Reindex run while serving             | Lock contention                          | SQLite WAL mode; reads don't block reindex's writes; reindex batches in transactions.      |
-| Index leak via backup                 | `*.db` file exfil reveals all transcripts | Same threat surface as JSONL itself; index doesn't add a new surface.                     |
-| Disk fill via large session corpus    | DOS                                       | `maxIndexBytes` cap + automatic eviction.                                                 |
-| Out-of-band edits to JSONL            | Cached index lies                        | fsnotify watcher re-indexes affected lines; reindex CLI for forceful refresh.             |
-| Snippet leaks sensitive content       | Result snippet shows secret              | Out of scope to redact; operator's responsibility. Document this.                         |
+| Attacker                              | Capability                                | Mitigation                                                                            |
+| ------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------- |
+| Read-scope token enumerates sessions  | Discover sessions by snippet leak         | Hard filter on `token_session_history`; sessions never attached → never searchable.   |
+| Share-token searches across workspace | Bypass session lock                       | `visibleSessionIds = [session_lock_id]`; SQL hard filter.                             |
+| Malicious query DoS                   | Pathological regex-like patterns          | FTS5 syntax only; query length cap; per-query timeout 2 s.                            |
+| Reindex run while serving             | Lock contention                           | SQLite WAL mode; reads don't block reindex's writes; reindex batches in transactions. |
+| Index leak via backup                 | `*.db` file exfil reveals all transcripts | Same threat surface as JSONL itself; index doesn't add a new surface.                 |
+| Disk fill via large session corpus    | DOS                                       | `maxIndexBytes` cap + automatic eviction.                                             |
+| Out-of-band edits to JSONL            | Cached index lies                         | fsnotify watcher re-indexes affected lines; reindex CLI for forceful refresh.         |
+| Snippet leaks sensitive content       | Result snippet shows secret               | Out of scope to redact; operator's responsibility. Document this.                     |
 
 ## Risks / Trade-offs
 
-| Risk                                | Likelihood | Impact | Mitigation                                                                            |
-|-------------------------------------|------------|--------|---------------------------------------------------------------------------------------|
-| Ingestion lag during heavy load     | M          | L      | Batching with 250 ms / 100-event window keeps throughput high; debug counter exposed via `/rc/search/stats`. |
-| FTS5 query syntax surprise          | M          | L      | Documented; the modal shows syntax help.                                              |
-| Index corruption                    | L          | M      | Reindex is the recovery path; SQLite WAL mode reduces corruption risk.                |
-| Sensitive content surfaced in snippet | M        | M      | Documented operator responsibility; no automatic redaction.                           |
-| Token history table grows unbounded | L          | L      | Pruned on token revoke + 30-day GC of orphaned rows.                                  |
-| fsnotify on macOS / WSL flakiness   | M          | L      | Direct in-process ingest is primary; fsnotify is fallback only.                       |
+| Risk                                  | Likelihood | Impact | Mitigation                                                                                                   |
+| ------------------------------------- | ---------- | ------ | ------------------------------------------------------------------------------------------------------------ |
+| Ingestion lag during heavy load       | M          | L      | Batching with 250 ms / 100-event window keeps throughput high; debug counter exposed via `/rc/search/stats`. |
+| FTS5 query syntax surprise            | M          | L      | Documented; the modal shows syntax help.                                                                     |
+| Index corruption                      | L          | M      | Reindex is the recovery path; SQLite WAL mode reduces corruption risk.                                       |
+| Sensitive content surfaced in snippet | M          | M      | Documented operator responsibility; no automatic redaction.                                                  |
+| Token history table grows unbounded   | L          | L      | Pruned on token revoke + 30-day GC of orphaned rows.                                                         |
+| fsnotify on macOS / WSL flakiness     | M          | L      | Direct in-process ingest is primary; fsnotify is fallback only.                                              |
 
 ## Open questions
 
 1. **Should we expose `kind: tool_args` separately from `kind:
-   tool`?** Many searches want to find tool calls by *name* but
-   not by *args*. v1: combine into `tool`; revisit.
+tool`?** Many searches want to find tool calls by _name_ but
+   not by _args_. v1: combine into `tool`; revisit.
 
 2. **Should bridge-scope tokens (from `add-bridge-protocol`) be
    able to search?** They have `write+approve+read`; by the table
@@ -445,7 +449,7 @@ Mitigation: query length cap, a per-query timeout (default
 
 4. **Stemming and language model.** FTS5's default `unicode61`
    tokeniser doesn't stem. For English-heavy users this is fine
-   ("oauth*" prefix covers plurals). Internationalisation is
+   ("oauth\*" prefix covers plurals). Internationalisation is
    open; revisit if real users hit pain.
 
 5. **Should `since` accept eventId as well as ISO timestamp?**

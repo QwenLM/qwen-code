@@ -227,7 +227,7 @@ subsequent presses SHALL retry with the same setting.
 - **GIVEN** `settings.voice.lang` is `xx-YY`
 - **WHEN** the user holds the MicButton
 - **THEN** the recognition session emits a `language-not-
-  supported` error
+supported` error
 - **AND** a toast informs the user
 - **AND** no transcript is inserted
 

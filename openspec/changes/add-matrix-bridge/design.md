@@ -21,7 +21,7 @@ decoupled SSE-vs-chat back-pressure. The deviations are:
 
 - **Reactions, not buttons, for voting.** Matrix has no inline
   button surface. `m.reaction` events with `key: "👍"` or `key:
-  "👎"` on a permission-request message are the closest equivalent.
+"👎"` on a permission-request message are the closest equivalent.
 - **DM-bootstrapped attach.** Operator invites the bot to a room
   and posts `!qwen attach <invite>` — there's no slash-command
   registry to register, so we use a text command prefix.
@@ -31,6 +31,7 @@ decoupled SSE-vs-chat back-pressure. The deviations are:
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Single-container deployment against any standards-compliant
   Matrix homeserver (Synapse, Conduit, Dendrite).
 - User-mode bot login (just an access token); no application
@@ -42,6 +43,7 @@ decoupled SSE-vs-chat back-pressure. The deviations are:
   on the operator's homeserver or federated in).
 
 **Non-Goals:**
+
 - Application service (AS) registration. Future.
 - Cross-homeserver identity reconciliation.
 - Voice / video / Element Call.
@@ -89,17 +91,17 @@ Loops:
 
 ## Configuration
 
-| Var                       | Required | Notes                                         |
-|---------------------------|----------|-----------------------------------------------|
-| `MATRIX_HOMESERVER_URL`   | yes      | e.g. `https://home.example.com`.              |
-| `MATRIX_USER_ID`          | yes      | e.g. `@qwenbot:home.example.com`.             |
-| `MATRIX_ACCESS_TOKEN`     | yes      | From a one-time `/login` (manual).            |
-| `QWEN_DAEMON_URL`         | yes      |                                               |
-| `QWEN_BRIDGE_TOKEN`       | yes      | `qwk_*` bridge-scope token.                   |
-| `QWEN_BRIDGE_PAIRING_CODE`| no       | One-time bootstrap.                           |
-| `QWEN_BRIDGE_STATE_DIR`   | no       | Default `~/.qwen/rc/bridges/matrix`. Contains olm store. |
-| `MATRIX_COMMAND_PREFIX`   | no       | Default `!qwen`. Operator can override if it clashes. |
-| `BRIDGE_LOG_LEVEL`        | no       | `info` default.                               |
+| Var                        | Required | Notes                                                    |
+| -------------------------- | -------- | -------------------------------------------------------- |
+| `MATRIX_HOMESERVER_URL`    | yes      | e.g. `https://home.example.com`.                         |
+| `MATRIX_USER_ID`           | yes      | e.g. `@qwenbot:home.example.com`.                        |
+| `MATRIX_ACCESS_TOKEN`      | yes      | From a one-time `/login` (manual).                       |
+| `QWEN_DAEMON_URL`          | yes      |                                                          |
+| `QWEN_BRIDGE_TOKEN`        | yes      | `qwk_*` bridge-scope token.                              |
+| `QWEN_BRIDGE_PAIRING_CODE` | no       | One-time bootstrap.                                      |
+| `QWEN_BRIDGE_STATE_DIR`    | no       | Default `~/.qwen/rc/bridges/matrix`. Contains olm store. |
+| `MATRIX_COMMAND_PREFIX`    | no       | Default `!qwen`. Operator can override if it clashes.    |
+| `BRIDGE_LOG_LEVEL`         | no       | `info` default.                                          |
 
 ## Attach flow
 
@@ -107,7 +109,7 @@ Matrix has no slash-command registry; commands are plain text. The
 flow:
 
 1. Operator generates `inv_abc` via `qwen rc bridges invite --kind
-   matrix --session sess_xyz`.
+matrix --session sess_xyz`.
 2. Operator (or any room member) invites `@qwenbot:home.example.com`
    to the target room.
 3. Bot auto-accepts the invite (on `m.room.member` invite event,
@@ -143,10 +145,12 @@ Reactions are the affordance. Branch on
 `bridgeHints.recommendedSurface`:
 
 - **`inline`**: Send a message with body
+
   ```
   ⚠️ Tool call: <argsSummaryShort>
   React 👍 to approve, 👎 to deny.
   ```
+
   Record `(requestId → eventId)`.
 
 - **`deeplink`**: Send a message with body
@@ -225,16 +229,16 @@ trigger a vote.
 
 ## Threat model
 
-| Attacker                              | Capability                                    | Mitigation                                                                                       |
-|---------------------------------------|-----------------------------------------------|--------------------------------------------------------------------------------------------------|
-| Bot access-token leak                 | Impersonate the bot account across all its rooms | Operator revokes the access token via `/logout` on the homeserver AND revokes the bridge token. Coupled rotation. |
-| Bridge token leak                     | Mint daemon calls with arbitrary subActor      | Revoke bridge token; audit pinpoints.                                                            |
-| Homeserver compromise                 | See / forge all bot messages                   | Out of bridge's control; documented. Trust assumption: "your homeserver is trusted." Operators self-host for this reason. |
-| Federated homeserver compromise       | Forge messages in federated rooms              | Matrix federation trust model; same caveat as Matrix in general. The bridge's only defence: scope-limited bridge token. |
-| Olm store theft                       | Decrypt past room messages                     | $QWEN_BRIDGE_STATE_DIR permissioned 0700, files 0600. Docker volume isolation. Documented.       |
-| Non-moderator user binds session      | Hijack channel for their session               | `!qwen attach` requires power level ≥ 50.                                                        |
-| Spam reactions from many MXIDs        | Drain vote rate limit / inflate audit          | Per-sub-actor token bucket; ban flow.                                                            |
-| Long-downtime missed events           | Bot misses /sync events past server retention  | On reconnect, full /sync with empty `since` re-establishes state; bridge logs a "events possibly missed" warning. Daemon SSE remains the source of truth for the agent. |
+| Attacker                         | Capability                                       | Mitigation                                                                                                                                                              |
+| -------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bot access-token leak            | Impersonate the bot account across all its rooms | Operator revokes the access token via `/logout` on the homeserver AND revokes the bridge token. Coupled rotation.                                                       |
+| Bridge token leak                | Mint daemon calls with arbitrary subActor        | Revoke bridge token; audit pinpoints.                                                                                                                                   |
+| Homeserver compromise            | See / forge all bot messages                     | Out of bridge's control; documented. Trust assumption: "your homeserver is trusted." Operators self-host for this reason.                                               |
+| Federated homeserver compromise  | Forge messages in federated rooms                | Matrix federation trust model; same caveat as Matrix in general. The bridge's only defence: scope-limited bridge token.                                                 |
+| Olm store theft                  | Decrypt past room messages                       | $QWEN_BRIDGE_STATE_DIR permissioned 0700, files 0600. Docker volume isolation. Documented.                                                                              |
+| Non-moderator user binds session | Hijack channel for their session                 | `!qwen attach` requires power level ≥ 50.                                                                                                                               |
+| Spam reactions from many MXIDs   | Drain vote rate limit / inflate audit            | Per-sub-actor token bucket; ban flow.                                                                                                                                   |
+| Long-downtime missed events      | Bot misses /sync events past server retention    | On reconnect, full /sync with empty `since` re-establishes state; bridge logs a "events possibly missed" warning. Daemon SSE remains the source of truth for the agent. |
 
 ## Decisions
 
@@ -335,15 +339,15 @@ protect the volume. Documented as a top-level security note.
 
 ## Risks / Trade-offs
 
-| Risk                                                  | Likelihood | Impact | Mitigation                                                                                              |
-|-------------------------------------------------------|------------|--------|---------------------------------------------------------------------------------------------------------|
-| Encrypted room key-share fails after bridge restart   | M          | M      | Persistent olm store; documented backup pattern; debug log on `m.room.encrypted` decrypt failure.       |
-| Federation outage hides reaction events                | M          | L      | Sync resumes when federation restores; voting deadline extended on the daemon-side.                     |
-| Reaction spam from multiple MXIDs                      | M          | L      | First-responder-wins (daemon-level); per-sub-actor token bucket; ban flow.                              |
-| Long downtime exceeds server retention                 | L          | M      | On `/sync` empty-`since` full state load; emit `events_possibly_missed` log; chats may show edited-but-not-seen state. |
-| MXID with unusual chars breaks audit                   | L          | L      | The bridge-protocol regex allows the MXID character set; verified in tests.                             |
-| Bot kicked from room mid-stream                        | L          | M      | Bridge detects `m.room.member` leave for itself; logs and detaches binding on next scan.                |
-| Homeserver-side rate limit thrashes                    | L          | M      | `matrix-bot-sdk` backoff; daemon SSE unaffected.                                                        |
+| Risk                                                | Likelihood | Impact | Mitigation                                                                                                             |
+| --------------------------------------------------- | ---------- | ------ | ---------------------------------------------------------------------------------------------------------------------- |
+| Encrypted room key-share fails after bridge restart | M          | M      | Persistent olm store; documented backup pattern; debug log on `m.room.encrypted` decrypt failure.                      |
+| Federation outage hides reaction events             | M          | L      | Sync resumes when federation restores; voting deadline extended on the daemon-side.                                    |
+| Reaction spam from multiple MXIDs                   | M          | L      | First-responder-wins (daemon-level); per-sub-actor token bucket; ban flow.                                             |
+| Long downtime exceeds server retention              | L          | M      | On `/sync` empty-`since` full state load; emit `events_possibly_missed` log; chats may show edited-but-not-seen state. |
+| MXID with unusual chars breaks audit                | L          | L      | The bridge-protocol regex allows the MXID character set; verified in tests.                                            |
+| Bot kicked from room mid-stream                     | L          | M      | Bridge detects `m.room.member` leave for itself; logs and detaches binding on next scan.                               |
+| Homeserver-side rate limit thrashes                 | L          | M      | `matrix-bot-sdk` backoff; daemon SSE unaffected.                                                                       |
 
 ## Open questions
 
@@ -354,7 +358,7 @@ protect the volume. Documented as a top-level security note.
 
 2. **Should `!qwen attach` accept a room-aliased shorthand
    instead of the invite token?** E.g. `!qwen attach
-   #session-abc:home.example.com`. Defer; the invite-token path
+#session-abc:home.example.com`. Defer; the invite-token path
    matches the other bridges.
 
 3. **Should the bridge handle Spaces (parent rooms) specially?**

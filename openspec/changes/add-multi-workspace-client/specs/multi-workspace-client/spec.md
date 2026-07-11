@@ -154,13 +154,13 @@ Each daemon SHALL expose `GET /ui/clients-manifest.json`
 {
   "daemons": [
     {
-      "name":             "workstation-1",
-      "url":              "https://qwen.local:4170",
-      "tokenStorageKey":  "qwen-rc:qwen.local:4170:token",
-      "default":          true
-    }
+      "name": "workstation-1",
+      "url": "https://qwen.local:4170",
+      "tokenStorageKey": "qwen-rc:qwen.local:4170:token",
+      "default": true,
+    },
   ],
-  "generatedAt":   "<ISO>"
+  "generatedAt": "<ISO>",
 }
 ```
 
@@ -259,7 +259,7 @@ When enabled, the client SHALL:
    daemon in parallel.
 2. Tag each hit with `daemonName`.
 3. Merge results client-side by round-robin top-`min(limit/N,
-   10)` from each daemon, then sort within tie-bands by score.
+10)` from each daemon, then sort within tie-bands by score.
 4. Render each result row with the `daemonName` as a pill.
 
 Daemons that fail or return non-2xx SHALL be listed in a footer
@@ -286,7 +286,7 @@ ACL traversal.
 - **WHEN** the operator runs an aggregated search
 - **THEN** the modal renders results from `A` and `C` only
 - **AND** the footer reads `B: 401 not paired · re-pair to
-  include`
+include`
 
 #### Scenario: Aggregator does not leak across daemons
 

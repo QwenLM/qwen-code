@@ -238,11 +238,8 @@ the prompt path and the direct-tool path.
 {
   "customCommands": {
     "enabled": true,
-    "paths": [
-      "<workspace>/.qwen/commands/",
-      "~/.qwen/commands/"
-    ]
-  }
+    "paths": ["<workspace>/.qwen/commands/", "~/.qwen/commands/"],
+  },
 }
 ```
 

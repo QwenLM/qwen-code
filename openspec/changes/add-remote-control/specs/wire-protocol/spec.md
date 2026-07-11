@@ -15,7 +15,9 @@ transports, supported scopes, and feature flags.
   ```jsonc
   {
     "v": 1,
-    "features": [ /* Stage 1 features */ ],
+    "features": [
+      /* Stage 1 features */
+    ],
     "remoteControl": {
       "version": 1,
       "supportedTransports": ["sse", "ws"],
@@ -23,8 +25,8 @@ transports, supported scopes, and feature flags.
       "pairingEnabled": true,
       "auditEnabled": true,
       "walHorizonSec": 86400,
-      "walMaxEvents": 10000
-    }
+      "walMaxEvents": 10000,
+    },
   }
   ```
 
@@ -46,7 +48,9 @@ envelope:
   "v": 1,
   "type": "<event type>",
   "originatorClientId": "<tokenId or null>",
-  "data": { /* type-specific payload */ }
+  "data": {
+    /* type-specific payload */
+  },
 }
 ```
 
@@ -136,7 +140,7 @@ receive an opaque CORS denial.
 - **GIVEN** a client paired from origin `https://qwen.local:4170`
 - **WHEN** a browser preflights with `Origin: https://qwen.local:4170`
 - **THEN** the response carries `Access-Control-Allow-Origin:
-  https://qwen.local:4170`
+https://qwen.local:4170`
 - **AND** `Access-Control-Allow-Credentials: true`
 
 #### Scenario: Unknown origin is denied

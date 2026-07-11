@@ -93,15 +93,8 @@ State machine and alignment pattern: see
   - **Effort:** ~0.75 day
   - **Files:**
     `packages/cli/src/serve/remoteControl/routing/evaluator.ts`
-  - **Prompt:**
-    > Implement `evaluate(event, rules, ctx) → MatchedRule[]`.
-    > Match operators per `design.md`. First rule with
-    > `drop: true` short-circuits; otherwise UNION the
-    > subscription selections across all matching rules; pick the
-    > highest urgency per subscription. Pure function; no I/O.
-    > Acceptance: golden tests over fixture events; scenarios
-    > `Auto-allow silenced`, `Auto-deny pages`, `Prompt fall-
-    > through pages approvers`.
+  - **Prompt:** > Implement `evaluate(event, rules, ctx) → MatchedRule[]`. > Match operators per `design.md`. First rule with > `drop: true` short-circuits; otherwise UNION the > subscription selections across all matching rules; pick the > highest urgency per subscription. Pure function; no I/O. > Acceptance: golden tests over fixture events; scenarios > `Auto-allow silenced`, `Auto-deny pages`, `Prompt fall-
+through pages approvers`.
 
 - [ ] **1.3 Hot-reload**
   - **Status:** not-started
@@ -162,14 +155,8 @@ State machine and alignment pattern: see
 - [ ] **2.3 Evaluator consumes tracker**
   - **Status:** not-started
   - **Effort:** ~0.25 day
-  - **Prompt:**
-    > In `route()`, pass `workingDevices` snapshot into rule
-    > evaluation. A rule with `suppressIfWorkingDevice: true`
-    > drops the subscription if its owning token is working
-    > within `workingDeviceWindowSec`. Suppression produces a
-    > `Decision { kind: "suppress", reason: "working_device",
-    > workingTokenId }`.
-    > Acceptance: scenario `Working laptop suppresses phone push`.
+  - **Prompt:** > In `route()`, pass `workingDevices` snapshot into rule > evaluation. A rule with `suppressIfWorkingDevice: true` > drops the subscription if its owning token is working > within `workingDeviceWindowSec`. Suppression produces a > `Decision { kind: "suppress", reason: "working_device",
+workingTokenId }`. > Acceptance: scenario `Working laptop suppresses phone push`.
 
 ## Phase 3 — Mentions
 
@@ -188,16 +175,8 @@ State machine and alignment pattern: see
   - **Effort:** ~0.5 day
   - **Files:**
     `packages/cli/src/serve/remoteControl/routing/mentions.ts`
-  - **Prompt:**
-    > Implement `compileMentionPatterns(patterns, caseSensitive)`
-    > and `matchMentions(event, compiled): MentionEvent | null`.
-    > Canonicalize args to a single string
-    > (`<toolName> <JSON.stringify(args)>`); apply each glob;
-    > first match wins; truncate context to 140 chars excluding
-    > the literal pattern string (only tool name + filename +
-    > matched-pattern label travel in the synthetic event).
-    > Acceptance: scenarios `Mention on production`, `No mention
-    > does not synthesize event`.
+  - **Prompt:** > Implement `compileMentionPatterns(patterns, caseSensitive)` > and `matchMentions(event, compiled): MentionEvent | null`. > Canonicalize args to a single string > (`<toolName> <JSON.stringify(args)>`); apply each glob; > first match wins; truncate context to 140 chars excluding > the literal pattern string (only tool name + filename + > matched-pattern label travel in the synthetic event). > Acceptance: scenarios `Mention on production`, `No mention
+does not synthesize event`.
 
 - [ ] **3.2 Synthetic mention event bus**
   - **Status:** not-started
@@ -236,27 +215,15 @@ State machine and alignment pattern: see
   - **Effort:** ~0.5 day
   - **Files:**
     `packages/cli/src/serve/remoteControl/routing/snooze.ts`
-  - **Prompt:**
-    > Implement `SnoozeStore` with `get()`, `set({ durationSec,
-    > scope, createdBy })`, `clear()`, `isActive(eventKind,
-    > subscriptionScope)`. Atomic write (tmp + rename + fsync).
-    > Enforce `maxDurationSec: 86400`. Hardcode the
-    > `session.died` exception per `design.md` D5 (owner-scope
-    > subscriptions still receive `session.died` while snoozed).
-    > Acceptance: unit tests cover persistence across mock-
-    > restart, expiry, the death floor.
+  - **Prompt:** > Implement `SnoozeStore` with `get()`, `set({ durationSec,
+scope, createdBy })`, `clear()`, `isActive(eventKind,
+subscriptionScope)`. Atomic write (tmp + rename + fsync). > Enforce `maxDurationSec: 86400`. Hardcode the > `session.died` exception per `design.md` D5 (owner-scope > subscriptions still receive `session.died` while snoozed). > Acceptance: unit tests cover persistence across mock- > restart, expiry, the death floor.
 
 - [ ] **4.2 Endpoints + CLI**
   - **Status:** not-started
   - **Effort:** ~0.25 day
-  - **Prompt:**
-    > `POST /rc/routing/snooze`, `DELETE /rc/routing/snooze`,
-    > `GET /rc/routing/snooze` (owner scope). CLI
-    > `qwen rc snooze [duration]` and `qwen rc unsnooze`.
-    > Confirmation message names the hardcoded death floor.
-    > Acceptance: scenarios `Snooze active suppresses pushes`,
-    > `Snooze persists across restart`, `Snooze does not silence
-    > session.died for owner`.
+  - **Prompt:** > `POST /rc/routing/snooze`, `DELETE /rc/routing/snooze`, > `GET /rc/routing/snooze` (owner scope). CLI > `qwen rc snooze [duration]` and `qwen rc unsnooze`. > Confirmation message names the hardcoded death floor. > Acceptance: scenarios `Snooze active suppresses pushes`, > `Snooze persists across restart`, `Snooze does not silence
+session.died for owner`.
 
 - [ ] **4.3 Evaluator integration**
   - **Status:** not-started
@@ -317,12 +284,12 @@ State machine and alignment pattern: see
 
 ## Effort summary
 
-| Phase | Description                       | Estimate (days) |
-|-------|-----------------------------------|------------------|
-| 0     | Foundation                        | 1                |
-| 1     | Loader + evaluator                | 2                |
-| 2     | Working-device detection          | 1                |
-| 3     | Mentions                          | 1                |
-| 4     | Snooze                            | 1                |
-| 5     | Polish + docs + archive           | 1                |
-| **Total** |                               | **7**            |
+| Phase     | Description              | Estimate (days) |
+| --------- | ------------------------ | --------------- |
+| 0         | Foundation               | 1               |
+| 1         | Loader + evaluator       | 2               |
+| 2         | Working-device detection | 1               |
+| 3         | Mentions                 | 1               |
+| 4         | Snooze                   | 1               |
+| 5         | Polish + docs + archive  | 1               |
+| **Total** |                          | **7**           |

@@ -67,10 +67,10 @@ quick global override.
   (≤140 chars). Details remain fetched on tap-through per
   `add-webpush-notifications` payload privacy posture.
 - **Snooze.** `POST /rc/routing/snooze { durationSec, scope:
-  "all"|"<kind>" }` suppresses pushes globally for the duration.
+"all"|"<kind>" }` suppresses pushes globally for the duration.
   Persisted in `~/.qwen/rc/snooze.state` (JSON) so it survives a
   daemon restart. Auto-expires; can be cleared with `DELETE
-  /rc/routing/snooze`. CLI `qwen rc snooze 1h` and web "Snooze for"
+/rc/routing/snooze`. CLI `qwen rc snooze 1h` and web "Snooze for"
   menu use this.
 - **New SSE event `routing_decision`.** When a push is suppressed or
   routed, the daemon emits a `routing_decision` event visible to
@@ -119,7 +119,7 @@ know the agent is trying something it shouldn't.
 ["*production*", "*PROD-*"]`. The agent runs `kubectl get pods -n
 production`. The routing layer evaluates the args, matches, emits a
 synthetic `mention` event, and pushes a notification "mention:
-*production* in tool call" with deep link. I tap through to see the
+_production_ in tool call" with deep link. I tap through to see the
 full command.
 
 **R5. Snooze before a meeting.** Before a 1-hour meeting I run
@@ -151,7 +151,7 @@ owner-only).
   (glob match), `snooze.ts` (persisted state), `index.ts` (decision
   module API).
 - **Integration point**: `eventBus → routing.route(event) →
-  pushSender.enqueue(decisions)`. Existing direct
+pushSender.enqueue(decisions)`. Existing direct
   `pushSender.enqueue` calls in `server.ts` rerouted through the new
   module.
 - **Wire protocol**: new SSE event type `routing_decision`. New

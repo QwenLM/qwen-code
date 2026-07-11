@@ -24,13 +24,8 @@ State machine and alignment pattern: see
 
 - [ ] **1.0 Alignment**
   - **Status:** not-started
-  - **Prompt:**
-    > Verify Phase 0 `completed`. Confirm the session manager
-    > exposes an event-committed signal (Phase 1 of
-    > `add-remote-control`). If it doesn't, add it and update
-    > `add-remote-control/specs/remote-session-host/spec.md`
-    > with a `Requirement: Event-committed signal for in-process
-    > consumers` (drift note).
+  - **Prompt:** > Verify Phase 0 `completed`. Confirm the session manager > exposes an event-committed signal (Phase 1 of > `add-remote-control`). If it doesn't, add it and update > `add-remote-control/specs/remote-session-host/spec.md` > with a `Requirement: Event-committed signal for in-process
+consumers` (drift note).
 
 - [ ] **1.1 Index schema and migrations**
   - **Status:** not-started
@@ -63,13 +58,8 @@ State machine and alignment pattern: see
 - [ ] **1.3 In-process ingest worker**
   - **Status:** not-started
   - **Effort:** ~0.5 day
-  - **Prompt:**
-    > Subscribe to the session manager's event-committed signal.
-    > Batch up to 100 events or 250 ms, whichever first. INSERT
-    > into `documents`; idempotent via `INSERT … ON CONFLICT
-    > (session_id, event_id) DO NOTHING`. Acceptance: load test
-    > with 10k events/sec arrives at the index inside 1 s
-    > end-to-end p95.
+  - **Prompt:** > Subscribe to the session manager's event-committed signal. > Batch up to 100 events or 250 ms, whichever first. INSERT > into `documents`; idempotent via `INSERT … ON CONFLICT
+(session_id, event_id) DO NOTHING`. Acceptance: load test > with 10k events/sec arrives at the index inside 1 s > end-to-end p95.
 
 - [ ] **1.4 fsnotify fallback ingest**
   - **Status:** not-started
@@ -99,11 +89,8 @@ State machine and alignment pattern: see
   - **Effort:** ~0.5 day
   - **Files:**
     `packages/cli/src/serve/remoteControl/search/visibility.ts`
-  - **Prompt:**
-    > Pure function: given a token's scopes and id, return the
-    > set of session ids visible to it. Owner: all. Share: lock
-    > id. Else: `SELECT session_id FROM token_session_history
-    > WHERE token_id = ?`. Acceptance: unit tests per scope.
+  - **Prompt:** > Pure function: given a token's scopes and id, return the > set of session ids visible to it. Owner: all. Share: lock > id. Else: `SELECT session_id FROM token_session_history
+WHERE token_id = ?`. Acceptance: unit tests per scope.
 
 - [ ] **2.2 `token_session_history` writer**
   - **Status:** not-started
@@ -118,14 +105,9 @@ State machine and alignment pattern: see
   - **Effort:** ~0.5 day
   - **Files:**
     `packages/cli/src/serve/remoteControl/search/queryRoute.ts`
-  - **Prompt:**
-    > Params per spec. Validate `q` length ≤ 1024 and reject
-    > regex chars outside phrases. Compose SQL with visible-set
-    > filter, kind filter, ts filter, `MATCH` clause. ORDER BY
-    > `bm25(fts)`. Compose snippets via `snippet(fts, 0, '<mark>',
-    > '</mark>', '…', 32)` (the result is HTML-escaped plaintext
-    > at the boundary). Acceptance: scenarios under `Requirement:
-    > Query API`.
+  - **Prompt:** > Params per spec. Validate `q` length ≤ 1024 and reject > regex chars outside phrases. Compose SQL with visible-set > filter, kind filter, ts filter, `MATCH` clause. ORDER BY > `bm25(fts)`. Compose snippets via `snippet(fts, 0, '<mark>',
+'</mark>', '…', 32)` (the result is HTML-escaped plaintext > at the boundary). Acceptance: scenarios under `Requirement:
+Query API`.
 
 - [ ] **2.4 `GET /rc/search/stats` (operator diagnostics)**
   - **Status:** not-started
@@ -220,14 +202,8 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/cli/src/commands/rc/search.ts`
-  - **Prompt:**
-    > Subcommands:
-    > - `query "<q>" [--kind …] [--session …] [--since …]
-    >   [--limit …] [--json]` — print hits.
-    > - `reindex [<sessionId>] [--detach]` — start a reindex; on
-    >   foreground mode, render a progress bar.
-    > - `stats` — print the diagnostics.
-    > Output format: human table by default, JSON with `--json`.
+  - **Prompt:** > Subcommands: > > - `query "<q>" [--kind …] [--session …] [--since …]
+[--limit …] [--json]` — print hits. > - `reindex [<sessionId>] [--detach]` — start a reindex; on > foreground mode, render a progress bar. > - `stats` — print the diagnostics. > Output format: human table by default, JSON with `--json`.
 
 ## Phase 5 — Polish + docs
 
@@ -257,12 +233,12 @@ State machine and alignment pattern: see
 
 ## Effort summary
 
-| Phase | Description                          | Estimate (days) |
-|-------|--------------------------------------|------------------|
-| 0     | Foundation                           | 0.5              |
-| 1     | Schema + ingestion                   | 2                |
-| 2     | Query + permission filtering         | 1.5              |
-| 3     | Reindex + eviction                   | 1.5              |
-| 4     | Clients                              | 2                |
-| 5     | Polish + docs + archive              | 0.5              |
-| **Total** |                                  | **8**            |
+| Phase     | Description                  | Estimate (days) |
+| --------- | ---------------------------- | --------------- |
+| 0         | Foundation                   | 0.5             |
+| 1         | Schema + ingestion           | 2               |
+| 2         | Query + permission filtering | 1.5             |
+| 3         | Reindex + eviction           | 1.5             |
+| 4         | Clients                      | 2               |
+| 5         | Polish + docs + archive      | 0.5             |
+| **Total** |                              | **8**           |

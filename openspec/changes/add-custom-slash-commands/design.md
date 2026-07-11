@@ -26,6 +26,7 @@ custom commands are merged on top.
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Repo-tracked, plain-text commands editable without restarting the
   daemon.
 - A single discovery API any client can hit.
@@ -35,6 +36,7 @@ custom commands are merged on top.
   than the caller already has.
 
 **Non-Goals:**
+
 - Sandboxed scripting. The prompt is a template; placeholder
   substitution is the only computation.
 - A marketplace.
@@ -76,25 +78,27 @@ Workspace                            Daemon
 ---
 name: lint
 description: Run the project lint
-scope: write              # required: read | write | approve | bridge
-tool: shell               # optional: skip-agent direct tool call
-sessionScope: required    # optional: required | optional | none
-                          #   required: invoke must be on a session
-                          #   none:     invoke is workspace-level
+scope: write # required: read | write | approve | bridge
+tool: shell # optional: skip-agent direct tool call
+sessionScope:
+  required # optional: required | optional | none
+  #   required: invoke must be on a session
+  #   none:     invoke is workspace-level
 ---
+
 npm run lint
 ```
 
 Front-matter fields:
 
-| Field         | Required | Notes                                              |
-|---------------|----------|----------------------------------------------------|
-| `name`        | yes      | `^[a-z][a-z0-9_-]{0,31}$`; uniqueness scoped to source. |
-| `description` | yes      | One line, ≤140 chars. Shown in palette.            |
-| `scope`       | yes      | Minimum scope required to invoke. Cannot be `owner`. |
-| `tool`        | no       | If set, name of a built-in tool. Bypasses agent.   |
-| `sessionScope`| no       | Default `required`.                                |
-| `args`        | no       | Array of `{ name, required, default? }` declarations for argument validation. If omitted, args are pass-through. |
+| Field          | Required | Notes                                                                                                            |
+| -------------- | -------- | ---------------------------------------------------------------------------------------------------------------- |
+| `name`         | yes      | `^[a-z][a-z0-9_-]{0,31}$`; uniqueness scoped to source.                                                          |
+| `description`  | yes      | One line, ≤140 chars. Shown in palette.                                                                          |
+| `scope`        | yes      | Minimum scope required to invoke. Cannot be `owner`.                                                             |
+| `tool`         | no       | If set, name of a built-in tool. Bypasses agent.                                                                 |
+| `sessionScope` | no       | Default `required`.                                                                                              |
+| `args`         | no       | Array of `{ name, required, default? }` declarations for argument validation. If omitted, args are pass-through. |
 
 Body: template string with placeholders:
 
@@ -141,10 +145,10 @@ Request:
 
 ```jsonc
 {
-  "sessionId": "...",    // required if sessionScope=required
-  "args": ["1234"],      // positional
+  "sessionId": "...", // required if sessionScope=required
+  "args": ["1234"], // positional
   "named": { "branch": "main" },
-  "fileContext": "src/auth/login.ts"  // optional, fills ${file}
+  "fileContext": "src/auth/login.ts", // optional, fills ${file}
 }
 ```
 
@@ -253,28 +257,28 @@ multiple repos must symlink or duplicate. Acceptable.
 
 ## Threat model
 
-| Attacker                          | Capability                              | Mitigation                                                                                |
-|-----------------------------------|------------------------------------------|-------------------------------------------------------------------------------------------|
+| Attacker                                     | Capability                                          | Mitigation                                                                                                                                                                                  |
+| -------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Workspace contributor adds malicious command | Get other users to execute a destructive shell call | Custom commands cannot exceed caller scope; `tool: shell` still goes through `permission_request` (policy engine + human approval). Audit records the command name and resolved invocation. |
-| Read-scope token invokes write command | Run a write-level command | Scope clamp returns `403`; audit logs the attempt.                                       |
-| Command shadows a built-in        | Surprise behavior on `/compact`         | Collision audit event on load; `qwen rc commands list` shows source priority.            |
-| Front-matter parse failure        | Daemon-wide palette breakage             | Per-file loader; bad files are skipped with `slash_command_parse_failed` audit, palette continues to serve good files. |
+| Read-scope token invokes write command       | Run a write-level command                           | Scope clamp returns `403`; audit logs the attempt.                                                                                                                                          |
+| Command shadows a built-in                   | Surprise behavior on `/compact`                     | Collision audit event on load; `qwen rc commands list` shows source priority.                                                                                                               |
+| Front-matter parse failure                   | Daemon-wide palette breakage                        | Per-file loader; bad files are skipped with `slash_command_parse_failed` audit, palette continues to serve good files.                                                                      |
 
 ## Risks
 
-| Risk                                            | Likelihood | Impact | Mitigation                                                                |
-|-------------------------------------------------|------------|--------|---------------------------------------------------------------------------|
-| Operator forgets a workspace command is shadowing a built-in | M | M | Collision audit; palette renders shadow indicator.                        |
-| File watcher fires on transient editor save sequence | M    | L      | 250 ms debounce; idempotent reload.                                       |
-| `${file}` semantics differ per client           | M          | L      | Spec mandates client fills `fileContext` field; daemon trusts the value.  |
-| Direct-tool commands skip the agent's safety prompts | L | M | Permission flow still fires; policy engine still gates. Documented.       |
-| Argument injection into shell tool              | M          | M      | Direct-tool path uses the tool's argument shape, not bash-style string concat. Substituted args become a single argv element by default. |
+| Risk                                                         | Likelihood | Impact | Mitigation                                                                                                                               |
+| ------------------------------------------------------------ | ---------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Operator forgets a workspace command is shadowing a built-in | M          | M      | Collision audit; palette renders shadow indicator.                                                                                       |
+| File watcher fires on transient editor save sequence         | M          | L      | 250 ms debounce; idempotent reload.                                                                                                      |
+| `${file}` semantics differ per client                        | M          | L      | Spec mandates client fills `fileContext` field; daemon trusts the value.                                                                 |
+| Direct-tool commands skip the agent's safety prompts         | L          | M      | Permission flow still fires; policy engine still gates. Documented.                                                                      |
+| Argument injection into shell tool                           | M          | M      | Direct-tool path uses the tool's argument shape, not bash-style string concat. Substituted args become a single argv element by default. |
 
 ## Open questions
 
 1. **Should `args` declarations be enforced or advisory?** Leaning
    enforced: a command declaring `args: [{ name: issue, required:
-   true }]` should fail-fast with `400` if missing. This makes
+true }]` should fail-fast with `400` if missing. This makes
    command authors document their inputs.
 
 2. **Should the loader expose a versioned ETag on `/rc/commands` so

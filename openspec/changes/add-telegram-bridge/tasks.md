@@ -26,11 +26,8 @@ State machine and alignment pattern: see
 
 - [ ] **1.0 Alignment**
   - **Status:** not-started
-  - **Prompt:**
-    > Verify Phase 0 `completed`. Choose esbuild vs tsc for the
-    > build output; decision determines `package.json` scripts.
-    > Confirm `examples/bridges/skeleton/` from `add-bridge-
-    > protocol` is current and clone-friendly as a starting point.
+  - **Prompt:** > Verify Phase 0 `completed`. Choose esbuild vs tsc for the > build output; decision determines `package.json` scripts. > Confirm `examples/bridges/skeleton/` from `add-bridge-
+protocol` is current and clone-friendly as a starting point.
 
 - [ ] **1.1 Package scaffolding**
   - **Status:** not-started
@@ -39,12 +36,8 @@ State machine and alignment pattern: see
     `packages/bridge-telegram/tsconfig.json`,
     `packages/bridge-telegram/esbuild.config.mjs`,
     `packages/bridge-telegram/src/index.ts`
-  - **Prompt:**
-    > Create the package. Dependencies: `node-telegram-bot-api` OR
-    > `grammy` (pick `grammy` — newer, better TS types, smaller
-    > dep tree); justify in commit. No daemon imports — bridge talks
-    > only over HTTP. Acceptance: `pnpm --filter bridge-telegram
-    > build` produces a single `dist/index.js`.
+  - **Prompt:** > Create the package. Dependencies: `node-telegram-bot-api` OR > `grammy` (pick `grammy` — newer, better TS types, smaller > dep tree); justify in commit. No daemon imports — bridge talks > only over HTTP. Acceptance: `pnpm --filter bridge-telegram
+build` produces a single `dist/index.js`.
 
 - [ ] **1.2 Env config loader**
   - **Status:** not-started
@@ -73,24 +66,16 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/bridge-telegram/src/registration.ts`
-  - **Prompt:**
-    > On boot, `POST /rc/bridges` with declared capabilities:
-    > `{ displayName: "Telegram-bridge", bridgeKind: "telegram",
-    > capabilities: { supportsActions: true, supportsMarkdown:
-    > "limited", maxMessageBytes: 4096, supportsThreads: false,
-    > supportsEdits: true } }`. Loop heartbeat every 30 s. Acceptance:
-    > daemon `GET /rc/bridges` shows the bridge as online; killing
-    > the bridge causes `bridge_stale_deregistered` audit within
-    > 180 s.
+  - **Prompt:** > On boot, `POST /rc/bridges` with declared capabilities: > `{ displayName: "Telegram-bridge", bridgeKind: "telegram",
+capabilities: { supportsActions: true, supportsMarkdown:
+"limited", maxMessageBytes: 4096, supportsThreads: false,
+supportsEdits: true } }`. Loop heartbeat every 30 s. Acceptance: > daemon `GET /rc/bridges` shows the bridge as online; killing > the bridge causes `bridge_stale_deregistered` audit within > 180 s.
 
 - [ ] **1.5 Healthz endpoint**
   - **Status:** not-started
   - **Effort:** ~0.25 day
-  - **Prompt:**
-    > Expose `GET /healthz` on a configurable port (default 9100)
-    > returning `{ ok: true, daemonReachable: bool,
-    > telegramReachable: bool, registeredId: "br_*" | null }`. For
-    > Docker / k8s liveness probes.
+  - **Prompt:** > Expose `GET /healthz` on a configurable port (default 9100) > returning `{ ok: true, daemonReachable: bool,
+telegramReachable: bool, registeredId: "br_*" | null }`. For > Docker / k8s liveness probes.
 
 ## Phase 2 — Chat binding + inbound prompts
 
@@ -98,33 +83,22 @@ State machine and alignment pattern: see
 
 - [ ] **2.0 Alignment**
   - **Status:** not-started
-  - **Prompt:**
-    > Verify Phase 1 `completed`. Confirm `POST /rc/bridges/:id/
-    > invite` and `.../invite/redeem` routes are live in the daemon
-    > (per Phase 0 amendment). If not, escalate.
+  - **Prompt:** > Verify Phase 1 `completed`. Confirm `POST /rc/bridges/:id/
+invite` and `.../invite/redeem` routes are live in the daemon > (per Phase 0 amendment). If not, escalate.
 
 - [ ] **2.1 chats.json storage**
   - **Status:** not-started
   - **Effort:** ~0.25 day
   - **Files:** `packages/bridge-telegram/src/store/chats.ts`
-  - **Prompt:**
-    > Atomic-rename JSON store at
-    > `$QWEN_BRIDGE_STATE_DIR/chats.json`. API: `getByChatId`,
-    > `bind(chatId, sessionId, primarySubActor)`, `unbind(chatId)`,
-    > `all()`. Acceptance: scenarios under `Requirement: Chat-to-
-    > session binding via /start`.
+  - **Prompt:** > Atomic-rename JSON store at > `$QWEN_BRIDGE_STATE_DIR/chats.json`. API: `getByChatId`, > `bind(chatId, sessionId, primarySubActor)`, `unbind(chatId)`, > `all()`. Acceptance: scenarios under `Requirement: Chat-to-
+session binding via /start`.
 
 - [ ] **2.2 /start invite redemption**
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/bridge-telegram/src/handlers/start.ts`
-  - **Prompt:**
-    > Telegram update handler for `/start <token>`. Calls daemon
-    > `POST /rc/bridges/:id/invite/redeem` with the token; on
-    > success, persists chat binding and replies "Bound chat to
-    > session `<id>`". On failure, replies with the daemon's error
-    > text. Acceptance: scenario `Operator-issued invite binds
-    > chat`.
+  - **Prompt:** > Telegram update handler for `/start <token>`. Calls daemon > `POST /rc/bridges/:id/invite/redeem` with the token; on > success, persists chat binding and replies "Bound chat to > session `<id>`". On failure, replies with the daemon's error > text. Acceptance: scenario `Operator-issued invite binds
+chat`.
 
 - [ ] **2.3 /detach handler**
   - **Status:** not-started
@@ -137,20 +111,8 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/bridge-telegram/src/handlers/message.ts`
-  - **Prompt:**
-    > For a non-command message in a bound chat:
-    > - Look up `(sessionId, subActor)` from chats.json AND the
-    >   message's sender id (the latter overrides primarySubActor;
-    >   per-group chats vary by sender).
-    > - Drop the message if sender is in local ban cache.
-    > - POST `/session/<sessionId>/prompt` with body
-    >   `{ prompt: <text> }` and `X-RC-SubActor:
-    >   telegram:<senderId>`.
-    > - On daemon 429: reply with "slow down, try again in
-    >   `<Retry-After>` s".
-    > - On daemon 403 `sub_actor_banned`: silently drop.
-    > Acceptance: scenarios `Inbound prompt forwarded to daemon`
-    > and `Sender-specific sub-actor`.
+  - **Prompt:** > For a non-command message in a bound chat: > > - Look up `(sessionId, subActor)` from chats.json AND the > message's sender id (the latter overrides primarySubActor; > per-group chats vary by sender). > - Drop the message if sender is in local ban cache. > - POST `/session/<sessionId>/prompt` with body > `{ prompt: <text> }` and `X-RC-SubActor:
+telegram:<senderId>`. > - On daemon 429: reply with "slow down, try again in > `<Retry-After>` s". > - On daemon 403 `sub_actor_banned`: silently drop. > Acceptance: scenarios `Inbound prompt forwarded to daemon` > and `Sender-specific sub-actor`.
 
 - [ ] **2.5 /status handler**
   - **Status:** not-started
@@ -175,14 +137,9 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/bridge-telegram/src/sseConsumer.ts`
-  - **Prompt:**
-    > For each bound session in chats.json, open a `GET /session/
-    > :id/events` SSE connection with `Authorization: Bearer
-    > <bridge-token>` and `Last-Event-ID` from persisted cursor
-    > (`$QWEN_BRIDGE_STATE_DIR/cursors.json`). On disconnect,
-    > reconnect with backoff. Persist event id after each
-    > successful dispatch. Acceptance: bridge restart resumes
-    > without duplicate messages.
+  - **Prompt:** > For each bound session in chats.json, open a `GET /session/
+:id/events` SSE connection with `Authorization: Bearer
+<bridge-token>` and `Last-Event-ID` from persisted cursor > (`$QWEN_BRIDGE_STATE_DIR/cursors.json`). On disconnect, > reconnect with backoff. Persist event id after each > successful dispatch. Acceptance: bridge restart resumes > without duplicate messages.
 
 - [ ] **3.2 MarkdownV2 escape utility**
   - **Status:** not-started
@@ -212,35 +169,29 @@ State machine and alignment pattern: see
   - **Files:** `packages/bridge-telegram/src/render/permissionRequest.ts`
   - **Prompt:**
     > Branch on `bridgeHints.recommendedSurface`:
+    >
     > - `inline`: send message with `argsSummaryShort` and two-
     >   button inline keyboard (Approve/Deny), callback_data
     >   `vote:approve:<reqId>` / `vote:deny:<reqId>`.
     > - `deeplink`: send `argsSummaryShort` plus one-button
     >   keyboard linking to `${QWEN_DAEMON_URL}/ui/permission/
-    >   <reqId>`.
-    > Record the resulting Telegram message id in an in-memory map
-    > keyed by `requestId` for later edit. Acceptance: scenarios
-    > under `Requirement: permission_request rendering`.
+<reqId>`.
+    >   Record the resulting Telegram message id in an in-memory map
+    >   keyed by `requestId` for later edit. Acceptance: scenarios
+    >   under `Requirement: permission_request rendering`.
 
 - [ ] **3.5 Callback query → vote**
   - **Status:** not-started
   - **Effort:** ~0.25 day
   - **Files:** `packages/bridge-telegram/src/handlers/callback.ts`
-  - **Prompt:**
-    > Parse `vote:<approve|deny>:<reqId>`. POST `/permission/
-    > <reqId>` with vote + `X-RC-SubActor: telegram:<tapper-id>`.
-    > Answer the callback query with green tick / red cross.
-    > Acceptance: scenario `Telegram tap resolves permission`.
+  - **Prompt:** > Parse `vote:<approve|deny>:<reqId>`. POST `/permission/
+<reqId>` with vote + `X-RC-SubActor: telegram:<tapper-id>`. > Answer the callback query with green tick / red cross. > Acceptance: scenario `Telegram tap resolves permission`.
 
 - [ ] **3.6 permission_resolved → message edit**
   - **Status:** not-started
   - **Effort:** ~0.25 day
-  - **Prompt:**
-    > On SSE `permission_resolved`, look up Telegram message id
-    > from in-memory map and `editMessageReplyMarkup` to clear
-    > buttons, then `editMessageText` to append `Resolved:
-    > <approved|denied> by <subActor>`. If message id unknown
-    > (post-restart), no-op.
+  - **Prompt:** > On SSE `permission_resolved`, look up Telegram message id > from in-memory map and `editMessageReplyMarkup` to clear > buttons, then `editMessageText` to append `Resolved:
+<approved|denied> by <subActor>`. If message id unknown > (post-restart), no-op.
 
 ## Phase 4 — Rate limits, bans, polish
 
@@ -258,12 +209,8 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.25 day
   - **Files:** `packages/bridge-telegram/src/store/bans.ts`
-  - **Prompt:**
-    > Subscribe to bridge-scope SSE channel `GET /rc/bridges/:id/
-    > events` (if available; otherwise listen on every session's
-    > events). On `sub_actor_banned`, add to in-memory set and
-    > persist to `bans.json`. On `sub_actor_unbanned`, remove.
-    > Apply pre-filter in inbound message handler.
+  - **Prompt:** > Subscribe to bridge-scope SSE channel `GET /rc/bridges/:id/
+events` (if available; otherwise listen on every session's > events). On `sub_actor_banned`, add to in-memory set and > persist to `bans.json`. On `sub_actor_unbanned`, remove. > Apply pre-filter in inbound message handler.
 
 - [ ] **4.2 Telegram rate-limit backoff**
   - **Status:** not-started
@@ -299,10 +246,8 @@ State machine and alignment pattern: see
 
 - [ ] **5.0 Alignment**
   - **Status:** not-started
-  - **Prompt:**
-    > Verify Phase 4 `completed`. Confirm `qwen rc bridges invite
-    > --kind telegram --session <id>` lands in the daemon CLI (the
-    > bridge-protocol extension noted in design D3).
+  - **Prompt:** > Verify Phase 4 `completed`. Confirm `qwen rc bridges invite
+--kind telegram --session <id>` lands in the daemon CLI (the > bridge-protocol extension noted in design D3).
 
 - [ ] **5.1 Telegram-specific CLI flags**
   - **Status:** not-started
@@ -332,12 +277,12 @@ State machine and alignment pattern: see
 
 ## Effort summary
 
-| Phase | Description                          | Estimate (days) |
-|-------|--------------------------------------|------------------|
-| 0     | Foundation                           | 0.5              |
-| 1     | Skeleton + registration              | 1.5              |
-| 2     | Chat binding + inbound               | 1.5              |
-| 3     | Outbound rendering                   | 2                |
-| 4     | Rate limits, bans, polish            | 1                |
-| 5     | CLI helper + docs + archive          | 0.5              |
-| **Total** |                                  | **~7**           |
+| Phase     | Description                 | Estimate (days) |
+| --------- | --------------------------- | --------------- |
+| 0         | Foundation                  | 0.5             |
+| 1         | Skeleton + registration     | 1.5             |
+| 2         | Chat binding + inbound      | 1.5             |
+| 3         | Outbound rendering          | 2               |
+| 4         | Rate limits, bans, polish   | 1               |
+| 5         | CLI helper + docs + archive | 0.5             |
+| **Total** |                             | **~7**          |

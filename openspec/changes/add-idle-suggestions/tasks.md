@@ -38,12 +38,8 @@ State machine and alignment pattern: see
   - **Effort:** ~0.25 day
   - **Files:**
     `packages/cli/src/serve/remoteControl/idle/config.ts`
-  - **Prompt:**
-    > Load `~/.qwen/rc/idle.yaml` with the schema from `design.md`.
-    > File-watcher with 250 ms debounce. On parse error keep
-    > previous good config and audit `idle_config_parse_failed`.
-    > Ship a default file. Acceptance: scenarios under `Requirement:
-    > Config file and reload`.
+  - **Prompt:** > Load `~/.qwen/rc/idle.yaml` with the schema from `design.md`. > File-watcher with 250 ms debounce. On parse error keep > previous good config and audit `idle_config_parse_failed`. > Ship a default file. Acceptance: scenarios under `Requirement:
+Config file and reload`.
 
 - [ ] **1.2 IdleWatcher per session**
   - **Status:** not-started
@@ -60,13 +56,8 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/cli/src/serve/remoteControl/idle/emitter.ts`
-  - **Prompt:**
-    > Mark next agent call with `attribution.synthetic: "idle-
-    > suggest"`. Submit the operator-configured synthetic prompt.
-    > Wire suppression: transcript writer and SSE fan-out check the
-    > flag and skip the round-trip's `session_update` frames AND
-    > skip JSONL transcript writes. Acceptance: scenarios under
-    > `Requirement: Synthetic round-trip suppression`.
+  - **Prompt:** > Mark next agent call with `attribution.synthetic: "idle-
+suggest"`. Submit the operator-configured synthetic prompt. > Wire suppression: transcript writer and SSE fan-out check the > flag and skip the round-trip's `session_update` frames AND > skip JSONL transcript writes. Acceptance: scenarios under > `Requirement: Synthetic round-trip suppression`.
 
 - [ ] **1.4 Per-session rate-limit bucket**
   - **Status:** not-started
@@ -102,20 +93,16 @@ State machine and alignment pattern: see
 - [ ] **2.2 `idle_suggestions` SSE event**
   - **Status:** not-started
   - **Effort:** ~0.25 day
-  - **Prompt:**
-    > Emit the event with the payload shape from `design.md`.
-    > Acceptance: scenario under `Requirement: idle_suggestions SSE
-    > event`.
+  - **Prompt:** > Emit the event with the payload shape from `design.md`. > Acceptance: scenario under `Requirement: idle_suggestions SSE
+event`.
 
 - [ ] **2.3 `/suggest` slash command + toggle endpoint**
   - **Status:** not-started
   - **Effort:** ~0.25 day
   - **Files:** `packages/cli/src/serve/remoteControl/idle/toggle.ts`
-  - **Prompt:**
-    > New endpoint `POST /session/:id/idle-suggest-toggle { enabled:
-    > bool }` for write-scope tokens. Built-in `/suggest [on|off|
-    > status]` slash command in clients posts to it. Acceptance:
-    > scenarios under `Requirement: Per-session toggle`.
+  - **Prompt:** > New endpoint `POST /session/:id/idle-suggest-toggle { enabled:
+bool }` for write-scope tokens. Built-in `/suggest [on|off|
+status]` slash command in clients posts to it. Acceptance: > scenarios under `Requirement: Per-session toggle`.
 
 ## Phase 3 — Client rendering + capability
 
@@ -152,9 +139,8 @@ State machine and alignment pattern: see
 - [ ] **3.3 Capability advertisement**
   - **Status:** not-started
   - **Effort:** ~0.1 day
-  - **Prompt:**
-    > Add `idleSuggestions: { enabled, idleAfterSec,
-    > maxSuggestionsPerHour }` to `/capabilities`'s `remoteControl`.
+  - **Prompt:** > Add `idleSuggestions: { enabled, idleAfterSec,
+maxSuggestionsPerHour }` to `/capabilities`'s `remoteControl`.
 
 - [ ] **3.4 Archive change**
   - **Status:** not-started
@@ -164,10 +150,10 @@ State machine and alignment pattern: see
 
 ## Effort summary
 
-| Phase | Description                   | Estimate (days) |
-|-------|-------------------------------|------------------|
-| 0     | Foundation                    | 0.5              |
-| 1     | Detector + emitter            | 1.5              |
-| 2     | Parser + event + toggle       | 1                |
-| 3     | Client rendering + capability | 0.5              |
-| **Total** |                           | **3.5**          |
+| Phase     | Description                   | Estimate (days) |
+| --------- | ----------------------------- | --------------- |
+| 0         | Foundation                    | 0.5             |
+| 1         | Detector + emitter            | 1.5             |
+| 2         | Parser + event + toggle       | 1               |
+| 3         | Client rendering + capability | 0.5             |
+| **Total** |                               | **3.5**         |

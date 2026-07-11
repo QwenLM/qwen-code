@@ -56,6 +56,7 @@ bridge) gets the same commands automatically.
 
 **SC1. `/lint` runs npm script.** I drop
 `.qwen/commands/lint.md` in my repo:
+
 ```
 ---
 name: lint
@@ -65,12 +66,14 @@ tool: shell
 ---
 npm run lint
 ```
+
 From any client palette, `/lint` invokes the shell tool directly.
 The result is rendered as a tool-call card. The agent is not
 consulted; this saves tokens.
 
 **SC2. `/triage` synthesizes a triage prompt.** I drop
 `.qwen/commands/triage.md`:
+
 ```
 ---
 name: triage
@@ -82,6 +85,7 @@ Read issue #${arg} from the GitHub remote and propose:
 2. minimal reproduction
 3. files to investigate first
 ```
+
 `/triage 1234` resolves to that prompt with `${arg}` = `1234`,
 posts as a normal session prompt, agent responds.
 

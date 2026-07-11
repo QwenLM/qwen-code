@@ -36,14 +36,8 @@ State machine and alignment pattern: see
   - **Effort:** ~0.5 day
   - **Files:**
     `packages/cli/src/serve/remoteControl/commands/loader.ts`
-  - **Prompt:**
-    > Implement `CommandLoader` that scans `<workspace>/.qwen/
-    > commands/*.md` and `~/.qwen/commands/*.md`. Parse YAML
-    > front-matter, validate against the schema in `design.md`,
-    > validate `name` regex, hold body as opaque string. On parse
-    > error, skip the file and emit audit
-    > `slash_command_parse_failed`. Acceptance: scenarios under
-    > `Requirement: Command file format and loading`.
+  - **Prompt:** > Implement `CommandLoader` that scans `<workspace>/.qwen/
+commands/*.md` and `~/.qwen/commands/*.md`. Parse YAML > front-matter, validate against the schema in `design.md`, > validate `name` regex, hold body as opaque string. On parse > error, skip the file and emit audit > `slash_command_parse_failed`. Acceptance: scenarios under > `Requirement: Command file format and loading`.
 
 - [ ] **1.2 Hot reload + collision audit**
   - **Status:** not-started
@@ -91,13 +85,8 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/cli/src/serve/remoteControl/commands/invoke.ts`
-  - **Prompt:**
-    > Resolve placeholders against the request body; submit via the
-    > internal prompt path; emit audit
-    > `slash_command_prompt_submitted` with command name, args, and
-    > resolved prompt text. Reject with 403 if effective scope is
-    > insufficient. Acceptance: scenarios under `Requirement:
-    > Invoke endpoint — prompt path`.
+  - **Prompt:** > Resolve placeholders against the request body; submit via the > internal prompt path; emit audit > `slash_command_prompt_submitted` with command name, args, and > resolved prompt text. Reject with 403 if effective scope is > insufficient. Acceptance: scenarios under `Requirement:
+Invoke endpoint — prompt path`.
 
 - [ ] **2.3 Invoke route — direct-tool path**
   - **Status:** not-started
@@ -163,10 +152,10 @@ State machine and alignment pattern: see
 
 ## Effort summary
 
-| Phase | Description                  | Estimate (days) |
-|-------|------------------------------|------------------|
-| 0     | Foundation                   | 0.5              |
-| 1     | Loader + storage             | 1.5              |
-| 2     | Discovery + execution        | 1.5              |
-| 3     | Client palette + ops UX      | 1                |
-| **Total** |                          | **4.5**          |
+| Phase     | Description             | Estimate (days) |
+| --------- | ----------------------- | --------------- |
+| 0         | Foundation              | 0.5             |
+| 1         | Loader + storage        | 1.5             |
+| 2         | Discovery + execution   | 1.5             |
+| 3         | Client palette + ops UX | 1               |
+| **Total** |                         | **4.5**         |

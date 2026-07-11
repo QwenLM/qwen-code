@@ -45,7 +45,7 @@ hosted session: all session-scoped routes apply identically to it.
 - **GIVEN** session `S` has JSONL lines 1..20 and event 15 is
   terminal
 - **WHEN** a write-scope token posts `/session/S/fork {
-  fromEventId: 15, transcript: "include", name: "branch-a" }`
+fromEventId: 15, transcript: "include", name: "branch-a" }`
 - **THEN** the response is `200` with a new `sessionId` `S'`
 - **AND** the new JSONL at
   `~/.qwen/projects/<cwd>/chats/<S'>.jsonl` begins with the fork
@@ -58,7 +58,7 @@ hosted session: all session-scoped routes apply identically to it.
 - **GIVEN** session `S` is currently streaming a tool call started
   at event 16
 - **WHEN** a client posts `/session/S/fork { fromEventId: 17, ...
-  }` where event 17 is mid-stream
+}` where event 17 is mid-stream
 - **THEN** the response is `409 Conflict` with code
   `fork_mid_prompt`
 
@@ -116,7 +116,7 @@ full file into memory.
 
 - **GIVEN** parent JSONL bytes `B` for lines 1..N
 - **WHEN** a fork is created with `transcript: "include",
-  fromEventId: N`
+fromEventId: N`
 - **THEN** the new JSONL contains the fork header, then bytes `B`
   verbatim, then nothing else
 - **AND** `sha256` of bytes after the header equals `sha256(B)`
@@ -134,7 +134,7 @@ contain the fork header, then exactly one assistant-shape line:
 {
   "type": "assistant",
   "text": "<summary text>",
-  "meta": { "kind": "fork_summary" }
+  "meta": { "kind": "fork_summary" },
 }
 ```
 
@@ -206,7 +206,7 @@ ending the fork MUST NOT affect the parent.
 - **THEN** `S`'s record has `forks: ["F1", "F2"]`
 - **AND** `F1`'s record has `parentSessionId: "S"`,
   `parentEventId: <number>`, `forkedAt: <ISO>`, `transcriptMode:
-  <string>`
+<string>`
 
 ### Requirement: Lineage chain endpoint
 
@@ -250,10 +250,10 @@ The daemon SHALL emit two new event types:
 
 - `session_forked` — emitted to the **fork's** SSE stream as its
   first event. Data: `{ parentSessionId, parentEventId,
-  transcriptMode, forkedAt, forkedByTokenId, name }`.
+transcriptMode, forkedAt, forkedByTokenId, name }`.
 - `child_forked` — emitted to the **parent's** SSE stream when a
   fork branches off. Data: `{ childSessionId, parentEventId,
-  forkedAt, name, forkedByTokenId }`.
+forkedAt, name, forkedByTokenId }`.
 
 Both events SHALL be replayable via `Last-Event-ID` per the
 existing WAL semantics.
@@ -283,7 +283,7 @@ the error code in `outcome`.
 
 - **WHEN** token `T` successfully forks `S` at event 8
 - **THEN** the audit entry includes `tokenId: T`, `action:
-  "session.fork"`, `parentSessionId: "S"`, `parentEventId: 8`,
+"session.fork"`, `parentSessionId: "S"`, `parentEventId: 8`,
   `newSessionId: "<S'>"`
 
 ### Requirement: Operator CLI for fork management
@@ -291,7 +291,7 @@ the error code in `outcome`.
 The CLI SHALL expose:
 
 - `qwen rc fork <sessionId> --from-event <id> [--mode
-  include|summary|empty] [--name <name>]` — create a fork. Prints
+include|summary|empty] [--name <name>]` — create a fork. Prints
   new sessionId to stdout. If the active client is currently
   attached, also switches the attachment to the new session.
 - The terminal client's `:fork` slash command SHALL accept the

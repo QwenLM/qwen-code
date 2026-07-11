@@ -28,6 +28,7 @@ that consumes all of those signals.
 ## Goals / Non-Goals
 
 **Goals:**
+
 - One declarative rule file expresses which events become pushes and
   to which subscriptions.
 - Policy-engine decisions are first-class inputs: auto-allow silent
@@ -39,9 +40,10 @@ that consumes all of those signals.
 - Decisions are visible (`routing_decision` SSE event) and audited.
 
 **Non-Goals:**
+
 - Replacing per-subscription `prefs` from `add-webpush-notifications`.
-  Prefs continue to exist as a *subscription-owned* opt-out. Routing
-  rules are *operator-owned* policy. Both apply.
+  Prefs continue to exist as a _subscription-owned_ opt-out. Routing
+  rules are _operator-owned_ policy. Both apply.
 - Routing to non-WebPush channels. Bridges (Telegram, Discord, etc.)
   consume the SSE event stream directly and apply their own routing
   logic; this module emits only WebPush decisions.
@@ -102,10 +104,21 @@ type Inputs = {
 };
 
 type Decision =
-  | { kind: "send"; subscriptionId: string; payload: Payload; urgency: "high"|"normal"|"low"; ruleId: string }
-  | { kind: "suppress"; subscriptionId: string; reason: SuppressReason; ruleId: string };
+  | {
+      kind: 'send';
+      subscriptionId: string;
+      payload: Payload;
+      urgency: 'high' | 'normal' | 'low';
+      ruleId: string;
+    }
+  | {
+      kind: 'suppress';
+      subscriptionId: string;
+      reason: SuppressReason;
+      ruleId: string;
+    };
 
-function route(inputs: Inputs): Decision[]
+function route(inputs: Inputs): Decision[];
 ```
 
 Pure-function-with-state-snapshot makes the module trivially testable
@@ -119,13 +132,13 @@ and replayable (golden-input → golden-decision tests).
 version: 1
 mentions:
   patterns:
-    - "*production*"
-    - "*PROD-*"
-    - "*billing*"
-    - "*--force*"
+    - '*production*'
+    - '*PROD-*'
+    - '*billing*'
+    - '*--force*'
   caseSensitive: false
 
-workingDeviceWindowSec: 120   # default
+workingDeviceWindowSec: 120 # default
 
 rules:
   # 1. Policy auto-allow → silent (default-on)
@@ -150,7 +163,7 @@ rules:
   - id: prompt-fallthrough
     match:
       kind: permission.required
-      policy.decisionSource: fallthrough  # or absent
+      policy.decisionSource: fallthrough # or absent
     route:
       subscriptions:
         scopeIn: [owner, approve]
@@ -190,29 +203,29 @@ rules:
 
 Match operators:
 
-| Field                       | Type                       | Notes                                      |
-|-----------------------------|----------------------------|--------------------------------------------|
-| `kind`                      | enum or list               | event kind                                 |
-| `sessionTag`                | glob                       | matches session name                       |
-| `originatingClientScope`    | one of owner/write/...     | who triggered the underlying event         |
-| `policy.decisionSource`     | `rule`/`fallthrough`/null  | from `add-policy-engine` `policy_decision` |
-| `policy.action`             | `allow`/`deny`/`prompt`    | only meaningful if decisionSource present  |
-| `subActor`                  | glob                       | from `add-bridge-protocol`                 |
-| `mentionPatterns`           | implicit                   | matched by `mentions.patterns` block       |
-| `urgencyAtLeast`            | low/normal/high            | matches event's pre-routing urgency        |
+| Field                    | Type                      | Notes                                      |
+| ------------------------ | ------------------------- | ------------------------------------------ |
+| `kind`                   | enum or list              | event kind                                 |
+| `sessionTag`             | glob                      | matches session name                       |
+| `originatingClientScope` | one of owner/write/...    | who triggered the underlying event         |
+| `policy.decisionSource`  | `rule`/`fallthrough`/null | from `add-policy-engine` `policy_decision` |
+| `policy.action`          | `allow`/`deny`/`prompt`   | only meaningful if decisionSource present  |
+| `subActor`               | glob                      | from `add-bridge-protocol`                 |
+| `mentionPatterns`        | implicit                  | matched by `mentions.patterns` block       |
+| `urgencyAtLeast`         | low/normal/high           | matches event's pre-routing urgency        |
 
 Route operators:
 
-| Field                             | Effect                                                    |
-|-----------------------------------|-----------------------------------------------------------|
-| `drop: true`                      | no push, no further rule evaluation                       |
-| `subscriptions.scopeIn`           | filter subscriptions by their owning token's scope        |
-| `subscriptions.tokenIdsIn`        | filter by specific token ids                              |
-| `subscriptions.deviceTagsIn`      | filter by user-tagged labels (phone/laptop/watch)         |
-| `urgency`                         | low / normal / high; passed to push sender                |
-| `suppressIfWorkingDevice`         | drop subscription if its token wrote within window        |
-| `digestUntilQuietHoursEnd`        | per `add-webpush-notifications` quiet-hours digest        |
-| `material: true`                  | include in audit feed with `material` flag                |
+| Field                        | Effect                                             |
+| ---------------------------- | -------------------------------------------------- |
+| `drop: true`                 | no push, no further rule evaluation                |
+| `subscriptions.scopeIn`      | filter subscriptions by their owning token's scope |
+| `subscriptions.tokenIdsIn`   | filter by specific token ids                       |
+| `subscriptions.deviceTagsIn` | filter by user-tagged labels (phone/laptop/watch)  |
+| `urgency`                    | low / normal / high; passed to push sender         |
+| `suppressIfWorkingDevice`    | drop subscription if its token wrote within window |
+| `digestUntilQuietHoursEnd`   | per `add-webpush-notifications` quiet-hours digest |
+| `material: true`             | include in audit feed with `material` flag         |
 
 Rules evaluate in order; first match with `drop: true` short-circuits;
 otherwise the routing engine UNION-merges the chosen subscriptions
@@ -227,7 +240,11 @@ Maintained in-memory only (per-process):
 class WorkingDeviceTracker {
   private lastWrite = new Map<TokenId, EpochMs>();
   recordWrite(tokenId: TokenId, sessionId: SessionId): void;
-  isWorking(tokenId: TokenId, withinSec: number, sessionId?: SessionId): boolean;
+  isWorking(
+    tokenId: TokenId,
+    withinSec: number,
+    sessionId?: SessionId,
+  ): boolean;
   recentFor(tokenId: TokenId): { at: EpochMs; sessionId: SessionId } | null;
 }
 ```
@@ -248,11 +265,13 @@ arg glob matches:
 
 ```ts
 function checkMentions(event, patterns): MentionEvent | null {
-  const haystack = canonicalizeArgs(event.data.args ?? event.data.toolCall?.args);
+  const haystack = canonicalizeArgs(
+    event.data.args ?? event.data.toolCall?.args,
+  );
   for (const p of patterns) {
     if (glob(p, haystack)) {
       return {
-        kind: "mention",
+        kind: 'mention',
         sessionId: event.sessionId,
         sessionName: event.sessionName,
         matched: p,
@@ -327,17 +346,17 @@ While snoozed:
         "subscriptionId": "sub_phone",
         "action": "sent",
         "urgency": "high",
-        "ruleId": "prompt-fallthrough"
+        "ruleId": "prompt-fallthrough",
       },
       {
         "subscriptionId": "sub_laptop",
         "action": "suppressed",
         "reason": "working_device",
         "workingTokenId": "tkn_laptop",
-        "ruleId": "prompt-fallthrough"
-      }
-    ]
-  }
+        "ruleId": "prompt-fallthrough",
+      },
+    ],
+  },
 }
 ```
 
@@ -470,25 +489,25 @@ rules --resolved` command prints the merged list.
 
 ## Threat model
 
-| Attacker                                       | Capability                                                              | Mitigation                                                                                  |
-|------------------------------------------------|-------------------------------------------------------------------------|---------------------------------------------------------------------------------------------|
-| Operator misconfigures rule → silently drops critical pushes | "drop: true" rule with broad match never pings   | `qwen rc routing test <event-json>` and `--resolved` make decisions inspectable; CHANGELOG warns about default policy-auto-allow silence. |
-| Compromised non-owner token tries to snooze the daemon | A `write` token could call `/rc/routing/snooze`         | Snooze endpoint requires `owner` scope. Documented; integration-tested.                     |
-| Compromised owner token issues an indefinite snooze | All pushes silenced; agent runs unattended         | Snooze hardcoded `maxDurationSec: 24h`. Longer snoozes require explicit owner re-issuance.   |
-| Mention pattern matches a credential          | Push payload's `summary` carries credential fragment   | Per `add-webpush-notifications` `summary` is allowlisted; mention context truncated to 140 chars and excludes args byte-for-byte (uses tool name + filename + pattern matched). Documented; tested by golden cases. |
-| Routing config mutation via API               | Attacker rewrites rules to drop everything            | Rule reload requires `owner` scope; rules loaded from disk only, not from HTTP body.        |
-| Working-device suppression race               | Subscription A's token wrote 121s ago, rule says suppressIfWorkingDevice with 120s — push fires, but A's user just stepped away | Best-effort nicety; documented as not a security boundary; both A and other devices see the SSE event regardless. |
+| Attacker                                                     | Capability                                                                                                                      | Mitigation                                                                                                                                                                                                          |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Operator misconfigures rule → silently drops critical pushes | "drop: true" rule with broad match never pings                                                                                  | `qwen rc routing test <event-json>` and `--resolved` make decisions inspectable; CHANGELOG warns about default policy-auto-allow silence.                                                                           |
+| Compromised non-owner token tries to snooze the daemon       | A `write` token could call `/rc/routing/snooze`                                                                                 | Snooze endpoint requires `owner` scope. Documented; integration-tested.                                                                                                                                             |
+| Compromised owner token issues an indefinite snooze          | All pushes silenced; agent runs unattended                                                                                      | Snooze hardcoded `maxDurationSec: 24h`. Longer snoozes require explicit owner re-issuance.                                                                                                                          |
+| Mention pattern matches a credential                         | Push payload's `summary` carries credential fragment                                                                            | Per `add-webpush-notifications` `summary` is allowlisted; mention context truncated to 140 chars and excludes args byte-for-byte (uses tool name + filename + pattern matched). Documented; tested by golden cases. |
+| Routing config mutation via API                              | Attacker rewrites rules to drop everything                                                                                      | Rule reload requires `owner` scope; rules loaded from disk only, not from HTTP body.                                                                                                                                |
+| Working-device suppression race                              | Subscription A's token wrote 121s ago, rule says suppressIfWorkingDevice with 120s — push fires, but A's user just stepped away | Best-effort nicety; documented as not a security boundary; both A and other devices see the SSE event regardless.                                                                                                   |
 
 ## Risks / Trade-offs
 
-| Risk                                          | Likelihood | Impact | Mitigation                                                                                  |
-|-----------------------------------------------|------------|--------|---------------------------------------------------------------------------------------------|
-| Operator writes a rule that silences pages they wanted to hear | M | H | `qwen rc routing test`; `routing_decision` SSE event makes suppression visible at runtime. |
-| Working-device detection thrashes on quick alternation | L | L | Window default 120s; bumpable per-rule.                                              |
-| Mention pattern false positives               | M          | L      | Patterns are operator-defined; default is empty. `qwen rc routing test` to dry-run.         |
-| Snooze state file corruption / partial write  | L          | M      | Atomic write (write to `.tmp`, fsync, rename); on parse failure log + treat as not snoozed. |
-| Hot-reload of `routing.yaml` while events stream | L       | M      | Debounced fsnotify; rule swap is atomic per-event.                                          |
-| Rule eval cost on hot path                    | L          | L      | Rules compile once at load; per-event eval is O(rules × matchFields); typical ≤ 20 rules.   |
+| Risk                                                           | Likelihood | Impact | Mitigation                                                                                  |
+| -------------------------------------------------------------- | ---------- | ------ | ------------------------------------------------------------------------------------------- |
+| Operator writes a rule that silences pages they wanted to hear | M          | H      | `qwen rc routing test`; `routing_decision` SSE event makes suppression visible at runtime.  |
+| Working-device detection thrashes on quick alternation         | L          | L      | Window default 120s; bumpable per-rule.                                                     |
+| Mention pattern false positives                                | M          | L      | Patterns are operator-defined; default is empty. `qwen rc routing test` to dry-run.         |
+| Snooze state file corruption / partial write                   | L          | M      | Atomic write (write to `.tmp`, fsync, rename); on parse failure log + treat as not snoozed. |
+| Hot-reload of `routing.yaml` while events stream               | L          | M      | Debounced fsnotify; rule swap is atomic per-event.                                          |
+| Rule eval cost on hot path                                     | L          | L      | Rules compile once at load; per-event eval is O(rules × matchFields); typical ≤ 20 rules.   |
 
 ## Open questions
 

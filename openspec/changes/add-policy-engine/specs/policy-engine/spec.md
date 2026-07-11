@@ -125,7 +125,7 @@ the cap, the rule SHALL NOT match.
 #### Scenario: Rate-limited rule falls through after cap
 
 - **GIVEN** rule `safe-tests` with `maxPerWindow: { count: 5,
-  windowSec: 60 }`
+windowSec: 60 }`
 - **WHEN** the rule has matched 5 times in the past 60 seconds
 - **AND** the agent issues a 6th matching tool call
 - **THEN** the rule does NOT match
@@ -176,7 +176,7 @@ resolves a tool call without prompting. The data payload SHALL include:
 #### Scenario: Forward compatible across versions
 
 - **GIVEN** a future daemon emits an extra `data.policySource:
-  "remote"` field
+"remote"` field
 - **WHEN** a current-version client receives the frame
 - **THEN** the client SHALL render the known fields and ignore the
   unknown one

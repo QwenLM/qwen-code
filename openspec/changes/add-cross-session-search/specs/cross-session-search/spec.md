@@ -19,7 +19,7 @@ The schema MUST include:
 - `token_session_history(token_id, session_id, first_seen)` for
   permission filtering.
 - `session_meta(session_id, name, ended, first_ts, last_ts,
-  evicted_at)`.
+evicted_at)`.
 
 #### Scenario: Fresh install creates schema
 
@@ -68,7 +68,7 @@ ingesting the same event MUST NOT create duplicate rows.
 - **WHEN** the same event is processed by both the in-process and
   fsnotify paths
 - **THEN** exactly one row exists for that `(session_id,
-  event_id)`
+event_id)`
 
 ### Requirement: Canonicalised text per event kind
 
@@ -78,7 +78,7 @@ deterministic canonicaliser:
 - `user`: the raw user message text.
 - `assistant`: the raw assistant text (no tool-call envelope).
 - `tool` (call): `"<tool name> <args canonicalised to flat
-  space-separated path=value pairs>"`; args truncated at 4 KiB.
+space-separated path=value pairs>"`; args truncated at 4 KiB.
 - `tool_result`: outcome label (e.g., `ok`, `error`) followed by
   the first 4 KiB of stderr/stdout.
 
@@ -88,20 +88,20 @@ runs produces identical `text`.
 #### Scenario: Tool call canonicalisation is stable
 
 - **WHEN** the same tool call `edit_file path=src/x.ts
-  line_start=4 line_end=8` is indexed twice
+line_start=4 line_end=8` is indexed twice
 - **THEN** both `documents.text` values are byte-identical
 
 ### Requirement: Query API
 
 `GET /rc/search` SHALL accept:
 
-| Param      | Type    | Required | Default | Notes                                                   |
-|------------|---------|----------|---------|---------------------------------------------------------|
-| `q`        | string  | yes      | -       | FTS5 query. Max length 1024.                            |
-| `kind`     | enum    | no       | `all`   | `assistant`, `user`, `tool`, `tool_result`, `all`.       |
-| `sessionId`| string  | no       | -       | Restricts to one session.                               |
-| `since`    | ISO ts  | no       | -       | Lower bound on `ts`.                                    |
-| `limit`    | int     | no       | 50      | Max 200.                                                |
+| Param       | Type   | Required | Default | Notes                                              |
+| ----------- | ------ | -------- | ------- | -------------------------------------------------- |
+| `q`         | string | yes      | -       | FTS5 query. Max length 1024.                       |
+| `kind`      | enum   | no       | `all`   | `assistant`, `user`, `tool`, `tool_result`, `all`. |
+| `sessionId` | string | no       | -       | Restricts to one session.                          |
+| `since`     | ISO ts | no       | -       | Lower bound on `ts`.                               |
+| `limit`     | int    | no       | 50      | Max 200.                                           |
 
 The response SHALL be:
 
@@ -316,7 +316,7 @@ SHALL skip if the cap is not exceeded.
 The CLI SHALL expose:
 
 - `qwen rc search query "<q>" [--kind …] [--session …] [--since
-  …] [--limit …] [--json]` — print hits. Default human-readable
+…] [--limit …] [--json]` — print hits. Default human-readable
   table with snippet, session name, kind, relative ts, score.
 - `qwen rc search reindex [<sessionId>] [--detach]` — start a
   reindex; foreground mode renders a progress bar.

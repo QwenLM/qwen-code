@@ -26,23 +26,23 @@ the pattern itself changes.
   env. Holds no daemon code; speaks only the public HTTP+SSE API.
 - **Telegram bot setup procedure documented.** Operator creates a
   bot via BotFather, captures the bot token, runs `qwen rc pair
-  --scope bridge --name telegram` on the workstation, redeems the
+--scope bridge --name telegram` on the workstation, redeems the
   pairing code in the bridge container, and the bridge auto-
   registers via `POST /rc/bridges`.
 - **Chat-to-session binding via `/start <token>`.** The bridge has
   no concept of sessions until a Telegram chat invokes
   `/start <pairing-link>` (deeplinked from a `qwen rc bridges
-  invite --kind telegram` CLI on the workstation). Mapping persisted
+invite --kind telegram` CLI on the workstation). Mapping persisted
   to a small JSON file `~/.qwen/rc/bridges/telegram/chats.json`.
 - **Inline-keyboard rendering for `permission_request`.** Approve /
   Deny buttons; on tap, bridge POSTs `/permission/:requestId` with
   `X-RC-SubActor: telegram:<numeric-user-id>`.
 - **Hint-driven render strategy.** `bridgeHints.recommendedSurface
-  == "deeplink"` → bridge sends `argsSummaryShort` plus a one-button
+== "deeplink"` → bridge sends `argsSummaryShort` plus a one-button
   "Open in web client" deeplink. `inline` → render `argsSummaryShort`
   with Approve/Deny inline keyboard.
 - **Capability declaration on registration:** `supportsActions:
-  true`, `supportsMarkdown: "limited"` (MarkdownV2 with escape
+true`, `supportsMarkdown: "limited"` (MarkdownV2 with escape
   table), `maxMessageBytes: 4096`, `supportsThreads: false`,
   `supportsEdits: true`.
 - **Rate-limit back-pressure.** When the daemon returns `429`, the
@@ -110,7 +110,7 @@ both, restarts the container. Bridge re-pairs and re-binds chats.
   env config, chat binding, troubleshooting (long-poll vs webhook,
   message-size handling, escape gotchas).
 - **CLI helper** (in daemon): `qwen rc bridges invite --kind
-  telegram --session <id>` to produce the `/start` deeplink.
+telegram --session <id>` to produce the `/start` deeplink.
   Technically a bridge-protocol concern; landed here because
   Telegram is the first consumer.
 - **Out of scope:**

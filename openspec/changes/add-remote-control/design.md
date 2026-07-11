@@ -27,6 +27,7 @@ What Stage 1 is missing for a Claude-Code-style remote control UX:
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Start a session on the workstation, drive it from any paired device.
 - Multi-client sync: messages, tool-call proposals, approvals, results
   appear on every attached client.
@@ -38,6 +39,7 @@ What Stage 1 is missing for a Claude-Code-style remote control UX:
 - Browser-first second client — phone is a first-class target.
 
 **Non-Goals:**
+
 - Mode A (in-process TUI daemon). The TUI is a client of the daemon.
 - Self-discovery across the public internet (no relay, no DNS magic).
   Reachability is the operator's problem.
@@ -122,26 +124,26 @@ shape (additive to Stage 1's protocol):
 
 ### Endpoints
 
-| Method | Path                                  | Purpose                              | Auth                |
-|--------|---------------------------------------|--------------------------------------|---------------------|
-| GET    | `/health`                             | liveness                             | none on loopback    |
-| GET    | `/capabilities`                       | feature flags + `remoteControl` block| any token           |
-| POST   | `/rc/pair`                            | mint a one-time pairing code         | owner scope         |
-| POST   | `/rc/pair/redeem`                     | exchange code for client token       | none (code carries) |
-| GET    | `/rc/tokens`                          | list paired clients                  | owner scope         |
-| DELETE | `/rc/tokens/:id`                      | revoke a paired client               | owner scope         |
-| GET    | `/rc/audit?since=…&limit=…`           | audit log query                      | owner+read scopes   |
-| POST   | `/session`                            | create or attach session             | session scope       |
-| GET    | `/workspace/:cwd/sessions`            | list sessions for workspace          | session scope       |
-| POST   | `/session/:id/prompt`                 | send user prompt                     | write scope         |
-| POST   | `/session/:id/cancel`                 | cancel active prompt                 | write scope         |
-| POST   | `/session/:id/model`                  | switch model                         | write scope         |
-| GET    | `/session/:id/events`                 | SSE event stream                     | read scope          |
-| GET    | `/session/:id/ws`                     | optional WS upgrade (same events)    | read scope          |
-| POST   | `/permission/:requestId`              | vote on tool approval                | approve scope       |
-| GET    | `/files?glob=…`                       | read-only file enumeration for @-autocomplete | read scope |
-| GET    | `/files/content?path=…`               | read-only file content for diff/view | read scope          |
-| GET    | `/ui/*`                               | static web client                    | any token           |
+| Method | Path                        | Purpose                                       | Auth                |
+| ------ | --------------------------- | --------------------------------------------- | ------------------- |
+| GET    | `/health`                   | liveness                                      | none on loopback    |
+| GET    | `/capabilities`             | feature flags + `remoteControl` block         | any token           |
+| POST   | `/rc/pair`                  | mint a one-time pairing code                  | owner scope         |
+| POST   | `/rc/pair/redeem`           | exchange code for client token                | none (code carries) |
+| GET    | `/rc/tokens`                | list paired clients                           | owner scope         |
+| DELETE | `/rc/tokens/:id`            | revoke a paired client                        | owner scope         |
+| GET    | `/rc/audit?since=…&limit=…` | audit log query                               | owner+read scopes   |
+| POST   | `/session`                  | create or attach session                      | session scope       |
+| GET    | `/workspace/:cwd/sessions`  | list sessions for workspace                   | session scope       |
+| POST   | `/session/:id/prompt`       | send user prompt                              | write scope         |
+| POST   | `/session/:id/cancel`       | cancel active prompt                          | write scope         |
+| POST   | `/session/:id/model`        | switch model                                  | write scope         |
+| GET    | `/session/:id/events`       | SSE event stream                              | read scope          |
+| GET    | `/session/:id/ws`           | optional WS upgrade (same events)             | read scope          |
+| POST   | `/permission/:requestId`    | vote on tool approval                         | approve scope       |
+| GET    | `/files?glob=…`             | read-only file enumeration for @-autocomplete | read scope          |
+| GET    | `/files/content?path=…`     | read-only file content for diff/view          | read scope          |
+| GET    | `/ui/*`                     | static web client                             | any token           |
 
 Stage 1's existing endpoints retained verbatim where possible to keep the
 TS SDK's `DaemonClient` source-compatible.
@@ -187,8 +189,8 @@ with a 426 Upgrade Required.
    on stdout and (optionally) as a QR for phone scanning.
 
 2. New client opens the daemon URL, posts the code: `POST /rc/pair/redeem
-   { code, name?, userAgent }` → `{ tokenId, token, scopes, expiresAt
-   }`. Token is base64url(32 random bytes), prefixed `qwk_`. Default
+{ code, name?, userAgent }` → `{ tokenId, token, scopes, expiresAt
+}`. Token is base64url(32 random bytes), prefixed `qwk_`. Default
    lifetime 30 days, sliding renewal on use.
 
 3. Client stores `token` and sends `Authorization: Bearer <token>` on
@@ -197,12 +199,12 @@ with a 426 Upgrade Required.
 
 ### Scopes
 
-| Scope    | Permissions                                                 |
-|----------|-------------------------------------------------------------|
-| owner    | All. Mint/list/revoke tokens. Read audit. Implies write+read+approve. |
-| write    | Send prompts, cancel, switch model. Implies read.           |
-| approve  | Vote on permission requests. Implies read.                  |
-| read     | Subscribe to events, read files for view, list sessions.    |
+| Scope   | Permissions                                                           |
+| ------- | --------------------------------------------------------------------- |
+| owner   | All. Mint/list/revoke tokens. Read audit. Implies write+read+approve. |
+| write   | Send prompts, cancel, switch model. Implies read.                     |
+| approve | Vote on permission requests. Implies read.                            |
+| read    | Subscribe to events, read files for view, list sessions.              |
 
 Owner scope is bootstrapped exactly once at daemon startup: the daemon
 prints a one-time `owner-bootstrap` code to stdout (or to a file
@@ -224,17 +226,17 @@ rotation. Retention default 30 days; configurable.
 
 ### Threat model
 
-| Attacker                           | Capability                              | Mitigation                                                                                                          |
-|------------------------------------|------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
-| Network passive (no TLS terminator)| Read traffic                             | Operator MUST terminate TLS upstream. Daemon SHOULD refuse non-loopback bind without `--tls` or a documented opt-out. |
-| Network active (proxy in path)     | Modify traffic                           | TLS as above. Tokens are bearer-only, no replay defense beyond TLS; reauthentication after revocation is fast.      |
-| LAN attacker, no token             | Probe daemon                             | All endpoints except `/health` on loopback require bearer. CORS denies unrecognized origins.                        |
-| Bootstrap code leak before first use| Become owner                            | Bootstrap code TTL 5 min (configurable); printed to console + restrictive-mode file only; first-use closes the path. |
-| Pairing code leak in 90 s window   | Become a paired client of stated scope   | Codes single-use; default TTL 90 s; owner-scope codes require an interactive confirm at the daemon's controlling tty if `--strict-pairing`. |
-| Long-lived token leak              | Drive sessions until revoked             | Per-client revocation (`DELETE /rc/tokens/:id`); audit log records what the token did; sliding renewal stops on revoke. |
-| Compromised paired client device   | Same as token leak                       | Revoke. Audit log gives blast-radius bound.                                                                          |
-| Local process on workstation       | Read tokens from disk                    | Tokens stored hashed (Argon2id) — daemon never persists plaintext after issue. Clients persist their own token in OS-appropriate storage. |
-| Operator (daemon host)             | All. Out of scope.                       | The daemon trusts the host; this is by design.                                                                       |
+| Attacker                             | Capability                             | Mitigation                                                                                                                                  |
+| ------------------------------------ | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Network passive (no TLS terminator)  | Read traffic                           | Operator MUST terminate TLS upstream. Daemon SHOULD refuse non-loopback bind without `--tls` or a documented opt-out.                       |
+| Network active (proxy in path)       | Modify traffic                         | TLS as above. Tokens are bearer-only, no replay defense beyond TLS; reauthentication after revocation is fast.                              |
+| LAN attacker, no token               | Probe daemon                           | All endpoints except `/health` on loopback require bearer. CORS denies unrecognized origins.                                                |
+| Bootstrap code leak before first use | Become owner                           | Bootstrap code TTL 5 min (configurable); printed to console + restrictive-mode file only; first-use closes the path.                        |
+| Pairing code leak in 90 s window     | Become a paired client of stated scope | Codes single-use; default TTL 90 s; owner-scope codes require an interactive confirm at the daemon's controlling tty if `--strict-pairing`. |
+| Long-lived token leak                | Drive sessions until revoked           | Per-client revocation (`DELETE /rc/tokens/:id`); audit log records what the token did; sliding renewal stops on revoke.                     |
+| Compromised paired client device     | Same as token leak                     | Revoke. Audit log gives blast-radius bound.                                                                                                 |
+| Local process on workstation         | Read tokens from disk                  | Tokens stored hashed (Argon2id) — daemon never persists plaintext after issue. Clients persist their own token in OS-appropriate storage.   |
+| Operator (daemon host)               | All. Out of scope.                     | The daemon trusts the host; this is by design.                                                                                              |
 
 ### What leaks if `qwk_*` leaks
 
@@ -272,20 +274,20 @@ rotation. Retention default 30 days; configurable.
 Reconnection:
 
 - Client reconnects to `GET /session/:id/events` with `Last-Event-ID:
-  <hex>`. Daemon replays from in-memory ring if present; if id is older
+<hex>`. Daemon replays from in-memory ring if present; if id is older
   than the ring's earliest, falls back to WAL replay; if older than WAL
   horizon, returns `412 Precondition Failed` and the client begins fresh
   with a `replay_truncated` event.
 
 ## Persistence
 
-| File                                                  | Format       | Purpose                                | Retention                       |
-|-------------------------------------------------------|--------------|----------------------------------------|---------------------------------|
-| `~/.qwen/projects/<cwd>/chats/<sid>.jsonl`            | JSONL        | Canonical agent transcript (Stage 1)   | Inherits qwen-code default      |
-| `~/.qwen/rc/wal/<sid>.log`                            | Length-prefixed CBOR or JSONL | Durable SSE event ring | Bounded: max 10 k events or 24 h, whichever first |
-| `~/.qwen/rc/tokens.db`                                | SQLite       | Token store (hashed), pairing codes    | Until revoke / expiry           |
-| `~/.qwen/rc/audit.log` (daily-rotated)                | JSONL        | Audit events                           | 30 days, configurable           |
-| `~/.qwen/rc/config.toml`                              | TOML         | Daemon CORS allowlist, scopes, GC config | Persistent                    |
+| File                                       | Format                        | Purpose                                  | Retention                                         |
+| ------------------------------------------ | ----------------------------- | ---------------------------------------- | ------------------------------------------------- |
+| `~/.qwen/projects/<cwd>/chats/<sid>.jsonl` | JSONL                         | Canonical agent transcript (Stage 1)     | Inherits qwen-code default                        |
+| `~/.qwen/rc/wal/<sid>.log`                 | Length-prefixed CBOR or JSONL | Durable SSE event ring                   | Bounded: max 10 k events or 24 h, whichever first |
+| `~/.qwen/rc/tokens.db`                     | SQLite                        | Token store (hashed), pairing codes      | Until revoke / expiry                             |
+| `~/.qwen/rc/audit.log` (daily-rotated)     | JSONL                         | Audit events                             | 30 days, configurable                             |
+| `~/.qwen/rc/config.toml`                   | TOML                          | Daemon CORS allowlist, scopes, GC config | Persistent                                        |
 
 SQLite is chosen for `tokens.db` for transactional safety with concurrent
 pairing flows; everything else is append-friendly flat files.
@@ -377,8 +379,9 @@ clients (since the browser EventSource API has no header customization).
 
 **Why**: Tokens in URLs leak via referrer headers, proxy logs, browser
 history, server access logs. The cost of avoiding this is using `fetch`
-+ a streaming reader (or the `EventSource` polyfill with header support)
-in the web client, which is well-trodden ground.
+
+- a streaming reader (or the `EventSource` polyfill with header support)
+  in the web client, which is well-trodden ground.
 
 **Cost**: Web client cannot use the native `EventSource` class as-is.
 Mitigation: ship a small `fetch`-based SSE reader (~80 LoC).
@@ -400,16 +403,16 @@ change.
 
 ## Risks / Trade-offs
 
-| Risk                                            | Likelihood | Impact | Mitigation                                                                                              |
-|-------------------------------------------------|------------|--------|---------------------------------------------------------------------------------------------------------|
-| SSE through reverse proxy buffers / fails       | M          | H      | Phase 1 test plan exercises Caddy + Nginx + Cloudflare Tunnel against a long-running session before shipping. WS fallback in Phase 4 covers residual cases. |
-| Pairing UX clunky on phone (typing 9 chars)     | M          | M      | QR code path on TUI side; web pairing page can deep-link from QR scan.                                  |
-| Upstream `qwen serve` API changes mid-build     | M          | M      | Pin to a known Stage 1 commit during Phase 1; track upstream issue #4175 (Mode B roadmap) and #4156 (Mode A) for divergence. |
-| Web client supply-chain bloat                   | L          | M      | Vanilla TS, no framework, single build step (esbuild). No npm dep on React/Vue.                          |
-| Token store migration when scopes evolve        | L          | M      | SQLite with a `schema_version` row; migrations are append-only.                                          |
-| WAL growth on long sessions                     | M          | M      | Strict bounds; rotate when full; old segments deleted on horizon roll.                                   |
-| Approval race (two clients vote near-simultaneously) | L     | L      | Stage 1's first-responder-wins handles this; losers get a 404 and re-render with the resolved state.    |
-| Terminal client diverges from upstream TUI      | M          | M      | Lift shared rendering into `packages/cli/src/ui/` so both upstream TUI and `qwen rc` consume it.        |
+| Risk                                                 | Likelihood | Impact | Mitigation                                                                                                                                                  |
+| ---------------------------------------------------- | ---------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SSE through reverse proxy buffers / fails            | M          | H      | Phase 1 test plan exercises Caddy + Nginx + Cloudflare Tunnel against a long-running session before shipping. WS fallback in Phase 4 covers residual cases. |
+| Pairing UX clunky on phone (typing 9 chars)          | M          | M      | QR code path on TUI side; web pairing page can deep-link from QR scan.                                                                                      |
+| Upstream `qwen serve` API changes mid-build          | M          | M      | Pin to a known Stage 1 commit during Phase 1; track upstream issue #4175 (Mode B roadmap) and #4156 (Mode A) for divergence.                                |
+| Web client supply-chain bloat                        | L          | M      | Vanilla TS, no framework, single build step (esbuild). No npm dep on React/Vue.                                                                             |
+| Token store migration when scopes evolve             | L          | M      | SQLite with a `schema_version` row; migrations are append-only.                                                                                             |
+| WAL growth on long sessions                          | M          | M      | Strict bounds; rotate when full; old segments deleted on horizon roll.                                                                                      |
+| Approval race (two clients vote near-simultaneously) | L          | L      | Stage 1's first-responder-wins handles this; losers get a 404 and re-render with the resolved state.                                                        |
+| Terminal client diverges from upstream TUI           | M          | M      | Lift shared rendering into `packages/cli/src/ui/` so both upstream TUI and `qwen rc` consume it.                                                            |
 
 ## Deferred decisions
 

@@ -48,7 +48,7 @@ Route tests (the spec scenario as a real round-trip, per advisor):
   304, empty body (`await res.text() === ''`), header echoed on the 304.
 - Quoted form: `If-None-Match: "<rev>"` → 304.
 - Negative: modify a command file between GETs → 200 + a _different_ revision.
-- Scope-fold: a SESSION_READ-only caller and a WRITE caller get _different_
+- Scope-fold: a SESSION*READ-only caller and a WRITE caller get \_different*
   revisions for the same registry (invocableByYou differs → body differs).
 
 ## Verify (repo root)

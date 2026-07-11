@@ -42,6 +42,7 @@ unaware of each other. The client's responsibilities are:
   daemons by name, URL, and a token-storage key (a localStorage
   key namespace, since each daemon has its own paired token).
   Example:
+
   ```toml
   [[daemon]]
   name = "workstation-1"
@@ -54,6 +55,7 @@ unaware of each other. The client's responsibilities are:
   url  = "https://qwen.local:4171"
   tokenStorageKey = "qwen-rc:qwen.local:4171:token"
   ```
+
 - **Web client daemon switcher.** Header dropdown listing each
   daemon with a coloured dot (green = healthy, yellow = degraded,
   red = unreachable / 401). Switching changes which daemon's
@@ -70,7 +72,7 @@ unaware of each other. The client's responsibilities are:
   client-side.
 - **Terminal CLI.** `qwen rc attach --daemon <name>` selects a
   specific daemon. `qwen rc daemons {list, add, remove,
-  set-default, health}` manages the registry. Operations like
+set-default, health}` manages the registry. Operations like
   `qwen rc share` operate against the currently-active daemon
   unless `--daemon` is passed.
 - **Per-daemon push.** Each daemon's webpush subscription remains
@@ -141,7 +143,7 @@ add daemons you trust to run code on your behalf."
   for the terminal client; for the web client, a JSON shape in
   `localStorage["qwen-rc:clients"]` synced from the TOML when
   served by the daemon as a bootstrap payload (`/ui/clients-
-  manifest.json`, owner-only).
+manifest.json`, owner-only).
 - **Push**: each daemon issues its own webpush keys; the web
   client subscribes to each separately. Notification routing uses
   the existing per-daemon webpush flow (from any prior

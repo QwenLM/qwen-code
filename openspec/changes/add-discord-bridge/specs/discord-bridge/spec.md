@@ -57,8 +57,8 @@ with:
     "supportsMarkdown": "limited",
     "maxMessageBytes": 2000,
     "supportsThreads": true,
-    "supportsEdits": true
-  }
+    "supportsEdits": true,
+  },
 }
 ```
 
@@ -100,7 +100,7 @@ A Discord channel SHALL NOT be bound to any qwen session by default.
 Binding occurs when:
 
 1. An operator runs `qwen rc bridges invite --kind discord
-   --session <id>` on the workstation, producing a one-time invite
+--session <id>` on the workstation, producing a one-time invite
    token.
 2. A guild member runs `/qwen attach <token>` in the desired
    channel.
@@ -139,7 +139,7 @@ SHALL:
 1. Resolve sub-actor as `discord:<author.id>` (snowflake).
 2. Drop the message if the sub-actor is in the local ban cache.
 3. POST `/session/<sessionId>/prompt` with body `{ prompt: <content>
-   }` and headers `Authorization: Bearer <bridge-token>` and
+}` and headers `Authorization: Bearer <bridge-token>` and
    `X-RC-SubActor: discord:<author.id>`.
 4. On daemon `429`, send an ephemeral follow-up to the author
    ("Slow down, try again in `<Retry-After>` seconds").
@@ -168,10 +168,10 @@ username, global name, or any mutable identifier.
 #### Scenario: Snowflake used even when username present
 
 - **GIVEN** a Discord user with `id: 111122223333444455, username:
-  "evan"`
+"evan"`
 - **WHEN** they post any message
 - **THEN** the daemon request carries `X-RC-SubActor:
-  discord:111122223333444455`
+discord:111122223333444455`
 
 ### Requirement: SSE consumer per binding
 
@@ -248,7 +248,7 @@ message with components branched on `bridgeHints.recommendedSurface`:
 - **`deeplink`**: `content` = `bridgeHints.argsSummaryShort`;
   `components` = one ActionRow with one Link Button labelled
   `Open in web client`, `url:
-  ${QWEN_DAEMON_URL}/ui/permission/<requestId>`.
+${QWEN_DAEMON_URL}/ui/permission/<requestId>`.
 
 The bridge SHALL NOT render `bridgeHints.argsSummaryFull` in
 `deeplink` mode.
@@ -257,7 +257,7 @@ The bridge SHALL NOT render `bridgeHints.argsSummaryFull` in
 
 - **GIVEN** a `permission_request` with
   `bridgeHints.recommendedSurface: "inline"`, `argsSummaryShort:
-  "Edit src/auth.ts"`, `requestId: "req_xyz"`
+"Edit src/auth.ts"`, `requestId: "req_xyz"`
 - **WHEN** the bridge renders it
 - **THEN** the Discord message has content "Edit src/auth.ts"
 - **AND** the components contain exactly two buttons with
@@ -277,8 +277,8 @@ When a Discord user clicks an Approve or Deny button:
 
 1. The bridge SHALL defer the interaction reply (ephemeral).
 2. The bridge SHALL POST `/permission/<requestId>` with body `{
-   vote: "approve" | "deny" }` and `X-RC-SubActor:
-   discord:<member.user.id>`.
+vote: "approve" | "deny" }` and `X-RC-SubActor:
+discord:<member.user.id>`.
 3. The bridge SHALL edit the deferred interaction reply with "You
    voted `<approve|deny>`" or with the daemon's error message.
 
@@ -288,9 +288,9 @@ When a Discord user clicks an Approve or Deny button:
   requestId `req_xyz`
 - **WHEN** user `111122223333` clicks Approve
 - **THEN** the bridge POSTs `/permission/req_xyz` with `vote:
-  "approve"`
+"approve"`
 - **AND** the request carries `X-RC-SubActor:
-  discord:111122223333`
+discord:111122223333`
 
 #### Scenario: Voter sees private confirmation
 

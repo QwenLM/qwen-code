@@ -94,12 +94,12 @@ subsequent reads MUST NOT expose it.
 
 - **GIVEN** session `S` exists in the daemon's workspace
 - **WHEN** an owner posts `{ sessionId: "S", scope: "view", ttlSec:
-  3600, maxUses: 5, label: "oncall-bob" }`
+3600, maxUses: 5, label: "oncall-bob" }`
 - **THEN** the response includes
   `url: "https://D/ui/share/qwk_…"`
 - **AND** the response includes `expiresAt` 1 hour ahead
 - **AND** the audit log records `share.create` with `share_label:
-  "oncall-bob"` and `parent_token_id`
+"oncall-bob"` and `parent_token_id`
 
 #### Scenario: TTL above max is clamped with a warning
 
@@ -168,7 +168,7 @@ cookie OR with a cookie unknown for this token, the daemon SHALL
 atomically:
 
 1. Execute `UPDATE tokens SET uses = uses + 1 WHERE id = :id AND
-   uses < max_uses AND revoked_at IS NULL AND expires_at > :now`.
+uses < max_uses AND revoked_at IS NULL AND expires_at > :now`.
 2. If rowcount is 0 → respond `410 Gone` with code
    `share_exhausted` or `share_expired` or `share_revoked`
    depending on which guard failed.
@@ -318,8 +318,8 @@ on the affected session.
 The CLI SHALL expose the subcommands:
 
 - `qwen rc share create <sessionId> [--scope view|approve]
-  [--ttl <duration>] [--max-uses N] [--label <name>]
-  [--copy-to-clipboard]` — mint a share. Prints the URL once.
+[--ttl <duration>] [--max-uses N] [--label <name>]
+[--copy-to-clipboard]` — mint a share. Prints the URL once.
 - `qwen rc share list [--session <sid>]` — table of active shares
   with id, sessionId, scope, label, uses, time remaining,
   lastUsedAt.
@@ -343,7 +343,7 @@ before printing the URL.
 #### Scenario: List shows uses and remaining time
 
 - **GIVEN** an active share with `uses=2, maxUses=5,
-  expiresAt = now+30m`
+expiresAt = now+30m`
 - **WHEN** the operator runs `qwen rc share list`
 - **THEN** that row shows `2/5` and a remaining-time column
   `~30m`

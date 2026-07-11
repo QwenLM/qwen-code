@@ -21,6 +21,7 @@ about what we advertise.
 ## Goals / Non-Goals
 
 **Goals:**
+
 - One-command LAN discovery from a paired or unpaired terminal
   client.
 - Conservative TXT records (no secrets, no paths).
@@ -29,6 +30,7 @@ about what we advertise.
   not haunt the LAN.
 
 **Non-Goals:**
+
 - WAN discovery.
 - Browser discovery (no API).
 - Identity. Advertisements are unauthenticated; the pairing flow is
@@ -80,12 +82,12 @@ Print table sorted by host then port
 
 Strict schema, expressed as comma-separated `key=value` pairs:
 
-| Key           | Value example          | Notes                                              |
-|---------------|------------------------|----------------------------------------------------|
-| `version`     | `1`                    | The `remoteControl.version` advertised on `/capabilities`. |
-| `name`        | `kitchen-workstation`  | Operator-visible display name. Default = `<hostname>-<workspace-basename>`. |
-| `workspace`   | `app`                  | Basename only, never absolute path. Operator can override with `--mdns-workspace-name`. |
-| `tlsRequired` | `true` / `false`       | `true` if the daemon refuses non-TLS; `false` if it allows plain HTTP. |
+| Key           | Value example         | Notes                                                                                   |
+| ------------- | --------------------- | --------------------------------------------------------------------------------------- |
+| `version`     | `1`                   | The `remoteControl.version` advertised on `/capabilities`.                              |
+| `name`        | `kitchen-workstation` | Operator-visible display name. Default = `<hostname>-<workspace-basename>`.             |
+| `workspace`   | `app`                 | Basename only, never absolute path. Operator can override with `--mdns-workspace-name`. |
+| `tlsRequired` | `true` / `false`      | `true` if the daemon refuses non-TLS; `false` if it allows plain HTTP.                  |
 
 NOT advertised:
 
@@ -222,30 +224,30 @@ them, then visit. Acceptable.
 
 ## Threat model
 
-| Attacker                          | Capability                              | Mitigation                                                                                |
-|-----------------------------------|------------------------------------------|-------------------------------------------------------------------------------------------|
-| LAN observer                      | See advertised TXT records              | TXT records carry only non-sensitive metadata; operator can disable per daemon.            |
-| LAN observer                      | Learn the daemon's IP/port              | mDNS is broadcast; this is the inherent design. Tokens still required to actually do anything. |
-| LAN attacker spoofs an `_qwen-rc._tcp.local.` service | Lure a user to a fake daemon | Clients authenticate via the pairing flow; pairing codes are short-lived and the user types them. A spoof daemon cannot satisfy that round-trip without owner cooperation. |
-| Hostile co-resident on host       | Read sigterm timing to learn presence   | Out of scope (already had root on the host).                                              |
+| Attacker                                              | Capability                            | Mitigation                                                                                                                                                                 |
+| ----------------------------------------------------- | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| LAN observer                                          | See advertised TXT records            | TXT records carry only non-sensitive metadata; operator can disable per daemon.                                                                                            |
+| LAN observer                                          | Learn the daemon's IP/port            | mDNS is broadcast; this is the inherent design. Tokens still required to actually do anything.                                                                             |
+| LAN attacker spoofs an `_qwen-rc._tcp.local.` service | Lure a user to a fake daemon          | Clients authenticate via the pairing flow; pairing codes are short-lived and the user types them. A spoof daemon cannot satisfy that round-trip without owner cooperation. |
+| Hostile co-resident on host                           | Read sigterm timing to learn presence | Out of scope (already had root on the host).                                                                                                                               |
 
 ## Risks
 
-| Risk                                            | Likelihood | Impact | Mitigation                                                                |
-|-------------------------------------------------|------------|--------|---------------------------------------------------------------------------|
-| Multicast disabled on operator's network (some corporate WiFi) | M | L | Documented. Browse just returns empty; manual `--host` still works.       |
-| Multiple network interfaces produce duplicate advertisements | M | L | `bonjour-service` handles this in default mode; operator can pin to one interface via library option. |
-| Library churn / abandonment                     | L          | M      | Acceptance criteria allow swap to `multicast-dns`; thin wrapper module.   |
-| IPv6-only LAN segments                          | L          | M      | `bonjour-service` supports IPv6 by default; tested in Phase 2.            |
-| Operator forgets to override workspace name; basename leaks | M  | L | Documented in startup banner: "Advertising `workspace=foo`; use --no-mdns to disable." |
+| Risk                                                           | Likelihood | Impact | Mitigation                                                                                            |
+| -------------------------------------------------------------- | ---------- | ------ | ----------------------------------------------------------------------------------------------------- |
+| Multicast disabled on operator's network (some corporate WiFi) | M          | L      | Documented. Browse just returns empty; manual `--host` still works.                                   |
+| Multiple network interfaces produce duplicate advertisements   | M          | L      | `bonjour-service` handles this in default mode; operator can pin to one interface via library option. |
+| Library churn / abandonment                                    | L          | M      | Acceptance criteria allow swap to `multicast-dns`; thin wrapper module.                               |
+| IPv6-only LAN segments                                         | L          | M      | `bonjour-service` supports IPv6 by default; tested in Phase 2.                                        |
+| Operator forgets to override workspace name; basename leaks    | M          | L      | Documented in startup banner: "Advertising `workspace=foo`; use --no-mdns to disable."                |
 
 ## Open questions
 
 1. **Should the daemon log the advertisement on startup so the
    operator sees what's being broadcast?** Leaning yes —
    transparency by default. A line like `mDNS: advertising
-   "kitchen-workstation-app" at <ip>:7070 (use --no-mdns to
-   disable)`.
+"kitchen-workstation-app" at <ip>:7070 (use --no-mdns to
+disable)`.
 
 2. **Default `--mdns-workspace-name` for repos under `~/Downloads`
    or other generic paths?** Probably no auto-handling — operators

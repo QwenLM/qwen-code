@@ -11,7 +11,7 @@ fields:
 enabled: true
 idleAfterSec: 60
 maxSuggestionsPerHour: 5
-syntheticPrompt: "<operator-tunable prompt text>"
+syntheticPrompt: '<operator-tunable prompt text>'
 ```
 
 The daemon SHALL watch the file for changes with a 250 ms debounce.
@@ -57,7 +57,7 @@ firing immediately upon any real (non-synthetic) prompt arrival.
 - **GIVEN** session `S` with idle suggestions enabled and
   `idleAfterSec: 60`
 - **WHEN** the agent emits `session_update` with `stopReason:
-  end_turn`
+end_turn`
 - **THEN** the daemon schedules an idle firing 60 s later
 
 #### Scenario: User prompt cancels
@@ -148,7 +148,7 @@ Otherwise, emit an `idle_suggestions` SSE event.
 
 #### Scenario: Code-fenced JSON parsed
 
-- **GIVEN** the model returns ```` ```json\n["a", "b", "c"]\n``` ````
+- **GIVEN** the model returns ` ```json\n["a", "b", "c"]\n``` `
 - **WHEN** the parser runs
 - **THEN** the resulting suggestions are `["a", "b", "c"]`
 
@@ -283,8 +283,8 @@ first, second, and third chip respectively.
   "idleSuggestions": {
     "enabled": true,
     "idleAfterSec": 60,
-    "maxSuggestionsPerHour": 5
-  }
+    "maxSuggestionsPerHour": 5,
+  },
 }
 ```
 

@@ -180,7 +180,7 @@ warning at every startup and at every pairing-code mint.
 #### Scenario: Explicit opt-out is loud
 
 - **WHEN** the daemon starts with `--hostname 0.0.0.0
-  --insecure-no-tls`
+--insecure-no-tls`
 - **THEN** stdout includes a banner warning about plaintext bearer
   exposure
 - **AND** every `/rc/pair` response includes

@@ -46,8 +46,8 @@ with:
     "supportsMarkdown": "full",
     "maxMessageBytes": 65536,
     "supportsThreads": true,
-    "supportsEdits": true
-  }
+    "supportsEdits": true,
+  },
 }
 ```
 
@@ -102,12 +102,12 @@ A Matrix room SHALL NOT be bound to any qwen session by default.
 Binding occurs when:
 
 1. An operator generates an invite token via `qwen rc bridges invite
-   --kind matrix --session <id>`.
+--kind matrix --session <id>`.
 2. The bot is invited to the target room and auto-joins.
 3. A room member with power level ≥ 50 posts `!qwen attach
-   <token>` (or `<MATRIX_COMMAND_PREFIX> attach <token>`).
+<token>` (or `<MATRIX_COMMAND_PREFIX> attach <token>`).
 4. The bridge redeems the token; on success persists `(roomId,
-   sessionId)` to `$QWEN_BRIDGE_STATE_DIR/rooms.json` using
+sessionId)` to `$QWEN_BRIDGE_STATE_DIR/rooms.json` using
    atomic-replace writes.
 
 Commands from members with power level < 50 SHALL be rejected with
@@ -116,7 +116,7 @@ a reply "Permission denied: attach requires power level ≥ 50".
 #### Scenario: Moderator-issued attach binds room
 
 - **GIVEN** an invite token `inv_abc` AND a room where `@evan:
-  home.example.com` has power level 50
+home.example.com` has power level 50
 - **WHEN** `@evan:home.example.com` posts `!qwen attach inv_abc`
 - **THEN** the bridge calls `POST /rc/bridges/:id/invite/redeem`
 - **AND** on `200 OK` persists the binding
@@ -146,7 +146,7 @@ sender is not the bot AND not in the local ban cache, the bridge
 SHALL:
 
 1. POST `/session/<sessionId>/prompt` with body `{ prompt: <body>
-   }` and `X-RC-SubActor: matrix:<sender>` (sender is the
+}` and `X-RC-SubActor: matrix:<sender>` (sender is the
    fully-qualified MXID from `event.sender`).
 2. On daemon 429, send a room reply "Slow down, try again in
    `<Retry-After>` seconds".
@@ -158,7 +158,7 @@ SHALL:
 - **GIVEN** room `!abc:home.example.com` bound to `sess_xyz`
 - **WHEN** `@evan:home.example.com` posts "run the tests"
 - **THEN** the bridge POSTs `/session/sess_xyz/prompt` with `prompt:
-  "run the tests"`
+"run the tests"`
 - **AND** carries `X-RC-SubActor: matrix:@evan:home.example.com`
 
 #### Scenario: Bot's own messages are not re-posted
@@ -179,7 +179,7 @@ homeserver suffix or use a localpart-only identifier.
   in a bound room
 - **WHEN** they post a message
 - **THEN** the daemon request carries `X-RC-SubActor:
-  matrix:@alice:other-server.org` (NOT `matrix:@alice` or
+matrix:@alice:other-server.org` (NOT `matrix:@alice` or
   `matrix:alice`)
 
 ### Requirement: SSE consumer per binding
@@ -214,7 +214,7 @@ exceed 65536 bytes.
 - **THEN** the sent event has `body` containing the original
   characters
 - **AND** `formatted_body` contains `<strong>bold</strong> and
-  <code>code</code>`
+<code>code</code>`
 
 ### Requirement: Threads on long streams via m.thread
 
@@ -252,8 +252,8 @@ in an in-memory map for later editing.
 #### Scenario: Inline surface invites reactions
 
 - **GIVEN** a `permission_request` with `recommendedSurface:
-  "inline"`, `argsSummaryShort: "Edit auth.ts"`, `requestId:
-  "req_xyz"`
+"inline"`, `argsSummaryShort: "Edit auth.ts"`, `requestId:
+"req_xyz"`
 - **WHEN** the bridge renders it
 - **THEN** the event body contains "Edit auth.ts"
 - **AND** the event body contains "React 👍 to approve, 👎 to deny"
@@ -262,7 +262,7 @@ in an in-memory map for later editing.
 #### Scenario: Deeplink surface omits reaction prompt
 
 - **GIVEN** a `permission_request` with `recommendedSurface:
-  "deeplink"`
+"deeplink"`
 - **WHEN** the bridge renders it
 - **THEN** the event body does NOT contain "React 👍"
 
@@ -291,9 +291,9 @@ matrix:<sender>`.
 - **WHEN** `@evan:home.example.com` posts an `m.reaction` event
   with `m.relates_to.event_id: "m_42"` AND `key: "👍"`
 - **THEN** the bridge POSTs `/permission/req_xyz` with `vote:
-  "approve"`
+"approve"`
 - **AND** the request carries `X-RC-SubActor:
-  matrix:@evan:home.example.com`
+matrix:@evan:home.example.com`
 
 #### Scenario: Other reactions ignored
 

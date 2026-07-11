@@ -217,6 +217,7 @@ subscription, the daemon SHALL:
 
 The payload schema SHALL mirror `add-webpush-notifications`
 payload, with iOS-specific fields populated:
+
 - `aps.alert.title` from `summary`
 - `aps.alert.body` from a short subtitle
 - `aps.category` from `kind`
@@ -343,7 +344,7 @@ block:
   "bridgeVersion": 1,
   "apnsEnabled": true,
   "supportedPlatforms": ["android-twa", "ios-wkwebview"],
-  "minShellVersion": { "android": "1.0.0", "ios": "1.0.0" }
+  "minShellVersion": { "android": "1.0.0", "ios": "1.0.0" },
 }
 ```
 

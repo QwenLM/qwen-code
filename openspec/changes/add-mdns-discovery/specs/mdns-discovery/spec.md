@@ -89,7 +89,7 @@ same character constraints (1–63 ASCII, no `/` or `\`).
 #### Scenario: Override applies
 
 - **GIVEN** `qwen serve --host 0.0.0.0
-  --mdns-workspace-name app-public`
+--mdns-workspace-name app-public`
 - **WHEN** the advertisement is registered
 - **THEN** the TXT `workspace` value is `app-public` regardless of
   the actual cwd basename

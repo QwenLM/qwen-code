@@ -31,6 +31,7 @@ priced row.
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Persist every usage emission with attribution sufficient to answer
   "who, when, which model, how much" at the per-request granularity.
 - Render running cost live in the chat surfaces without an extra
@@ -40,6 +41,7 @@ priced row.
   lesser scopes see only their own attribution.
 
 **Non-Goals:**
+
 - Enforcement. This change neither caps nor refuses anything based on
   cost. A follow-up change (`add-cost-caps`) is anticipated.
 - Re-pricing past data when the rate table changes. Each row stores
@@ -97,13 +99,13 @@ trivial.
 ```yaml
 # All prices in cents per million tokens. Currency is the operator's
 # choice; UI labels use the `currencyLabel` value verbatim.
-currencyLabel: "USD"
-defaultModelServiceId: "qwen-cloud"
+currencyLabel: 'USD'
+defaultModelServiceId: 'qwen-cloud'
 
 models:
   - modelServiceId: qwen-cloud
     modelId: qwen3-coder-plus
-    inputPerMTok: 200          # $2.00 / M tokens
+    inputPerMTok: 200 # $2.00 / M tokens
     outputPerMTok: 800
     cachedReadPerMTok: 20
 
@@ -121,6 +123,7 @@ models:
 ```
 
 The loader:
+
 - watches the file for changes (debounced 250 ms, same pattern as
   `add-policy-engine`'s policy file watcher)
 - on parse error, keeps the previous good table in memory and emits
@@ -193,6 +196,7 @@ Response:
 ```
 
 Scope filtering:
+
 - `owner` sees all rows.
 - `write` / `approve` / `read` see only rows where
   `attribution_token_id = self`.
@@ -279,22 +283,22 @@ session has been. Acceptable — they can ask the owner.
 
 ## Threat model
 
-| Attacker                  | Capability                              | Mitigation                                                                                |
-|---------------------------|------------------------------------------|-------------------------------------------------------------------------------------------|
-| read-scope token leaks    | See own attribution (zero rows)          | By construction read-scope never originates priced events; query returns empty.            |
-| bridge token leaks        | See all rows attributed to that bridge   | Owner revokes bridge token; sub-actor data remains in DB for forensics.                    |
-| rate table tampering on host | Inflate or deflate recorded costs     | Out of scope. Daemon trusts the host filesystem (consistent with `add-remote-control` D1). |
-| Sensitive metadata in sub_actor | sub-actor ids could be PII         | sub-actor is already in audit log (see `add-bridge-protocol`); same scope rules apply.     |
+| Attacker                        | Capability                             | Mitigation                                                                                 |
+| ------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------ |
+| read-scope token leaks          | See own attribution (zero rows)        | By construction read-scope never originates priced events; query returns empty.            |
+| bridge token leaks              | See all rows attributed to that bridge | Owner revokes bridge token; sub-actor data remains in DB for forensics.                    |
+| rate table tampering on host    | Inflate or deflate recorded costs      | Out of scope. Daemon trusts the host filesystem (consistent with `add-remote-control` D1). |
+| Sensitive metadata in sub_actor | sub-actor ids could be PII             | sub-actor is already in audit log (see `add-bridge-protocol`); same scope rules apply.     |
 
 ## Risks
 
-| Risk                                            | Likelihood | Impact | Mitigation                                                                |
-|-------------------------------------------------|------------|--------|---------------------------------------------------------------------------|
-| Rate table drift from reality                   | H          | M      | Operator-owned; `rate_table_miss` audit fires on lookup gaps.             |
-| `usage_tick` event volume in long sessions      | M          | L      | Coalesce: at most one tick per 500 ms per session.                        |
-| usage.db grows unbounded                        | M          | M      | `qwen rc usage prune` command; documented retention recommendation.       |
-| Stage rename in upstream qwen-code breaks stage field | M    | L      | Persist stage as opaque string; aggregator does not interpret it.          |
-| Clock skew between agent and daemon             | L          | L      | `ts` recorded at daemon side at write time, not from the event payload.    |
+| Risk                                                  | Likelihood | Impact | Mitigation                                                              |
+| ----------------------------------------------------- | ---------- | ------ | ----------------------------------------------------------------------- |
+| Rate table drift from reality                         | H          | M      | Operator-owned; `rate_table_miss` audit fires on lookup gaps.           |
+| `usage_tick` event volume in long sessions            | M          | L      | Coalesce: at most one tick per 500 ms per session.                      |
+| usage.db grows unbounded                              | M          | M      | `qwen rc usage prune` command; documented retention recommendation.     |
+| Stage rename in upstream qwen-code breaks stage field | M          | L      | Persist stage as opaque string; aggregator does not interpret it.       |
+| Clock skew between agent and daemon                   | L          | L      | `ts` recorded at daemon side at write time, not from the event payload. |
 
 ## Open questions
 

@@ -35,7 +35,7 @@ diverges; the operator can compare or merge by hand if they wish.
 - **New endpoint `POST /session/:id/fork`.** Body:
   `{ fromEventId, name?, transcript: "include" | "summary" | "empty" }`.
   Response: `{ sessionId, parentSessionId, parentEventId,
-  forkedAt }`. The new session is a regular daemon-hosted session
+forkedAt }`. The new session is a regular daemon-hosted session
   thereafter — all existing session routes apply to it without
   modification.
 - **JSONL transcript header for forks.** The new session's JSONL
@@ -97,6 +97,7 @@ the new session opens with that summary as its only prior context.
 
 **F4. Forks visible in listing.** `qwen rc sessions` (or the web
 client's session list) renders a small tree:
+
 ```
 session-alpha            (active, 2h)
   └─ fork-postgres       (forked 14m ago from event #245)
@@ -116,7 +117,7 @@ sessions.
   the session manager to support creation-with-parent semantics;
   small change to the JSONL writer to emit the header line. New
   CLI: `qwen rc fork <sessionId> --from-event <id> [--mode include|
-  summary|empty] [--name <name>]`. Web/TUI clients gain the "Fork
+summary|empty] [--name <name>]`. Web/TUI clients gain the "Fork
   from here" affordance.
 - **Storage**: no schema changes; lineage lives in the JSONL header
   and in a small in-memory adjacency map rebuilt from JSONL on

@@ -39,7 +39,7 @@ daemon.
   operators who don't want the basename leaked (the basename can
   hint at a private project).
 - **Terminal client discovery.** `qwen rc daemons discover [--timeout
-  5s]` browses for `_qwen-rc._tcp.local.` advertisements and prints
+5s]` browses for `_qwen-rc._tcp.local.` advertisements and prints
   a table of `name | host | port | version | tlsRequired`.
 - **Web client.** Browsers cannot speak mDNS. The web client gains
   no direct discovery. `add-multi-workspace-client` (a separate
@@ -53,18 +53,20 @@ daemon.
 - `mdns-discovery` — service-type registration on
   `_qwen-rc._tcp.local.`, TXT record schema, advertise-on-non-
   loopback default, operator toggles, the `qwen rc daemons
-  discover` browse command, and the explicit prohibition on
+discover` browse command, and the explicit prohibition on
   exposing any sensitive material in the advertisement.
 
 ## User Stories
 
 **M1. Find the kitchen daemon.** On my laptop I run
 `qwen rc daemons discover` and see:
+
 ```
 NAME                       HOST          PORT  VERSION  TLS
 kitchen-workstation-app     kitchen.local 7070  1        yes
 office-pi-homelab           pi.local      7080  1        no
 ```
+
 I pick the one I want and `qwen rc attach --host kitchen.local:7070`.
 
 **M2. Privacy-conscious operator.** I'm working on `secret-project`

@@ -32,6 +32,7 @@ The risk shape is fundamentally different from pairing tokens:
 ## Goals / Non-Goals
 
 **Goals:**
+
 - One CLI command + paste = working URL.
 - The URL is the credential. No additional pairing step.
 - Time-bounded and use-count-bounded by default.
@@ -43,6 +44,7 @@ The risk shape is fundamentally different from pairing tokens:
 - No changes to existing pairing flow or `qwk_*` tokens.
 
 **Non-Goals:**
+
 - Anonymous public sharing (no auth at all). The URL still carries a
   high-entropy token; that's the auth.
 - Custom UI for guests (e.g., hiding sidebar, simplified layout).
@@ -164,12 +166,12 @@ bump) from refresh-after-close (bump). The cookie is `Secure`,
 
 ### Defaults
 
-| Knob       | Default | Range                |
-|------------|---------|----------------------|
-| `--ttl`    | 1h      | 5m to 30d (clamped)  |
-| `--scope`  | `view`  | `view` or `approve`  |
-| `--max-uses` | 5     | 1 to 100             |
-| `--label`  | none    | 1 to 64 chars; advisory |
+| Knob         | Default | Range                   |
+| ------------ | ------- | ----------------------- |
+| `--ttl`      | 1h      | 5m to 30d (clamped)     |
+| `--scope`    | `view`  | `view` or `approve`     |
+| `--max-uses` | 5       | 1 to 100                |
+| `--label`    | none    | 1 to 64 chars; advisory |
 
 ## Watermark UX
 
@@ -196,10 +198,10 @@ sessionId=<sid>` polled on session attach and updated via SSE
 
 ## Scope semantics
 
-| Share scope | Reads transcript | Approves tools | Sends prompts | Ends session | Notes                                           |
-|-------------|------------------|----------------|---------------|--------------|-------------------------------------------------|
-| `view`      | yes              | no             | no            | no           | Default.                                        |
-| `approve`   | yes              | yes            | no            | no           | "Watch and unblock." Cannot start new actions.  |
+| Share scope | Reads transcript | Approves tools | Sends prompts | Ends session | Notes                                          |
+| ----------- | ---------------- | -------------- | ------------- | ------------ | ---------------------------------------------- |
+| `view`      | yes              | no             | no            | no           | Default.                                       |
+| `approve`   | yes              | yes            | no            | no           | "Watch and unblock." Cannot start new actions. |
 
 Neither share scope ever lets the holder mint another share, list
 shares, revoke, or read audit. The web client masks out unreachable
@@ -228,18 +230,18 @@ fields. Existing rows are not backfilled.
 
 ## Threat model
 
-| Attacker                              | Capability                          | Mitigation                                                                                              |
-|---------------------------------------|-------------------------------------|---------------------------------------------------------------------------------------------------------|
-| Share URL forwarded to public channel | Any reader gets the share's access  | Short default TTL (1h); `max_uses` cap (default 5); fast revoke; visible watermark on owner's own UI so they see suspicious use; audit log of every redemption with IP and user-agent. |
-| Reverse proxy logs the first URL      | Token visible to operator's log host | Documented mitigation: configure proxy to redact `/ui/share/*` request paths from access logs. The daemon itself never logs the path with the token. |
-| Browser history / bookmark            | Token persists locally on guest's device | History neutralised by `history.replaceState` on first load. Bookmarks save `/ui/` after replace. SessionStorage clears on tab close. |
-| Guest's machine compromised mid-share | Attacker reads sessionStorage       | Same blast radius as the share scope itself (one session, time-bounded). Revoke ends it. Pairing-token compromise is broader and slower; share is narrower and shorter by design. |
-| Share holder tries to escalate scope  | Mint another share, etc.            | `share` scope cannot reach `/rc/share`, `/rc/pair`, `/rc/tokens`, `/rc/audit`. Enforced by scope guard. |
-| Share holder attaches to other sessions| Workspace-wide leak                | `session_lock_id` is checked on every session-scoped route: `/session/:id/events`, `/session/:id/prompt`, `/permission/:requestId` (resolved to its session for the check). Wrong session → 403 with code `share_session_mismatch`. |
-| Use-count race                        | Two clicks slip past `max_uses`     | `UPDATE tokens SET uses = uses + 1 WHERE id = ? AND uses < max_uses` returning rowcount; if rowcount is 0 the request 410s. SQLite-level atomicity. |
-| Long-TTL share → token theft tail risk | Forgotten share keeps working      | TTL clamp default 1h; max 30d. CLI warns when ttl > 24h. Listing surfaces every active share. |
-| Owner shares wrong session by mistake | Wrong transcript leaked             | `qwen rc share create` requires explicit `<sessionId>`; no "default to active session" sugar. CLI prints the session's display name in the confirmation output before printing the URL. |
-| Daemon restart                        | Tokens persist; uses counter intact | Tokens.db is durable. Revocation state, uses count, expiry, all persist across restart. |
+| Attacker                                | Capability                               | Mitigation                                                                                                                                                                                                                          |
+| --------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Share URL forwarded to public channel   | Any reader gets the share's access       | Short default TTL (1h); `max_uses` cap (default 5); fast revoke; visible watermark on owner's own UI so they see suspicious use; audit log of every redemption with IP and user-agent.                                              |
+| Reverse proxy logs the first URL        | Token visible to operator's log host     | Documented mitigation: configure proxy to redact `/ui/share/*` request paths from access logs. The daemon itself never logs the path with the token.                                                                                |
+| Browser history / bookmark              | Token persists locally on guest's device | History neutralised by `history.replaceState` on first load. Bookmarks save `/ui/` after replace. SessionStorage clears on tab close.                                                                                               |
+| Guest's machine compromised mid-share   | Attacker reads sessionStorage            | Same blast radius as the share scope itself (one session, time-bounded). Revoke ends it. Pairing-token compromise is broader and slower; share is narrower and shorter by design.                                                   |
+| Share holder tries to escalate scope    | Mint another share, etc.                 | `share` scope cannot reach `/rc/share`, `/rc/pair`, `/rc/tokens`, `/rc/audit`. Enforced by scope guard.                                                                                                                             |
+| Share holder attaches to other sessions | Workspace-wide leak                      | `session_lock_id` is checked on every session-scoped route: `/session/:id/events`, `/session/:id/prompt`, `/permission/:requestId` (resolved to its session for the check). Wrong session → 403 with code `share_session_mismatch`. |
+| Use-count race                          | Two clicks slip past `max_uses`          | `UPDATE tokens SET uses = uses + 1 WHERE id = ? AND uses < max_uses` returning rowcount; if rowcount is 0 the request 410s. SQLite-level atomicity.                                                                                 |
+| Long-TTL share → token theft tail risk  | Forgotten share keeps working            | TTL clamp default 1h; max 30d. CLI warns when ttl > 24h. Listing surfaces every active share.                                                                                                                                       |
+| Owner shares wrong session by mistake   | Wrong transcript leaked                  | `qwen rc share create` requires explicit `<sessionId>`; no "default to active session" sugar. CLI prints the session's display name in the confirmation output before printing the URL.                                             |
+| Daemon restart                          | Tokens persist; uses counter intact      | Tokens.db is durable. Revocation state, uses count, expiry, all persist across restart.                                                                                                                                             |
 
 ### What leaks if a share URL leaks
 
@@ -275,6 +277,7 @@ told this explicitly in the CLI help text and in `--ttl >24h`
 warnings.
 
 ### D2 — `share` scope is brand new, not "read with extra
+
 constraints"
 
 **Choice**: Add `share` as a distinct scope. It implies `read` only
@@ -359,7 +362,7 @@ is no setting, no close button, no opacity tweak.
 **Alternative considered**: A subtle indicator only (small icon in
 the corner).
 
-**Why**: The watermark is for the *owner's* awareness, not the
+**Why**: The watermark is for the _owner's_ awareness, not the
 guest's. The owner views their own client and sees, at a glance,
 that an external share is live. A guest dismissing the banner
 defeats that purpose.
@@ -369,24 +372,24 @@ someone else's session; a banner is the lightest possible signal.
 
 ## Persistence
 
-| Artifact                           | Format    | Notes                                                |
-|------------------------------------|-----------|------------------------------------------------------|
-| `tokens` (extended)                | SQLite    | New columns above; existing rows null in those columns. |
-| Audit log entries                  | JSONL     | New `share_id`, `share_label` fields.                |
-| Bootstrap HTML for `/ui/share/*`   | Static    | Bundled with web client; no per-request rendering.   |
-| Server-side share-session cookies  | Volatile  | Stored in tokens.db `share_browser_sessions(token_id, cookie_hash, first_seen)` keyed for the dedup-counter check. Pruned 24h after share expiry. |
+| Artifact                          | Format   | Notes                                                                                                                                             |
+| --------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tokens` (extended)               | SQLite   | New columns above; existing rows null in those columns.                                                                                           |
+| Audit log entries                 | JSONL    | New `share_id`, `share_label` fields.                                                                                                             |
+| Bootstrap HTML for `/ui/share/*`  | Static   | Bundled with web client; no per-request rendering.                                                                                                |
+| Server-side share-session cookies | Volatile | Stored in tokens.db `share_browser_sessions(token_id, cookie_hash, first_seen)` keyed for the dedup-counter check. Pruned 24h after share expiry. |
 
 ## Risks / Trade-offs
 
-| Risk                                | Likelihood | Impact | Mitigation                                                                                |
-|-------------------------------------|------------|--------|-------------------------------------------------------------------------------------------|
+| Risk                                | Likelihood | Impact | Mitigation                                                                                         |
+| ----------------------------------- | ---------- | ------ | -------------------------------------------------------------------------------------------------- |
 | Guests forward the URL              | H          | M      | Defaults: 1h TTL, 5 uses, watermark visible to owner, fast revoke. Owner is the controlling adult. |
-| Reverse proxy logs token            | M          | H      | Documented redaction config snippets for Caddy and Nginx in `docs/users/remote-control.md`. |
-| Owner forgets to revoke a 30d share | M          | M      | `qwen rc share list` prominent in `--watch`; weekly summary in audit feed; max TTL clamp 30d. |
-| Watermark UX feels heavy            | M          | L      | The whole point. Operator can revoke if guest complains; can't disable the watermark.    |
-| Confusion: share vs pair            | M          | M      | CLI help, owner docs, distinct command (`share`, not `pair --short`). Scope enum separate. |
-| `max_uses` race                     | L          | M      | Atomic SQL UPDATE; tested.                                                                |
-| Long-running SSE survives revoke    | L          | M      | Eviction within 1s reused from pairing-auth.                                              |
+| Reverse proxy logs token            | M          | H      | Documented redaction config snippets for Caddy and Nginx in `docs/users/remote-control.md`.        |
+| Owner forgets to revoke a 30d share | M          | M      | `qwen rc share list` prominent in `--watch`; weekly summary in audit feed; max TTL clamp 30d.      |
+| Watermark UX feels heavy            | M          | L      | The whole point. Operator can revoke if guest complains; can't disable the watermark.              |
+| Confusion: share vs pair            | M          | M      | CLI help, owner docs, distinct command (`share`, not `pair --short`). Scope enum separate.         |
+| `max_uses` race                     | L          | M      | Atomic SQL UPDATE; tested.                                                                         |
+| Long-running SSE survives revoke    | L          | M      | Eviction within 1s reused from pairing-auth.                                                       |
 
 ## Open questions
 
@@ -403,7 +406,7 @@ someone else's session; a banner is the lightest possible signal.
    into the daemon's served HTML.
 
 3. **Should share tokens be revealable via `qwen rc share show
-   <id>`?** No — same as paired tokens, plaintext is shown only at
+<id>`?** No — same as paired tokens, plaintext is shown only at
    creation. If the operator lost the URL, they revoke and recreate.
 
 4. **Watermark on the guest side: should we also include the

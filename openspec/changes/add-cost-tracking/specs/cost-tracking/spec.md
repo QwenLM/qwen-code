@@ -34,7 +34,7 @@ emit an audit event `rate_table_parse_failed`.
 #### Scenario: Lookup miss is recorded
 
 - **GIVEN** the rate table has no entry for `(modelServiceId,
-  modelId)` `("openai", "gpt-5")`
+modelId)` `("openai", "gpt-5")`
 - **WHEN** a `session_update` arrives for that model
 - **THEN** the ingester writes the row with `cost_cents = NULL`
 - **AND** emits an audit event `rate_table_miss` with the model
@@ -58,7 +58,7 @@ delay the emitted SSE frame to subscribers.
 
 - **GIVEN** a session with originator `tkn_abc`
 - **WHEN** the agent emits `session_update` with usage `{ in: 1000,
-  out: 500, cached: 0 }` for model `qwen3-coder-plus` at rates
+out: 500, cached: 0 }` for model `qwen3-coder-plus` at rates
   `(200, 800, 20) cents/Mtok`
 - **THEN** a row is written with `cost_cents = 0.2 + 0.4 = 0.6`
 - **AND** `attribution_token_id = "tkn_abc"`
@@ -160,8 +160,8 @@ The daemon SHALL apply scope-based filters to `/rc/usage`:
   "costTracking": {
     "enabled": true,
     "currencyLabel": "USD",
-    "rateTablePath": "~/.qwen/rc/model-rates.yaml"
-  }
+    "rateTablePath": "~/.qwen/rc/model-rates.yaml",
+  },
 }
 ```
 
@@ -213,7 +213,7 @@ suppressed if `costTracking` is not advertised by the daemon.
 The CLI SHALL expose:
 
 - `qwen rc usage [--since <duration>] [--group-by <axis>]
-  [--sub-actor <s>] [--format json|csv|table]` — query.
+[--sub-actor <s>] [--format json|csv|table]` — query.
 - `qwen rc usage prune --before <iso> [--yes]` — delete rows older
   than a timestamp; prompts unless `--yes`.
 
@@ -221,7 +221,7 @@ The CLI SHALL expose:
 
 - **GIVEN** the usage database has 1000 rows older than 60 days
 - **WHEN** the operator runs `qwen rc usage prune --before $(date
-  -d '60 days ago' --iso-8601) --yes`
+-d '60 days ago' --iso-8601) --yes`
 - **THEN** the command prints `1000 rows removed`
 - **AND** subsequent `qwen rc usage --since 90d` queries do not
   return those rows

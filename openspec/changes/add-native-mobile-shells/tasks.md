@@ -110,12 +110,8 @@ State machine and alignment pattern: see
 - [ ] **1.4 Custom scheme handler**
   - **Status:** not-started
   - **Effort:** ~0.5 day
-  - **Prompt:**
-    > Add intent filter for `qwen-rc://`. On receipt, parse the
-    > path per `design.md`, validate the URL portion matches the
-    > paired daemon, navigate the TWA to the corresponding deep
-    > route. Acceptance: scenario `Tap notification opens correct
-    > session`.
+  - **Prompt:** > Add intent filter for `qwen-rc://`. On receipt, parse the > path per `design.md`, validate the URL portion matches the > paired daemon, navigate the TWA to the corresponding deep > route. Acceptance: scenario `Tap notification opens correct
+session`.
 
 - [ ] **1.5 Build flavors and CI**
   - **Status:** not-started
@@ -226,13 +222,8 @@ State machine and alignment pattern: see
 - [ ] **3.2 Cold-start biometric prompt**
   - **Status:** not-started
   - **Effort:** ~0.5 day
-  - **Prompt:**
-    > Native shell, on `applicationDidBecomeActive` (iOS) or
-    > `onResume` (Android), if the flag is set, prompt
-    > biometric BEFORE loading the WebView's URL. On failure,
-    > show "Tap to unlock" with a retry button. Acceptance:
-    > scenario `Biometric blocks app foreground without
-    > fingerprint`.
+  - **Prompt:** > Native shell, on `applicationDidBecomeActive` (iOS) or > `onResume` (Android), if the flag is set, prompt > biometric BEFORE loading the WebView's URL. On failure, > show "Tap to unlock" with a retry button. Acceptance: > scenario `Biometric blocks app foreground without
+fingerprint`.
 
 ## Phase 4 — iOS APNs sender
 
@@ -240,13 +231,8 @@ State machine and alignment pattern: see
 
 - [ ] **4.0 Alignment**
   - **Status:** not-started
-  - **Prompt:**
-    > Verify Phase 3 `completed`. Verify `add-notification-
-    > routing` Phase 5 `completed` — routing decisions emit
-    > both webpush and (future) apns subscriptions through the
-    > same path. If routing module doesn't accept an `apns`
-    > subscription kind yet, extend it here and update routing
-    > spec.
+  - **Prompt:** > Verify Phase 3 `completed`. Verify `add-notification-
+routing` Phase 5 `completed` — routing decisions emit > both webpush and (future) apns subscriptions through the > same path. If routing module doesn't accept an `apns` > subscription kind yet, extend it here and update routing > spec.
 
 - [ ] **4.1 APNs subscription routes**
   - **Status:** not-started
@@ -255,13 +241,9 @@ State machine and alignment pattern: see
     `packages/cli/src/serve/remoteControl/nativePush/apns/routes.ts`,
     `packages/cli/src/serve/remoteControl/nativePush/apns/storage.ts`,
     `schema/00X_apns_subscriptions.sql`
-  - **Prompt:**
-    > `POST /rc/native-push/apns/register { deviceToken,
-    > bundleId, shellVersion }` (any non-bridge auth scope).
-    > `DELETE /rc/native-push/apns/register/:id`. Store
-    > `(token_id, device_token, bundle_id, shell_version,
-    > created_at, last_seen_at)`. Acceptance: scenarios under
-    > `Requirement: APNs subscription registration`.
+  - **Prompt:** > `POST /rc/native-push/apns/register { deviceToken,
+bundleId, shellVersion }` (any non-bridge auth scope). > `DELETE /rc/native-push/apns/register/:id`. Store > `(token_id, device_token, bundle_id, shell_version,
+created_at, last_seen_at)`. Acceptance: scenarios under > `Requirement: APNs subscription registration`.
 
 - [ ] **4.2 APNs sender**
   - **Status:** not-started
@@ -269,16 +251,8 @@ State machine and alignment pattern: see
   - **Files:**
     `packages/cli/src/serve/remoteControl/nativePush/apns/sender.ts`,
     `packages/cli/src/serve/remoteControl/nativePush/apns/jwt.ts`
-  - **Prompt:**
-    > JWT signing with P-8 key (ES256, header `kid`, claims
-    > `iss` + `iat`). HTTP/2 client (Node's built-in `http2`)
-    > posting to `api.sandbox.push.apple.com` or
-    > `api.push.apple.com` per config. Payload mirrors
-    > `add-webpush-notifications` schema, mapped to APNs alert /
-    > category / thread-id fields. On `410 Unregistered` or
-    > `400 BadDeviceToken`, drop the subscription and audit.
-    > Acceptance: scenarios under `Requirement: APNs delivery
-    > pipeline`.
+  - **Prompt:** > JWT signing with P-8 key (ES256, header `kid`, claims > `iss` + `iat`). HTTP/2 client (Node's built-in `http2`) > posting to `api.sandbox.push.apple.com` or > `api.push.apple.com` per config. Payload mirrors > `add-webpush-notifications` schema, mapped to APNs alert / > category / thread-id fields. On `410 Unregistered` or > `400 BadDeviceToken`, drop the subscription and audit. > Acceptance: scenarios under `Requirement: APNs delivery
+pipeline`.
 
 - [ ] **4.3 Capability advertisement**
   - **Status:** not-started
@@ -317,24 +291,14 @@ State machine and alignment pattern: see
 - [ ] **5.1 TLS pin on first pair**
   - **Status:** not-started
   - **Effort:** ~0.5 day
-  - **Prompt:**
-    > Native shells fetch the daemon's TLS cert at first pair
-    > and store its SHA-256 in keystore. Subsequent connections
-    > verify; on mismatch, show a confirmation dialog and require
-    > biometric (if enabled) to accept the new fingerprint.
-    > Acceptance: scenarios under `Requirement: TLS pin on
-    > first pair`.
+  - **Prompt:** > Native shells fetch the daemon's TLS cert at first pair > and store its SHA-256 in keystore. Subsequent connections > verify; on mismatch, show a confirmation dialog and require > biometric (if enabled) to accept the new fingerprint. > Acceptance: scenarios under `Requirement: TLS pin on
+first pair`.
 
 - [ ] **5.2 Bridge version negotiation**
   - **Status:** not-started
   - **Effort:** ~0.25 day
-  - **Prompt:**
-    > Web client logs a warning when
-    > `bridge.version.bridge < <required>` for a feature it
-    > tried to use. Add a `<MIN_BRIDGE_FOR_FEATURE>` map in
-    > `bridge.ts` and gate optional features on it. Acceptance:
-    > scenario `Old shell loads new web client without
-    > crashing`.
+  - **Prompt:** > Web client logs a warning when > `bridge.version.bridge < <required>` for a feature it > tried to use. Add a `<MIN_BRIDGE_FOR_FEATURE>` map in > `bridge.ts` and gate optional features on it. Acceptance: > scenario `Old shell loads new web client without
+crashing`.
 
 - [ ] **5.3 Operator docs**
   - **Status:** not-started
@@ -354,12 +318,12 @@ State machine and alignment pattern: see
 
 ## Effort summary
 
-| Phase | Description                        | Estimate (days) |
-|-------|------------------------------------|------------------|
-| 0     | Shared design + bridge interface   | 1                |
-| 1     | Android TWA shell                  | 3                |
-| 2     | iOS WKWebView shell                | 3                |
-| 3     | Keystore + biometric               | 1                |
-| 4     | iOS APNs sender                    | 2                |
-| 5     | Polish + distribution + docs       | 1.5              |
-| **Total** |                                | **11.5**         |
+| Phase     | Description                      | Estimate (days) |
+| --------- | -------------------------------- | --------------- |
+| 0         | Shared design + bridge interface | 1               |
+| 1         | Android TWA shell                | 3               |
+| 2         | iOS WKWebView shell              | 3               |
+| 3         | Keystore + biometric             | 1               |
+| 4         | iOS APNs sender                  | 2               |
+| 5         | Polish + distribution + docs     | 1.5             |
+| **Total** |                                  | **11.5**        |

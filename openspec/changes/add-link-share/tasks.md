@@ -9,18 +9,8 @@ State machine and alignment pattern: see
 
 - [ ] **0.0 Alignment**
   - **Status:** not-started
-  - **Prompt:**
-    > Verify `add-remote-control` Phase 2 (pairing, scopes, audit)
-    > is `completed`. Confirm the `tokens` table schema in
-    > `packages/cli/src/serve/remoteControl/schema/` is reachable
-    > and additive migrations are wired through the migrator. If
-    > the scope guard from `add-remote-control` hard-codes the four
-    > existing scopes such that adding `share` requires touching
-    > many call sites, note the drift here and update
-    > `add-remote-control/specs/pairing-auth/spec.md` `Requirement:
-    > Scope hierarchy and enforcement` to enumerate scopes via a
-    > registry. Record `BASELINE_SHA=<sha>` of the qwen-code branch
-    > you build against.
+  - **Prompt:** > Verify `add-remote-control` Phase 2 (pairing, scopes, audit) > is `completed`. Confirm the `tokens` table schema in > `packages/cli/src/serve/remoteControl/schema/` is reachable > and additive migrations are wired through the migrator. If > the scope guard from `add-remote-control` hard-codes the four > existing scopes such that adding `share` requires touching > many call sites, note the drift here and update > `add-remote-control/specs/pairing-auth/spec.md` `Requirement:
+Scope hierarchy and enforcement` to enumerate scopes via a > registry. Record `BASELINE_SHA=<sha>` of the qwen-code branch > you build against.
 
 ## Phase 1 — Schema and scope
 
@@ -97,20 +87,9 @@ State machine and alignment pattern: see
   - **Effort:** ~0.5 day
   - **Files:**
     `packages/cli/src/serve/remoteControl/shareRoutes.ts`
-  - **Prompt:**
-    > Implement `POST /rc/share { sessionId, scope, ttlSec,
-    > maxUses, label }`. Owner-scope only. Validates sessionId
-    > belongs to the daemon's workspace and exists. Validates
-    > scope is `view` or `approve` (mapping to
-    > `["share"]` or `["share","approve"]` in storage). Clamps
-    > `ttlSec` to [300, 2592000]; clamps `maxUses` to [1, 100].
-    > Stores `parent_token_id` = the calling token. Generates
-    > `qwk_*`-style token (32 bytes, base64url), persists
-    > argon2id hash, returns `{ id, url, expiresAt, scope,
-    > maxUses, label }`. The `url` is
-    > `https://<daemon-host>/ui/share/<plain-token>`. Acceptance:
-    > integration test mints a share, fetches it via the URL,
-    > confirms scope, confirms 200.
+  - **Prompt:** > Implement `POST /rc/share { sessionId, scope, ttlSec,
+maxUses, label }`. Owner-scope only. Validates sessionId > belongs to the daemon's workspace and exists. Validates > scope is `view` or `approve` (mapping to > `["share"]` or `["share","approve"]` in storage). Clamps > `ttlSec` to [300, 2592000]; clamps `maxUses` to [1, 100]. > Stores `parent_token_id` = the calling token. Generates > `qwk_*`-style token (32 bytes, base64url), persists > argon2id hash, returns `{ id, url, expiresAt, scope,
+maxUses, label }`. The `url` is > `https://<daemon-host>/ui/share/<plain-token>`. Acceptance: > integration test mints a share, fetches it via the URL, > confirms scope, confirms 200.
 
 - [ ] **2.2 List + show + revoke routes**
   - **Status:** not-started
@@ -159,37 +138,16 @@ State machine and alignment pattern: see
   - **Effort:** ~0.5 day
   - **Files:** `packages/web-client/src/share-bootstrap.html`,
     `packages/web-client/src/share-bootstrap.ts`
-  - **Prompt:**
-    > Daemon serves this static HTML for any `/ui/share/<rest>`
-    > path. The HTML's inline JS:
-    > 1. Reads `<rest>` from `location.pathname`.
-    > 2. Validates shape (`qwk_…`, length, regex).
-    > 3. `sessionStorage.setItem("qwen-rc:" + location.host +
-    >    ":share-token", token)`.
-    > 4. `history.replaceState({}, '', '/ui/')`.
-    > 5. Dynamically imports the main web client bundle.
-    > The path validation must reject obvious junk before storage
-    > (so a typo'd URL doesn't poison state). Acceptance: tests
-    > that the address bar after load shows `/ui/` and that
-    > `sessionStorage` contains the token; that
-    > `localStorage` is untouched.
+  - **Prompt:** > Daemon serves this static HTML for any `/ui/share/<rest>` > path. The HTML's inline JS: > > 1. Reads `<rest>` from `location.pathname`. > 2. Validates shape (`qwk_…`, length, regex). > 3. `sessionStorage.setItem("qwen-rc:" + location.host +
+":share-token", token)`. > 4. `history.replaceState({}, '', '/ui/')`. > 5. Dynamically imports the main web client bundle. > The path validation must reject obvious junk before storage > (so a typo'd URL doesn't poison state). Acceptance: tests > that the address bar after load shows `/ui/` and that > `sessionStorage` contains the token; that > `localStorage` is untouched.
 
 - [ ] **3.2 `GET /rc/share/whoami` endpoint**
   - **Status:** not-started
   - **Effort:** ~0.5 day
-  - **Prompt:**
-    > Endpoint accepts the share token via `Authorization:
-    > Bearer`. On valid: returns `{ shareId, sessionId, scope,
-    > sharedByTokenName, label, expiresAt, usesRemaining }`. Sets
-    > a `Secure HttpOnly SameSite=Strict` cookie named
-    > `qwen-rc-share-session` with an opaque hashed-cookie value;
-    > if no cookie present, atomically bumps `uses` (SQL UPDATE
-    > guarded by `uses < max_uses`); if rowcount 0, return `410
-    > Gone` with code `share_exhausted`. If cookie present and
-    > matches a stored hash for this token, do NOT bump uses;
-    > respond 200. Audit each first-use. Acceptance: scenario
-    > "max_uses race is atomic" and "refresh-same-tab does not
-    > bump uses".
+  - **Prompt:** > Endpoint accepts the share token via `Authorization:
+Bearer`. On valid: returns `{ shareId, sessionId, scope,
+sharedByTokenName, label, expiresAt, usesRemaining }`. Sets > a `Secure HttpOnly SameSite=Strict` cookie named > `qwen-rc-share-session` with an opaque hashed-cookie value; > if no cookie present, atomically bumps `uses` (SQL UPDATE > guarded by `uses < max_uses`); if rowcount 0, return `410
+Gone` with code `share_exhausted`. If cookie present and > matches a stored hash for this token, do NOT bump uses; > respond 200. Audit each first-use. Acceptance: scenario > "max_uses race is atomic" and "refresh-same-tab does not > bump uses".
 
 - [ ] **3.3 Watermark banner in web client**
   - **Status:** not-started
@@ -269,11 +227,11 @@ State machine and alignment pattern: see
 
 ## Effort summary
 
-| Phase | Description                          | Estimate (days) |
-|-------|--------------------------------------|------------------|
-| 0     | Foundation                           | 0.5              |
-| 1     | Schema + scope                       | 1.5              |
-| 2     | Mint / list / revoke + CLI           | 2                |
-| 3     | URL bootstrap + watermark            | 2                |
-| 4     | Audit + ops + archive                | 1                |
-| **Total** |                                  | **7**            |
+| Phase     | Description                | Estimate (days) |
+| --------- | -------------------------- | --------------- |
+| 0         | Foundation                 | 0.5             |
+| 1         | Schema + scope             | 1.5             |
+| 2         | Mint / list / revoke + CLI | 2               |
+| 3         | URL bootstrap + watermark  | 2               |
+| 4         | Audit + ops + archive      | 1               |
+| **Total** |                            | **7**           |

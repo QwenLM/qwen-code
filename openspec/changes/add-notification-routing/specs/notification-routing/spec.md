@@ -73,7 +73,7 @@ subscription with the highest urgency requested.
 #### Scenario: Drop short-circuits
 
 - **GIVEN** rules `[R1: match kind=X drop=true, R2: match kind=X
-  route to phone]`
+route to phone]`
 - **WHEN** an event of kind `X` is evaluated
 - **THEN** no `send` decision is emitted
 - **AND** no further rules are evaluated for that event
@@ -81,7 +81,7 @@ subscription with the highest urgency requested.
 #### Scenario: Multiple matching rules union subscriptions
 
 - **GIVEN** rules `[R1: match kind=X → scopeIn=[owner],
-  R2: match kind=X → scopeIn=[write]]`
+R2: match kind=X → scopeIn=[write]]`
 - **AND** subscriptions `S_owner` (owner scope) and `S_write`
   (write scope)
 - **WHEN** an event of kind `X` is evaluated
@@ -100,7 +100,7 @@ match operators above.
 The default ruleset SHALL include:
 
 1. A rule silencing `policy.decisionSource == rule, policy.action ==
-   allow` events (no push).
+allow` events (no push).
 2. A rule paging `owner+write+approve` subscriptions with high
    urgency on `kind: policy.deny`.
 3. A rule paging `owner+approve` subscriptions with high urgency on
@@ -206,7 +206,7 @@ other event.
 - **GIVEN** `mentions.patterns: ["*production*"]`
 - **AND** a rule `match { kind: mention } → owner urgency high`
 - **WHEN** the agent proposes `bash kubectl get pods -n
-  production`
+production`
 - **THEN** a synthetic `mention` event is published with
   `matched: "*production*"`
 - **AND** a push is sent to owner-scope subscriptions
@@ -315,8 +315,8 @@ Each entry SHALL include the matched `ruleId` where applicable.
 - **GIVEN** a working-device suppression fires for `S_laptop`
 - **WHEN** the audit log is queried
 - **THEN** an entry exists with `action: push_suppressed,
-  subscription_id: S_laptop, reason: working_device,
-  rule_id: prompt-fallthrough`
+subscription_id: S_laptop, reason: working_device,
+rule_id: prompt-fallthrough`
 
 ### Requirement: Operator inspection and dry-run
 
@@ -325,7 +325,7 @@ The daemon SHALL expose:
 - `GET /rc/routing/rules?resolved=true|false` — owner-only; returns
   the merged ruleset.
 - `POST /rc/routing/test` with `{ event: <EventEnvelope>,
-  subscriptions: <Subscription[]>, workingDevices?: <map> }` —
+subscriptions: <Subscription[]>, workingDevices?: <map> }` —
   owner-only; returns decisions the engine would produce. Does
   NOT enqueue any push or emit audit.
 
@@ -359,20 +359,28 @@ reload`, and `qwen rc routing test <file.json>` as thin wrappers.
 {
   "version": 1,
   "supportedMatchFields": [
-    "kind", "sessionTag", "originatingClientScope",
-    "policy.decisionSource", "policy.action",
-    "subActor", "urgencyAtLeast"
+    "kind",
+    "sessionTag",
+    "originatingClientScope",
+    "policy.decisionSource",
+    "policy.action",
+    "subActor",
+    "urgencyAtLeast",
   ],
   "supportedRouteFields": [
-    "drop", "subscriptions.scopeIn", "subscriptions.tokenIdsIn",
-    "subscriptions.deviceTagsIn", "urgency",
-    "suppressIfWorkingDevice", "digestUntilQuietHoursEnd",
-    "material"
+    "drop",
+    "subscriptions.scopeIn",
+    "subscriptions.tokenIdsIn",
+    "subscriptions.deviceTagsIn",
+    "urgency",
+    "suppressIfWorkingDevice",
+    "digestUntilQuietHoursEnd",
+    "material",
   ],
   "snooze": {
     "maxDurationSec": 86400,
-    "floorKinds": ["session.died"]
-  }
+    "floorKinds": ["session.died"],
+  },
 }
 ```
 

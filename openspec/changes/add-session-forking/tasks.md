@@ -41,25 +41,9 @@ State machine and alignment pattern: see
     `packages/cli/src/serve/remoteControl/forkRoutes.ts`,
     `packages/cli/src/serve/sessionManager.ts` (refactor as
     needed)
-  - **Prompt:**
-    > Implement the endpoint per spec. `write`-scope only.
-    > Validates `fromEventId` is within the parent's JSONL range
-    > and refers to a completed (terminal) event; returns 409
-    > `fork_mid_prompt` if not. For each mode:
-    > - `include`: copies parent JSONL lines 1..fromEventId into
-    >   the new JSONL, preceded by the fork header. Use streaming
-    >   I/O (no full file read into memory).
-    > - `summary`: out-of-band ACP call to the parent's agent
-    >   requesting a summary (system prompt provided). 30s
-    >   timeout. On fail, 502 `fork_summary_failed`. On success,
-    >   writes header + one assistant line with `meta.kind =
-    >   "fork_summary"`.
-    > - `empty`: writes header only.
-    > New WAL file at `~/.qwen/rc/wal/<newSid>.log`; first entry
-    > is `session_forked`. New agent child spawns with
-    > `--resume <newSid>`. Acceptance: scenarios under
-    > `Requirement: Fork endpoint` and `Requirement: Transcript
-    > modes`.
+  - **Prompt:** > Implement the endpoint per spec. `write`-scope only. > Validates `fromEventId` is within the parent's JSONL range > and refers to a completed (terminal) event; returns 409 > `fork_mid_prompt` if not. For each mode: > > - `include`: copies parent JSONL lines 1..fromEventId into > the new JSONL, preceded by the fork header. Use streaming > I/O (no full file read into memory). > - `summary`: out-of-band ACP call to the parent's agent > requesting a summary (system prompt provided). 30s > timeout. On fail, 502 `fork_summary_failed`. On success, > writes header + one assistant line with `meta.kind =
+"fork_summary"`. > - `empty`: writes header only. > New WAL file at `~/.qwen/rc/wal/<newSid>.log`; first entry > is `session_forked`. New agent child spawns with > `--resume <newSid>`. Acceptance: scenarios under > `Requirement: Fork endpoint` and `Requirement: Transcript
+modes`.
 
 - [ ] **1.2 Lineage map**
   - **Status:** not-started
@@ -106,7 +90,7 @@ State machine and alignment pattern: see
     > consumers ignore unknown fields). If not, patch the spec.
 
 - [ ] **2.1 `session_forked` (fork stream) + `child_forked`
-       (parent stream) events**
+      (parent stream) events**
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Prompt:**
@@ -165,12 +149,8 @@ State machine and alignment pattern: see
 - [ ] **3.2 "Fork from here" — terminal client (`qwen rc`)**
   - **Status:** not-started
   - **Effort:** ~0.5 day
-  - **Prompt:**
-    > Add `:fork` slash with arguments:
-    > `:fork [--from <eventId>] [--mode include|summary|empty]
-    > [--name <name>]`. Defaults: `--from` = the most recent
-    > terminal event; `--mode include`. On success, switch the
-    > attached session to the new fork (effectively a reattach).
+  - **Prompt:** > Add `:fork` slash with arguments: > `:fork [--from <eventId>] [--mode include|summary|empty]
+[--name <name>]`. Defaults: `--from` = the most recent > terminal event; `--mode include`. On success, switch the > attached session to the new fork (effectively a reattach).
 
 - [ ] **3.3 Lineage rendering in session list**
   - **Status:** not-started
@@ -186,11 +166,8 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.25 day
   - **Files:** `packages/cli/src/commands/rc/fork.ts`
-  - **Prompt:**
-    > Top-level: `qwen rc fork <sessionId> --from-event <id>
-    > [--mode include|summary|empty] [--name <name>]`. Same
-    > behaviour as the `:fork` slash but without an attached
-    > session. Prints the new sessionId to stdout.
+  - **Prompt:** > Top-level: `qwen rc fork <sessionId> --from-event <id>
+[--mode include|summary|empty] [--name <name>]`. Same > behaviour as the `:fork` slash but without an attached > session. Prints the new sessionId to stdout.
 
 ## Phase 4 — Polish
 
@@ -222,11 +199,11 @@ State machine and alignment pattern: see
 
 ## Effort summary
 
-| Phase | Description                          | Estimate (days) |
-|-------|--------------------------------------|------------------|
-| 0     | Foundation                           | 0.5              |
-| 1     | Endpoint + JSONL + lineage map       | 2                |
-| 2     | SSE events + audit                   | 1                |
-| 3     | Clients                              | 2                |
-| 4     | Polish                               | 0.5              |
-| **Total** |                                  | **6**            |
+| Phase     | Description                    | Estimate (days) |
+| --------- | ------------------------------ | --------------- |
+| 0         | Foundation                     | 0.5             |
+| 1         | Endpoint + JSONL + lineage map | 2               |
+| 2         | SSE events + audit             | 1               |
+| 3         | Clients                        | 2               |
+| 4         | Polish                         | 0.5             |
+| **Total** |                                | **6**           |

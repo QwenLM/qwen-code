@@ -32,6 +32,7 @@ this change.
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Press-and-hold microphone button in the PWA input bar.
 - Configurable push-to-talk hotkey.
 - Live partial transcript visible while recording.
@@ -42,6 +43,7 @@ this change.
 - Accessibility parity for keyboard / screen reader users.
 
 **Non-Goals:**
+
 - Server-side STT proxy. Audio MUST stay in the user agent.
 - Wake-word / always-on listening.
 - Voice output (TTS).
@@ -98,21 +100,21 @@ to the browser's built-in STT.
 // packages/web-client/src/voice/recognition.ts
 
 export type RecognitionEvent =
-  | { kind: "start" }
-  | { kind: "partial"; text: string }
-  | { kind: "final"; text: string }
-  | { kind: "error"; code: ErrorCode; message: string }
-  | { kind: "end" };
+  | { kind: 'start' }
+  | { kind: 'partial'; text: string }
+  | { kind: 'final'; text: string }
+  | { kind: 'error'; code: ErrorCode; message: string }
+  | { kind: 'end' };
 
 export type ErrorCode =
-  | "not-supported"
-  | "permission-denied"
-  | "no-speech"
-  | "audio-capture"
-  | "network"
-  | "language-not-supported"
-  | "aborted"
-  | "max-duration";
+  | 'not-supported'
+  | 'permission-denied'
+  | 'no-speech'
+  | 'audio-capture'
+  | 'network'
+  | 'language-not-supported'
+  | 'aborted'
+  | 'max-duration';
 
 export function isSupported(): boolean;
 
@@ -159,14 +161,14 @@ When `getUserMedia` rejects (permission denied), the meter shows
 
 ### MicButton states
 
-| State              | Visual                                  | Trigger                                       |
-|--------------------|-----------------------------------------|-----------------------------------------------|
-| idle               | mic icon, not pressed                   | default                                       |
-| recording          | filled circle, volume halo, "rec" pill  | pointer-down OR hotkey down                   |
-| transcribing       | rotating spinner                        | pointer-up; awaiting final event              |
-| error              | red mic with toast                      | onError                                       |
-| unavailable        | hidden                                  | `!isSupported()` OR `voice.disabled`          |
-| max-duration-warn  | recording + "5s left" chip              | 55 s into a recording                         |
+| State             | Visual                                 | Trigger                              |
+| ----------------- | -------------------------------------- | ------------------------------------ |
+| idle              | mic icon, not pressed                  | default                              |
+| recording         | filled circle, volume halo, "rec" pill | pointer-down OR hotkey down          |
+| transcribing      | rotating spinner                       | pointer-up; awaiting final event     |
+| error             | red mic with toast                     | onError                              |
+| unavailable       | hidden                                 | `!isSupported()` OR `voice.disabled` |
+| max-duration-warn | recording + "5s left" chip             | 55 s into a recording                |
 
 ### Live transcript
 
@@ -360,25 +362,25 @@ even on supported iOS versions. Documented in
 
 ## Threat model
 
-| Attacker                                  | Capability                                       | Mitigation                                                                                  |
-|-------------------------------------------|--------------------------------------------------|---------------------------------------------------------------------------------------------|
-| Browser vendor (Google/Apple)             | Sees audio + transcript                           | Documented in disclosure; user opts in per use. No daemon-side surface.                     |
-| Network passive between browser and vendor| Sees audio (HTTPS encrypted but vendor terminates)| Out of our control; consistent with operating system dictation. Documented.                 |
-| Compromised page (XSS) starts recording   | Records ambient audio                             | Press-and-hold model means recording only when button pressed; hotkey requires actual keydown; getUserMedia permission is per-origin and prompts on first use; CSP excludes 3rd-party scripts. |
-| Stolen unlocked phone                     | Records ambient audio in PWA                      | Same as above; recording requires the button pressed; mitigation = lock the phone (biometric on the shell from `add-native-mobile-shells`). |
-| Misheard destructive command auto-runs    | Voice input causes harm                           | Slash commands never auto-execute (D3); plain prompts go through the agent which has its own approval gating (`add-policy-engine`). |
-| Permission denial leaks user state        | The Web Speech "denied" state is observable       | Negligible; not a credential.                                                              |
+| Attacker                                   | Capability                                         | Mitigation                                                                                                                                                                                     |
+| ------------------------------------------ | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Browser vendor (Google/Apple)              | Sees audio + transcript                            | Documented in disclosure; user opts in per use. No daemon-side surface.                                                                                                                        |
+| Network passive between browser and vendor | Sees audio (HTTPS encrypted but vendor terminates) | Out of our control; consistent with operating system dictation. Documented.                                                                                                                    |
+| Compromised page (XSS) starts recording    | Records ambient audio                              | Press-and-hold model means recording only when button pressed; hotkey requires actual keydown; getUserMedia permission is per-origin and prompts on first use; CSP excludes 3rd-party scripts. |
+| Stolen unlocked phone                      | Records ambient audio in PWA                       | Same as above; recording requires the button pressed; mitigation = lock the phone (biometric on the shell from `add-native-mobile-shells`).                                                    |
+| Misheard destructive command auto-runs     | Voice input causes harm                            | Slash commands never auto-execute (D3); plain prompts go through the agent which has its own approval gating (`add-policy-engine`).                                                            |
+| Permission denial leaks user state         | The Web Speech "denied" state is observable        | Negligible; not a credential.                                                                                                                                                                  |
 
 ## Risks / Trade-offs
 
-| Risk                                      | Likelihood | Impact | Mitigation                                                                                  |
-|-------------------------------------------|------------|--------|---------------------------------------------------------------------------------------------|
-| Web Speech rate-limited by vendor         | M          | L      | Hold-to-talk pattern produces bounded short sessions; 60s cap.                              |
-| Safari Web Speech support gaps in older iOS | M       | M      | Feature detect; button hidden when unsupported; documented as "may be partial".             |
-| Volume meter battery drain                | L          | L      | Meter runs only while recording; AudioContext disposed on stop.                             |
-| User believes audio goes to daemon        | M          | M      | Disclosure modal first time + persistent pill.                                              |
-| Mic permission prompt confuses on phone   | M          | L      | Microbutton press launches getUserMedia first time; subsequent presses use the granted permission. |
-| Hotkey conflict with browser shortcut     | M          | L      | Configurable; default uses uncommon chord on focused input.                                 |
+| Risk                                        | Likelihood | Impact | Mitigation                                                                                         |
+| ------------------------------------------- | ---------- | ------ | -------------------------------------------------------------------------------------------------- |
+| Web Speech rate-limited by vendor           | M          | L      | Hold-to-talk pattern produces bounded short sessions; 60s cap.                                     |
+| Safari Web Speech support gaps in older iOS | M          | M      | Feature detect; button hidden when unsupported; documented as "may be partial".                    |
+| Volume meter battery drain                  | L          | L      | Meter runs only while recording; AudioContext disposed on stop.                                    |
+| User believes audio goes to daemon          | M          | M      | Disclosure modal first time + persistent pill.                                                     |
+| Mic permission prompt confuses on phone     | M          | L      | Microbutton press launches getUserMedia first time; subsequent presses use the granted permission. |
+| Hotkey conflict with browser shortcut       | M          | L      | Configurable; default uses uncommon chord on focused input.                                        |
 
 ## Open questions
 

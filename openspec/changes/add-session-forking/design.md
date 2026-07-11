@@ -25,6 +25,7 @@ is on the daemon and the clients.
 ## Goals / Non-Goals
 
 **Goals:**
+
 - A single HTTP call creates a fork.
 - The fork is a normal session afterwards (no special-case routes,
   no special-case clients).
@@ -43,6 +44,7 @@ is on the daemon and the clients.
 - Audit captures every fork.
 
 **Non-Goals:**
+
 - Merging forks. A future change might add a "merge" that copies a
   range of events from one session into another; not in scope here.
 - Cross-workspace forking.
@@ -51,7 +53,7 @@ is on the daemon and the clients.
 - A visual tree-diff UI. The listing renders a flat tree-formatted
   table; rich visualisation is out of scope.
 - Reverse-resolution: looking up forks of a specific event
-  *anywhere across workspaces*. Listing is per-workspace.
+  _anywhere across workspaces_. Listing is per-workspace.
 - Storage deduplication between parent and `include`-mode fork.
   Each fork has its own JSONL file. Disk usage is the cost of the
   feature; bounded by transcript size.
@@ -257,7 +259,7 @@ max).
 ### D2 — Three transcript modes (no "shallow copy" / "pointer" mode)
 
 **Choice**: `include` / `summary` / `empty`. No "the fork
-*references* the parent's transcript and doesn't copy."
+_references_ the parent's transcript and doesn't copy."
 
 **Alternative considered**: A symlink-style "reference" mode where
 the fork's JSONL is just a pointer to a byte range of the parent's
@@ -275,7 +277,7 @@ long parent. Mitigated by the option to use `summary` or `empty`.
 ### D3 — Forking requires `write` scope
 
 **Choice**: `POST /session/:id/fork` requires `write` scope on the
-parent session. Reading is not enough — forking *creates state*
+parent session. Reading is not enough — forking _creates state_
 (a new session, new JSONL, possibly an out-of-band summary call to
 the parent's model that consumes API budget).
 
@@ -366,36 +368,36 @@ and brevity.
 
 ## Persistence
 
-| Artifact                                                | Format | Notes                                                |
-|---------------------------------------------------------|--------|------------------------------------------------------|
-| `~/.qwen/projects/<cwd>/chats/<sessionId>.jsonl`        | JSONL  | First line is `type: "fork"` for forks; otherwise normal start line. |
-| `~/.qwen/rc/wal/<sessionId>.log`                        | Binary | New WAL per session as before. First entry for a fork is `session_forked`. |
-| In-memory lineage map                                   | RAM    | Rebuilt on startup by reading first line of each JSONL in the workspace. |
+| Artifact                                         | Format | Notes                                                                      |
+| ------------------------------------------------ | ------ | -------------------------------------------------------------------------- |
+| `~/.qwen/projects/<cwd>/chats/<sessionId>.jsonl` | JSONL  | First line is `type: "fork"` for forks; otherwise normal start line.       |
+| `~/.qwen/rc/wal/<sessionId>.log`                 | Binary | New WAL per session as before. First entry for a fork is `session_forked`. |
+| In-memory lineage map                            | RAM    | Rebuilt on startup by reading first line of each JSONL in the workspace.   |
 
 No new SQLite tables.
 
 ## Threat model
 
-| Attacker                                  | Capability                                  | Mitigation                                                                              |
-|-------------------------------------------|---------------------------------------------|-----------------------------------------------------------------------------------------|
-| Write-scope token forks repeatedly        | Disk exhaustion via many `include` forks    | Operator's choice; rate limit per token at the daemon's existing per-token bucket. Audit shows the storm. |
-| `summary` mode used to exfil parent state | Each summary is a model call that returns text the caller could log; same as just reading the transcript | Already authorised; not an escalation. Audit records the fork action and mode.          |
-| Parent deletion while fork exists         | Lineage chain breaks                        | Fork is independent; chain just truncates at the deleted parent. Documented behaviour. |
-| Fork from non-existent event id           | Confusing error / 500                       | Validate `fromEventId` is within the parent's JSONL range before allocating any new state; 400 if not. |
-| Deep fork chain → walk DoS                | `lineage` endpoint slow                     | Hard cap on chain walk (default 100 levels); beyond returns first 100 plus a `truncated: true` flag. |
-| Fork name collisions / injection          | Misleading display strings                  | Names are stored as opaque strings; validated to printable ASCII length ≤ 64. No injection into structured fields. |
-| Read-scope token tries to fork            | Spawns sessions / runs summary call         | Scope check (D3); 403.                                                                  |
+| Attacker                                  | Capability                                                                                               | Mitigation                                                                                                         |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Write-scope token forks repeatedly        | Disk exhaustion via many `include` forks                                                                 | Operator's choice; rate limit per token at the daemon's existing per-token bucket. Audit shows the storm.          |
+| `summary` mode used to exfil parent state | Each summary is a model call that returns text the caller could log; same as just reading the transcript | Already authorised; not an escalation. Audit records the fork action and mode.                                     |
+| Parent deletion while fork exists         | Lineage chain breaks                                                                                     | Fork is independent; chain just truncates at the deleted parent. Documented behaviour.                             |
+| Fork from non-existent event id           | Confusing error / 500                                                                                    | Validate `fromEventId` is within the parent's JSONL range before allocating any new state; 400 if not.             |
+| Deep fork chain → walk DoS                | `lineage` endpoint slow                                                                                  | Hard cap on chain walk (default 100 levels); beyond returns first 100 plus a `truncated: true` flag.               |
+| Fork name collisions / injection          | Misleading display strings                                                                               | Names are stored as opaque strings; validated to printable ASCII length ≤ 64. No injection into structured fields. |
+| Read-scope token tries to fork            | Spawns sessions / runs summary call                                                                      | Scope check (D3); 403.                                                                                             |
 
 ## Risks / Trade-offs
 
-| Risk                                         | Likelihood | Impact | Mitigation                                                                |
-|----------------------------------------------|------------|--------|---------------------------------------------------------------------------|
-| Forks pile up; UI tree gets cluttered        | M          | L      | `forks` array bounded by reality; listing renders only direct children; lineage view explicit. |
-| Summary mode produces poor context           | M          | M      | `summary` is opt-in; documented to be lossy. CLI prints the summary so user can verify. |
-| Agent-side memory differs from JSONL replay  | L          | M      | This change does not touch agent's memory model. Upstream `--resume` is the contract. |
-| Forking into a session that's already ended  | L          | L      | Parent doesn't have to be active to be forked from; only `fromEventId` validity matters. |
-| WAL eviction in parent before fork command   | L          | L      | Forking reads from the JSONL, not the WAL; WAL retention doesn't affect fork feasibility. |
-| Pollution of `<cwd>/chats/` with abandoned forks | M       | L      | Standard GC (`add-remote-control` `gcAfterSec`) applies; orphaned forks GC just like any session. |
+| Risk                                             | Likelihood | Impact | Mitigation                                                                                        |
+| ------------------------------------------------ | ---------- | ------ | ------------------------------------------------------------------------------------------------- |
+| Forks pile up; UI tree gets cluttered            | M          | L      | `forks` array bounded by reality; listing renders only direct children; lineage view explicit.    |
+| Summary mode produces poor context               | M          | M      | `summary` is opt-in; documented to be lossy. CLI prints the summary so user can verify.           |
+| Agent-side memory differs from JSONL replay      | L          | M      | This change does not touch agent's memory model. Upstream `--resume` is the contract.             |
+| Forking into a session that's already ended      | L          | L      | Parent doesn't have to be active to be forked from; only `fromEventId` validity matters.          |
+| WAL eviction in parent before fork command       | L          | L      | Forking reads from the JSONL, not the WAL; WAL retention doesn't affect fork feasibility.         |
+| Pollution of `<cwd>/chats/` with abandoned forks | M          | L      | Standard GC (`add-remote-control` `gcAfterSec`) applies; orphaned forks GC just like any session. |
 
 ## Open questions
 

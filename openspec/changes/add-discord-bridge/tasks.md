@@ -77,22 +77,17 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.3 day
   - **Files:** `packages/bridge-discord/src/registration.ts`
-  - **Prompt:**
-    > POST `/rc/bridges` with `displayName: "Discord-bridge",
-    > bridgeKind: "discord", capabilities: { supportsActions:
-    > true, supportsMarkdown: "limited", maxMessageBytes: 2000,
-    > supportsThreads: true, supportsEdits: true }`. Heartbeat
-    > every 30 s.
+  - **Prompt:** > POST `/rc/bridges` with `displayName: "Discord-bridge",
+bridgeKind: "discord", capabilities: { supportsActions:
+true, supportsMarkdown: "limited", maxMessageBytes: 2000,
+supportsThreads: true, supportsEdits: true }`. Heartbeat > every 30 s.
 
 - [ ] **1.6 Healthz endpoint + invite URL print**
   - **Status:** not-started
   - **Effort:** ~0.15 day
-  - **Prompt:**
-    > Expose `GET /healthz` (port 9100 default). On first boot
-    > print the OAuth2 invite URL:
-    > `https://discord.com/api/oauth2/authorize?client_id=
-    > <APP_ID>&permissions=274877943808&scope=bot+applications.
-    > commands` so the operator can add the bot to a guild.
+  - **Prompt:** > Expose `GET /healthz` (port 9100 default). On first boot > print the OAuth2 invite URL: > `https://discord.com/api/oauth2/authorize?client_id=
+<APP_ID>&permissions=274877943808&scope=bot+applications.
+commands` so the operator can add the bot to a guild.
 
 ## Phase 2 — Slash commands + channel binding
 
@@ -111,12 +106,13 @@ State machine and alignment pattern: see
   - **Files:** `packages/bridge-discord/src/commands/register.ts`
   - **Prompt:**
     > On boot, register three commands via Discord REST:
+    >
     > - `/qwen attach <invite:string>` — bind this channel
     > - `/qwen detach` — unbind
     > - `/qwen status` — show binding + health
-    > Guild-scoped if `DISCORD_GUILD_ID` set; else global.
-    > Acceptance: commands appear in the Discord client within 30s
-    > of bot startup (guild-scoped).
+    >   Guild-scoped if `DISCORD_GUILD_ID` set; else global.
+    >   Acceptance: commands appear in the Discord client within 30s
+    >   of bot startup (guild-scoped).
 
 - [ ] **2.2 channels.json store**
   - **Status:** not-started
@@ -134,6 +130,7 @@ State machine and alignment pattern: see
   - **Files:** `packages/bridge-discord/src/commands/attach.ts`
   - **Prompt:**
     > On `ChatInputCommandInteraction` for `/qwen attach`:
+    >
     > - Defer reply ephemeral.
     > - POST `/rc/bridges/:id/invite/redeem` with the token arg.
     > - On 200, persist binding and reply "Channel bound to
@@ -158,13 +155,8 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.3 day
   - **Files:** `packages/bridge-discord/src/handlers/message.ts`
-  - **Prompt:**
-    > On `MESSAGE_CREATE` for a bound channel, where author is not
-    > the bot itself and not in the ban cache:
-    > - POST `/session/<sessionId>/prompt` with `prompt:
-    >   <content>` and `X-RC-SubActor: discord:<author.id>`.
-    > - On 429: send ephemeral reply ("slow down...").
-    > - On 403 sub_actor_banned: add to local ban cache, drop.
+  - **Prompt:** > On `MESSAGE_CREATE` for a bound channel, where author is not > the bot itself and not in the ban cache: > > - POST `/session/<sessionId>/prompt` with `prompt:
+<content>` and `X-RC-SubActor: discord:<author.id>`. > - On 429: send ephemeral reply ("slow down..."). > - On 403 sub_actor_banned: add to local ban cache, drop.
 
 ## Phase 3 — Outbound rendering, components, threads
 
@@ -198,43 +190,22 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/bridge-discord/src/render/threads.ts`
-  - **Prompt:**
-    > Track per-(channel, turn) flush count. On the 7th flush,
-    > create a public thread on the first message of the turn via
-    > `Channel.threads.create({ startMessage, name: "qwen agent
-    > turn", autoArchiveDuration: 60 })`. Redirect subsequent
-    > flushes of the turn to the thread. Turn boundary defined by
-    > a `permission_resolved` SSE event OR the next inbound user
-    > prompt. Acceptance: scenario `Long stream spawns thread`.
+  - **Prompt:** > Track per-(channel, turn) flush count. On the 7th flush, > create a public thread on the first message of the turn via > `Channel.threads.create({ startMessage, name: "qwen agent
+turn", autoArchiveDuration: 60 })`. Redirect subsequent > flushes of the turn to the thread. Turn boundary defined by > a `permission_resolved` SSE event OR the next inbound user > prompt. Acceptance: scenario `Long stream spawns thread`.
 
 - [ ] **3.4 permission_request renderer with components**
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/bridge-discord/src/render/permissionRequest.ts`
-  - **Prompt:**
-    > Branch on `bridgeHints.recommendedSurface`:
-    > - `inline`: send a `MessageCreate` with `content:
-    >   argsSummaryShort`, components = one ActionRow with two
-    >   buttons (Approve = Success style, Deny = Danger style,
-    >   custom_id `vote:<dir>:<reqId>`).
-    > - `deeplink`: send with one link-style button to the web
-    >   client URL.
-    > Record (requestId → messageId) in in-memory map for edit on
-    > resolve.
+  - **Prompt:** > Branch on `bridgeHints.recommendedSurface`: > > - `inline`: send a `MessageCreate` with `content:
+argsSummaryShort`, components = one ActionRow with two > buttons (Approve = Success style, Deny = Danger style, > custom_id `vote:<dir>:<reqId>`). > - `deeplink`: send with one link-style button to the web > client URL. > Record (requestId → messageId) in in-memory map for edit on > resolve.
 
 - [ ] **3.5 Button interaction handler → vote**
   - **Status:** not-started
   - **Effort:** ~0.3 day
   - **Files:** `packages/bridge-discord/src/handlers/component.ts`
-  - **Prompt:**
-    > On `MessageComponentInteraction`:
-    > - Parse `customId` `vote:<dir>:<reqId>`.
-    > - Defer reply ephemeral.
-    > - POST `/permission/<reqId>` with vote + `X-RC-SubActor:
-    >   discord:<member.user.id>`.
-    > - Edit reply: "You voted `<dir>`".
-    > - On daemon error, edit reply with the error text.
-    > Acceptance: scenario `Approve click resolves permission`.
+  - **Prompt:** > On `MessageComponentInteraction`: > > - Parse `customId` `vote:<dir>:<reqId>`. > - Defer reply ephemeral. > - POST `/permission/<reqId>` with vote + `X-RC-SubActor:
+discord:<member.user.id>`. > - Edit reply: "You voted `<dir>`". > - On daemon error, edit reply with the error text. > Acceptance: scenario `Approve click resolves permission`.
 
 - [ ] **3.6 permission_resolved → message edit**
   - **Status:** not-started
@@ -290,11 +261,8 @@ State machine and alignment pattern: see
 
 - [ ] **5.0 Alignment**
   - **Status:** not-started
-  - **Prompt:**
-    > Verify Phase 4 `completed`. Confirm `qwen rc bridges invite
-    > --kind discord` produces a usable invite token (just an
-    > opaque token; no Discord-specific URL needed since users
-    > paste it into `/qwen attach`).
+  - **Prompt:** > Verify Phase 4 `completed`. Confirm `qwen rc bridges invite
+--kind discord` produces a usable invite token (just an > opaque token; no Discord-specific URL needed since users > paste it into `/qwen attach`).
 
 - [ ] **5.1 docs/bridges/discord.md**
   - **Status:** not-started
@@ -316,12 +284,12 @@ State machine and alignment pattern: see
 
 ## Effort summary
 
-| Phase | Description                          | Estimate (days) |
-|-------|--------------------------------------|------------------|
-| 0     | Foundation                           | 0.5              |
-| 1     | Skeleton + registration              | 1.5              |
-| 2     | Slash commands + binding             | 1.5              |
-| 3     | Outbound rendering + threads         | 2.5              |
-| 4     | Rate limits, bans, polish            | 0.75             |
-| 5     | Docs + archive                       | 0.5              |
-| **Total** |                                  | **~7.25**        |
+| Phase     | Description                  | Estimate (days) |
+| --------- | ---------------------------- | --------------- |
+| 0         | Foundation                   | 0.5             |
+| 1         | Skeleton + registration      | 1.5             |
+| 2         | Slash commands + binding     | 1.5             |
+| 3         | Outbound rendering + threads | 2.5             |
+| 4         | Rate limits, bans, polish    | 0.75            |
+| 5         | Docs + archive               | 0.5             |
+| **Total** |                              | **~7.25**       |

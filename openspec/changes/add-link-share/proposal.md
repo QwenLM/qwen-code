@@ -49,10 +49,10 @@ from `add-remote-control` D6 — guests are second-class by design.
      from the address bar before any other navigation happens.
   4. Loads the normal web client shell, which now sends the token
      in the `Authorization` header.
-  Subsequent requests never carry the token in the URL.
+     Subsequent requests never carry the token in the URL.
 - **Share-token watermark in the web client.** Every share-token
   session displays a banner showing `Shared: <label> · expires in
-  47m · 3 of 5 uses` so the owner (or anyone else watching) can see
+47m · 3 of 5 uses` so the owner (or anyone else watching) can see
   what guest access is live.
 - **Audit visibility.** Every share-link creation, redemption, and
   every action by a share-token holder is audited with the share
@@ -107,10 +107,10 @@ the watermark to revoke immediately.
 
 - **qwen-code repo**: extends the pairing system from
   `add-remote-control` with the `share` scope and `session_lock_id`
-  + `max_uses` token-store columns. New routes:
-  `POST /rc/share` (mint), `GET /rc/share` (list),
-  `DELETE /rc/share/:id` (revoke), `GET /ui/share/<token>`
-  (bootstrap page).
+  - `max_uses` token-store columns. New routes:
+    `POST /rc/share` (mint), `GET /rc/share` (list),
+    `DELETE /rc/share/:id` (revoke), `GET /ui/share/<token>`
+    (bootstrap page).
 - **Web client**: adds the bootstrap page, the watermark banner, and
   filters destructive UI (prompt input, end-session button) when the
   active token has `share` scope.
@@ -129,6 +129,6 @@ the watermark to revoke immediately.
     trusted; this only constrains who else can reach the session.
   - Cross-daemon sharing (the URL works only against the daemon
     that minted it). Multi-daemon UX is in `add-multi-workspace-
-    client`.
+client`.
   - Federation: a share link minted on daemon A cannot be used
     against daemon B even with the same operator. By construction.

@@ -20,13 +20,13 @@ context: |
 
 rules:
   specs:
-    - "Requirements use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)."
-    - "Each requirement has at least one scenario."
-    - "Wire-protocol requirements MUST cite endpoint method+path or SSE event type."
+    - 'Requirements use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY).'
+    - 'Each requirement has at least one scenario.'
+    - 'Wire-protocol requirements MUST cite endpoint method+path or SSE event type.'
   tasks:
-    - "Phase 0 of every phase is an Alignment task (N.0) that verifies state-machine, prior phase completion, and spec drift before any implementation."
-    - "Each task lists Status and Prompt fields directly under the checkbox."
-    - "Status values: not-started | started | completed | deferred:<reason> | skipped:<reason> | cancelled:<reason>"
+    - 'Phase 0 of every phase is an Alignment task (N.0) that verifies state-machine, prior phase completion, and spec drift before any implementation.'
+    - 'Each task lists Status and Prompt fields directly under the checkbox.'
+    - 'Status values: not-started | started | completed | deferred:<reason> | skipped:<reason> | cancelled:<reason>'
   design:
-    - "Architecture decisions record the alternative considered, not just the choice."
-    - "Threat model enumerates attacker, capability, mitigation explicitly."
+    - 'Architecture decisions record the alternative considered, not just the choice.'
+    - 'Threat model enumerates attacker, capability, mitigation explicitly.'

@@ -117,8 +117,8 @@ A push payload (pre-encryption) SHALL conform to schema v1:
   "sessionName": "<≤64 chars>",
   "summary": "<≤140 chars>",
   "deepLink": "<absolute https URL>",
-  "permission": { "requestId": "...", "toolName": "...", "expiresAt": "..." },  // when kind = permission.required
-  "actions": [ { "id": "...", "title": "..." } ]   // optional, max 2
+  "permission": { "requestId": "...", "toolName": "...", "expiresAt": "..." }, // when kind = permission.required
+  "actions": [{ "id": "...", "title": "..." }], // optional, max 2
 }
 ```
 
@@ -147,12 +147,12 @@ Each subscription MAY only receive event kinds permitted by its
 token's scope per the table below. The send pipeline SHALL filter
 events before encryption:
 
-| Scope     | Allowed kinds                                                  |
-|-----------|----------------------------------------------------------------|
-| owner     | All                                                            |
-| write     | permission.required, task.completed, session.died              |
-| approve   | permission.required                                            |
-| read      | task.completed, mention                                        |
+| Scope   | Allowed kinds                                     |
+| ------- | ------------------------------------------------- |
+| owner   | All                                               |
+| write   | permission.required, task.completed, session.died |
+| approve | permission.required                               |
+| read    | task.completed, mention                           |
 
 #### Scenario: Read scope does not receive permission pings
 

@@ -26,6 +26,7 @@ bridge against a stable contract.
 ## Goals / Non-Goals
 
 **Goals:**
+
 - A bridge is a regular HTTP+SSE client of the daemon. No special
   RPC channel.
 - The audit log records the actual human behind every bridge-mediated
@@ -37,6 +38,7 @@ bridge against a stable contract.
   the daemon.
 
 **Non-Goals:**
+
 - A universal bridge framework. Each bridge is its own process and
   can be in any language as long as it speaks HTTP+SSE.
 - Cross-bridge identity linking. `telegram:evan` and `discord:evan`
@@ -178,15 +180,15 @@ Bans are bridge-scoped. Banning `telegram:trolly` does not affect
 
 ## Threat model
 
-| Attacker                              | Capability                                    | Mitigation                                                                                       |
-|---------------------------------------|-----------------------------------------------|--------------------------------------------------------------------------------------------------|
-| Bridge process compromise             | Use bridge token to vote / prompt              | Bridge token is `bridge` scope only — cannot mint other tokens, cannot read audit, cannot revoke. Owner revokes the token; bridge is offline; threat ends. |
-| Bridge spoofs sub-actor identity      | "Approved by ceo" when really a random user    | Sub-actor is bridge-asserted; the daemon CANNOT verify. Threat model: a compromised bridge can lie. Mitigation = revoke the bridge promptly; audit captures both the bridge tokenId AND the asserted subActor so post-incident analysis distinguishes "bridge compromised" vs "user account compromised." |
-| Misbehaving bridge fans out events    | Floods chat service with sensitive content     | `bridgeHints.sensitivity: high` + `recommendedSurface: deeplink` advises bridges; bridges that ignore it are operator-removed. |
-| External user spams prompts           | DOS via prompt queue                           | Per-sub-actor token bucket; per-bridge token bucket; FIFO discipline.                            |
-| Sub-actor impersonation across bridges | telegram:alice claims to be discord:alice     | No cross-bridge identity linking; each sub-actor is namespaced.                                  |
-| Bridge stays online indefinitely after revoke | Token revoked but bridge keeps cached SSE | Stage 1's `client_evicted` semantics close the SSE within 1 s; subsequent fetches 401.           |
-| Operator unaware of stale bridges     | Long-dead bridge still listed                  | Heartbeat-or-GC: bridges that miss 3 consecutive heartbeats (60s each) are auto-deregistered, audit `bridge_stale_deregistered` written. |
+| Attacker                                      | Capability                                  | Mitigation                                                                                                                                                                                                                                                                                                |
+| --------------------------------------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bridge process compromise                     | Use bridge token to vote / prompt           | Bridge token is `bridge` scope only — cannot mint other tokens, cannot read audit, cannot revoke. Owner revokes the token; bridge is offline; threat ends.                                                                                                                                                |
+| Bridge spoofs sub-actor identity              | "Approved by ceo" when really a random user | Sub-actor is bridge-asserted; the daemon CANNOT verify. Threat model: a compromised bridge can lie. Mitigation = revoke the bridge promptly; audit captures both the bridge tokenId AND the asserted subActor so post-incident analysis distinguishes "bridge compromised" vs "user account compromised." |
+| Misbehaving bridge fans out events            | Floods chat service with sensitive content  | `bridgeHints.sensitivity: high` + `recommendedSurface: deeplink` advises bridges; bridges that ignore it are operator-removed.                                                                                                                                                                            |
+| External user spams prompts                   | DOS via prompt queue                        | Per-sub-actor token bucket; per-bridge token bucket; FIFO discipline.                                                                                                                                                                                                                                     |
+| Sub-actor impersonation across bridges        | telegram:alice claims to be discord:alice   | No cross-bridge identity linking; each sub-actor is namespaced.                                                                                                                                                                                                                                           |
+| Bridge stays online indefinitely after revoke | Token revoked but bridge keeps cached SSE   | Stage 1's `client_evicted` semantics close the SSE within 1 s; subsequent fetches 401.                                                                                                                                                                                                                    |
+| Operator unaware of stale bridges             | Long-dead bridge still listed               | Heartbeat-or-GC: bridges that miss 3 consecutive heartbeats (60s each) are auto-deregistered, audit `bridge_stale_deregistered` written.                                                                                                                                                                  |
 
 ## Decisions
 
@@ -295,22 +297,22 @@ person who uses two services. Acceptable; rare case.
 
 ## Persistence
 
-| Artifact                  | Format     | Notes                                                       |
-|---------------------------|------------|-------------------------------------------------------------|
-| `bridges` table           | SQLite     | Columns: `id, token_id, display_name, bridge_kind, capabilities (JSON), registered_at, last_heartbeat_at`. |
-| `bridge_bans` table       | SQLite     | Columns: `bridge_id, sub_actor, reason, banned_at, banned_by_token_id`. |
-| Audit log entries         | JSONL      | `sub_actor` column added.                                   |
-| Rate limit counters       | In-memory  | (No WAL — rate limits resetting on restart is acceptable for this case; cf. policy quotas which need persistence.) |
+| Artifact            | Format    | Notes                                                                                                              |
+| ------------------- | --------- | ------------------------------------------------------------------------------------------------------------------ |
+| `bridges` table     | SQLite    | Columns: `id, token_id, display_name, bridge_kind, capabilities (JSON), registered_at, last_heartbeat_at`.         |
+| `bridge_bans` table | SQLite    | Columns: `bridge_id, sub_actor, reason, banned_at, banned_by_token_id`.                                            |
+| Audit log entries   | JSONL     | `sub_actor` column added.                                                                                          |
+| Rate limit counters | In-memory | (No WAL — rate limits resetting on restart is acceptable for this case; cf. policy quotas which need persistence.) |
 
 ## Risks / Trade-offs
 
-| Risk                                  | Likelihood | Impact | Mitigation                                                                        |
-|---------------------------------------|------------|--------|-----------------------------------------------------------------------------------|
-| Bridges proliferate; users confused   | M          | L      | `qwen rc bridges` lists with capabilities; documented bridge taxonomy.            |
-| Sub-actor namespace collisions        | L          | M      | Strict `<kind>:<id>` enforcement; reject IDs without the prefix.                  |
-| Bridge crashes mid-message            | M          | L      | Bridge restarts replay events; client_evicted closes stale SSE.                    |
-| Operator forgets a bridge is running  | M          | M      | Heartbeat-or-GC; presence event in workstation TUI keeps it visible.              |
-| Sensitivity heuristic fails           | M          | L      | Advisory only (D3); operator owns trust boundary.                                 |
+| Risk                                 | Likelihood | Impact | Mitigation                                                             |
+| ------------------------------------ | ---------- | ------ | ---------------------------------------------------------------------- |
+| Bridges proliferate; users confused  | M          | L      | `qwen rc bridges` lists with capabilities; documented bridge taxonomy. |
+| Sub-actor namespace collisions       | L          | M      | Strict `<kind>:<id>` enforcement; reject IDs without the prefix.       |
+| Bridge crashes mid-message           | M          | L      | Bridge restarts replay events; client_evicted closes stale SSE.        |
+| Operator forgets a bridge is running | M          | M      | Heartbeat-or-GC; presence event in workstation TUI keeps it visible.   |
+| Sensitivity heuristic fails          | M          | L      | Advisory only (D3); operator owns trust boundary.                      |
 
 ## Open questions
 

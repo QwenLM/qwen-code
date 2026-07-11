@@ -18,6 +18,7 @@ of automation policy.
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Eliminate user-in-the-loop for clearly safe tool calls (allowlist).
 - Hard-block clearly dangerous tool calls without a prompt-and-deny
   ceremony (denylist).
@@ -26,6 +27,7 @@ of automation policy.
 - Decisions visible to every attached client in real time.
 
 **Non-Goals:**
+
 - Policy-as-code runtime (Cedar/OPA). Adds a dependency, learning
   curve, and attack surface for marginal benefit at this scope.
 - Cross-workspace policy distribution. Per-workspace `.qwen/policy.yaml`
@@ -89,60 +91,61 @@ rules:
   - id: safe-tests
     match:
       tool: bash
-      argsGlob: ["npm test*", "pnpm test*", "vitest *"]
-      pathGlob: "**"        # any cwd within workspace
+      argsGlob: ['npm test*', 'pnpm test*', 'vitest *']
+      pathGlob: '**' # any cwd within workspace
     action: allow
     maxPerWindow:
       count: 50
       windowSec: 3600
-    expiresAt: 2026-05-16T08:00:00Z   # optional absolute expiry
+    expiresAt: 2026-05-16T08:00:00Z # optional absolute expiry
 
   - id: forbid-force-push
     match:
       tool: bash
-      argsGlob: ["git push --force*", "git push -f*", "git push *--force-with-lease*"]
+      argsGlob:
+        ['git push --force*', 'git push -f*', 'git push *--force-with-lease*']
     action: deny
-    reason: "Force-push prohibited by policy. Use a PR."
+    reason: 'Force-push prohibited by policy. Use a PR.'
 
   - id: auth-tree-owner-only
     match:
       tool: edit_file
-      pathGlob: "src/auth/**"
+      pathGlob: 'src/auth/**'
     action: prompt
     requireScope: owner
 
   - id: nighttime-quiet
     match:
-      tool: "*"
+      tool: '*'
       timeOfDay:
-        from: "23:00"
-        to:   "07:00"
-        timezone: "America/Los_Angeles"
+        from: '23:00'
+        to: '07:00'
+        timezone: 'America/Los_Angeles'
     action: prompt
     requireScope: owner
-    priority: 100           # higher priority overrides lower
+    priority: 100 # higher priority overrides lower
 ```
 
 ### Match semantics
 
-| Field          | Meaning                                                                                       |
-|----------------|-----------------------------------------------------------------------------------------------|
-| `tool`         | Tool name string or glob. `"*"` matches any tool.                                             |
-| `argsGlob`     | One or more globs matched against the canonical-string serialization of args (whitespace-collapsed). |
-| `pathGlob`     | One or more globs matched against `args.path`, `args.cwd`, or `args.files[]` (tool-dependent). |
-| `originScope`  | Originating client's scope: `owner|write|approve|read`. Useful for "agents acting on behalf of read tokens cannot do X." |
-| `timeOfDay`    | `{from, to, timezone}`. Local time at the daemon. Wraps over midnight if `from > to`.          |
-| `sessionTag`   | Optional `--tag` value passed at session create — lets you have stricter policies for unattended runs (`tag: night-run`). |
+| Field         | Meaning                                                                                                                   |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------- | ----- | ------- | ----------------------------------------------------------------------- |
+| `tool`        | Tool name string or glob. `"*"` matches any tool.                                                                         |
+| `argsGlob`    | One or more globs matched against the canonical-string serialization of args (whitespace-collapsed).                      |
+| `pathGlob`    | One or more globs matched against `args.path`, `args.cwd`, or `args.files[]` (tool-dependent).                            |
+| `originScope` | Originating client's scope: `owner                                                                                        | write | approve | read`. Useful for "agents acting on behalf of read tokens cannot do X." |
+| `timeOfDay`   | `{from, to, timezone}`. Local time at the daemon. Wraps over midnight if `from > to`.                                     |
+| `sessionTag`  | Optional `--tag` value passed at session create — lets you have stricter policies for unattended runs (`tag: night-run`). |
 
 All `match` fields are AND-combined; multi-value globs (lists) are
 OR-combined within their field.
 
 ### Action semantics
 
-| Action   | Effect                                                                                       |
-|----------|----------------------------------------------------------------------------------------------|
-| `allow`  | Resolve permission with `outcome: "selected", optionId: "allow"`. Emit `policy_decision`.    |
-| `deny`   | Resolve permission with `outcome: "selected", optionId: "deny"` and `reason`. Emit `policy_decision`. |
+| Action   | Effect                                                                                                        |
+| -------- | ------------------------------------------------------------------------------------------------------------- |
+| `allow`  | Resolve permission with `outcome: "selected", optionId: "allow"`. Emit `policy_decision`.                     |
+| `deny`   | Resolve permission with `outcome: "selected", optionId: "deny"` and `reason`. Emit `policy_decision`.         |
 | `prompt` | Emit normal `permission_request`, but include `requiredScope` so clients without that scope hide the buttons. |
 
 ### Precedence
@@ -176,16 +179,16 @@ the file is treated as part of the operator's repository.
 
 ### Threats
 
-| Attacker                                  | Capability                              | Mitigation                                                                                              |
-|-------------------------------------------|------------------------------------------|---------------------------------------------------------------------------------------------------------|
-| Write-scope token holder                  | Force auto-approve via API               | No API to mutate policy — file-only. (See open question Q1.)                                            |
-| Compromised paired client                 | Trick agent into proposing high-priv tool that matches an allow rule | `requireScope` + denylist for catastrophic tools (`rm -rf`, force-push) caught by `deny` rules regardless of scope. |
-| File tamper by non-daemon process         | Rewrite policy.yaml                      | Daemon checks file mode at load (warns on world-writable); fsnotify is a load trigger, not a trust signal. Operator must control filesystem perms. |
-| Hot-reload race (file replaced mid-eval)  | Inconsistent rule snapshot               | Loader snapshots ruleset atomically; evaluator never holds a partial set.                                |
-| Time-of-day spoofing                      | Trick rule into matching wrong window    | Daemon's wallclock is the source of truth; not configurable. Drift > 5 min logs a warning.              |
-| Quota wraparound / counter manipulation   | Bypass `maxPerWindow`                    | Counters are in-memory + WAL'd; daemon restart restores from WAL.                                       |
-| Rule-DOS by adding 100k rules             | CPU exhaustion                           | Loader hard-caps `len(rules) ≤ 1000`; over-cap is a parse error.                                        |
-| `deny`-bypass via client-side approval    | Vote past a deny                          | `deny` never emits `permission_request`; no client surface to vote against.                              |
+| Attacker                                 | Capability                                                           | Mitigation                                                                                                                                         |
+| ---------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Write-scope token holder                 | Force auto-approve via API                                           | No API to mutate policy — file-only. (See open question Q1.)                                                                                       |
+| Compromised paired client                | Trick agent into proposing high-priv tool that matches an allow rule | `requireScope` + denylist for catastrophic tools (`rm -rf`, force-push) caught by `deny` rules regardless of scope.                                |
+| File tamper by non-daemon process        | Rewrite policy.yaml                                                  | Daemon checks file mode at load (warns on world-writable); fsnotify is a load trigger, not a trust signal. Operator must control filesystem perms. |
+| Hot-reload race (file replaced mid-eval) | Inconsistent rule snapshot                                           | Loader snapshots ruleset atomically; evaluator never holds a partial set.                                                                          |
+| Time-of-day spoofing                     | Trick rule into matching wrong window                                | Daemon's wallclock is the source of truth; not configurable. Drift > 5 min logs a warning.                                                         |
+| Quota wraparound / counter manipulation  | Bypass `maxPerWindow`                                                | Counters are in-memory + WAL'd; daemon restart restores from WAL.                                                                                  |
+| Rule-DOS by adding 100k rules            | CPU exhaustion                                                       | Loader hard-caps `len(rules) ≤ 1000`; over-cap is a parse error.                                                                                   |
+| `deny`-bypass via client-side approval   | Vote past a deny                                                     | `deny` never emits `permission_request`; no client surface to vote against.                                                                        |
 
 ### What does NOT change about threat model
 
@@ -197,13 +200,13 @@ the file is treated as part of the operator's repository.
 
 ## Lifecycle and persistence
 
-| Artifact                              | Lifecycle                                                                                  |
-|---------------------------------------|--------------------------------------------------------------------------------------------|
-| `~/.qwen/rc/policy.yaml`              | Operator-managed. Loaded at daemon start, reloaded on fsnotify (debounced 250 ms).         |
-| `<workspace>/.qwen/policy.yaml`       | Operator-managed; same lifecycle. Loaded after user file.                                  |
-| Quota counters                        | In-memory map keyed by `(ruleId, windowStart)`. Mirrored to `~/.qwen/rc/quotas.wal`.        |
-| Audit log entries                     | Append to existing `add-remote-control` audit stream; carries `decision_source`, `rule_id`. |
-| `policy_decision` SSE events          | Replayed from existing event ring/WAL.                                                     |
+| Artifact                        | Lifecycle                                                                                   |
+| ------------------------------- | ------------------------------------------------------------------------------------------- |
+| `~/.qwen/rc/policy.yaml`        | Operator-managed. Loaded at daemon start, reloaded on fsnotify (debounced 250 ms).          |
+| `<workspace>/.qwen/policy.yaml` | Operator-managed; same lifecycle. Loaded after user file.                                   |
+| Quota counters                  | In-memory map keyed by `(ruleId, windowStart)`. Mirrored to `~/.qwen/rc/quotas.wal`.        |
+| Audit log entries               | Append to existing `add-remote-control` audit stream; carries `decision_source`, `rule_id`. |
+| `policy_decision` SSE events    | Replayed from existing event ring/WAL.                                                      |
 
 Quota WAL is rotated daily; counters reset at the configured window
 boundary (rolling, not aligned to wall-clock midnight, so a rule
@@ -315,14 +318,14 @@ deliverable) mitigates.
 
 ## Risks / Trade-offs
 
-| Risk                                      | Likelihood | Impact | Mitigation                                                                            |
-|-------------------------------------------|------------|--------|---------------------------------------------------------------------------------------|
-| Operator misconfigures and auto-approves too much | M  | H      | `qwen rc policy explain` dry-run; pre-deploy lint that warns when `allow` matches `*`. |
-| Rule precedence surprises                 | M          | M      | Doc + `policy explain` tool that shows which rule won and why.                         |
-| Quota WAL grows unbounded                 | L          | M      | Daily rotation; old segments deleted on horizon roll.                                  |
-| `argsGlob` matches command injection payload | L     | H      | Globs are matched on canonical-string form, not parsed shell tokens. Document this clearly. |
-| YAML parsing CVE                          | L          | M      | Use `js-yaml` `safeLoad` (no constructors); never `load`.                              |
-| Time-of-day misfires across DST changes   | L          | L      | Use Intl.DateTimeFormat with IANA tz; warn when `from`/`to` span DST boundary.         |
+| Risk                                              | Likelihood | Impact | Mitigation                                                                                  |
+| ------------------------------------------------- | ---------- | ------ | ------------------------------------------------------------------------------------------- |
+| Operator misconfigures and auto-approves too much | M          | H      | `qwen rc policy explain` dry-run; pre-deploy lint that warns when `allow` matches `*`.      |
+| Rule precedence surprises                         | M          | M      | Doc + `policy explain` tool that shows which rule won and why.                              |
+| Quota WAL grows unbounded                         | L          | M      | Daily rotation; old segments deleted on horizon roll.                                       |
+| `argsGlob` matches command injection payload      | L          | H      | Globs are matched on canonical-string form, not parsed shell tokens. Document this clearly. |
+| YAML parsing CVE                                  | L          | M      | Use `js-yaml` `safeLoad` (no constructors); never `load`.                                   |
+| Time-of-day misfires across DST changes           | L          | L      | Use Intl.DateTimeFormat with IANA tz; warn when `from`/`to` span DST boundary.              |
 
 ## Open questions
 

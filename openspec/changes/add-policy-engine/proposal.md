@@ -39,7 +39,7 @@ must decide" (ping the appropriate device).
   minutes. After expiry, the rule no longer matches — useful for
   "approve npm install once this hour."
 - **Override path.** `prompt` rules can carry a `requireScope:
-  approve|owner` field. `deny` rules are not overridable from a
+approve|owner` field. `deny` rules are not overridable from a
   client; the rule file itself must change.
 - **Audit-first.** Every evaluation produces an audit entry, whether
   the rule matched or fell through to default-prompt.

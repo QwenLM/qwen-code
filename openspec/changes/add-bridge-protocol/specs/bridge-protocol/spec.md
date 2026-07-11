@@ -34,7 +34,7 @@ subscriptions for arbitrary tokens.
   promote to bridge)
 
 - **GIVEN** an owner-scope caller posts `/rc/pair { scope: "bridge"
-  }`
+}`
 - **WHEN** the call succeeds
 - **THEN** the produced code carries scope `bridge` exactly
 
@@ -176,7 +176,7 @@ bridge's subscription so it can filter pre-emptively.
 
 - **GIVEN** `telegram:troll` is banned on bridge `br_001`
 - **WHEN** the bridge posts a prompt with `X-RC-SubActor:
-  telegram:troll`
+telegram:troll`
 - **THEN** the response is `403 Forbidden` with code
   `sub_actor_banned`
 
@@ -197,7 +197,7 @@ events SHALL distinguish bridge departures.
 - **WHEN** a bridge subscribes to `/session/:id/events`
 - **THEN** all other subscribers receive a `client_joined` event
   whose `data` includes `kind: "bridge", displayName: "Telegram-bridge",
-  bridgeKind: "telegram"`
+bridgeKind: "telegram"`
 
 ### Requirement: `bridgeHints` on permission requests
 
@@ -251,7 +251,7 @@ The CLI SHALL expose:
   and last heartbeat.
 - `qwen rc bridges deregister <id>` — owner-only; remove a bridge
   registration. Does NOT revoke its token; use `qwen rc tokens
-  revoke` for that.
+revoke` for that.
 - `qwen rc bridges ban <subActor> --on <bridgeId>` — record a sub-
   actor ban.
 - `qwen rc bridges unban <subActor> --on <bridgeId>` — lift a ban.

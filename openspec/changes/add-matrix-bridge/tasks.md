@@ -36,11 +36,9 @@ State machine and alignment pattern: see
     `packages/bridge-matrix/tsconfig.json`,
     `packages/bridge-matrix/esbuild.config.mjs`,
     `packages/bridge-matrix/src/index.ts`
-  - **Prompt:**
-    > Create package. Dependency: `matrix-bot-sdk` (per design D2)
-    > and its native crypto module (`@matrix-org/matrix-sdk-crypto-
-    > nodejs` or equivalent). Acceptance: `pnpm --filter bridge-
-    > matrix build` produces `dist/index.js`.
+  - **Prompt:** > Create package. Dependency: `matrix-bot-sdk` (per design D2) > and its native crypto module (`@matrix-org/matrix-sdk-crypto-
+nodejs` or equivalent). Acceptance: `pnpm --filter bridge-
+matrix build` produces `dist/index.js`.
 
 - [ ] **1.2 Env config loader**
   - **Status:** not-started
@@ -87,12 +85,10 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.3 day
   - **Files:** `packages/bridge-matrix/src/registration.ts`
-  - **Prompt:**
-    > POST `/rc/bridges` with `displayName: "Matrix-bridge",
-    > bridgeKind: "matrix", capabilities: { supportsActions:
-    > false, supportsMarkdown: "full", maxMessageBytes: 65536,
-    > supportsThreads: true, supportsEdits: true }`. Heartbeat
-    > every 30 s.
+  - **Prompt:** > POST `/rc/bridges` with `displayName: "Matrix-bridge",
+bridgeKind: "matrix", capabilities: { supportsActions:
+false, supportsMarkdown: "full", maxMessageBytes: 65536,
+supportsThreads: true, supportsEdits: true }`. Heartbeat > every 30 s.
 
 - [ ] **1.7 Healthz endpoint**
   - **Status:** not-started
@@ -135,15 +131,8 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.4 day
   - **Files:** `packages/bridge-matrix/src/commands/attach.ts`
-  - **Prompt:**
-    > Require sender power level ≥ 50 in the room (look up via
-    > `m.room.power_levels`); reply "Permission denied: attach
-    > requires power level ≥ 50" if insufficient. Otherwise call
-    > daemon `POST /rc/bridges/:id/invite/redeem` with the token
-    > argument. On 200, persist binding, reply "Room bound to
-    > session `<id>`. React 👍/👎 on tool-call messages to vote."
-    > Acceptance: scenarios under `Requirement: Room-to-session
-    > binding via !qwen attach`.
+  - **Prompt:** > Require sender power level ≥ 50 in the room (look up via > `m.room.power_levels`); reply "Permission denied: attach > requires power level ≥ 50" if insufficient. Otherwise call > daemon `POST /rc/bridges/:id/invite/redeem` with the token > argument. On 200, persist binding, reply "Room bound to > session `<id>`. React 👍/👎 on tool-call messages to vote." > Acceptance: scenarios under `Requirement: Room-to-session
+binding via !qwen attach`.
 
 - [ ] **2.4 !qwen detach handler**
   - **Status:** not-started
@@ -167,6 +156,7 @@ State machine and alignment pattern: see
     > For non-command `m.room.message` (msgtype `m.text`) in a
     > bound room from a non-banned sender that isn't the bot:
     > POST `/session/<sessionId>/prompt` with body `prompt:
+    >
     > <body>` and `X-RC-SubActor: matrix:<sender>`. Handle 429
     > (room reply "Slow down...") and 403 sub_actor_banned
     > (silent drop + cache).
@@ -218,6 +208,7 @@ State machine and alignment pattern: see
   - **Files:** `packages/bridge-matrix/src/render/permissionRequest.ts`
   - **Prompt:**
     > Branch on `bridgeHints.recommendedSurface`:
+    >
     > - `inline`: send a message body containing
     >   `argsSummaryShort` and the instruction "React 👍 to
     >   approve, 👎 to deny." Record requestId → eventId.
@@ -325,12 +316,12 @@ State machine and alignment pattern: see
 
 ## Effort summary
 
-| Phase | Description                          | Estimate (days) |
-|-------|--------------------------------------|------------------|
-| 0     | Foundation                           | 0.5              |
-| 1     | Skeleton + login + registration      | 2                |
-| 2     | Room binding + inbound               | 1.5              |
-| 3     | Outbound + reactions + E2EE          | 2.5              |
-| 4     | Rate limits, bans, polish            | 0.75             |
-| 5     | Docs + archive                       | 0.5              |
-| **Total** |                                  | **~7.75**        |
+| Phase     | Description                     | Estimate (days) |
+| --------- | ------------------------------- | --------------- |
+| 0         | Foundation                      | 0.5             |
+| 1         | Skeleton + login + registration | 2               |
+| 2         | Room binding + inbound          | 1.5             |
+| 3         | Outbound + reactions + E2EE     | 2.5             |
+| 4         | Rate limits, bans, polish       | 0.75            |
+| 5         | Docs + archive                  | 0.5             |
+| **Total** |                                 | **~7.75**       |

@@ -24,6 +24,7 @@ We deviate where Discord's surface differs:
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Single-container deployment with env config and no public URL.
 - Conform to `bridge-protocol` registration, heartbeat, rate-limit,
   ban, and hint semantics without modification.
@@ -34,6 +35,7 @@ We deviate where Discord's surface differs:
   streams.
 
 **Non-Goals:**
+
 - HTTP interactions endpoint mode (requires public URL + ed25519
   signature verification). Future.
 - Voice / video features.
@@ -80,16 +82,16 @@ Loops:
 
 ## Configuration
 
-| Var                       | Required | Notes                                     |
-|---------------------------|----------|-------------------------------------------|
-| `DISCORD_BOT_TOKEN`       | yes      | From Developer Portal.                    |
-| `DISCORD_APPLICATION_ID`  | yes      | App id from Developer Portal.             |
-| `QWEN_DAEMON_URL`         | yes      | daemon base URL.                          |
-| `QWEN_BRIDGE_TOKEN`       | yes      | `qwk_*` bridge-scope token.               |
-| `QWEN_BRIDGE_PAIRING_CODE`| no       | One-time bootstrap.                       |
-| `QWEN_BRIDGE_STATE_DIR`   | no       | Default `~/.qwen/rc/bridges/discord`.     |
-| `DISCORD_GUILD_ID`        | no       | If set, slash commands registered guild-scoped (fast); else global (~hourly propagation). Recommended in development. |
-| `BRIDGE_LOG_LEVEL`        | no       | `info` default.                           |
+| Var                        | Required | Notes                                                                                                                 |
+| -------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------- |
+| `DISCORD_BOT_TOKEN`        | yes      | From Developer Portal.                                                                                                |
+| `DISCORD_APPLICATION_ID`   | yes      | App id from Developer Portal.                                                                                         |
+| `QWEN_DAEMON_URL`          | yes      | daemon base URL.                                                                                                      |
+| `QWEN_BRIDGE_TOKEN`        | yes      | `qwk_*` bridge-scope token.                                                                                           |
+| `QWEN_BRIDGE_PAIRING_CODE` | no       | One-time bootstrap.                                                                                                   |
+| `QWEN_BRIDGE_STATE_DIR`    | no       | Default `~/.qwen/rc/bridges/discord`.                                                                                 |
+| `DISCORD_GUILD_ID`         | no       | If set, slash commands registered guild-scoped (fast); else global (~hourly propagation). Recommended in development. |
+| `BRIDGE_LOG_LEVEL`         | no       | `info` default.                                                                                                       |
 
 ## Slash commands
 
@@ -98,11 +100,11 @@ Three commands, registered at boot. Guild-scoped if
 caches global commands for ~1 hour, so dev iteration is faster with
 guild scope).
 
-| Command            | Description                                     | Reply       |
-|--------------------|-------------------------------------------------|-------------|
-| `/qwen attach`     | Bind this channel to a session via invite token | ephemeral   |
-| `/qwen detach`     | Unbind this channel                              | ephemeral   |
-| `/qwen status`     | Show binding + daemon health                     | ephemeral   |
+| Command        | Description                                     | Reply     |
+| -------------- | ----------------------------------------------- | --------- |
+| `/qwen attach` | Bind this channel to a session via invite token | ephemeral |
+| `/qwen detach` | Unbind this channel                             | ephemeral |
+| `/qwen status` | Show binding + daemon health                    | ephemeral |
 
 All three reply with `INTERACTION_RESPONSE_TYPE.CHANNEL_MESSAGE_WITH_SOURCE`
 and `flags: 64` (ephemeral). Slash commands are control plane; the
@@ -120,9 +122,9 @@ Same shape as Telegram's chats.json:
       "channelId": "1234567890",
       "guildId": "0987654321",
       "sessionId": "sess_abc",
-      "boundAt": "<ISO>"
-    }
-  ]
+      "boundAt": "<ISO>",
+    },
+  ],
 }
 ```
 
@@ -167,7 +169,7 @@ Branch on `bridgeHints.recommendedSurface`:
 - **`deeplink`**: channel message with `argsSummaryShort` and an
   ActionRow with one link button:
   - `Open in web client` — `url:
-    ${QWEN_DAEMON_URL}/ui/permission/<requestId>`
+${QWEN_DAEMON_URL}/ui/permission/<requestId>`
 
 Discord allows at most 5 buttons per ActionRow and at most 5 rows;
 we use one row with up to two buttons, well within the limit.
@@ -176,7 +178,7 @@ On button click (an `INTERACTION_CREATE` with type `MESSAGE_COMPONENT`):
 
 1. Parse custom_id.
 2. POST `/permission/<id>` with vote + `X-RC-SubActor:
-   discord:<user-snowflake>`.
+discord:<user-snowflake>`.
 3. Respond to the interaction with an ephemeral message
    "You voted approve" (so the voter gets immediate feedback).
 4. On the subsequent `permission_resolved`, edit the original
@@ -223,15 +225,15 @@ deferred ephemeral response and does nothing further.
 
 ## Threat model
 
-| Attacker                              | Capability                                    | Mitigation                                                                                       |
-|---------------------------------------|-----------------------------------------------|--------------------------------------------------------------------------------------------------|
-| Bot token leak                        | Impersonate bot in every guild it joined       | Operator regenerates the bot token in Developer Portal AND revokes the bridge token. Coupled rotation.|
-| Bridge token leak                     | Mint prompts / votes with arbitrary subActor   | Revoke bridge token; audit pinpoints actions.                                                    |
-| Slash-command spoofing                | None — Discord signs all gateway events        | Gateway TLS + Discord's auth. Bridge trusts gateway events from `wss://gateway.discord.gg`.       |
-| Guild member with channel access      | Spam prompts via chat                          | Per-sub-actor rate limit (daemon-side); sender-attributed sub-actor; operator can ban.           |
-| Hostile guild operator                | Add the bot to a guild they control            | Bridge enforces channel-binding: unbound channels are ignored. Operator must explicitly invite the bot AND issue an invite token. |
-| Bot retains channel permissions after compromise | Read backlog of bound channels          | Bot permissions are guild-managed; operator removes the bot from the guild once token is revoked. |
-| Public link button leaks daemon URL   | Anyone in channel sees the daemon URL          | Acceptable: the URL is not a secret; bearer auth is what protects the daemon. Document that bound channels should be private. |
+| Attacker                                         | Capability                                   | Mitigation                                                                                                                        |
+| ------------------------------------------------ | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Bot token leak                                   | Impersonate bot in every guild it joined     | Operator regenerates the bot token in Developer Portal AND revokes the bridge token. Coupled rotation.                            |
+| Bridge token leak                                | Mint prompts / votes with arbitrary subActor | Revoke bridge token; audit pinpoints actions.                                                                                     |
+| Slash-command spoofing                           | None — Discord signs all gateway events      | Gateway TLS + Discord's auth. Bridge trusts gateway events from `wss://gateway.discord.gg`.                                       |
+| Guild member with channel access                 | Spam prompts via chat                        | Per-sub-actor rate limit (daemon-side); sender-attributed sub-actor; operator can ban.                                            |
+| Hostile guild operator                           | Add the bot to a guild they control          | Bridge enforces channel-binding: unbound channels are ignored. Operator must explicitly invite the bot AND issue an invite token. |
+| Bot retains channel permissions after compromise | Read backlog of bound channels               | Bot permissions are guild-managed; operator removes the bot from the guild once token is revoked.                                 |
+| Public link button leaks daemon URL              | Anyone in channel sees the daemon URL        | Acceptable: the URL is not a secret; bearer auth is what protects the daemon. Document that bound channels should be private.     |
 
 ## Decisions
 
@@ -336,13 +338,13 @@ log last-seen username as audit metadata.
 
 ## Risks / Trade-offs
 
-| Risk                                                  | Likelihood | Impact | Mitigation                                                                                              |
-|-------------------------------------------------------|------------|--------|---------------------------------------------------------------------------------------------------------|
-| Gateway disconnect during important stream            | M          | M      | `discord.js` auto-resume via `session_id+seq`; if resume fails, full reconnect + replay daemon SSE from cursor. |
-| Slash commands stuck in stale state (global cache)    | L          | M      | Recommend `DISCORD_GUILD_ID` for prod and dev; document the 1-hour global propagation delay.            |
-| Bot kicked from guild mid-session                     | L          | M      | Bridge logs and detaches affected channels; bindings purged on next boot scan.                          |
-| 2000-char limit truncates important content           | M          | L      | Safe-boundary splitter; large blobs use threads anyway.                                                |
-| Discord-side ban / token revocation                   | L          | H      | Bridge crashes loudly; operator regenerates and re-pairs.                                              |
+| Risk                                               | Likelihood | Impact | Mitigation                                                                                                      |
+| -------------------------------------------------- | ---------- | ------ | --------------------------------------------------------------------------------------------------------------- |
+| Gateway disconnect during important stream         | M          | M      | `discord.js` auto-resume via `session_id+seq`; if resume fails, full reconnect + replay daemon SSE from cursor. |
+| Slash commands stuck in stale state (global cache) | L          | M      | Recommend `DISCORD_GUILD_ID` for prod and dev; document the 1-hour global propagation delay.                    |
+| Bot kicked from guild mid-session                  | L          | M      | Bridge logs and detaches affected channels; bindings purged on next boot scan.                                  |
+| 2000-char limit truncates important content        | M          | L      | Safe-boundary splitter; large blobs use threads anyway.                                                         |
+| Discord-side ban / token revocation                | L          | H      | Bridge crashes loudly; operator regenerates and re-pairs.                                                       |
 
 ## Open questions
 
@@ -364,4 +366,4 @@ log last-seen username as audit metadata.
 4. **Reactions as a fallback voting UI?** Matrix uses reactions;
    Discord supports them too. For consistency we use buttons only
    in v1; reactions could be a future fallback if `supportsActions:
-   false` flag is ever needed for a fork.
+false` flag is ever needed for a fork.

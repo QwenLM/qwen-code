@@ -27,8 +27,8 @@ ciphertext metadata, not message contents.
   `pushManager.subscribe({ applicationServerKey })`.
 - **Subscription management endpoints.** `POST /rc/push/subscribe`
   stores a subscription record bound to the caller's token. `GET
-  /rc/push/subscriptions` lists the caller's own. `DELETE
-  /rc/push/subscriptions/:id` removes one. Owner-scope can list/revoke
+/rc/push/subscriptions` lists the caller's own. `DELETE
+/rc/push/subscriptions/:id` removes one. Owner-scope can list/revoke
   any subscription via `?all=true`.
 - **Send pipeline.** Daemon background task watches a queue and posts
   encrypted notifications to subscription endpoints with exponential

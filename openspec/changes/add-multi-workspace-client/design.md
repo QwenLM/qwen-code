@@ -29,6 +29,7 @@ default daemon.
 ## Goals / Non-Goals
 
 **Goals:**
+
 - A registry of daemons that the operator manages with a small
   CLI.
 - A web client switcher that scopes the active UI to one daemon.
@@ -44,6 +45,7 @@ default daemon.
 - No daemon-side changes required.
 
 **Non-Goals:**
+
 - Multi-workspace daemons (preserves D6).
 - Session migration between daemons.
 - Cross-daemon agent state sharing.
@@ -195,8 +197,9 @@ Dot colour: green = `/health` returned 200 in last 30 s; yellow =
 last `/health` was older than 30 s but newer than 5 min OR returned
 non-OK 5xx; red = `/health` failed (network or 401/403/404).
 Switching to a daemon does a top-level `location.assign(daemon.url
-+ "/ui/")` — a real navigation, not an in-tab swap — because the
-new daemon's UI must run in its own origin.
+
+- "/ui/")` — a real navigation, not an in-tab swap — because the
+  new daemon's UI must run in its own origin.
 
 ### Aggregated sessions view
 
@@ -228,7 +231,7 @@ all daemons" toggle. When on, the client:
 3. Merges results, sorted by per-daemon BM25 score normalised
    within each daemon's batch (cross-daemon BM25 scores are not
    directly comparable; we use a simple "round-robin top-N from
-   each daemon, then global sort within tie-bands"). 
+   each daemon, then global sort within tie-bands").
 4. Renders each row with a daemon-name pill.
 
 Clicking a result navigates to the source daemon's UI scrolled to
@@ -298,6 +301,7 @@ the dropdown's `<a>` elements use prefetch hints to make the new
 daemon's index instant.
 
 ### D3 — Clients-manifest is daemon-served owner-only JSON, not
+
 synchronised across daemons
 
 **Choice**: Each daemon serves `/ui/clients-manifest.json` by
@@ -321,6 +325,7 @@ isn't represented; the file's contents are operator-owned, not
 workspace-owned.
 
 ### D4 — Tokens stored in OS keyring (terminal) / localStorage
+
 (web)
 
 **Choice**: Terminal client persists tokens in the OS keyring
@@ -355,6 +360,7 @@ a sensible compromise between staleness and traffic.
 **Cost**: A small periodic burst of N GETs per tab. Acceptable.
 
 ### D6 — Aggregated search merges client-side, no cross-daemon
+
 ranking
 
 **Choice**: Each daemon does its own search; the client tags and
@@ -395,28 +401,28 @@ Acceptable.
 
 ## Persistence
 
-| Artifact                                    | Format | Notes                                                                 |
-|---------------------------------------------|--------|-----------------------------------------------------------------------|
-| `~/.qwen/rc/clients.toml`                   | TOML   | Operator-owned list. Edited via CLI or by hand.                       |
-| OS keyring entries (per daemon)             | Native | `tokenStorageKey` indexes into keyring.                               |
-| `localStorage[<tokenStorageKey>]` (web)     | String | Per-daemon-origin token (already from `add-remote-control` Phase 4.2). |
-| `localStorage["qwen-rc:clients"]` (web)     | JSON   | Cached manifest; refreshed every 5 minutes.                           |
-| `localStorage["qwen-rc:active-daemon"]` (web)| String | Last-selected daemon name, per browser-origin.                       |
-| Service worker per-subscription mapping     | Native | Per-daemon push subscription metadata.                                |
+| Artifact                                      | Format | Notes                                                                  |
+| --------------------------------------------- | ------ | ---------------------------------------------------------------------- |
+| `~/.qwen/rc/clients.toml`                     | TOML   | Operator-owned list. Edited via CLI or by hand.                        |
+| OS keyring entries (per daemon)               | Native | `tokenStorageKey` indexes into keyring.                                |
+| `localStorage[<tokenStorageKey>]` (web)       | String | Per-daemon-origin token (already from `add-remote-control` Phase 4.2). |
+| `localStorage["qwen-rc:clients"]` (web)       | JSON   | Cached manifest; refreshed every 5 minutes.                            |
+| `localStorage["qwen-rc:active-daemon"]` (web) | String | Last-selected daemon name, per browser-origin.                         |
+| Service worker per-subscription mapping       | Native | Per-daemon push subscription metadata.                                 |
 
 ## Threat model
 
-| Attacker                              | Capability                                          | Mitigation                                                                                                                |
-|---------------------------------------|------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------|
-| Malicious daemon added to registry     | Serves arbitrary JS in its own origin                | Documented trust step; the malicious JS runs only in its origin. It CANNOT read other daemons' tokens (different origins). |
-| Malicious daemon impersonates another  | URL spoofing / DNS hijack                            | Daemon URL is set by operator; TLS termination is operator's job; pairing happens against the spoofed URL → operator notices wrong workspace; pairing fails or is suspicious. |
-| Daemon A reads daemon B's token        | Cross-origin XHR with credentials                    | No; tokens stored under daemon B's origin's localStorage, unreachable from daemon A. CORS preflight on B requires explicit allow-list entry, which is operator-controlled.   |
-| Operator clicks malicious switcher link| `<a href="evil">` injected into legitimate daemon's UI | The switcher is server-rendered from the operator's own manifest; it does not embed external content. If an XSS landed in a legitimate daemon's UI, that's a daemon-A bug. |
-| Aggregated search leaks one daemon's content to another | Cross-daemon visibility           | Each daemon enforces its own scope filter on its own results; client merges only what each daemon willingly returns. No cross-daemon ACL traversal possible.                 |
-| Token expiry on one daemon             | Aggregated views silently fail for that daemon       | Switcher shows red dot; CLI surfaces the error; aggregated view renders an "auth failed — re-pair" affordance.                                                                |
-| `clients.toml` tampering on disk       | Adding rogue daemon entries                          | File mode 0600; documented in setup. Local-only threat; out-of-scope to mitigate fully (no signed registry).                                                                  |
-| Service worker persists past daemon removal | Removed daemon still pushes                     | When a daemon is removed from registry, the CLI unsubscribes from its push and the web client tears down the corresponding service-worker push subscription on next load.    |
-| Network attacker between operator and a daemon | Read/modify cross-origin XHR                  | TLS via the operator's network layer (already required by `add-remote-control` for non-loopback). The aggregator inherits this assumption.                                    |
+| Attacker                                                | Capability                                             | Mitigation                                                                                                                                                                    |
+| ------------------------------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Malicious daemon added to registry                      | Serves arbitrary JS in its own origin                  | Documented trust step; the malicious JS runs only in its origin. It CANNOT read other daemons' tokens (different origins).                                                    |
+| Malicious daemon impersonates another                   | URL spoofing / DNS hijack                              | Daemon URL is set by operator; TLS termination is operator's job; pairing happens against the spoofed URL → operator notices wrong workspace; pairing fails or is suspicious. |
+| Daemon A reads daemon B's token                         | Cross-origin XHR with credentials                      | No; tokens stored under daemon B's origin's localStorage, unreachable from daemon A. CORS preflight on B requires explicit allow-list entry, which is operator-controlled.    |
+| Operator clicks malicious switcher link                 | `<a href="evil">` injected into legitimate daemon's UI | The switcher is server-rendered from the operator's own manifest; it does not embed external content. If an XSS landed in a legitimate daemon's UI, that's a daemon-A bug.    |
+| Aggregated search leaks one daemon's content to another | Cross-daemon visibility                                | Each daemon enforces its own scope filter on its own results; client merges only what each daemon willingly returns. No cross-daemon ACL traversal possible.                  |
+| Token expiry on one daemon                              | Aggregated views silently fail for that daemon         | Switcher shows red dot; CLI surfaces the error; aggregated view renders an "auth failed — re-pair" affordance.                                                                |
+| `clients.toml` tampering on disk                        | Adding rogue daemon entries                            | File mode 0600; documented in setup. Local-only threat; out-of-scope to mitigate fully (no signed registry).                                                                  |
+| Service worker persists past daemon removal             | Removed daemon still pushes                            | When a daemon is removed from registry, the CLI unsubscribes from its push and the web client tears down the corresponding service-worker push subscription on next load.     |
+| Network attacker between operator and a daemon          | Read/modify cross-origin XHR                           | TLS via the operator's network layer (already required by `add-remote-control` for non-loopback). The aggregator inherits this assumption.                                    |
 
 ### What this change does NOT defend against
 
@@ -429,16 +435,16 @@ Acceptable.
 
 ## Risks / Trade-offs
 
-| Risk                                          | Likelihood | Impact | Mitigation                                                                                              |
-|-----------------------------------------------|------------|--------|---------------------------------------------------------------------------------------------------------|
-| Operators confused which daemon they're on   | M          | L      | Switcher always visible; daemon name in title bar; coloured banner on aggregated views.                 |
-| Health polling burns battery on mobile        | M          | L      | Pause polling when tab is backgrounded; 30 s default; per-daemon configurable.                          |
-| Cross-daemon search merge looks unfair         | M          | L      | UI labels result as "approximate cross-daemon ranking"; per-daemon view is one click away.              |
-| Adding a daemon via CLI fails partway          | L          | M      | Atomic write of `clients.toml`; pairing happens before write; rollback on pairing failure.              |
-| OS keyring missing                             | L          | M      | Graceful fallback to mode-0600 file; loud stderr warning.                                               |
-| Manifest stale across daemon-add               | M          | L      | 5-minute refresh; manual "Reload daemons" in switcher.                                                  |
-| Two daemons on the same host:port              | L          | L      | URL is the unique key; the registry rejects duplicate URLs.                                             |
-| Push deduplication across daemons              | L          | L      | Each push is independent; service worker shows them all. Operator can mute per daemon via the OS.       |
+| Risk                                       | Likelihood | Impact | Mitigation                                                                                        |
+| ------------------------------------------ | ---------- | ------ | ------------------------------------------------------------------------------------------------- |
+| Operators confused which daemon they're on | M          | L      | Switcher always visible; daemon name in title bar; coloured banner on aggregated views.           |
+| Health polling burns battery on mobile     | M          | L      | Pause polling when tab is backgrounded; 30 s default; per-daemon configurable.                    |
+| Cross-daemon search merge looks unfair     | M          | L      | UI labels result as "approximate cross-daemon ranking"; per-daemon view is one click away.        |
+| Adding a daemon via CLI fails partway      | L          | M      | Atomic write of `clients.toml`; pairing happens before write; rollback on pairing failure.        |
+| OS keyring missing                         | L          | M      | Graceful fallback to mode-0600 file; loud stderr warning.                                         |
+| Manifest stale across daemon-add           | M          | L      | 5-minute refresh; manual "Reload daemons" in switcher.                                            |
+| Two daemons on the same host:port          | L          | L      | URL is the unique key; the registry rejects duplicate URLs.                                       |
+| Push deduplication across daemons          | L          | L      | Each push is independent; service worker shows them all. Operator can mute per daemon via the OS. |
 
 ## Open questions
 
@@ -450,7 +456,7 @@ Acceptable.
    than just the daemon name. Probably yes — minor add.
 
 2. **CLI command shape for aggregated search.** `qwen rc search
-   query "<q>" --across-all` fans out via the CLI. Should it run
+query "<q>" --across-all` fans out via the CLI. Should it run
    serially or in parallel? Parallel; bounded by max-in-flight to
    avoid swamping when the operator has lots of daemons.
 

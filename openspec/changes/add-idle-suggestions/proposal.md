@@ -20,7 +20,7 @@ cost is auditable.
 
 - **Opt-in config.** `~/.qwen/rc/idle.yaml` controls per-daemon
   defaults: `enabled: bool, idleAfterSec: int, maxSuggestionsPerHour:
-  int`. A per-session `/suggest on|off` slash command overrides
+int`. A per-session `/suggest on|off` slash command overrides
   the default for that session.
 - **Idle detection.** A session is "idle" after a
   `session_update.stopReason: end_turn` AND no new
@@ -33,7 +33,7 @@ cost is auditable.
 - **Capture, do not insert.** The response is parsed, validated as a
   JSON array of strings, and rendered as a single SSE event of new
   type `idle_suggestions` with payload `{ suggestions: string[],
-  expiresAt }`. The model's response text is NOT appended to the
+expiresAt }`. The model's response text is NOT appended to the
   session transcript (no JSONL line written), and no
   `session_update` is forwarded to subscribers.
 - **Client rendering.** Web and terminal clients render the
@@ -82,7 +82,7 @@ in 10 minutes. The first 5 trigger suggestions; the 6th–8th do not
 "Suggestions paused (rate limit)."
 
 **I5. Bad model response is dropped.** The model returns
-"```\ntext\n```" instead of valid JSON. The daemon parses, fails,
+"`\ntext\n`" instead of valid JSON. The daemon parses, fails,
 emits no `idle_suggestions` event, audit-logs
 `idle_suggest_parse_failed`. No transcript pollution, no broken UI.
 
@@ -102,7 +102,7 @@ emits no `idle_suggestions` event, audit-logs
   changes required from the cost-tracking side.
 - **Capability advertisement**: `/capabilities` gains
   `remoteControl.idleSuggestions: { enabled, idleAfterSec,
-  maxSuggestionsPerHour }`.
+maxSuggestionsPerHour }`.
 - **Out of scope** (deliberately):
   - Cross-session learning ("the user usually asks X after Y").
   - RAG over past sessions to inform suggestions.

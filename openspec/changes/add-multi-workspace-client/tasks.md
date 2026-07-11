@@ -66,6 +66,7 @@ State machine and alignment pattern: see
   - **Files:** `packages/cli/src/commands/rc/daemons/index.ts`
   - **Prompt:**
     > Subcommands:
+    >
     > - `list` — table: name, url, default flag, health (last
     >   known), token presence.
     > - `add <name> <url>` — fetch `<url>/capabilities` first;
@@ -81,7 +82,7 @@ State machine and alignment pattern: see
     >   daemon; prints results.
     > - `whoami [--daemon <name>]` — prints token name, scope,
     >   expiry.
-    > Acceptance: scenarios under `Requirement: Registry CLI`.
+    >   Acceptance: scenarios under `Requirement: Registry CLI`.
 
 - [ ] **1.4 `--daemon` flag on every per-daemon CLI**
   - **Status:** not-started
@@ -149,28 +150,16 @@ change is purely client-side.
   - **Files:**
     `packages/web-client/src/components/DaemonSwitcher.tsx`,
     `packages/web-client/src/state/health.ts`
-  - **Prompt:**
-    > Dropdown lists every daemon with a coloured dot. Poll
-    > `<url>/health` every 30 s per daemon (pause when tab is
-    > backgrounded). 200 in last 30 s = green; 200 between 30s
-    > and 5m = yellow; failure or 401/403 = red. Switching to
-    > another daemon calls `location.assign(<other>/ui/)`.
-    > Acceptance: scenarios under `Requirement: Daemon
-    > switcher and health polling`.
+  - **Prompt:** > Dropdown lists every daemon with a coloured dot. Poll > `<url>/health` every 30 s per daemon (pause when tab is > backgrounded). 200 in last 30 s = green; 200 between 30s > and 5m = yellow; failure or 401/403 = red. Switching to > another daemon calls `location.assign(<other>/ui/)`. > Acceptance: scenarios under `Requirement: Daemon
+switcher and health polling`.
 
 - [ ] **3.3 Aggregated sessions view at `/ui/sessions`**
   - **Status:** not-started
   - **Effort:** ~1 day
   - **Files:**
     `packages/web-client/src/views/AllSessions.tsx`
-  - **Prompt:**
-    > Fan out `GET /workspace/<cwd>/sessions` to each daemon
-    > with its token (cross-origin fetch). Render a unified
-    > table with daemon-name pills. Failures shown as
-    > "UNREACHABLE — last seen <relative>." Each row's "Open"
-    > navigates to the source daemon's `/ui/session/<sid>`.
-    > Acceptance: scenarios under `Requirement: Aggregated
-    > sessions view`.
+  - **Prompt:** > Fan out `GET /workspace/<cwd>/sessions` to each daemon > with its token (cross-origin fetch). Render a unified > table with daemon-name pills. Failures shown as > "UNREACHABLE — last seen <relative>." Each row's "Open" > navigates to the source daemon's `/ui/session/<sid>`. > Acceptance: scenarios under `Requirement: Aggregated
+sessions view`.
 
 - [ ] **3.4 Aggregated search toggle**
   - **Status:** not-started
@@ -232,11 +221,11 @@ change is purely client-side.
 
 ## Effort summary
 
-| Phase | Description                          | Estimate (days) |
-|-------|--------------------------------------|------------------|
-| 0     | Foundation                           | 0.5              |
-| 1     | clients.toml + CLI registry          | 2                |
-| 2     | Manifest endpoint                    | 0.25             |
-| 3     | Switcher + aggregated views          | 3                |
-| 4     | Push + docs                          | 1                |
-| **Total** |                                  | **~7**           |
+| Phase     | Description                 | Estimate (days) |
+| --------- | --------------------------- | --------------- |
+| 0         | Foundation                  | 0.5             |
+| 1         | clients.toml + CLI registry | 2               |
+| 2         | Manifest endpoint           | 0.25            |
+| 3         | Switcher + aggregated views | 3               |
+| 4         | Push + docs                 | 1               |
+| **Total** |                             | **~7**          |

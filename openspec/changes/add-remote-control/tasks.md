@@ -9,14 +9,14 @@ the alignment task (`N.0`) of the next phase.
 
 Each task carries a `Status` line whose value is one of:
 
-| Value                  | Meaning                                                                                  |
-|------------------------|------------------------------------------------------------------------------------------|
-| `not-started`          | Default. No work begun.                                                                  |
-| `started`              | Active work in progress. Set this BEFORE any other tool call for the task.                |
-| `completed`            | Acceptance criteria in the task's `Prompt` are met; downstream tasks may proceed.        |
-| `deferred:<reason>`    | Intentionally postponed. Downstream tasks must check this is acceptable before proceeding.|
-| `skipped:<reason>`     | Decided not to do. Spec deltas affected by this task SHOULD be revised in alignment.     |
-| `cancelled:<reason>`   | Abandoned mid-flight. Partial work left behind MUST be documented in the reason.         |
+| Value                | Meaning                                                                                    |
+| -------------------- | ------------------------------------------------------------------------------------------ |
+| `not-started`        | Default. No work begun.                                                                    |
+| `started`            | Active work in progress. Set this BEFORE any other tool call for the task.                 |
+| `completed`          | Acceptance criteria in the task's `Prompt` are met; downstream tasks may proceed.          |
+| `deferred:<reason>`  | Intentionally postponed. Downstream tasks must check this is acceptable before proceeding. |
+| `skipped:<reason>`   | Decided not to do. Spec deltas affected by this task SHOULD be revised in alignment.       |
+| `cancelled:<reason>` | Abandoned mid-flight. Partial work left behind MUST be documented in the reason.           |
 
 ## Alignment task pattern (`N.0`)
 
@@ -52,6 +52,7 @@ green, against which all later phases diff.
   - **Prompt:**
     > This is the project's first task; the "prior phases" section is
     > empty by definition. Still perform the verification pass:
+    >
     > - Confirm `openspec/changes/add-remote-control/` contains the
     >   four files this plan references: `proposal.md`, `design.md`,
     >   `tasks.md`, and four spec deltas under `specs/`.
@@ -77,15 +78,8 @@ green, against which all later phases diff.
 - [ ] **0.2 Reproduce Stage 1 multi-client attach locally**
   - **Status:** not-started
   - **Effort:** ~0.5 day
-  - **Prompt:**
-    > Build the branch from 0.1. Run `qwen serve --hostname 127.0.0.1
-    > --port 4170 --token $(openssl rand -hex 16)` in one terminal.
-    > From two other terminals, post `POST /session` with the same
-    > workspace, then `POST /session/:id/prompt` from one and
-    > subscribe to `GET /session/:id/events` from the other. Confirm
-    > prompts and `session_update` events fan out. Record any
-    > divergences from `docs/developers/qwen-serve-protocol.md` in
-    > this task body for the alignment phase of Phase 1 to consider.
+  - **Prompt:** > Build the branch from 0.1. Run `qwen serve --hostname 127.0.0.1
+--port 4170 --token $(openssl rand -hex 16)` in one terminal. > From two other terminals, post `POST /session` with the same > workspace, then `POST /session/:id/prompt` from one and > subscribe to `GET /session/:id/events` from the other. Confirm > prompts and `session_update` events fan out. Record any > divergences from `docs/developers/qwen-serve-protocol.md` in > this task body for the alignment phase of Phase 1 to consider.
 
 - [ ] **0.3 Add a docker-compose harness for the test setup**
   - **Status:** not-started
@@ -115,6 +109,7 @@ end to end.
     > Verify Phase 0 tasks are all `completed` or have non-blocking
     > deferral reasons. Verify the docker harness from 0.3 starts.
     > Compare the spec deltas to current upstream Stage 1 reality:
+    >
     > - Does `docs/developers/qwen-serve-protocol.md` still match the
     >   endpoints in `specs/wire-protocol/spec.md`?
     > - Does the Stage 1 SSE envelope shape match `specs/wire-protocol`
@@ -124,54 +119,31 @@ end to end.
     >   references the changed shape.
 
 - [ ] **1.1 Add `qwen rc` command surface (alias to `qwen serve` plus
-        new subcommands)**
+      new subcommands)**
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/cli/src/commands/rc/index.ts`,
     `packages/cli/src/commands/rc/{serve,attach,pair,tokens,audit}.ts`
-  - **Prompt:**
-    > Add a top-level `rc` subcommand to the qwen CLI with these
-    > children: `serve` (proxies to existing `qwen serve` with extra
-    > flags), `attach [sessionId|name]`, `pair`, `tokens`, `audit`. The
-    > `serve` and `attach` subcommands must be functional in this
-    > phase; `pair`, `tokens`, `audit` may stub-print `not yet
-    > implemented`. Wire the parser; no behavior changes to `qwen
-    > serve` yet. Set `completed` when `qwen rc serve --help` and
-    > `qwen rc attach --help` print plausible help text.
+  - **Prompt:** > Add a top-level `rc` subcommand to the qwen CLI with these > children: `serve` (proxies to existing `qwen serve` with extra > flags), `attach [sessionId|name]`, `pair`, `tokens`, `audit`. The > `serve` and `attach` subcommands must be functional in this > phase; `pair`, `tokens`, `audit` may stub-print `not yet
+implemented`. Wire the parser; no behavior changes to `qwen
+serve` yet. Set `completed` when `qwen rc serve --help` and > `qwen rc attach --help` print plausible help text.
 
 - [ ] **1.2 Audit log writer (skeleton)**
   - **Status:** not-started
   - **Effort:** ~1 day
   - **Files:** `packages/cli/src/serve/remoteControl/audit.ts`,
     integration in `packages/cli/src/serve/server.ts`
-  - **Prompt:**
-    > Implement an append-only JSONL audit writer at
-    > `~/.qwen/rc/audit.log` with daily rotation
-    > (`audit-YYYY-MM-DD.log`). Hook every authenticated request to
-    > log `{id, ts, tokenId, ip, method, path, sessionId?, action,
-    > outcome, durationMs}`. In Phase 1, `tokenId` is the literal
-    > string `shared-bearer` (we have no per-client identity yet).
-    > Implement crash-safe recovery per
-    > `specs/pairing-auth/spec.md` `Requirement: Audit log captures
-    > all material actions`, scenario "Audit append survives daemon
-    > crash". Set `completed` when a 1000-request smoke test produces
-    > a valid JSONL file and crash injection during a write recovers
-    > on next start.
+  - **Prompt:** > Implement an append-only JSONL audit writer at > `~/.qwen/rc/audit.log` with daily rotation > (`audit-YYYY-MM-DD.log`). Hook every authenticated request to > log `{id, ts, tokenId, ip, method, path, sessionId?, action,
+outcome, durationMs}`. In Phase 1, `tokenId` is the literal > string `shared-bearer` (we have no per-client identity yet). > Implement crash-safe recovery per > `specs/pairing-auth/spec.md` `Requirement: Audit log captures
+all material actions`, scenario "Audit append survives daemon > crash". Set `completed` when a 1000-request smoke test produces > a valid JSONL file and crash injection during a write recovers > on next start.
 
 - [ ] **1.3 `audit_event` SSE mirror**
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/cli/src/serve/eventBus.ts`,
     `packages/cli/src/serve/remoteControl/audit.ts`
-  - **Prompt:**
-    > When the audit writer records a `material: true` action, emit a
-    > corresponding `audit_event` SSE frame to every subscriber on the
-    > session it touches (or to all sessions if the action is daemon-
-    > wide, e.g. token mint). Frame shape per
-    > `specs/wire-protocol/spec.md` `Requirement: New event types
-    > beyond Stage 1`. Verify with the harness from 0.3: two
-    > subscribers, one prompt → both subscribers see one
-    > `audit_event`.
+  - **Prompt:** > When the audit writer records a `material: true` action, emit a > corresponding `audit_event` SSE frame to every subscriber on the > session it touches (or to all sessions if the action is daemon- > wide, e.g. token mint). Frame shape per > `specs/wire-protocol/spec.md` `Requirement: New event types
+beyond Stage 1`. Verify with the harness from 0.3: two > subscribers, one prompt → both subscribers see one > `audit_event`.
 
 - [ ] **1.4 Thin terminal client `qwen rc attach`**
   - **Status:** not-started
@@ -209,15 +181,8 @@ end to end.
   - **Status:** not-started
   - **Effort:** ~1 day
   - **Files:** `packages/cli/src/serve/__tests__/multiClient.test.ts`
-  - **Prompt:**
-    > Write an integration test that boots the daemon in-process,
-    > attaches two `DaemonClient` instances, has one post a prompt and
-    > the other observe `session_update` events, then has the agent
-    > issue a fake `permission_request`, has client A approve, and
-    > asserts client B sees the resolved frame with `originatorClientId
-    > = A`. The test must complete in <10 s and not depend on a real
-    > model — stub the ACP child or use a mock service. Acceptance:
-    > test green in CI on the feature branch.
+  - **Prompt:** > Write an integration test that boots the daemon in-process, > attaches two `DaemonClient` instances, has one post a prompt and > the other observe `session_update` events, then has the agent > issue a fake `permission_request`, has client A approve, and > asserts client B sees the resolved frame with `originatorClientId
+= A`. The test must complete in <10 s and not depend on a real > model — stub the ACP child or use a mock service. Acceptance: > test green in CI on the feature branch.
 
 ---
 
@@ -246,31 +211,18 @@ paired origins. Owner bootstrap.
   - **Effort:** ~1 day
   - **Files:** `packages/cli/src/serve/remoteControl/tokenStore.ts`,
     `packages/cli/src/serve/remoteControl/schema/001_init.sql`
-  - **Prompt:**
-    > Add a SQLite schema with tables `tokens(id PK, hash, name,
-    > scopes, origin, user_agent, created_at, expires_at,
-    > revoked_at, last_used_at)` and
-    > `pairing_codes(code_hash PK, scope, ttl_sec, expires_at,
-    > redeemed_at, issued_by_token_id)`. Tokens are stored Argon2id-
-    > hashed, salt per row. Schema version row in a separate
-    > `meta` table. Add forward-only migration system. Acceptance:
-    > unit tests for insert/lookup/revoke and a migration test
-    > applying 001_init to an empty DB.
+  - **Prompt:** > Add a SQLite schema with tables `tokens(id PK, hash, name,
+scopes, origin, user_agent, created_at, expires_at,
+revoked_at, last_used_at)` and > `pairing_codes(code_hash PK, scope, ttl_sec, expires_at,
+redeemed_at, issued_by_token_id)`. Tokens are stored Argon2id- > hashed, salt per row. Schema version row in a separate > `meta` table. Add forward-only migration system. Acceptance: > unit tests for insert/lookup/revoke and a migration test > applying 001_init to an empty DB.
 
 - [ ] **2.2 Owner bootstrap flow**
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/cli/src/serve/remoteControl/bootstrap.ts`,
     invoked from daemon startup.
-  - **Prompt:**
-    > On first daemon startup against an empty token store, generate
-    > a single-use owner bootstrap code (default TTL 300 s). Write it
-    > to stdout AND `~/.qwen/rc/owner-bootstrap.code` with mode 0600.
-    > First successful redemption closes the path and deletes the
-    > file. Implement `qwen rc bootstrap-reset` to invalidate and
-    > regenerate. Acceptance: scenarios in
-    > `specs/pairing-auth/spec.md` `Requirement: Owner bootstrap is
-    > single-use and time-bounded`.
+  - **Prompt:** > On first daemon startup against an empty token store, generate > a single-use owner bootstrap code (default TTL 300 s). Write it > to stdout AND `~/.qwen/rc/owner-bootstrap.code` with mode 0600. > First successful redemption closes the path and deletes the > file. Implement `qwen rc bootstrap-reset` to invalidate and > regenerate. Acceptance: scenarios in > `specs/pairing-auth/spec.md` `Requirement: Owner bootstrap is
+single-use and time-bounded`.
 
 - [ ] **2.3 Pair / redeem endpoints**
   - **Status:** not-started
@@ -291,17 +243,10 @@ paired origins. Owner bootstrap.
   - **Effort:** ~1 day
   - **Files:** `packages/cli/src/serve/remoteControl/scopeGuard.ts`,
     edits to every route handler in `server.ts`.
-  - **Prompt:**
-    > For every existing route plus the new ones, declare its
-    > required scope per the table in `design.md` `Auth & threat
-    > model → Pairing flow → Scopes`. Implement middleware that
-    > checks the token's scopes (with hierarchy `owner ⊃ write ⊃
-    > read` and `approve ⊃ read`) and emits a `403` with code
-    > `scope_required: <scope>` on failure. Update audit writer to
-    > log the deciding token id from this middleware. Replace the
-    > `shared-bearer` placeholder in audit writes. Acceptance: scope
-    > scenarios in `specs/pairing-auth/spec.md` `Requirement: Scope
-    > hierarchy and enforcement` pass as integration tests.
+  - **Prompt:** > For every existing route plus the new ones, declare its > required scope per the table in `design.md` `Auth & threat
+model → Pairing flow → Scopes`. Implement middleware that > checks the token's scopes (with hierarchy `owner ⊃ write ⊃
+read` and `approve ⊃ read`) and emits a `403` with code > `scope_required: <scope>` on failure. Update audit writer to > log the deciding token id from this middleware. Replace the > `shared-bearer` placeholder in audit writes. Acceptance: scope > scenarios in `specs/pairing-auth/spec.md` `Requirement: Scope
+hierarchy and enforcement` pass as integration tests.
 
 - [ ] **2.5 CORS allowlist from paired origins**
   - **Status:** not-started
@@ -319,24 +264,14 @@ paired origins. Owner bootstrap.
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/cli/src/serve/remoteControl/auditRoutes.ts`
-  - **Prompt:**
-    > Implement `GET /rc/audit` per
-    > `specs/wire-protocol/spec.md` `Requirement: Audit query
-    > endpoint`. Owner-scope only. Filters: `since` (id or ISO
-    > timestamp), `limit` (max 1000), `tokenId`. Read from the
-    > append-only JSONL log; do not load the whole file in memory.
-    > Acceptance: query against a log with 100k rotated entries
-    > returns within 500 ms when filtered.
+  - **Prompt:** > Implement `GET /rc/audit` per > `specs/wire-protocol/spec.md` `Requirement: Audit query
+endpoint`. Owner-scope only. Filters: `since` (id or ISO > timestamp), `limit` (max 1000), `tokenId`. Read from the > append-only JSONL log; do not load the whole file in memory. > Acceptance: query against a log with 100k rotated entries > returns within 500 ms when filtered.
 
 - [ ] **2.7 TLS-required-on-non-loopback default**
   - **Status:** not-started
   - **Effort:** ~0.5 day
-  - **Prompt:**
-    > Implement the startup check in
-    > `specs/pairing-auth/spec.md` `Requirement: TLS required for
-    > non-loopback bind`. `--tls-cert`/`--tls-key` flags or
-    > `--insecure-no-tls` must be present; otherwise refuse boot.
-    > Insecure mode emits the documented warnings.
+  - **Prompt:** > Implement the startup check in > `specs/pairing-auth/spec.md` `Requirement: TLS required for
+non-loopback bind`. `--tls-cert`/`--tls-key` flags or > `--insecure-no-tls` must be present; otherwise refuse boot. > Insecure mode emits the documented warnings.
 
 ---
 
@@ -370,15 +305,8 @@ audit feed, detach UX, slash split).
 - [ ] **3.2 Slash command split implementation and lint**
   - **Status:** not-started
   - **Effort:** ~1 day
-  - **Prompt:**
-    > For each slash command in the upstream TUI, classify as local-
-    > only or daemon-broadcast per
-    > `specs/clients/spec.md` `Requirement: Local-only slash commands
-    > handled in the client`. Add a typed registry so future commands
-    > must declare a classification. Broadcast commands generate a
-    > `ui_command` event; local-only do not touch the daemon.
-    > Acceptance: a test runs every registered command and asserts
-    > the network behavior matches the classification.
+  - **Prompt:** > For each slash command in the upstream TUI, classify as local- > only or daemon-broadcast per > `specs/clients/spec.md` `Requirement: Local-only slash commands
+handled in the client`. Add a typed registry so future commands > must declare a classification. Broadcast commands generate a > `ui_command` event; local-only do not touch the daemon. > Acceptance: a test runs every registered command and asserts > the network behavior matches the classification.
 
 - [ ] **3.3 Detach / reattach UX**
   - **Status:** not-started
@@ -457,15 +385,8 @@ approve/deny, slash palette, file tree, diff viewer, reconnect.
   - **Status:** not-started
   - **Effort:** ~1 day
   - **Files:** `packages/web-client/src/transport/sseClient.ts`
-  - **Prompt:**
-    > Implement a header-capable SSE reader using `fetch` +
-    > `ReadableStream`. Handle reconnect with `Last-Event-ID`, the
-    > `replay_truncated` event (per
-    > `specs/clients/spec.md` `Requirement: Web client reconnects
-    > after sleep or transient outage`), and tab-visibility-change
-    > driven reconnects. Backoff 1s → 2s → 4s → 8s capped 30s.
-    > Acceptance: a Vitest test (using an in-memory fetch mock)
-    > exercises: clean stream, drop+reconnect, replay-truncated.
+  - **Prompt:** > Implement a header-capable SSE reader using `fetch` + > `ReadableStream`. Handle reconnect with `Last-Event-ID`, the > `replay_truncated` event (per > `specs/clients/spec.md` `Requirement: Web client reconnects
+after sleep or transient outage`), and tab-visibility-change > driven reconnects. Backoff 1s → 2s → 4s → 8s capped 30s. > Acceptance: a Vitest test (using an in-memory fetch mock) > exercises: clean stream, drop+reconnect, replay-truncated.
 
 - [ ] **4.4 Transcript + tool-call cards**
   - **Status:** not-started
@@ -502,8 +423,7 @@ approve/deny, slash palette, file tree, diff viewer, reconnect.
   - **Status:** not-started
   - **Effort:** ~1 day
   - **Prompt:**
-    > Lazy-expand tree backed by `GET /files?glob=<dir>/*`. Max depth
-    > 4. Clicking a file opens a syntax-highlighted preview pane
+    > Lazy-expand tree backed by `GET /files?glob=<dir>/*`. Max depth 4. Clicking a file opens a syntax-highlighted preview pane
     > (via `/files/content`). No editing.
 
 - [ ] **4.8 Presence and audit feed**
@@ -571,12 +491,8 @@ restart.
 - [ ] **5.3 WS upgrade endpoint**
   - **Status:** not-started
   - **Effort:** ~1 day
-  - **Prompt:**
-    > Add `GET /session/:id/ws` accepting `Sec-WebSocket-Protocol:
-    > qwen-rc.v1`. Message bodies are identical JSON to SSE. Honor
-    > `?lastEventId=<hex>` for replay. Authentication is the same
-    > `Authorization: Bearer` header. Add a web-client transport
-    > switch (`preferTransport: "ws"|"sse"`) selectable in settings.
+  - **Prompt:** > Add `GET /session/:id/ws` accepting `Sec-WebSocket-Protocol:
+qwen-rc.v1`. Message bodies are identical JSON to SSE. Honor > `?lastEventId=<hex>` for replay. Authentication is the same > `Authorization: Bearer` header. Add a web-client transport > switch (`preferTransport: "ws"|"sse"`) selectable in settings.
 
 - [ ] **5.4 Long-running torture test**
   - **Status:** not-started
@@ -666,30 +582,30 @@ Each is a runnable artifact, not a manual check. All belong to
 specific phase tasks above but are summarized here so the test
 strategy is legible at a glance.
 
-| Test                            | Phase | Mechanism                                                                                  |
-|---------------------------------|-------|--------------------------------------------------------------------------------------------|
-| Two-client sync                 | 1.6   | In-process daemon + two `DaemonClient`s; one prompts, the other observes.                  |
-| Approval race winner            | 1.6   | Same; race two `/permission/:id` POSTs; assert one 200 one 404.                            |
-| Pairing → revoke → 401          | 2.3   | Integration; full pairing cycle.                                                           |
-| Scope denial                    | 2.4   | Each route hit with each scope; assert table-driven outcomes.                              |
-| CORS allowlist                  | 2.5   | Playwright headless from a paired origin and an unpaired one.                              |
-| Web client reconnect            | 4.3   | Vitest + fetch mock; close mid-stream, observe Last-Event-ID replay.                       |
-| Cross-tab cross-device proxy    | 4.x   | Playwright with two browser contexts hitting the same daemon; phone-like viewport on one.  |
-| WAL replay across restart       | 5.2   | Boot, write 100 events, kill -9 daemon, restart, reconnect with Last-Event-ID, assert OK.  |
-| Reverse-proxy matrix            | 6.2   | docker-compose with one proxy at a time; run 1.6 test against each.                        |
-| Threat-model coverage           | 6.1   | One negative test per threat-model row.                                                    |
+| Test                         | Phase | Mechanism                                                                                 |
+| ---------------------------- | ----- | ----------------------------------------------------------------------------------------- |
+| Two-client sync              | 1.6   | In-process daemon + two `DaemonClient`s; one prompts, the other observes.                 |
+| Approval race winner         | 1.6   | Same; race two `/permission/:id` POSTs; assert one 200 one 404.                           |
+| Pairing → revoke → 401       | 2.3   | Integration; full pairing cycle.                                                          |
+| Scope denial                 | 2.4   | Each route hit with each scope; assert table-driven outcomes.                             |
+| CORS allowlist               | 2.5   | Playwright headless from a paired origin and an unpaired one.                             |
+| Web client reconnect         | 4.3   | Vitest + fetch mock; close mid-stream, observe Last-Event-ID replay.                      |
+| Cross-tab cross-device proxy | 4.x   | Playwright with two browser contexts hitting the same daemon; phone-like viewport on one. |
+| WAL replay across restart    | 5.2   | Boot, write 100 events, kill -9 daemon, restart, reconnect with Last-Event-ID, assert OK. |
+| Reverse-proxy matrix         | 6.2   | docker-compose with one proxy at a time; run 1.6 test against each.                       |
+| Threat-model coverage        | 6.1   | One negative test per threat-model row.                                                   |
 
 ---
 
 ## Effort summary
 
-| Phase | Description                            | Estimate (days) |
-|-------|----------------------------------------|------------------|
-| 0     | Foundation                             | 1–2              |
-| 1     | MVP round-trip                         | 4–6              |
-| 2     | Pairing + scopes                       | 5–7              |
-| 3     | Terminal polish                        | 3–5              |
-| 4     | Web client                             | 7–10             |
-| 5     | Durability + WS                        | 4–6              |
-| 6     | Hardening + docs                       | 4–6              |
-| **Total** |                                    | **28–42**        |
+| Phase     | Description      | Estimate (days) |
+| --------- | ---------------- | --------------- |
+| 0         | Foundation       | 1–2             |
+| 1         | MVP round-trip   | 4–6             |
+| 2         | Pairing + scopes | 5–7             |
+| 3         | Terminal polish  | 3–5             |
+| 4         | Web client       | 7–10            |
+| 5         | Durability + WS  | 4–6             |
+| 6         | Hardening + docs | 4–6             |
+| **Total** |                  | **28–42**       |

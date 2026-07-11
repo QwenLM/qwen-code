@@ -24,14 +24,8 @@ State machine and alignment pattern: see
   - **Files:**
     `packages/web-client/src/voice/recognition.ts`,
     `packages/web-client/src/voice/types.ts`
-  - **Prompt:**
-    > Implement `isSupported(): boolean` checking both
-    > `SpeechRecognition` and `webkitSpeechRecognition`. Define
-    > `RecognitionEvent`, `ErrorCode`, `RecognitionSession`
-    > types per `design.md` "Recognition module API". Export
-    > `createSession()` returning a stub that always reports
-    > "not-supported" for now. Acceptance: scenario `Feature
-    > detection in unsupported browser`.
+  - **Prompt:** > Implement `isSupported(): boolean` checking both > `SpeechRecognition` and `webkitSpeechRecognition`. Define > `RecognitionEvent`, `ErrorCode`, `RecognitionSession` > types per `design.md` "Recognition module API". Export > `createSession()` returning a stub that always reports > "not-supported" for now. Acceptance: scenario `Feature
+detection in unsupported browser`.
 
 - [ ] **0.2 Wire MicButton placeholder**
   - **Status:** not-started
@@ -61,14 +55,9 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/web-client/src/voice/recognition.ts`
-  - **Prompt:**
-    > Replace the stub with a real implementation wrapping
-    > `SpeechRecognition`. Continuous OFF; interim results ON;
-    > lang per call. Translate API events to
-    > `RecognitionEvent`. Map API error codes to our
-    > `ErrorCode` union. Acceptance: scenarios `Hold to talk
-    > captures partial then final`, `Permission denied bubbles
-    > error`, `No-speech error returns gracefully`.
+  - **Prompt:** > Replace the stub with a real implementation wrapping > `SpeechRecognition`. Continuous OFF; interim results ON; > lang per call. Translate API events to > `RecognitionEvent`. Map API error codes to our > `ErrorCode` union. Acceptance: scenarios `Hold to talk
+captures partial then final`, `Permission denied bubbles
+error`, `No-speech error returns gracefully`.
 
 - [ ] **1.2 60s safety timer**
   - **Status:** not-started
@@ -83,15 +72,8 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/web-client/src/components/MicButton.tsx`
-  - **Prompt:**
-    > Pointer-down: call `session.start({ lang })`. Pointer-up
-    > or pointer-leave: `session.stop()`. While recording, emit
-    > the visual state changes per `design.md` "MicButton
-    > states". Insert interim text (gray) and final text
-    > (black) into the input bar (append with single-space
-    > separator if the input already has content). Acceptance:
-    > scenarios `Append on existing input`, `Interim then final
-    > rendering`.
+  - **Prompt:** > Pointer-down: call `session.start({ lang })`. Pointer-up > or pointer-leave: `session.stop()`. While recording, emit > the visual state changes per `design.md` "MicButton > states". Insert interim text (gray) and final text > (black) into the input bar (append with single-space > separator if the input already has content). Acceptance: > scenarios `Append on existing input`, `Interim then final
+rendering`.
 
 - [ ] **1.4 Page-visibility abort**
   - **Status:** not-started
@@ -119,15 +101,8 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/web-client/src/voice/volumeMeter.ts`
-  - **Prompt:**
-    > Implement `startVolumeMeter()` per `design.md`. Returns
-    > a level observable (0..1) and a stop function.
-    > AudioContext + AnalyserNode (FFT 256), RMS over freq
-    > buckets, normalized; 30 fps update rate. On
-    > getUserMedia rejection, return an observable that emits
-    > 0 and a `permission_denied` error event. Acceptance:
-    > scenarios `Volume meter responds to audio input`, `Mic
-    > permission denied shows blocked state`.
+  - **Prompt:** > Implement `startVolumeMeter()` per `design.md`. Returns > a level observable (0..1) and a stop function. > AudioContext + AnalyserNode (FFT 256), RMS over freq > buckets, normalized; 30 fps update rate. On > getUserMedia rejection, return an observable that emits > 0 and a `permission_denied` error event. Acceptance: > scenarios `Volume meter responds to audio input`, `Mic
+permission denied shows blocked state`.
 
 - [ ] **2.2 Volume meter UI component**
   - **Status:** not-started
@@ -143,12 +118,8 @@ State machine and alignment pattern: see
 - [ ] **2.3 ARIA live region**
   - **Status:** not-started
   - **Effort:** ~0.25 day
-  - **Prompt:**
-    > Add an off-screen `aria-live="polite"` region near the
-    > input. On recording start: "Recording started". On final:
-    > "Transcript inserted: <text>". On error: "Recording
-    > error: <reason>". Acceptance: scenario `Screen reader
-    > announces recording state`.
+  - **Prompt:** > Add an off-screen `aria-live="polite"` region near the > input. On recording start: "Recording started". On final: > "Transcript inserted: <text>". On error: "Recording > error: <reason>". Acceptance: scenario `Screen reader
+announces recording state`.
 
 ## Phase 3 — Hotkey + slash commands + privacy
 
@@ -167,24 +138,15 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/web-client/src/input/hotkeys.ts`
-  - **Prompt:**
-    > Register two default hotkeys per `design.md`. Hold-to-
-    > talk: 150ms debounce distinguishes hold-vs-tap; on hold
-    > start, fire `recognition.start`; on release, fire
-    > `recognition.stop`. Acceptance: scenarios `Hotkey holds
-    > start recording`, `Brief tap does not start`.
+  - **Prompt:** > Register two default hotkeys per `design.md`. Hold-to- > talk: 150ms debounce distinguishes hold-vs-tap; on hold > start, fire `recognition.start`; on release, fire > `recognition.stop`. Acceptance: scenarios `Hotkey holds
+start recording`, `Brief tap does not start`.
 
 - [ ] **3.2 Slash command rendering (no exec)**
   - **Status:** not-started
   - **Effort:** ~0.25 day
   - **Files:** `packages/web-client/src/components/InputBar.tsx`
-  - **Prompt:**
-    > After a final voice transcript, if the text begins with a
-    > recognized `/<command>` (looked up in the existing slash-
-    > command palette), render the slash-command pill but do
-    > NOT execute. User must press Send. Acceptance: scenarios
-    > `Dictated slash command not executed`, `Unrecognized
-    > slash sent as plain text`.
+  - **Prompt:** > After a final voice transcript, if the text begins with a > recognized `/<command>` (looked up in the existing slash- > command palette), render the slash-command pill but do > NOT execute. User must press Send. Acceptance: scenarios > `Dictated slash command not executed`, `Unrecognized
+slash sent as plain text`.
 
 - [ ] **3.3 Privacy disclosure modal + persistent pill**
   - **Status:** not-started
@@ -192,14 +154,8 @@ State machine and alignment pattern: see
   - **Files:**
     `packages/web-client/src/components/PrivacyBanner.tsx`,
     `packages/web-client/src/components/VoicePill.tsx`
-  - **Prompt:**
-    > First voice activation per origin (no
-    > `localStorage["qwen-rc:voice-disclosure:<origin>"]`)
-    > shows the disclosure modal per `design.md`. On dismiss,
-    > store `"v1"`. Persistent pill "Voice: vendor-side" shown
-    > whenever the MicButton is rendered. Tapping pill re-
-    > opens the modal. Acceptance: scenarios `Privacy modal on
-    > first activation`, `Pill always visible`.
+  - **Prompt:** > First voice activation per origin (no > `localStorage["qwen-rc:voice-disclosure:<origin>"]`) > shows the disclosure modal per `design.md`. On dismiss, > store `"v1"`. Persistent pill "Voice: vendor-side" shown > whenever the MicButton is rendered. Tapping pill re- > opens the modal. Acceptance: scenarios `Privacy modal on
+first activation`, `Pill always visible`.
 
 ## Phase 4 — Polish
 
@@ -220,13 +176,8 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.25 day
   - **Files:** `packages/web-client/src/views/Settings.tsx`
-  - **Prompt:**
-    > Add three controls under "Voice input": `lang` (BCP-47
-    > tag, free text + a few presets), `hotkey` (single chord
-    > capture), `disabled` (kill switch). Persist in
-    > `~/.qwen/rc/web.yaml` per-client; defaults from
-    > `design.md`. Acceptance: scenarios `Language preference
-    > respected`, `Disabled hides MicButton`.
+  - **Prompt:** > Add three controls under "Voice input": `lang` (BCP-47 > tag, free text + a few presets), `hotkey` (single chord > capture), `disabled` (kill switch). Persist in > `~/.qwen/rc/web.yaml` per-client; defaults from > `design.md`. Acceptance: scenarios `Language preference
+respected`, `Disabled hides MicButton`.
 
 - [ ] **4.2 Docs**
   - **Status:** not-started
@@ -245,11 +196,11 @@ State machine and alignment pattern: see
 
 ## Effort summary
 
-| Phase | Description                          | Estimate (days) |
-|-------|--------------------------------------|------------------|
-| 0     | Foundation                           | 0.5              |
-| 1     | Recognition pipeline                 | 1.5              |
-| 2     | Volume meter + UX                    | 1                |
-| 3     | Hotkey + slash + privacy             | 1                |
-| 4     | Polish + docs + archive              | 0.5              |
-| **Total** |                                  | **4.5**          |
+| Phase     | Description              | Estimate (days) |
+| --------- | ------------------------ | --------------- |
+| 0         | Foundation               | 0.5             |
+| 1         | Recognition pipeline     | 1.5             |
+| 2         | Volume meter + UX        | 1               |
+| 3         | Hotkey + slash + privacy | 1               |
+| 4         | Polish + docs + archive  | 0.5             |
+| **Total** |                          | **4.5**         |

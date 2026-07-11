@@ -51,22 +51,16 @@ State machine and alignment-task pattern: see
     > schema v1. On failure, emit structured error including line
     > and column. Acceptance: unit tests for happy path, missing
     > version, unknown action, absolute-path glob, duplicate id,
-    > >1000 rules.
+    >
+    > > 1000 rules.
 
 - [ ] **1.2 Specificity-ordered evaluator**
   - **Status:** not-started
   - **Effort:** ~1 day
   - **Files:** `packages/cli/src/serve/policy/evaluator.ts`,
     `policy/specificity.ts`
-  - **Prompt:**
-    > Compute specificity scores per `design.md` Decisions D6.
-    > Evaluator method: `evaluate(toolCall, ctx) → { action, ruleId
-    > | null, reason? }`. Match supports `tool`, `argsGlob`,
-    > `pathGlob`, `originScope`, `sessionTag`, `timeOfDay`. Use a
-    > glob library that does NOT enable absolute-path globs (or
-    > pre-filter input). Acceptance: table-driven test with 20+
-    > scenarios covering precedence, fallthrough, and edge cases
-    > from `specs/policy-engine/spec.md`.
+  - **Prompt:** > Compute specificity scores per `design.md` Decisions D6. > Evaluator method: `evaluate(toolCall, ctx) → { action, ruleId
+| null, reason? }`. Match supports `tool`, `argsGlob`, > `pathGlob`, `originScope`, `sessionTag`, `timeOfDay`. Use a > glob library that does NOT enable absolute-path globs (or > pre-filter input). Acceptance: table-driven test with 20+ > scenarios covering precedence, fallthrough, and edge cases > from `specs/policy-engine/spec.md`.
 
 - [ ] **1.3 Integrate into permission handler**
   - **Status:** not-started
@@ -102,32 +96,20 @@ State machine and alignment-task pattern: see
   - **Status:** not-started
   - **Effort:** ~1 day
   - **Files:** `packages/cli/src/serve/policy/quotas.ts`
-  - **Prompt:**
-    > Implement rolling-window counters keyed by `(ruleId,
-    > windowStartTs)`. On match-and-execute, append to
-    > `~/.qwen/rc/quotas.wal` and update memory. On daemon start,
-    > replay WAL within retention horizon. Daily rotation. Acceptance:
-    > kill -9 mid-window and verify counter restored.
+  - **Prompt:** > Implement rolling-window counters keyed by `(ruleId,
+windowStartTs)`. On match-and-execute, append to > `~/.qwen/rc/quotas.wal` and update memory. On daemon start, > replay WAL within retention horizon. Daily rotation. Acceptance: > kill -9 mid-window and verify counter restored.
 
 - [ ] **2.2 expiresAt + timeOfDay evaluation**
   - **Status:** not-started
   - **Effort:** ~0.5 day
-  - **Prompt:**
-    > Add `expiresAt` (ISO timestamp) and `timeOfDay` `{from, to,
-    > timezone}` matchers. Use `Intl.DateTimeFormat` with IANA tz.
-    > Wrap correctly around midnight. Acceptance: unit tests for
-    > before/after expiry, before/in/after window, and a wrap-over-
-    > midnight window.
+  - **Prompt:** > Add `expiresAt` (ISO timestamp) and `timeOfDay` `{from, to,
+timezone}` matchers. Use `Intl.DateTimeFormat` with IANA tz. > Wrap correctly around midnight. Acceptance: unit tests for > before/after expiry, before/in/after window, and a wrap-over- > midnight window.
 
 - [ ] **2.3 Quota-falls-through behavior**
   - **Status:** not-started
   - **Effort:** ~0.5 day
-  - **Prompt:**
-    > When a rule's quota is exhausted, evaluator skips it and tries
-    > the next-most-specific rule. Audit records `rule_skipped:
-    > quota_exhausted` at debug level. Acceptance: scenario
-    > "Rate-limited rule falls through after cap" in
-    > `specs/policy-engine/spec.md`.
+  - **Prompt:** > When a rule's quota is exhausted, evaluator skips it and tries > the next-most-specific rule. Audit records `rule_skipped:
+quota_exhausted` at debug level. Acceptance: scenario > "Rate-limited rule falls through after cap" in > `specs/policy-engine/spec.md`.
 
 ## Phase 3 — Hot reload + tooling
 
@@ -224,11 +206,11 @@ State machine and alignment-task pattern: see
 
 ## Effort summary
 
-| Phase | Description                            | Estimate (days) |
-|-------|----------------------------------------|------------------|
-| 0     | Foundation                             | 1                |
-| 1     | Loader + evaluator + integration       | 3–4              |
-| 2     | Quotas + time                          | 2                |
-| 3     | Hot reload + CLI                       | 2                |
-| 4     | Polish + starter rules                 | 1–2              |
-| **Total** |                                    | **9–11**         |
+| Phase     | Description                      | Estimate (days) |
+| --------- | -------------------------------- | --------------- |
+| 0         | Foundation                       | 1               |
+| 1         | Loader + evaluator + integration | 3–4             |
+| 2         | Quotas + time                    | 2               |
+| 3         | Hot reload + CLI                 | 2               |
+| 4         | Polish + starter rules           | 1–2             |
+| **Total** |                                  | **9–11**        |

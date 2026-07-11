@@ -37,14 +37,8 @@ State machine and alignment pattern: see
   - **Effort:** ~0.5 day
   - **Files:** `packages/cli/src/serve/remoteControl/usage/rateTable.ts`,
     default file shipped at `assets/default-model-rates.yaml`.
-  - **Prompt:**
-    > Implement `RateTable` class with `load(path)`, `lookup({
-    > modelServiceId, modelId })`, file-watcher with 250 ms debounce.
-    > On parse error, retain previous good table in memory and emit
-    > audit `rate_table_parse_failed`. On lookup miss return
-    > `undefined` (writer handles by storing `cost_cents: NULL` and
-    > emitting `rate_table_miss`). Acceptance: scenarios under
-    > `Requirement: Rate table format and reload`.
+  - **Prompt:** > Implement `RateTable` class with `load(path)`, `lookup({
+modelServiceId, modelId })`, file-watcher with 250 ms debounce. > On parse error, retain previous good table in memory and emit > audit `rate_table_parse_failed`. On lookup miss return > `undefined` (writer handles by storing `cost_cents: NULL` and > emitting `rate_table_miss`). Acceptance: scenarios under > `Requirement: Rate table format and reload`.
 
 - [ ] **1.2 Schema migration for usage.db**
   - **Status:** not-started
@@ -87,22 +81,15 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/cli/src/serve/remoteControl/usage/route.ts`
-  - **Prompt:**
-    > Implement the route with the query parameters from `design.md`.
-    > Apply scope filtering: owner = all rows; lesser scopes =
-    > `attribution_token_id = caller`. Return both JSON and CSV
-    > formats. Acceptance: scenarios under `Requirement: /rc/usage
-    > aggregation endpoint` and `Requirement: Scope filtering on
-    > /rc/usage`.
+  - **Prompt:** > Implement the route with the query parameters from `design.md`. > Apply scope filtering: owner = all rows; lesser scopes = > `attribution_token_id = caller`. Return both JSON and CSV > formats. Acceptance: scenarios under `Requirement: /rc/usage
+aggregation endpoint` and `Requirement: Scope filtering on
+/rc/usage`.
 
 - [ ] **2.2 Capability advertisement**
   - **Status:** not-started
   - **Effort:** ~0.25 day
-  - **Prompt:**
-    > Add `costTracking: { enabled: true, currencyLabel,
-    > rateTablePath }` to `/capabilities`'s `remoteControl` block.
-    > Bump nothing — additive. Acceptance: capabilities response
-    > contains the new block.
+  - **Prompt:** > Add `costTracking: { enabled: true, currencyLabel,
+rateTablePath }` to `/capabilities`'s `remoteControl` block. > Bump nothing — additive. Acceptance: capabilities response > contains the new block.
 
 - [ ] **2.3 Pruning command**
   - **Status:** not-started
@@ -141,19 +128,14 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.25 day
   - **Files:** `packages/cli/src/ui/statusLine/costElement.tsx`
-  - **Prompt:**
-    > Extend the status line with a cost cell (e.g. `$0.42 · 12.3k
-    > in / 4.1k out`). Updates on each `usage_tick`. Hidden if
-    > `costTracking` capability not advertised.
+  - **Prompt:** > Extend the status line with a cost cell (e.g. `$0.42 · 12.3k
+in / 4.1k out`). Updates on each `usage_tick`. Hidden if > `costTracking` capability not advertised.
 
 - [ ] **3.3 `qwen rc usage` CLI subcommand**
   - **Status:** not-started
   - **Effort:** ~0.25 day
-  - **Prompt:**
-    > Implement `qwen rc usage [--since] [--group-by] [--sub-actor]
-    > [--format csv|table]`. Wraps `GET /rc/usage`. Acceptance:
-    > `qwen rc usage --sub-actor telegram:99 --since 24h` returns
-    > the bridge user's attributed total.
+  - **Prompt:** > Implement `qwen rc usage [--since] [--group-by] [--sub-actor]
+[--format csv|table]`. Wraps `GET /rc/usage`. Acceptance: > `qwen rc usage --sub-actor telegram:99 --since 24h` returns > the bridge user's attributed total.
 
 - [ ] **3.4 Archive change**
   - **Status:** not-started
@@ -163,10 +145,10 @@ State machine and alignment pattern: see
 
 ## Effort summary
 
-| Phase | Description                  | Estimate (days) |
-|-------|------------------------------|------------------|
-| 0     | Foundation                   | 0.5              |
-| 1     | Rate table + storage         | 1.5              |
-| 2     | Aggregation endpoint         | 1                |
-| 3     | Client surfaces              | 1                |
-| **Total** |                          | **4**            |
+| Phase     | Description          | Estimate (days) |
+| --------- | -------------------- | --------------- |
+| 0         | Foundation           | 0.5             |
+| 1         | Rate table + storage | 1.5             |
+| 2         | Aggregation endpoint | 1               |
+| 3         | Client surfaces      | 1               |
+| **Total** |                      | **4**           |

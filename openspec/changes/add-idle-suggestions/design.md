@@ -23,6 +23,7 @@ fail silently.
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Idle detection that doesn't accidentally fire while the agent is
   mid-tool-call or waiting for permission.
 - Synthetic prompts that produce JSON suggestions reliably enough to
@@ -32,6 +33,7 @@ fail silently.
 - Per-session opt-out and global opt-out.
 
 **Non-Goals:**
+
 - A learning system. The synthetic prompt is the same every time;
   the agent's context is what changes.
 - Suggesting tool calls directly (e.g., auto-running tests).
@@ -139,7 +141,7 @@ shows a subtle "Suggestions paused" badge near the input.
 The model is fallible. The parser:
 
 1. Strips a leading/trailing markdown code fence
-   (```` ``` ```` or ```` ```json ````).
+   (` ``` ` or ` ```json `).
 2. Trims whitespace.
 3. `JSON.parse` and confirm `Array.isArray(value)`.
 4. For each element: confirm `typeof === 'string'`, 5–140 chars
@@ -163,14 +165,14 @@ summaries — see Threat model).
     "suggestions": [
       "Run the test suite",
       "Update the changelog with the changes we made",
-      "Commit and create a PR"
+      "Commit and create a PR",
     ],
     "expiresAt": "<ISO-8601, default now + 5 min>",
     "rateLimitState": {
       "remainingThisHour": 4,
-      "nextSlotAt": "<ISO>"
-    }
-  }
+      "nextSlotAt": "<ISO>",
+    },
+  },
 }
 ```
 
@@ -273,28 +275,28 @@ ships.
 
 ## Threat model
 
-| Attacker                          | Capability                              | Mitigation                                                                                |
-|-----------------------------------|------------------------------------------|-------------------------------------------------------------------------------------------|
-| Model emits prompt-injection content in suggestions | User taps and unwittingly sends it | Chips do not auto-send; the user reviews. Plus, suggestions are short and visible.        |
-| Sensitive context summarized into a suggestion | Leak via push or shoulder-surfing | No WebPush push (D4). Suggestions visible only to attached SSE subscribers in scope.       |
-| Compromised attached client       | Race to read suggestions before owner    | No different from other SSE content. Standard scope rules apply.                          |
-| Cost amplification via short idleAfterSec | Drain operator budget               | Per-hour rate limit; operator owns the config; default conservative (5/hour).             |
+| Attacker                                            | Capability                            | Mitigation                                                                           |
+| --------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------ |
+| Model emits prompt-injection content in suggestions | User taps and unwittingly sends it    | Chips do not auto-send; the user reviews. Plus, suggestions are short and visible.   |
+| Sensitive context summarized into a suggestion      | Leak via push or shoulder-surfing     | No WebPush push (D4). Suggestions visible only to attached SSE subscribers in scope. |
+| Compromised attached client                         | Race to read suggestions before owner | No different from other SSE content. Standard scope rules apply.                     |
+| Cost amplification via short idleAfterSec           | Drain operator budget                 | Per-hour rate limit; operator owns the config; default conservative (5/hour).        |
 
 ## Risks
 
-| Risk                                            | Likelihood | Impact | Mitigation                                                                |
-|-------------------------------------------------|------------|--------|---------------------------------------------------------------------------|
-| Model rarely returns valid JSON                 | M          | M      | Tolerant parser (strip fences, trim). On persistent failure, suggestions just don't appear. |
-| `end_turn` fires mid-tool-call inadvertently    | L          | L      | Detect strictly: end_turn AND no pending permission_request.              |
-| User toggles `/suggest off`; setting forgotten in next session | M | L | Document scope (per session). Daemon default re-applies in new sessions.   |
-| Multiple clients see different chips after a race | L        | L      | Daemon is single source of truth; both clients receive identical SSE.     |
-| Idle-suggest model call interleaves with real prompt | M     | M     | When a real prompt arrives mid-synthetic, daemon cancels suggestion (`AbortController`) and discards partial response. |
+| Risk                                                           | Likelihood | Impact | Mitigation                                                                                                             |
+| -------------------------------------------------------------- | ---------- | ------ | ---------------------------------------------------------------------------------------------------------------------- |
+| Model rarely returns valid JSON                                | M          | M      | Tolerant parser (strip fences, trim). On persistent failure, suggestions just don't appear.                            |
+| `end_turn` fires mid-tool-call inadvertently                   | L          | L      | Detect strictly: end_turn AND no pending permission_request.                                                           |
+| User toggles `/suggest off`; setting forgotten in next session | M          | L      | Document scope (per session). Daemon default re-applies in new sessions.                                               |
+| Multiple clients see different chips after a race              | L          | L      | Daemon is single source of truth; both clients receive identical SSE.                                                  |
+| Idle-suggest model call interleaves with real prompt           | M          | M      | When a real prompt arrives mid-synthetic, daemon cancels suggestion (`AbortController`) and discards partial response. |
 
 ## Open questions
 
 1. **Should `/suggest off` persist beyond the session?** Today it's
    per-session. An operator who hates suggestions sets `enabled:
-   false` in `idle.yaml`. A middle ground would be per-paired-
+false` in `idle.yaml`. A middle ground would be per-paired-
    client persistence (in `tokens.db`); probably overkill for v1.
 
 2. **Are 3 chips the right cap?** Anthropic shows 3. We follow.

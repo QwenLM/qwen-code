@@ -32,6 +32,7 @@ on iOS — both well-trodden production patterns.
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Web codebase is the only UI. Native shells host it.
 - Reliable iOS push via APNs, separate from the WebPush pipeline.
 - Token stored in Android Keystore / iOS Keychain, optionally gated
@@ -42,6 +43,7 @@ on iOS — both well-trodden production patterns.
   cadences via a versioned bridge contract.
 
 **Non-Goals:**
+
 - Replicating any UI in native code. Settings screens, transcript
   rendering, approval cards — all in the web client.
 - Cross-platform UI frameworks (React Native, Flutter, etc.). The
@@ -109,7 +111,7 @@ web JS runs.
 ```ts
 interface QwenBridge {
   // Identification and version negotiation
-  readonly platform: "android-twa" | "ios-wkwebview" | "web";
+  readonly platform: 'android-twa' | 'ios-wkwebview' | 'web';
   readonly version: { shell: string; bridge: number };
 
   // Token storage
@@ -216,12 +218,12 @@ the native shell writes to Keychain / Keystore.
 
 Both shells register the scheme `qwen-rc://`. Routes:
 
-| URL                                          | Behavior                                |
-|----------------------------------------------|-----------------------------------------|
-| `qwen-rc://session/<sid>`                    | Open shell, navigate web to session `sid` |
-| `qwen-rc://session/<sid>?event=<eid>`        | Same, scrolled/focused on event         |
-| `qwen-rc://permission/<pid>`                 | Same, scrolled to permission `pid` card |
-| `qwen-rc://pair?code=<code>&url=<url>`       | Open shell, attempt pairing             |
+| URL                                    | Behavior                                  |
+| -------------------------------------- | ----------------------------------------- |
+| `qwen-rc://session/<sid>`              | Open shell, navigate web to session `sid` |
+| `qwen-rc://session/<sid>?event=<eid>`  | Same, scrolled/focused on event           |
+| `qwen-rc://permission/<pid>`           | Same, scrolled to permission `pid` card   |
+| `qwen-rc://pair?code=<code>&url=<url>` | Open shell, attempt pairing               |
 
 Notification taps (from APNs payloads or WebPush) use these URLs in
 their `click_action` / `category` payload. The shell intercepts and
@@ -259,7 +261,7 @@ Shell registers for remote notifications:
 - On `didRegisterForRemoteNotificationsWithDeviceToken`, shell
   POSTs the hex-encoded device token to
   `POST /rc/native-push/apns/register { deviceToken, bundleId,
-  shellVersion }` with its bearer.
+shellVersion }` with its bearer.
 
 The daemon stores `(tokenId, apnsDeviceToken, bundleId)` in a new
 `apns_subscriptions` table. The routing module from
@@ -420,30 +422,30 @@ Documented.
 
 ## Threat model
 
-| Attacker                              | Capability                                  | Mitigation                                                                                  |
-|---------------------------------------|---------------------------------------------|---------------------------------------------------------------------------------------------|
-| Stolen unlocked phone                 | Open shell, drive session                   | Biometric gate (opt-in) re-prompts on app foreground. Token in keystore, not page memory.   |
-| Stolen locked phone                   | Read storage                                | Android Keystore / iOS Keychain protect ciphertext at rest. Requires device unlock + (if set) biometric. |
-| Malicious WebView content (XSS)       | Steal token via JS bridge                   | Bridge methods are scoped: `getToken` returns the bearer only AFTER biometric (if required); web code holds in-memory only; CSP blocks 3rd-party JS. |
+| Attacker                              | Capability                                  | Mitigation                                                                                                                                                                  |
+| ------------------------------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Stolen unlocked phone                 | Open shell, drive session                   | Biometric gate (opt-in) re-prompts on app foreground. Token in keystore, not page memory.                                                                                   |
+| Stolen locked phone                   | Read storage                                | Android Keystore / iOS Keychain protect ciphertext at rest. Requires device unlock + (if set) biometric.                                                                    |
+| Malicious WebView content (XSS)       | Steal token via JS bridge                   | Bridge methods are scoped: `getToken` returns the bearer only AFTER biometric (if required); web code holds in-memory only; CSP blocks 3rd-party JS.                        |
 | Compromised daemon URL DNS            | Phish a fresh pairing onto the wrong server | Pairing flow shows the daemon's fingerprint (TLS cert SHA-256) before accepting; operator visually compares with their workstation. Documented; UI shows in pairing screen. |
-| MITM TLS on daemon URL                | Read traffic                                | Daemon serves over TLS (existing); shell pins to the daemon's TLS cert SHA-256 on first pair; cert change → manual confirm. |
-| Custom-scheme abuse                   | Malicious app sends qwen-rc:// URLs          | Shell handlers VALIDATE the path; pairing scheme requires URL == previously-paired daemon URL; unknown URLs show a confirmation dialog. |
-| APNs P-8 key leak                     | Attacker impersonates this app to APNs       | P-8 file mode 0600; rotated via Apple Developer portal; subscriptions re-bind on next app launch. |
-| Token leak (out-of-band)              | Drive session until revoke                  | Same as web-client token leak; daemon revoke is the remedy. Keystore makes leak harder to start with. |
-| Side-loaded malicious "qwen-rc" build | Pretends to be ours, captures pairing       | Reproducible F-Droid builds; signed GitHub releases with SHA-256 in release notes; operator verifies. |
+| MITM TLS on daemon URL                | Read traffic                                | Daemon serves over TLS (existing); shell pins to the daemon's TLS cert SHA-256 on first pair; cert change → manual confirm.                                                 |
+| Custom-scheme abuse                   | Malicious app sends qwen-rc:// URLs         | Shell handlers VALIDATE the path; pairing scheme requires URL == previously-paired daemon URL; unknown URLs show a confirmation dialog.                                     |
+| APNs P-8 key leak                     | Attacker impersonates this app to APNs      | P-8 file mode 0600; rotated via Apple Developer portal; subscriptions re-bind on next app launch.                                                                           |
+| Token leak (out-of-band)              | Drive session until revoke                  | Same as web-client token leak; daemon revoke is the remedy. Keystore makes leak harder to start with.                                                                       |
+| Side-loaded malicious "qwen-rc" build | Pretends to be ours, captures pairing       | Reproducible F-Droid builds; signed GitHub releases with SHA-256 in release notes; operator verifies.                                                                       |
 
 ## Risks / Trade-offs
 
-| Risk                                          | Likelihood | Impact | Mitigation                                                                                  |
-|-----------------------------------------------|------------|--------|---------------------------------------------------------------------------------------------|
-| Apple changes WKWebView semantics             | M          | M      | Bridge wraps narrow surface; periodic re-test against new iOS majors. Document iOS minimum. |
-| TWA verification (digital asset links) fails  | M          | M      | Provide both TWA (full screen) and Custom Tab fallback. Asset-link file documented.         |
-| F-Droid build reproducibility breaks          | M          | L      | CI builds and compares to F-Droid build server; mismatches block release.                   |
-| iOS push P-8 key rotation breaks all subs     | L          | M      | Subscriptions self-heal on next launch (re-register with new key id).                       |
-| Operator can't get Apple Dev account          | M          | M      | iOS shell still works with WebPush only — degraded but functional.                          |
-| Bridge version skew (old shell, new web)      | M          | L      | Feature detection in web client; missing features degrade, not crash. Documented.            |
-| WebView storage gets cleared by OS            | L          | M      | Token in keystore is preserved; web client re-injects on next launch via handshake.         |
-| Custom scheme conflict with another app       | L          | L      | `qwen-rc://` is namespaced enough that collision is unlikely; documented as the canonical scheme. |
+| Risk                                         | Likelihood | Impact | Mitigation                                                                                        |
+| -------------------------------------------- | ---------- | ------ | ------------------------------------------------------------------------------------------------- |
+| Apple changes WKWebView semantics            | M          | M      | Bridge wraps narrow surface; periodic re-test against new iOS majors. Document iOS minimum.       |
+| TWA verification (digital asset links) fails | M          | M      | Provide both TWA (full screen) and Custom Tab fallback. Asset-link file documented.               |
+| F-Droid build reproducibility breaks         | M          | L      | CI builds and compares to F-Droid build server; mismatches block release.                         |
+| iOS push P-8 key rotation breaks all subs    | L          | M      | Subscriptions self-heal on next launch (re-register with new key id).                             |
+| Operator can't get Apple Dev account         | M          | M      | iOS shell still works with WebPush only — degraded but functional.                                |
+| Bridge version skew (old shell, new web)     | M          | L      | Feature detection in web client; missing features degrade, not crash. Documented.                 |
+| WebView storage gets cleared by OS           | L          | M      | Token in keystore is preserved; web client re-injects on next launch via handshake.               |
+| Custom scheme conflict with another app      | L          | L      | `qwen-rc://` is namespaced enough that collision is unlikely; documented as the canonical scheme. |
 
 ## Open questions
 

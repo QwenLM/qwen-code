@@ -27,8 +27,8 @@ or refuse prompts — a follow-up change can use this data to do that.
   mapping `(modelServiceId, modelId)` to per-million-token prices
   (input, output, cached read). Ships with Qwen models pre-populated.
 - **Storage.** New SQLite table `usage_events(session_id, ts,
-  tokens_in, tokens_out, tokens_cached, cost_cents, model_id,
-  attribution_token_id, sub_actor)`. Indexed for the common
+tokens_in, tokens_out, tokens_cached, cost_cents, model_id,
+attribution_token_id, sub_actor)`. Indexed for the common
   group-by queries.
 - **Ingestion.** The daemon hooks the existing `session_update` event
   pipeline: whenever a frame carries a usage block, the daemon

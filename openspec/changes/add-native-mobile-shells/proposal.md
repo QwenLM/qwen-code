@@ -160,7 +160,7 @@ is cleared from keystore.
 - **Daemon**: two new endpoints —
   `POST /rc/native-push/apns/register` (store device token bound
   to a paired token) and `DELETE
-  /rc/native-push/apns/register/:id`. An optional APNs sender
+/rc/native-push/apns/register/:id`. An optional APNs sender
   (operator supplies a P-8 key file + key id + team id via daemon
   config). When the P-8 file is absent, iOS native push is silently
   disabled and the shell falls back to WebPush as if on the web.

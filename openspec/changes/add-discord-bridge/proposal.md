@@ -66,7 +66,7 @@ first-class capability, and a 2000-character message size limit.
 **D1. Operator installs the bridge.** Operator creates a Discord
 app, copies bot token + application id, runs `qwen rc pair --scope
 bridge --name discord` on the workstation, runs the bridge
-container with env vars. Bridge logs "registered as br_..."; the
+container with env vars. Bridge logs "registered as br\_..."; the
 operator invites the bot to a server using the OAuth2 URL printed
 by the bridge on first boot.
 

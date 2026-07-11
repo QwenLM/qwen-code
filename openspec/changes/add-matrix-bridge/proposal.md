@@ -54,8 +54,8 @@ change must handle:
 - **Capability declaration:** `supportsActions: false`,
   `supportsMarkdown: "full"` (Matrix supports CommonMark via
   `org.matrix.custom.html` formatted body), `maxMessageBytes:
-  65536` (Matrix's effective practical limit), `supportsThreads:
-  true` (`m.thread` relations), `supportsEdits: true`
+65536` (Matrix's effective practical limit), `supportsThreads:
+true` (`m.thread` relations), `supportsEdits: true`
   (`m.replace`).
 - **Sub-actor:** `matrix:@user:homeserver`. Matrix IDs are
   homeserver-scoped and immutable.
@@ -76,7 +76,7 @@ change must handle:
 home.example.com` on their Synapse server (manual user reg or
 admin API), logs in once via Element to grab an access token, runs
 `qwen rc pair --scope bridge --name matrix`, then runs the bridge
-container with all env vars. Bridge logs "registered as br_...";
+container with all env vars. Bridge logs "registered as br\_...";
 operator confirms via `qwen rc bridges list`.
 
 **M2. Team member binds a room.** Operator generates `inv_abc` via

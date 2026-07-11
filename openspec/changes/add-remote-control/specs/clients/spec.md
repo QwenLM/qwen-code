@@ -122,7 +122,7 @@ The web client SHALL render at minimum:
 #### Scenario: Diff viewer renders before approval
 
 - **GIVEN** a `permission_request` event with `data.toolCall.name =
-  "edit_file"` and a `diff` payload
+"edit_file"` and a `diff` payload
 - **WHEN** the web client receives it
 - **THEN** the user sees a syntax-highlighted unified diff with
   before/after context

@@ -24,6 +24,7 @@ rendering, persistence shape, and back-pressure handling.
 ## Goals / Non-Goals
 
 **Goals:**
+
 - A single-binary or single-container bridge an operator can run
   next to the daemon with three env vars.
 - No daemon code in the bridge process; bridge speaks only the
@@ -34,6 +35,7 @@ rendering, persistence shape, and back-pressure handling.
   `deeplink` hints.
 
 **Non-Goals:**
+
 - Webhook deployment mode. Long-polling only in v1.
 - Rich file upload / preview from Telegram to the agent.
 - Inline-query mode (`@bot search...`). Not in the user stories.
@@ -80,14 +82,14 @@ to disk on every mutation. No DB; JSON file with atomic replace.
 Environment variables only (twelve-factor; matches the Docker
 deployment story):
 
-| Var                       | Required | Notes                                      |
-|---------------------------|----------|--------------------------------------------|
-| `TELEGRAM_BOT_TOKEN`      | yes      | From BotFather. Treated as secret.         |
-| `QWEN_DAEMON_URL`         | yes      | e.g. `https://daemon.tailnet.ts.net`       |
-| `QWEN_BRIDGE_TOKEN`       | yes      | `qwk_*` bridge-scope token.                |
-| `QWEN_BRIDGE_PAIRING_CODE`| no       | If set, bridge redeems and exits or persists token; one-time bootstrap. |
-| `QWEN_BRIDGE_STATE_DIR`   | no       | Default `~/.qwen/rc/bridges/telegram`.     |
-| `BRIDGE_LOG_LEVEL`        | no       | `info` default.                            |
+| Var                        | Required | Notes                                                                   |
+| -------------------------- | -------- | ----------------------------------------------------------------------- |
+| `TELEGRAM_BOT_TOKEN`       | yes      | From BotFather. Treated as secret.                                      |
+| `QWEN_DAEMON_URL`          | yes      | e.g. `https://daemon.tailnet.ts.net`                                    |
+| `QWEN_BRIDGE_TOKEN`        | yes      | `qwk_*` bridge-scope token.                                             |
+| `QWEN_BRIDGE_PAIRING_CODE` | no       | If set, bridge redeems and exits or persists token; one-time bootstrap. |
+| `QWEN_BRIDGE_STATE_DIR`    | no       | Default `~/.qwen/rc/bridges/telegram`.                                  |
+| `BRIDGE_LOG_LEVEL`         | no       | `info` default.                                                         |
 
 `QWEN_BRIDGE_TOKEN` and `QWEN_BRIDGE_PAIRING_CODE` are mutually
 exclusive at the "persisted" level; the pairing code is consumed at
@@ -109,7 +111,7 @@ The team member clicks it. Telegram opens the chat and sends
 `/start inv_K9X2P7L`. The bridge:
 
 1. Verifies `inv_K9X2P7L` against the daemon (a new `POST
-   /rc/bridges/:id/invite/redeem` route, added as a small extension
+/rc/bridges/:id/invite/redeem` route, added as a small extension
    to `add-bridge-protocol` — see Decisions D3).
 2. Writes `{chatId, sessionId, telegramUserId}` to `chats.json`.
 3. Replies "Bound chat to session `sess_abc123`. You will see tool-
@@ -128,9 +130,9 @@ fresh `/start` overwrites. `/detach` unbinds.
       "chatId": -1001234567890,
       "sessionId": "sess_abc123",
       "primarySubActor": "telegram:12345",
-      "boundAt": "<ISO>"
-    }
-  ]
+      "boundAt": "<ISO>",
+    },
+  ],
 }
 ```
 
@@ -159,11 +161,13 @@ Branch on `bridgeHints.recommendedSurface`:
 - **`inline`**: Send a message containing `argsSummaryShort`
   (already ≤140 chars from the daemon) with a two-button reply
   markup:
+
   ```
   ┌──────────┬──────────┐
   │ Approve  │  Deny    │
   └──────────┴──────────┘
   ```
+
   Callback data: `vote:approve:<requestId>` /
   `vote:deny:<requestId>`. On tap, bridge POSTs
   `/permission/:requestId` with `X-RC-SubActor: telegram:<userId>`
@@ -242,15 +246,15 @@ Three artifacts:
 
 ## Threat model
 
-| Attacker                              | Capability                                    | Mitigation                                                                                       |
-|---------------------------------------|-----------------------------------------------|--------------------------------------------------------------------------------------------------|
-| Bot token leak (e.g. screenshot)      | Impersonate the bot, see all chats with it     | Operator regenerates the bot token in BotFather (revokes the old one immediately) AND revokes the bridge token. Coupled rotation documented; see D5. |
-| Bridge token leak only                | Mint prompts / votes with arbitrary subActor   | Same as bridge-protocol threat model: revoke the bridge token. Audit shows what it did.          |
-| Spoofed sub-actor inside the bridge   | Compromised bridge claims `telegram:ceo`       | Inherits bridge-protocol's "bridge can lie" model. Mitigation = revoke + audit forensics.        |
-| Telegram MITM                         | Read bot traffic                               | Telegram Bot API is HTTPS; trusted up to Telegram itself. Operator should treat Telegram as an external trust boundary. |
-| Operator-side log capture             | Bot token visible in logs                      | Logger MUST redact `TELEGRAM_BOT_TOKEN`; explicit unit test for log redaction.                   |
-| Long-lived persistent chats.json on shared FS | Other users on host read session bindings | `$QWEN_BRIDGE_STATE_DIR` permissioned 0700; files 0600. Docker volume best-practice documented.  |
-| Banned user obtains new Telegram id   | Bypass ban                                     | Out of bridge's control. Operator's recourse: block at the chat level (kick from group) or ban the new id when discovered. |
+| Attacker                                      | Capability                                   | Mitigation                                                                                                                                           |
+| --------------------------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bot token leak (e.g. screenshot)              | Impersonate the bot, see all chats with it   | Operator regenerates the bot token in BotFather (revokes the old one immediately) AND revokes the bridge token. Coupled rotation documented; see D5. |
+| Bridge token leak only                        | Mint prompts / votes with arbitrary subActor | Same as bridge-protocol threat model: revoke the bridge token. Audit shows what it did.                                                              |
+| Spoofed sub-actor inside the bridge           | Compromised bridge claims `telegram:ceo`     | Inherits bridge-protocol's "bridge can lie" model. Mitigation = revoke + audit forensics.                                                            |
+| Telegram MITM                                 | Read bot traffic                             | Telegram Bot API is HTTPS; trusted up to Telegram itself. Operator should treat Telegram as an external trust boundary.                              |
+| Operator-side log capture                     | Bot token visible in logs                    | Logger MUST redact `TELEGRAM_BOT_TOKEN`; explicit unit test for log redaction.                                                                       |
+| Long-lived persistent chats.json on shared FS | Other users on host read session bindings    | `$QWEN_BRIDGE_STATE_DIR` permissioned 0700; files 0600. Docker volume best-practice documented.                                                      |
+| Banned user obtains new Telegram id           | Bypass ban                                   | Out of bridge's control. Operator's recourse: block at the chat level (kick from group) or ban the new id when discovered.                           |
 
 ## Decisions
 
@@ -362,13 +366,13 @@ the place for byte-accurate streaming.
 
 ## Risks / Trade-offs
 
-| Risk                                            | Likelihood | Impact | Mitigation                                                                                              |
-|-------------------------------------------------|------------|--------|---------------------------------------------------------------------------------------------------------|
-| MarkdownV2 escape miss → broken rendering        | M          | L      | Property-based test on escape function with random unicode + the documented escape set.                |
-| Long-poll stall after network blip               | M          | M      | Restart poll loop with backoff on any error; log every reconnection; expose `/healthz` for orchestrators. |
-| chats.json corruption                             | L          | M      | Atomic-rename writes; on parse failure, archive the corrupt file and start empty (log loud warning).   |
-| Buffered chunks lost on crash mid-stream         | L          | L      | Daemon WAL is the source of truth; bridge replays from `Last-Event-ID` after restart.                  |
-| Telegram global outage                           | L          | L      | Daemon and other bridges unaffected; chat catches up when Telegram returns.                            |
+| Risk                                      | Likelihood | Impact | Mitigation                                                                                                |
+| ----------------------------------------- | ---------- | ------ | --------------------------------------------------------------------------------------------------------- |
+| MarkdownV2 escape miss → broken rendering | M          | L      | Property-based test on escape function with random unicode + the documented escape set.                   |
+| Long-poll stall after network blip        | M          | M      | Restart poll loop with backoff on any error; log every reconnection; expose `/healthz` for orchestrators. |
+| chats.json corruption                     | L          | M      | Atomic-rename writes; on parse failure, archive the corrupt file and start empty (log loud warning).      |
+| Buffered chunks lost on crash mid-stream  | L          | L      | Daemon WAL is the source of truth; bridge replays from `Last-Event-ID` after restart.                     |
+| Telegram global outage                    | L          | L      | Daemon and other bridges unaffected; chat catches up when Telegram returns.                               |
 
 ## Open questions
 

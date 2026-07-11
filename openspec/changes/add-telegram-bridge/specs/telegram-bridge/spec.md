@@ -50,8 +50,8 @@ with the exact capability declaration:
     "supportsMarkdown": "limited",
     "maxMessageBytes": 4096,
     "supportsThreads": false,
-    "supportsEdits": true
-  }
+    "supportsEdits": true,
+  },
 }
 ```
 
@@ -77,7 +77,7 @@ A Telegram chat SHALL NOT be bound to any qwen session by default.
 Binding occurs exclusively when:
 
 1. An operator on the workstation runs `qwen rc bridges invite
-   --kind telegram --session <id>`, producing a one-time invite
+--kind telegram --session <id>`, producing a one-time invite
    token and a `t.me/<bot>?start=<token>` URL.
 2. A Telegram user opens that URL, causing Telegram to send
    `/start <token>` to the bot.
@@ -137,7 +137,7 @@ SHALL:
 - **THEN** the bridge POSTs `/session/sess_abc/prompt` with body
   containing `prompt: "fix the build"`
 - **AND** the request carries header `X-RC-SubActor:
-  telegram:12345`
+telegram:12345`
 
 #### Scenario: Sender-specific sub-actor
 
@@ -222,8 +222,8 @@ SHALL:
 
 1. Parse `callback_data` as `vote:<approve|deny>:<requestId>`.
 2. POST `/permission/<requestId>` with body `{ vote:
-   "approve" | "deny" }` and `X-RC-SubActor:
-   telegram:<tapper-numeric-id>`.
+"approve" | "deny" }` and `X-RC-SubActor:
+telegram:<tapper-numeric-id>`.
 3. Answer the Telegram callback query (so the loading spinner
    clears).
 
@@ -262,7 +262,7 @@ present.
 - **GIVEN** a Telegram user with `id: 12345, username: "evan"`
 - **WHEN** they send any message to the bot
 - **THEN** the resulting daemon request carries `X-RC-SubActor:
-  telegram:12345`
+telegram:12345`
 - **AND** does NOT carry `telegram:evan` or `telegram:@evan`
 
 ### Requirement: Local ban cache

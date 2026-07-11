@@ -20,6 +20,7 @@ notification finds them.
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Push approval prompts and task-completion events to the user's
   device with no relay we run ourselves.
 - Encrypt payload contents; the push service never sees sensitive
@@ -30,6 +31,7 @@ notification finds them.
   without operator action.
 
 **Non-Goals:**
+
 - APNs / FCM direct integration. WebPush already routes through them
   transparently.
 - Notification persistence on the daemon beyond delivery confirmation.
@@ -115,12 +117,12 @@ even if encryption were compromised, only metadata leaks).
 A subscription is owned by exactly one token. The token's scope
 defines which event categories the subscription may receive:
 
-| Scope     | Allowed kinds                                                           |
-|-----------|--------------------------------------------------------------------------|
-| `owner`   | All                                                                      |
+| Scope     | Allowed kinds                                                                           |
+| --------- | --------------------------------------------------------------------------------------- |
+| `owner`   | All                                                                                     |
 | `write`   | `permission.required` (where the user's vote matters), `task.completed`, `session.died` |
-| `approve` | `permission.required`                                                    |
-| `read`    | `task.completed`, `mention` only                                         |
+| `approve` | `permission.required`                                                                   |
+| `read`    | `task.completed`, `mention` only                                                        |
 
 Subscriptions inherit token expiry; when the token is revoked, all
 its subscriptions are removed and a final "subscription revoked"
@@ -129,16 +131,16 @@ operator).
 
 ### Threats
 
-| Attacker                                  | Capability                                       | Mitigation                                                                                  |
-|-------------------------------------------|---------------------------------------------------|---------------------------------------------------------------------------------------------|
-| Push service operator (Mozilla/Google/Apple) | See timing + size; cannot decrypt              | RFC 8291 encryption; TTL set short; payload size bounded.                                   |
-| Attacker captures subscription endpoint   | Can flood the push service on user's behalf       | Endpoint alone is not sufficient — VAPID JWT signed with our private key required.          |
-| Leaked VAPID private key                  | Impersonate this daemon to the push service       | Key gen at first start; rotation via `qwen rc push rotate-vapid`. Subscriptions re-bind on next page load. |
-| Leaked client token + endpoint            | Send DELETE for that token's subscriptions        | Same blast radius as token leak in general; revoke token to invalidate.                     |
-| Notification spoofing on device           | UI in another browser tab pretends to be us       | Subscription is bound to the daemon's origin; service worker checks payload `v`+`kind` schema and ignores malformed. |
-| Storm: 1000 events/sec → 1000 pushes/sec  | Rate-limit budget exhausted                       | Per-subscription `maxPerHour` default 30; daemon coalesces same-kind events within a 5 s window. |
-| Sensitive content in payload              | Push service sees user data                       | Payload schema explicitly excludes tool args, file contents, prompt text. Audit linted to ensure no sensitive fields land in `summary`. |
-| Approve from a stolen unlocked phone      | Attacker votes via lock-screen action             | Inherent to push action model. Operator can disable inline actions per-subscription via prefs; deep-link-only mode requires unlock+web-client. |
+| Attacker                                     | Capability                                  | Mitigation                                                                                                                                     |
+| -------------------------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Push service operator (Mozilla/Google/Apple) | See timing + size; cannot decrypt           | RFC 8291 encryption; TTL set short; payload size bounded.                                                                                      |
+| Attacker captures subscription endpoint      | Can flood the push service on user's behalf | Endpoint alone is not sufficient — VAPID JWT signed with our private key required.                                                             |
+| Leaked VAPID private key                     | Impersonate this daemon to the push service | Key gen at first start; rotation via `qwen rc push rotate-vapid`. Subscriptions re-bind on next page load.                                     |
+| Leaked client token + endpoint               | Send DELETE for that token's subscriptions  | Same blast radius as token leak in general; revoke token to invalidate.                                                                        |
+| Notification spoofing on device              | UI in another browser tab pretends to be us | Subscription is bound to the daemon's origin; service worker checks payload `v`+`kind` schema and ignores malformed.                           |
+| Storm: 1000 events/sec → 1000 pushes/sec     | Rate-limit budget exhausted                 | Per-subscription `maxPerHour` default 30; daemon coalesces same-kind events within a 5 s window.                                               |
+| Sensitive content in payload                 | Push service sees user data                 | Payload schema explicitly excludes tool args, file contents, prompt text. Audit linted to ensure no sensitive fields land in `summary`.        |
+| Approve from a stolen unlocked phone         | Attacker votes via lock-screen action       | Inherent to push action model. Operator can disable inline actions per-subscription via prefs; deep-link-only mode requires unlock+web-client. |
 
 ### What does NOT leak
 
@@ -262,12 +264,12 @@ Acceptable for any human-relevant latency budget.
 
 ## Persistence
 
-| Artifact                                   | Format    | Lifecycle                                |
-|--------------------------------------------|-----------|------------------------------------------|
-| `~/.qwen/rc/vapid.pub.pem`                 | PEM       | Generated on first start; rotation event.|
-| `~/.qwen/rc/vapid.priv.pem`                | PEM, 0600 | Same.                                    |
-| `tokens.db` → `push_subscriptions` table   | SQLite    | Per-token records; deleted on token revoke. |
-| Push send queue                            | In-memory + WAL'd backlog | Bounded queue; backlog persists across restart for ≤ 30 min. |
+| Artifact                                 | Format                    | Lifecycle                                                    |
+| ---------------------------------------- | ------------------------- | ------------------------------------------------------------ |
+| `~/.qwen/rc/vapid.pub.pem`               | PEM                       | Generated on first start; rotation event.                    |
+| `~/.qwen/rc/vapid.priv.pem`              | PEM, 0600                 | Same.                                                        |
+| `tokens.db` → `push_subscriptions` table | SQLite                    | Per-token records; deleted on token revoke.                  |
+| Push send queue                          | In-memory + WAL'd backlog | Bounded queue; backlog persists across restart for ≤ 30 min. |
 
 `push_subscriptions` columns:
 `id PK, token_id FK, endpoint, p256dh, auth_secret, prefs (JSON),
@@ -276,14 +278,14 @@ created_at`.
 
 ## Risks / Trade-offs
 
-| Risk                                       | Likelihood | Impact | Mitigation                                                                                  |
-|--------------------------------------------|------------|--------|---------------------------------------------------------------------------------------------|
-| Browser push permission rejected           | M          | M      | UI shows permission status; explains what's lost; clear retry path.                          |
-| iOS Safari push (since 16.4) flakiness     | M          | M      | PWA must be installed to home screen for push to work on iOS; instructions in pairing UI.    |
-| 4 KiB payload limit overrun                | L          | M      | Schema includes a length cap on `summary`; emergency truncation with `…` marker.            |
-| Push provider outage (Mozilla autopush down)| L         | M      | Daemon still works without push; events still flow via SSE/WS. Push is best-effort.         |
-| Action button does not post vote (network) | M          | L      | Service worker queues votes and retries; if user opens app, vote pending banner shows.       |
-| Notification fatigue (too many)            | M          | M      | Defaults: `maxPerHour: 30`, quiet hours, same-kind coalescing.                              |
+| Risk                                         | Likelihood | Impact | Mitigation                                                                                |
+| -------------------------------------------- | ---------- | ------ | ----------------------------------------------------------------------------------------- |
+| Browser push permission rejected             | M          | M      | UI shows permission status; explains what's lost; clear retry path.                       |
+| iOS Safari push (since 16.4) flakiness       | M          | M      | PWA must be installed to home screen for push to work on iOS; instructions in pairing UI. |
+| 4 KiB payload limit overrun                  | L          | M      | Schema includes a length cap on `summary`; emergency truncation with `…` marker.          |
+| Push provider outage (Mozilla autopush down) | L          | M      | Daemon still works without push; events still flow via SSE/WS. Push is best-effort.       |
+| Action button does not post vote (network)   | M          | L      | Service worker queues votes and retries; if user opens app, vote pending banner shows.    |
+| Notification fatigue (too many)              | M          | M      | Defaults: `maxPerHour: 30`, quiet hours, same-kind coalescing.                            |
 
 ## Open questions
 
@@ -300,8 +302,8 @@ created_at`.
    tuning to Phase 3 with telemetry from operators.
 
 4. **Notification routing decision — same change or separate?**
-   This change ships the *delivery channel*. `add-notification-routing`
-   ships the *decision logic* ("send to phone only, not laptop"). They
+   This change ships the _delivery channel_. `add-notification-routing`
+   ships the _decision logic_ ("send to phone only, not laptop"). They
    are intentionally separate so this one can ship first.
 
 5. **Web Push for the terminal client too?** The terminal client

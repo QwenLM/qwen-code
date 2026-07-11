@@ -80,21 +80,14 @@ State machine and alignment pattern: see
   - **Status:** not-started
   - **Effort:** ~0.5 day
   - **Files:** `packages/cli/src/serve/remoteControl/mdns/browse.ts`
-  - **Prompt:**
-    > Browse `_qwen-rc._tcp.local.` for `--timeout` seconds.
-    > Collect responses, dedupe by service name, normalize TXT to
-    > structured records (`{ name, host, port, version,
-    > tlsRequired, workspace }`). Acceptance: scenarios under
-    > `Requirement: Browse helper`.
+  - **Prompt:** > Browse `_qwen-rc._tcp.local.` for `--timeout` seconds. > Collect responses, dedupe by service name, normalize TXT to > structured records (`{ name, host, port, version,
+tlsRequired, workspace }`). Acceptance: scenarios under > `Requirement: Browse helper`.
 
 - [ ] **2.2 `qwen rc daemons discover` CLI**
   - **Status:** not-started
   - **Effort:** ~0.25 day
-  - **Prompt:**
-    > Subcommand printing a table sorted by host then port. Support
-    > `--format json` for scripting. Print a row count and timing
-    > summary line. Acceptance: scenarios under `Requirement:
-    > Discover CLI output`.
+  - **Prompt:** > Subcommand printing a table sorted by host then port. Support > `--format json` for scripting. Print a row count and timing > summary line. Acceptance: scenarios under `Requirement:
+Discover CLI output`.
 
 - [ ] **2.3 `qwen rc daemons list-self` CLI**
   - **Status:** not-started
@@ -121,9 +114,9 @@ State machine and alignment pattern: see
 
 ## Effort summary
 
-| Phase | Description                  | Estimate (days) |
-|-------|------------------------------|------------------|
-| 0     | Foundation                   | 0.5              |
-| 1     | Advertisement                | 1                |
-| 2     | Browse + CLI                 | 1                |
-| **Total** |                          | **2.5**          |
+| Phase     | Description   | Estimate (days) |
+| --------- | ------------- | --------------- |
+| 0         | Foundation    | 0.5             |
+| 1         | Advertisement | 1               |
+| 2         | Browse + CLI  | 1               |
+| **Total** |               | **2.5**         |

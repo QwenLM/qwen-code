@@ -42,6 +42,7 @@ packages/rc-gateway/
 ## Task 0: Package skeleton + toolchain smoke test
 
 **Files:**
+
 - Create: `packages/rc-gateway/package.json`
 - Create: `packages/rc-gateway/tsconfig.json`
 - Create: `packages/rc-gateway/vitest.config.ts`
@@ -149,12 +150,14 @@ describe('toolchain smoke', () => {
 - [ ] **Step 6: Install workspaces and build the SDK dependency**
 
 Run:
+
 ```bash
 cd /home/evan/projects/qwen-code
 npm install
 npm run build --workspace @qwen-code/sdk
 ls packages/sdk-typescript/dist/index.mjs packages/sdk-typescript/dist/index.cjs packages/sdk-typescript/dist/index.d.ts
 ```
+
 Expected: install completes and links `@qwen-code/rc-gateway`; the `ls` lists all
 three artifacts. If `dist/index.mjs` is missing (the package's publish flow runs
 `build && bundle:cli`), also run `npm run build --workspace @qwen-code/sdk &&
@@ -181,6 +184,7 @@ git commit -m "feat(rc-gateway): package skeleton + scopes"
 ## Task 1: Token store
 
 **Files:**
+
 - Create: `packages/rc-gateway/src/tokenStore.ts`
 - Test: `packages/rc-gateway/src/tokenStore.test.ts`
 
@@ -373,6 +377,7 @@ git commit -m "feat(rc-gateway): persistent scoped token store"
 ## Task 2: Pairing service
 
 **Files:**
+
 - Create: `packages/rc-gateway/src/pairing.ts`
 - Test: `packages/rc-gateway/src/pairing.test.ts`
 
@@ -490,6 +495,7 @@ git commit -m "feat(rc-gateway): single-use pairing codes"
 ## Task 3: Auth + scope middleware
 
 **Files:**
+
 - Create: `packages/rc-gateway/src/types.ts`
 - Create: `packages/rc-gateway/src/auth.ts`
 - Test: `packages/rc-gateway/src/auth.test.ts`
@@ -665,6 +671,7 @@ git commit -m "feat(rc-gateway): bearer-resolve + require-scope middleware"
 ## Task 4: Stub daemon (test helper)
 
 **Files:**
+
 - Create: `packages/rc-gateway/src/testing/stubDaemon.ts`
 
 This is a test-only helper used by Tasks 5–6. It records the `Last-Event-ID`
@@ -767,6 +774,7 @@ git commit -m "test(rc-gateway): daemon-shaped SSE stub helper"
 ## Task 5: Session-events proxy route
 
 **Files:**
+
 - Create: `packages/rc-gateway/src/routes/sessionEvents.ts`
 - Test: `packages/rc-gateway/src/routes/sessionEvents.test.ts`
 
@@ -816,7 +824,10 @@ async function readFrames(
     .filter((b) => b.includes('data:'))
     .map((block) => {
       const lines = block.split('\n');
-      const id = lines.find((l) => l.startsWith('id:'))?.slice(3).trim();
+      const id = lines
+        .find((l) => l.startsWith('id:'))
+        ?.slice(3)
+        .trim();
       const data = lines
         .find((l) => l.startsWith('data:'))!
         .slice(5)
@@ -955,6 +966,7 @@ git commit -m "feat(rc-gateway): SSE proxy route with Last-Event-ID + 502 mappin
 ## Task 6: Pair-redeem route + gateway app assembly
 
 **Files:**
+
 - Create: `packages/rc-gateway/src/routes/pair.ts`
 - Create: `packages/rc-gateway/src/server.ts`
 - Test: `packages/rc-gateway/src/server.test.ts`
@@ -1158,6 +1170,7 @@ git commit -m "feat(rc-gateway): pair-redeem route + gateway app assembly"
 ## Task 7: Daemon supervisor
 
 **Files:**
+
 - Create: `packages/rc-gateway/src/daemonSupervisor.ts`
 - Test: `packages/rc-gateway/src/daemonSupervisor.test.ts`
 
@@ -1319,6 +1332,7 @@ git commit -m "feat(rc-gateway): daemon supervisor with injectable spawner"
 ## Task 8: CLI entrypoint (`qwen-rc serve`)
 
 **Files:**
+
 - Create: `packages/rc-gateway/src/cli.ts`
 
 This is thin wiring + console output; correctness is proven by the manual e2e
@@ -1390,11 +1404,13 @@ if (process.argv[2] === 'serve') {
 - [ ] **Step 2: Typecheck, lint, and build**
 
 Run:
+
 ```bash
 npm run typecheck --workspace @qwen-code/rc-gateway
 npm run lint --workspace @qwen-code/rc-gateway
 npm run build --workspace @qwen-code/rc-gateway
 ```
+
 Expected: no type errors; lint clean (the repo enforces the
 `/** @license ... Copyright 2025 Qwen Team ... */` header via `eslint-rules/` —
 every `src/*.ts` file in this plan already carries it; if lint flags a missing/
@@ -1409,9 +1425,11 @@ Expected: PASS (all tests across tokenStore, pairing, auth, sessionEvents, serve
 - [ ] **Step 4: Manual e2e (optional, not gating)**
 
 Run (from a built monorepo where `qwen` is available):
+
 ```bash
 node packages/rc-gateway/dist/cli.js serve
 ```
+
 Then in another shell, redeem the printed code and attach to a session's events
 through the gateway. Confirms the real `qwen serve` proxies end-to-end.
 
@@ -1427,6 +1445,7 @@ git commit -m "feat(rc-gateway): qwen-rc serve entrypoint"
 ## Self-Review
 
 **Spec coverage** (design doc §"Components" / §"Testing strategy"):
+
 - daemonSupervisor → Task 7. tokenStore → Task 1. pairing → Task 2. auth/requireScope → Task 3. sessionEvents proxy → Task 5. pair redeem route → Task 6. server/createGatewayApp → Task 6. cli `qwen-rc` → Task 8. Stub daemon + integration tests → Tasks 4–6. All listed components have a task. ✓
 - Error-handling table: 401 (Task 3/6), 403 (Task 3/6), 400 invalid_pairing_code (Task 6), 502 daemon_unavailable (Task 5), client-disconnect abort (Task 5). 404 unknown-session is handled implicitly by the daemon's own error → mapped to 502 by the connect-phase catch; not separately asserted (acceptable for the skeleton — noted as a follow-on refinement). ✓
 - Non-goals (revocation, audit, CORS/web client, WAL, fan-out, scope hierarchy) → correctly absent. ✓
@@ -1436,5 +1455,6 @@ git commit -m "feat(rc-gateway): qwen-rc serve entrypoint"
 **Type/name consistency:** `RcScope`/`SESSION_READ` (scopes.ts) used everywhere; `TokenStore.open`/`issue`/`resolve`, `PairingService.mint`/`redeem`, `bearerResolve`/`requireScope`, `createSessionEventsRoute`, `createPairRedeemRoute`, `createGatewayApp`/`GatewayDeps`, `startDaemon`/`StartDaemonOptions`/`DaemonHandle`/`SpawnedDaemon` consistent across tasks. `req.rcClient` shape matches the `types.ts` augmentation. ✓
 
 **Known pragmatic notes (intentional, not gaps):**
+
 - The default daemon spawner uses an explicit non-zero port (4180); ephemeral-port read-back from the daemon's stdout is a follow-on. Tests bypass this via the injected spawner.
 - Integration tests run the real `DaemonClient` against the stub daemon, so they require the SDK build from Task 0 Step 6.
