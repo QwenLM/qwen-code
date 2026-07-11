@@ -3927,6 +3927,16 @@ describe('runQwenServe runtime startup failures', () => {
       app.locals['acpHandle'] = {
         attachServer,
         dispose,
+        getSnapshot: () => ({
+          connectionCount: 0,
+          connectionStreams: 0,
+          sessionStreams: 0,
+          sseStreams: 0,
+          wsStreams: 0,
+          pendingClientRequests: 0,
+          mounts: [],
+          connections: [],
+        }),
         registry: { getSnapshot: () => undefined },
       };
       return app;
