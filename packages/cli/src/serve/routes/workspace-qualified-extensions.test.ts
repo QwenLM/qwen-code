@@ -566,6 +566,48 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('allows bearer-authenticated global install without a workspace client id', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionInstall',
+    ).mockResolvedValue({} as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    ).mockResolvedValue({
+      identity: { id: extensionId, name: 'demo' },
+      version: '1.0.0',
+      generation: 7,
+    } as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'disposePreparedExtension',
+    ).mockResolvedValue();
+    try {
+      const started = await request(h.app)
+        .post('/extensions/install')
+        .set('Host', host())
+        .set('Authorization', 'Bearer secret')
+        .send({
+          source: '@scope/demo',
+          consent: true,
+          activation: { scope: 'user' },
+        });
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded',
+        result: { status: 'installed', name: 'demo' },
+      });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('validates uninstall clients before reading extension state', async () => {
     const h = await makeHarness();
     mockExtensionManager();

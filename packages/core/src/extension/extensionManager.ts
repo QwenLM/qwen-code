@@ -782,11 +782,7 @@ export class ExtensionManager {
   private applyStoreActivation(snapshot: ExtensionStoreSnapshot): void {
     for (const extension of this.getLoadedExtensions()) {
       if (this.enabledExtensionNamesOverride.length > 0) {
-        extension.isActive =
-          !this.enabledExtensionNamesOverride.includes('none') &&
-          this.enabledExtensionNamesOverride.includes(
-            extension.name.toLowerCase(),
-          );
+        extension.isActive = this.isEnabled(extension.name);
         continue;
       }
       extension.isActive =

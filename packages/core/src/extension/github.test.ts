@@ -34,6 +34,7 @@ import {
 } from './extensionManager.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
+import { ExtensionStorage } from './storage.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockArch = vi.hoisted(() => vi.fn());
@@ -604,6 +605,100 @@ describe('git extension helpers', () => {
         expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
         expect(mockManager.loadExtensionConfig).toHaveBeenCalledWith({
           extensionDir: expect.stringContaining('extension-archive-update-'),
+        });
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('should propagate an abort observed after extracting a local archive', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'local-archive-abort-test-'),
+      );
+      try {
+        const archivePath = path.join(tempDir, 'qwen-extension.zip');
+        const archive = await createZipBuffer(tempDir, [
+          {
+            name: EXTENSIONS_CONFIG_FILENAME,
+            content: JSON.stringify({
+              name: 'local-archive-extension',
+              version: '2.0.0',
+            }),
+          },
+        ]);
+        await fs.writeFile(archivePath, archive);
+        const extension = createExtension({
+          version: '1.0.0',
+          installMetadata: {
+            type: 'local',
+            source: archivePath,
+          },
+        });
+        const mockManager = {
+          loadExtensionConfig: vi.fn(),
+        } as unknown as ExtensionManager;
+        const abortError = new DOMException('Aborted', 'AbortError');
+        let abortChecks = 0;
+        const signal = {
+          throwIfAborted: () => {
+            abortChecks += 1;
+            if (abortChecks >= 3) throw abortError;
+          },
+        } as unknown as AbortSignal;
+
+        await expect(
+          checkForExtensionUpdate(extension, mockManager, signal),
+        ).rejects.toBe(abortError);
+        expect(mockManager.loadExtensionConfig).not.toHaveBeenCalled();
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('should clean up a converted local archive when aborted after conversion', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'local-converted-archive-abort-test-'),
+      );
+      const convertedDir = path.join(tempDir, 'converted');
+      try {
+        const archivePath = path.join(tempDir, 'gemini-extension.zip');
+        const archive = await createZipBuffer(tempDir, [
+          {
+            name: 'gemini-extension.json',
+            content: JSON.stringify({
+              name: 'gemini-archive-extension',
+              version: '2.0.0',
+            }),
+          },
+        ]);
+        await fs.writeFile(archivePath, archive);
+        vi.spyOn(ExtensionStorage, 'createTmpDir').mockImplementation(
+          async () => {
+            await fs.mkdir(convertedDir);
+            return convertedDir;
+          },
+        );
+        const extension = createExtension({
+          version: '1.0.0',
+          installMetadata: {
+            type: 'local',
+            source: archivePath,
+          },
+        });
+        const abortError = new DOMException('Aborted', 'AbortError');
+        let abortChecks = 0;
+        const signal = {
+          throwIfAborted: () => {
+            abortChecks += 1;
+            if (abortChecks >= 4) throw abortError;
+          },
+        } as unknown as AbortSignal;
+
+        await expect(
+          checkForExtensionUpdate(extension, {} as ExtensionManager, signal),
+        ).rejects.toBe(abortError);
+        await expect(fs.stat(convertedDir)).rejects.toMatchObject({
+          code: 'ENOENT',
         });
       } finally {
         await fs.rm(tempDir, { recursive: true, force: true });

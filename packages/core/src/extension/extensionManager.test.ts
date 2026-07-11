@@ -1572,6 +1572,29 @@ describe('extension tests', () => {
       expect(extensions.every((e) => !e.isActive)).toBe(true);
     });
 
+    it('should treat "none" as disabling all only when it is the sole override', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext1',
+        version: '1.0.0',
+      });
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext2',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager({
+        enabledExtensionOverrides: ['none', 'ext1'],
+      });
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      expect(manager.isEnabled('ext1')).toBe(true);
+      expect(extensions.find((e) => e.name === 'ext1')?.isActive).toBe(true);
+      expect(extensions.find((e) => e.name === 'ext2')?.isActive).toBe(false);
+    });
+
     it('should handle case-insensitivity', async () => {
       createExtension({
         extensionsDir: userExtensionsDir,

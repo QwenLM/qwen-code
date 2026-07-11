@@ -227,7 +227,9 @@ export async function checkForExtensionUpdate(
         tempDir = await fs.promises.mkdtemp(
           path.join(os.tmpdir(), 'extension-archive-update-'),
         );
+        signal?.throwIfAborted();
         await extractArchiveFile(installMetadata.source, tempDir);
+        signal?.throwIfAborted();
         const converted = await convertGeminiOrClaudeExtension(
           tempDir,
           installMetadata.pluginName,
@@ -236,11 +238,13 @@ export async function checkForExtensionUpdate(
         if (extensionDir !== tempDir) {
           convertedDir = extensionDir;
         }
+        signal?.throwIfAborted();
       }
       latestConfig = extensionManager.loadExtensionConfig({
         extensionDir,
       });
     } catch (e) {
+      signal?.throwIfAborted();
       debugLogger.error(
         `Failed to check for update for local extension "${extension.name}". Could not load extension from source path: ${redactUrlCredentials(installMetadata.source)}. Error: ${redactUrlCredentials(getErrorMessage(e))}`,
       );
