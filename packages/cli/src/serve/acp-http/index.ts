@@ -14,13 +14,23 @@ import { RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
+import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import type { ParsedAllowOriginPatterns } from '../auth.js';
 import { AcpDispatcher } from './dispatch.js';
-import type { WorkspaceRememberTaskLane } from '../workspace-remember.js';
+import { WorkspaceRememberTaskLane } from '../workspace-remember.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from '../workspace-registry.js';
+import {
+  resolveRegisteredWorkspaceRuntimeByPathSelector,
+  resolveWorkspaceRuntimeFromParam,
+} from '../workspace-route-runtime.js';
 import {
   ConnectionRegistry,
   type AcpConnection,
+  type AcpConnectionDiagnostic,
 } from './connection-registry.js';
 import { SseStream } from './sse-stream.js';
 import { WsStream } from './ws-stream.js';
@@ -38,6 +48,7 @@ import {
   ClientMcpWsConnection,
   type ClientMcpServerProvider,
 } from './client-mcp-ws.js';
+import { createClientMcpServerProvider } from './client-mcp-sender-registry.js';
 import type {
   CdpTunnelRegistry,
   CdpBridgeEndpoint,
@@ -58,6 +69,71 @@ export const ACP_SESSION_HEADER = 'acp-session-id';
 
 /** Pathname of the Plan C CDP-tunnel endpoint (issue #5626). */
 const CDP_PATH = '/cdp';
+
+/** Prefix/suffix of the Phase 4 workspace-qualified ACP WS path. */
+const PLURAL_ACP_WS_PREFIX = '/workspaces/';
+const PLURAL_ACP_WS_SUFFIX = '/acp';
+
+/**
+ * Extract the raw (undecoded, un-normalized) pathname from a request-target.
+ * Unlike `new URL(target).pathname`, this does NOT collapse `.`/`..` segments
+ * or resolve percent-encoding, so a traversal like `/workspaces/%2e%2e/acp`
+ * cannot be normalized into `/acp` and silently bound to the primary mount.
+ */
+function rawRequestPathname(reqUrl: string | undefined): string {
+  const target = reqUrl ?? '/';
+  const qIdx = target.indexOf('?');
+  const hIdx = target.indexOf('#');
+  let end = target.length;
+  if (qIdx >= 0) end = Math.min(end, qIdx);
+  if (hIdx >= 0) end = Math.min(end, hIdx);
+  return target.slice(0, end);
+}
+
+/**
+ * Match `/workspaces/<selector>/acp` (with an optional single trailing slash)
+ * against a RAW request-target pathname and return the still-encoded selector,
+ * or null when the shape does not match. Rejects empty selectors, extra path
+ * segments (slash/backslash), and dot-segment traversal shapes -- including
+ * percent-encoded variants -- so decoding afterwards can never reintroduce a
+ * `/` or `..` that bypassed classification.
+ */
+function pluralAcpRawSelector(rawPath: string): string | null {
+  let p = rawPath;
+  if (p.endsWith(`${PLURAL_ACP_WS_SUFFIX}/`)) {
+    p = p.slice(0, -1);
+  }
+  if (
+    !p.startsWith(PLURAL_ACP_WS_PREFIX) ||
+    !p.endsWith(PLURAL_ACP_WS_SUFFIX) ||
+    p.length <= PLURAL_ACP_WS_PREFIX.length + PLURAL_ACP_WS_SUFFIX.length
+  ) {
+    return null;
+  }
+  const selector = p.slice(
+    PLURAL_ACP_WS_PREFIX.length,
+    p.length - PLURAL_ACP_WS_SUFFIX.length,
+  );
+  if (
+    selector.length === 0 ||
+    selector.includes('/') ||
+    selector.includes('\\')
+  ) {
+    return null;
+  }
+  const lower = selector.toLowerCase();
+  if (
+    lower === '.' ||
+    lower === '..' ||
+    lower === '%2e' ||
+    lower === '%2e%2e' ||
+    lower === '.%2e' ||
+    lower === '%2e.'
+  ) {
+    return null;
+  }
+  return selector;
+}
 
 /**
  * `clientInfo.name` an extension must send on `/acp` to claim the CDP bridge.
@@ -319,6 +395,13 @@ export interface MountAcpHttpOptions {
    */
   cdpTunnelRegistry?: CdpTunnelRegistry;
   /**
+   * Phase 4 (issue #6378): the daemon's workspace registry. When present and it
+   * has non-primary runtimes, `/workspaces/:workspace/acp` mounts a per-runtime
+   * ACP dispatcher for each registered workspace. Legacy `/acp` stays bound to
+   * the primary runtime.
+   */
+  workspaceRegistry?: WorkspaceRegistry;
+  /**
    * Additional non-ACP WebSocket routes (e.g. `/voice/stream`) that reuse this
    * upgrade listener's security checks. Matched paths skip the ACP init flow.
    */
@@ -336,9 +419,79 @@ export interface ExtraWsRoute {
   onConnection: (ws: WebSocket, req: IncomingMessage) => void;
 }
 
+/**
+ * Per-workspace ACP mount. Phase 4 (issue #6378) turns the single-runtime
+ * `/acp` into one mount per workspace runtime: each owns its own
+ * `ConnectionRegistry` + `AcpDispatcher` (built from that runtime's bridge /
+ * workspace / fsFactory / device-flow / remember-lane), while the HTTP handlers
+ * and the single WS upgrade listener select the mount by URL path. CDP-bridge
+ * runtime-MCP wiring stays primary-only, so non-primary mounts get no-op CDP
+ * hooks.
+ */
+interface RuntimeAcpMount {
+  /** Whether this mount is the daemon's primary runtime. CDP-tunnel claims and
+   *  chrome-devtools MCP wiring are primary-only. */
+  readonly primary: boolean;
+  readonly workspaceCwd: string;
+  readonly routeLabel: string;
+  readonly rateLimitScope: string;
+  readonly registry: ConnectionRegistry;
+  readonly dispatcher: AcpDispatcher;
+  readonly ensureChromeDevToolsMcpRegistered: (
+    localPort: number | undefined,
+    originatorClientId: string,
+  ) => void;
+  readonly removeChromeDevToolsMcpIfUnused: (
+    originatorClientId: string,
+  ) => void;
+  readonly clientMcpProviderFactory?: (
+    connectionId: string,
+  ) => ClientMcpServerProvider;
+}
+
+function workspaceRateLimitKey(
+  mount: RuntimeAcpMount,
+  clientKey: string,
+): string {
+  return JSON.stringify([clientKey, mount.rateLimitScope]);
+}
+
+/** Per-mount ACP connection counts (primary + each trusted secondary). */
+export interface AcpHttpMountSnapshot {
+  /** Workspace id, or `null` for the primary/legacy `/acp` mount. */
+  workspaceId: string | null;
+  primary: boolean;
+  connectionCount: number;
+  wsStreams: number;
+}
+
+export interface AcpHttpConnectionDiagnostic extends AcpConnectionDiagnostic {
+  workspaceId: string | null;
+  workspaceCwd: string;
+  primary: boolean;
+}
+
+/** Aggregate ACP HTTP observability across every mounted runtime. */
+export interface AcpHttpSnapshot {
+  connectionCount: number;
+  connectionStreams: number;
+  sessionStreams: number;
+  sseStreams: number;
+  wsStreams: number;
+  pendingClientRequests: number;
+  mounts: AcpHttpMountSnapshot[];
+  connections: AcpHttpConnectionDiagnostic[];
+}
+
 export interface AcpHttpHandle {
   dispose(): void;
   registry: ConnectionRegistry;
+  /**
+   * Aggregate connection snapshot across the primary mount and every trusted
+   * secondary runtime — so daemon metrics report all workspaces' ACP
+   * connections, not just the primary's.
+   */
+  getSnapshot(): AcpHttpSnapshot;
   /** Attach HTTP server post-listen to enable WebSocket upgrade. */
   attachServer(server: import('node:http').Server): void;
 }
@@ -360,11 +513,22 @@ export function mountAcpHttp(
   bridge: HttpAcpBridge,
   opts: MountAcpHttpOptions,
 ): AcpHttpHandle | undefined {
-  const enabled = opts.enabled ?? process.env['QWEN_SERVE_ACP_HTTP'] !== '0';
+  const enabled = opts.enabled ?? resolveAcpHttpEnabled();
   if (!enabled) return undefined;
 
   const path = opts.path ?? '/acp';
   const dispatcherRef: { current?: AcpDispatcher } = {};
+  // Lifecycle gate: once `dispose()` runs, late/in-flight HTTP requests get a
+  // 503 instead of racing torn-down registries (issue #6378 daemon shutdown).
+  let disposed = false;
+  const rejectIfDisposed = (res: Response): boolean => {
+    if (!disposed) return false;
+    res.status(503).json({
+      error: 'ACP HTTP transport has been disposed',
+      code: 'server_disposed',
+    });
+    return true;
+  };
   // When a session/connection tears down with a permission still pending,
   // cancel it on the bridge so the agent's prompt isn't left blocked.
   const registry = new ConnectionRegistry(
@@ -529,8 +693,56 @@ export function mountAcpHttp(
   );
   dispatcherRef.current = dispatcher;
 
+  // Phase 4: the primary runtime's mount. Non-primary mounts are added later in
+  // this milestone; the HTTP handlers and WS upgrade listener resolve the mount
+  // by URL path and delegate to these same helpers.
+  const primaryMount: RuntimeAcpMount = {
+    primary: true,
+    workspaceCwd: opts.boundWorkspace,
+    routeLabel: logSafe(path),
+    rateLimitScope: opts.workspaceRegistry?.primary.workspaceId ?? 'primary',
+    registry,
+    dispatcher,
+    ensureChromeDevToolsMcpRegistered,
+    removeChromeDevToolsMcpIfUnused,
+    clientMcpProviderFactory: opts.clientMcpProviderFactory,
+  };
+
+  // DELETE /acp handler, parameterized by the resolved mount so the legacy
+  // `/acp` and the Phase 4 `/workspaces/:workspace/acp` share one implementation.
+  const handleAcpDelete = (
+    mount: RuntimeAcpMount,
+    req: Request,
+    res: Response,
+  ): void => {
+    if (rejectIfDisposed(res)) return;
+    const connectionId = headerOf(req, ACP_CONNECTION_HEADER);
+    if (!connectionId) {
+      res.status(400).json({ error: 'Missing Acp-Connection-Id' });
+      return;
+    }
+    // NOTE: like every other route, DELETE is gated only by the bearer
+    // token — the daemon's trust boundary is "holds the token for this
+    // daemon", so any token-holder may tear down any connection (same posture
+    // as the REST `DELETE /session/:id`). A per-connection secret would add
+    // intra-token isolation; deferred with the rest of the multi-tenant
+    // hardening (design §7).
+    const existed = mount.registry.delete(connectionId);
+    if (existed) {
+      writeStderrLine(
+        `qwen serve: ${mount.routeLabel} connection deleted ${connectionId.slice(0, 8)} (remaining=${mount.registry.size})`,
+      );
+    }
+    res.status(202).end();
+  };
+
   // ── POST /acp ──────────────────────────────────────────────────────
-  app.post(path, async (req: Request, res: Response) => {
+  const handleAcpPost = async (
+    mount: RuntimeAcpMount,
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
+    if (rejectIfDisposed(res)) return;
     // RFD: Content-Type MUST be application/json; otherwise 415.
     const ct = req.headers['content-type'];
     if (!ct || !ct.startsWith('application/json')) {
@@ -547,7 +759,7 @@ export function mountAcpHttp(
     const parsed = parseInbound(req.body);
     if (!parsed.ok) {
       writeStderrLine(
-        `qwen serve: /acp malformed request from ${req.socket?.remoteAddress}: ${parsed.error.error.message}`,
+        `qwen serve: ${mount.routeLabel} malformed request from ${req.socket?.remoteAddress}: ${parsed.error.error.message}`,
       );
       res.status(400).json(parsed.error);
       return;
@@ -556,11 +768,11 @@ export function mountAcpHttp(
 
     // `initialize` mints a connection and replies inline (200 + JSON).
     if (isRequest(message) && message.method === 'initialize') {
-      const conn = registry.create(isLoopbackReq(req));
+      const conn = mount.registry.create(isLoopbackReq(req));
       if (!conn) {
         // Connection cap reached — shed load rather than grow unbounded.
         writeStderrLine(
-          `qwen serve: /acp connection cap reached (max=${registry.connectionCap}), rejecting initialize`,
+          `qwen serve: ${mount.routeLabel} connection cap reached (max=${mount.registry.connectionCap}), rejecting initialize`,
         );
         res.setHeader('Retry-After', '5');
         res
@@ -585,14 +797,14 @@ export function mountAcpHttp(
         // success envelope: clients correlate by the request id.
         jsonrpc: '2.0',
         id: message.id,
-        result: dispatcher.buildInitializeResult(
+        result: mount.dispatcher.buildInitializeResult(
           conn.connectionId,
           requestedVersion,
         ),
       });
       writeStderrLine(
-        `qwen serve: /acp connection established ${conn.connectionId.slice(0, 8)} ` +
-          `(loopback=${conn.fromLoopback}, active=${registry.size})`,
+        `qwen serve: ${mount.routeLabel} connection established ${conn.connectionId.slice(0, 8)} ` +
+          `(loopback=${conn.fromLoopback}, active=${mount.registry.size})`,
       );
       return;
     }
@@ -610,7 +822,7 @@ export function mountAcpHttp(
         );
       return;
     }
-    const conn = registry.get(connHeader);
+    const conn = mount.registry.get(connHeader);
     if (!conn) {
       res
         .status(404)
@@ -638,7 +850,7 @@ export function mountAcpHttp(
           /^::ffff:/,
           '',
         );
-        if (!opts.checkRate(httpKey, tier)) {
+        if (!opts.checkRate(workspaceRateLimitKey(mount, httpKey), tier)) {
           res.setHeader('Retry-After', '5');
           res.status(429).json({
             error: 'Rate limit exceeded',
@@ -655,7 +867,7 @@ export function mountAcpHttp(
     // Response already sent — `handle` delivers everything else over SSE, so
     // swallow+log any late rejection rather than let it escape as an
     // unhandled rejection (which could take the daemon down).
-    await dispatcher
+    await mount.dispatcher
       .handle(
         conn,
         message,
@@ -664,15 +876,24 @@ export function mountAcpHttp(
       )
       .catch((err: unknown) => {
         writeStderrLine(
-          `qwen serve: /acp handle error: ${
+          `qwen serve: ${mount.routeLabel} handle error: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
       });
-  });
+  };
+
+  app.post(path, (req: Request, res: Response) =>
+    handleAcpPost(primaryMount, req, res),
+  );
 
   // ── GET /acp (SSE) ─────────────────────────────────────────────────
-  app.get(path, (req: Request, res: Response) => {
+  const handleAcpGet = (
+    mount: RuntimeAcpMount,
+    req: Request,
+    res: Response,
+  ): void => {
+    if (rejectIfDisposed(res)) return;
     // RFD: Accept MUST include text/event-stream; otherwise 406.
     const accept = req.headers['accept'] ?? '';
     if (!accept.includes('text/event-stream')) {
@@ -686,7 +907,7 @@ export function mountAcpHttp(
       res.status(400).json({ error: 'Missing Acp-Connection-Id' });
       return;
     }
-    const conn = registry.get(connHeader);
+    const conn = mount.registry.get(connHeader);
     if (!conn) {
       res.status(404).json({ error: 'Unknown Acp-Connection-Id' });
       return;
@@ -702,7 +923,7 @@ export function mountAcpHttp(
         res,
         () => {
           writeStderrLine(
-            `qwen serve: /acp connection stream closed (${connId.slice(0, 8)})`,
+            `qwen serve: ${mount.routeLabel} connection stream closed (${connId.slice(0, 8)})`,
           );
           // Grace-period reap: a dead connection otherwise locks its
           // ownedSessions + counts against maxConnections for the full 30-min
@@ -721,16 +942,16 @@ export function mountAcpHttp(
           // until the 30-min idle sweep after that session finally tears down.
           const reapConnIfDead = () => {
             if (
-              registry.get(connId) === conn &&
+              mount.registry.get(connId) === conn &&
               conn.connStream === stream &&
               conn.connGraceExpired &&
               !conn.hasLiveSessionStream() &&
               !conn.hasRecoverableSession()
             ) {
               writeStderrLine(
-                `qwen serve: /acp reaping connection ${connId.slice(0, 8)} (conn stream gone, no live session stream)`,
+                `qwen serve: ${mount.routeLabel} reaping connection ${connId.slice(0, 8)} (conn stream gone, no live session stream)`,
               );
-              registry.delete(connId);
+              mount.registry.delete(connId);
             }
           };
           conn.connGraceTimer = setTimeout(() => {
@@ -820,7 +1041,7 @@ export function mountAcpHttp(
         // error) → the stream is a zombie; full close now. Logged so the
         // operator trail can tell this apart from a transport-close detach.
         writeStderrLine(
-          `qwen serve: /acp session stream pump ended while open ` +
+          `qwen serve: ${mount.routeLabel} session stream pump ended while open ` +
             `(${logSafe(sessionId)}) — closing`,
         );
         conn.closeSessionStream(sessionId);
@@ -828,44 +1049,174 @@ export function mountAcpHttp(
         // Guard mismatch: a stale stream's pump settled after a newer reclaim
         // already took over. No-op, but log it so the trail isn't silent.
         writeStderrLine(
-          `qwen serve: /acp session stream pump settled for a superseded ` +
+          `qwen serve: ${mount.routeLabel} session stream pump settled for a superseded ` +
             `stream (${logSafe(sessionId)}) — no-op`,
         );
       }
     };
-    void dispatcher
+    void mount.dispatcher
       .pumpSessionEvents(conn, sessionId, ac.signal, lastEventId)
       .then(onPumpSettled, (err: unknown) => {
         writeStderrLine(
-          `qwen serve: /acp event pump error (${logSafe(sessionId)}, lastEventId=${
+          `qwen serve: ${mount.routeLabel} event pump error (${logSafe(sessionId)}, lastEventId=${
             lastEventId ?? 'none'
           }): ${logSafe(err instanceof Error ? err.message : String(err))}`,
         );
         onPumpSettled();
       });
+  };
+
+  app.get(path, (req: Request, res: Response) => {
+    handleAcpGet(primaryMount, req, res);
   });
 
   // ── DELETE /acp ────────────────────────────────────────────────────
   app.delete(path, (req: Request, res: Response) => {
-    const connectionId = headerOf(req, ACP_CONNECTION_HEADER);
-    if (!connectionId) {
-      res.status(400).json({ error: 'Missing Acp-Connection-Id' });
-      return;
-    }
-    // NOTE: like every other route, DELETE is gated only by the bearer
-    // token — the daemon's trust boundary is "holds the token for this
-    // single-workspace daemon", so any token-holder may tear down any
-    // connection (same posture as the REST `DELETE /session/:id`). A
-    // per-connection secret would add intra-token isolation; deferred with
-    // the rest of the multi-tenant hardening (design §7).
-    const existed = registry.delete(connectionId);
-    if (existed) {
-      writeStderrLine(
-        `qwen serve: /acp connection deleted ${connectionId.slice(0, 8)} (remaining=${registry.size})`,
-      );
-    }
-    res.status(202).end();
+    handleAcpDelete(primaryMount, req, res);
   });
+
+  // ── Phase 4: workspace-qualified ACP (/workspaces/:workspace/acp) ────
+  // One dispatcher + connection registry per non-primary runtime, bound to that
+  // runtime's bridge / workspace / fsFactory / remember-lane. CDP-bridge
+  // runtime-MCP and reverse client-MCP stay primary-only in this milestone;
+  // per-runtime device-flow lands in a later milestone.
+  const createSecondaryAcpMount = (rt: WorkspaceRuntime): RuntimeAcpMount => {
+    const secondaryDispatcherRef: { current?: AcpDispatcher } = {};
+    const secondaryRegistry = new ConnectionRegistry(
+      (req, clientId) => {
+        if (!secondaryDispatcherRef.current) return false;
+        return secondaryDispatcherRef.current.cancelAbandonedPermission(
+          req,
+          clientId,
+        );
+      },
+      (sessionId, clientId) => {
+        void rt.bridge
+          .detachClient(sessionId, clientId)
+          .catch((err: unknown) => {
+            writeStderrLine(
+              `qwen serve: /workspaces/${rt.workspaceId}/acp detachClient(${sessionId}) failed: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          });
+      },
+      opts.maxConnections,
+    );
+    const secondaryDispatcher = new AcpDispatcher(
+      rt.bridge,
+      rt.workspaceCwd,
+      rt.workspaceService,
+      new WorkspaceRememberTaskLane(rt.bridge),
+      rt.routeFileSystemFactory,
+      // Phase 4: secondary mounts share the daemon-global device-flow registry
+      // (single instance per daemon; OAuth credentials are global state). The
+      // registry's event sink fans out to each trusted bridge, so a secondary
+      // ACP client's device_flow calls resolve against a real registry and its
+      // events reach that workspace's bridge -- without a per-runtime registry.
+      opts.deviceFlowRegistry,
+      opts.sessionShellCommandEnabled === true,
+      secondaryRegistry,
+      opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
+    );
+    secondaryDispatcherRef.current = secondaryDispatcher;
+    return {
+      primary: false,
+      workspaceCwd: rt.workspaceCwd,
+      routeLabel: `/workspaces/${logSafe(rt.workspaceId)}/acp`,
+      rateLimitScope: rt.workspaceId,
+      registry: secondaryRegistry,
+      dispatcher: secondaryDispatcher,
+      ensureChromeDevToolsMcpRegistered: () => {},
+      removeChromeDevToolsMcpIfUnused: () => {},
+      // Reverse client-MCP over WS is per-runtime: a connection on this
+      // workspace's ACP registers client-hosted MCP servers in this runtime's
+      // sender registry + bridge only. Only wired when the reverse channel is
+      // enabled (mirrors the primary mount).
+      clientMcpProviderFactory:
+        opts.clientMcpOverWs === true
+          ? (connectionId: string) =>
+              createClientMcpServerProvider(
+                rt.clientMcpSenderRegistry,
+                rt.bridge,
+                connectionId,
+              )
+          : undefined,
+    };
+  };
+
+  const secondaryMounts = new Map<string, RuntimeAcpMount>();
+  for (const rt of opts.workspaceRegistry?.list() ?? []) {
+    // Only trusted non-primary runtimes get a mount: untrusted workspaces are
+    // rejected (403) before any mount lookup on both the HTTP and WS paths, so
+    // allocating a dispatcher/registry/remember-lane for them is pure waste and
+    // would pollute the aggregate snapshot with always-zero entries.
+    if (!rt.primary && rt.trusted) {
+      secondaryMounts.set(rt.workspaceId, createSecondaryAcpMount(rt));
+    }
+  }
+
+  // Resolve the mount for a `/workspaces/:workspace/acp` request. Unknown
+  // selectors 400 via the shared resolver; untrusted non-primary workspaces are
+  // rejected here (no ACP child is spawned). Read/teardown refinement for
+  // untrusted workspaces is deferred to a later milestone.
+  const resolvePluralMount = (
+    req: Request,
+    res: Response,
+  ): RuntimeAcpMount | null => {
+    const workspaceRegistry = opts.workspaceRegistry;
+    if (!workspaceRegistry) {
+      res.status(400).json({
+        error: 'Workspace-qualified ACP is not enabled on this daemon',
+        code: 'workspace_mismatch',
+      });
+      return null;
+    }
+    const rt = resolveWorkspaceRuntimeFromParam(workspaceRegistry, req, res);
+    if (!rt) return null;
+    if (!rt.primary && !rt.trusted) {
+      res.status(403).json({
+        error: `Workspace "${rt.workspaceCwd}" is not trusted.`,
+        code: 'untrusted_workspace',
+        workspaceCwd: rt.workspaceCwd,
+        workspaceId: rt.workspaceId,
+      });
+      return null;
+    }
+    if (rt.primary) return primaryMount;
+    const mount = secondaryMounts.get(rt.workspaceId);
+    if (!mount) {
+      res.status(400).json({
+        error: `Workspace "${rt.workspaceCwd}" has no registered ACP mount`,
+        code: 'workspace_mismatch',
+        workspaceCwd: rt.workspaceCwd,
+        workspaceId: rt.workspaceId,
+      });
+      return null;
+    }
+    return mount;
+  };
+
+  const workspaceQualifiedAcpEnabled =
+    (opts.workspaceRegistry?.list().length ?? 0) > 1;
+  const pluralAcpPath = '/workspaces/:workspace/acp';
+  if (workspaceQualifiedAcpEnabled) {
+    app.post(pluralAcpPath, (req: Request, res: Response) => {
+      const mount = resolvePluralMount(req, res);
+      if (!mount) return;
+      return handleAcpPost(mount, req, res);
+    });
+    app.get(pluralAcpPath, (req: Request, res: Response) => {
+      const mount = resolvePluralMount(req, res);
+      if (!mount) return;
+      handleAcpGet(mount, req, res);
+    });
+    app.delete(pluralAcpPath, (req: Request, res: Response) => {
+      const mount = resolvePluralMount(req, res);
+      if (!mount) return;
+      handleAcpDelete(mount, req, res);
+    });
+  }
 
   // ── WebSocket upgrade (ACP RFD) ────────────────────────────────────
   let wss: WebSocketServer | undefined;
@@ -875,7 +1226,7 @@ export function mountAcpHttp(
   let upgradeServer: import('node:http').Server | undefined;
 
   function setupWebSocket(httpServer: import('node:http').Server): void {
-    if (wss) return;
+    if (disposed || wss) return;
     wss = new WebSocketServer({
       noServer: true,
       maxPayload: 10 * 1024 * 1024,
@@ -901,6 +1252,10 @@ export function mountAcpHttp(
       : undefined;
 
     upgradeListener = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+      if (disposed) {
+        socket.destroy();
+        return;
+      }
       const rawAddr =
         (socket as unknown as { remoteAddress?: string }).remoteAddress ??
         'ws-unknown';
@@ -910,30 +1265,29 @@ export function mountAcpHttp(
           `qwen serve: WebSocket upgrade rejected (${reason}) from ${rawAddr}`,
         );
       };
-      let url: URL;
-      try {
-        url = new URL(
-          req.url ?? '/',
-          `http://${req.headers.host ?? 'localhost'}`,
-        );
-      } catch {
-        logReject('invalid-url');
-        socket.destroy();
-        return;
-      }
       // `/cdp` is the Plan C CDP-tunnel endpoint (issue #5626): a loopback
       // puppeteer client connects to drive a real tab. It reuses the SAME
       // loopback / host-allowlist / auth / CSRF checks below, then upgrades into
       // the CDP glue instead of the ACP handshake. Off unless opted in.
+      // Phase 4 security: classify the upgrade path from the RAW request-target
+      // rather than `url.pathname`. WHATWG URL normalizes dot-segments, so
+      // `/workspaces/%2e%2e/acp` would collapse to `/acp` and silently bind to
+      // the primary mount. `rawRequestPathname` keeps it un-normalized and
+      // `pluralAcpRawSelector` rejects traversal / backslash / empty selectors.
+      const rawPath = rawRequestPathname(req.url);
       const isCdpPath =
         opts.cdpTunnelOverWs === true &&
         opts.cdpTunnelRegistry !== undefined &&
-        url.pathname === CDP_PATH;
+        rawPath === CDP_PATH;
       const extraRoute = opts.extraWsRoutes?.find(
-        (route) => route.path === url.pathname,
+        (route) => route.path === rawPath,
       );
-      if (url.pathname !== path && !isCdpPath && !extraRoute) {
-        logReject(`unknown-path ${url.pathname}`);
+      const pluralRawSelector = workspaceQualifiedAcpEnabled
+        ? pluralAcpRawSelector(rawPath)
+        : null;
+      const isPluralAcpShape = pluralRawSelector !== null;
+      if (rawPath !== path && !isCdpPath && !extraRoute && !isPluralAcpShape) {
+        logReject(`unknown-path ${logSafe(rawPath)}`);
         socket.destroy();
         return;
       }
@@ -1031,12 +1385,70 @@ export function mountAcpHttp(
       // ── /cdp branch: hand the upgraded socket to the CDP-tunnel glue ──
       if (isCdpPath) {
         wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+          if (disposed) {
+            ws.close(1012, 'Server shutting down');
+            return;
+          }
           attachCdpClient(ws, opts.cdpTunnelRegistry!, writeStderrLine);
         });
         return;
       }
 
+      // ── Phase 4: resolve the target ACP mount for this upgrade ──
+      // Legacy `/acp` binds to the primary mount; `/workspaces/:workspace/acp`
+      // resolves the registered runtime's mount. The shared security checks
+      // above already ran uniformly; workspace resolution/trust happens only
+      // after them, and the raw URL is decoded here (WS bypasses Express).
+      let activeMount = primaryMount;
+      if (isPluralAcpShape) {
+        let selector: string;
+        try {
+          // Decode only after the shape/traversal checks passed, so decoding
+          // cannot reintroduce a `/` or `..` that bypassed classification.
+          selector = decodeURIComponent(pluralRawSelector!);
+        } catch {
+          logReject('workspace-selector-decode-error');
+          socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        const wsRegistry = opts.workspaceRegistry;
+        const rt = wsRegistry
+          ? (wsRegistry.getByWorkspaceId(selector) ??
+            resolveRegisteredWorkspaceRuntimeByPathSelector(
+              wsRegistry,
+              selector,
+            ))
+          : undefined;
+        if (!rt) {
+          logReject(`workspace-mismatch ${logSafe(selector)}`);
+          socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        if (!rt.primary && !rt.trusted) {
+          logReject(`untrusted-workspace ${rt.workspaceId}`);
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        const resolvedMount = rt.primary
+          ? primaryMount
+          : secondaryMounts.get(rt.workspaceId);
+        if (!resolvedMount) {
+          logReject(`workspace-acp-no-mount ${rt.workspaceId}`);
+          socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        activeMount = resolvedMount;
+      }
+
       wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+        if (disposed) {
+          ws.close(1012, 'Server shutting down');
+          return;
+        }
         // Non-ACP routes (e.g. voice) own their own protocol — hand the
         // upgraded socket off and skip the ACP initialize handshake.
         if (extraRoute) {
@@ -1047,7 +1459,7 @@ export function mountAcpHttp(
         const initTimer = setTimeout(() => {
           if (!initialized) {
             writeStderrLine(
-              `qwen serve: /acp WS initialize timeout (30s) from ${rawAddr}`,
+              `qwen serve: ${activeMount.routeLabel} WS initialize timeout (30s) from ${rawAddr}`,
             );
             ws.close(1002, 'Initialize timeout');
           }
@@ -1075,15 +1487,14 @@ export function mountAcpHttp(
 
         ws.on('error', (err) => {
           writeStderrLine(
-            `qwen serve: /acp WS error: ${err instanceof Error ? err.message : String(err)}`,
+            `qwen serve: ${activeMount.routeLabel} WS error: ${err instanceof Error ? err.message : String(err)}`,
           );
         });
 
-        // Tear down client-hosted MCP servers when the socket goes away so a
-        // disconnected extension doesn't leave runtime servers + pending
-        // requests dangling. WsStream's onClose handles ACP teardown; this is
-        // the orthogonal client-MCP teardown.
+        // Clear handshake state and tear down client-hosted MCP servers when
+        // the socket goes away. WsStream's onClose handles ACP teardown.
         ws.on('close', () => {
+          clearTimeout(initTimer);
           if (clientMcp) {
             void clientMcp.dispose('WS closed').catch(() => {});
             clientMcp = undefined;
@@ -1091,7 +1502,7 @@ export function mountAcpHttp(
           if (cdpBridgeUnregister) {
             cdpBridgeUnregister();
             cdpBridgeUnregister = undefined;
-            removeChromeDevToolsMcpIfUnused(
+            activeMount.removeChromeDevToolsMcpIfUnused(
               connRef?.connectionId ?? 'cdp-bridge',
             );
           }
@@ -1102,7 +1513,7 @@ export function mountAcpHttp(
             .then(() => handleWsMessage(rawData))
             .catch((err) => {
               writeStderrLine(
-                `qwen serve: /acp WS message handler error: ${err instanceof Error ? err.message : String(err)}`,
+                `qwen serve: ${activeMount.routeLabel} WS message handler error: ${err instanceof Error ? err.message : String(err)}`,
               );
             });
         });
@@ -1110,6 +1521,10 @@ export function mountAcpHttp(
         async function handleWsMessage(
           rawData: Buffer | string,
         ): Promise<void> {
+          if (disposed) {
+            ws.close(1012, 'Server shutting down');
+            return;
+          }
           let text: string;
           try {
             text =
@@ -1175,7 +1590,9 @@ export function mountAcpHttp(
             if (opts.checkRate) {
               const tier: RateLimitTier =
                 frameType === 'mcp_message' ? 'read' : 'mutation';
-              if (!opts.checkRate(wsKey, tier)) {
+              if (
+                !opts.checkRate(workspaceRateLimitKey(activeMount, wsKey), tier)
+              ) {
                 safeWsSend(
                   ws,
                   JSON.stringify({
@@ -1194,8 +1611,8 @@ export function mountAcpHttp(
               // provider's runtime-MCP mutations are attributed to THIS
               // connection; fall back to the single shared provider (tests).
               // `connRef` is set above once `initialized` is true.
-              const provider = opts.clientMcpProviderFactory
-                ? opts.clientMcpProviderFactory(
+              const provider = activeMount.clientMcpProviderFactory
+                ? activeMount.clientMcpProviderFactory(
                     connRef?.connectionId ?? 'ws-unknown',
                   )
                 : opts.clientMcpProvider;
@@ -1260,7 +1677,7 @@ export function mountAcpHttp(
               // concurrent provider round-trips. Reject once at the cap.
               if (clientMcpInflightDispatch >= MAX_INFLIGHT_MCP_DISPATCH) {
                 writeStderrLine(
-                  `qwen serve: /acp client-MCP inflight cap hit (${MAX_INFLIGHT_MCP_DISPATCH}); rejecting ${String(frameType)} frame`,
+                  `qwen serve: ${activeMount.routeLabel} client-MCP inflight cap hit (${MAX_INFLIGHT_MCP_DISPATCH}); rejecting ${String(frameType)} frame`,
                 );
                 safeWsSend(
                   ws,
@@ -1282,7 +1699,7 @@ export function mountAcpHttp(
                 const message =
                   err instanceof Error ? err.message : String(err);
                 writeStderrLine(
-                  `qwen serve: /acp client-mcp frame error: ${message}`,
+                  `qwen serve: ${activeMount.routeLabel} client-mcp frame error: ${message}`,
                 );
                 // handleFrame normally returns a structured {kind:'error'};
                 // this branch is an UNEXPECTED rejection. mcp_register /
@@ -1348,7 +1765,7 @@ export function mountAcpHttp(
               return;
             }
 
-            const conn = registry.create(fromLoopback);
+            const conn = activeMount.registry.create(fromLoopback);
             if (!conn) {
               ws.send(
                 JSON.stringify(
@@ -1375,9 +1792,9 @@ export function mountAcpHttp(
               ws,
               () => {
                 writeStderrLine(
-                  `qwen serve: /acp WS closed (${conn.connectionId.slice(0, 8)})`,
+                  `qwen serve: ${activeMount.routeLabel} WS closed (${conn.connectionId.slice(0, 8)})`,
                 );
-                registry.delete(conn.connectionId);
+                activeMount.registry.delete(conn.connectionId);
               },
               () => conn.touch(),
             );
@@ -1387,7 +1804,7 @@ export function mountAcpHttp(
               JSON.stringify({
                 jsonrpc: '2.0',
                 id: message.id,
-                result: dispatcher.buildInitializeResult(
+                result: activeMount.dispatcher.buildInitializeResult(
                   conn.connectionId,
                   requestedVersion,
                 ),
@@ -1398,7 +1815,7 @@ export function mountAcpHttp(
             clearTimeout(initTimer);
             connRef = conn;
             writeStderrLine(
-              `qwen serve: /acp WS established ${conn.connectionId.slice(0, 8)} (loopback=${fromLoopback}, active=${registry.size})`,
+              `qwen serve: ${activeMount.routeLabel} WS established ${conn.connectionId.slice(0, 8)} (loopback=${fromLoopback}, active=${activeMount.registry.size})`,
             );
             // Plan C (issue #5626): register this connection as the active CDP
             // bridge eagerly so a `/cdp` puppeteer client can bind immediately
@@ -1418,6 +1835,7 @@ export function mountAcpHttp(
                   )?.name
                 : undefined;
             if (
+              activeMount.primary &&
               opts.cdpTunnelOverWs === true &&
               opts.cdpTunnelRegistry !== undefined &&
               clientName === CDP_BRIDGE_CLIENT_NAME
@@ -1430,9 +1848,12 @@ export function mountAcpHttp(
               };
               cdpBridgeUnregister =
                 opts.cdpTunnelRegistry.register(cdpEndpoint);
-              ensureChromeDevToolsMcpRegistered(localPort, conn.connectionId);
+              activeMount.ensureChromeDevToolsMcpRegistered(
+                localPort,
+                conn.connectionId,
+              );
               writeStderrLine(
-                `qwen serve: /acp connection ${conn.connectionId.slice(0, 8)} registered as CDP bridge`,
+                `qwen serve: ${activeMount.routeLabel} connection ${conn.connectionId.slice(0, 8)} registered as CDP bridge`,
               );
             }
             return;
@@ -1476,11 +1897,11 @@ export function mountAcpHttp(
                     conn.closeSessionStream(sid);
                   }
                 };
-                void dispatcher
+                void activeMount.dispatcher
                   .pumpSessionEvents(conn, sid, ac.signal)
                   .then(cleanupSession, (err: unknown) => {
                     writeStderrLine(
-                      `qwen serve: /acp WS pump error (${sid}): ${err instanceof Error ? err.message : String(err)}`,
+                      `qwen serve: ${activeMount.routeLabel} WS pump error (${sid}): ${err instanceof Error ? err.message : String(err)}`,
                     );
                     cleanupSession();
                   });
@@ -1500,7 +1921,9 @@ export function mountAcpHttp(
                   : WS_READ_METHODS.has(m)
                     ? 'read'
                     : 'mutation';
-              if (!opts.checkRate(wsKey, tier)) {
+              if (
+                !opts.checkRate(workspaceRateLimitKey(activeMount, wsKey), tier)
+              ) {
                 ws.send(
                   JSON.stringify(
                     rpcError(
@@ -1522,11 +1945,11 @@ export function mountAcpHttp(
             isRequest(message) &&
             (message.method === 'session/prompt' ||
               message.method === '_qwen/session/prompt');
-          const dispatchP = dispatcher
+          const dispatchP = activeMount.dispatcher
             .handle(conn, message, undefined, fromLoopback)
             .catch((err: unknown) => {
               writeStderrLine(
-                `qwen serve: /acp WS handle error: ${err instanceof Error ? err.message : String(err)}`,
+                `qwen serve: ${activeMount.routeLabel} WS handle error: ${err instanceof Error ? err.message : String(err)}`,
               );
             });
           if (!isPrompt) await dispatchP;
@@ -1540,18 +1963,77 @@ export function mountAcpHttp(
 
   return {
     dispose: () => {
+      if (disposed) return;
+      disposed = true;
       if (upgradeServer && upgradeListener) {
         upgradeServer.removeListener('upgrade', upgradeListener);
         upgradeListener = undefined;
         upgradeServer = undefined;
       }
       registry.dispose();
+      // Phase 4: dispose every non-primary runtime's ACP connection registry too,
+      // so their sweep timers + live connections are torn down on shutdown.
+      for (const mount of secondaryMounts.values()) {
+        mount.registry.dispose();
+      }
       if (wss) {
+        for (const client of wss.clients) {
+          client.close(1012, 'Server shutting down');
+        }
         wss.close();
         wss = undefined;
       }
     },
     registry,
+    getSnapshot: () => {
+      const perMount = [
+        {
+          workspaceId: null as string | null,
+          primary: true,
+          workspaceCwd: primaryMount.workspaceCwd,
+          snap: registry.getSnapshot(),
+        },
+      ];
+      for (const [workspaceId, mount] of secondaryMounts) {
+        perMount.push({
+          workspaceId,
+          primary: false,
+          workspaceCwd: mount.workspaceCwd,
+          snap: mount.registry.getSnapshot(),
+        });
+      }
+      return {
+        connectionCount: perMount.reduce(
+          (n, m) => n + m.snap.connectionCount,
+          0,
+        ),
+        connectionStreams: perMount.reduce(
+          (n, m) => n + m.snap.connectionStreams,
+          0,
+        ),
+        sessionStreams: perMount.reduce((n, m) => n + m.snap.sessionStreams, 0),
+        sseStreams: perMount.reduce((n, m) => n + m.snap.sseStreams, 0),
+        wsStreams: perMount.reduce((n, m) => n + m.snap.wsStreams, 0),
+        pendingClientRequests: perMount.reduce(
+          (n, m) => n + m.snap.pendingClientRequests,
+          0,
+        ),
+        mounts: perMount.map((m) => ({
+          workspaceId: m.workspaceId,
+          primary: m.primary,
+          connectionCount: m.snap.connectionCount,
+          wsStreams: m.snap.wsStreams,
+        })),
+        connections: perMount.flatMap((mount) =>
+          mount.snap.connections.map((connection) => ({
+            ...connection,
+            workspaceId: mount.workspaceId,
+            workspaceCwd: mount.workspaceCwd,
+            primary: mount.primary,
+          })),
+        ),
+      };
+    },
     attachServer(server: import('node:http').Server) {
       setupWebSocket(server);
     },

@@ -30,6 +30,15 @@ const submitPermission = vi.fn(async () => {});
 const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
+const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
+const daemonActions = {
+  sendPrompt,
+  submitPermission,
+  cancel,
+  setApprovalMode,
+  setModel,
+  loadArtifacts,
+};
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
 const insertQueuedPrompt = vi.fn();
@@ -41,13 +50,7 @@ let queuedTextsMock: string[] = [];
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
-  useActions: () => ({
-    sendPrompt,
-    submitPermission,
-    cancel,
-    setApprovalMode,
-    setModel,
-  }),
+  useActions: () => daemonActions,
   useConnection: () => connectionState,
   useDaemonFollowupSuggestion: (options: any) => {
     latestFollowupAccept = options?.onAccept;
@@ -63,6 +66,9 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useTranscriptStore: () => ({
     dispatch: transcriptDispatch,
   }),
+  usePromptStatus: () => 'idle',
+  useWorkspaceActions: () => ({}),
+  useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
 }));
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
@@ -218,6 +224,8 @@ beforeEach(() => {
   queuedPromptsMock = [];
   queuedTextsMock = [];
   sendPrompt.mockReset();
+  loadArtifacts.mockReset();
+  loadArtifacts.mockResolvedValue({ artifacts: [] });
   sendPrompt.mockImplementation(async (_text: string, options?: any) => {
     sendPromptAdmit = options?.onAdmitted;
     return {} as any;
@@ -267,6 +275,32 @@ describe('ChatPane', () => {
     render({ title: 'Refactor core' });
     expect(testid('pane-messages')?.textContent).toBe('1');
     expect(container!.textContent).toContain('Refactor core');
+  });
+
+  it('reports loaded pane artifacts to the outer panel owner', async () => {
+    const onPaneArtifactsChange = vi.fn();
+    connectionState.capabilities = { features: ['session_artifacts'] };
+    const artifact = {
+      id: 'artifact-1',
+      title: 'Report',
+      kind: 'html',
+      storage: 'workspace',
+      workspacePath: 'reports/a.html',
+      updatedAt: '2026-07-10T00:00:00Z',
+    };
+    loadArtifacts.mockResolvedValueOnce({ artifacts: [artifact] });
+
+    render({ onPaneArtifactsChange });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onPaneArtifactsChange).toHaveBeenLastCalledWith(
+      'sess-1',
+      [artifact],
+      expect.any(Object),
+    );
   });
 
   it('suppresses the rotating loading phrase in its compact status', () => {

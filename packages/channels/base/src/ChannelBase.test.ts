@@ -187,6 +187,23 @@ class TestChannel extends ChannelBase {
   }
 }
 
+class ResponseTrackingChannel extends TestChannel {
+  responseDeliveries: Array<{
+    chatId: string;
+    text: string;
+    sessionId: string;
+  }> = [];
+
+  protected override async sendResponseMessage(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    this.responseDeliveries.push({ chatId, text, sessionId });
+    await super.sendResponseMessage(chatId, text, sessionId);
+  }
+}
+
 class UnsafeProcessChannel extends TestChannel {
   processWithoutPreflight(envelope: Envelope): Promise<void> {
     return this.processInbound(envelope);
@@ -8148,6 +8165,30 @@ describe('ChannelBase', () => {
   });
 
   describe('block streaming', () => {
+    it('passes the prompt session to block-streamed response delivery', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'reply');
+          return Promise.resolve('reply');
+        },
+      );
+      const ch = new ResponseTrackingChannel(
+        'test-chan',
+        defaultConfig({
+          blockStreaming: 'on',
+          blockStreamingChunk: { minChars: 1, maxChars: 100 },
+          blockStreamingCoalesce: { idleMs: 0 },
+        }),
+        bridge,
+      );
+
+      await ch.handleInbound(envelope());
+
+      expect(ch.responseDeliveries).toEqual([
+        { chatId: 'chat1', text: 'reply', sessionId: 's-1' },
+      ]);
+    });
+
     it('uses block streamer when blockStreaming=on', async () => {
       // The streamer sends blocks; onResponseComplete is NOT called
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

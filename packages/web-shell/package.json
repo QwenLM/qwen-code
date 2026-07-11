@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.19.8",
+  "version": "0.19.9",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -35,6 +35,7 @@
     "@codemirror/autocomplete": "^6.18.0",
     "@codemirror/commands": "^6.7.0",
     "@codemirror/language": "^6.10.0",
+    "@codemirror/merge": "^6.12.2",
     "@codemirror/state": "^6.5.0",
     "@codemirror/view": "^6.35.0",
     "@tanstack/react-virtual": "^3.13.26",
