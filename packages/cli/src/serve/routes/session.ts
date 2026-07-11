@@ -2061,6 +2061,7 @@ export function registerSessionRoutes(
       sendBridgeError(res, err, {
         route: target.route,
         sessionId,
+        workspaceCwd: target.workspaceCwd,
       });
     }
   };
