@@ -118,6 +118,7 @@ export type {
   AssistantTurnFooterRenderer,
   UserMessageContentRenderer,
   UserMessageContentRenderInfo,
+  ComposerHeaderRenderer,
   ComposerToolbarStartRenderer,
   ComposerToolbarRightRenderer,
   WebShellComposerToolbarRenderInfo,
