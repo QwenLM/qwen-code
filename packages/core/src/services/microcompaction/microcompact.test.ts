@@ -40,6 +40,36 @@ function makeToolResult(name: string, output: string): Content {
   };
 }
 
+function makeFileToolCall(id: string, filePath: string): Content {
+  return {
+    role: 'model',
+    parts: [
+      {
+        functionCall: {
+          id,
+          name: 'read_file',
+          args: { file_path: filePath },
+        },
+      },
+    ],
+  };
+}
+
+function makeFileToolResult(id: string, output: string): Content {
+  return {
+    role: 'user',
+    parts: [
+      {
+        functionResponse: {
+          id,
+          name: 'read_file',
+          response: { output },
+        },
+      },
+    ],
+  };
+}
+
 function makeUserMessage(text: string): Content {
   return { role: 'user', parts: [{ text }] };
 }
@@ -135,6 +165,173 @@ describe('microcompactHistory', () => {
     expect(
       result.history[5]!.parts![0]!.functionResponse!.response!['output'],
     ).toBe('recent file content');
+  });
+
+  it('preserves managed-memory reads while clearing ordinary reads', () => {
+    const memoryPath = '/memory/feedback/testing.md';
+    const ordinaryPath = '/project/src/example.ts';
+    const history: Content[] = [
+      makeFileToolCall('memory', memoryPath),
+      makeFileToolResult('memory', 'durable testing guidance'),
+      makeFileToolCall('ordinary', ordinaryPath),
+      makeFileToolResult('ordinary', 'ordinary source content'),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', 'recent grep output'),
+    ];
+
+    const result = microcompactHistory(history, twoHoursAgo, DEFAULT_SETTINGS, {
+      preserveReadFileResult: (filePath: string) =>
+        filePath.startsWith('/memory/'),
+    });
+
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('durable testing guidance');
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.evictedReadPaths).toEqual([ordinaryPath]);
+  });
+
+  it('preserves managed-memory reads during size-based clearing', () => {
+    const memoryPath = '/memory/project/context.md';
+    const history: Content[] = [
+      makeFileToolCall('memory', memoryPath),
+      makeFileToolResult('memory', 'durable guidance '.repeat(20)),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'old shell output '.repeat(20)),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', 'recent grep output'),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      Date.now(),
+      {
+        ...DEFAULT_SETTINGS,
+        toolResultsTotalCharsThreshold: 50,
+      },
+      {
+        sizeOnly: true,
+        preserveReadFileResult: (filePath: string) =>
+          filePath.startsWith('/memory/'),
+      },
+    );
+
+    expect(result.meta!.triggerReason).toBe('size');
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('durable guidance '.repeat(20));
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(result.meta!.toolResultCharsBefore).toBeGreaterThan(
+      'durable guidance '.repeat(20).length,
+    );
+  });
+
+  it('reports a size overage when only protected memory can remain', () => {
+    const memoryContent = 'durable guidance '.repeat(20);
+    const history: Content[] = [
+      makeFileToolCall('memory', '/memory/project/context.md'),
+      makeFileToolResult('memory', memoryContent),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      Date.now(),
+      {
+        ...DEFAULT_SETTINGS,
+        toolResultsTotalCharsThreshold: 50,
+      },
+      {
+        sizeOnly: true,
+        preserveReadFileResult: (filePath) => filePath.startsWith('/memory/'),
+      },
+    );
+
+    expect(result.meta!.triggerReason).toBe('size');
+    expect(result.meta!.toolsCleared).toBe(0);
+    expect(result.meta!.toolResultCharsBefore).toBe(memoryContent.length);
+    expect(result.meta!.toolResultCharsAfter).toBe(memoryContent.length);
+    expect(result.history).toBe(history);
+  });
+
+  it('does not charge protected memory against the recent-result budget', () => {
+    const ordinaryContent = 'ordinary output '.repeat(20);
+    const memoryContent = 'durable guidance '.repeat(20);
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', ordinaryContent),
+      makeFileToolCall('memory', '/memory/project/context.md'),
+      makeFileToolResult('memory', memoryContent),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      Date.now(),
+      {
+        ...DEFAULT_SETTINGS,
+        toolResultsTotalCharsThreshold: 50,
+        toolResultsNumToKeep: 1,
+      },
+      {
+        sizeOnly: true,
+        preserveReadFileResult: (filePath) => filePath.startsWith('/memory/'),
+      },
+    );
+
+    expect(result.meta!.toolsCleared).toBe(0);
+    expect(result.meta!.toolsKept).toBe(1);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(ordinaryContent);
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(memoryContent);
+  });
+
+  it('preserves managed-memory reads during forced clearing', () => {
+    const memoryPath = '/memory/user/profile.md';
+    const history: Content[] = [
+      makeFileToolCall('memory', memoryPath),
+      makeFileToolResult('memory', 'durable user profile'),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', 'recent grep output'),
+    ];
+
+    const result = microcompactHistory(history, null, DEFAULT_SETTINGS, {
+      force: true,
+      preserveReadFileResult: (filePath) => filePath.startsWith('/memory/'),
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
+  });
+
+  it('does not preserve a read when a reused call id maps to mixed paths', () => {
+    const history: Content[] = [
+      makeFileToolCall('reused', '/memory/project/context.md'),
+      makeFileToolCall('reused', '/project/src/example.ts'),
+      makeFileToolResult('reused', 'ambiguous content'),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', 'recent grep output'),
+    ];
+
+    const result = microcompactHistory(history, twoHoursAgo, DEFAULT_SETTINGS, {
+      preserveReadFileResult: (filePath: string) =>
+        filePath.startsWith('/memory/'),
+    });
+
+    expect(
+      result.history[2]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+    expect(result.meta!.evictedReadPaths.sort()).toEqual([
+      '/memory/project/context.md',
+      '/project/src/example.ts',
+    ]);
   });
 
   it('should not clear non-compactable tools', () => {

@@ -47,6 +47,7 @@ import {
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { isManagedMemoryPath } from '../memory/paths.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { StructuredError } from './turn.js';
 import {
@@ -1769,13 +1770,19 @@ export class GeminiChat {
     // apples to apples. The API-authoritative lastPromptTokenCount is
     // then adjusted by the estimated delta — never replaced wholesale.
     const beforeEstimate = estimateContentTokens(this.history);
+    const projectRoot = this.config.getProjectRoot();
+    const targetDir = this.config.getTargetDir?.() ?? projectRoot;
 
     // Step 1: force microcompaction (clear old tool results + media)
     const mcResult = microcompactHistory(
       this.history,
       null,
       this.config.getClearContextOnIdle(),
-      { force: true },
+      {
+        force: true,
+        preserveReadFileResult: (filePath) =>
+          isManagedMemoryPath(filePath, projectRoot, targetDir),
+      },
     );
     const mcMeta = mcResult.meta;
 

@@ -248,6 +248,33 @@ export function isTeamAutoMemPath(
 }
 
 /**
+ * Returns true when the resolved file lives in any managed-memory layer.
+ *
+ * Unlike {@link isAnyAutoMemPath}, this helper includes team memory and is
+ * intended only for read retention. It does not grant write permissions.
+ * Resolving the nearest existing path prevents a symlink inside a memory root
+ * from protecting content that actually lives outside that root.
+ */
+export function isManagedMemoryPath(
+  filePath: string,
+  projectRoot: string,
+  baseDir: string = projectRoot,
+): boolean {
+  const absolutePath = path.resolve(baseDir, filePath);
+  const resolvedPath = path.normalize(realpathNearestExisting(absolutePath));
+  const roots = [
+    getAutoMemoryRoot(projectRoot),
+    getUserAutoMemoryRoot(),
+    getTeamAutoMemoryRoot(projectRoot),
+  ];
+  return roots.some((root) => {
+    const resolvedRoot = path.normalize(realpathNearestExisting(root));
+    const rel = path.relative(resolvedRoot, resolvedPath);
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  });
+}
+
+/**
  * Follow a leading symlink chain at `inputPath` to its eventual target, even
  * when that target does not exist yet (a dangling link).
  *
