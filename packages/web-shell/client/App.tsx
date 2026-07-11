@@ -1726,19 +1726,29 @@ export function App({
     }
   }, [connection.sessionId]);
   /**
-   * The empty session a failed `/goal` submit left behind.
+   * The session a failed `/goal` submit left behind.
    *
    * Setting a goal starts a fresh session and then sends `/goal <condition>`
    * into it, but the daemon session is not created by the "new session" step —
    * `ensureSessionForPrompt` creates it lazily *inside* `sendPrompt`. So a
-   * prompt that fails after admission leaves a created-but-empty session.
+   * prompt that fails leaves a session that exists but never got its goal.
    *
    * The Goals form keeps the condition and lets the user retry. Without this
-   * ref every retry would abandon the last empty session and create another,
-   * piling up blank chats in the sidebar. Remembering it lets the retry reuse
-   * it instead — no session is ever deleted.
+   * ref every retry would abandon that session and create another, piling up
+   * blank chats in the sidebar. Remembering it lets the retry reuse it — no
+   * session is ever deleted.
+   *
+   * Only valid while the Goals page stays mounted. The moment the user leaves,
+   * that session is reachable from the composer and may stop being a scratch
+   * session, so the effect below forgets it: a later goal then starts a fresh
+   * session rather than landing on top of a conversation.
    */
   const strandedGoalSessionRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (mainView !== 'goals') {
+      strandedGoalSessionRef.current = undefined;
+    }
+  }, [mainView]);
   const ensureSessionForPrompt = useCallback(() => {
     if (connectionRef.current.sessionId) return Promise.resolve();
     if (!createSessionPromiseRef.current) {
@@ -5012,11 +5022,16 @@ export function App({
                         // Start a FRESH session so the goal loop doesn't take
                         // over the conversation the user was already having.
                         //
-                        // Unless a previous attempt already made one and then
-                        // failed to send: that session is empty and still
-                        // current, so reuse it. Creating another would strand
-                        // it, and a user retrying a few times would end up with
-                        // a column of blank chats in the sidebar.
+                        // Unless a previous attempt in this same visit to the
+                        // page already made one and then failed to send: that
+                        // session never got its goal and is still current, so
+                        // reuse it. Creating another would strand it, and a user
+                        // retrying a few times would end up with a column of
+                        // blank chats in the sidebar.
+                        //
+                        // Leaving the page forgets it (see the effect on
+                        // `strandedGoalSessionRef`), so this can never reuse a
+                        // session the user has since talked to.
                         const stranded = strandedGoalSessionRef.current;
                         const canReuseStranded =
                           stranded !== undefined &&

@@ -322,16 +322,22 @@ export function registerGoalHook(args: {
   );
   hookRef.hookId = hookId;
 
+  const now = Date.now();
   const restoredSetAt = args.initialSetAt;
   const goal: ActiveGoal = {
     condition,
     iterations: Math.max(0, args.initialIterations ?? 0),
+    // A future `setAt` is rejected along with a non-finite or non-positive one.
+    // Every duration downstream is `Date.now() - setAt`, so a transcript
+    // claiming the goal starts tomorrow would render negative elapsed times
+    // rather than fail loudly.
     setAt:
       typeof restoredSetAt === 'number' &&
       Number.isFinite(restoredSetAt) &&
-      restoredSetAt > 0
+      restoredSetAt > 0 &&
+      restoredSetAt <= now
         ? restoredSetAt
-        : Date.now(),
+        : now,
     tokensAtStart,
     hookId,
   };

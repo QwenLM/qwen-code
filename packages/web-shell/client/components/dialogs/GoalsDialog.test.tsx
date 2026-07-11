@@ -122,6 +122,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Unconditionally, not just at the end of each fake-timer test: a failing
+  // assertion skips the inline restore, and fake timers would then leak into
+  // every test after it as unrelated-looking hangs.
+  vi.useRealTimers();
   act(() => root?.unmount());
   container?.remove();
   root = null;
@@ -269,6 +273,25 @@ describe('GoalsDialog', () => {
 
     expect(onCreateGoal).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain('clears a goal rather than');
+  });
+
+  it('discards the typed condition when the form is cancelled', async () => {
+    // Cancel is the only way out of the form without submitting; if its wiring
+    // breaks there is no escape but a page reload.
+    const onCreateGoal = vi.fn();
+    await mount([], { onCreateGoal });
+
+    click(findButton('New goal'));
+    setTextarea('ship it');
+    click(findButton('Cancel'));
+    await flush();
+
+    expect(onCreateGoal).not.toHaveBeenCalled();
+    expect(document.querySelector('textarea')).toBeNull();
+
+    // Re-opening must not resurrect the abandoned condition.
+    click(findButton('New goal'));
+    expect(document.querySelector('textarea')?.value).toBe('');
   });
 
   it('submits a trimmed condition and closes the form', async () => {

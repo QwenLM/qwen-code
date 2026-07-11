@@ -366,7 +366,16 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
                 className={styles.goalButton}
                 onClick={onOpenGoals}
                 title={activeGoal?.condition}
-                aria-label={t('sidebar.goals')}
+                // The visible label is truncated and the full condition lives
+                // only in `title`, which is a hover tooltip screen readers do
+                // not reliably announce. Name the goal here, but keep the
+                // button's purpose in front of it — the condition alone would
+                // read as a bare string with no hint it opens anything.
+                aria-label={
+                  activeGoal?.condition
+                    ? `${t('sidebar.goals')}: ${activeGoal.condition}`
+                    : t('sidebar.goals')
+                }
               >
                 <span className={styles.goal}>{goalLabel}</span>
               </button>

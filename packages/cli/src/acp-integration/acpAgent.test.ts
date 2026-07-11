@@ -9876,6 +9876,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       }),
       getFileSystemService: vi.fn().mockReturnValue(undefined),
       setFileSystemService: vi.fn(),
+      // `goalRestoreBlockedBy` reads trust FIRST. Without this, resume threw
+      // `config.isTrustedFolder is not a function`, and the goal-gate tests
+      // below passed through `#restoreGoalOnResume`'s catch rather than the
+      // branch each one names.
+      isTrustedFolder: vi.fn().mockReturnValue(true),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
@@ -10286,6 +10291,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       },
     });
     // makeRestoreInnerConfig defaults to getDisableAllHooks() === true.
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true) as unknown as MockInstance;
     const { agent, agentPromise } = await spawnAgent();
 
     await agent.loadSession({
@@ -10295,6 +10303,14 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     });
 
     expect(registerGoalHook).not.toHaveBeenCalled();
+    // `registerGoalHook` not being called is not enough on its own: anything
+    // that throws inside `#restoreGoalOnResume` skips it too, so a broken
+    // config mock would satisfy the assertion above while never reaching the
+    // hooks-disabled branch this test is named for. Pin the branch.
+    const written = stderr.mock.calls.map((c) => String(c[0])).join('');
+    expect(written).toContain('hooks-disabled');
+    expect(written).not.toContain('goal restore failed');
+    stderr.mockRestore();
 
     mockConnectionState.resolve();
     await agentPromise;

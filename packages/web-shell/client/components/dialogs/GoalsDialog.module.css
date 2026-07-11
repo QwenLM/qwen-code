@@ -223,6 +223,13 @@
   color: var(--foreground);
 }
 
+/* Keyboard users get the same affordance as the mouse hover; matches
+   `.iconButton:focus-visible` in DialogShell.module.css. */
+.iconAction:focus-visible:not(:disabled) {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
 .iconAction:disabled {
   opacity: 0.5;
   cursor: default;
