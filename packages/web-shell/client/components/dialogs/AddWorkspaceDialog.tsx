@@ -89,10 +89,7 @@ export function AddWorkspaceDialog({
             </span>
           )}
         </div>
-        <div
-          className={dp('dialog-footer-actions')}
-          style={{ paddingLeft: 0, paddingRight: 0 }}
-        >
+        <div className={`${dp('dialog-footer-actions')} ${styles.footer}`}>
           <button
             type="button"
             className={dp('dialog-inline-button')}

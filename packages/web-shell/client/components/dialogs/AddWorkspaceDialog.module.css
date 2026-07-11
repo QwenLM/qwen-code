@@ -20,6 +20,16 @@
   line-height: 1.4;
 }
 
+/* Applied alongside the shared `dialog-footer-actions`. That primitive adds side
+   padding for standalone (picker) footers; here the footer lives inside
+   `.dialog-form`, which already pads its sides, so drop the horizontal padding to
+   line the buttons up with the input. The selector is doubled so it outranks the
+   primitive regardless of stylesheet order. */
+.footer.footer {
+  padding-left: 0;
+  padding-right: 0;
+}
+
 .error {
   color: var(--error-color);
   font-size: 12px;
