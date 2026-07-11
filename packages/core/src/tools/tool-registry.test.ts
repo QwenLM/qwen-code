@@ -149,6 +149,7 @@ describe('ToolRegistry', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
@@ -735,6 +736,65 @@ describe('ToolRegistry', () => {
   });
 
   describe('discoverTools', () => {
+    it('normalizes Windows PATH variants for discovery and execution', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      vi.stubEnv('PATH', 'C:\\Windows;C:\\Tools');
+      vi.stubEnv('Path', 'C:\\Tools;C:\\UserBin');
+      mockConfigGetToolDiscoveryCommand.mockReturnValue('discover-command');
+      vi.spyOn(config, 'getToolCallCommand').mockReturnValue('call-command');
+
+      const toolDeclaration: FunctionDeclaration = {
+        name: 'path-tool',
+        description: 'A tool used to inspect the child PATH',
+        parametersJsonSchema: { type: 'object', properties: {} },
+      };
+      const discoveryProcess = {
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+        on: vi.fn(),
+      };
+      const executionProcess = {
+        stdout: { on: vi.fn(), removeListener: vi.fn() },
+        stderr: { on: vi.fn(), removeListener: vi.fn() },
+        stdin: { write: vi.fn(), end: vi.fn() },
+        on: vi.fn(),
+        connected: false,
+        removeListener: vi.fn(),
+      };
+      const mockSpawn = vi.mocked(spawn);
+      mockSpawn
+        .mockReturnValueOnce(discoveryProcess as any)
+        .mockReturnValueOnce(executionProcess as any);
+      discoveryProcess.stdout.on.mockImplementation((event, callback) => {
+        if (event === 'data') {
+          callback(
+            Buffer.from(
+              JSON.stringify([{ functionDeclarations: [toolDeclaration] }]),
+            ),
+          );
+        }
+      });
+      discoveryProcess.on.mockImplementation((event, callback) => {
+        if (event === 'close') callback(0);
+      });
+      executionProcess.on.mockImplementation((event, callback) => {
+        if (event === 'close') callback(0, null);
+      });
+
+      await toolRegistry.discoverAllTools();
+      const discoveredTool = toolRegistry.getTool('path-tool');
+      expect(discoveredTool).toBeDefined();
+      await (discoveredTool as DiscoveredTool)
+        .build({})
+        .execute(new AbortController().signal);
+
+      for (const call of mockSpawn.mock.calls) {
+        const env = call[2]?.env;
+        expect(env?.['PATH']).toBe('C:\\Windows;C:\\Tools;C:\\UserBin');
+        expect(env?.['Path']).toBeUndefined();
+      }
+    });
+
     it('should will preserve tool parametersJsonSchema during discovery from command', async () => {
       const discoveryCommand = 'my-discovery-command';
       mockConfigGetToolDiscoveryCommand.mockReturnValue(discoveryCommand);

@@ -26,6 +26,7 @@ import {
   collectSensitiveShellEnvKeys,
   scrubChildEnv,
 } from '../utils/child-env-scrub.js';
+import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
@@ -66,7 +67,7 @@ class DiscoveredToolInvocation extends BaseToolInvocation<
     const callCommand = this.config.getToolCallCommand()!;
     const child = spawn(callCommand, [this.toolName], {
       env: scrubChildEnv(
-        process.env,
+        normalizePathEnvForWindows(process.env),
         collectSensitiveShellEnvKeys(process.env),
       ),
     });
@@ -576,7 +577,7 @@ export class ToolRegistry {
       }
       const proc = spawn(cmdParts[0] as string, cmdParts.slice(1) as string[], {
         env: scrubChildEnv(
-          process.env,
+          normalizePathEnvForWindows(process.env),
           collectSensitiveShellEnvKeys(process.env),
         ),
       });
