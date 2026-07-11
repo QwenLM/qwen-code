@@ -27,6 +27,7 @@ import type {
   DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
   DaemonSessionStatsStatus,
+  DaemonSessionArtifactsEnvelope,
   DaemonShellCommandResult,
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
@@ -167,6 +168,7 @@ export type DaemonNoticeOperation =
   | 'load_context'
   | 'load_context_usage'
   | 'load_tasks'
+  | 'load_artifacts'
   | 'cancel_task'
   | 'clear_goal'
   | 'load_stats'
@@ -379,6 +381,7 @@ export interface DaemonSessionActions {
   ): Promise<{ cancelled: boolean }>;
   clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
+  loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
   branchSession(
     name?: string,
   ): Promise<{ sessionId: string; displayName: string }>;
@@ -399,6 +402,7 @@ export interface DaemonWorkspaceEventSignals {
   settingsVersion: number;
   mcpVersion: number;
   extensionsVersion: number;
+  artifactsVersion: number;
   lastExtensionChange?: {
     status?:
       | 'installed'

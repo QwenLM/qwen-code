@@ -94,6 +94,7 @@ export const MUST_TRANSLATE_KEYS = [
   '? for shortcuts',
   'Invalid approval mode "{{arg}}". Valid modes: {{modes}}',
   'Approval mode set to "{{mode}}"',
+  'auto_mode.entry_notice',
   "Set up Qwen Code's status line UI",
   'Cached (included in Input): {{tokens}}',
   'By source:',

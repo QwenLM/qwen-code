@@ -8,6 +8,14 @@
   min-height: 0;
 }
 
+@media (max-width: 760px) {
+  .listWithWelcomeHeader {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+}
+
 .list::-webkit-scrollbar {
   width: 6px;
 }

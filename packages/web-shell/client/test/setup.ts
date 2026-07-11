@@ -50,6 +50,12 @@ if (
   globalWithDom.Element.prototype.scrollIntoView = () => {};
 }
 
+// jsdom implements getClientRects()/getBoundingClientRect() on Element but not
+// on Range. CodeMirror's async measure pass (scheduled via requestAnimationFrame)
+// calls them on a text Range, so without this stub it throws
+// "textRange(...).getClientRects is not a function" from a rAF callback after a
+// test has completed — an unhandled error that flakes the whole run even though
+// every assertion passed.
 if (typeof globalWithDom.Range !== 'undefined') {
   const rangePrototype = globalWithDom.Range.prototype as Range & {
     getBoundingClientRect?: () => DOMRect;

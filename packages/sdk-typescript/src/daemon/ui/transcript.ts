@@ -293,6 +293,7 @@ function applyDaemonTranscriptEvent(
       next.approvalMode = event.next;
       break;
     case 'session.metadata.changed':
+    case 'session.artifact.changed':
     case 'session.available_commands':
       // Intentional no-op against `blocks[]`.
       break;
