@@ -190,6 +190,75 @@ describe('ExtensionFileWatcher', () => {
     }
   });
 
+  it('treats the first successful generation read as a change after an initial read failure', () => {
+    mockReadFileSync.mockImplementationOnce(() => {
+      throw new Error('state unavailable');
+    });
+    const refreshState = createRefreshState();
+    const watcher = new ExtensionFileWatcher(
+      configWithExtensions([]),
+      extensionsDir,
+      refreshState,
+    );
+    mockReadFileSync.mockReturnValue('{"generation":2}');
+
+    try {
+      watcher.startWatching();
+
+      expect(refreshState.markExtensionsChanged).toHaveBeenCalledWith(
+        'extension store generation changed',
+      );
+    } finally {
+      watcher.stopWatching();
+    }
+  });
+
+  it('records state-file event generations to avoid duplicate poll refreshes', () => {
+    vi.useFakeTimers();
+    const refreshState = createRefreshState();
+    const watcher = new ExtensionFileWatcher(
+      configWithExtensions([]),
+      extensionsDir,
+      refreshState,
+    );
+    try {
+      watcher.startWatching();
+      mockReadFileSync.mockReturnValue('{"generation":2}');
+      fireAllEvent(
+        0,
+        'change',
+        path.join(path.dirname(extensionsDir), 'extension-store', 'state.json'),
+      );
+      vi.advanceTimersByTime(30_000);
+
+      expect(refreshState.markExtensionsChanged).toHaveBeenCalledTimes(1);
+    } finally {
+      watcher.stopWatching();
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves the observed generation across internal restarts', () => {
+    const refreshState = createRefreshState();
+    const watcher = new ExtensionFileWatcher(
+      configWithExtensions([]),
+      extensionsDir,
+      refreshState,
+    );
+    try {
+      watcher.startWatching();
+      mockReadFileSync.mockReturnValue('{"generation":2}');
+
+      watcher.restartWatching();
+
+      expect(refreshState.markExtensionsChanged).toHaveBeenCalledWith(
+        'extension store generation changed',
+      );
+    } finally {
+      watcher.stopWatching();
+    }
+  });
+
   it('marks stale refresh needed for inventory and hook files', () => {
     const refreshState = createRefreshState();
     const watcher = new ExtensionFileWatcher(

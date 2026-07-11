@@ -59,6 +59,7 @@ export class ExtensionFileWatcher {
         'extension-store',
         'state.json',
       );
+    this.observedStoreGeneration = this.readStoreGeneration();
   }
 
   startWatching(): void {
@@ -123,7 +124,6 @@ export class ExtensionFileWatcher {
     this.watchGeneration++;
     if (this.generationPoller) clearInterval(this.generationPoller);
     this.generationPoller = undefined;
-    this.observedStoreGeneration = undefined;
     this.mutationListenerDisposer?.();
     this.mutationListenerDisposer = undefined;
     this.endPendingMutationSuppressions();
@@ -233,6 +233,10 @@ export class ExtensionFileWatcher {
     changedPath: string,
   ): RefreshAction | false {
     if (changedPath === path.resolve(this.storeStatePath)) {
+      const generation = this.readStoreGeneration();
+      if (generation !== undefined) {
+        this.observedStoreGeneration = generation;
+      }
       this.refreshState.markExtensionsChanged(
         'extension store generation changed',
       );
@@ -377,22 +381,27 @@ export class ExtensionFileWatcher {
   }
 
   private pollStoreGeneration(): void {
-    let generation: number;
+    const generation = this.readStoreGeneration();
+    if (generation === undefined) return;
+    const previous = this.observedStoreGeneration;
+    this.observedStoreGeneration = generation;
+    if (previous === undefined || previous !== generation) {
+      this.refreshState.markExtensionsChanged(
+        'extension store generation changed',
+      );
+    }
+  }
+
+  private readStoreGeneration(): number | undefined {
     try {
       const parsed = JSON.parse(
         fs.readFileSync(this.storeStatePath, 'utf8'),
       ) as { generation?: unknown };
-      if (typeof parsed.generation !== 'number') return;
-      generation = parsed.generation;
+      return typeof parsed.generation === 'number'
+        ? parsed.generation
+        : undefined;
     } catch {
-      return;
-    }
-    const previous = this.observedStoreGeneration;
-    this.observedStoreGeneration = generation;
-    if (previous !== undefined && previous !== generation) {
-      this.refreshState.markExtensionsChanged(
-        'extension store generation changed',
-      );
+      return undefined;
     }
   }
 }
