@@ -191,7 +191,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen3-max/, LIMITS['256k']],
   // Open-source Qwen3 variants: 256K native
   [/^qwen3-coder-/, LIMITS['256k']],
-  // Qwen fallback (VL, turbo, plus, 2.5, etc.): 128K
+  // Qwen fallback (VL, turbo, plus, 2.5, etc.): 256K
   [/^qwen/, LIMITS['256k']],
 
   // -------------------

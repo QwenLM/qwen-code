@@ -27,6 +27,7 @@ const allowedProcessEnvFiles = new Set(
     'packages/acp-bridge/src/bridge.ts',
     'packages/acp-bridge/src/bridgeOptions.ts',
     'packages/acp-bridge/src/spawnChannel.ts',
+    'packages/cli/src/serve/acp-http-enabled.ts',
     'packages/cli/src/serve/acp-http/index.ts',
     'packages/cli/src/serve/channel-worker-supervisor.ts',
     'packages/cli/src/serve/daemon-logger.ts',
