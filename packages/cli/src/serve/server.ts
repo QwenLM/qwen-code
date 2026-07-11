@@ -122,6 +122,7 @@ import {
 } from './routes/workspace-voice.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import { setRateLimiter } from './rate-limit.js';
+import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
 import {
   createTotalSessionAdmissionController,
   type TotalSessionAdmissionSnapshot,
@@ -687,6 +688,20 @@ export function createServeApp(
       bridge,
       registry: deps.deviceFlowRegistry,
       providers: deps.deviceFlowProviders,
+      // Phase 4: fan device-flow events out to the primary and every trusted
+      // secondary runtime bridge, so workspace-qualified ACP clients receive
+      // their own flow's events. Resolved lazily: the registry is created
+      // before the workspace registry exists, but by the time a flow emits,
+      // `app.locals` holds the populated registry.
+      resolveEventBridges: () => {
+        const reg = (app.locals as { workspaceRegistry?: WorkspaceRegistry })
+          .workspaceRegistry;
+        if (!reg) return [bridge];
+        return reg
+          .list()
+          .filter((rt) => rt.primary || rt.trusted)
+          .map((rt) => rt.bridge);
+      },
     });
 
   const { daemonLog } = deps;
@@ -767,6 +782,8 @@ export function createServeApp(
   const primaryBridge = primaryRuntime.bridge;
   const primaryWorkspace = primaryRuntime.workspaceService;
   const primaryRouteFileSystemFactory = primaryRuntime.routeFileSystemFactory;
+  const workspaceQualifiedAcpEnabled =
+    resolveAcpHttpEnabled() && workspaceRegistry.list().length > 1;
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -798,6 +815,7 @@ export function createServeApp(
   app.use(hostAllowlist(opts.hostname, getPort));
   const rateLimiter = installRateLimiter(app, opts, daemonLog, {
     mount: false,
+    workspaceQualifiedAcpEnabled,
   });
 
   const healthDemoRoutes = createHealthDemoRoutes({
@@ -1336,6 +1354,9 @@ export function createServeApp(
   // route through the JSON error contract below.
   acpHandleRef.current = mountAcpHttp(app, primaryBridge, {
     boundWorkspace: primaryBoundWorkspace,
+    // Phase 4 (issue #6378): pass the registry so `/workspaces/:workspace/acp`
+    // mounts a per-runtime ACP dispatcher for each registered workspace.
+    workspaceRegistry,
     archiveCoordinator,
     workspace: primaryWorkspace,
     fsFactory: primaryRouteFileSystemFactory,

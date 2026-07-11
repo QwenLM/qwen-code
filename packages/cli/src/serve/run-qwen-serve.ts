@@ -3201,7 +3201,7 @@ export async function runQwenServe(
         // limiter are both toggleable).
         const acp = (
           app.locals?.['acpHandle'] as AcpHttpHandle | undefined
-        )?.registry.getSnapshot();
+        )?.getSnapshot();
         const hits = getRateLimiter(app)?.getHitCounts();
         const rejectedTotal = hits
           ? hits.prompt + hits.mutation + hits.read
