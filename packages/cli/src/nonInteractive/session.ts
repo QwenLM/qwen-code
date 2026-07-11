@@ -10,7 +10,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   createDebugLogger,
-  detectTurnInterruption,
+  buildSessionRecoveryPlanFromApiHistory,
   SendMessageType,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
 } from '@qwen-code/qwen-code-core';
@@ -497,32 +497,39 @@ class Session {
     const historyTail =
       chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
-    const detection = detectTurnInterruption(historyTail);
-    debugLogger.info('[Session] requestContinueLastTurn detection', {
+    const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
-      kind: detection.kind,
+      apiHistory: historyTail,
     });
-    if (detection.kind === 'none') {
+    debugLogger.info('[Session] requestContinueLastTurn recovery', {
+      sessionId: this.sessionId,
+      kind: recoveryPlan.kind,
+    });
+    if (!recoveryPlan.continuation) {
       debugLogger.debug(
         '[Session] continue_last_turn rejected: no interrupted turn',
       );
       return { accepted: false, interruption: 'none' };
     }
+    const interruption =
+      recoveryPlan.kind === 'interrupted_prompt'
+        ? 'interrupted_prompt'
+        : 'interrupted_turn';
     if (this.pendingContinueTurn || this.continueTurnInProgress) {
       debugLogger.debug(
         '[Session] continue_last_turn rejected: continuation already pending',
-        { kind: detection.kind },
+        { kind: recoveryPlan.kind },
       );
-      return { accepted: false, interruption: detection.kind };
+      return { accepted: false, interruption };
     }
 
     this.pendingContinueTurn = true;
     this.ensureProcessingStarted();
     debugLogger.info('[Session] continue_last_turn accepted', {
       sessionId: this.sessionId,
-      kind: detection.kind,
+      kind: recoveryPlan.kind,
     });
-    return { accepted: true, interruption: detection.kind };
+    return { accepted: true, interruption };
   }
 
   /**
