@@ -1725,6 +1725,20 @@ export function App({
       createSessionPromiseRef.current = null;
     }
   }, [connection.sessionId]);
+  /**
+   * The empty session a failed `/goal` submit left behind.
+   *
+   * Setting a goal starts a fresh session and then sends `/goal <condition>`
+   * into it, but the daemon session is not created by the "new session" step —
+   * `ensureSessionForPrompt` creates it lazily *inside* `sendPrompt`. So a
+   * prompt that fails after admission leaves a created-but-empty session.
+   *
+   * The Goals form keeps the condition and lets the user retry. Without this
+   * ref every retry would abandon the last empty session and create another,
+   * piling up blank chats in the sidebar. Remembering it lets the retry reuse
+   * it instead — no session is ever deleted.
+   */
+  const strandedGoalSessionRef = useRef<string | undefined>(undefined);
   const ensureSessionForPrompt = useCallback(() => {
     if (connectionRef.current.sessionId) return Promise.resolve();
     if (!createSessionPromiseRef.current) {
@@ -4997,23 +5011,46 @@ export function App({
                         // the first turn, so it has to travel the prompt path.
                         // Start a FRESH session so the goal loop doesn't take
                         // over the conversation the user was already having.
-                        const created = await createNewSession();
-                        // createNewSession already surfaced the failure; don't
-                        // drop the goal into the wrong (still-current) session.
-                        // `false` keeps the form open with the typed condition
-                        // still in it — returning normally would read as
-                        // "created" and reset it.
-                        if (!created) return false;
-                        onSessionIdChange?.(undefined);
+                        //
+                        // Unless a previous attempt already made one and then
+                        // failed to send: that session is empty and still
+                        // current, so reuse it. Creating another would strand
+                        // it, and a user retrying a few times would end up with
+                        // a column of blank chats in the sidebar.
+                        const stranded = strandedGoalSessionRef.current;
+                        const canReuseStranded =
+                          stranded !== undefined &&
+                          connectionRef.current.sessionId === stranded;
+                        if (!canReuseStranded) {
+                          const created = await createNewSession();
+                          // createNewSession already surfaced the failure; don't
+                          // drop the goal into the wrong (still-current) session.
+                          // `false` keeps the form open with the typed condition
+                          // still in it — returning normally would read as
+                          // "created" and reset it.
+                          if (!created) return false;
+                          onSessionIdChange?.(undefined);
+                        }
                         // Switch to the chat only once the prompt is admitted.
                         // Switching first unmounts the Goals page, and a later
                         // rejection would then have nowhere to render: the user
                         // would land in an empty session with no explanation.
                         // Letting this reject keeps the error in the form the
                         // user is looking at.
-                        await sendPrompt(`/goal ${condition}`, undefined, {
-                          clearComposerOnPromptStart: true,
-                        });
+                        try {
+                          await sendPrompt(`/goal ${condition}`, undefined, {
+                            clearComposerOnPromptStart: true,
+                          });
+                        } catch (error) {
+                          // `sendPrompt` creates the session lazily, so by now
+                          // one may exist even though the prompt never landed.
+                          // Remember it so the retry reuses it rather than
+                          // stranding it.
+                          strandedGoalSessionRef.current =
+                            connectionRef.current.sessionId;
+                          throw error;
+                        }
+                        strandedGoalSessionRef.current = undefined;
                         setMainView('chat');
                       }}
                       onOpenSession={(sessionId) => {
