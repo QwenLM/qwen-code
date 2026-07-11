@@ -2246,7 +2246,7 @@ const SETTINGS_SCHEMA = {
             showInDialog: false,
           },
           defaultTimeoutMs: {
-            type: 'number',
+            type: 'integer',
             minimum: 0,
             maximum: 600000,
             label: 'Default Command Timeout (ms)',

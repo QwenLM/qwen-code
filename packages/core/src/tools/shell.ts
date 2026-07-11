@@ -2077,6 +2077,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       this.params.timeout ??
       this.config.getShellDefaultTimeoutMs() ??
       DEFAULT_FOREGROUND_TIMEOUT_MS;
+    debugLogger.debug('resolved foreground shell timeout', {
+      perCallTimeout: this.params.timeout ?? null,
+      configuredDefault: this.config.getShellDefaultTimeoutMs() ?? null,
+      effectiveTimeout,
+    });
 
     // Create combined signal with timeout AND promote-trigger for
     // foreground execution. The promoteAbortController is exposed to
