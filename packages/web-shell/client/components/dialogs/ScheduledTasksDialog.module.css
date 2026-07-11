@@ -98,6 +98,12 @@
   margin-left: 2px;
 }
 
+.fieldHint {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted-foreground);
+}
+
 .input,
 .textarea,
 .select {

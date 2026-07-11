@@ -2162,6 +2162,29 @@ describe('DaemonSessionProvider', () => {
             durationMs: 42,
           },
         };
+        yield {
+          id: 26,
+          v: 1,
+          type: 'artifact_changed',
+          data: {
+            sessionId: 'session-1',
+            change: {
+              action: 'created',
+              artifactId: 'artifact-1',
+              artifact: {
+                id: 'artifact-1',
+                kind: 'html',
+                storage: 'workspace',
+                source: 'tool',
+                status: 'available',
+                title: 'Report',
+                workspacePath: 'report.html',
+                createdAt: '2026-07-09T00:00:00.000Z',
+                updatedAt: '2026-07-09T00:00:00.000Z',
+              },
+            },
+          },
+        };
       },
     });
     sdkMocks.sessions.push(session);
@@ -2183,6 +2206,7 @@ describe('DaemonSessionProvider', () => {
       toolsVersion: 1,
       settingsVersion: 1,
       mcpVersion: 1,
+      artifactsVersion: 1,
       initVersion: 0,
       authVersion: 0,
     });
@@ -3017,7 +3041,7 @@ describe('DaemonSessionProvider', () => {
               truncatedEvents: 4,
               retainedEvents: 2,
               maxBytes: 512,
-              fullTranscriptAvailable: false,
+              fullTranscriptAvailable: true,
             },
           },
           {
@@ -5378,21 +5402,22 @@ describe('DaemonSessionProvider', () => {
       modelServices: [],
       workspaceCwd: '/mock-workspace',
     });
+    const releaseHeartbeatFailure = createDeferred<void>();
     const heartbeat = vi.fn(async () => {
+      await releaseHeartbeatFailure.promise;
       throw Object.assign(new Error('session gone'), { status: 410 });
     });
+    const submitStarted = createDeferred<void>();
     const session = createMockSession({
       heartbeat,
-      submitPrompt: vi.fn(
-        (_req: unknown, signal?: AbortSignal) =>
-          new Promise<NonBlockingPromptAccepted>((_resolve, reject) => {
-            signal?.addEventListener(
-              'abort',
-              () => reject(createAbortError()),
-              { once: true },
-            );
-          }),
-      ),
+      submitPrompt: vi.fn((_req: unknown, signal?: AbortSignal) => {
+        submitStarted.resolve();
+        return new Promise<NonBlockingPromptAccepted>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(createAbortError()), {
+            once: true,
+          });
+        });
+      }),
       events: createIdleEvents(),
     });
     sdkMocks.sessions.push(session);
@@ -5415,10 +5440,12 @@ describe('DaemonSessionProvider', () => {
     let promptResult: Promise<unknown> | undefined;
     await act(async () => {
       promptResult = providerActions.sendPrompt('still running');
+      await submitStarted.promise;
       await flushPromises();
     });
 
     await act(async () => {
+      releaseHeartbeatFailure.resolve();
       await wait(50);
       await flushPromises();
     });

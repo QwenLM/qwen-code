@@ -179,13 +179,4 @@ export const tipRegistry: ContextualTip[] = [
     cooldownPrompts: 0,
     priority: 50,
   },
-  {
-    id: 'compact-mode',
-    content:
-      'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.',
-    trigger: 'startup',
-    isRelevant: () => true,
-    cooldownPrompts: 0,
-    priority: 50,
-  },
 ];

@@ -36,6 +36,7 @@ import { pathToFileURL } from 'node:url';
 import type {
   ReadTextFileRequest,
   ReadTextFileResponse,
+  RequestPermissionRequest,
   SessionNotification,
   WriteTextFileRequest,
   WriteTextFileResponse,
@@ -48,8 +49,15 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { BridgeClient } from './bridgeClient.js';
+import {
+  MAX_SUB_SESSION_NAME_CHARS,
+  MAX_SUB_SESSION_PROMPT_CHARS,
+} from './bridgeOptions.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
-import type { MidTurnQueueEntry } from './bridgeTypes.js';
+import type {
+  BridgePendingInteraction,
+  MidTurnQueueEntry,
+} from './bridgeTypes.js';
 import type { ClientMcpMessageSender } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
@@ -717,6 +725,188 @@ describe('BridgeClient — token usage accounting', () => {
   });
 });
 
+describe('BridgeClient — create-sub-session extMethod dispatch', () => {
+  const noFlow = () => {
+    throw new Error('test: should not run');
+  };
+
+  function makeClientWithCreateSubSession(
+    onCreateSubSession:
+      | ((info: {
+          prompt: string;
+          completion: 'sent' | 'first-turn';
+          model?: string;
+          name?: string;
+          callerSessionId?: string;
+        }) => Promise<{
+          sessionId: string;
+          result?: string;
+          stopReason?: string;
+        }>)
+      | undefined,
+    ownsSession?: (sessionId: string) => boolean,
+  ) {
+    return new BridgeClient(
+      (() => undefined) as never, // resolveEntry
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined, // fileSystem
+      undefined, // onModelPromoted
+      undefined, // onModePromoted
+      undefined, // clientMcpSender
+      ownsSession as never, // ownsSession (undefined → defaults to () => true)
+      undefined, // onTokenUsage
+      onCreateSubSession,
+    );
+  }
+
+  const METHOD = 'qwen/control/create-sub-session';
+
+  it('forwards a valid request to the host handler and returns its result', async () => {
+    const onCreate = vi.fn(async () => ({
+      sessionId: 'sub-9',
+      result: 'done',
+      stopReason: 'end_turn',
+    }));
+    const client = makeClientWithCreateSubSession(onCreate);
+
+    const res = await client.extMethod(METHOD, {
+      prompt: 'summarize',
+      completion: 'first-turn',
+      model: 'm1',
+      name: 'digest',
+      callerSessionId: 'caller-1',
+    });
+
+    expect(onCreate).toHaveBeenCalledWith({
+      prompt: 'summarize',
+      completion: 'first-turn',
+      model: 'm1',
+      name: 'digest',
+      callerSessionId: 'caller-1',
+    });
+    expect(res).toEqual({
+      sessionId: 'sub-9',
+      result: 'done',
+      stopReason: 'end_turn',
+    });
+  });
+
+  it('omits result/stopReason when the handler does not return them (sent mode)', async () => {
+    const client = makeClientWithCreateSubSession(async () => ({
+      sessionId: 'sub-10',
+    }));
+    const res = await client.extMethod(METHOD, {
+      prompt: 'go',
+      completion: 'sent',
+      callerSessionId: 'caller-1',
+    });
+    expect(res).toEqual({ sessionId: 'sub-10' });
+  });
+
+  it('rejects methodNotFound when no host handler is wired (non-daemon)', async () => {
+    const client = makeClientWithCreateSubSession(undefined);
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'x',
+        completion: 'sent',
+        callerSessionId: 'caller-1',
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('rejects invalid params (missing prompt, bad completion)', async () => {
+    const onCreate = vi.fn();
+    const client = makeClientWithCreateSubSession(
+      onCreate as unknown as Parameters<
+        typeof makeClientWithCreateSubSession
+      >[0],
+    );
+    await expect(
+      client.extMethod(METHOD, { completion: 'sent' }),
+    ).rejects.toThrow();
+    await expect(
+      client.extMethod(METHOD, { prompt: 'x', completion: 'weird' }),
+    ).rejects.toThrow();
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects a callerSessionId this connection does not own', async () => {
+    // The key names the launcher's per-caller concurrency bucket. A child that
+    // can name any session evades its own cap (a fabricated id starts a fresh
+    // bucket at zero) and can burn a victim session's slots.
+    const onCreate = vi.fn(async () => ({ sessionId: 'sub-11' }));
+    const client = makeClientWithCreateSubSession(
+      onCreate,
+      (id) => id === 'mine',
+    );
+
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'x',
+        completion: 'sent',
+        callerSessionId: 'victim',
+      }),
+    ).rejects.toThrow(/callerSessionId/i);
+    expect(onCreate).not.toHaveBeenCalled();
+
+    // An owned id passes through untouched.
+    await client.extMethod(METHOD, {
+      prompt: 'x',
+      completion: 'sent',
+      callerSessionId: 'mine',
+    });
+    expect(onCreate).toHaveBeenCalledWith({
+      prompt: 'x',
+      completion: 'sent',
+      callerSessionId: 'mine',
+    });
+
+    // Omitting it is NOT legal: an absent id would give the launcher an
+    // anonymous per-call bucket (no cap) and skip its depth-1 nesting gate.
+    onCreate.mockClear();
+    await expect(
+      client.extMethod(METHOD, { prompt: 'x', completion: 'sent' }),
+    ).rejects.toThrow(/callerSessionId/i);
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects an over-long prompt and an over-long name', async () => {
+    const onCreate = vi.fn(async () => ({ sessionId: 'sub-12' }));
+    const client = makeClientWithCreateSubSession(onCreate);
+
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'x'.repeat(MAX_SUB_SESSION_PROMPT_CHARS + 1),
+        completion: 'sent',
+        callerSessionId: 'caller-1',
+      }),
+    ).rejects.toThrow(new RegExp(`${MAX_SUB_SESSION_PROMPT_CHARS}`));
+
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'x',
+        completion: 'sent',
+        name: 'n'.repeat(MAX_SUB_SESSION_NAME_CHARS + 1),
+        callerSessionId: 'caller-1',
+      }),
+    ).rejects.toThrow(new RegExp(`${MAX_SUB_SESSION_NAME_CHARS}`));
+
+    expect(onCreate).not.toHaveBeenCalled();
+
+    // Both boundaries are accepted.
+    await client.extMethod(METHOD, {
+      prompt: 'x'.repeat(MAX_SUB_SESSION_PROMPT_CHARS),
+      completion: 'sent',
+      name: 'n'.repeat(MAX_SUB_SESSION_NAME_CHARS),
+      callerSessionId: 'caller-1',
+    });
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('BridgeClient — artifact ingress', () => {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run');
@@ -740,6 +930,7 @@ describe('BridgeClient — artifact ingress', () => {
           workspaceCwd: workspace,
         }),
         pendingPermissionIds: new Set<string>(),
+        pendingInteractions: new Map(),
         midTurnMessageQueue: [] as MidTurnQueueEntry[],
         promptActive: true,
       };
@@ -766,6 +957,7 @@ describe('BridgeClient — artifact ingress', () => {
                 storage: 'published',
                 url: artifactUrl,
                 managedId: 'managed-1',
+                retention: 'ephemeral',
               },
             ],
           },
@@ -789,6 +981,7 @@ describe('BridgeClient — artifact ingress', () => {
               artifact: expect.objectContaining({
                 title: 'Dashboard',
                 storage: 'published',
+                retention: 'ephemeral',
               }),
             }),
           },
@@ -800,6 +993,7 @@ describe('BridgeClient — artifact ingress', () => {
             title: 'Dashboard',
             storage: 'published',
             managedId: 'managed-1',
+            retention: 'ephemeral',
           },
         ],
       });
@@ -820,6 +1014,7 @@ describe('BridgeClient — artifact ingress', () => {
         upsertMany,
       },
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
       promptActive: true,
     };
@@ -891,6 +1086,7 @@ describe('BridgeClient — artifact ingress', () => {
         upsertMany,
       },
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
       promptActive: true,
     };
@@ -953,6 +1149,7 @@ describe('BridgeClient — artifact ingress', () => {
         upsertMany,
       },
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
       promptActive: true,
     };
@@ -1001,6 +1198,7 @@ describe('BridgeClient — artifact ingress', () => {
           workspaceCwd: workspace,
         }),
         pendingPermissionIds: new Set<string>(),
+        pendingInteractions: new Map(),
         midTurnMessageQueue: [] as MidTurnQueueEntry[],
         promptActive: true,
       };
@@ -1063,6 +1261,7 @@ describe('BridgeClient — artifact ingress', () => {
           workspaceCwd: workspace,
         }),
         pendingPermissionIds: new Set<string>(),
+        pendingInteractions: new Map(),
         midTurnMessageQueue: [] as MidTurnQueueEntry[],
         promptActive: true,
       };
@@ -1081,6 +1280,7 @@ describe('BridgeClient — artifact ingress', () => {
           {
             title: 'Hook dashboard',
             url: 'https://example.com/hook-dashboard',
+            retention: 'ephemeral',
           },
         ],
       });
@@ -1096,6 +1296,7 @@ describe('BridgeClient — artifact ingress', () => {
                 source: 'hook',
                 hookEventName: 'PostToolUse',
                 title: 'Hook dashboard',
+                retention: 'ephemeral',
               }),
             }),
           },
@@ -1107,6 +1308,7 @@ describe('BridgeClient — artifact ingress', () => {
             source: 'hook',
             hookEventName: 'PostToolUse',
             title: 'Hook dashboard',
+            retention: 'ephemeral',
           },
         ],
       });
@@ -1129,6 +1331,7 @@ describe('BridgeClient — artifact ingress', () => {
               upsertMany: vi.fn().mockResolvedValue({ changes: [] }),
             },
             pendingPermissionIds: new Set<string>(),
+            pendingInteractions: new Map(),
             midTurnMessageQueue: [] as MidTurnQueueEntry[],
           }
         : undefined,
@@ -1181,6 +1384,7 @@ describe('BridgeClient — artifact ingress', () => {
               upsertMany,
             },
             pendingPermissionIds: new Set<string>(),
+            pendingInteractions: new Map(),
             midTurnMessageQueue: [] as MidTurnQueueEntry[],
           }
         : undefined,
@@ -1282,6 +1486,7 @@ describe('BridgeClient — artifact ingress', () => {
         upsertMany,
       },
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
     };
     const client = new BridgeClient(
@@ -1337,6 +1542,7 @@ describe('BridgeClient — artifact ingress', () => {
           .mockRejectedValue(new Error('artifact store unavailable')),
       },
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
       promptActive: true,
     };
@@ -1379,6 +1585,7 @@ describe('BridgeClient — artifact ingress', () => {
         upsertMany,
       },
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
       promptActive: true,
     };
@@ -1437,6 +1644,7 @@ describe('BridgeClient — artifact ingress', () => {
         workspaceCwd: workspace,
       }),
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
       promptActive: false,
     };
@@ -1515,6 +1723,7 @@ describe('BridgeClient — artifact ingress', () => {
         workspaceCwd: process.cwd(),
       }),
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
       promptActive: true,
     }));
@@ -1572,6 +1781,7 @@ describe('BridgeClient — requestPermission pre-publish collision guard', () =>
     const fakeEntry = {
       sessionId: 'sess:test',
       pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
       events: { publish },
       activePromptOriginatorClientId: undefined,
     };
@@ -1611,6 +1821,239 @@ describe('BridgeClient — requestPermission pre-publish collision guard', () =>
     expect(publish).not.toHaveBeenCalled();
     // And the cap-index was never touched (only added AFTER publish).
     expect(fakeEntry.pendingPermissionIds.size).toBe(0);
+  });
+});
+
+describe('BridgeClient — pending interaction classification', () => {
+  it('tracks a render-ready permission action until it resolves', async () => {
+    const pendingInteractions = new Map<string, BridgePendingInteraction>();
+    let resolveRequest:
+      | ((value: { kind: 'cancelled'; reason: 'agent_cancelled' }) => void)
+      | undefined;
+    const entry = {
+      sessionId: 'sess:permission',
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      activePromptOriginatorClientId: undefined,
+    };
+    const client = new BridgeClient(
+      ((sessionId: string) =>
+        sessionId === entry.sessionId ? entry : undefined) as never,
+      (() => undefined) as never,
+      {
+        request: () =>
+          new Promise((resolve) => {
+            resolveRequest = resolve as typeof resolveRequest;
+          }),
+      } as never,
+      0,
+      Infinity,
+    );
+
+    const request = client.requestPermission({
+      sessionId: entry.sessionId,
+      toolCall: {
+        toolCallId: 'shell-1',
+        title: 'Run cleanup command',
+        kind: 'execute',
+        content: [{ type: 'content', content: { type: 'text', text: 'rm' } }],
+        locations: [{ path: '/workspace' }],
+        rawInput: { command: 'rm -rf build-cache' },
+      },
+      options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(pendingInteractions.size).toBe(1);
+    });
+    expect([...pendingInteractions.values()]).toEqual([
+      expect.objectContaining({
+        kind: 'permission',
+        action: expect.objectContaining({
+          type: 'execute',
+          title: 'Run cleanup command',
+          input: { command: 'rm -rf build-cache' },
+        }),
+        options: [expect.objectContaining({ optionId: 'allow' })],
+      }),
+    ]);
+
+    resolveRequest!({ kind: 'cancelled', reason: 'agent_cancelled' });
+    await request;
+    expect(pendingInteractions.size).toBe(0);
+  });
+
+  it('tracks and releases ask_user_question details by request id', async () => {
+    const pendingInteractions = new Map<string, BridgePendingInteraction>();
+    let resolveRequest:
+      | ((value: { kind: 'cancelled'; reason: 'agent_cancelled' }) => void)
+      | undefined;
+    const entry = {
+      sessionId: 'sess:question',
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      activePromptOriginatorClientId: undefined,
+    };
+    const client = new BridgeClient(
+      ((sessionId: string) =>
+        sessionId === entry.sessionId ? entry : undefined) as never,
+      (() => undefined) as never,
+      {
+        request: () =>
+          new Promise((resolve) => {
+            resolveRequest = resolve as typeof resolveRequest;
+          }),
+      } as never,
+      0,
+      Infinity,
+    );
+
+    const request = client.requestPermission({
+      sessionId: entry.sessionId,
+      toolCall: {
+        toolCallId: 'ask-1',
+        title: 'Need an answer',
+        _meta: {
+          qwenInteractionKind: 'user_question',
+          qwenQuestions: [
+            {
+              header: 'Direction',
+              question: 'Which implementation should be used?',
+              options: [{ label: 'Polling' }, { label: 'SSE' }],
+            },
+          ],
+        },
+      },
+      options: [{ optionId: 'answer', name: 'Answer', kind: 'allow_once' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(pendingInteractions.size).toBe(1);
+    });
+    expect([...pendingInteractions.values()]).toEqual([
+      expect.objectContaining({
+        kind: 'user_question',
+        title: 'Need an answer',
+        questions: [
+          expect.objectContaining({
+            question: 'Which implementation should be used?',
+            answerKey: '0',
+          }),
+        ],
+        options: [expect.objectContaining({ optionId: 'answer' })],
+      }),
+    ]);
+
+    resolveRequest!({ kind: 'cancelled', reason: 'agent_cancelled' });
+    await request;
+    expect(pendingInteractions.size).toBe(0);
+    expect(entry.pendingPermissionIds.size).toBe(0);
+  });
+
+  it('uses rawInput questions and assigns sequential answer keys', async () => {
+    const pendingInteractions = new Map<string, BridgePendingInteraction>();
+    let resolveRequest:
+      | ((value: { kind: 'cancelled'; reason: 'agent_cancelled' }) => void)
+      | undefined;
+    const entry = {
+      sessionId: 'sess:raw-input-questions',
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      activePromptOriginatorClientId: undefined,
+    };
+    const client = new BridgeClient(
+      ((sessionId: string) =>
+        sessionId === entry.sessionId ? entry : undefined) as never,
+      (() => undefined) as never,
+      {
+        request: () =>
+          new Promise((resolve) => {
+            resolveRequest = resolve as typeof resolveRequest;
+          }),
+      } as never,
+      0,
+      Infinity,
+    );
+
+    const request = client.requestPermission({
+      sessionId: entry.sessionId,
+      toolCall: {
+        toolCallId: 'ask-raw-input',
+        _meta: { qwenInteractionKind: 'user_question' },
+        rawInput: {
+          questions: [
+            { header: 'One', question: 'First question?' },
+            { header: 'Two', question: 'Second question?' },
+          ],
+        },
+      },
+      options: [{ optionId: 'answer', name: 'Answer', kind: 'allow_once' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(pendingInteractions.size).toBe(1);
+    });
+    expect([...pendingInteractions.values()][0]).toMatchObject({
+      kind: 'user_question',
+      questions: [
+        { answerKey: '0', question: 'First question?' },
+        { answerKey: '1', question: 'Second question?' },
+      ],
+    });
+
+    resolveRequest!({ kind: 'cancelled', reason: 'agent_cancelled' });
+    await request;
+  });
+
+  it('keeps a generic permission snapshot when detail normalization fails', async () => {
+    const pendingInteractions = new Map<string, BridgePendingInteraction>();
+    let resolveRequest:
+      | ((value: { kind: 'cancelled'; reason: 'agent_cancelled' }) => void)
+      | undefined;
+    const entry = {
+      sessionId: 'sess:fallback',
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      activePromptOriginatorClientId: undefined,
+    };
+    const client = new BridgeClient(
+      ((sessionId: string) =>
+        sessionId === entry.sessionId ? entry : undefined) as never,
+      (() => undefined) as never,
+      {
+        request: () =>
+          new Promise((resolve) => {
+            resolveRequest = resolve as typeof resolveRequest;
+          }),
+      } as never,
+      0,
+      Infinity,
+    );
+
+    const request = client.requestPermission({
+      sessionId: entry.sessionId,
+      toolCall: null as unknown as RequestPermissionRequest['toolCall'],
+      options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(pendingInteractions.size).toBe(1);
+    });
+    expect([...pendingInteractions.values()]).toEqual([
+      expect.objectContaining({
+        kind: 'permission',
+        action: {},
+        options: [expect.objectContaining({ optionId: 'allow' })],
+      }),
+    ]);
+
+    resolveRequest!({ kind: 'cancelled', reason: 'agent_cancelled' });
+    await request;
+    expect(pendingInteractions.size).toBe(0);
   });
 });
 

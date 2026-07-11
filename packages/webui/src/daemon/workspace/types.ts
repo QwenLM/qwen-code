@@ -116,6 +116,16 @@ export interface DaemonWorkspaceContextValue {
   error?: Error;
   capabilities?: DaemonCapabilities;
   getCapabilities?: () => Promise<DaemonCapabilities>;
+  /**
+   * Force a fresh `/capabilities` fetch and push the result into the
+   * provider's `capabilities` state so consumers re-render. Unlike
+   * `getCapabilities` — which memoizes its first in-flight promise for the
+   * lifetime of the connection and never calls `setCapabilities` outside the
+   * initial mount — this bypasses that cache. Use it after a mutation that
+   * changes capabilities (e.g. registering a workspace) so the new state
+   * shows without a full page reload.
+   */
+  refreshCapabilities?: () => Promise<DaemonCapabilities>;
   actions: DaemonWorkspaceActions;
 }
 
@@ -171,6 +181,11 @@ export interface DaemonScheduledTaskRun {
    * daemon's `CronTaskRun.sessionId` so run-attribution isn't silently dropped
    * on the client (not surfaced in the UI yet). */
   sessionId?: string;
+  /** READ-ONLY legacy compat: a pre-removal version stamped this on a fire whose
+   * precondition withheld the prompt. Never written now, but kept so the UI can
+   * still mark such stored entries "skipped" instead of showing them as ordinary
+   * successful runs. Absent = a real dispatched run. */
+  withheld?: boolean;
 }
 
 export interface DaemonScheduledTask {
@@ -212,6 +227,13 @@ export interface DaemonUpdateScheduledTaskRequest {
   name?: string | null;
   recurring?: boolean;
   enabled?: boolean;
+}
+
+export interface DaemonAddWorkspaceResult {
+  id: string;
+  cwd: string;
+  primary: boolean;
+  trusted: boolean;
 }
 
 export interface DaemonWorkspaceActions {
@@ -401,4 +423,7 @@ export interface DaemonWorkspaceActions {
   installAuthProvider(
     req: DaemonAuthProviderInstallRequest,
   ): Promise<DaemonAuthProviderInstallResult>;
+
+  // Workspace management
+  addWorkspace(cwd: string): Promise<DaemonAddWorkspaceResult>;
 }

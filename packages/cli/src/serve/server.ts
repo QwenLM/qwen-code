@@ -14,7 +14,10 @@ import type {
   DaemonPerfSnapshot,
   DaemonStartupSnapshot,
 } from './daemon-status.js';
-import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type {
+  ChannelWorkerSnapshot,
+  ChannelWorkerSupervisor,
+} from './channel-worker-supervisor.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -52,21 +55,36 @@ import {
   mountWebShellAssets,
   mountWebShellSpaFallback,
 } from './web-shell-static.js';
-import { mountWorkspaceMemoryRoutes } from './workspace-memory.js';
+import {
+  mountWorkspaceMemoryRoutes,
+  mountWorkspaceQualifiedMemoryRoutes,
+} from './workspace-memory.js';
 import {
   mountWorkspaceMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
 } from './workspace-remember.js';
-import { mountWorkspaceAgentsRoutes } from './workspace-agents.js';
+import {
+  mountWorkspaceAgentsRoutes,
+  mountWorkspaceQualifiedAgentsRoutes,
+} from './workspace-agents.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
 import { createHealthDemoRoutes } from './routes/health-demo.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
-import { registerWorkspaceFileReadRoutes } from './routes/workspace-file-read.js';
-import { registerWorkspaceFileWriteRoutes } from './routes/workspace-file-write.js';
+import {
+  registerWorkspaceFileReadRoutes,
+  registerWorkspaceQualifiedFileReadRoutes,
+} from './routes/workspace-file-read.js';
+import {
+  registerWorkspaceFileWriteRoutes,
+  registerWorkspaceQualifiedFileWriteRoutes,
+} from './routes/workspace-file-write.js';
 import { registerWorkspaceSetupGithubRoutes } from './routes/workspace-setup-github.js';
-import { registerWorkspaceTrustRoutes } from './routes/workspace-trust.js';
+import {
+  registerWorkspaceQualifiedTrustRoutes,
+  registerWorkspaceTrustRoutes,
+} from './routes/workspace-trust.js';
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
 import { registerScheduledTasksRoutes } from './routes/scheduled-tasks.js';
@@ -77,6 +95,8 @@ import {
 } from './scheduled-task-keepalive.js';
 import {
   registerWorkspaceDiagnosticStatusRoutes,
+  registerWorkspaceQualifiedDiagnosticStatusRoutes,
+  registerWorkspaceQualifiedStatusRoutes,
   registerWorkspaceStatusRoutes,
 } from './routes/workspace-status.js';
 import {
@@ -84,8 +104,14 @@ import {
   type DaemonWorkspaceService,
 } from './workspace-service/index.js';
 import { registerCapabilitiesRoutes } from './routes/capabilities.js';
-import { registerWorkspacePermissionsRoutes } from './routes/workspace-permissions.js';
-import { registerWorkspaceSettingsRoutes } from './routes/workspace-settings.js';
+import {
+  registerWorkspacePermissionsRoutes,
+  registerWorkspaceQualifiedPermissionsRoutes,
+} from './routes/workspace-permissions.js';
+import {
+  registerWorkspaceQualifiedSettingsRoutes,
+  registerWorkspaceSettingsRoutes,
+} from './routes/workspace-settings.js';
 import {
   getActiveSseCount,
   registerSseEventsRoutes,
@@ -96,6 +122,7 @@ import {
 } from './routes/workspace-voice.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import { setRateLimiter } from './rate-limit.js';
+import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
 import {
   createTotalSessionAdmissionController,
   type TotalSessionAdmissionSnapshot,
@@ -127,11 +154,34 @@ import {
   createSingleWorkspaceRegistry,
   createWorkspaceSessionOwnerIndex,
   type WorkspaceRegistry,
+  type WorkspaceRuntime,
   type WorkspaceRuntimeEnvMetadata,
 } from './workspace-registry.js';
-import { registerWorkspaceLifecycleRoutes } from './routes/workspace-lifecycle.js';
-import { registerWorkspaceMcpControlRoutes } from './routes/workspace-mcp-control.js';
-import { registerWorkspaceToolsRoutes } from './routes/workspace-tools.js';
+import {
+  isPortableAbsolutePath,
+  resolveRegisteredWorkspaceRuntimeByPathSelector,
+} from './workspace-route-runtime.js';
+import {
+  registerWorkspaceLifecycleRoutes,
+  registerWorkspaceQualifiedLifecycleRoutes,
+} from './routes/workspace-lifecycle.js';
+import { registerWorkspaceManagementRoutes } from './routes/workspace-management.js';
+import {
+  registerWorkspaceMcpControlRoutes,
+  registerWorkspaceQualifiedMcpControlRoutes,
+} from './routes/workspace-mcp-control.js';
+import { registerWorkspaceChannelControlRoutes } from './routes/workspace-channel-control.js';
+import {
+  registerWorkspaceQualifiedToolsRoutes,
+  registerWorkspaceToolsRoutes,
+} from './routes/workspace-tools.js';
+import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
+import {
+  parseChannelWebhookConfigLenient,
+  type parseChannelWebhookConfig,
+} from '../commands/channel/config-utils.js';
+import { loadChannelsConfig } from '../commands/channel/runtime.js';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 export {
   createDefaultFsAuditEmit,
@@ -159,6 +209,49 @@ export { getActiveSseCount } from './routes/sse-events.js';
  * `createServeApp` repeatedly would flood stderr with identical lines.
  */
 let warnedDefaultTrust = false;
+
+function loadServeChannelWebhookConfigs(
+  workspace: string,
+): Record<string, { webhooks?: ReturnType<typeof parseChannelWebhookConfig> }> {
+  const channelsConfig = loadChannelsConfig(workspace);
+  const parsed: Record<
+    string,
+    { webhooks?: ReturnType<typeof parseChannelWebhookConfig> }
+  > = {};
+
+  for (const [channelName, rawConfig] of Object.entries(channelsConfig)) {
+    if (typeof rawConfig !== 'object' || rawConfig === null) {
+      continue;
+    }
+    let webhooks: ReturnType<typeof parseChannelWebhookConfig>;
+    try {
+      webhooks = parseChannelWebhookConfigLenient(
+        channelName,
+        rawConfig as Record<string, unknown>,
+        (source, sourceError) => {
+          const sourceMessage =
+            sourceError instanceof Error
+              ? sourceError.message
+              : String(sourceError);
+          writeStderrLine(
+            `[daemon] Skipping malformed webhook source "${source}" for channel "${channelName}": ${sourceMessage}`,
+          );
+        },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      writeStderrLine(
+        `[daemon] Skipping malformed webhook config for channel "${channelName}": ${message}`,
+      );
+      continue;
+    }
+    if (webhooks) {
+      parsed[channelName] = { webhooks };
+    }
+  }
+
+  return parsed;
+}
 
 function describeRegistryPrimaryForConflict(
   registry: WorkspaceRegistry,
@@ -256,6 +349,14 @@ export interface ServeAppDeps {
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  enqueueChannelWebhookTask?: ChannelWorkerSupervisor['enqueueWebhookTask'];
+  /**
+   * Stop and relaunch the daemon-managed channel worker so it re-reads
+   * settings.json. Wired only when the daemon owns a channel worker; its
+   * presence gates the `channel_reload` capability and the
+   * `POST /workspace/channel/reload` route.
+   */
+  reloadChannelWorker?: () => Promise<ChannelWorkerSnapshot>;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
   getMetricsSeries?: () => DaemonMetricsBucket[];
@@ -287,6 +388,7 @@ export interface ServeAppDeps {
       value: unknown;
     }>,
   ) => Promise<void>;
+  sessionArtifactsPersistenceAvailable?: boolean;
   /**
    * Reverse tool channel (issue #5626, Phase 2). Shared sender registry that
    * bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
@@ -299,6 +401,7 @@ export interface ServeAppDeps {
    */
   clientMcpSenderRegistry?: ClientMcpSenderRegistry;
   workspaceRegistry?: WorkspaceRegistry;
+  createWorkspaceRuntime?: (cwd: string) => Promise<WorkspaceRuntime>;
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
@@ -499,13 +602,22 @@ export function createServeApp(
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
+      sessionArtifactsPersistenceAvailable:
+        deps.sessionArtifactsPersistenceAvailable !== false,
       // Registry injection supplies the primary workspace service through the
       // runtime, so it has the same reload surface as legacy deps.workspace.
       reloadAvailable:
         deps.workspace !== undefined || injectedWorkspaceRegistry !== undefined,
+      // Advertise `channel_reload` only when BOTH deps the route needs are
+      // wired — the same condition that gates route registration below — so an
+      // embedder can never see the capability advertised while the route 404s.
+      channelReloadAvailable:
+        deps.getChannelWorkerSnapshot !== undefined &&
+        deps.reloadChannelWorker !== undefined,
       sessionShellCommandEnabled,
       multiWorkspaceSessionsEnabled:
         (injectedWorkspaceRegistry?.list().length ?? 1) > 1,
+      ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
     });
   const statusProvider =
     deps.statusProvider ??
@@ -576,6 +688,20 @@ export function createServeApp(
       bridge,
       registry: deps.deviceFlowRegistry,
       providers: deps.deviceFlowProviders,
+      // Phase 4: fan device-flow events out to the primary and every trusted
+      // secondary runtime bridge, so workspace-qualified ACP clients receive
+      // their own flow's events. Resolved lazily: the registry is created
+      // before the workspace registry exists, but by the time a flow emits,
+      // `app.locals` holds the populated registry.
+      resolveEventBridges: () => {
+        const reg = (app.locals as { workspaceRegistry?: WorkspaceRegistry })
+          .workspaceRegistry;
+        if (!reg) return [bridge];
+        return reg
+          .list()
+          .filter((rt) => rt.primary || rt.trusted)
+          .map((rt) => rt.bridge);
+      },
     });
 
   const { daemonLog } = deps;
@@ -656,6 +782,8 @@ export function createServeApp(
   const primaryBridge = primaryRuntime.bridge;
   const primaryWorkspace = primaryRuntime.workspaceService;
   const primaryRouteFileSystemFactory = primaryRuntime.routeFileSystemFactory;
+  const workspaceQualifiedAcpEnabled =
+    resolveAcpHttpEnabled() && workspaceRegistry.list().length > 1;
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -685,6 +813,10 @@ export function createServeApp(
     app.use(denyBrowserOriginCors);
   }
   app.use(hostAllowlist(opts.hostname, getPort));
+  const rateLimiter = installRateLimiter(app, opts, daemonLog, {
+    mount: false,
+    workspaceQualifiedAcpEnabled,
+  });
 
   const healthDemoRoutes = createHealthDemoRoutes({
     opts,
@@ -727,12 +859,23 @@ export function createServeApp(
     mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
   }
 
+  if (deps.enqueueChannelWebhookTask) {
+    registerChannelWebhookRoutes(app, {
+      channelsConfig: loadServeChannelWebhookConfigs(primaryBoundWorkspace),
+      safeBody,
+      enqueueWebhookTask: deps.enqueueChannelWebhookTask,
+      rateLimiter,
+      daemonLog,
+    });
+  }
+
   app.use(bearerAuth(opts.token));
 
-  // Rate limiter: after auth (only count authenticated requests),
-  // before body parser (reject early without burning JSON.parse CPU).
-  const rateLimiter = installRateLimiter(app, opts, daemonLog);
-  installJsonBodyParser(app);
+  // Rate limiter: after auth (only count authenticated requests), except
+  // webhook routes which use their own shared-secret auth before bearerAuth.
+  if (rateLimiter) {
+    app.use(rateLimiter.middleware);
+  }
 
   if (!healthDemoRoutes.exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
@@ -743,6 +886,8 @@ export function createServeApp(
     healthDemoRoutes.register(app);
   }
 
+  installJsonBodyParser(app);
+
   // Mutation-route gate factory. Non-strict mode is passthrough;
   // `{ strict: true }` requires a token even on loopback defaults.
   const mutate = createMutationGate({
@@ -751,10 +896,27 @@ export function createServeApp(
   });
 
   app.use(
-    daemonTelemetryMiddleware(
-      () => primaryBoundWorkspace,
-      deps.recordDaemonRequest,
-    ),
+    daemonTelemetryMiddleware((req) => {
+      const match = req.path.match(/^\/workspaces\/([^/]+)/);
+      const rawSelector = match?.[1];
+      if (rawSelector) {
+        try {
+          const selector = decodeURIComponent(rawSelector);
+          const byId = workspaceRegistry.getByWorkspaceId(selector);
+          if (byId) return byId.workspaceCwd;
+          if (isPortableAbsolutePath(selector)) {
+            const runtime = resolveRegisteredWorkspaceRuntimeByPathSelector(
+              workspaceRegistry,
+              selector,
+            );
+            if (runtime) return runtime.workspaceCwd;
+          }
+        } catch {
+          return primaryBoundWorkspace;
+        }
+      }
+      return primaryBoundWorkspace;
+    }, deps.recordDaemonRequest),
   );
 
   const buildWorkspaceCtx = createBuildWorkspaceCtx(primaryBoundWorkspace);
@@ -811,11 +973,21 @@ export function createServeApp(
     mutate,
     sendBridgeError,
   });
+  registerWorkspaceQualifiedStatusRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+  });
 
   // Workspace memory + agents CRUD routes.
   mountWorkspaceMemoryRoutes(app, {
     bridge: primaryBridge,
     boundWorkspace: primaryBoundWorkspace,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
+  mountWorkspaceQualifiedMemoryRoutes(app, {
+    workspaceRegistry,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
@@ -834,12 +1006,22 @@ export function createServeApp(
     parseClientId: parseClientIdHeader,
     safeBody,
   });
+  mountWorkspaceQualifiedAgentsRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
 
   registerWorkspaceDiagnosticStatusRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspace: primaryWorkspace,
     mutate,
+    sendBridgeError,
+  });
+  registerWorkspaceQualifiedDiagnosticStatusRoutes(app, {
+    workspaceRegistry,
     sendBridgeError,
   });
 
@@ -859,11 +1041,22 @@ export function createServeApp(
   registerWorkspaceFileReadRoutes(app, {
     parseClientId: parseClientIdHeader,
   });
+  registerWorkspaceQualifiedFileReadRoutes(app, {
+    parseClientId: parseClientIdHeader,
+    workspaceRegistry,
+  });
   registerWorkspaceFileWriteRoutes(app, {
     bridge: primaryBridge,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
+  });
+  registerWorkspaceQualifiedFileWriteRoutes(app, {
+    bridge: primaryBridge,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+    workspaceRegistry,
   });
   registerWorkspaceSetupGithubRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -879,6 +1072,19 @@ export function createServeApp(
     safeBody,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
+  registerWorkspaceQualifiedTrustRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+  });
+
+  // Dynamic workspace registration.
+  registerWorkspaceManagementRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    createWorkspaceRuntime: deps.createWorkspaceRuntime,
   });
 
   const broadcastSettingsChanged = (
@@ -908,6 +1114,15 @@ export function createServeApp(
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
     });
+    registerWorkspaceQualifiedSettingsRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      safeBody,
+      persistSetting: async (...args) => {
+        await persistSetting(...args);
+      },
+      invalidateServeFeaturesCache,
+    });
   }
   registerWorkspacePermissionsRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -916,6 +1131,11 @@ export function createServeApp(
     workspace: primaryWorkspace,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
+  registerWorkspaceQualifiedPermissionsRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
   });
   registerWorkspaceVoiceRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -983,6 +1203,24 @@ export function createServeApp(
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
+  registerWorkspaceQualifiedMcpControlRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+  });
+  if (deps.getChannelWorkerSnapshot && deps.reloadChannelWorker) {
+    const getChannelWorkerSnapshot = deps.getChannelWorkerSnapshot;
+    const reloadChannelWorker = deps.reloadChannelWorker;
+    registerWorkspaceChannelControlRoutes(app, {
+      getChannelWorkerSnapshot,
+      reloadChannelWorker,
+      mutate,
+      sendBridgeError,
+      parseAndValidateClientId: (req, res) =>
+        parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+    });
+  }
   registerWorkspaceLifecycleRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     workspace: primaryWorkspace,
@@ -993,6 +1231,13 @@ export function createServeApp(
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
+  registerWorkspaceQualifiedLifecycleRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+    invalidateServeFeaturesCache,
+  });
   registerWorkspaceToolsRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     workspace: primaryWorkspace,
@@ -1001,6 +1246,12 @@ export function createServeApp(
     sendBridgeError,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
+  registerWorkspaceQualifiedToolsRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
   });
 
   // Durable scheduled-tasks CRUD (the Web Shell "Scheduled tasks" page).
@@ -1103,6 +1354,9 @@ export function createServeApp(
   // route through the JSON error contract below.
   acpHandleRef.current = mountAcpHttp(app, primaryBridge, {
     boundWorkspace: primaryBoundWorkspace,
+    // Phase 4 (issue #6378): pass the registry so `/workspaces/:workspace/acp`
+    // mounts a per-runtime ACP dispatcher for each registered workspace.
+    workspaceRegistry,
     archiveCoordinator,
     workspace: primaryWorkspace,
     fsFactory: primaryRouteFileSystemFactory,

@@ -26,7 +26,11 @@ interface MockTask {
   lastFiredAt: number | null;
   nextRunAt: number | null;
   sessionId: string | null;
-  runs: Array<{ at: number; kind?: 'scheduled' | 'catch-up' }>;
+  runs: Array<{
+    at: number;
+    kind?: 'scheduled' | 'catch-up';
+    sessionId?: string;
+  }>;
 }
 
 const { actions } = vi.hoisted(() => ({
@@ -104,6 +108,13 @@ function findButton(label: string): HTMLButtonElement | undefined {
   );
 }
 
+// The frequency picker is the (only) <select> with a weekdays option.
+function findFrequencySelect(): HTMLSelectElement | undefined {
+  return Array.from(document.querySelectorAll('select')).find(
+    (s) => !!s.querySelector('option[value="weekdays"]'),
+  );
+}
+
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
@@ -138,7 +149,7 @@ describe('ScheduledTasksDialog editing', () => {
     // name/prompt are prefilled — not left blank as they would be for create.
     const name = document.querySelector<HTMLInputElement>('input[type="text"]');
     const prompt = document.querySelector<HTMLTextAreaElement>('textarea');
-    const frequency = document.querySelector<HTMLSelectElement>('select');
+    const frequency = findFrequencySelect();
     const time = document.querySelector<HTMLInputElement>('input[type="time"]');
     expect(name?.value).toBe('Digest');
     expect(prompt?.value).toBe('summarize the day');
@@ -162,7 +173,7 @@ describe('ScheduledTasksDialog editing', () => {
     await mount([baseTask({ cron: '0 9 * * 1,3,5' })]); // day-of-week list
 
     click(document.querySelector('[aria-label="Edit"]'));
-    const frequency = document.querySelector<HTMLSelectElement>('select');
+    const frequency = findFrequencySelect();
     expect(frequency?.value).toBe('custom');
 
     click(findButton('Save'));

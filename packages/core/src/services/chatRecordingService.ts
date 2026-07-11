@@ -34,6 +34,10 @@ import type {
   SerializedFileHistorySnapshot,
 } from './fileHistoryService.js';
 import { serializeSnapshot } from './fileHistoryService.js';
+import type {
+  SessionArtifactEventRecordPayload,
+  SessionArtifactSnapshotRecordPayload,
+} from './session-artifact-persistence.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
@@ -248,10 +252,13 @@ export interface ChatRecord {
     | 'cron'
     | 'mid_turn_user_message'
     | 'custom_title'
+    | 'parent_session'
     | 'rewind'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
-    | 'file_history_snapshot';
+    | 'file_history_snapshot'
+    | 'session_artifact_event'
+    | 'session_artifact_snapshot';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -295,10 +302,13 @@ export interface ChatRecord {
     | AtCommandRecordPayload
     | AttributionSnapshotPayload
     | CustomTitleRecordPayload
+    | ParentSessionRecordPayload
     | NotificationRecordPayload
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
-    | FileHistorySnapshotRecordPayload;
+    | FileHistorySnapshotRecordPayload
+    | SessionArtifactEventRecordPayload
+    | SessionArtifactSnapshotRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
   agentId?: string;
@@ -423,6 +433,17 @@ export interface CustomTitleRecordPayload {
 }
 
 /**
+ * Stored payload recording the session that spawned this one (a
+ * `create_sub_session` caller). Immutable — written once, near the start of the
+ * transcript. Lets a management UI link a sub-session back to its parent, and
+ * survives a daemon restart via the session-list transcript scan.
+ */
+export interface ParentSessionRecordPayload {
+  /** Id of the session that spawned this one. */
+  parentSessionId: string;
+}
+
+/**
  * Stored payload for UI telemetry replay.
  */
 export interface UiTelemetryRecordPayload {
@@ -515,6 +536,10 @@ export class ChatRecordingService {
    * (safe default) without rewriting the persisted record.
    */
   private currentTitleSource: TitleSource | undefined;
+  /** Parent session id once recorded, so {@link recordParentSession} is
+   * idempotent — a bridge retry (after a failed response) must not append a
+   * second `parent_session` record for the same immutable lineage. */
+  private currentParentSessionId: string | undefined;
   /**
    * How many auto-title attempts have been made this process.
    *
@@ -767,6 +792,39 @@ export class ChatRecordingService {
         }
       });
     this.updateTitleAnchorTracking(record);
+  }
+
+  private async appendRecordStrict(
+    record: ChatRecord,
+    options?: { updateActiveTail?: boolean },
+  ): Promise<void> {
+    const previousLastRecordUuid = this.lastRecordUuid;
+    const updateActiveTail = options?.updateActiveTail !== false;
+    let conversationFile: string;
+    try {
+      conversationFile = this.ensureConversationFile();
+    } catch (error) {
+      debugLogger.error('Error appending record:', error);
+      throw error;
+    }
+
+    if (updateActiveTail) {
+      this.lastRecordUuid = record.uuid;
+    }
+    this.writeChain = this.writeChain
+      .catch(() => {})
+      .then(() => jsonl.writeLine(conversationFile, record));
+
+    try {
+      await this.writeChain;
+      this.updateTitleAnchorTracking(record);
+    } catch (error) {
+      if (updateActiveTail && this.lastRecordUuid === record.uuid) {
+        this.lastRecordUuid = previousLastRecordUuid;
+      }
+      debugLogger.error('Error appending record (async):', error);
+      throw error;
+    }
   }
 
   /**
@@ -1325,6 +1383,40 @@ export class ChatRecordingService {
   }
 
   /**
+   * Records the session that spawned this one (a `create_sub_session` caller).
+   * Appended as a system record near the start of the transcript so the parent
+   * lineage persists with the session and survives a daemon restart (the
+   * session list rehydrates it by scanning the transcript). Immutable — written
+   * once when the sub-session is created.
+   *
+   * @param parentSessionId Id of the spawning session.
+   * @returns true once the record is durably written, false on I/O error.
+   *   AWAITS the write (via the strict append path) rather than the
+   *   fire-and-forget `appendRecord`, whose swallowed rejection would let the
+   *   caller report `persisted: true` for a record that never reached disk.
+   */
+  async recordParentSession(parentSessionId: string): Promise<boolean> {
+    // Idempotent: the lineage is immutable and written once. A bridge retry
+    // (the write succeeded but its response was lost) must not append a second
+    // record — the session would then carry two `parent_session` entries.
+    if (this.currentParentSessionId === parentSessionId) return true;
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'parent_session',
+        systemPayload: { parentSessionId },
+      };
+      await this.appendRecordStrict(record);
+      this.currentParentSessionId = parentSessionId;
+      return true;
+    } catch (error) {
+      debugLogger.error('Error saving parent session record:', error);
+      return false;
+    }
+  }
+
+  /**
    * Finalizes the current session by re-appending cached metadata to EOF, but
    * only after this recorder has appended non-title content since the last
    * title anchor. Pure load/resume must remain read-only so session lists do
@@ -1476,5 +1568,29 @@ export class ChatRecordingService {
     } catch (error) {
       debugLogger.error('Error saving file history snapshot batch:', error);
     }
+  }
+
+  async recordSessionArtifactEvent(
+    payload: SessionArtifactEventRecordPayload,
+  ): Promise<void> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'session_artifact_event',
+      systemPayload: payload,
+    };
+    await this.appendRecordStrict(record, { updateActiveTail: false });
+  }
+
+  async recordSessionArtifactSnapshot(
+    payload: SessionArtifactSnapshotRecordPayload,
+  ): Promise<void> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'session_artifact_snapshot',
+      systemPayload: payload,
+    };
+    await this.appendRecordStrict(record, { updateActiveTail: false });
   }
 }

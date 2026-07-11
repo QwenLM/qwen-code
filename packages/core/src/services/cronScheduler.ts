@@ -21,6 +21,8 @@ import {
   getCronFilePath,
   readCronTasks,
   removeCronTasks,
+  taskHasLegacyCondition,
+  taskHasLegacyRunMode,
   updateCronTasks,
 } from './cronTasksFile.js';
 import { tryAcquireLock, releaseLock } from './cronTasksLock.js';
@@ -257,6 +259,13 @@ export class CronScheduler {
   // the live job away (or clear its pendingRemoval guard) as if it had
   // been deleted on disk.
   private pendingAdd = new Set<string>();
+  // Ids of legacy tasks (a pre-removal `isolated` task with a `condition`
+  // precondition) already reported as skipped, so the fail-closed remediation
+  // breadcrumb is logged once per task rather than on every file reload.
+  private warnedLegacyConditionIds = new Set<string>();
+  // Ids of bare `runMode: 'isolated'` legacy tasks already warned about — they
+  // still run (no safety gate), so this is a one-time behavior-change notice.
+  private warnedLegacyRunModeIds = new Set<string>();
   // Durable ids whose lastFiredAt persist is in flight after a fire — the tick
   // (on-time) OR a catch-up delivery. A reload racing that async write reads the
   // stale disk stamp, so it must not re-detect and re-fire the same slot. Only
@@ -710,9 +719,44 @@ export class CronScheduler {
     // is no longer in this filtered set, so toggling off removes the job,
     // and toggling on reinstalls it on the next watcher reload. Absent
     // `enabled` counts as enabled, so tool-created tasks keep firing.
-    const tasks = read.filter(
-      (t) => hasParseableCron(t) && t.enabled !== false,
-    );
+    // Legacy safety gate — FAIL CLOSED. A task written by an older version as
+    // `runMode: 'isolated'` with a `condition` precondition only fired when the
+    // guard evaluated YES. That mode is gone, and `durableTaskToJob` no longer
+    // carries `condition`, so such a task would now fire inline and
+    // UNCONDITIONALLY — silently changing a safety gate ("only run if X") into
+    // "always run", with no user edit. Skip these entirely (left on disk, like
+    // an unparseable-cron entry) so the removal can never turn a guarded task
+    // into a runaway one; the user re-creates it if they still want it.
+    const tasks = read.filter((t) => {
+      if (!hasParseableCron(t) || t.enabled === false) return false;
+      if (taskHasLegacyCondition(t)) {
+        if (!this.warnedLegacyConditionIds.has(t.id)) {
+          this.warnedLegacyConditionIds.add(t.id);
+          // eslint-disable-next-line no-console -- operator-facing remediation breadcrumb for a silently-disabled task
+          console.warn(
+            `CronScheduler: scheduled task ${t.id} carries a legacy precondition ` +
+              `(isolated run mode was removed) and will NOT fire — recreate it if ` +
+              `you still want it to run.`,
+          );
+        }
+        return false;
+      }
+      // A bare `runMode: 'isolated'` task (no precondition) has no safety gate,
+      // so it still fires — but no longer in a fresh per-run session; it now
+      // accumulates history in its bound session. It runs, but warn once so an
+      // operator who relied on the clean slate knows why runs now differ.
+      if (taskHasLegacyRunMode(t) && !this.warnedLegacyRunModeIds.has(t.id)) {
+        this.warnedLegacyRunModeIds.add(t.id);
+        // eslint-disable-next-line no-console -- operator-facing behavior-change breadcrumb
+        console.warn(
+          `CronScheduler: scheduled task ${t.id} was created with the removed ` +
+            `'isolated' run mode; it now runs in its bound session (history ` +
+            `accumulates across runs). Recreate it and call create_sub_session ` +
+            `from the prompt for per-run isolation.`,
+        );
+      }
+      return true;
+    });
 
     const now = Date.now();
     const missedOneShots: DurableCronTask[] = [];
@@ -920,8 +964,14 @@ export class CronScheduler {
         // "defer to the owning session" path).
         for (const id of skipped) this.pendingRemoval.delete(id);
         if (runnable.length > 0) {
+          // The carrier is SYNTHETIC: its prompt is a notification about every
+          // task in `runnable`, not the command of any one of them.
+          const carrier = durableTaskToJob(
+            runnable[0]!,
+            this.recurringMaxAgeMs,
+          );
           onFire({
-            ...durableTaskToJob(runnable[0]!, this.recurringMaxAgeMs),
+            ...carrier,
             prompt: buildMissedCronNotification(runnable),
             missed: true,
           });

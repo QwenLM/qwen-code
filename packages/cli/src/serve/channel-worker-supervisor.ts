@@ -12,10 +12,21 @@ import {
   QWEN_SERVER_TOKEN_ENV,
 } from './channel-worker-env.js';
 import { sanitizeLogText } from '@qwen-code/channel-base';
+import type { ChannelWebhookTask } from '@qwen-code/channel-base';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
+import {
+  CHANNEL_WEBHOOK_TASK_IPC_TIMEOUT_MS,
+  ChannelWebhookEnqueueError,
+  createChannelWebhookTaskMessage,
+  isChannelWebhookEnqueueErrorCode,
+  isChannelWebhookTaskResultMessage,
+  type ChannelWebhookAccepted,
+  type ChannelWebhookEnqueueErrorCode,
+} from './channel-webhook-ipc.js';
 
 const DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_CHANNEL_WORKER_HEARTBEAT_TIMEOUT_MS = 45_000;
+const CHANNEL_WORKER_STOP_GRACE_MS = 10_000;
 const MAX_WORKER_LOG_LINE_LENGTH = 4096;
 const MAX_WORKER_LOG_BUFFER_LENGTH = 64 * 1024;
 const MAX_WORKER_LOG_DISCARDED_REMAINDER_LENGTH = MAX_WORKER_LOG_BUFFER_LENGTH;
@@ -68,8 +79,15 @@ export interface ChannelWorkerSnapshot {
 export interface ChannelWorkerSupervisor {
   start(): Promise<void>;
   stop(): Promise<void>;
+  /**
+   * Stop the current worker (if any) and relaunch it. The relaunched worker
+   * re-reads settings.json, so this is how settings changes are applied
+   * without restarting the whole daemon. Rejects if the relaunch fails.
+   */
+  restart(): Promise<ChannelWorkerSnapshot>;
   killAllSync(): void;
   snapshot(): ChannelWorkerSnapshot;
+  enqueueWebhookTask(task: ChannelWebhookTask): Promise<ChannelWebhookAccepted>;
 }
 
 export interface ChannelWorkerChild {
@@ -77,6 +95,7 @@ export interface ChannelWorkerChild {
   killed?: boolean;
   stdout?: WorkerLogStream;
   stderr?: WorkerLogStream;
+  send?(message: unknown, callback?: (err: Error | null) => void): boolean;
   kill(signal?: NodeJS.Signals | number): boolean;
   on(event: 'message', listener: (message: unknown) => void): this;
   removeListener(event: 'message', listener: (message: unknown) => void): this;
@@ -448,6 +467,16 @@ export function createChannelWorkerSupervisor(
   let restartTimer: NodeJS.Timeout | undefined;
   let staleHeartbeatTimer: NodeJS.Timeout | undefined;
   let restartAttemptTimes: number[] = [];
+  const pendingWebhookTasks = new Map<
+    string,
+    {
+      resolve: (accepted: ChannelWebhookAccepted) => void;
+      reject: (err: Error) => void;
+      timer: NodeJS.Timeout;
+    }
+  >();
+  let restarting: Promise<ChannelWorkerSnapshot> | undefined;
+  let disposed = false;
 
   const snapshotCopy = (): ChannelWorkerSnapshot => ({
     ...snapshot,
@@ -473,6 +502,48 @@ export function createChannelWorkerSupervisor(
     if (!staleHeartbeatTimer) return;
     clearTimeout(staleHeartbeatTimer);
     staleHeartbeatTimer = undefined;
+  };
+
+  const rejectPendingWebhookTasks = (
+    code: ChannelWebhookEnqueueErrorCode,
+    message: string,
+  ) => {
+    for (const pending of pendingWebhookTasks.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new ChannelWebhookEnqueueError(code, message));
+    }
+    pendingWebhookTasks.clear();
+  };
+
+  const rejectPendingWebhookTask = (id: string, err: Error) => {
+    const pending = pendingWebhookTasks.get(id);
+    if (!pending) return;
+    pendingWebhookTasks.delete(id);
+    clearTimeout(pending.timer);
+    pending.reject(err);
+  };
+
+  const settleWebhookTask = (message: unknown): boolean => {
+    if (!isChannelWebhookTaskResultMessage(message)) return false;
+    const pending = pendingWebhookTasks.get(message.id);
+    if (!pending) return true;
+    if (message.ok) {
+      pendingWebhookTasks.delete(message.id);
+      clearTimeout(pending.timer);
+      pending.resolve({ accepted: true });
+    } else {
+      const code = isChannelWebhookEnqueueErrorCode(message.code)
+        ? message.code
+        : 'channel_webhook_enqueue_failed';
+      rejectPendingWebhookTask(
+        message.id,
+        new ChannelWebhookEnqueueError(
+          code,
+          message.error || 'Channel webhook task failed.',
+        ),
+      );
+    }
+    return true;
   };
 
   const pruneRestartAttempts = (nowMs: number) => {
@@ -746,6 +817,9 @@ export function createChannelWorkerSupervisor(
       };
       function handleMessage(message: unknown) {
         if (child !== startedChild) return;
+        if (settleWebhookTask(message)) {
+          return;
+        }
         if (!ready && isReadyMessage(message)) {
           completeReady(message);
         } else if (isHeartbeatMessage(message)) {
@@ -764,6 +838,10 @@ export function createChannelWorkerSupervisor(
           signal,
           snapshot.error ??
             (ready ? undefined : sanitizeWorkerError(message, redaction)),
+        );
+        rejectPendingWebhookTasks(
+          'channel_worker_unavailable',
+          'Channel worker exited.',
         );
         child = undefined;
         if ((ready || kind === 'restart') && !stopping) {
@@ -815,9 +893,12 @@ export function createChannelWorkerSupervisor(
     });
   };
 
-  return {
+  const supervisor: ChannelWorkerSupervisor = {
     async start() {
-      if (child) return;
+      // `disposed` is latched only by killAllSync() (hard shutdown), so the
+      // supported stop()/start() reuse lifecycle is preserved; this guard just
+      // prevents a relaunch into a daemon that is being force-torn-down.
+      if (disposed || child) return;
       stopping = false;
       clearRestartTimer();
       restartAttemptTimes = [];
@@ -826,6 +907,10 @@ export function createChannelWorkerSupervisor(
     async stop() {
       clearRestartTimer();
       clearStaleHeartbeatTimer();
+      rejectPendingWebhookTasks(
+        'channel_worker_unavailable',
+        'Channel worker stopped.',
+      );
       if (
         !child ||
         snapshot.state === 'exited' ||
@@ -836,7 +921,7 @@ export function createChannelWorkerSupervisor(
         snapshot = { ...snapshot, state: 'stopped' };
         return;
       }
-      const exited = waitForExit(child, 5_000);
+      const exited = waitForExit(child, CHANNEL_WORKER_STOP_GRACE_MS);
       stopping = true;
       child.kill('SIGTERM');
       if (!(await exited)) {
@@ -858,7 +943,33 @@ export function createChannelWorkerSupervisor(
       stopping = false;
       snapshot = { ...snapshot, state: 'stopped' };
     },
+    async restart() {
+      // A hard shutdown (killAllSync) latches `disposed`; a reload racing that
+      // must not relaunch a worker into a tearing-down daemon.
+      if (disposed) return snapshotCopy();
+      // Coalesce concurrent reloads onto one stop+relaunch so a burst of
+      // reload requests cannot fork multiple workers.
+      restarting ??= (async () => {
+        try {
+          await supervisor.stop();
+          // start() bails if a child is still attached (stop cleared it) or if
+          // killAllSync latched `disposed` mid-reload — avoiding an orphaned
+          // fork. It also resets the restart budget, so a worker previously
+          // parked in `failed` recovers on an explicit reload.
+          await supervisor.start();
+          return snapshotCopy();
+        } finally {
+          restarting = undefined;
+        }
+      })();
+      return restarting;
+    },
     killAllSync() {
+      disposed = true;
+      rejectPendingWebhookTasks(
+        'channel_worker_unavailable',
+        'Channel worker stopped.',
+      );
       if (
         !child ||
         snapshot.state === 'exited' ||
@@ -887,5 +998,59 @@ export function createChannelWorkerSupervisor(
     snapshot() {
       return snapshotCopy();
     },
+    async enqueueWebhookTask(task) {
+      const startedChild = child;
+      if (!startedChild || snapshot.state !== 'running') {
+        throw new ChannelWebhookEnqueueError(
+          'channel_worker_unavailable',
+          'Channel worker is not running.',
+        );
+      }
+      const send = startedChild.send;
+      if (!send) {
+        throw new ChannelWebhookEnqueueError(
+          'channel_worker_unavailable',
+          'Channel worker IPC send failed.',
+        );
+      }
+      const message = createChannelWebhookTaskMessage(task);
+      return await new Promise<ChannelWebhookAccepted>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingWebhookTasks.delete(message.id);
+          reject(
+            new ChannelWebhookEnqueueError(
+              'channel_webhook_enqueue_timeout',
+              'Channel webhook task IPC timed out.',
+            ),
+          );
+        }, CHANNEL_WEBHOOK_TASK_IPC_TIMEOUT_MS);
+        timer.unref();
+        pendingWebhookTasks.set(message.id, { resolve, reject, timer });
+        try {
+          send.call(startedChild, message, (err) => {
+            if (err) {
+              rejectPendingWebhookTask(
+                message.id,
+                new ChannelWebhookEnqueueError(
+                  'channel_worker_unavailable',
+                  `Channel worker IPC send failed: ${err.message}`,
+                ),
+              );
+            }
+          });
+        } catch (err) {
+          rejectPendingWebhookTask(
+            message.id,
+            new ChannelWebhookEnqueueError(
+              'channel_worker_unavailable',
+              `Channel worker IPC send failed: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            ),
+          );
+        }
+      });
+    },
   };
+  return supervisor;
 }

@@ -25,6 +25,10 @@ import {
   getResumeTokenCounts,
   type ConversationRecord,
 } from './sessionService.js';
+import {
+  SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  stableSessionArtifactId,
+} from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
@@ -466,6 +470,354 @@ describe('SessionService', () => {
       expect(loaded?.conversation.messages[0].uuid).toBe('b1');
       expect(loaded?.conversation.messages[1].uuid).toBe('b2');
       expect(loaded?.lastCompletedUuid).toBe('b2');
+    });
+
+    it('loads artifact side records attached to the active branch', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      const artifactId = stableSessionArtifactId(
+        sessionIdB,
+        'url:https://example.com/report',
+      );
+      const artifactRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'artifact-1',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: sessionIdB,
+          sequence: 1,
+          recordedAt: '2026-07-06T00:00:00.000Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId,
+              artifact: {
+                id: artifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Report',
+                url: 'https://example.com/report',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-06T00:00:00.000Z',
+                updatedAt: '2026-07-06T00:00:00.000Z',
+                persistedAt: '2026-07-06T00:00:00.000Z',
+              },
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        artifactRecord,
+        recordB2,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['b1', 'b2']);
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([
+        expect.objectContaining({
+          id: artifactId,
+          title: 'Report',
+        }),
+      ]);
+    });
+
+    it('loads artifact side records after a tail-neutral title reanchor', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      const artifactId = stableSessionArtifactId(
+        sessionIdB,
+        'url:https://example.com/reanchored-report',
+      );
+      const titleRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'title-reanchor',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'custom_title',
+        message: undefined,
+        systemPayload: {
+          customTitle: 'Reanchored title',
+          titleSource: 'auto',
+        },
+      };
+      const artifactRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'artifact-after-title',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: sessionIdB,
+          sequence: 1,
+          recordedAt: '2026-07-06T00:00:00.000Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId,
+              artifact: {
+                id: artifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Reanchored report',
+                url: 'https://example.com/reanchored-report',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-06T00:00:00.000Z',
+                updatedAt: '2026-07-06T00:00:00.000Z',
+                persistedAt: '2026-07-06T00:00:00.000Z',
+              },
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        titleRecord,
+        artifactRecord,
+        recordB2,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['b1', 'b2']);
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([
+        expect.objectContaining({
+          id: artifactId,
+          title: 'Reanchored report',
+        }),
+      ]);
+    });
+
+    it('loads chained artifact side records attached to the active branch', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      const artifactId = stableSessionArtifactId(
+        sessionIdB,
+        'url:https://example.com/chained-report',
+      );
+      const createRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'artifact-create',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: sessionIdB,
+          sequence: 1,
+          recordedAt: '2026-07-06T00:00:00.000Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId,
+              artifact: {
+                id: artifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Chained report',
+                url: 'https://example.com/chained-report',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-06T00:00:00.000Z',
+                updatedAt: '2026-07-06T00:00:00.000Z',
+                persistedAt: '2026-07-06T00:00:00.000Z',
+              },
+            },
+          ],
+        },
+      };
+      const removeRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'artifact-remove',
+        parentUuid: 'artifact-create',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: sessionIdB,
+          sequence: 2,
+          recordedAt: '2026-07-06T00:00:01.000Z',
+          changes: [
+            {
+              action: 'removed',
+              artifactId,
+              reason: 'explicit',
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        createRecord,
+        removeRecord,
+        recordB2,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['b1', 'b2']);
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([]);
+      expect(loaded?.artifactSnapshot?.tombstonedIds).toContain(artifactId);
+    });
+
+    it('does not load artifact side records from abandoned branches', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      const artifactId = stableSessionArtifactId(
+        sessionIdB,
+        'url:https://example.com/abandoned-report',
+      );
+      const artifactRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'artifact-abandoned',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: sessionIdB,
+          sequence: 1,
+          recordedAt: '2026-07-06T00:00:00.000Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId,
+              artifact: {
+                id: artifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Abandoned report',
+                url: 'https://example.com/abandoned-report',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-06T00:00:00.000Z',
+                updatedAt: '2026-07-06T00:00:00.000Z',
+                persistedAt: '2026-07-06T00:00:00.000Z',
+              },
+            },
+          ],
+        },
+      };
+      const abandonedChild: ChatRecord = {
+        ...recordB2,
+        uuid: 'abandoned-child',
+        parentUuid: 'b1',
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        artifactRecord,
+        abandonedChild,
+        recordB2,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['b1', 'b2']);
+      expect(loaded?.artifactSnapshot).toBeUndefined();
+    });
+
+    it('does not treat trailing artifact side records as the conversation leaf', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      const artifactId = stableSessionArtifactId(
+        sessionIdB,
+        'url:https://example.com/trailing-report',
+      );
+      const artifactRecord: ChatRecord = {
+        ...recordB2,
+        uuid: 'artifact-tail',
+        parentUuid: 'b2',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: sessionIdB,
+          sequence: 1,
+          recordedAt: '2026-07-06T00:00:00.000Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId,
+              artifact: {
+                id: artifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Trailing report',
+                url: 'https://example.com/trailing-report',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-06T00:00:00.000Z',
+                updatedAt: '2026-07-06T00:00:00.000Z',
+                persistedAt: '2026-07-06T00:00:00.000Z',
+              },
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        recordB2,
+        artifactRecord,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['b1', 'b2']);
+      expect(loaded?.lastCompletedUuid).toBe('b2');
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([
+        expect.objectContaining({
+          id: artifactId,
+          title: 'Trailing report',
+        }),
+      ]);
     });
 
     it('keeps the latest file history snapshot for a prompt id', async () => {
@@ -2511,6 +2863,324 @@ describe('SessionService', () => {
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
     });
 
+    it('copies artifact side records from the active branch', async () => {
+      const oldId = '71717171-7171-7171-7171-717171717171';
+      const newId = '81818181-8181-8181-8181-818181818181';
+      const { file, lines } = seedSession(oldId);
+      const oldArtifactId = stableSessionArtifactId(
+        oldId,
+        'url:https://example.com/forked',
+      );
+      const artifactRecord = {
+        uuid: 'artifact-1',
+        parentUuid: 'u1',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:00.500Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 1,
+          recordedAt: '2026-04-22T00:00:00.500Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId: oldArtifactId,
+              artifact: {
+                id: oldArtifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Forked artifact',
+                url: 'https://example.com/forked',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-04-22T00:00:00.500Z',
+                updatedAt: '2026-04-22T00:00:00.500Z',
+                persistedAt: '2026-04-22T00:00:00.500Z',
+              },
+            },
+          ],
+        },
+      };
+      fs.writeFileSync(
+        file,
+        [lines[0], artifactRecord, lines[1]]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const loaded = await service.loadSession(newId);
+      const forkedLines = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(result.copiedCount).toBe(3);
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['u1', 'u2']);
+      expect(
+        forkedLines.find((record) => record.uuid === 'artifact-1'),
+      ).toMatchObject({
+        parentUuid: 'u1',
+      });
+      expect(forkedLines.find((record) => record.uuid === 'u2')).toMatchObject({
+        parentUuid: 'u1',
+      });
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([
+        expect.objectContaining({
+          id: stableSessionArtifactId(newId, 'url:https://example.com/forked'),
+          title: 'Forked artifact',
+        }),
+      ]);
+    });
+
+    it('does not copy artifact side records from abandoned branches', async () => {
+      const oldId = '74747474-7474-7474-7474-747474747474';
+      const newId = '84848484-8484-8484-8484-848484848484';
+      const { file, lines } = seedSession(oldId);
+      const oldArtifactId = stableSessionArtifactId(
+        oldId,
+        'url:https://example.com/abandoned-forked',
+      );
+      const artifactRecord = {
+        uuid: 'artifact-abandoned',
+        parentUuid: 'u1',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:00.500Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 1,
+          recordedAt: '2026-04-22T00:00:00.500Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId: oldArtifactId,
+              artifact: {
+                id: oldArtifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Abandoned forked artifact',
+                url: 'https://example.com/abandoned-forked',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-04-22T00:00:00.500Z',
+                updatedAt: '2026-04-22T00:00:00.500Z',
+                persistedAt: '2026-04-22T00:00:00.500Z',
+              },
+            },
+          ],
+        },
+      };
+      const abandonedChild = {
+        ...lines[1],
+        uuid: 'abandoned-child',
+        parentUuid: 'u1',
+      };
+      fs.writeFileSync(
+        file,
+        [lines[0], artifactRecord, abandonedChild, lines[1]]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const loaded = await service.loadSession(newId);
+      const forkedLines = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(result.copiedCount).toBe(2);
+      expect(
+        forkedLines.some((record) => record.uuid === 'artifact-abandoned'),
+      ).toBe(false);
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['u1', 'u2']);
+      expect(loaded?.artifactSnapshot).toBeUndefined();
+    });
+
+    it('does not treat trailing artifact side records as the fork leaf', async () => {
+      const oldId = '73737373-7373-7373-7373-737373737373';
+      const newId = '83838383-8383-8383-8383-838383838383';
+      const { file, lines } = seedSession(oldId);
+      const url = 'https://example.com/trailing-forked';
+      const oldArtifactId = stableSessionArtifactId(oldId, `url:${url}`);
+      const artifactRecord = {
+        uuid: 'artifact-tail',
+        parentUuid: 'u2',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:01.500Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 1,
+          recordedAt: '2026-04-22T00:00:01.500Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId: oldArtifactId,
+              artifact: {
+                id: oldArtifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Trailing forked artifact',
+                url,
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-04-22T00:00:01.500Z',
+                updatedAt: '2026-04-22T00:00:01.500Z',
+                persistedAt: '2026-04-22T00:00:01.500Z',
+              },
+            },
+          ],
+        },
+      };
+      fs.writeFileSync(
+        file,
+        [...lines, artifactRecord]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const loaded = await service.loadSession(newId);
+
+      expect(result.copiedCount).toBe(3);
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['u1', 'u2']);
+      expect(loaded?.lastCompletedUuid).toBe('u2');
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([
+        expect.objectContaining({
+          id: stableSessionArtifactId(newId, `url:${url}`),
+          title: 'Trailing forked artifact',
+        }),
+      ]);
+    });
+
+    it('does not resurrect artifacts removed by later side records when forking', async () => {
+      const oldId = '72727272-7272-7272-7272-727272727272';
+      const newId = '82828282-8282-8282-8282-828282828282';
+      const { file, lines } = seedSession(oldId);
+      const url = 'https://example.com/forked-then-removed';
+      const oldArtifactId = stableSessionArtifactId(oldId, `url:${url}`);
+      const forkedArtifactId = stableSessionArtifactId(newId, `url:${url}`);
+      const createRecord = {
+        uuid: 'artifact-create',
+        parentUuid: 'u1',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:00.500Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 1,
+          recordedAt: '2026-04-22T00:00:00.500Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId: oldArtifactId,
+              artifact: {
+                id: oldArtifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Forked artifact',
+                url,
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-04-22T00:00:00.500Z',
+                updatedAt: '2026-04-22T00:00:00.500Z',
+                persistedAt: '2026-04-22T00:00:00.500Z',
+              },
+            },
+          ],
+        },
+      };
+      const removeRecord = {
+        uuid: 'artifact-remove',
+        parentUuid: 'u1',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:00.750Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 2,
+          recordedAt: '2026-04-22T00:00:00.750Z',
+          changes: [
+            {
+              action: 'removed',
+              artifactId: oldArtifactId,
+              reason: 'explicit',
+            },
+          ],
+        },
+      };
+      fs.writeFileSync(
+        file,
+        [lines[0], createRecord, removeRecord, lines[1]]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const loaded = await service.loadSession(newId);
+      const forkedLines = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      const forkedRemovePayload = forkedLines.find(
+        (record) => record.uuid === 'artifact-remove',
+      )?.systemPayload;
+
+      expect(result.copiedCount).toBe(4);
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([]);
+      expect(loaded?.artifactSnapshot?.tombstonedIds).toContain(
+        forkedArtifactId,
+      );
+      expect(forkedRemovePayload).toMatchObject({
+        changes: [
+          {
+            action: 'removed',
+            artifactId: forkedArtifactId,
+            reason: 'explicit',
+          },
+        ],
+      });
+    });
+
     it('preserves file history snapshots on the forked session', async () => {
       const oldId = '31313131-3131-3131-3131-313131313131';
       const newId = '41414141-4141-4141-4141-414141414141';
@@ -2721,6 +3391,75 @@ describe('SessionService', () => {
         /Invalid new sessionId/,
       );
     });
+
+    it('drops the source parent_session record so the fork inherits no lineage', async () => {
+      // A fork is a fresh top-level session, not a sub-session. Copying the
+      // source's parent_session record would make the fork report the original's
+      // parent as its own. Seed the parent_session record on the active branch
+      // (u1 -> parent_session -> u2) so it would otherwise be copied.
+      const oldId = 'aaaaaaaa-1111-1111-1111-111111111111';
+      const newId = 'bbbbbbbb-2222-2222-2222-222222222222';
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      const srcFile = realPath.join(chatsDir, `${oldId}.jsonl`);
+      const lines = [
+        {
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId: oldId,
+          type: 'user',
+          timestamp: '2026-04-22T00:00:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+        },
+        {
+          uuid: 'up',
+          parentUuid: 'u1',
+          sessionId: oldId,
+          type: 'system',
+          subtype: 'parent_session',
+          timestamp: '2026-04-22T00:00:00.500Z',
+          cwd,
+          version: 'test',
+          systemPayload: { parentSessionId: 'P' },
+        },
+        {
+          uuid: 'u2',
+          parentUuid: 'up',
+          sessionId: oldId,
+          type: 'assistant',
+          timestamp: '2026-04-22T00:00:01.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'model', parts: [{ text: 'hi' }] },
+        },
+      ];
+      fs.writeFileSync(
+        srcFile,
+        lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      expect(
+        written.some(
+          (r) => r.type === 'system' && r.subtype === 'parent_session',
+        ),
+      ).toBe(false);
+
+      // The source keeps its lineage; the fork carries none of it.
+      expect(await service.readParentSessionId(oldId)).toBe('P');
+      expect(await service.readParentSessionId(newId)).toBeUndefined();
+    });
   });
 
   describe('findSessionTitlesByPrefix', () => {
@@ -2895,6 +3634,198 @@ describe('SessionService', () => {
 
       const titles = await service.findSessionTitlesByPrefix('anything');
       expect(titles).toEqual([]);
+    });
+  });
+
+  describe('listSessions parentSessionId round-trip', () => {
+    // Uses real disk like findSessionTitlesByPrefix — readParentSessionIdFromFile
+    // does a synchronous tail/head scan of the file, so the mocked
+    // jsonl.readLines path can't stand in for it. Seed a real transcript with a
+    // parent_session record and assert listSessions rehydrates parentSessionId.
+    let realTmpDir: string;
+    let realPath: typeof import('node:path');
+    let service: SessionService;
+    let cwd: string;
+
+    beforeEach(async () => {
+      const realOs = await import('node:os');
+      realPath = await vi.importActual<typeof import('node:path')>('node:path');
+      const actualPaths =
+        await vi.importActual<typeof import('../utils/paths.js')>(
+          '../utils/paths.js',
+        );
+      const actualJsonl = await vi.importActual<
+        typeof import('../utils/jsonl-utils.js')
+      >('../utils/jsonl-utils.js');
+
+      vi.mocked(path.join).mockImplementation(
+        realPath.join as unknown as typeof path.join,
+      );
+      vi.mocked(path.dirname).mockImplementation(
+        realPath.dirname as unknown as typeof path.dirname,
+      );
+      vi.mocked(path.isAbsolute).mockImplementation(
+        realPath.isAbsolute as unknown as typeof path.isAbsolute,
+      );
+      vi.mocked(path.resolve).mockImplementation(
+        realPath.resolve as unknown as typeof path.resolve,
+      );
+      vi.mocked(getProjectHash).mockImplementation(actualPaths.getProjectHash);
+      const mockedPaths = (await import('../utils/paths.js')) as unknown as {
+        sanitizeCwd: (cwd: string) => string;
+      };
+      mockedPaths.sanitizeCwd = actualPaths.sanitizeCwd;
+      vi.mocked(jsonl.read).mockImplementation(actualJsonl.read);
+      vi.mocked(jsonl.readLines).mockImplementation(actualJsonl.readLines);
+
+      vi.mocked(readdirSyncSpy).mockRestore?.();
+      vi.mocked(statSyncSpy).mockRestore?.();
+      vi.mocked(unlinkSyncSpy).mockRestore?.();
+
+      realTmpDir = fs.mkdtempSync(
+        realPath.join(realOs.tmpdir(), 'parent-session-id-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = realTmpDir;
+      cwd = process.cwd();
+      service = new SessionService(cwd);
+    });
+
+    afterEach(() => {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      try {
+        fs.rmSync(realTmpDir, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+    });
+
+    const getChatsDir = () => {
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      return chatsDir;
+    };
+
+    const userLine = (sessionId: string, text: string) => ({
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId,
+      type: 'user',
+      timestamp: '2026-04-22T00:00:00.000Z',
+      cwd,
+      version: 'test',
+      message: { role: 'user', parts: [{ text }] },
+    });
+
+    const parentSessionLine = (sessionId: string, parentSessionId: string) => ({
+      uuid: 'u2',
+      parentUuid: 'u1',
+      sessionId,
+      type: 'system',
+      subtype: 'parent_session',
+      timestamp: '2026-04-22T00:00:01.000Z',
+      cwd,
+      version: 'test',
+      systemPayload: { parentSessionId },
+    });
+
+    const writeSession = (
+      sessionId: string,
+      lines: Array<Record<string, unknown>>,
+    ) => {
+      const file = realPath.join(getChatsDir(), `${sessionId}.jsonl`);
+      fs.writeFileSync(
+        file,
+        lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
+      );
+      return file;
+    };
+
+    const findItem = (
+      items: Array<{ sessionId: string; parentSessionId?: string }>,
+      sessionId: string,
+    ) => items.find((item) => item.sessionId === sessionId);
+
+    it('rehydrates parentSessionId from a parent_session record', async () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      writeSession(sessionId, [
+        userLine(sessionId, 'hello'),
+        parentSessionLine(sessionId, 'parent-abc'),
+      ]);
+
+      const result = await service.listSessions();
+
+      const item = findItem(result.items, sessionId);
+      expect(item).toBeDefined();
+      expect(item?.parentSessionId).toBe('parent-abc');
+    });
+
+    it('leaves parentSessionId undefined when no parent_session record exists', async () => {
+      const sessionId = '22222222-2222-2222-2222-222222222222';
+      writeSession(sessionId, [userLine(sessionId, 'hello')]);
+
+      const result = await service.listSessions();
+
+      const item = findItem(result.items, sessionId);
+      expect(item).toBeDefined();
+      expect(item?.parentSessionId).toBeUndefined();
+    });
+
+    it('reads a parent_session record near the head past the tail window', async () => {
+      // The parent_session record is written once near the start of the file.
+      // Push it out of the trailing 64KB scan window with bulk user records so
+      // the read must fall back to the head window to recover it.
+      const sessionId = '33333333-3333-3333-3333-333333333333';
+      const bulk = 'x'.repeat(4000);
+      const lines: Array<Record<string, unknown>> = [
+        userLine(sessionId, 'hello'),
+        parentSessionLine(sessionId, 'parent-head'),
+      ];
+      // 30 * ~4KB comfortably exceeds the 64KB tail window.
+      for (let i = 0; i < 30; i++) {
+        lines.push({
+          uuid: `bulk-${i}`,
+          parentUuid: i === 0 ? 'u2' : `bulk-${i - 1}`,
+          sessionId,
+          type: 'user',
+          timestamp: '2026-04-22T00:01:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: bulk }] },
+        });
+      }
+      writeSession(sessionId, lines);
+
+      const result = await service.listSessions();
+
+      const item = findItem(result.items, sessionId);
+      expect(item).toBeDefined();
+      expect(item?.parentSessionId).toBe('parent-head');
+    });
+
+    it('readParentSessionId returns the parentSessionId for a session with a parent_session record', async () => {
+      const sessionId = '44444444-4444-4444-4444-444444444444';
+      writeSession(sessionId, [
+        userLine(sessionId, 'hello'),
+        parentSessionLine(sessionId, 'parent-xyz'),
+      ]);
+
+      expect(await service.readParentSessionId(sessionId)).toBe('parent-xyz');
+    });
+
+    it('readParentSessionId returns undefined for a session without a parent_session record', async () => {
+      const sessionId = '55555555-5555-5555-5555-555555555555';
+      writeSession(sessionId, [userLine(sessionId, 'hello')]);
+
+      expect(await service.readParentSessionId(sessionId)).toBeUndefined();
+    });
+
+    it('readParentSessionId returns undefined for a nonexistent session', async () => {
+      const sessionId = '66666666-6666-6666-6666-666666666666';
+
+      expect(await service.readParentSessionId(sessionId)).toBeUndefined();
     });
   });
 });

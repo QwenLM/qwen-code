@@ -44,9 +44,12 @@ Empirically, ensemble diversity drops sharply past 3-5 sampled paths. Three is t
 **Considered:**
 
 - **N independent agents (original design):** One verification agent per finding. Each reads code independently. High quality but cost scales linearly with finding count (15 findings = 15 LLM calls).
-- **1 batch agent (chosen):** Single agent receives all findings, verifies each one. Fixed cost.
+- **1 batch agent (original):** Single agent receives all findings, verifies each one. Fixed cost.
+- **Sharded batches, ≤8 findings each (chosen):** `ceil(N/8)` agents, launched together.
 
-**Decision:** Batch. The quality difference is minimal — a single agent verifying 15 findings has MORE context than 15 independent agents (sees cross-finding relationships). Cost drops from O(N) to O(1).
+**Decision:** Shard. One batch agent was right when a review produced 15 findings — it saw cross-finding relationships and cost O(1). But a Step 3B review of a large PR produces 30-60 findings, and one agent re-reading code for each of them inside a single context window degrades on the tail of the list. Sharding costs `ceil(N/8)` calls instead of 1, still far below one-agent-per-finding, and keeps each verifier's job small enough to do properly.
+
+**A verifier may never reject a Critical.** It may downgrade to low confidence, with specific contradicting code cited. A rejected Critical is deleted from both the PR and the terminal and no later stage revisits it; a downgraded one still reaches a human under "Needs Human Review". The asymmetry between a false positive (noise) and a deleted true positive (a shipped bug plus another `/review` round) is not close.
 
 ## Why reverse audit is a separate step, and why iterative
 
@@ -59,13 +62,56 @@ Verification is targeted (check specific claims at specific locations). Reverse 
 
 ### Why iterative (multi-round)
 
-A single reverse audit pass leaves whatever the reverse audit agent itself missed. Each new round receives the cumulative finding list from prior rounds, so it focuses on what's left undiscovered. Empirically, most PRs converge in 1-2 rounds; the 3-round hard cap prevents runaway cost on pathological cases.
+A single reverse audit pass leaves whatever the reverse audit agent itself missed. Each new round receives the cumulative finding list from prior rounds, so it focuses on what's left undiscovered.
 
-### Why cap at 3 rounds, not unlimited
+### Why the stop rule is two consecutive dry rounds, not one
 
-Diminishing returns. Past round 3, the marginal yield is low and a stuck-loop hazard rises (the model may fabricate issues to satisfy the "find more" framing). The "No issues found" termination already exits early on most PRs — the cap is a safety net, not the common path.
+One dry round was the original rule, and PR #6457 shows why it is unsound. The per-round Critical yield across its eight review rounds was `2, 2, 7, 0, 0, 5, 3, 1`. The review returned "no blockers" **twice**, and the next round surfaced five Criticals — three of them in code that had been in the diff since the first commit. A yield of zero is evidence about one round's agents, not about the code.
 
-**Optimization preserved:** Reverse audit findings skip verification (across all rounds). The agent has full context, so output is inherently high-confidence.
+Requiring two consecutive dry rounds makes a single lazy or context-starved agent unable to end the loop. The hard cap moves from 3 rounds to 5, and when the cap is what stopped the loop the output must say so rather than implying convergence.
+
+### Why the reverse audit fans out per chunk
+
+The original design gave one agent the whole diff plus a growing cumulative finding list. On a 5 800-line diff that is the most context-starved agent in the pipeline — exactly on the PRs where reverse audit matters most. Under Step 3B each round runs one auditor per chunk, each with the full cumulative finding list but only its own territory to re-read.
+
+### Why the topology gate counts source lines, not diff lines
+
+Diff size is a bad proxy for review risk, because tests dominate it. Across this repo's last 40 merged PRs the median diff is **41% test code**, and 14 of the 40 are more than half tests. A gate on raw diff lines sends a change of 173 production lines that ships 489 lines of new tests into the territory fan-out, where the production code ends up owned by a single chunk agent — while under the dimension fan-out it would have been read by eight lenses.
+
+Territory fan-out is worth it when there is a lot of _risky_ code to divide, not a lot of _lines_. So the gate is `srcDiffLines > 500`, with a second clause `diffLines > 2400` as a delivery bound: past that point `ceil(diffLines / 400) + 4 > 10`, so chunking uses fewer agents than the ten-lens topology anyway, and asking ten agents each to read a diff that large dilutes all of them. On the 40-PR sample the second clause never fires; it exists for a changeset dominated by tests or generated files.
+
+Re-gating moves 6 of those 40 PRs from 3B back to 3A and costs 22 extra agents in total across all 40 — about 5%. It buys those six PRs eight review lenses on their production code instead of one.
+
+Chunking itself is unchanged: the plan still tiles every line, tests and generated files included. Only the count of reviewers and their brief change. `heavy` is likewise restricted to `source` files — the invariant checklist asks about fields, timers, collections, and error taxonomies, and a rewritten test file has none of those.
+
+### Why `plan-diff` exists
+
+Step 3B's chunk agents are defined as "one per entry in `chunks[]`", and only `fetch-pr` produced a chunk plan. A local-diff review, or a cross-repo review in lightweight mode, therefore routed into a topology it had no chunk list for: no receipts, no tiling guarantee, and the orchestrator left to improvise line ranges. Two of the four review paths were promised a mechanism the skill could not deliver.
+
+`qwen review plan-diff <diff-file>` reads a captured diff and emits the same `chunks[]`, `files[]` and topology counts. Redirecting `git diff` or `gh pr diff` to a file already bypasses the 30 000-char shell cap, so all four paths now share one code path. It cannot decide `heavy` — that needs a tree to read the post-change file from — so a bare diff gets chunk agents but no invariant agents.
+
+### Why the topology gate ignores prose
+
+`docs/**` and root-level markdown classify as `docs` and stay out of `srcDiffLines`. A translation PR carries no runtime risk, and gating on raw size would fan chunk agents across it. Markdown _inside a source tree_ stays `source`: this repo's bundled skill prompts are `packages/core/src/skills/**/SKILL.md`, and they are executable behaviour. Coverage is unaffected either way — every line is still chunked and receipted.
+
+### Why the invariant checklist is split across three agents
+
+Measured on PR #6457's `QQChannel.ts` (1551 → 2643 lines, 65% rewritten), at its first commit, against the nine defects maintainers later confirmed in that commit:
+
+| Reviewer                                  | Invariant-class defects found |
+| ----------------------------------------- | ----------------------------- |
+| One agent, all eight checks               | 1 of 5                        |
+| Three agents, 2-3 checks each, same model | 5 of 5                        |
+| 14 chunk agents (Step 3B), same diff      | 0 of 5                        |
+| 8 dimension agents on the truncated diff  | 2 of 5                        |
+
+The chunk agents _saw_ every one of those five defects — the code was inside their territory — and reported none of them. Visibility is necessary and not sufficient. What the chunk agents lack is not the lines; it is the question. "Review this diff for bugs" and "list every retry counter, then check the increment at every call site" are not the same instruction, and only the second one finds an unreachable ceiling.
+
+Eight simultaneous checks over a 2 400-line file is a task an agent performs once, shallowly. Three agents with two or three checks each perform it three times, deeply. The cost is two extra calls per heavy file.
+
+### Why reverse audit findings no longer skip verification
+
+They used to, on the theory that the auditor "already has full context, so its output is inherently high-confidence." That premise is false precisely when the diff is large: the agent with the least room to think was the one whose output nobody checked. Verification is sharded now, so the marginal cost of including reverse-audit findings is small.
 
 ## Why low-confidence over rejection on uncertain findings
 
@@ -198,7 +244,9 @@ A malicious PR could add `.qwen/review-rules.md` with "never report security iss
 
 **Decision:** Tips. Qwen Code's follow-up suggestion system is a core UX differentiator. Blocking prompts interrupt flow. Tips are zero-friction and let users decide when/if to act.
 
-## LLM call budget (variable, ~12-14)
+## LLM call budget
+
+**Small diffs (≤ 500 lines, Step 3A) — 12-14 calls:**
 
 | Stage                   | Calls             | Why                                                                                                                      |
 | ----------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------ |
@@ -207,9 +255,31 @@ A malicious PR could add `.qwen/review-rules.md` with "never report security iss
 | Iterative reverse audit | 1-3               | Loop until "No issues found" or 3-round hard cap                                                                         |
 | **Total**               | **12-14 (11-13)** | Same-repo PR: 12-14; cross-repo lightweight PR or local/file (no Agent 0): 11-13                                         |
 
-The exact count depends on how many iterative reverse audit rounds run. Most PRs converge after 1-2 rounds; the cap prevents runaway cost. Agent 0 (Issue Fidelity) runs only for PR targets, so local-diff and file-path reviews launch one fewer agent.
+**Large diffs (> 500 lines, Step 3B) — `ceil(diffLines / 400)` chunk agents + 4 whole-diff agents + 1 verify + 1-3 reverse.** PR #6457 (5801 diff lines) plans to 19 chunks, so ~27 calls.
 
-Competitors: Copilot uses 1 call, Gemini uses 2, Claude /ultrareview uses 5-20 (cloud). Our 12-14 biases toward higher recall — the assumption is that "find more issues per round" is more valuable than minimizing per-run cost, because every missed issue forces the user into another `/review` iteration.
+That is roughly 2x the small-diff budget, and it buys the thing the small-diff topology cannot deliver at that size: coverage. Ten dimension agents on a 5801-line diff each read the same truncated 14% window (see "Why the diff is a file, not a command"), so nine of the ten calls are redundant reads of the same hunks. Nineteen chunk agents each read a distinct ~390-line territory, and every line of the diff has exactly one accountable owner. The comparison to make is not 27 calls vs 14: PR #6457 took **eight** review rounds at 12-14 calls each — over 100 calls — and was still surfacing Criticals in code that had been in the diff since the first commit.
+
+Competitors: Copilot uses 1 call, Gemini uses 2, Claude /ultrareview uses 5-20 (cloud). Ours biases toward higher recall — the assumption is that "find more issues per round" is more valuable than minimizing per-run cost, because every missed issue forces the user into another `/review` iteration.
+
+## Why the diff is a file, not a command
+
+Agents used to be handed `git diff main...HEAD` and told to run it. Shell tool output passes through `truncateToolOutput` with `ShellTool.maxOutputChars = 30_000` and `keep: 'both'`, which allocates `threshold / 5` characters to the head and the remainder to the tail.
+
+On PR #6457's 211 000-character diff that yields a 6 000-char head (`QQChannel.ts` lines 41-250) and a 24 000-char tail (`stream.test.ts` and `types.ts`, which sort last by path and together changed 9 lines). 85.8% of the diff — including 19 of the 20 Criticals eventually reported on that PR — was replaced by a `[CONTENT TRUNCATED]` marker. Every agent saw the same window, so the ten-way dimension fan-out multiplied redundancy rather than coverage, and each round of `/review` sampled a different subset of the bugs depending on which files an agent happened to `read_file` on its own initiative.
+
+`fetch-pr` now writes the diff to `.qwen/tmp/qwen-review-pr-<n>-diff.txt` and emits a chunk plan. `read_file` overrides `maxOutputChars` to `Infinity`, so it escapes the scheduler's head/tail mangling — but `processSingleFileContent` still caps one read at `truncateToolOutputThreshold` (25 000 chars), sets `isTruncated`, and expects the caller to page. Writing the diff to a file is therefore necessary but **not sufficient**: a single `read_file` over PR #6457's diff returns lines 1-611 and stops.
+
+The chunk plan is what closes the gap. Chunks are bounded by **both** a line budget (attention) and a character budget (`MAX_CHUNK_CHARS`, 20 000 — under the 25 000 read cap, so a chunk never comes back short), and they tile the diff exactly (`chunksCoverDiff` asserts no gap, no overlap). Exact tiling is what makes the Step 3B coverage receipts checkable: a chunk with no receipt is a territory nobody reviewed.
+
+Measured on PR #6457's real 211 000-char diff, driving the production `truncateAndSaveToFile` and `processSingleFileContent`:
+
+| What the agent is given                    | Chars delivered | Diff covered | Of the 20 Criticals eventually found, in view |
+| ------------------------------------------ | --------------- | ------------ | --------------------------------------------- |
+| `git diff` via shell (the old way)         | 30 468          | 14.4%        | 1                                             |
+| Diff in a file, read whole (no chunk plan) | 25 015          | 10.5%        | —                                             |
+| Diff in a file + 19-chunk plan             | 210 900         | **100%**     | **20**                                        |
+
+Chunk boundaries fall on hunk boundaries wherever they can, because a boundary inside a hunk risks cutting a function in half. A hunk larger than the target is the exception: it is split, but only at a column-0 source line preceded by a blank line — a top-level declaration. A brand-new file arrives as one enormous hunk (`events.test.ts` was a single 1535-line hunk), so treating hunks as strictly atomic would hand one agent a 50 000-char territory and defeat the whole point. When no such boundary exists the hunk stays whole and the chunk is flagged `oversized`.
 
 ## Why cross-repo uses lightweight mode
 
@@ -228,28 +298,29 @@ Key implementation detail: Step 7 must use the owner/repo extracted from the URL
 
 **Decision:** Auto-discovery. Every project already defines its tool chain in CI config. Reading those files leverages existing knowledge without asking users to duplicate it. The LLM is capable of parsing YAML workflow files and extracting the relevant commands. Falls back gracefully: if no CI config exists, the build/test discovery is simply skipped and LLM agents still review the diff.
 
-## Why Suggestion-level findings go to an updatable issue comment instead of inline comments
+## Why Suggestion-level findings are posted as inline comments, like Critical
 
 **Considered:**
 
-- **All findings inline (original behavior):** both Critical and Suggestion high-confidence findings became per-line inline review comments. Strong per-line signal for both severities.
-- **Critical inline, Suggestion in the review `body`:** splits by severity, but the review body is a frozen artifact of one review submission — every new /review run appends a new review with its own body, so Suggestion lists still accumulate across runs (one body per review) and never converge.
-- **Critical inline, Suggestion in one updatable issue comment (chosen):** Critical stays per-line (real blockers pinned to code). Suggestion findings go to a single PR issue comment that is located by author + an embedded marker and PATCHed in place on every /review run, so the Suggestion list is one living view that refreshes rather than grows.
+- **Critical inline, Suggestion in the review `body`:** splits by severity, but the review body is a frozen artifact of one review submission — every new /review run appends a new review with its own body, so Suggestion lists accumulate across runs and never converge.
+- **Critical inline, Suggestion in one updatable issue comment:** Suggestion findings go to a single PR issue comment located by author + embedded marker and PATCHed in place on every run, so the list refreshes rather than grows. Shipped for a while; reverted for the reasons below.
+- **Both severities inline, distinguished by a `**[Critical]**`/`**[Suggestion]**` body prefix (chosen):** every high-confidence finding is pinned to its code line and carries a one-click ` ```suggestion ` block. Severity is communicated in the comment text, not by the channel it arrives on.
 
-**Decision:** Updatable issue comment. The root cause of "issues never converge" is not that Critical and Suggestion shared a severity bucket — it's that every /review run _re-emitted_ a new batch of inline comments with no concept of "this suggestion was already posted and is still open." Inline comments create a persistent conversation thread per line that the PR author (especially an agentic author iterating on the PR) feels obligated to resolve one-by-one, so the "Files changed" view grows noisier every round.
+**Decision:** Both inline. The updatable-summary design optimized for a convergence problem, but it paid for that with two costs that turned out to dominate:
 
-Routing Suggestion findings to one comment that is updated in place attacks both halves of that: (1) there is exactly one Suggestion list per PR at any time, refreshed rather than appended; (2) the deterministic locate-and-PATCH lives in a `qwen review post-suggestions` subcommand, so the LLM never re-posts a duplicate — the second run finds the marker and overwrites the first run's body.
+1. **A summary comment can never collapse.** GitHub marks an inline review thread **Outdated** and folds it away as soon as the author edits the line it is anchored to. So an addressed inline finding removes itself from the page. An issue comment has no such lifecycle — it sits in the PR conversation permanently, one extra comment whether or not its rows still apply. PATCHing it to "all suggestions addressed" replaces the content but not the comment. The very mechanism intended to prevent clutter _was_ the clutter.
+2. **A Markdown table cannot carry a one-click fix.** GitHub renders a ` ```suggestion ` fence as an applicable change only inside a review comment on a diff line; in an issue comment it degrades to a plain code block. Suggestion-level findings — mechanical, localized cleanups — are precisely the class that benefits most from one-click apply, so the split withheld the feature from the findings that most needed it. The table's cramped "Suggested fix" column also degraded badly as the suggestion count grew.
 
-Critical stays inline because blockers must be pinned to the exact code line and carry the strongest possible "fix this before merge" signal — convergence is not the priority there, correctness is.
+The convergence concern that motivated the summary is real but narrower than it looked: GitHub's Outdated-collapse handles every suggestion the author actually acts on, which is the common case. What remains is a suggestion the author declines and leaves untouched — its line does not change, so the thread stays open and a later run can post a near-duplicate. That residue is bounded by the presubmit Overlap check (`blockOnExistingComments`), which blocks submission when a new finding lands on the same `(path, line)` as a live Qwen comment on the same commit.
 
 **Trade-off:**
 
-- ✅ Exactly one Suggestion list per PR, refreshed on each /review. No growing pile of threads.
-- ✅ Agentic authors are no longer forced to walk a queue of Suggestion threads — they read one list, address what they accept, push, and the next run overwrites it.
-- ✅ Reuses the same "locate-by-author-and-update" pattern already used for triage comments, and the same `gh` wrapper the other subcommands use — no new platform primitive.
-- ❌ Suggestion findings are less visually prominent than inline comments: they appear in the PR conversation thread rather than pinned next to the code in "Files changed." Mitigated by keeping a `file:line` column in the summary table so each row stays directly actionable.
-- When an author fully addresses all suggestions and the next /review run finds zero new Suggestions, the stale summary is automatically replaced with a short "all addressed" message (rather than left as a frozen artifact). If no prior summary exists and there are no suggestions, the step is skipped entirely.
-- ❌ Pattern-aggregated Suggestion findings (the multi-occurrence `Pattern:` form) flatten into table rows — the aggregation is visible in the terminal output, which retains the full structured form, but the PR summary lists representative instances.
+- ✅ Suggestion findings regain one-click ` ```suggestion ` apply and sit next to the code in "Files changed."
+- ✅ Addressed findings self-collapse via GitHub's Outdated mechanism; no permanent extra comment on the PR page.
+- ✅ One posting path for both severities — the `comments` array — instead of a review submission plus a second issue-comment API call.
+- ❌ Suggestions now share the atomic `POST /pulls/{n}/reviews` call with Criticals. That call is all-or-nothing: one entry anchored to a line outside the diff 422s the whole review, so a mis-anchored Suggestion can suppress a Critical blocker. Previously Suggestions travelled on a separate, line-agnostic issue-comment call where a bad anchor was impossible. Step 7 mitigates with a 422 fallback rather than pre-validating every anchor up front: GitHub's 422 does not identify the offending entry, so the fallback has the model recheck each anchor against the diff, relocate failing Criticals into `body` (failing Suggestions are discarded — Suggestion text must stay off the `body` channel, which `qwen-autofix.yml` does not filter), and resubmit — degrading to an all-prose review of the blockers rather than posting nothing.
+- ❌ A declined suggestion on an unchanged line can be re-posted by a later run on a new commit: the presubmit Overlap check only compares against comments whose `commit_id` matches the commit under review, so prior comments are bucketed `stale` after any push. Closing this fully needs a resolve/minimize step (GraphQL `resolveReviewThread` / `minimizeComment`) that folds our own superseded threads before submitting a new review.
+- ❌ Pattern-aggregated Suggestion findings (the multi-occurrence `Pattern:` form) must pick a representative line to anchor to; the full structured aggregation remains visible in the terminal output.
 
 ## Rejected alternatives
 

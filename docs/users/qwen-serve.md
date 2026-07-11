@@ -13,9 +13,10 @@ Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, 
 - **Built-in Web Shell UI** — `qwen serve` serves the browser-based Web Shell at its root (`http://127.0.0.1:4170/`) out of the box; run `qwen serve --open` to launch it in your browser automatically. It is served on the same origin as the API, so no second port or reverse proxy is needed. Pass `--no-web` for an API-only daemon.
 - **One agent process, many clients** — under the default `sessionScope: 'single'`, every client connecting to the daemon shares one ACP session. Live cross-client collaboration on the same conversation, the same file diffs, the same permission prompts.
 - **Reconnect-safe streaming** — SSE with `Last-Event-ID` reconnect lets a client drop and pick up exactly where it left off (within the ring's replay window).
+- **Paged persisted transcripts** — `GET /session/:id/transcript` returns the complete active on-disk transcript as replay pages without attaching a client or changing the live SSE replay window.
 - **First-responder permissions** — when the agent asks for permission to run a tool, every connected client sees the request; whichever client answers first wins.
 - **One daemon, one workspace** — each `qwen serve` process binds to exactly one workspace at boot (per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02). Multi-workspace deployments run one daemon per workspace on separate ports (or behind an orchestrator).
-- **Experimental daemon-managed channels** — `qwen serve --channel <name>` starts a channel worker owned by the daemon lifecycle. The worker is a separate process, connects back to the daemon through the SDK, and reports its state in `GET /daemon/status`.
+- **Experimental daemon-managed channels** — `qwen serve --channel <name>` starts a channel worker owned by the daemon lifecycle. The worker is a separate process, connects back to the daemon through the SDK, and reports its state in `GET /daemon/status`. After editing channel settings, reload it in place with `POST /workspace/channel/reload` (or `qwen channel reload`) — no full daemon restart needed.
 - **Remote runtime control** ([#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 17) — change a session's approval mode (`POST /session/:id/approval-mode`), toggle a tool per workspace (`POST /workspace/tools/:name/enable`), scaffold an empty `QWEN.md` (`POST /workspace/init`, mechanical only — does NOT call the model; for AI-fill, follow up with `POST /session/:id/prompt`), restart a single MCP server with a budget pre-check (`POST /workspace/mcp/:server/restart`), or add/remove MCP servers at runtime without a daemon restart (`POST /workspace/mcp/servers`, `DELETE /workspace/mcp/servers/:name`). All strict-gated — configure `--token` first.
 - **Session recap** ([#4175](https://github.com/QwenLM/qwen-code/issues/4175) follow-up) — fetch a one-sentence "where did I leave off" summary of an active session (`POST /session/:id/recap`). Wraps core's `generateSessionRecap` as a side-query against the fast model; pollutes neither the main chat history nor the SSE stream. Non-strict gate (same posture as `/prompt`); SDK helper `client.recapSession(sessionId)`.
   - **Known limit — token-cost amplification:** the route is a pure-cost endpoint (each call is an LLM side-query, no state benefit) and the daemon has no per-route rate limit in v1. On a no-token loopback default a buggy or malicious local client can spam it to burn tokens. Configure `--token` (and optionally `--require-auth`) on shared dev hosts before exposing the daemon.
@@ -96,7 +97,9 @@ qwen serve --channel telegram --channel feishu
 qwen serve --channel all
 ```
 
-This mode is experimental and daemon-managed. It does not replace the standalone `qwen channel start` command: standalone channels still use the ACP-backed `AcpBridge` service. With `qwen serve --channel`, the daemon launches one channel worker process after the HTTP runtime is ready. If the worker exits after startup, the daemon keeps running and `GET /daemon/status` reports a `channel_worker_exited` warning. Automatic worker restart is deferred.
+This mode is experimental and daemon-managed. It does not replace the standalone `qwen channel start` command: standalone channels still use the ACP-backed `AcpBridge` service. With `qwen serve --channel`, the daemon launches one channel worker process after the HTTP runtime is ready. If the worker crashes after startup, the daemon keeps running, relaunches it under a bounded restart policy, and reports its state (including `channel_worker_exited` warnings) in `GET /daemon/status`.
+
+The daemon reads each channel's settings (tokens, `proxy`, per-channel `model`) from `settings.json` once, when the worker starts. To apply changes without restarting the whole daemon, call `POST /workspace/channel/reload` (strict-gated; SDK `client.reloadChannelWorker()`, or `qwen channel reload`). The daemon stops and relaunches the channel worker, which re-reads `settings.json`; every selected channel briefly disconnects and reconnects, and persisted threads are restored from disk. The route is advertised as the `channel_reload` capability only when the daemon was started with `--channel`. Adding a brand-new channel name to a `--channel <names>` selection still requires a daemon restart (or use `--channel all`, which picks up newly-configured channels on reload).
 
 The daemon is bound to one workspace, so every selected channel's `cwd` must resolve to the daemon workspace. `--channel all` cannot be combined with named channels.
 
@@ -106,7 +109,8 @@ operators: `GET /daemon/status`, `GET /workspace/mcp`,
 `GET /workspace/preflight`,
 `GET /session/:id/status`, `GET /session/:id/context`,
 `GET /session/:id/supported-commands`, and
-`GET /session/:id/tasks`, and `GET /session/:id/lsp`.
+`GET /session/:id/tasks`, `GET /session/:id/lsp`, and
+`GET /session/:id/transcript`.
 
 `GET /session/:id/status` returns the live bridge summary for a single session:
 `sessionId`, `workspaceCwd`, `createdAt`, optional `displayName`, `clientCount`,
@@ -421,14 +425,16 @@ To handle multiple **users** (each with their own quota, audit log, sandbox) or 
 
 ## Loading and resuming a persisted session
 
-The daemon exposes ACP's `session/load` and resume flow over HTTP via two routes:
+The daemon exposes ACP's `session/load` and resume flow over HTTP, plus a separate read-only transcript pager:
 
-| Route                      | Use when                                                                                                                                                                                                                                                                                          |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /session/:id/load`   | The client has **no** useful local history rendered (cold reconnect, picker-then-open). For a live session, the daemon returns and injects the current bounded replay snapshot window; if older replay was dropped, the snapshot begins with `history_truncated`. Capability tag: `session_load`. |
-| `POST /session/:id/resume` | The client already has the turns on screen and only needs the daemon-side handle back. Model context is restored on the agent side without UI replay — the SSE stream stays clean. Capability tag: `session_resume` (`unstable_session_resume` remains a deprecated alias for older clients).     |
+| Route                         | Use when                                                                                                                                                                                                                                                                                          |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /session/:id/load`      | The client has **no** useful local history rendered (cold reconnect, picker-then-open). For a live session, the daemon returns and injects the current bounded replay snapshot window; if older replay was dropped, the snapshot begins with `history_truncated`. Capability tag: `session_load`. |
+| `POST /session/:id/resume`    | The client already has the turns on screen and only needs the daemon-side handle back. Model context is restored on the agent side without UI replay — the SSE stream stays clean. Capability tag: `session_resume` (`unstable_session_resume` remains a deprecated alias for older clients).     |
+| `GET /session/:id/transcript` | The client needs the complete active persisted transcript. It returns id-less replay frames in cursor pages and does not call `/load`, attach a client, seed the live EventBus, create a live session, or change the live replay window. Capability tag: `session_transcript`.                    |
 
-The TypeScript SDK exposes both as static factories on `DaemonSessionClient`:
+For load and resume, the TypeScript SDK exposes static factories on
+`DaemonSessionClient`:
 
 ```ts
 import { DaemonClient, DaemonSessionClient } from '@qwen-code/sdk';
@@ -447,9 +453,19 @@ for await (const event of session.events()) {
 }
 ```
 
-Pre-flight `caps.features.session_load` / `caps.features.session_resume` before calling — older daemons return `404`. `unstable_session_resume` is still advertised as a deprecated compatibility alias. Concurrent same-action requests for the same id coalesce; cross-action races (a `load` racing a `resume`) get `409 restore_in_progress` with `Retry-After: 5`. See the [protocol reference](../developers/qwen-serve-protocol.md) for the full error envelope.
+Pre-flight `caps.features.session_load`, `caps.features.session_resume`, or `caps.features.session_transcript` before calling the matching route — older daemons return `404`. `unstable_session_resume` is still advertised as a deprecated compatibility alias. Concurrent same-action requests for the same id coalesce; cross-action races (a `load` racing a `resume`) get `409 restore_in_progress` with `Retry-After: 5`. See the [protocol reference](../developers/qwen-serve-protocol.md) for the full error envelope.
 
-Note: live-session history replay is bounded twice: by the SSE ring for `Last-Event-ID` reconnects and by `--compacted-replay-max-bytes` for the snapshot returned by `POST /session/:id/load`. Long histories with chatty turns can exceed either bound. The daemon surfaces snapshot truncation with `history_truncated`; full transcript access is intentionally not a one-shot array response in this API. For very long sessions, prefer `resume` and rely on the client's local persisted UI until a paginated or streaming transcript endpoint is available.
+For full persisted replay, page with `DaemonClient.getSessionTranscriptPage(sessionId, { cursor, limit })` or the raw REST route:
+
+```bash
+curl "http://127.0.0.1:4170/session/$SESSION_ID/transcript?limit=100"
+```
+
+`limit` counts active chat records, not emitted replay frames; one record can produce several `session_update` events. The first response freezes the JSONL snapshot size and returns `nextCursor` while `hasMore` is true. Later pages ignore appends after page 1, but return `409` if the file is deleted, truncated, replaced, archived, or otherwise conflicts with the frozen cursor. Very large snapshots return `413 transcript_too_large` before indexing so the daemon does not scan unbounded transcript files on the request path.
+
+For repeated cold-session transcript paging, set `--channel-idle-timeout-ms` to a positive value. With the default `0`, an idle workspace's ACP child — and the in-process transcript index cache it holds — is reaped after every page, so each page re-spawns the child and rebuilds the index by re-scanning the whole frozen prefix (`O(snapshotSize)` per page). A positive timeout keeps the child alive across the cursor walk so it reuses its cached transcript index and replay config.
+
+Note: live-session history replay is bounded twice: by the SSE ring for `Last-Event-ID` reconnects and by `--compacted-replay-max-bytes` for the snapshot returned by `POST /session/:id/load`. Long histories with chatty turns can exceed either bound. The daemon surfaces snapshot truncation with `history_truncated`; use `/transcript` when you need the complete active persisted history.
 
 ## Durability model
 
