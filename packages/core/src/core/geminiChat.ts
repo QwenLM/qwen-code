@@ -2632,6 +2632,9 @@ export class GeminiChat {
             params: SendMessageParameters;
             rollback: () => void;
           },
+          retryEvent: Extract<StreamEvent, { type: StreamEventType.RETRY }> = {
+            type: StreamEventType.RETRY,
+          },
         ): AsyncGenerator<InvalidStreamRetryEvent> {
           let retryCount = 0;
           for (;;) {
@@ -2672,7 +2675,7 @@ export class GeminiChat {
                   model,
                 ),
               );
-              yield { type: StreamEventType.RETRY };
+              yield retryEvent;
               await delay(delayMs, attemptState.params.config?.abortSignal)
                 .promise;
             }
@@ -2854,14 +2857,17 @@ export class GeminiChat {
             };
 
             try {
-              for await (const event of streamWithInvalidStreamRetries(() => {
-                self.history.push(recoveryUserContent);
-                return {
-                  requestContents: self.getRequestHistory(currentUserContent),
-                  params: iterationParams,
-                  rollback: rollbackRecoveryAttempt,
-                };
-              })) {
+              for await (const event of streamWithInvalidStreamRetries(
+                () => {
+                  self.history.push(recoveryUserContent);
+                  return {
+                    requestContents: self.getRequestHistory(currentUserContent),
+                    params: iterationParams,
+                    rollback: rollbackRecoveryAttempt,
+                  };
+                },
+                { type: StreamEventType.RETRY, isContinuation: true },
+              )) {
                 if (event.type === StreamEventType.RETRY) {
                   yield event;
                   continue;

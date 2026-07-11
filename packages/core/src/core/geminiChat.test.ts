@@ -7321,11 +7321,11 @@ describe('GeminiChat', async () => {
       expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
         true,
       );
-      const emittedText = events
+      const emittedParts = events
         .filter((event) => event.type === StreamEventType.CHUNK)
-        .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? [])
-        .map((part) => part.text ?? '')
-        .join('');
+        .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+      expect(emittedParts.some((part) => part.functionCall)).toBe(false);
+      const emittedText = emittedParts.map((part) => part.text ?? '').join('');
       expect(emittedText).toBe('Successful final response');
       expect(chatWithRecording.getLastModelMessageText()).toBe(
         'Successful final response',
@@ -8738,9 +8738,15 @@ describe('GeminiChat', async () => {
         expect(
           mockContentGenerator.generateContentStream,
         ).toHaveBeenCalledTimes(3);
+        const retries = events.filter(
+          (event) => event.type === StreamEventType.RETRY,
+        );
+        expect(retries).toHaveLength(2);
         expect(
-          events.filter((event) => event.type === StreamEventType.RETRY).length,
-        ).toBe(2);
+          retries.map(
+            (event) => (event as { isContinuation?: boolean }).isContinuation,
+          ),
+        ).toEqual([true, true]);
         expect(chat.getLastModelMessageText()).toBe('Hello world');
         expect(chat.getHistory()).toEqual([
           { role: 'user', parts: [{ text: 'write a long essay' }] },
