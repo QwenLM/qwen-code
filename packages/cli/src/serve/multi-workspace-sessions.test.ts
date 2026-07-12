@@ -1459,7 +1459,7 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
-  it('pages an untrusted secondary transcript without bridge or cursor-key writes', async () => {
+  it('chains untrusted transcript pages without bridge or cursor-key writes', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440270';
       await writeStoredSession({
@@ -1476,15 +1476,37 @@ describe('multi-workspace session dispatch', () => {
       );
       await fsp.appendFile(
         transcriptPath,
-        `${JSON.stringify({
-          uuid: `${sessionId}-assistant-1`,
-          parentUuid: `${sessionId}-user-1`,
-          sessionId,
-          timestamp: '2026-07-08T00:01:00.000Z',
-          type: 'assistant',
-          message: { role: 'model', parts: [{ text: 'second page' }] },
-          cwd: SECONDARY_CWD,
-        })}\n`,
+        [
+          {
+            uuid: `${sessionId}-assistant-1`,
+            parentUuid: `${sessionId}-user-1`,
+            sessionId,
+            timestamp: '2026-07-08T00:01:00.000Z',
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'first answer' }] },
+            cwd: SECONDARY_CWD,
+          },
+          {
+            uuid: `${sessionId}-user-2`,
+            parentUuid: `${sessionId}-assistant-1`,
+            sessionId,
+            timestamp: '2026-07-08T00:02:00.000Z',
+            type: 'user',
+            message: { role: 'user', parts: [{ text: 'second question' }] },
+            cwd: SECONDARY_CWD,
+          },
+          {
+            uuid: `${sessionId}-assistant-2`,
+            parentUuid: `${sessionId}-user-2`,
+            sessionId,
+            timestamp: '2026-07-08T00:03:00.000Z',
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'second answer' }] },
+            cwd: SECONDARY_CWD,
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
         'utf8',
       );
       await writeStoredSession({
@@ -1503,17 +1525,20 @@ describe('multi-workspace session dispatch', () => {
       });
 
       const first = await request(app)
-        .get(`/workspaces/secondary-id/session/${sessionId}/transcript?limit=1`)
+        .get(`/workspaces/secondary-id/session/${sessionId}/transcript?limit=2`)
         .set('Host', host())
         .expect(200);
-      expect(first.body.events).toEqual([
-        expect.objectContaining({
-          type: 'session_update',
-          data: expect.objectContaining({
-            sessionUpdate: 'user_message_chunk',
-          }),
-        }),
+      expect(
+        first.body.events.map(
+          (event: {
+            data: { sessionUpdate: string; content?: { text?: string } };
+          }) => [event.data.sessionUpdate, event.data.content?.text],
+        ),
+      ).toEqual([
+        ['user_message_chunk', 'first page'],
+        ['agent_message_chunk', 'first answer'],
       ]);
+      expect(first.body.hasMore).toBe(true);
       expect(first.body.nextCursor).toEqual(expect.any(String));
 
       const crossWorkspace = await request(app)
@@ -1529,16 +1554,24 @@ describe('multi-workspace session dispatch', () => {
 
       const second = await request(app)
         .get(
-          `/workspaces/${encodeURIComponent(SECONDARY_CWD)}/session/${sessionId}/transcript?limit=1&cursor=${encodeURIComponent(
+          `/workspaces/${encodeURIComponent(SECONDARY_CWD)}/session/${sessionId}/transcript?limit=2&cursor=${encodeURIComponent(
             first.body.nextCursor as string,
           )}`,
         )
         .set('Host', host())
         .expect(200);
-      expect(second.body.events[0].data).toMatchObject({
-        sessionUpdate: 'agent_message_chunk',
-      });
+      expect(
+        second.body.events.map(
+          (event: {
+            data: { sessionUpdate: string; content?: { text?: string } };
+          }) => [event.data.sessionUpdate, event.data.content?.text],
+        ),
+      ).toEqual([
+        ['user_message_chunk', 'second question'],
+        ['agent_message_chunk', 'second answer'],
+      ]);
       expect(second.body.hasMore).toBe(false);
+      expect(second.body.nextCursor).toBeUndefined();
       expect(primaryBridge.spawnCalls).toEqual([]);
       expect(primaryBridge.restoreCalls).toEqual([]);
       expect(secondaryBridge.spawnCalls).toEqual([]);
