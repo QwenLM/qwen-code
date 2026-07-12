@@ -207,8 +207,8 @@ import type {
   SessionContext,
   ToolCallStartParams,
 } from './types.js';
-import { HistoryReplayer } from './HistoryReplayer.js';
-import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
+import { HistoryReplayer } from './history-replayer.js';
+import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { SubAgentTracker } from './SubAgentTracker.js';

@@ -900,6 +900,40 @@
   flex-wrap: wrap;
 }
 
+.gitBranchChip {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 180px;
+  height: 28px;
+  padding: 0 8px;
+  align-items: center;
+  gap: 5px;
+  border-radius: 6px;
+  color: var(--agent-gray-500);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.gitBranchIcon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+}
+
+.gitBranchIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.gitBranchText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .toolbarRight {
   flex-shrink: 0;
   margin-right: -5px;
@@ -920,6 +954,23 @@
 
   .toolbarLeft .toolBtnText {
     display: none;
+  }
+
+  /* Keep the leading controls on a single row on narrow screens. The branch
+     chip yields space first — truncating via its ellipsis, down to just the
+     icon if needed — instead of pushing the mode/model buttons onto a second
+     line and making the composer taller. */
+  .toolbarLeft {
+    flex-wrap: nowrap;
+  }
+
+  .toolbarLeft .dropdownWrapper {
+    flex: 0 0 auto;
+  }
+
+  .gitBranchChip {
+    max-width: 140px;
+    flex-shrink: 1;
   }
 }
 

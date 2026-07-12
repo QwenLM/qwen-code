@@ -537,7 +537,7 @@ type MockPendingToolCall = {
 const { mockHistoryPendingToolCalls } = vi.hoisted(() => ({
   mockHistoryPendingToolCalls: vi.fn((): MockPendingToolCall[] => []),
 }));
-vi.mock('./session/HistoryReplayer.js', () => ({
+vi.mock('./session/history-replayer.js', () => ({
   HistoryReplayer: vi.fn().mockImplementation((context: unknown) => ({
     replay: (messages: unknown, gaps: unknown) =>
       mockHistoryReplay(context, messages, gaps),
@@ -6995,7 +6995,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('qwen/status/session/transcript preserves hasMore on replay errors', async () => {
+  it('qwen/status/session/transcript terminates pagination on replay errors', async () => {
     const settings = makeCoreSettings();
     vi.mocked(loadCliConfig).mockResolvedValue({
       ...makeInnerConfig(),
@@ -7048,7 +7048,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       replayError?: string;
     };
 
-    expect(result.hasMore).toBe(true);
+    expect(result.hasMore).toBe(false);
     // On a replay error the page is partial and must NOT hand back a cursor:
     // continuing would drop the un-replayed records and carry corrupted
     // pendingToolCalls forward into the next page.

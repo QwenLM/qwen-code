@@ -16,6 +16,7 @@ type MessageValue =
 type Messages = Record<string, MessageValue>;
 
 const EN: Messages = {
+  'git.currentBranch': (v) => `Current Git branch: ${v?.branch ?? ''}`,
   'about.auth': 'Auth',
   'about.baseUrl': 'Base URL',
   'about.fastModel': 'Fast Model',
@@ -826,6 +827,7 @@ const EN: Messages = {
   'sidebar.archive': 'Archive',
   'sidebar.unarchive': 'Restore',
   'sidebar.moreActions': 'More actions',
+  'sidebar.currentVersion': (v) => `Current version: ${v?.version ?? ''}`,
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.archivedEmpty': 'No archived sessions.',
@@ -870,6 +872,10 @@ const EN: Messages = {
   'sidebar.groupColor.green': 'Green',
   'sidebar.groupColor.blue': 'Blue',
   'sidebar.groupColor.purple': 'Purple',
+  'sidebar.groupColor.custom': 'Custom…',
+  'sidebar.groupColor.picker': 'Choose custom group color',
+  'sidebar.groupColor.hex': 'Hex color',
+  'sidebar.groupColor.invalid': 'Enter a six-digit Hex color such as #416ef5.',
   'quickKeys.cursor': 'Move cursor',
   'quickKeys.escape': 'Cancel run',
   'quickKeys.history': 'History',
@@ -1762,6 +1768,7 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
+  'git.currentBranch': (v) => `当前 Git 分支：${v?.branch ?? ''}`,
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via
   // `localizeToolDisplayName`. Proper tool names / acronyms stay in English
@@ -2581,6 +2588,7 @@ const ZH: Messages = {
   'sidebar.archive': '归档',
   'sidebar.unarchive': '恢复',
   'sidebar.moreActions': '更多操作',
+  'sidebar.currentVersion': (v) => `当前版本：${v?.version ?? ''}`,
   'sidebar.archiveCurrentDisabled': '不能归档当前会话',
   'sidebar.archivedTitle': '已归档',
   'sidebar.archivedEmpty': '没有已归档的会话。',
@@ -2624,6 +2632,10 @@ const ZH: Messages = {
   'sidebar.groupColor.green': '绿色',
   'sidebar.groupColor.blue': '蓝色',
   'sidebar.groupColor.purple': '紫色',
+  'sidebar.groupColor.custom': '自定义…',
+  'sidebar.groupColor.picker': '选择自定义分组颜色',
+  'sidebar.groupColor.hex': 'Hex 颜色',
+  'sidebar.groupColor.invalid': '请输入六位 Hex 颜色，例如 #416ef5。',
   'quickKeys.cursor': '移动光标',
   'quickKeys.escape': '取消运行',
   'quickKeys.history': '切换历史',

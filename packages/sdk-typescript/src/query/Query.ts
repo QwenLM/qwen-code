@@ -93,8 +93,11 @@ export class Query implements AsyncIterable<SDKMessage> {
   ) {
     this.transport = transport;
     this.options = options;
-    // Use sessionId from options if provided (for SDK-CLI alignment), otherwise generate one
-    this.sessionId = options.resume ?? options.sessionId ?? randomUUID();
+    // When forkSession is true, sessionId is a fresh UUID (computed in createQuery)
+    // that should be used instead of the resume (source) session ID
+    this.sessionId = options.forkSession
+      ? (options.sessionId ?? randomUUID())
+      : (options.resume ?? options.sessionId ?? randomUUID());
     this.inputStream = new Stream<SDKMessage>();
     this.abortController = options.abortController ?? new AbortController();
     this.isSingleTurn = singleTurn;

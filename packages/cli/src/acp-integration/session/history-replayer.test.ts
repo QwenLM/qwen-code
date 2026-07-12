@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   HistoryReplayer,
   MISSING_TOOL_RESULT_MESSAGE,
-} from './HistoryReplayer.js';
+} from './history-replayer.js';
 import type { SessionContext } from './types.js';
 import type {
   Config,

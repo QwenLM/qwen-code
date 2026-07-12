@@ -261,6 +261,9 @@ export function normalizeDaemonEvent(
       return normalizeApprovalModeChanged(event, base);
 
     // ── Workspace events ──────────────────────────────────────
+    case 'git_branch_changed':
+      return [];
+
     case 'memory_changed':
       return normalizeMemoryChanged(event, base);
 

@@ -12,6 +12,9 @@ const mockRegisterToolCallDispatch = vi.hoisted(() => vi.fn());
 const mockRegisterPermissionRelay = vi.hoisted(() => vi.fn());
 const mockRegisterSessionCleanup = vi.hoisted(() => vi.fn());
 const mockSessionsPath = vi.hoisted(() => vi.fn(() => '/tmp/sessions.json'));
+const mockDaemonSessionRoutesPath = vi.hoisted(() =>
+  vi.fn(() => '/tmp/qwen/channels/daemon/workspace-hash/routes.json'),
+);
 const mockLoadSettings = vi.hoisted(() =>
   vi.fn((_cwd?: string, _opts?: unknown) => ({
     merged: { proxy: 'http://settings-proxy:8080' as string | undefined },
@@ -75,6 +78,7 @@ const mockBridgeNewSession = vi.hoisted(() => vi.fn());
 const mockBridgeLoadSession = vi.hoisted(() => vi.fn());
 const mockBridgePrompt = vi.hoisted(() => vi.fn());
 const mockBridgeCancelSession = vi.hoisted(() => vi.fn());
+const mockBridgeDiscardSession = vi.hoisted(() => vi.fn());
 const mockBridgeRespondToPermission = vi.hoisted(() => vi.fn());
 const mockBridgeShellCommand = vi.hoisted(() => vi.fn());
 const mockBridgeGetAvailableCommands = vi.hoisted(() => vi.fn(() => []));
@@ -90,6 +94,7 @@ const mockDaemonChannelBridge = vi.hoisted(() =>
     loadSession: mockBridgeLoadSession,
     prompt: mockBridgePrompt,
     cancelSession: mockBridgeCancelSession,
+    discardSession: mockBridgeDiscardSession,
     respondToPermission: mockBridgeRespondToPermission,
     shellCommand: mockBridgeShellCommand,
     start: mockBridgeStart,
@@ -99,6 +104,10 @@ const mockDaemonChannelBridge = vi.hoisted(() =>
 const mockRouterSetChannelScope = vi.hoisted(() => vi.fn());
 const mockRouterSetChannelApprovalMode = vi.hoisted(() => vi.fn());
 const mockRouterClearAll = vi.hoisted(() => vi.fn());
+const mockRouterRestoreRoutes = vi.hoisted(() =>
+  vi.fn(() => ({ restored: 1, dropped: 0 })),
+);
+const mockRouterDispose = vi.hoisted(() => vi.fn());
 const mockSessionRouter = vi.hoisted(() =>
   vi.fn(
     (
@@ -110,6 +119,8 @@ const mockSessionRouter = vi.hoisted(() =>
       setChannelScope: mockRouterSetChannelScope,
       setChannelApprovalMode: mockRouterSetChannelApprovalMode,
       clearAll: mockRouterClearAll,
+      restoreRoutes: mockRouterRestoreRoutes,
+      dispose: mockRouterDispose,
     }),
   ),
 );
@@ -139,6 +150,7 @@ vi.mock('./proxy.js', () => ({
 
 vi.mock('./runtime.js', () => ({
   createChannel: mockCreateChannel,
+  daemonSessionRoutesPath: mockDaemonSessionRoutesPath,
   loadChannelsConfig: mockLoadChannelsConfig,
   loadChannelsFromExtensions: mockLoadChannelsFromExtensions,
   parseConfiguredChannels: mockParseConfiguredChannels,
@@ -506,6 +518,7 @@ describe('createDaemonChannelBridgeFacade', () => {
     });
 
     expect('respondToPermission' in facade).toBe(false);
+    expect('discardSession' in facade).toBe(false);
   });
 
   it('omits listSessions when absent on bridge', () => {
@@ -547,6 +560,36 @@ describe('createDaemonChannelBridgeFacade', () => {
 });
 
 describe('runChannelDaemonWorker', () => {
+  it('forwards router discard through the daemon bridge facade', async () => {
+    const sdk = createSdk();
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    const bridgeFacade = mockSessionRouter.mock.calls[0]![0] as {
+      discardSession?: (
+        sessionId: string,
+        expectedBindingToken?: object,
+      ) => Promise<void>;
+    };
+    const bindingToken = {};
+
+    expect(bridgeFacade.discardSession).toBeTypeOf('function');
+    await bridgeFacade.discardSession?.('orphan-session', bindingToken);
+
+    expect(mockBridgeDiscardSession).toHaveBeenCalledWith(
+      'orphan-session',
+      bindingToken,
+    );
+    expect(mockBridgeDiscardSession.mock.instances[0]).toBe(
+      mockDaemonChannelBridge.mock.results[0]!.value,
+    );
+
+    await handle.close();
+  });
+
   it('starts selected channels through a daemon-backed bridge facade', async () => {
     const sdk = createSdk();
     const ready = vi.fn();
@@ -612,8 +655,23 @@ describe('runChannelDaemonWorker', () => {
       skipLoadEnvironment: true,
     });
     expect(mockLoadChannelsConfig).toHaveBeenCalledWith('/workspace', settings);
+    expect(mockDaemonSessionRoutesPath).toHaveBeenCalledWith('/workspace');
+    expect(mockSessionRouter).toHaveBeenCalledWith(
+      expect.any(Object),
+      '/workspace',
+      'user',
+      '/tmp/qwen/channels/daemon/workspace-hash/routes.json',
+      { recoveryMode: 'lazy' },
+    );
+    expect(mockRouterRestoreRoutes).toHaveBeenCalledTimes(1);
+    expect(mockBridgeLoadSession).not.toHaveBeenCalled();
+    expect(mockRouterSetChannelScope.mock.invocationCallOrder[0]).toBeLessThan(
+      mockRouterRestoreRoutes.mock.invocationCallOrder[0],
+    );
+    expect(mockRouterRestoreRoutes.mock.invocationCallOrder[0]).toBeLessThan(
+      mockCreateChannel.mock.invocationCallOrder[0],
+    );
     expect(mockSessionsPath).not.toHaveBeenCalled();
-    expect(mockSessionRouter.mock.calls[0]![3]).toBeUndefined();
     expect(ready).toHaveBeenCalledWith({
       channels: ['telegram'],
       requestedChannels: ['telegram'],
@@ -623,8 +681,9 @@ describe('runChannelDaemonWorker', () => {
     await handle.close();
     expect(mockBridgeStop).toHaveBeenCalled();
     expect(mockBridgeStop.mock.invocationCallOrder[0]!).toBeLessThan(
-      mockRouterClearAll.mock.invocationCallOrder[0]!,
+      mockRouterDispose.mock.invocationCallOrder[0]!,
     );
+    expect(mockRouterClearAll).not.toHaveBeenCalled();
   });
 
   it('selects all configured channels in one shared router', async () => {
@@ -910,7 +969,7 @@ describe('runChannelDaemonWorker', () => {
     expect(mockBridgeStop).toHaveBeenCalled();
   });
 
-  it('clears router state when startup rollback bridge stop fails', async () => {
+  it('disposes router state when startup rollback bridge stop fails', async () => {
     const sdk = createSdk();
     mockCreateChannel.mockRejectedValueOnce(new Error('adapter boom'));
     mockBridgeStop.mockImplementationOnce(() => {
@@ -927,7 +986,8 @@ describe('runChannelDaemonWorker', () => {
     ).rejects.toThrow('adapter boom');
 
     expect(mockBridgeStop).toHaveBeenCalled();
-    expect(mockRouterClearAll).toHaveBeenCalled();
+    expect(mockRouterDispose).toHaveBeenCalled();
+    expect(mockRouterClearAll).not.toHaveBeenCalled();
   });
 
   it('does not repopulate daemon-private env from worker settings loads', async () => {
@@ -1057,7 +1117,8 @@ describe('runChannelDaemonWorker', () => {
     await expect(started).rejects.toThrow('Daemon worker startup aborted.');
     expect(disconnect).toHaveBeenCalled();
     expect(mockBridgeStop).toHaveBeenCalled();
-    expect(mockRouterClearAll).toHaveBeenCalled();
+    expect(mockRouterDispose).toHaveBeenCalled();
+    expect(mockRouterClearAll).not.toHaveBeenCalled();
   });
 
   it('fails fast when a channel cwd does not match the daemon workspace', async () => {
@@ -1079,7 +1140,7 @@ describe('runChannelDaemonWorker', () => {
     ).rejects.toThrow('must use daemon workspace "/workspace"');
   });
 
-  it('clears router state even when bridge stop fails during close', async () => {
+  it('disposes router state even when bridge stop fails during close', async () => {
     const sdk = createSdk();
     mockBridgeStop.mockImplementationOnce(() => {
       throw new Error('stop boom');
@@ -1093,7 +1154,8 @@ describe('runChannelDaemonWorker', () => {
     });
 
     await expect(handle.close()).rejects.toThrow('stop boom');
-    expect(mockRouterClearAll).toHaveBeenCalled();
+    expect(mockRouterDispose).toHaveBeenCalled();
+    expect(mockRouterClearAll).not.toHaveBeenCalled();
   });
 
   it('runs webhook tasks on the matching channel handle', async () => {
@@ -1512,6 +1574,7 @@ describe('daemonWorkerCommand', () => {
       expect(exit).not.toHaveBeenCalled();
       expect(disconnect).not.toHaveBeenCalled();
       expect(mockBridgeStop).not.toHaveBeenCalled();
+      expect(mockRouterDispose).not.toHaveBeenCalled();
       expect(mockRouterClearAll).not.toHaveBeenCalled();
 
       await handler;
@@ -1520,7 +1583,8 @@ describe('daemonWorkerCommand', () => {
       expect(send).not.toHaveBeenCalled();
       expect(disconnect).toHaveBeenCalled();
       expect(mockBridgeStop).toHaveBeenCalled();
-      expect(mockRouterClearAll).toHaveBeenCalled();
+      expect(mockRouterDispose).toHaveBeenCalled();
+      expect(mockRouterClearAll).not.toHaveBeenCalled();
     } finally {
       restoreSend();
     }

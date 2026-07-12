@@ -344,6 +344,8 @@ On reconnect the daemon replays events with `id > lastSeenEventId` from its boun
 
 `history_truncated.fullTranscriptAvailable` is a boolean capability flag. When it is `true`, callers can page the full active persisted replay with `DaemonClient.getSessionTranscriptPage(sessionId, { cursor, limit })`; when it is `false`, clients should keep rendering the bounded replay normally.
 
+When `workspace_persisted_transcript` is advertised, `client.workspaceById(workspaceId).getSessionTranscriptPage(sessionId, { cursor, limit })` reads the selected registered workspace without attaching to ACP. The workspace-qualified method always uses native REST even if the client has a replaceable transport; its cursor expires when the daemon restarts.
+
 ### Seeding `lastEventId` at Construction
 
 Callers that persist the cursor across process restarts can seed it:

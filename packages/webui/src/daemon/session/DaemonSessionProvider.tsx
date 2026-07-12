@@ -24,6 +24,7 @@ import {
   extractServerTimestamp,
   matchTurnEvent,
   normalizeDaemonEvent,
+  type CreateSessionRequest,
   type DaemonEvent,
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
@@ -453,11 +454,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // session-scoped supported-commands snapshot (which also carries
               // custom/MCP/workflow commands) still lands once the first prompt
               // creates a session.
-              const [providerResult, skillsResult, acpStatusResult] =
+              const [providerResult, skillsResult, acpStatusResult, gitResult] =
                 await Promise.allSettled([
                   client.workspaceProviders(),
                   client.workspaceSkills(),
                   client.workspaceAcpStatus(),
+                  effectWorkspaceCwd
+                    ? client.workspaceByCwd(effectWorkspaceCwd).workspaceGit()
+                    : client.workspaceGit(),
                 ]);
               if (providerResult.status === 'rejected') {
                 console.warn(
@@ -498,6 +502,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ...current,
                 status: 'connected',
                 workspaceCwd: effectWorkspaceCwd,
+                gitBranch:
+                  gitResult.status === 'fulfilled'
+                    ? (gitResult.value.branch ?? undefined)
+                    : undefined,
                 models: providerModelStatus.models,
                 currentModel: providerModelStatus.currentModel,
                 currentMode: providerModelStatus.currentMode,
@@ -855,14 +863,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             connectionRef.current.skills !== undefined &&
             connectionRef.current.supportedCommands !== undefined &&
             connectionRef.current.context !== undefined;
-          const [providerResult, commandResult, contextResult] =
-            canReuseSessionMetadata
-              ? [undefined, undefined, undefined]
-              : await Promise.allSettled([
-                  client.workspaceProviders(),
-                  activeSession.supportedCommands(),
-                  activeSession.context(),
-                ]);
+          const gitPromise = activeSession.workspaceCwd
+            ? client.workspaceByCwd(activeSession.workspaceCwd).workspaceGit()
+            : client.workspaceGit();
+          const [providerResult, commandResult, contextResult, gitResult] =
+            await Promise.allSettled([
+              canReuseSessionMetadata
+                ? Promise.resolve(undefined)
+                : client.workspaceProviders(),
+              canReuseSessionMetadata
+                ? Promise.resolve(undefined)
+                : activeSession.supportedCommands(),
+              canReuseSessionMetadata
+                ? Promise.resolve(undefined)
+                : activeSession.context(),
+              gitPromise,
+            ]);
           const providers =
             providerResult?.status === 'fulfilled'
               ? providerResult.value
@@ -874,6 +890,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const context =
             contextResult?.status === 'fulfilled'
               ? contextResult.value
+              : undefined;
+          const gitBranch =
+            gitResult?.status === 'fulfilled'
+              ? (gitResult.value.branch ?? undefined)
               : undefined;
           const loadWarningTexts = [
             providerResult?.status === 'rejected'
@@ -942,6 +962,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               providers: providers ?? current.providers,
               supportedCommands: supportedCommands ?? current.supportedCommands,
               context: context ?? current.context,
+              gitBranch:
+                gitResult.status === 'fulfilled'
+                  ? gitBranch
+                  : current.gitBranch,
               capabilities: capabilities ?? current.capabilities,
               loadingTranscript: undefined,
               catchingUp:
@@ -1681,7 +1705,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           workspaceCwd:
             activeWorkspaceCwdRef.current ?? sessionRef.current?.workspaceCwd,
         }),
-        createDetachedSession: (workspaceCwd?: string) => {
+        createDetachedSession: (
+          workspaceCwd?: string,
+          overrides?: Pick<CreateSessionRequest, 'approvalMode'>,
+        ) => {
           const client =
             workspaceClientRef.current ??
             new DaemonClient({
@@ -1695,6 +1722,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               workspaceCwd ??
               activeWorkspaceCwdRef.current ??
               sessionRef.current?.workspaceCwd,
+            ...(overrides?.approvalMode !== undefined
+              ? { approvalMode: overrides.approvalMode }
+              : {}),
           };
           const requestClientId = clientId
             ? clientIdRef.current

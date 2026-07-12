@@ -284,6 +284,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // projections. This is additive to the legacy primary-workspace
   // `workspace_extensions` contract.
   extension_management_v2: { since: 'v1' },
+  // Workspace-qualified, daemon-local persisted transcript paging. The tag is
+  // unconditional because the route also serves a trusted single-workspace
+  // primary; authorization is evaluated for the selected runtime per request.
+  workspace_persisted_transcript: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and
