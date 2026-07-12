@@ -31,7 +31,6 @@ import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { getModelDisplayName } from '../utils/modelDisplay';
-import { hasMultipleWorkspaces, workspaceBasename } from '../utils/workspace';
 import {
   getLocalCommands,
   localizeBuiltinDescriptions,
@@ -361,16 +360,6 @@ export function ChatPane({
   const headerLabel =
     title || connection.displayName || connection.sessionId?.slice(0, 8) || '';
 
-  // On a multi-workspace daemon, name the pane's workspace in the composer
-  // placeholder so it's clear which workspace a message is going to. Single
-  // workspace: unchanged.
-  const composerPlaceholder =
-    hasMultipleWorkspaces(connection.capabilities) && connection.workspaceCwd
-      ? t('splitView.composerPlaceholderWorkspace', {
-          workspace: workspaceBasename(connection.workspaceCwd),
-        })
-      : t('splitView.composerPlaceholder');
-
   return (
     <section
       className={styles.pane}
@@ -486,7 +475,7 @@ export function ChatPane({
           followupState={followupState}
           onAcceptFollowup={onAcceptFollowup}
           onDismissFollowup={onDismissFollowup}
-          placeholderText={composerPlaceholder}
+          placeholderText={t('splitView.composerPlaceholder')}
         />
       </div>
     </section>

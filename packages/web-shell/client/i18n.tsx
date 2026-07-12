@@ -1724,8 +1724,6 @@ const EN: Messages = {
   'splitView.goToApproval': 'Go to it',
   'splitView.empty': 'No sessions in the split. Add one to get started.',
   'splitView.composerPlaceholder': 'Message this session…',
-  'splitView.composerPlaceholderWorkspace': (v) =>
-    `Message this session in ${v?.workspace ?? ''}…`,
   'settings.title': 'Settings',
   'settings.loading': 'Loading settings...',
   'settings.empty': 'No settings available.',
@@ -3423,8 +3421,6 @@ const ZH: Messages = {
   'splitView.goToApproval': '前往处理',
   'splitView.empty': '分屏中还没有会话，添加一个开始。',
   'splitView.composerPlaceholder': '给这个会话发消息…',
-  'splitView.composerPlaceholderWorkspace': (v) =>
-    `给 ${v?.workspace ?? ''} 的这个会话发消息…`,
   'settings.title': '设置',
   'settings.loading': '正在加载设置...',
   'settings.empty': '暂无可用设置。',
