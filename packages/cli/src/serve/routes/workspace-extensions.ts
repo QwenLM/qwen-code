@@ -108,8 +108,8 @@ const validateExtensionSourceHost = (
     res.status(400).json({ error: '`source` host is not allowed' });
     return false;
   }
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'ssh:') {
-    res.status(400).json({ error: '`source` must use https or ssh' });
+  if (parsed.protocol !== 'https:') {
+    res.status(400).json({ error: '`source` must use https' });
     return false;
   }
   return true;
@@ -122,7 +122,9 @@ const validateExtensionSourceMetadata = (
   const parsed = parsePotentialSourceUrl(installMetadata.source);
   return (
     !!parsed &&
-    (parsed.protocol === 'https:' || parsed.protocol === 'ssh:') &&
+    (installMetadata.networkPolicy === 'public'
+      ? parsed.protocol === 'https:'
+      : parsed.protocol === 'https:' || parsed.protocol === 'ssh:') &&
     !isBlockedAuthProviderHost(parsed.hostname)
   );
 };
@@ -494,7 +496,9 @@ export function registerWorkspaceExtensionRoutes(
           res,
           async (extensionManager, _signal, context) => {
             const prepared = await context!.prepare(async (signal) => {
-              const installMetadata = await parseInstallSource(sourceValue);
+              const installMetadata = await parseInstallSource(sourceValue, {
+                networkPolicy: 'public',
+              });
 
               if (
                 installMetadata.type !== 'git' &&
@@ -1134,7 +1138,9 @@ export function registerWorkspaceExtensionRoutes(
       { source },
       async (extensionManager, _signal, context) => {
         const prepared = await context!.prepare(async (signal) => {
-          const metadata = await parseInstallSource(source);
+          const metadata = await parseInstallSource(source, {
+            networkPolicy: 'public',
+          });
           if (
             metadata.type !== 'git' &&
             metadata.type !== 'github-release' &&

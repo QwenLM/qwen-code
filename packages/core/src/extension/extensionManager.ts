@@ -242,6 +242,7 @@ export interface ExtensionManagerOptions {
     marketplace: ClaudeMarketplaceConfig,
   ) => Promise<string>;
   extensionStore?: ExtensionStore;
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'];
 }
 
 export interface PrepareExtensionInstallOptions {
@@ -418,8 +419,17 @@ export class ExtensionManager {
   private readonly preferencesStore: ExtensionPreferencesStore;
   private readonly sourceRegistryStore: SourceRegistryStore;
   private readonly extensionStore: ExtensionStore;
+  private readonly networkPolicy?: ExtensionInstallMetadata['networkPolicy'];
   private readonly preparedMutations = new WeakSet<PreparedExtensionMutation>();
   private discoverCache: DiscoveredPlugin[] | null = null;
+
+  private applyNetworkPolicy(
+    installMetadata: ExtensionInstallMetadata | undefined,
+  ): void {
+    if (installMetadata && this.networkPolicy) {
+      installMetadata.networkPolicy = this.networkPolicy;
+    }
+  }
 
   private config?: Config;
   private telemetrySettings?: TelemetrySettings;
@@ -451,6 +461,7 @@ export class ExtensionManager {
       path.join(this.configDir, 'marketplaces.json'),
     );
     this.extensionStore = options.extensionStore ?? new ExtensionStore();
+    this.networkPolicy = options.networkPolicy;
     this.requestSetting = options.requestSetting;
     this.requestChoicePlugin =
       options.requestChoicePlugin || (() => Promise.resolve(''));
@@ -901,14 +912,19 @@ export class ExtensionManager {
     if (!trimmed) {
       throw new Error('Marketplace source cannot be empty.');
     }
-    const config = await loadMarketplaceConfigFromSource(trimmed);
+    const config = await loadMarketplaceConfigFromSource(
+      trimmed,
+      this.networkPolicy,
+    );
     if (!config) {
       // A "marketplace" is a Claude-format collection (.claude-plugin/
       // marketplace.json). A single extension repo (Gemini/Claude/git/npm) is
       // not a marketplace — guide the user to install it directly instead.
       let isInstallableExtension = false;
       try {
-        await parseInstallSource(trimmed);
+        await parseInstallSource(trimmed, {
+          networkPolicy: this.networkPolicy,
+        });
         isInstallableExtension = true;
       } catch {
         // Not a recognizable install source either.
@@ -976,7 +992,7 @@ export class ExtensionManager {
   }
 
   loadSource(source: string): Promise<ClaudeMarketplaceConfig | null> {
-    return loadMarketplaceConfigFromSource(source);
+    return loadMarketplaceConfigFromSource(source, this.networkPolicy);
   }
 
   /**
@@ -997,7 +1013,11 @@ export class ExtensionManager {
         installed: installedNames.has(plugin.name),
       }));
     }
-    const result = await discoverPlugins(this.getSources(), installedNames);
+    const result = await discoverPlugins(
+      this.getSources(),
+      installedNames,
+      this.networkPolicy,
+    );
     this.discoverCache = result;
     return result;
   }
@@ -1448,6 +1468,7 @@ export class ExtensionManager {
     | { upToDate: true; extension: Extension }
     | { upToDate: false; prepared: PreparedExtensionMutation }
   > {
+    this.applyNetworkPolicy(options.extension.installMetadata);
     const state = await checkForExtensionUpdate(
       options.extension,
       this,
@@ -1485,6 +1506,7 @@ export class ExtensionManager {
     prepareOnly: boolean,
     emitMutation: boolean,
   ): Promise<Extension | PreparedExtensionMutation> {
+    this.applyNetworkPolicy(installMetadata);
     const currentDir = cwd ?? this.workspaceDir;
     const telemetryConfig = getTelemetryConfig(
       currentDir,
@@ -1611,6 +1633,7 @@ export class ExtensionManager {
           await convertGeminiOrClaudeExtension(
             sourceBeforeConversion,
             installMetadata.pluginName,
+            installMetadata.networkPolicy,
           );
         signal?.throwIfAborted();
 
@@ -2318,6 +2341,7 @@ export class ExtensionManager {
         callback(extension.name, ExtensionUpdateState.NOT_UPDATABLE);
         continue;
       }
+      this.applyNetworkPolicy(extension.installMetadata);
       callback(extension.name, ExtensionUpdateState.CHECKING_FOR_UPDATES);
       promises.push(
         schedule(

@@ -205,6 +205,7 @@ export function createExtensionsController(
         getWorkspaceTrustStatus(loadSettings(workspaceDir).merged, workspaceDir)
           .effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
+      networkPolicy: 'public',
       requestSetting: async (setting: ExtensionSetting) => {
         throw new Error(
           `Extension setting "${setting.envVar}" requires interactive configuration and is not supported over the daemon install endpoint.`,

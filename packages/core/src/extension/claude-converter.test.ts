@@ -1330,11 +1330,15 @@ describe('convertClaudePluginPackage — git-subdir source', () => {
       sha: 'abc123',
     });
 
-    const result = await convertClaudePluginPackage(extDir, 'p');
+    const result = await convertClaudePluginPackage(extDir, 'p', 'public');
     expect(result.config.name).toBe('p');
     // The immutable sha is preferred over the named ref when both are present.
-    const meta = vi.mocked(cloneFromGit).mock.calls[0][0] as { ref?: string };
+    const meta = vi.mocked(cloneFromGit).mock.calls[0][0] as {
+      ref?: string;
+      networkPolicy?: string;
+    };
     expect(meta.ref).toBe('abc123');
+    expect(meta.networkPolicy).toBe('public');
 
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });

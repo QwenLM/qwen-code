@@ -628,7 +628,12 @@ describe('extension tests', () => {
           return undefined;
         },
       );
-      mockGit.getRemotes.mockResolvedValue([{ name: 'origin' }]);
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://github.com/owner/repo' },
+        },
+      ]);
       mockGit.fetch.mockResolvedValue(undefined);
       mockGit.checkout.mockResolvedValue(undefined);
 
@@ -746,6 +751,29 @@ describe('extension tests', () => {
         source: 'https://example.com/archive-extension.zip',
         type: 'archive-url',
       });
+    });
+
+    it('forces the manager network policy onto remote operations', async () => {
+      mockDownloadFromArchiveUrl.mockImplementation(
+        async (_metadata: ExtensionInstallMetadata, destination: string) => {
+          writeExtractedExtension(destination, 'policy-extension');
+        },
+      );
+      const manager = createExtensionManager({ networkPolicy: 'public' });
+
+      await manager.installExtension(
+        {
+          source: 'https://example.com/policy-extension.zip',
+          type: 'archive-url',
+        },
+        async () => {},
+      );
+
+      expect(mockDownloadFromArchiveUrl).toHaveBeenCalledWith(
+        expect.objectContaining({ networkPolicy: 'public' }),
+        expect.any(String),
+        undefined,
+      );
     });
 
     it('should clean up the temp dir when archive URL download fails', async () => {
@@ -1691,6 +1719,33 @@ describe('extension tests', () => {
   });
 
   describe('updateExtension', () => {
+    it('forces the manager network policy onto update checks for existing installs', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        installMetadata: {
+          type: 'archive-url',
+          source: 'https://example.com/extension.zip',
+        },
+      });
+      mockDownloadFromArchiveUrl.mockImplementation(
+        async (_metadata: ExtensionInstallMetadata, destination: string) => {
+          fs.mkdirSync(destination, { recursive: true });
+          fs.writeFileSync(
+            path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+            JSON.stringify({ name: 'my-extension', version: '1.0.0' }),
+          );
+        },
+      );
+      const manager = createExtensionManager({ networkPolicy: 'public' });
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+      expect(extension.installMetadata?.networkPolicy).toBeUndefined();
+
+      await manager.checkForAllExtensionUpdates(() => {});
+
+      expect(extension.installMetadata?.networkPolicy).toBe('public');
+    });
+
     it('rejects a stale direct update after the artifact changes', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'direct-update.zip');
       fs.writeFileSync(archivePath, 'archive');

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { simpleGit } from 'simple-git';
+import { simpleGit, type SimpleGit } from 'simple-git';
 import { getErrorMessage } from '../utils/errors.js';
 import * as os from 'node:os';
 import * as https from 'node:https';
@@ -27,6 +27,7 @@ import {
   SUPPORTED_EXTENSION_MANIFESTS,
 } from './extension-converter.js';
 import { assertTarArchiveHasNoLinks } from './archive-safety.js';
+import { resolveNetworkTarget } from './network-policy.js';
 
 const debugLogger = createDebugLogger('EXT_GITHUB');
 const SUPPORTED_ARCHIVE_EXTENSIONS = ['.tar.gz', '.zip'] as const;
@@ -34,6 +35,7 @@ const ZIP_FILE_TYPE_MASK = 0xf000;
 const ZIP_SYMBOLIC_LINK_TYPE = 0xa000;
 const ARCHIVE_DOWNLOAD_TIMEOUT_MS = 120_000;
 const ARCHIVE_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024;
+const MINIMUM_PINNED_GIT_VERSION = { major: 2, minor: 37 } as const;
 
 interface GithubReleaseData {
   assets: Asset[];
@@ -107,6 +109,39 @@ function getGitHubToken(): string | undefined {
   return process.env['GITHUB_TOKEN'];
 }
 
+async function assertPinnedGitSupported(): Promise<void> {
+  const version = await simpleGit().version();
+  if (
+    version.major < MINIMUM_PINNED_GIT_VERSION.major ||
+    (version.major === MINIMUM_PINNED_GIT_VERSION.major &&
+      version.minor < MINIMUM_PINNED_GIT_VERSION.minor)
+  ) {
+    throw new Error('Public extension Git installs require Git 2.37 or newer.');
+  }
+}
+
+function createPinnedGitConfig(curlResolve: string): string[] {
+  return [
+    `http.curloptResolve=${curlResolve}`,
+    'http.followRedirects=false',
+    'http.proxy=',
+    'protocol.allow=never',
+    'protocol.https.allow=always',
+  ];
+}
+
+function restrictGitEnvironment(
+  git: SimpleGit,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+): SimpleGit {
+  if (networkPolicy !== 'public') return git;
+  return git.env({
+    ...process.env,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: os.devNull,
+  });
+}
+
 /**
  * Clones a Git repository to a specified local path.
  * @param installMetadata The metadata for the extension to install.
@@ -119,7 +154,26 @@ export async function cloneFromGit(
 ): Promise<void> {
   const redactedSource = redactUrlCredentials(installMetadata.source);
   try {
-    const git = simpleGit(destination, signal ? { abort: signal } : undefined);
+    if (installMetadata.networkPolicy === 'public') {
+      if (!/^https:/i.test(installMetadata.source)) {
+        throw new Error('Public extension Git installs must use HTTPS.');
+      }
+      await assertPinnedGitSupported();
+    }
+    const networkTarget = await resolveNetworkTarget(
+      installMetadata.source,
+      installMetadata.networkPolicy,
+    );
+    const networkConfig = networkTarget.curlResolve
+      ? createPinnedGitConfig(networkTarget.curlResolve)
+      : [];
+    const git = restrictGitEnvironment(
+      simpleGit(destination, {
+        ...(signal ? { abort: signal } : {}),
+        ...(networkConfig.length > 0 ? { config: networkConfig } : {}),
+      }),
+      installMetadata.networkPolicy,
+    );
     signal?.throwIfAborted();
     let sourceUrl = installMetadata.source;
     const token = getGitHubToken();
@@ -158,7 +212,11 @@ export async function cloneFromGit(
 
     const refToFetch = installMetadata.ref || 'HEAD';
 
-    await git.fetch(remotes[0].name, refToFetch);
+    const remoteUrl = remotes[0].refs.fetch;
+    if (!remoteUrl) {
+      throw new Error(`Unable to find a fetch URL for repo ${redactedSource}`);
+    }
+    await git.fetch(remoteUrl, refToFetch);
     signal?.throwIfAborted();
 
     // Detached HEAD is expected here — we only need the fetched content.
@@ -212,10 +270,11 @@ async function fetchReleaseFromGithub(
   repo: string,
   ref?: string,
   signal?: AbortSignal,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
 ): Promise<GithubReleaseData> {
   const endpoint = ref ? `releases/tags/${ref}` : 'releases/latest';
   const url = `https://api.github.com/repos/${owner}/${repo}/${endpoint}`;
-  return await fetchJson(url, signal);
+  return await fetchJson(url, signal, networkPolicy);
 }
 
 export async function checkForExtensionUpdate(
@@ -241,6 +300,7 @@ export async function checkForExtensionUpdate(
         const converted = await convertGeminiOrClaudeExtension(
           tempDir,
           installMetadata.pluginName,
+          installMetadata.networkPolicy,
         );
         extensionDir = converted.extensionDir;
         if (extensionDir !== tempDir) {
@@ -291,6 +351,7 @@ export async function checkForExtensionUpdate(
       const converted = await convertGeminiOrClaudeExtension(
         tempDir,
         installMetadata.pluginName,
+        installMetadata.networkPolicy,
       );
       const extensionDir = converted.extensionDir;
       if (extensionDir !== tempDir) {
@@ -334,11 +395,14 @@ export async function checkForExtensionUpdate(
   }
   try {
     if (installMetadata.type === 'git') {
-      const git = simpleGit(
+      if (installMetadata.networkPolicy === 'public') {
+        await assertPinnedGitSupported();
+      }
+      const localGit = simpleGit(
         extension.path,
         signal ? { abort: signal } : undefined,
       );
-      const remotes = await git.getRemotes(true);
+      const remotes = await localGit.getRemotes(true);
       signal?.throwIfAborted();
       if (remotes.length === 0) {
         debugLogger.error('No git remotes found.');
@@ -351,7 +415,28 @@ export async function checkForExtensionUpdate(
         );
         return ExtensionUpdateState.ERROR;
       }
-
+      let resolutionUrl = remoteUrl;
+      if (installMetadata.networkPolicy === 'public') {
+        const parsedRemote = new URL(remoteUrl);
+        parsedRemote.username = '';
+        parsedRemote.password = '';
+        resolutionUrl = parsedRemote.toString();
+      }
+      const remoteTarget = await resolveNetworkTarget(
+        resolutionUrl,
+        installMetadata.networkPolicy,
+      );
+      const git = restrictGitEnvironment(
+        simpleGit(extension.path, {
+          ...(signal ? { abort: signal } : {}),
+          ...(remoteTarget.curlResolve
+            ? {
+                config: createPinnedGitConfig(remoteTarget.curlResolve),
+              }
+            : {}),
+        }),
+        installMetadata.networkPolicy,
+      );
       const refToCheck = installMetadata.ref || 'HEAD';
 
       const lsRemoteOutput = await git.listRemote([remoteUrl, refToCheck]);
@@ -389,6 +474,7 @@ export async function checkForExtensionUpdate(
         repo,
         installMetadata.ref,
         signal,
+        installMetadata.networkPolicy,
       );
       if (releaseData.tag_name !== releaseTag) {
         return ExtensionUpdateState.UPDATE_AVAILABLE;
@@ -412,7 +498,13 @@ export async function downloadFromGitHubRelease(
   const { source, ref } = installMetadata;
   const { owner, repo } = parseGitHubRepoForReleases(source);
 
-  const releaseData = await fetchReleaseFromGithub(owner, repo, ref, signal);
+  const releaseData = await fetchReleaseFromGithub(
+    owner,
+    repo,
+    ref,
+    signal,
+    installMetadata.networkPolicy,
+  );
   if (!releaseData) {
     throw new Error(`No release data found for ${owner}/${repo} at tag ${ref}`);
   }
@@ -453,6 +545,7 @@ export async function downloadFromGitHubRelease(
       downloadedAssetPath,
       {
         includeGitHubToken: true,
+        networkPolicy: installMetadata.networkPolicy,
       },
       0,
       signal,
@@ -497,6 +590,7 @@ export async function downloadFromArchiveUrl(
       downloadedAssetPath,
       {
         includeGitHubToken: false,
+        networkPolicy: installMetadata.networkPolicy,
       },
       0,
       signal,
@@ -577,7 +671,11 @@ export function findReleaseAsset(assets: Asset[]): Asset | undefined {
   return undefined;
 }
 
-async function fetchJson<T>(url: string, signal?: AbortSignal): Promise<T> {
+async function fetchJson<T>(
+  url: string,
+  signal?: AbortSignal,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+): Promise<T> {
   const headers: { 'User-Agent': string; Authorization?: string } = {
     'User-Agent': 'gemini-cli',
   };
@@ -585,21 +683,33 @@ async function fetchJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   if (token) {
     headers.Authorization = `token ${token}`;
   }
+  const target = networkPolicy
+    ? await resolveNetworkTarget(url, networkPolicy)
+    : { url: new URL(url) };
   return new Promise((resolve, reject) => {
     https
-      .get(url, { headers, signal }, (res) => {
-        if (res.statusCode !== 200) {
-          return reject(
-            new Error(`Request failed with status code ${res.statusCode}`),
-          );
-        }
-        const chunks: Buffer[] = [];
-        res.on('data', (chunk) => chunks.push(chunk));
-        res.on('end', () => {
-          const data = Buffer.concat(chunks).toString();
-          resolve(JSON.parse(data) as T);
-        });
-      })
+      .get(
+        url,
+        {
+          headers,
+          signal,
+          lookup: target.lookup,
+          ...(target.lookup ? { agent: false } : {}),
+        },
+        (res) => {
+          if (res.statusCode !== 200) {
+            return reject(
+              new Error(`Request failed with status code ${res.statusCode}`),
+            );
+          }
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk) => chunks.push(chunk));
+          res.on('end', () => {
+            const data = Buffer.concat(chunks).toString();
+            resolve(JSON.parse(data) as T);
+          });
+        },
+      )
       .on('error', reject);
   });
 }
@@ -607,7 +717,10 @@ async function fetchJson<T>(url: string, signal?: AbortSignal): Promise<T> {
 async function downloadFile(
   url: string,
   dest: string,
-  options: { includeGitHubToken?: boolean } = { includeGitHubToken: false },
+  options: {
+    includeGitHubToken?: boolean;
+    networkPolicy?: ExtensionInstallMetadata['networkPolicy'];
+  } = { includeGitHubToken: false },
   redirectCount = 0,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -621,7 +734,10 @@ async function downloadFile(
   if (options.includeGitHubToken === true && token) {
     headers.Authorization = `token ${token}`;
   }
-  const parsedUrl = new URL(url);
+  const target = options.networkPolicy
+    ? await resolveNetworkTarget(url, options.networkPolicy)
+    : { url: new URL(url) };
+  const parsedUrl = target.url;
   if (parsedUrl.protocol !== 'https:') {
     throw new Error(`Unsupported download URL protocol: ${parsedUrl.protocol}`);
   }
@@ -651,74 +767,85 @@ async function downloadFile(
       reject(error);
     };
     const req = https
-      .get(parsedUrl, { headers, signal }, (res) => {
-        if (
-          res.statusCode === 301 ||
-          res.statusCode === 302 ||
-          res.statusCode === 307 ||
-          res.statusCode === 308
-        ) {
-          if (!res.headers.location) {
+      .get(
+        url,
+        {
+          headers,
+          signal,
+          lookup: target.lookup,
+          ...(target.lookup ? { agent: false } : {}),
+        },
+        (res) => {
+          if (
+            res.statusCode === 301 ||
+            res.statusCode === 302 ||
+            res.statusCode === 307 ||
+            res.statusCode === 308
+          ) {
+            if (!res.headers.location) {
+              res.resume();
+              fail(new Error('Redirect response missing location header'));
+              return;
+            }
             res.resume();
-            fail(new Error('Redirect response missing location header'));
+            let redirectUrl: URL;
+            try {
+              redirectUrl = new URL(res.headers.location, url);
+            } catch (error) {
+              fail(
+                new Error(`Invalid redirect URL: ${getErrorMessage(error)}`),
+              );
+              return;
+            }
+            const redirectHost = redirectUrl.host;
+            const redirectOptions =
+              redirectHost === parsedUrl.host
+                ? options
+                : { ...options, includeGitHubToken: false };
+            cleanup();
+            downloadFile(
+              redirectUrl.toString(),
+              dest,
+              redirectOptions,
+              redirectCount + 1,
+              signal,
+            )
+              .then(finish)
+              .catch(fail);
             return;
           }
-          res.resume();
-          let redirectUrl: URL;
-          try {
-            redirectUrl = new URL(res.headers.location, url);
-          } catch (error) {
-            fail(new Error(`Invalid redirect URL: ${getErrorMessage(error)}`));
-            return;
-          }
-          const redirectHost = redirectUrl.host;
-          const redirectOptions =
-            redirectHost === parsedUrl.host
-              ? options
-              : { ...options, includeGitHubToken: false };
-          cleanup();
-          downloadFile(
-            redirectUrl.toString(),
-            dest,
-            redirectOptions,
-            redirectCount + 1,
-            signal,
-          )
-            .then(finish)
-            .catch(fail);
-          return;
-        }
-        if (res.statusCode !== 200) {
-          res.resume();
-          return fail(
-            new Error(`Request failed with status code ${res.statusCode}`),
-          );
-        }
-        const file = fs.createWriteStream(dest);
-        let bytesWritten = 0;
-        res.on('data', (chunk: Buffer) => {
-          bytesWritten += chunk.length;
-          if (bytesWritten > ARCHIVE_DOWNLOAD_MAX_BYTES) {
-            res.destroy();
-            file.destroy();
-            fail(
-              new Error(
-                `Extension archive download exceeded maximum size of ${ARCHIVE_DOWNLOAD_MAX_BYTES} bytes`,
-              ),
+          if (res.statusCode !== 200) {
+            res.resume();
+            return fail(
+              new Error(`Request failed with status code ${res.statusCode}`),
             );
           }
-        });
-        res.on('error', (error) => {
-          file.destroy();
-          fail(error);
-        });
-        file.on('error', (error) => {
-          res.destroy();
-          fail(error);
-        });
-        res.pipe(file);
-        file.on('finish', () => file.close(finish));
-      })
+          const file = fs.createWriteStream(dest);
+          let bytesWritten = 0;
+          res.on('data', (chunk: Buffer) => {
+            bytesWritten += chunk.length;
+            if (bytesWritten > ARCHIVE_DOWNLOAD_MAX_BYTES) {
+              res.destroy();
+              file.destroy();
+              fail(
+                new Error(
+                  `Extension archive download exceeded maximum size of ${ARCHIVE_DOWNLOAD_MAX_BYTES} bytes`,
+                ),
+              );
+            }
+          });
+          res.on('error', (error) => {
+            file.destroy();
+            fail(error);
+          });
+          file.on('error', (error) => {
+            res.destroy();
+            fail(error);
+          });
+          res.pipe(file);
+          file.on('finish', () => file.close(finish));
+        },
+      )
       .on('error', fail);
     if (!settled) {
       hardDeadline = setTimeout(() => {

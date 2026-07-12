@@ -13,6 +13,7 @@ import {
 import type { ExtensionInstallMetadata } from '../config/config.js';
 import { ExtensionUpdateState } from './extensionManager.js';
 import * as fs from 'node:fs';
+import { promises as dns } from 'node:dns';
 
 vi.mock('node:fs', () => ({
   readFileSync: vi.fn(),
@@ -359,6 +360,35 @@ describe('downloadFromNpmRegistry', () => {
       ),
     ).resolves.toEqual({ version: '1.0.0', type: 'npm' });
     expect(https.get).toHaveBeenCalledTimes(2);
+    expect(http.get).not.toHaveBeenCalled();
+  });
+
+  it('rejects a public-policy tarball URL targeting the private network', async () => {
+    vi.spyOn(dns, 'lookup').mockResolvedValue([
+      { address: '8.8.8.8', family: 4 },
+    ] as never);
+    mockNpmRegistryResponse({
+      'dist-tags': { latest: '1.0.0' },
+      versions: {
+        '1.0.0': {
+          dist: { tarball: 'http://127.0.0.1/internal.tgz' },
+        },
+      },
+    });
+
+    await expect(
+      downloadFromNpmRegistry(
+        {
+          source: '@scope/pkg',
+          type: 'npm',
+          registryUrl: 'https://registry.example.com',
+          networkPolicy: 'public',
+        },
+        '/tmp/qwen-extension',
+      ),
+    ).rejects.toThrow('must use HTTPS');
+
+    expect(https.get).toHaveBeenCalledTimes(1);
     expect(http.get).not.toHaveBeenCalled();
   });
 

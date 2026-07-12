@@ -13,6 +13,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { redactUrlCredentials } from './redaction.js';
 import { clientForUrl } from './http-client.js';
 import { assertTarArchiveHasNoLinks } from './archive-safety.js';
+import { resolveNetworkTarget } from './network-policy.js';
 
 const debugLogger = createDebugLogger('EXT_NPM');
 const NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS = 120_000;
@@ -198,6 +199,7 @@ function fetchNpmJson<T>(
   authToken?: string,
   signal?: AbortSignal,
   redirectCount = 0,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
 ): Promise<T> {
   signal?.throwIfAborted();
   if (redirectCount > NPM_MAX_REDIRECTS) {
@@ -212,57 +214,76 @@ function fetchNpmJson<T>(
     headers['Authorization'] = `Bearer ${authToken}`;
   }
 
-  const client = clientForUrl(url);
-
-  return new Promise((resolve, reject) => {
-    client
-      .get(url, { headers, signal }, (res) => {
-        if (res.statusCode === 301 || res.statusCode === 302) {
-          if (res.headers.location) {
-            let redirectUrl: URL;
-            try {
-              redirectUrl = resolveNpmRedirectUrl(url, res.headers.location);
-            } catch (error) {
-              res.resume();
-              reject(error);
-              return;
-            }
-            res.resume();
-            const originalOrigin = new URL(url).origin;
-            const redirectToken =
-              redirectUrl.origin === originalOrigin ? authToken : undefined;
-            fetchNpmJson<T>(
-              redirectUrl.toString(),
-              redirectToken,
+  return resolveNetworkTarget(url, networkPolicy).then(
+    (target) =>
+      new Promise((resolve, reject) => {
+        const client = clientForUrl(target.url.toString());
+        client
+          .get(
+            url,
+            {
+              headers,
               signal,
-              redirectCount + 1,
-            )
-              .then(resolve)
-              .catch(reject);
-            return;
-          }
-        }
-        if (res.statusCode !== 200) {
-          return reject(
-            new Error(
-              `npm registry request failed with status ${res.statusCode}: ${redactUrlCredentials(url)}`,
-            ),
-          );
-        }
-        const chunks: Buffer[] = [];
-        res.on('data', (chunk) => chunks.push(chunk));
-        res.on('end', () => {
-          try {
-            resolve(JSON.parse(Buffer.concat(chunks).toString()) as T);
-          } catch (e) {
-            reject(new Error(`Failed to parse npm registry response: ${e}`));
-          }
-        });
-      })
-      .on('error', (error) => {
-        reject(signal?.aborted ? signal.reason : error);
-      });
-  });
+              lookup: target.lookup,
+              ...(target.lookup ? { agent: false } : {}),
+            },
+            (res) => {
+              if (res.statusCode === 301 || res.statusCode === 302) {
+                if (res.headers.location) {
+                  let redirectUrl: URL;
+                  try {
+                    redirectUrl = resolveNpmRedirectUrl(
+                      url,
+                      res.headers.location,
+                    );
+                  } catch (error) {
+                    res.resume();
+                    reject(error);
+                    return;
+                  }
+                  res.resume();
+                  const originalOrigin = new URL(url).origin;
+                  const redirectToken =
+                    redirectUrl.origin === originalOrigin
+                      ? authToken
+                      : undefined;
+                  fetchNpmJson<T>(
+                    redirectUrl.toString(),
+                    redirectToken,
+                    signal,
+                    redirectCount + 1,
+                    networkPolicy,
+                  )
+                    .then(resolve)
+                    .catch(reject);
+                  return;
+                }
+              }
+              if (res.statusCode !== 200) {
+                return reject(
+                  new Error(
+                    `npm registry request failed with status ${res.statusCode}: ${redactUrlCredentials(url)}`,
+                  ),
+                );
+              }
+              const chunks: Buffer[] = [];
+              res.on('data', (chunk) => chunks.push(chunk));
+              res.on('end', () => {
+                try {
+                  resolve(JSON.parse(Buffer.concat(chunks).toString()) as T);
+                } catch (e) {
+                  reject(
+                    new Error(`Failed to parse npm registry response: ${e}`),
+                  );
+                }
+              });
+            },
+          )
+          .on('error', (error) => {
+            reject(signal?.aborted ? signal.reason : error);
+          });
+      }),
+  );
 }
 
 /**
@@ -283,6 +304,7 @@ function downloadNpmFileRedirect(
   authToken?: string,
   signal?: AbortSignal,
   redirectCount = 0,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
 ): Promise<void> {
   signal?.throwIfAborted();
   if (redirectCount > NPM_MAX_REDIRECTS) {
@@ -295,99 +317,116 @@ function downloadNpmFileRedirect(
     headers['Authorization'] = `Bearer ${authToken}`;
   }
 
-  const client = clientForUrl(url);
-
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      resolve();
-    };
-    const fail = (error: unknown) => {
-      if (settled) return;
-      settled = true;
-      reject(error);
-    };
-    const requestGeneration = ++context.requestGeneration;
-    const req = client
-      .get(url, { headers, signal }, (res) => {
-        if (context.timedOut) {
-          res.destroy();
-          return;
-        }
-        context.activeResponse = res;
-        if (res.statusCode === 301 || res.statusCode === 302) {
-          if (res.headers.location) {
-            let redirectUrl: URL;
-            try {
-              redirectUrl = resolveNpmRedirectUrl(url, res.headers.location);
-            } catch (error) {
-              res.destroy();
-              context.activeResponse = undefined;
-              fail(error);
-              return;
-            }
-            const originalOrigin = new URL(url).origin;
-            const redirectToken =
-              redirectUrl.origin === originalOrigin ? authToken : undefined;
-            res.destroy();
-            context.activeResponse = undefined;
-            downloadNpmFileRedirect(
-              redirectUrl.toString(),
-              dest,
-              context,
-              redirectToken,
+  return resolveNetworkTarget(url, networkPolicy).then(
+    (target) =>
+      new Promise((resolve, reject) => {
+        const client = clientForUrl(target.url.toString());
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        const fail = (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          reject(error);
+        };
+        const requestGeneration = ++context.requestGeneration;
+        const req = client
+          .get(
+            url,
+            {
+              headers,
               signal,
-              redirectCount + 1,
-            )
-              .then(finish)
-              .catch(fail);
-            return;
-          }
+              lookup: target.lookup,
+              ...(target.lookup ? { agent: false } : {}),
+            },
+            (res) => {
+              if (context.timedOut) {
+                res.destroy();
+                return;
+              }
+              context.activeResponse = res;
+              if (res.statusCode === 301 || res.statusCode === 302) {
+                if (res.headers.location) {
+                  let redirectUrl: URL;
+                  try {
+                    redirectUrl = resolveNpmRedirectUrl(
+                      url,
+                      res.headers.location,
+                    );
+                  } catch (error) {
+                    res.destroy();
+                    context.activeResponse = undefined;
+                    fail(error);
+                    return;
+                  }
+                  const originalOrigin = new URL(url).origin;
+                  const redirectToken =
+                    redirectUrl.origin === originalOrigin
+                      ? authToken
+                      : undefined;
+                  res.destroy();
+                  context.activeResponse = undefined;
+                  downloadNpmFileRedirect(
+                    redirectUrl.toString(),
+                    dest,
+                    context,
+                    redirectToken,
+                    signal,
+                    redirectCount + 1,
+                    networkPolicy,
+                  )
+                    .then(finish)
+                    .catch(fail);
+                  return;
+                }
+              }
+              if (res.statusCode !== 200) {
+                fail(
+                  new Error(
+                    `Failed to download npm tarball: status ${res.statusCode}`,
+                  ),
+                );
+                return;
+              }
+              const file = fs.createWriteStream(dest);
+              context.activeFile = file;
+              let bytesWritten = 0;
+              res.on('data', (chunk: Buffer) => {
+                bytesWritten += chunk.length;
+                if (bytesWritten > NPM_ARCHIVE_DOWNLOAD_MAX_BYTES) {
+                  res.destroy();
+                  file.destroy();
+                  fail(
+                    new Error(
+                      `npm extension archive download exceeded maximum size of ${NPM_ARCHIVE_DOWNLOAD_MAX_BYTES} bytes`,
+                    ),
+                  );
+                  return;
+                }
+              });
+              res.on('error', (error) => {
+                file.destroy();
+                fail(error);
+              });
+              file.on('error', (error) => {
+                res.destroy();
+                fail(error);
+              });
+              res.pipe(file);
+              file.on('finish', () => file.close(finish));
+            },
+          )
+          .on('error', (error) => {
+            fail(signal?.aborted ? signal.reason : error);
+          });
+        if (requestGeneration === context.requestGeneration) {
+          context.activeRequest = req;
         }
-        if (res.statusCode !== 200) {
-          fail(
-            new Error(
-              `Failed to download npm tarball: status ${res.statusCode}`,
-            ),
-          );
-          return;
-        }
-        const file = fs.createWriteStream(dest);
-        context.activeFile = file;
-        let bytesWritten = 0;
-        res.on('data', (chunk: Buffer) => {
-          bytesWritten += chunk.length;
-          if (bytesWritten > NPM_ARCHIVE_DOWNLOAD_MAX_BYTES) {
-            res.destroy();
-            file.destroy();
-            fail(
-              new Error(
-                `npm extension archive download exceeded maximum size of ${NPM_ARCHIVE_DOWNLOAD_MAX_BYTES} bytes`,
-              ),
-            );
-            return;
-          }
-        });
-        res.on('error', (error) => {
-          file.destroy();
-          fail(error);
-        });
-        file.on('error', (error) => {
-          res.destroy();
-          fail(error);
-        });
-        res.pipe(file);
-        file.on('finish', () => file.close(finish));
-      })
-      .on('error', (error) => {
-        fail(signal?.aborted ? signal.reason : error);
-      });
-    if (requestGeneration === context.requestGeneration) {
-      context.activeRequest = req;
-    }
-  });
+      }),
+  );
 }
 
 function downloadNpmFile(
@@ -395,6 +434,7 @@ function downloadNpmFile(
   dest: string,
   authToken?: string,
   signal?: AbortSignal,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
 ): Promise<void> {
   const context: NpmDownloadContext = {
     requestGeneration: 0,
@@ -425,7 +465,15 @@ function downloadNpmFile(
       context.activeFile?.destroy();
     }, NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS);
     hardDeadline.unref();
-    downloadNpmFileRedirect(url, dest, context, authToken, signal)
+    downloadNpmFileRedirect(
+      url,
+      dest,
+      context,
+      authToken,
+      signal,
+      0,
+      networkPolicy,
+    )
       .then(finish)
       .catch(fail);
   });
@@ -462,6 +510,8 @@ export async function downloadFromNpmRegistry(
     metadataUrl,
     authToken,
     signal,
+    0,
+    installMetadata.networkPolicy,
   );
 
   // Resolve version
@@ -504,7 +554,13 @@ export async function downloadFromNpmRegistry(
 
   // Download tarball
   const tarballPath = path.join(destination, 'package.tgz');
-  await downloadNpmFile(tarballUrl, tarballPath, tarballAuthToken, signal);
+  await downloadNpmFile(
+    tarballUrl,
+    tarballPath,
+    tarballAuthToken,
+    signal,
+    installMetadata.networkPolicy,
+  );
   signal?.throwIfAborted();
 
   // Extract tarball
@@ -565,6 +621,8 @@ export async function checkNpmUpdate(
       metadataUrl,
       authToken,
       signal,
+      0,
+      installMetadata.networkPolicy,
     );
 
     const { version: requestedVersion } = parseNpmPackageSource(

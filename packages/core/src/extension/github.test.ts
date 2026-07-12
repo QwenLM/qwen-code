@@ -25,6 +25,7 @@ import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { Readable } from 'node:stream';
+import { promises as dns } from 'node:dns';
 import * as tar from 'tar';
 import * as archiver from 'archiver';
 import {
@@ -144,10 +145,14 @@ describe('git extension helpers', () => {
       getRemotes: vi.fn(),
       fetch: vi.fn(),
       checkout: vi.fn(),
+      version: vi.fn(),
+      env: vi.fn(),
     };
 
     beforeEach(() => {
       vi.mocked(simpleGit).mockReturnValue(mockGit as unknown as SimpleGit);
+      mockGit.env.mockReturnValue(mockGit);
+      mockGit.version.mockResolvedValue({ major: 2, minor: 52 });
     });
 
     it('should clone, fetch and checkout a repo', async () => {
@@ -175,7 +180,10 @@ describe('git extension helpers', () => {
         '1',
       ]);
       expect(mockGit.getRemotes).toHaveBeenCalledWith(true);
-      expect(mockGit.fetch).toHaveBeenCalledWith('origin', 'my-ref');
+      expect(mockGit.fetch).toHaveBeenCalledWith(
+        'http://my-repo.com',
+        'my-ref',
+      );
       expect(mockGit.checkout).toHaveBeenCalledWith('FETCH_HEAD');
     });
 
@@ -235,7 +243,60 @@ describe('git extension helpers', () => {
 
       await cloneFromGit(installMetadata, destination);
 
-      expect(mockGit.fetch).toHaveBeenCalledWith('origin', 'HEAD');
+      expect(mockGit.fetch).toHaveBeenCalledWith('http://my-repo.com', 'HEAD');
+    });
+
+    it('pins public HTTPS Git traffic and disables redirects and proxies', async () => {
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      const installMetadata = {
+        source: 'https://github.com/owner/repo.git',
+        type: 'git' as const,
+        networkPolicy: 'public' as const,
+      };
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://github.com/owner/repo.git' },
+        },
+      ]);
+
+      await cloneFromGit(installMetadata, '/dest');
+
+      expect(simpleGit).toHaveBeenLastCalledWith('/dest', {
+        config: [
+          'http.curloptResolve=github.com:443:8.8.8.8',
+          'http.followRedirects=false',
+          'http.proxy=',
+          'protocol.allow=never',
+          'protocol.https.allow=always',
+        ],
+      });
+      expect(mockGit.env).toHaveBeenCalledWith(
+        expect.objectContaining({
+          GIT_CONFIG_NOSYSTEM: '1',
+          GIT_CONFIG_GLOBAL: expect.any(String),
+        }),
+      );
+      expect(mockGit.fetch).toHaveBeenCalledWith(
+        'https://github.com/owner/repo.git',
+        'HEAD',
+      );
+    });
+
+    it('rejects SSH Git traffic under the public network policy', async () => {
+      await expect(
+        cloneFromGit(
+          {
+            source: 'git@github.com:owner/repo.git',
+            type: 'git',
+            networkPolicy: 'public',
+          },
+          '/dest',
+        ),
+      ).rejects.toThrow('must use HTTPS');
+      expect(mockGit.clone).not.toHaveBeenCalled();
     });
 
     it('should throw if no remotes are found', async () => {
@@ -354,13 +415,14 @@ describe('git extension helpers', () => {
         type: 'git' as const,
       };
       const controller = new AbortController();
+      const reason = new Error('download cancelled');
       mockGit.clone.mockImplementationOnce(async () => {
-        controller.abort();
+        controller.abort(reason);
       });
 
       await expect(
         cloneFromGit(installMetadata, '/dest', controller.signal),
-      ).rejects.toBe(controller.signal.reason);
+      ).rejects.toBe(reason);
     });
 
     it('preserves a git failure when the signal aborts as a side effect', async () => {
@@ -387,6 +449,8 @@ describe('git extension helpers', () => {
       getRemotes: vi.fn(),
       listRemote: vi.fn(),
       revparse: vi.fn(),
+      version: vi.fn(),
+      env: vi.fn(),
     };
 
     const mockExtensionManager = {
@@ -395,6 +459,8 @@ describe('git extension helpers', () => {
 
     beforeEach(() => {
       vi.mocked(simpleGit).mockReturnValue(mockGit as unknown as SimpleGit);
+      mockGit.version.mockResolvedValue({ major: 2, minor: 52 });
+      mockGit.env.mockReturnValue(mockGit);
     });
 
     function createExtension(overrides: Partial<Extension> = {}): Extension {
@@ -457,6 +523,47 @@ describe('git extension helpers', () => {
         mockExtensionManager,
       );
       expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+    });
+
+    it('pins public Git update checks and disables redirects and proxies', async () => {
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      const extension = createExtension({
+        installMetadata: {
+          type: 'git',
+          source: 'https://github.com/owner/repo.git',
+          networkPolicy: 'public',
+        },
+      });
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://github.com/owner/repo.git' },
+        },
+      ]);
+      mockGit.listRemote.mockResolvedValue('same-hash\tHEAD');
+      mockGit.revparse.mockResolvedValue('same-hash');
+
+      const result = await checkForExtensionUpdate(
+        extension,
+        mockExtensionManager,
+      );
+
+      expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+      expect(simpleGit).toHaveBeenLastCalledWith('/ext', {
+        config: [
+          'http.curloptResolve=github.com:443:8.8.8.8',
+          'http.followRedirects=false',
+          'http.proxy=',
+          'protocol.allow=never',
+          'protocol.https.allow=always',
+        ],
+      });
+      expect(mockGit.listRemote).toHaveBeenCalledWith([
+        'https://github.com/owner/repo.git',
+        'HEAD',
+      ]);
     });
 
     it('should return UP_TO_DATE when remote and local hashes are the same', async () => {
