@@ -81,6 +81,7 @@ import {
   type ServeAuthProviderInstallResult,
   type ServeOptions,
   type ServeChannelSelection,
+  type ChannelWebhookConfigSource,
 } from './types.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type {
@@ -88,7 +89,6 @@ import type {
   WorkspaceRuntime,
 } from './workspace-registry.js';
 import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
-import type { ChannelWebhookConfigSource } from './server.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';

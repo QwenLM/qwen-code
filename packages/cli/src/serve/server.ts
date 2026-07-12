@@ -56,6 +56,7 @@ import {
   type ServeAuthProviderInstallRequest,
   type ServeAuthProviderInstallResult,
   type ServeChannelSelection,
+  type ChannelWebhookConfigSource,
   type ServeOptions,
 } from './types.js';
 import {
@@ -295,12 +296,6 @@ function getRuntimeEffectiveEnv(
   metadata: WorkspaceRuntimeEnvMetadata | undefined,
 ): Readonly<Record<string, string | undefined>> | undefined {
   return metadata?.effectiveEnv;
-}
-
-export interface ChannelWebhookConfigSource {
-  workspaceCwd: string;
-  channelNames?: readonly string[];
-  env?: Readonly<Record<string, string | undefined>>;
 }
 
 export interface ServeAppDeps {
