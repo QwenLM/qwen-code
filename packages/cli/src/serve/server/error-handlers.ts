@@ -17,9 +17,23 @@ export function installJsonBodyParser(app: Application): void {
   });
 }
 
+function isMalformedRouteEncoding(err: unknown): boolean {
+  if (!(err instanceof URIError)) return false;
+  const status = (err as { status?: unknown; statusCode?: unknown }).status;
+  const statusCode = (err as { statusCode?: unknown }).statusCode;
+  return status === 400 || statusCode === 400;
+}
+
 export function installFinalErrorHandler(app: Application): void {
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (sendJsonBodyParserError(res, err)) return;
+    if (isMalformedRouteEncoding(err)) {
+      res.status(400).json({
+        error: 'Malformed URL encoding',
+        code: 'invalid_request',
+      });
+      return;
+    }
     writeStderrLine(
       `qwen serve: unhandled error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
     );

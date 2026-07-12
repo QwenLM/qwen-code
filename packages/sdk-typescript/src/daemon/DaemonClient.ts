@@ -66,6 +66,7 @@ import type {
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
   DaemonWorkspaceEnvStatus,
+  DaemonWorkspaceGitStatus,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
@@ -687,6 +688,7 @@ export class DaemonClient {
       body?: unknown;
       clientId?: string;
       timeoutMs?: number;
+      mode?: 'transport' | 'rest';
     } = {},
   ): Promise<T> {
     return await this.jsonRequest<T>(
@@ -812,6 +814,14 @@ export class DaemonClient {
         if (!res.ok) throw await this.failOnError(res, 'GET /workspace/mcp');
         return (await res.json()) as DaemonWorkspaceMcpStatus;
       },
+    );
+  }
+
+  async workspaceGit(): Promise<DaemonWorkspaceGitStatus> {
+    return await this.jsonRequest<DaemonWorkspaceGitStatus>(
+      '/workspace/git',
+      'GET /workspace/git',
+      { mode: 'rest' },
     );
   }
 
@@ -1545,8 +1555,8 @@ export class DaemonClient {
   }
 
   /**
-   * Enumerate live sessions in the given workspace. Used by session-picker
-   * UIs. Returns an empty list (not 404) when the workspace has no sessions.
+   * Enumerate the session catalog for a workspace. Used by session-picker UIs.
+   * Returns an empty list (not 404) when the workspace has no sessions.
    */
   async listWorkspaceSessions(
     workspaceCwd: string,
@@ -3355,13 +3365,23 @@ export class DaemonClient {
 
   async addWorkspace(
     cwd: string,
-  ): Promise<{ id: string; cwd: string; primary: boolean; trusted: boolean }> {
+    options: { persist?: boolean } = {},
+  ): Promise<{
+    id: string;
+    cwd: string;
+    primary: boolean;
+    trusted: boolean;
+    persisted?: boolean;
+  }> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspaces`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ cwd }),
+        body: JSON.stringify({
+          cwd,
+          ...(options.persist ? { persist: true } : {}),
+        }),
       },
       async (res) => {
         if (!res.ok) {
@@ -3372,6 +3392,7 @@ export class DaemonClient {
           cwd: string;
           primary: boolean;
           trusted: boolean;
+          persisted?: boolean;
         };
       },
     );
@@ -3473,6 +3494,15 @@ export class WorkspaceDaemonClient {
 
   workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
+  }
+
+  workspaceGit(): Promise<DaemonWorkspaceGitStatus> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceGitStatus>(
+      this.workspaceSelector,
+      '/git',
+      'GET /workspaces/:workspace/git',
+      { mode: 'rest' },
+    );
   }
 
   workspaceSkills(): Promise<DaemonWorkspaceSkillsStatus> {
@@ -3649,6 +3679,19 @@ export class WorkspaceDaemonClient {
       `/session-groups/${urlEncode(groupId)}`,
       'DELETE /workspaces/:workspace/session-groups/:groupId',
       { method: 'DELETE' },
+    );
+  }
+
+  updateSessionOrganization(
+    sessionId: string,
+    update: DaemonSessionOrganizationUpdate,
+    clientId?: string,
+  ): Promise<DaemonSessionOrganizationResult> {
+    return this.client.workspaceJsonRequest<DaemonSessionOrganizationResult>(
+      this.workspaceSelector,
+      `/session/${urlEncode(sessionId)}/organization`,
+      'PATCH /workspaces/:workspace/session/:id/organization',
+      { method: 'PATCH', body: update, clientId },
     );
   }
 

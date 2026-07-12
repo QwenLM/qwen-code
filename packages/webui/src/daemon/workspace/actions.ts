@@ -759,10 +759,10 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async addWorkspace(cwd) {
+    async addWorkspace(cwd, options) {
       const client = requireClient(getClient, 'Add workspace failed');
       return withActionTimeout(
-        client.addWorkspace(cwd),
+        client.addWorkspace(cwd, options),
         'Add workspace timed out',
       );
     },

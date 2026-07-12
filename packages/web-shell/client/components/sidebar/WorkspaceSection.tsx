@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, type ReactNode } from 'react';
 import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import type {
   DaemonSessionSummary,
@@ -51,31 +51,39 @@ interface WorkspaceSectionProps {
   workspace: DaemonWorkspaceCapability;
   client: DaemonClient;
   isActive: boolean;
-  currentSessionId?: string;
   reloadToken: number;
   primaryLabel: string;
   untrustedLabel: string;
+  readOnlyLabel: string;
+  trustToOpenLabel: string;
   noSessionsLabel: string;
   formatTime: (iso: string) => string;
   onSelectWorkspace: (cwd: string | undefined) => void;
-  onLoadSession: (sessionId: string) => void;
+  /**
+   * Render a trusted session row with the sidebar's shared interactions and
+   * styling. Untrusted rows stay non-interactive in this component.
+   */
+  renderSession: (session: DaemonSessionSummary) => ReactNode;
 }
 
 export function WorkspaceSection({
   workspace,
   client,
   isActive,
-  currentSessionId,
   reloadToken,
   primaryLabel,
   untrustedLabel,
+  readOnlyLabel,
+  trustToOpenLabel,
   noSessionsLabel,
   formatTime,
   onSelectWorkspace,
-  onLoadSession,
+  renderSession,
 }: WorkspaceSectionProps) {
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
   const [expanded, setExpanded] = useState(workspace.primary);
+  const readOnly = !workspace.primary && !workspace.trusted;
+  const disabled = workspace.primary && !workspace.trusted;
 
   // Sync if the primary flag changes after mount (e.g. capabilities refresh).
   useEffect(() => {
@@ -83,7 +91,7 @@ export function WorkspaceSection({
   }, [workspace.primary]);
 
   const loadSessions = useCallback(async () => {
-    if (!workspace.trusted) return;
+    if (disabled) return;
     try {
       const result = await client.listWorkspaceSessions(workspace.cwd, {
         archiveState: 'active',
@@ -95,14 +103,15 @@ export function WorkspaceSection({
       console.warn('[WorkspaceSection] session poll failed:', err);
       setSessions([]);
     }
-  }, [client, workspace.cwd, workspace.trusted]);
+  }, [client, disabled, workspace.cwd]);
 
   useEffect(() => {
     if (!expanded) return;
     void loadSessions();
+    if (readOnly) return;
     const timer = setInterval(() => void loadSessions(), 10_000);
     return () => clearInterval(timer);
-  }, [expanded, loadSessions, reloadToken]);
+  }, [expanded, loadSessions, readOnly, reloadToken]);
 
   return (
     <div className={styles.section}>
@@ -110,12 +119,14 @@ export function WorkspaceSection({
         className={cx(
           styles.header,
           isActive && styles.headerActive,
-          !workspace.trusted && styles.headerDisabled,
+          disabled && styles.headerDisabled,
         )}
-        disabled={!workspace.trusted}
+        disabled={disabled}
         aria-expanded={expanded}
         onClick={() => {
-          onSelectWorkspace(workspace.primary ? undefined : workspace.cwd);
+          if (!readOnly) {
+            onSelectWorkspace(workspace.primary ? undefined : workspace.cwd);
+          }
           setExpanded((v) => !v);
         }}
       >
@@ -129,33 +140,31 @@ export function WorkspaceSection({
         {!workspace.trusted && (
           <span className={styles.badge}>{untrustedLabel}</span>
         )}
+        {readOnly && <span className={styles.badge}>{readOnlyLabel}</span>}
       </button>
-      {expanded && workspace.trusted && (
+      {expanded && !disabled && (
         <div className={styles.sessions}>
           {sessions.length === 0 ? (
             <div className={styles.empty}>{noSessionsLabel}</div>
           ) : (
-            sessions.map((session) => (
-              <button
-                key={session.sessionId}
-                className={cx(
-                  styles.sessionItem,
-                  session.sessionId === currentSessionId &&
-                    styles.sessionItemActive,
-                )}
-                onClick={() => onLoadSession(session.sessionId)}
-                title={getSessionLabel(session)}
-              >
-                <span className={styles.sessionName}>
-                  {getSessionLabel(session)}
-                </span>
-                {session.createdAt && (
-                  <span className={styles.sessionTime}>
-                    {formatTime(session.createdAt)}
-                  </span>
-                )}
-              </button>
-            ))
+            sessions.map((session) => {
+              if (!readOnly) return renderSession(session);
+              const label = getSessionLabel(session);
+              const time = session.createdAt
+                ? formatTime(session.createdAt)
+                : '';
+              return (
+                <div
+                  key={session.sessionId}
+                  className={styles.sessionItemReadOnly}
+                  role="note"
+                  aria-label={`${label}${time ? `, ${time}` : ''}. ${trustToOpenLabel}`}
+                >
+                  <span className={styles.sessionName}>{label}</span>
+                  {time && <span className={styles.sessionTime}>{time}</span>}
+                </div>
+              );
+            })
           )}
         </div>
       )}

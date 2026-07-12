@@ -768,6 +768,14 @@ function parseWorkspaceMemoryDreamResult(
   };
 }
 
+function pickUserInputEchoMeta(meta: unknown): Record<string, unknown> {
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return {};
+  const inputAnnotations = (meta as Record<string, unknown>)[
+    'inputAnnotations'
+  ];
+  return Array.isArray(inputAnnotations) ? { inputAnnotations } : {};
+}
+
 /**
  * Echo a user prompt to the session bus so multi-client SSE subscribers
  * see the input alongside the agent response. Iterates content blocks
@@ -831,7 +839,11 @@ function echoPromptToSessionBus(
             // field permitted alongside spec fields, the SDK normalizer
             // reads it from `update._meta`/`data._meta`, and every other
             // agent-emitted session_update carries `_meta` the same way.
-            _meta: { serverTimestamp, source: 'bridge-echo' },
+            _meta: {
+              ...pickUserInputEchoMeta(req._meta),
+              serverTimestamp,
+              source: 'bridge-echo',
+            },
           },
         },
         ...(originatorClientId ? { originatorClientId } : {}),

@@ -333,6 +333,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     StopFailure: 'StopFailure',
     TodoCreated: 'TodoCreated',
     TodoCompleted: 'TodoCompleted',
+    MessageDisplay: 'MessageDisplay',
+    InstructionsLoaded: 'InstructionsLoaded',
   },
   buildInstallPlan: vi.fn((provider, inputs) => {
     const authType = inputs.protocol ?? provider.protocol;
@@ -362,6 +364,25 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   },
   runManagedRememberByAgent: mockRunManagedRememberByAgent,
   runManagedAutoMemoryDream: mockRunManagedAutoMemoryDream,
+  refreshMemoryInstruction: vi.fn(
+    async (config: {
+      refreshHierarchicalMemory?: () => Promise<void>;
+      getGeminiClient?: () =>
+        | { refreshSystemInstruction?: () => Promise<void> }
+        | undefined;
+    }) => {
+      try {
+        await config.refreshHierarchicalMemory?.();
+      } catch {
+        // Best-effort, matching the real helper.
+      }
+      try {
+        await config.getGeminiClient?.()?.refreshSystemInstruction?.();
+      } catch {
+        // Best-effort, matching the real helper.
+      }
+    },
+  ),
   clearCachedCredentialFile: vi.fn(),
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   getAutoMemoryRoot: vi.fn(
@@ -3847,9 +3868,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it('runs workspace memory remember without requiring a session', async () => {
+    const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
+    const refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
     Object.assign(mockConfig, {
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
       getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      refreshHierarchicalMemory,
+      getGeminiClient: vi.fn().mockReturnValue({
+        refreshSystemInstruction,
+      }),
     });
     mockRunManagedRememberByAgent.mockResolvedValue({
       summary: 'saved',
@@ -3888,6 +3915,242 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         abortSignal: expect.any(AbortSignal),
       }),
     );
+    expect(refreshHierarchicalMemory).not.toHaveBeenCalled();
+    expect(refreshSystemInstruction).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('refreshes live sessions after workspace memory remember', async () => {
+    const sessionRefreshHierarchicalMemory = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    const sessionRefreshSystemInstruction = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    const innerConfig = {
+      ...makeInnerConfig(),
+      getSessionId: vi.fn().mockReturnValue('remember-session'),
+      refreshHierarchicalMemory: sessionRefreshHierarchicalMemory,
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        refreshSystemInstruction: sessionRefreshSystemInstruction,
+      }),
+    };
+    vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('remember-session'),
+          getConfig: vi.fn().mockReturnValue(innerConfig),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockResolvedValue({
+      summary: 'saved',
+      filesTouched: ['/mem/MEMORY.md'],
+      touchedScopes: ['project'],
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/workspace', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember the workspace uses vitest.',
+      }),
+    ).resolves.toEqual({
+      summary: 'saved',
+      filesTouched: ['/mem/MEMORY.md'],
+      touchedScopes: ['project'],
+    });
+    expect(sessionRefreshHierarchicalMemory).toHaveBeenCalledTimes(1);
+    expect(sessionRefreshSystemInstruction).toHaveBeenCalledTimes(1);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not refresh live sessions when workspace memory remember writes nothing', async () => {
+    const sessionRefreshHierarchicalMemory = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    const sessionRefreshSystemInstruction = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    const innerConfig = {
+      ...makeInnerConfig(),
+      getSessionId: vi.fn().mockReturnValue('remember-noop-session'),
+      refreshHierarchicalMemory: sessionRefreshHierarchicalMemory,
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        refreshSystemInstruction: sessionRefreshSystemInstruction,
+      }),
+    };
+    vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('remember-noop-session'),
+          getConfig: vi.fn().mockReturnValue(innerConfig),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockResolvedValue({
+      summary: 'No memory files updated.',
+      filesTouched: [],
+      touchedScopes: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/workspace', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember the workspace uses vitest.',
+      }),
+    ).resolves.toEqual({
+      summary: 'No memory files updated.',
+      filesTouched: [],
+      touchedScopes: [],
+    });
+    expect(sessionRefreshHierarchicalMemory).not.toHaveBeenCalled();
+    expect(sessionRefreshSystemInstruction).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('keeps workspace memory remember successful when live session refresh fails', async () => {
+    const sessionRefreshHierarchicalMemory = vi
+      .fn()
+      .mockRejectedValue(new Error('memory refresh failed'));
+    const sessionRefreshSystemInstruction = vi
+      .fn()
+      .mockRejectedValue(new Error('system instruction refresh failed'));
+    const innerConfig = {
+      ...makeInnerConfig(),
+      getSessionId: vi.fn().mockReturnValue('remember-fail-session'),
+      refreshHierarchicalMemory: sessionRefreshHierarchicalMemory,
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        refreshSystemInstruction: sessionRefreshSystemInstruction,
+      }),
+    };
+    vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('remember-fail-session'),
+          getConfig: vi.fn().mockReturnValue(innerConfig),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockResolvedValue({
+      summary: 'saved',
+      filesTouched: ['/mem/MEMORY.md'],
+      touchedScopes: ['project'],
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/workspace', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember the workspace uses vitest.',
+      }),
+    ).resolves.toEqual({
+      summary: 'saved',
+      filesTouched: ['/mem/MEMORY.md'],
+      touchedScopes: ['project'],
+    });
+    expect(sessionRefreshHierarchicalMemory).toHaveBeenCalledTimes(1);
+    expect(sessionRefreshSystemInstruction).toHaveBeenCalledTimes(1);
 
     mockConnectionState.resolve();
     await agentPromise;

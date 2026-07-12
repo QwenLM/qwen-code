@@ -23,6 +23,7 @@ import type {
   DaemonCapabilities,
   DaemonSessionContextStatus,
   DaemonSessionLspStatus,
+  DaemonSessionOrganizationResult,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTasksStatus,
   DaemonWorkspaceEnvStatus,
@@ -597,6 +598,51 @@ describe('DaemonClient', () => {
         ['GET', 'http://daemon/workspace/acp/status'],
         ['GET', 'http://daemon/workspace/providers'],
       ]);
+    });
+
+    it('reads primary and workspace-qualified Git status over REST', async () => {
+      const primary = {
+        v: 1 as const,
+        workspaceCwd: '/work/main',
+        branch: 'main',
+      };
+      const secondary = {
+        v: 1 as const,
+        workspaceCwd: '/work/secondary',
+        branch: 'feature/web-shell',
+      };
+      const { fetch, calls } = recordingFetch((req) =>
+        jsonResponse(
+          200,
+          req.url.endsWith('/workspace/git') ? primary : secondary,
+        ),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'transport should not be used' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await expect(client.workspaceGit()).resolves.toEqual(primary);
+      await expect(
+        client.workspaceByCwd('/work/secondary').workspaceGit(),
+      ).resolves.toEqual(secondary);
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        ['GET', 'http://daemon/workspace/git'],
+        ['GET', 'http://daemon/workspaces/%2Fwork%2Fsecondary/git'],
+      ]);
+      expect(transportFetch).not.toHaveBeenCalled();
     });
 
     it('lets ACP preheat wait longer than the client default timeout', async () => {
@@ -4623,6 +4669,58 @@ describe('DaemonClient', () => {
         'http://daemon/workspaces/%2Ftmp%2Fwork%20space/session-groups/group%2F1',
       );
     });
+
+    it('workspaceById updates session organization on the workspace-qualified route', async () => {
+      const reply: DaemonSessionOrganizationResult = {
+        sessionId: 'session/1',
+        isPinned: true,
+        groupId: 'group/1',
+        color: 'purple',
+        updatedAt: '2026-07-11T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result: DaemonSessionOrganizationResult = await client
+        .workspaceById('workspace/id')
+        .updateSessionOrganization(
+          'session/1',
+          { isPinned: true, groupId: 'group/1', color: 'purple' },
+          'client-1',
+        );
+
+      expect(result).toEqual(reply);
+      expect(calls[0]?.method).toBe('PATCH');
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/workspace%2Fid/session/session%2F1/organization',
+      );
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        isPinned: true,
+        groupId: 'group/1',
+        color: 'purple',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('workspaceByCwd encodes the selector when updating session organization', async () => {
+      const reply: DaemonSessionOrganizationResult = {
+        sessionId: 'session-1',
+        isPinned: false,
+        groupId: null,
+        updatedAt: '2026-07-11T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result: DaemonSessionOrganizationResult = await client
+        .workspaceByCwd('/tmp/work space')
+        .updateSessionOrganization('session-1', { isPinned: false });
+
+      expect(result).toEqual(reply);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Ftmp%2Fwork%20space/session/session-1/organization',
+      );
+    });
   });
 
   describe('addRuntimeMcpServer (T2.8 #4514)', () => {
@@ -4890,6 +4988,48 @@ describe('DaemonClient', () => {
       const b = client.auth;
       // Same instance on subsequent reads — singleton allocation.
       expect(a).toBe(b);
+    });
+  });
+
+  describe('workspace registration persistence', () => {
+    it('forwards persist:true and returns the persisted marker', async () => {
+      const response = {
+        id: 'workspace-id',
+        cwd: '/work/secondary',
+        primary: false,
+        trusted: true,
+        persisted: true,
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(201, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.addWorkspace('/work/secondary', { persist: true }),
+      ).resolves.toEqual(response);
+      expect(calls[0]?.url).toBe('http://daemon/workspaces');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        cwd: '/work/secondary',
+        persist: true,
+      });
+    });
+
+    it('keeps the existing ephemeral request shape by default', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(201, {
+          id: 'workspace-id',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.addWorkspace('/work/secondary');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        cwd: '/work/secondary',
+      });
     });
   });
 });

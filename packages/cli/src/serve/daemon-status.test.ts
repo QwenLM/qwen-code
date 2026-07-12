@@ -6,7 +6,11 @@
 
 import type { RequestHandler } from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AcpHttpHandle } from './acp-http/index.js';
+import type {
+  AcpHttpConnectionDiagnostic,
+  AcpHttpHandle,
+  AcpHttpSnapshot,
+} from './acp-http/index.js';
 import type {
   AcpSessionBridge,
   BridgeDaemonStatusSnapshot,
@@ -194,6 +198,48 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('reports aggregate workspace-attributed ACP diagnostics in full status', async () => {
+    const primaryDiagnostic = makeAcpDiagnostic(null, BASE_WORKSPACE, true);
+    const secondaryDiagnostic = makeAcpDiagnostic(
+      'secondary-id',
+      '/work/secondary',
+      false,
+    );
+    const primaryRegistrySnapshot = {
+      connectionCount: 1,
+      connectionCap: 10,
+      connectionStreams: 1,
+      sessionStreams: 0,
+      sseStreams: 0,
+      wsStreams: 1,
+      pendingClientRequests: 0,
+      connections: [primaryDiagnostic],
+    };
+
+    const response = await buildDaemonStatusResponse(
+      'full',
+      makeOptions({
+        acpSnapshot: primaryRegistrySnapshot,
+        acpAggregate: {
+          connectionCount: 2,
+          connectionStreams: 2,
+          sessionStreams: 0,
+          sseStreams: 0,
+          wsStreams: 2,
+          pendingClientRequests: 0,
+          mounts: [],
+          connections: [primaryDiagnostic, secondaryDiagnostic],
+        },
+      }),
+    );
+
+    expect(response.runtime.transport.acp.connections).toBe(2);
+    expect(response.full?.acpConnections).toEqual([
+      primaryDiagnostic,
+      secondaryDiagnostic,
+    ]);
+  });
+
   it('embeds runtime.metrics.series when getMetricsSeries is provided, and omits it otherwise', async () => {
     const base = makeOptions({});
     const withSeries = await buildDaemonStatusResponse('summary', {
@@ -251,6 +297,90 @@ describe('buildDaemonStatusResponse', () => {
         },
       },
     });
+  });
+
+  it('reports and diagnoses non-primary channel workers', async () => {
+    const options = makeOptions({
+      channelWorkerSnapshot: {
+        enabled: false,
+        state: 'disabled',
+        channels: [],
+      },
+    });
+    options.workspaceRegistry = {
+      list: () => [
+        {
+          workspaceId: 'primary',
+          workspaceCwd: BASE_WORKSPACE,
+          primary: true,
+          trusted: true,
+          bridge: options.bridge,
+        },
+        {
+          workspaceId: 'secondary',
+          workspaceCwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+          bridge: options.bridge,
+        },
+      ],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    options.getChannelWorkerSnapshots = () => [
+      {
+        enabled: true,
+        state: 'failed',
+        channels: ['telegram'],
+        error: 'secondary failed',
+        workspaceId: 'secondary',
+        workspaceCwd: '/work/secondary',
+        primary: false,
+      },
+    ];
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.channelWorkers).toEqual(
+      options.getChannelWorkerSnapshots(),
+    );
+    expect(response).toMatchObject({
+      status: 'error',
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'channel_worker_exited',
+          severity: 'error',
+          section: 'runtime.channelWorkers',
+          message: expect.stringContaining('/work/secondary'),
+        }),
+      ]),
+    });
+  });
+
+  it('omits channelWorkers for single-workspace and empty multi-workspace snapshots', async () => {
+    const single = makeOptions();
+    single.getChannelWorkerSnapshots = () => [
+      {
+        enabled: true,
+        state: 'running',
+        channels: ['telegram'],
+        workspaceId: 'primary',
+        workspaceCwd: BASE_WORKSPACE,
+        primary: true,
+      },
+    ];
+    expect(
+      (await buildDaemonStatusResponse('summary', single)).runtime
+        .channelWorkers,
+    ).toBeUndefined();
+
+    const multi = makeOptions();
+    multi.workspaceRegistry = {
+      list: () => [{ bridge: multi.bridge }, { bridge: multi.bridge }],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    multi.getChannelWorkerSnapshots = () => [];
+    expect(
+      (await buildDaemonStatusResponse('summary', multi)).runtime
+        .channelWorkers,
+    ).toBeUndefined();
   });
 
   it('warns for failed channel worker snapshots that still have a scheduled restart', async () => {
@@ -783,9 +913,36 @@ describe('buildDaemonStatusResponse', () => {
   });
 });
 
+function makeAcpDiagnostic(
+  workspaceId: string | null,
+  workspaceCwd: string,
+  primary: boolean,
+): AcpHttpConnectionDiagnostic {
+  return {
+    connectionIdPrefix: primary ? 'primary' : 'secondary',
+    fromLoopback: true,
+    destroyed: false,
+    lastActiveMs: 0,
+    ownedSessionCount: 0,
+    sessionBindingCount: 0,
+    closingSessionCount: 0,
+    pendingClientRequests: 0,
+    connectionStreamOpen: true,
+    sessionStreams: 0,
+    sseStreams: 0,
+    wsStreams: 1,
+    bufferedConnectionFrames: 0,
+    bufferedSessionFrames: 0,
+    workspaceId,
+    workspaceCwd,
+    primary,
+  };
+}
+
 interface MakeOptionsInput {
   bridgeSnapshot?: BridgeDaemonStatusSnapshot;
   acpSnapshot?: ReturnType<AcpHttpHandle['registry']['getSnapshot']>;
+  acpAggregate?: AcpHttpSnapshot;
   rateLimitHits?: Record<RateLimitTier, number>;
   rateLimitEnabled?: boolean;
   mcpStatus?: unknown;
@@ -856,6 +1013,24 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
       ? {
           acpHandle: {
             registry: { getSnapshot: () => input.acpSnapshot },
+            getSnapshot: () =>
+              input.acpAggregate ?? {
+                connectionCount: input.acpSnapshot!.connectionCount,
+                connectionStreams: input.acpSnapshot!.connectionStreams,
+                sessionStreams: input.acpSnapshot!.sessionStreams,
+                sseStreams: input.acpSnapshot!.sseStreams,
+                wsStreams: input.acpSnapshot!.wsStreams,
+                pendingClientRequests: input.acpSnapshot!.pendingClientRequests,
+                mounts: [
+                  {
+                    workspaceId: null,
+                    primary: true,
+                    connectionCount: input.acpSnapshot!.connectionCount,
+                    wsStreams: input.acpSnapshot!.wsStreams,
+                  },
+                ],
+                connections: [],
+              },
           } as unknown as AcpHttpHandle,
         }
       : {}),

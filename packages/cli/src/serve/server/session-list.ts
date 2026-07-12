@@ -45,6 +45,11 @@ export interface ListWorkspaceSessionsResult {
   truncated?: boolean;
 }
 
+export interface ListWorkspaceSessionsReadOptions {
+  /** Merge live bridge state into persisted summaries. */
+  mergeLive?: boolean;
+}
+
 export class InvalidCursorError extends Error {
   constructor(
     cursor: string,
@@ -381,6 +386,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
   workspaceCwd: string,
   options: ListWorkspaceSessionsOptions,
   pageSize: number,
+  readOptions: ListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const archiveState = options.archiveState ?? 'active';
   const sessionService = new SessionService(workspaceCwd);
@@ -419,7 +425,11 @@ async function listOrganizedWorkspaceSessionsForResponse(
     );
   }
 
-  if (archiveState !== 'archived' && isFirstPage) {
+  if (
+    readOptions.mergeLive !== false &&
+    archiveState !== 'archived' &&
+    isFirstPage
+  ) {
     try {
       const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
       for (const live of liveSessions) {
@@ -518,6 +528,7 @@ async function listWorkspaceSessionsByParentForResponse(
   options: ListWorkspaceSessionsOptions,
   pageSize: number,
   parentSessionId: string,
+  readOptions: ListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const archiveState = options.archiveState ?? 'active';
   const sessionService = new SessionService(workspaceCwd);
@@ -531,7 +542,7 @@ async function listWorkspaceSessionsByParentForResponse(
   }
 
   let liveMergeFailed = false;
-  if (archiveState !== 'archived') {
+  if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
       for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
         const existing = bySessionId.get(live.sessionId);
@@ -606,6 +617,7 @@ export async function listWorkspaceSessionsForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
   options?: ListWorkspaceSessionsOptions,
+  readOptions: ListWorkspaceSessionsReadOptions = {},
 ): Promise<ListWorkspaceSessionsResult> {
   const rawSize = options?.size;
   const requestedSize =
@@ -620,6 +632,7 @@ export async function listWorkspaceSessionsForResponse(
       workspaceCwd,
       options,
       pageSize,
+      readOptions,
     );
   }
 
@@ -630,6 +643,7 @@ export async function listWorkspaceSessionsForResponse(
       options,
       pageSize,
       options.parentSessionId,
+      readOptions,
     );
   }
 
@@ -652,7 +666,7 @@ export async function listWorkspaceSessionsForResponse(
     bySessionId.set(item.sessionId, toSummary(item));
   }
 
-  if (archiveState === 'archived') {
+  if (archiveState === 'archived' || readOptions.mergeLive === false) {
     const sessions = [...bySessionId.values()];
     const nextCursor =
       persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;

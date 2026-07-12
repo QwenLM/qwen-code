@@ -2245,6 +2245,18 @@ const SETTINGS_SCHEMA = {
             description: 'Show color in shell output.',
             showInDialog: false,
           },
+          defaultTimeoutMs: {
+            type: 'integer',
+            minimum: 0,
+            maximum: 600000,
+            label: 'Default Command Timeout (ms)',
+            category: 'Tools',
+            requiresRestart: true,
+            default: undefined as number | undefined,
+            description:
+              'Default timeout, in milliseconds, for foreground shell commands started by the agent. A per-call timeout on the shell tool overrides this. When unset, foreground commands time out after 120000 ms (2 minutes). Set to 0 to disable the timeout.',
+            showInDialog: false,
+          },
         },
       },
       // Legacy tool permission fields – kept for backward compatibility.
@@ -2927,6 +2939,18 @@ const SETTINGS_SCHEMA = {
         default: [],
         description:
           'Hooks that execute after agent processing. Can post-process responses or log interactions.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      MessageDisplay: {
+        type: 'array',
+        label: 'Message Display Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute repeatedly as the assistant reply streams, before the After Agent (Stop) hooks fire.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,

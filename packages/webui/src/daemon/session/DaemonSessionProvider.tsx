@@ -24,6 +24,7 @@ import {
   extractServerTimestamp,
   matchTurnEvent,
   normalizeDaemonEvent,
+  type CreateSessionRequest,
   type DaemonEvent,
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
@@ -190,6 +191,7 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   settingsVersion: 0,
   mcpVersion: 0,
   extensionsVersion: 0,
+  artifactsVersion: 0,
   initVersion: 0,
   authVersion: 0,
 };
@@ -452,11 +454,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // session-scoped supported-commands snapshot (which also carries
               // custom/MCP/workflow commands) still lands once the first prompt
               // creates a session.
-              const [providerResult, skillsResult, acpStatusResult] =
+              const [providerResult, skillsResult, acpStatusResult, gitResult] =
                 await Promise.allSettled([
                   client.workspaceProviders(),
                   client.workspaceSkills(),
                   client.workspaceAcpStatus(),
+                  effectWorkspaceCwd
+                    ? client.workspaceByCwd(effectWorkspaceCwd).workspaceGit()
+                    : client.workspaceGit(),
                 ]);
               if (providerResult.status === 'rejected') {
                 console.warn(
@@ -497,6 +502,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ...current,
                 status: 'connected',
                 workspaceCwd: effectWorkspaceCwd,
+                gitBranch:
+                  gitResult.status === 'fulfilled'
+                    ? (gitResult.value.branch ?? undefined)
+                    : undefined,
                 models: providerModelStatus.models,
                 currentModel: providerModelStatus.currentModel,
                 currentMode: providerModelStatus.currentMode,
@@ -854,14 +863,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             connectionRef.current.skills !== undefined &&
             connectionRef.current.supportedCommands !== undefined &&
             connectionRef.current.context !== undefined;
-          const [providerResult, commandResult, contextResult] =
-            canReuseSessionMetadata
-              ? [undefined, undefined, undefined]
-              : await Promise.allSettled([
-                  client.workspaceProviders(),
-                  activeSession.supportedCommands(),
-                  activeSession.context(),
-                ]);
+          const gitPromise = activeSession.workspaceCwd
+            ? client.workspaceByCwd(activeSession.workspaceCwd).workspaceGit()
+            : client.workspaceGit();
+          const [providerResult, commandResult, contextResult, gitResult] =
+            await Promise.allSettled([
+              canReuseSessionMetadata
+                ? Promise.resolve(undefined)
+                : client.workspaceProviders(),
+              canReuseSessionMetadata
+                ? Promise.resolve(undefined)
+                : activeSession.supportedCommands(),
+              canReuseSessionMetadata
+                ? Promise.resolve(undefined)
+                : activeSession.context(),
+              gitPromise,
+            ]);
           const providers =
             providerResult?.status === 'fulfilled'
               ? providerResult.value
@@ -873,6 +890,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const context =
             contextResult?.status === 'fulfilled'
               ? contextResult.value
+              : undefined;
+          const gitBranch =
+            gitResult?.status === 'fulfilled'
+              ? (gitResult.value.branch ?? undefined)
               : undefined;
           const loadWarningTexts = [
             providerResult?.status === 'rejected'
@@ -941,6 +962,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               providers: providers ?? current.providers,
               supportedCommands: supportedCommands ?? current.supportedCommands,
               context: context ?? current.context,
+              gitBranch:
+                gitResult.status === 'fulfilled'
+                  ? gitBranch
+                  : current.gitBranch,
               capabilities: capabilities ?? current.capabilities,
               loadingTranscript: undefined,
               catchingUp:
@@ -1680,7 +1705,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           workspaceCwd:
             activeWorkspaceCwdRef.current ?? sessionRef.current?.workspaceCwd,
         }),
-        createDetachedSession: (workspaceCwd?: string) => {
+        createDetachedSession: (
+          workspaceCwd?: string,
+          overrides?: Pick<CreateSessionRequest, 'approvalMode'>,
+        ) => {
           const client =
             workspaceClientRef.current ??
             new DaemonClient({
@@ -1694,6 +1722,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               workspaceCwd ??
               activeWorkspaceCwdRef.current ??
               sessionRef.current?.workspaceCwd,
+            ...(overrides?.approvalMode !== undefined
+              ? { approvalMode: overrides.approvalMode }
+              : {}),
           };
           const requestClientId = clientId
             ? clientIdRef.current
@@ -2226,6 +2257,7 @@ function bumpWorkspaceEventSignals(
   let settings = 0;
   let mcp = 0;
   let extensions = 0;
+  let artifacts = 0;
   let lastExtensionChange:
     | DaemonWorkspaceEventSignals['lastExtensionChange']
     | undefined;
@@ -2264,6 +2296,9 @@ function bumpWorkspaceEventSignals(
           failed: event.failed,
         };
         break;
+      case 'session.artifact.changed':
+        artifacts += 1;
+        break;
       case 'workspace.initialized':
         init += 1;
         break;
@@ -2279,7 +2314,18 @@ function bumpWorkspaceEventSignals(
     }
   }
 
-  if (memory + agents + tools + settings + mcp + extensions + init + auth === 0)
+  if (
+    memory +
+      agents +
+      tools +
+      settings +
+      mcp +
+      extensions +
+      artifacts +
+      init +
+      auth ===
+    0
+  )
     return;
 
   setSignals((current) => ({
@@ -2289,6 +2335,7 @@ function bumpWorkspaceEventSignals(
     settingsVersion: current.settingsVersion + settings,
     mcpVersion: current.mcpVersion + mcp,
     extensionsVersion: current.extensionsVersion + extensions,
+    artifactsVersion: current.artifactsVersion + artifacts,
     ...(lastExtensionChange ? { lastExtensionChange } : {}),
     initVersion: current.initVersion + init,
     authVersion: current.authVersion + auth,

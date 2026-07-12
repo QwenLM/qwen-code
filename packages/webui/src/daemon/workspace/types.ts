@@ -234,6 +234,7 @@ export interface DaemonAddWorkspaceResult {
   cwd: string;
   primary: boolean;
   trusted: boolean;
+  persisted?: boolean;
 }
 
 /**
@@ -464,5 +465,8 @@ export interface DaemonWorkspaceActions {
   ): Promise<DaemonAuthProviderInstallResult>;
 
   // Workspace management
-  addWorkspace(cwd: string): Promise<DaemonAddWorkspaceResult>;
+  addWorkspace(
+    cwd: string,
+    options?: { persist?: boolean },
+  ): Promise<DaemonAddWorkspaceResult>;
 }

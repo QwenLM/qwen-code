@@ -58,6 +58,12 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `metadata: ${event.displayName ?? '(no display name)'}`,
         '36',
       );
+    case 'session.artifact.changed':
+      return terminalLine(
+        'artifact',
+        `${event.change.action} ${event.change.artifact?.title ?? event.change.artifactId}`,
+        '36',
+      );
     case 'session.approval_mode.changed':
       return terminalLine(
         'approval-mode',

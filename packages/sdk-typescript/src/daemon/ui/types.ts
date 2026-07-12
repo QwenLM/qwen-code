@@ -9,6 +9,7 @@ import type {
   DaemonAuthProviderId,
   DaemonEvent,
   DaemonErrorKind,
+  DaemonSessionArtifactChange,
   PermissionResponse,
 } from '../types.js';
 
@@ -34,6 +35,7 @@ export type DaemonUiEventType =
   | 'debug'
   // Session-meta events
   | 'session.metadata.changed'
+  | 'session.artifact.changed'
   | 'session.approval_mode.changed'
   | 'session.available_commands'
   | 'session.state_resync_required'
@@ -94,8 +96,28 @@ export interface DaemonUiTextEvent extends DaemonUiEventBase {
   meta?: DaemonTextDeltaMeta;
 }
 
+export interface DaemonInputReference {
+  id: string;
+  kind?: string;
+  label?: string;
+  value?: string;
+  serialized?: string;
+  removable?: boolean;
+}
+
+export interface DaemonInputReferenceAnnotation {
+  type: 'reference';
+  start: number;
+  end: number;
+  text: string;
+  reference: DaemonInputReference;
+}
+
+export type DaemonInputAnnotation = DaemonInputReferenceAnnotation;
+
 export interface DaemonTextDeltaMeta extends Record<string, unknown> {
   qwenDiscreteMessage?: boolean;
+  inputAnnotations?: DaemonInputAnnotation[];
 }
 
 export interface DaemonUiUserImageEvent extends DaemonUiEventBase {
@@ -279,6 +301,12 @@ export interface DaemonUiSessionMetadataChangedEvent extends DaemonUiEventBase {
   type: 'session.metadata.changed';
   sessionId: string;
   displayName?: string;
+}
+
+export interface DaemonUiSessionArtifactChangedEvent extends DaemonUiEventBase {
+  type: 'session.artifact.changed';
+  sessionId: string;
+  change: DaemonSessionArtifactChange;
 }
 
 export interface DaemonUiSessionApprovalModeChangedEvent
@@ -556,6 +584,7 @@ export type DaemonUiEvent =
   | DaemonUiErrorEvent
   // Session-meta events
   | DaemonUiSessionMetadataChangedEvent
+  | DaemonUiSessionArtifactChangedEvent
   | DaemonUiSessionApprovalModeChangedEvent
   | DaemonUiSessionAvailableCommandsEvent
   | DaemonUiStateResyncRequiredEvent
@@ -963,6 +992,7 @@ export interface DaemonTranscriptStore {
   appendLocalUserMessage(
     text: string,
     images?: Array<{ data: string; mimeType: string }>,
+    meta?: DaemonTextDeltaMeta,
   ): void;
   reset(seed?: Partial<DaemonTranscriptState>): void;
   /**

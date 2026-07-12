@@ -39,6 +39,7 @@ import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
+  daemonSessionRoutesPath,
   loadChannelsConfig,
   loadChannelsFromExtensions,
   parseConfiguredChannels,
@@ -57,6 +58,16 @@ const WEBHOOK_TASK_SHUTDOWN_DRAIN_MS = 10_000;
 interface DaemonCapabilitiesLike {
   features: string[];
   workspaceCwd?: string;
+  /**
+   * Registered runtimes on a multi-workspace daemon (Phase 2a `/capabilities`).
+   * Absent on legacy single-workspace daemons, where `workspaceCwd` is used.
+   */
+  workspaces?: Array<{
+    cwd: string;
+    id: string;
+    primary: boolean;
+    trusted: boolean;
+  }>;
 }
 
 interface DaemonClientLike {
@@ -178,6 +189,10 @@ export function createDaemonChannelBridgeFacade(
     facade.respondToPermission = bridge.respondToPermission.bind(bridge);
   }
 
+  if (bridge.discardSession) {
+    facade.discardSession = bridge.discardSession.bind(bridge);
+  }
+
   if (bridge.getAvailableCommands) {
     facade.getAvailableCommands = bridge.getAvailableCommands.bind(bridge);
   }
@@ -285,14 +300,37 @@ export async function runChannelDaemonWorker(
     client.capabilities(),
     startupSignal,
   );
-  const daemonWorkspace = canonicalizeWorkspace(
-    capabilities.workspaceCwd ?? opts.workspace,
-  );
   const requestedWorkspace = canonicalizeWorkspace(opts.workspace);
-  if (requestedWorkspace !== daemonWorkspace) {
-    throw new Error(
-      `Daemon workspace "${daemonWorkspace}" does not match worker workspace "${requestedWorkspace}".`,
+  let daemonWorkspace: string;
+  if (capabilities.workspaces && capabilities.workspaces.length > 0) {
+    // Multi-workspace daemon: the worker must target one of the registered
+    // workspaces (matched on canonical cwd), and that workspace must be trusted
+    // before it can create sessions.
+    const match = capabilities.workspaces.find(
+      (workspace) =>
+        canonicalizeWorkspace(workspace.cwd) === requestedWorkspace,
     );
+    if (!match) {
+      throw new Error(
+        `Worker workspace "${requestedWorkspace}" is not registered on the daemon.`,
+      );
+    }
+    if (!match.trusted) {
+      throw new Error(
+        `Worker workspace "${requestedWorkspace}" is not trusted; channels cannot run there.`,
+      );
+    }
+    daemonWorkspace = requestedWorkspace;
+  } else {
+    // Legacy single-workspace daemon: validate against the primary workspace.
+    daemonWorkspace = canonicalizeWorkspace(
+      capabilities.workspaceCwd ?? opts.workspace,
+    );
+    if (requestedWorkspace !== daemonWorkspace) {
+      throw new Error(
+        `Daemon workspace "${daemonWorkspace}" does not match worker workspace "${requestedWorkspace}".`,
+      );
+    }
   }
 
   await abortableStartup(loadChannelsFromExtensions(), startupSignal);
@@ -349,7 +387,8 @@ export async function runChannelDaemonWorker(
       bridgeFacade,
       daemonWorkspace,
       'user',
-      undefined,
+      daemonSessionRoutesPath(daemonWorkspace),
+      { recoveryMode: 'lazy' },
     );
     router = createdRouter;
     for (const { name, config } of parsed) {
@@ -358,6 +397,13 @@ export async function runChannelDaemonWorker(
         createdRouter.setChannelApprovalMode(name, config.approvalMode);
       }
     }
+    const restoredRoutes = createdRouter.restoreRoutes();
+    writeStdoutLine(
+      `[Channel] Restored ${restoredRoutes.restored} dormant route(s)` +
+        (restoredRoutes.dropped > 0
+          ? `; dropped ${restoredRoutes.dropped} invalid route(s)`
+          : ''),
+    );
 
     for (const { name, config } of parsed) {
       throwIfStartupAborted(startupSignal);
@@ -450,7 +496,7 @@ export async function runChannelDaemonWorker(
         try {
           bridge.stop();
         } finally {
-          createdRouter.clearAll();
+          createdRouter.dispose();
         }
       },
     };
@@ -461,7 +507,7 @@ export async function runChannelDaemonWorker(
     } catch {
       // best-effort during startup rollback
     } finally {
-      router?.clearAll();
+      router?.dispose();
     }
     throw err;
   }

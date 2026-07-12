@@ -1,5 +1,14 @@
 import type { ACPToolCall } from '../../adapters/types';
 
+/**
+ * Internal-tool-name → display-name lookup. This is a standalone copy of
+ * core's `ToolDisplayNames` (mapped to wire names, as the CLI's shared
+ * `tool-display-map.ts` does): the web-shell is a browser bundle and
+ * intentionally does not depend on `@qwen-code/qwen-code-core`, so the map
+ * can't be imported. Keep the canonical tool entries in sync with core's
+ * `ToolDisplayNames`; the extra lowercase ACP aliases below (bash, read,
+ * write, …) are web-shell-only conveniences with no core equivalent.
+ */
 export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   edit: 'Edit',
   write_file: 'WriteFile',
@@ -22,12 +31,15 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   cron_create: 'CronCreate',
   cron_list: 'CronList',
   cron_delete: 'CronDelete',
+  loop_wakeup: 'LoopWakeup',
+  create_sub_session: 'CreateSubSession',
   task_stop: 'TaskStop',
   send_message: 'SendMessage',
   structured_output: 'StructuredOutput',
   monitor: 'Monitor',
   notebook_edit: 'NotebookEdit',
   tool_search: 'ToolSearch',
+  read_mcp_resource: 'ReadMcpResource',
   enter_worktree: 'EnterWorktree',
   exit_worktree: 'ExitWorktree',
   enter_plan_mode: 'EnterPlanMode',
@@ -36,7 +48,10 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   task_list: 'TaskList',
   team_create: 'TeamCreate',
   team_delete: 'TeamDelete',
+  team_plan_approval: 'TeamPlanApproval',
   workflow: 'Workflow',
+  artifact: 'Artifact',
+  record_artifact: 'RecordArtifact',
   web_search: 'WebSearch',
   bash: 'Shell',
   shell: 'Shell Command',
@@ -44,6 +59,34 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   write: 'WriteFile',
   search: 'Grep',
 };
+
+/**
+ * Escape bare C0/C1 control characters (BEL, BS, CR, DEL, ESC, the 8-bit
+ * CSI, …) to inert, visible text, mirroring the CLI's
+ * `sanitizeMultilineForDisplay`. React escapes HTML but not control bytes,
+ * so LLM-generated tool descriptions carrying a stray `\r`/BEL/ESC would
+ * otherwise garble the rendered panel. `\n`/`\t` are excluded — callers
+ * collapse whitespace before rendering single-line labels.
+ */
+// Matches bare C0/C1 control bytes but not `\n`/`\t` (mirrors the CLI's
+// MULTILINE_CONTROL_CHARS_REGEX).
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+
+export function sanitizeControlChars(text: string): string {
+  return text.replace(CONTROL_CHARS_REGEX, (ch) => {
+    switch (ch) {
+      case '\b':
+        return '\\b';
+      case '\f':
+        return '\\f';
+      case '\r':
+        return '\\r';
+      default:
+        return `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`;
+    }
+  });
+}
 
 export function formatToolDisplayName(toolName: string): string {
   if (!toolName.trim()) return 'Tool';

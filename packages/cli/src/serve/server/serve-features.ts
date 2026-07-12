@@ -8,11 +8,9 @@ import { loadSettings } from '../../config/settings.js';
 import { SUPPORTED_LANGUAGES } from '../../i18n/index.js';
 import { hasConfiguredBatchVoiceTranscriptionModel } from '../../services/voice-service.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import { getAdvertisedServeFeatures } from '../capabilities.js';
-import {
-  isBrowserAutomationMcpAvailable,
-  QWEN_SERVE_ACP_HTTP_ENV,
-} from '../cdp-mcp-command.js';
+import { isBrowserAutomationMcpAvailable } from '../cdp-mcp-command.js';
 import type { ServeOptions } from '../types.js';
 
 // Keep in sync with acp-bridge bridge.ts and SDK DaemonClient.ts.
@@ -48,7 +46,8 @@ interface CreateServeFeaturesDeps {
   reloadAvailable: boolean;
   channelReloadAvailable: boolean;
   sessionShellCommandEnabled: boolean;
-  multiWorkspaceSessionsEnabled: boolean;
+  multiWorkspaceSessionsEnabled: () => boolean;
+  persistentWorkspaceRegistrationAvailable: boolean;
   env?: Readonly<Record<string, string | undefined>>;
 }
 
@@ -70,6 +69,7 @@ export function createServeFeatures(
     channelReloadAvailable,
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
+    persistentWorkspaceRegistrationAvailable,
   } = deps;
   const env = deps.env ?? process.env;
   let cachedVoiceTranscriptionAvailable: boolean | undefined;
@@ -103,7 +103,9 @@ export function createServeFeatures(
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
         channelReloadAvailable,
-        multiWorkspaceSessionsEnabled,
+        multiWorkspaceSessionsEnabled: multiWorkspaceSessionsEnabled(),
+        persistentWorkspaceRegistrationAvailable,
+        acpHttpEnabled: resolveAcpHttpEnabled(),
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
         browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
@@ -115,7 +117,7 @@ export function createServeFeatures(
         // on). A configured token no longer suppresses it — the browser carries
         // the bearer token via the WS subprotocol, which the upgrade listener
         // verifies (acp-http/index.ts).
-        voiceWsAvailable: env[QWEN_SERVE_ACP_HTTP_ENV] !== '0',
+        voiceWsAvailable: resolveAcpHttpEnabled(env),
       }),
   };
 }
