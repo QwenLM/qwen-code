@@ -1182,6 +1182,7 @@ export class DaemonClient {
           ]);
         } finally {
           if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+          deadlineController.abort();
         }
       }
       if (operation.status !== 'queued' && operation.status !== 'running') {

@@ -3510,6 +3510,53 @@ describe('DaemonClient', () => {
       expect(polls).toBe(2);
     });
 
+    it('disposes fallback abort listeners after a settled poll', async () => {
+      const anyDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, 'any');
+      Object.defineProperty(AbortSignal, 'any', {
+        configurable: true,
+        value: undefined,
+      });
+      const controller = new AbortController();
+      const removeEventListener = vi.spyOn(
+        controller.signal,
+        'removeEventListener',
+      );
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          operationId: 'op-1',
+          operation: 'install',
+          status: 'succeeded',
+          createdAt: 1,
+          updatedAt: 2,
+        }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 0,
+      });
+
+      try {
+        await client.waitForExtensionOperation(
+          { accepted: true, operationId: 'op-1' },
+          { timeoutMs: 100, signal: controller.signal },
+        );
+        expect(removeEventListener).toHaveBeenCalledWith(
+          'abort',
+          expect.any(Function),
+        );
+        expect(removeEventListener).toHaveBeenCalledTimes(1);
+        expect(controller.signal.aborted).toBe(false);
+      } finally {
+        if (anyDescriptor) {
+          Object.defineProperty(AbortSignal, 'any', anyDescriptor);
+        } else {
+          delete (AbortSignal as { any?: unknown }).any;
+        }
+      }
+    });
+
     it('times out polling without cancelling the accepted operation', async () => {
       let polls = 0;
       const { fetch } = recordingFetch(() => {
