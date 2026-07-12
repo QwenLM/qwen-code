@@ -239,6 +239,10 @@ export function registerWorkspaceExtensionRoutes(
   if (workspaceRegistry) {
     let observedGeneration: number | undefined;
     let reconciling = false;
+    const reconciliationInFlightByWorkspaceId = new Map<
+      string,
+      Promise<void>
+    >();
     const reconcileExternalGeneration = async (): Promise<void> => {
       if (reconciling) return;
       reconciling = true;
@@ -249,20 +253,48 @@ export function registerWorkspaceExtensionRoutes(
         );
         const generation = (await manager.getExtensionStoreSnapshot())
           .generation;
-        const runtimes = workspaceRegistry
+        const pendingRuntimes = workspaceRegistry
           .list()
           .filter(
             (runtime) =>
               (appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0) <
               generation,
           );
-        if (generation === observedGeneration && runtimes.length === 0) return;
+        if (generation === observedGeneration && pendingRuntimes.length === 0)
+          return;
+        const runtimes = pendingRuntimes.filter(
+          (runtime) =>
+            !reconciliationInFlightByWorkspaceId.has(runtime.workspaceId),
+        );
+        if (runtimes.length === 0) return;
         const results = await Promise.allSettled(
           runtimes.map(async (runtime) => {
-            runtime.workspaceService.invalidateWorkspaceSkillsStatus();
+            const refresh = (async () => {
+              runtime.workspaceService.invalidateWorkspaceSkillsStatus();
+              const result =
+                await runtime.bridge.refreshExtensionsForAllSessions();
+              if (result.failed > 0) {
+                throw new Error(
+                  `${result.failed} extension session refresh(es) failed`,
+                );
+              }
+            })();
+            reconciliationInFlightByWorkspaceId.set(
+              runtime.workspaceId,
+              refresh,
+            );
+            const clearInFlight = () => {
+              if (
+                reconciliationInFlightByWorkspaceId.get(runtime.workspaceId) ===
+                refresh
+              ) {
+                reconciliationInFlightByWorkspaceId.delete(runtime.workspaceId);
+              }
+            };
+            void refresh.then(clearInFlight, clearInFlight);
             let timer: ReturnType<typeof setTimeout> | undefined;
-            const result = await Promise.race([
-              runtime.bridge.refreshExtensionsForAllSessions(),
+            await Promise.race([
+              refresh,
               new Promise<never>((_resolve, reject) => {
                 timer = setTimeout(() => {
                   reject(
@@ -276,11 +308,6 @@ export function registerWorkspaceExtensionRoutes(
             ]).finally(() => {
               if (timer) clearTimeout(timer);
             });
-            if (result.failed > 0) {
-              throw new Error(
-                `${result.failed} extension session refresh(es) failed`,
-              );
-            }
           }),
         );
         results.forEach((result, index) => {
@@ -303,7 +330,10 @@ export function registerWorkspaceExtensionRoutes(
             );
           }
         });
-        if (results.every((result) => result.status === 'fulfilled')) {
+        if (
+          runtimes.length === pendingRuntimes.length &&
+          results.every((result) => result.status === 'fulfilled')
+        ) {
           observedGeneration = generation;
         }
       } catch (error) {

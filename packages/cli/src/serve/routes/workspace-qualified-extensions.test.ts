@@ -477,14 +477,21 @@ describe('extension management v2 REST', () => {
     }
   });
 
-  it('retries generation reconciliation after a runtime refresh times out', async () => {
+  it('does not overlap generation reconciliation after a runtime refresh times out', async () => {
     vi.useFakeTimers();
     const h = await makeHarness();
     mockExtensionManager();
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-    vi.mocked(
-      h.secondary.bridge.refreshExtensionsForAllSessions,
-    ).mockImplementation(async () => await new Promise(() => undefined));
+    let releaseRefresh = () => {};
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    vi.mocked(h.secondary.bridge.refreshExtensionsForAllSessions)
+      .mockImplementationOnce(async () => {
+        await refreshGate;
+        return { refreshed: 1, failed: 0 };
+      })
+      .mockResolvedValue({ refreshed: 1, failed: 0 });
     try {
       await vi.advanceTimersByTimeAsync(30_000);
       expect(
@@ -495,7 +502,7 @@ describe('extension management v2 REST', () => {
 
       expect(
         h.secondary.bridge.refreshExtensionsForAllSessions,
-      ).toHaveBeenCalledTimes(2);
+      ).toHaveBeenCalledOnce();
       expect(
         h.primary.bridge.refreshExtensionsForAllSessions,
       ).toHaveBeenCalledOnce();
@@ -504,7 +511,15 @@ describe('extension management v2 REST', () => {
           `extension generation reconciliation failed for workspace ${h.secondary.workspaceId}`,
         ),
       );
+
+      releaseRefresh();
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledTimes(2);
     } finally {
+      releaseRefresh();
       vi.useRealTimers();
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
