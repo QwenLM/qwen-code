@@ -450,7 +450,7 @@ export interface BridgeClientSessionEntry {
   sessionId: string;
   events: EventBus;
   artifacts: SessionArtifactStore;
-  recordingDegraded?: boolean;
+  recordingDegraded: boolean;
   pendingPermissionIds: Set<string>;
   /** Pollable pending human interactions, keyed by permission request id. */
   pendingInteractions: Map<string, BridgePendingInteraction>;
