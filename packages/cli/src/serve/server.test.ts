@@ -116,6 +116,7 @@ import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
+import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   createWorkspaceRegistry,
   type WorkspaceRegistry,
@@ -385,7 +386,9 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_reload',
   'channel_reload',
   'multi_workspace_sessions',
+  'persistent_workspace_registration',
   'workspace_qualified_rest_core',
+  'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
   'browser_automation_mcp',
@@ -2186,6 +2189,54 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'persistent_workspace_registration') {
+          expect(
+            predicate({ persistentWorkspaceRegistrationAvailable: true }),
+          ).toBe(true);
+          expect(
+            predicate({ persistentWorkspaceRegistrationAvailable: false }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              persistentWorkspaceRegistrationAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_qualified_acp') {
+          // Advertised only when BOTH multi-workspace sessions and the HTTP ACP
+          // surface are enabled.
+          expect(
+            predicate({
+              multiWorkspaceSessionsEnabled: true,
+              acpHttpEnabled: true,
+            }),
+          ).toBe(true);
+          expect(
+            predicate({
+              multiWorkspaceSessionsEnabled: true,
+              acpHttpEnabled: false,
+            }),
+          ).toBe(false);
+          expect(predicate({ multiWorkspaceSessionsEnabled: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              multiWorkspaceSessionsEnabled: true,
+              acpHttpEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'client_mcp_over_ws') {
           expect(predicate({ clientMcpOverWsEnabled: true })).toBe(true);
           expect(predicate({ clientMcpOverWsEnabled: false })).toBe(false);
@@ -2620,6 +2671,48 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.features).not.toContain('session_artifacts_persistence');
+    });
+
+    it('reflects a dynamically added workspace and persistence support', async () => {
+      const primaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+      ]);
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry: registry,
+        workspaceRegistrationStore: {} as unknown as WorkspaceRegistrationStore,
+      });
+
+      const before = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(before.status).toBe(200);
+      expect(before.body.features).toContain(
+        'persistent_workspace_registration',
+      );
+      expect(before.body.features).not.toContain('multi_workspace_sessions');
+      expect(before.body.workspaces).toBeUndefined();
+
+      registry.add(
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: '/workspace/secondary',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+      );
+      const after = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(after.status).toBe(200);
+      expect(after.body.features).toContain('multi_workspace_sessions');
+      expect(after.body.workspaces).toHaveLength(2);
     });
 
     it('advertises workspace voice transcription when a batch ASR model is configured', async () => {
@@ -10226,6 +10319,75 @@ describe('createServeApp', () => {
       expect(reloadChannelWorker).not.toHaveBeenCalled();
     });
 
+    it('returns 409 when every workspace worker is disabled', async () => {
+      const reloadChannelWorker = vi.fn(async () => disabledSnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        getChannelWorkerSnapshots: () => [
+          {
+            ...disabledSnapshot,
+            workspaceId: 'primary',
+            workspaceCwd: WS_BOUND,
+            primary: true,
+          },
+        ],
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('channel_worker_not_enabled');
+      expect(reloadChannelWorker).not.toHaveBeenCalled();
+    });
+
+    it('reloads when only a non-primary workspace worker is enabled', async () => {
+      const secondarySnapshot = {
+        ...runningSnapshot,
+        workspaceId: 'secondary',
+        workspaceCwd: '/work/secondary',
+        primary: false,
+      };
+      const reloadChannelWorker = vi.fn(async () => secondarySnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => disabledSnapshot,
+        getChannelWorkerSnapshots: () => [secondarySnapshot],
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ reloaded: true, worker: secondarySnapshot });
+      expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back to the legacy snapshot when the worker list is empty', async () => {
+      const reloadChannelWorker = vi.fn(async () => runningSnapshot);
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerSnapshot: () => runningSnapshot,
+        getChannelWorkerSnapshots: () => [],
+        reloadChannelWorker,
+      });
+
+      const res = await auth(
+        request(app).post('/workspace/channel/reload'),
+      ).send({});
+
+      expect(res.status).toBe(200);
+      expect(reloadChannelWorker).toHaveBeenCalledTimes(1);
+    });
+
     it('maps relaunch failures through sendBridgeError', async () => {
       const reloadChannelWorker = vi.fn(async () => {
         throw new Error('relaunch failed');
@@ -14000,6 +14162,117 @@ describe('createServeApp', () => {
   });
 
   describe('POST /channels/:channelName/webhooks/:source', () => {
+    it('isolates webhook configs across workspace sources', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-multi-home-'),
+      );
+      const primary = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-primary-'),
+      );
+      const secondary = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-secondary-'),
+      );
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        for (const [workspace, channel, secret] of [
+          [primary, 'primary-channel', 'primary-secret'],
+          [secondary, 'secondary-channel', 'secondary-secret'],
+        ]) {
+          const qwenDir = path.join(workspace, '.qwen');
+          await fsp.mkdir(qwenDir);
+          await fsp.writeFile(
+            path.join(qwenDir, 'settings.json'),
+            JSON.stringify({
+              channels: {
+                [channel]: {
+                  type: 'dingtalk',
+                  webhooks: {
+                    sources: {
+                      ci: {
+                        secret,
+                        targets: {
+                          default: {
+                            chatId: `${channel}-chat`,
+                            senderId: 'webhook:ci',
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            }),
+            'utf8',
+          );
+        }
+        resetHomeEnvBootstrapForTesting();
+
+        const enqueueChannelWebhookTask = vi.fn(async () => ({
+          accepted: true as const,
+        }));
+        const app = createServeApp(
+          { ...baseOpts, workspace: primary },
+          undefined,
+          {
+            bridge: fakeBridge(),
+            enqueueChannelWebhookTask,
+            channelWebhookConfigSources: [
+              { workspaceCwd: primary, channelNames: ['primary-channel'] },
+              {
+                workspaceCwd: secondary,
+                channelNames: ['secondary-channel'],
+              },
+            ],
+          },
+        );
+
+        const primaryResponse = await request(app)
+          .post('/channels/primary-channel/webhooks/ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'primary-secret')
+          .send({ eventType: 'ci', targetRef: 'default', title: 'Primary' });
+        const secondaryResponse = await request(app)
+          .post('/channels/secondary-channel/webhooks/ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secondary-secret')
+          .send({ eventType: 'ci', targetRef: 'default', title: 'Secondary' });
+        const leakedSecretResponse = await request(app)
+          .post('/channels/secondary-channel/webhooks/ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'primary-secret')
+          .send({ eventType: 'ci', targetRef: 'default', title: 'Wrong' });
+
+        expect(primaryResponse.status).toBe(202);
+        expect(secondaryResponse.status).toBe(202);
+        expect(leakedSecretResponse.status).toBe(401);
+        expect(enqueueChannelWebhookTask).toHaveBeenNthCalledWith(1, {
+          channelName: 'primary-channel',
+          source: 'ci',
+          eventType: 'ci',
+          targetRef: 'default',
+          title: 'Primary',
+          payload: {},
+        });
+        expect(enqueueChannelWebhookTask).toHaveBeenNthCalledWith(2, {
+          channelName: 'secondary-channel',
+          source: 'ci',
+          eventType: 'ci',
+          targetRef: 'default',
+          title: 'Secondary',
+          payload: {},
+        });
+      } finally {
+        await Promise.all([
+          fsp.rm(tempHome, { recursive: true, force: true }),
+          fsp.rm(primary, { recursive: true, force: true }),
+          fsp.rm(secondary, { recursive: true, force: true }),
+        ]);
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+
     it('is only mounted when enqueueChannelWebhookTask is available', async () => {
       const previousQwenHome = process.env['QWEN_HOME'];
       const tempHome = await fsp.mkdtemp(
@@ -16874,6 +17147,59 @@ describe('auth device-flow routes', () => {
     expect(json).not.toContain('device-1');
     expect(json).not.toContain('pkce-1');
     expect(fakeProvider.startCount()).toBe(1);
+  });
+
+  it('fans device-flow events out only to primary and trusted workspace bridges', async () => {
+    const fakeProvider = makeFakeProvider();
+    const primaryBridge = fakeBridge();
+    const trustedBridge = fakeBridge();
+    const untrustedBridge = fakeBridge();
+    const primaryPublish = vi.spyOn(primaryBridge, 'publishWorkspaceEvent');
+    const trustedPublish = vi.spyOn(trustedBridge, 'publishWorkspaceEvent');
+    const untrustedPublish = vi.spyOn(untrustedBridge, 'publishWorkspaceEvent');
+    const registry = createWorkspaceRegistry([
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: primaryBridge,
+      }),
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'trusted',
+        workspaceCwd: WS_DIFFERENT,
+        primary: false,
+        bridge: trustedBridge,
+      }),
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'untrusted',
+        workspaceCwd: '/work/untrusted',
+        primary: false,
+        trusted: false,
+        bridge: untrustedBridge,
+      }),
+    ]);
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      workspaceRegistry: registry,
+      deviceFlowProviders: [fakeProvider.provider],
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+
+    expect(res.status).toBe(201);
+    expect(primaryPublish).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'auth_device_flow_started' }),
+    );
+    expect(trustedPublish).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'auth_device_flow_started' }),
+    );
+    expect(untrustedPublish).not.toHaveBeenCalled();
+    (
+      app.locals['deviceFlowRegistry'] as DeviceFlowRegistryType | undefined
+    )?.dispose();
   });
 
   it('POST is rejected with 401 token_required on token-less loopback (strict gate)', async () => {

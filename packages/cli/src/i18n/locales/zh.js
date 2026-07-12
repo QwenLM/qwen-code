@@ -19,6 +19,8 @@ export default {
 
   'User level': '用户级',
   'Project level': '项目级',
+  'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
+    '剪贴板图片粘贴不可用，因为原生剪贴板模块加载失败。请重新安装 Qwen Code，或改用 npm 安装方式。',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -223,7 +225,9 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell 模式',
   'YOLO mode': 'YOLO 模式',
-  'Auto mode': 'Auto 模式',
+  'Auto mode': '自动模式',
+  'auto_mode.entry_notice':
+    '已启用自动模式。\n   LLM 分类器会评估每次工具调用 — 安全操作将自动批准，\n   有风险的操作将被阻止。退出：Shift+Tab 或 /approval-mode default。',
   'plan mode': '规划模式',
   'auto-accept edits': '自动接受编辑',
   'Accepting edits': '接受编辑',

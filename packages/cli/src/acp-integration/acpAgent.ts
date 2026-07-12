@@ -77,6 +77,7 @@ import {
   normalizeEventPayload,
   normalizeSnapshotPayload,
   startEventLoopLagMonitor,
+  refreshMemoryInstruction,
   type AgentParams,
   type ApprovalMode,
   type ChatRecord,
@@ -4972,6 +4973,22 @@ class QwenAgent implements Agent {
     return session;
   }
 
+  private async refreshLiveSessionMemoryInstructions(
+    logContext: string,
+  ): Promise<void> {
+    const sessions = [...this.sessions.values()];
+    if (sessions.length === 0) {
+      return;
+    }
+    await Promise.all(
+      sessions.map((session) =>
+        refreshMemoryInstruction(session.getConfig(), {
+          logContext: `${logContext} session ${session.getId()}`,
+        }),
+      ),
+    );
+  }
+
   private buildSessionContextStatus(
     sessionId: string,
   ): ServeSessionContextStatus {
@@ -6226,6 +6243,11 @@ class QwenAgent implements Agent {
             contextMode,
             abortSignal: childSignal,
           });
+          if (result.filesTouched.length > 0) {
+            await this.refreshLiveSessionMemoryInstructions(
+              'workspace memory remember',
+            );
+          }
           return result as unknown as Record<string, unknown>;
         } catch (err) {
           if (err instanceof RequestError) {

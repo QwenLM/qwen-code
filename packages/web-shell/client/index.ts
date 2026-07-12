@@ -5,6 +5,10 @@ export type {
   BugReportInfo,
   SessionChangeEvent,
 } from './App';
+export type {
+  TurnOutputKind,
+  TurnOutputOpenRequest,
+} from './components/artifacts/TurnOutputs';
 export type { ComposerToolbarAction } from './components/ChatEditor';
 export type { ToastTone } from './components/ToastHost';
 export type { WebShellLanguage } from './i18n';
@@ -24,6 +28,7 @@ export type {
   UserMessageContentParser,
   AssistantTurnFooterRenderer,
   ComposerToolbarStartRenderer,
+  ComposerHeaderRenderer,
   ComposerToolbarRightRenderer,
   WelcomeFooterRenderer,
   WebShellAtItemRenderInfo,

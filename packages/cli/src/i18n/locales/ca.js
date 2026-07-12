@@ -23,6 +23,8 @@ export default {
   'Shell mode': 'Mode shell',
   'YOLO mode': 'Mode YOLO',
   'Auto mode': 'Mode auto',
+  'auto_mode.entry_notice':
+    "Mode auto activat.\n   Un classificador LLM avalua cada crida d'eina — les accions segures s'aproven automàticament,\n   les arriscades es bloquegen. Sortiu: Shift+Tab o /approval-mode default.",
   'plan mode': 'mode de planificació',
   'auto-accept edits': 'acceptació automàtica de canvis',
   'Accepting edits': 'Acceptant canvis',

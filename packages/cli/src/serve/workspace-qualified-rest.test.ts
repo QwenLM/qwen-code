@@ -464,7 +464,7 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
-  it('allows untrusted workspace file reads but rejects other core reads', async () => {
+  it('allows untrusted workspace file reads but rejects non-catalog core reads', async () => {
     const h = await makeHarness({ secondaryTrusted: false });
     try {
       const file = await request(h.app)
@@ -474,14 +474,28 @@ describe('workspace-qualified core REST', () => {
       expect(file.status).toBe(200);
       expect(file.body.content).toBe('secondary');
 
-      const mcp = await request(h.app)
-        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/mcp`)
-        .set('Host', host());
-      expect(mcp.status).toBe(403);
-      expect(mcp.body.code).toBe('untrusted_workspace');
-      expect(mcp.body.error).toBe('Workspace is not trusted.');
-      expect(mcp.body).not.toHaveProperty('workspaceCwd');
-      expect(mcp.body).not.toHaveProperty('workspaceId');
+      for (const route of [
+        'mcp',
+        'skills',
+        'providers',
+        'env',
+        'preflight',
+        'hooks',
+        'tools',
+        'settings',
+        'permissions',
+        'memory',
+        'agents',
+      ]) {
+        const res = await request(h.app)
+          .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/${route}`)
+          .set('Host', host());
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('untrusted_workspace');
+        expect(res.body.error).toBe('Workspace is not trusted.');
+        expect(res.body).not.toHaveProperty('workspaceCwd');
+        expect(res.body).not.toHaveProperty('workspaceId');
+      }
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }

@@ -21,6 +21,8 @@ export default {
 
   'User level': 'User level',
   'Project level': 'Project level',
+  'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
+    'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -233,6 +235,8 @@ export default {
   'Shell mode': 'Shell mode',
   'YOLO mode': 'YOLO mode',
   'Auto mode': 'Auto mode',
+  'auto_mode.entry_notice':
+    'Auto mode enabled.\n   An LLM classifier evaluates each tool call — safe actions auto-approve,\n   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.',
   'plan mode': 'plan mode',
   'auto-accept edits': 'auto-accept edits',
   'Accepting edits': 'Accepting edits',
