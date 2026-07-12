@@ -652,6 +652,28 @@ describe('downloadFromNpmRegistry', () => {
     expect(tar.x).not.toHaveBeenCalled();
   });
 
+  it('stops between tar inspection and extraction when cancelled', async () => {
+    const controller = new AbortController();
+    const reason = new Error('inspection cancelled');
+    mockNpmDownload('https://registry.example.com/pkg.tgz');
+    vi.mocked(tar.t).mockImplementationOnce(async () => {
+      controller.abort(reason);
+    });
+
+    await expect(
+      downloadFromNpmRegistry(
+        {
+          source: '@scope/pkg',
+          type: 'npm',
+          registryUrl: 'https://registry.example.com',
+        },
+        '/tmp/qwen-extension',
+        controller.signal,
+      ),
+    ).rejects.toBe(reason);
+    expect(tar.x).not.toHaveBeenCalled();
+  });
+
   it('rejects npm tarballs larger than 100 MB', async () => {
     mockNpmDownload(
       'https://registry.example.com/pkg.tgz',

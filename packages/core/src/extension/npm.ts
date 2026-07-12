@@ -473,28 +473,34 @@ export async function downloadFromNpmRegistry(
   // Download tarball
   const tarballPath = path.join(destination, 'package.tgz');
   await downloadNpmFile(tarballUrl, tarballPath, tarballAuthToken, signal);
+  signal?.throwIfAborted();
 
   // Extract tarball
   await assertTarArchiveHasNoLinks(tarballPath);
+  signal?.throwIfAborted();
   await tar.x({
     file: tarballPath,
     cwd: destination,
   });
+  signal?.throwIfAborted();
 
   // npm tarballs contain a `package/` wrapper directory — flatten it
   const packageDir = path.join(destination, 'package');
   if (fs.existsSync(packageDir)) {
     const entries = await fs.promises.readdir(packageDir);
     for (const entry of entries) {
+      signal?.throwIfAborted();
       await fs.promises.rename(
         path.join(packageDir, entry),
         path.join(destination, entry),
       );
     }
+    signal?.throwIfAborted();
     await fs.promises.rmdir(packageDir);
   }
 
   // Clean up tarball
+  signal?.throwIfAborted();
   await fs.promises.unlink(tarballPath);
 
   debugLogger.debug(

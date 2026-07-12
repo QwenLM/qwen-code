@@ -245,6 +245,27 @@ describe('extension tests', () => {
       ]);
     });
 
+    it('stops archive preparation when cancellation follows download', async () => {
+      const controller = new AbortController();
+      const reason = new Error('preparation expired');
+      mockDownloadFromArchiveUrl.mockImplementationOnce(async () => {
+        controller.abort(reason);
+      });
+      const manager = createExtensionManager();
+
+      await expect(
+        manager.prepareExtensionInstall({
+          installMetadata: {
+            type: 'archive-url',
+            source: 'https://example.com/extension.zip',
+          },
+          initialActivation: { scope: 'user' },
+          requestConsent: async () => {},
+          signal: controller.signal,
+        }),
+      ).rejects.toBe(reason);
+    });
+
     it('uses the installed path for Claude plugin root replacement', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'claude-ext.zip');
       fs.writeFileSync(archivePath, 'archive');
@@ -398,6 +419,7 @@ describe('extension tests', () => {
       expect(mockExtractArchiveFile).toHaveBeenCalledWith(
         archivePath,
         expect.any(String),
+        undefined,
       );
       expect(extension.name).toBe('local-archive-extension');
       expect(extension.installMetadata).toMatchObject({

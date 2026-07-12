@@ -1582,7 +1582,7 @@ export class ExtensionManager {
         isSupportedArchivePath(installMetadata.source)
       ) {
         tempDir = await ExtensionStorage.createTmpDir();
-        await extractArchiveFile(installMetadata.source, tempDir);
+        await extractArchiveFile(installMetadata.source, tempDir, signal);
         localSourcePath = tempDir;
       } else if (
         installMetadata.type === 'local' ||
@@ -1593,6 +1593,7 @@ export class ExtensionManager {
         throw new Error(`Unsupported install type: ${installMetadata.type}`);
       }
 
+      signal?.throwIfAborted();
       try {
         const sourceBeforeConversion = localSourcePath;
         const { extensionDir, originSource } =
@@ -1600,6 +1601,7 @@ export class ExtensionManager {
             sourceBeforeConversion,
             installMetadata.pluginName,
           );
+        signal?.throwIfAborted();
 
         if (extensionDir !== sourceBeforeConversion) {
           convertedSourcePath = extensionDir;

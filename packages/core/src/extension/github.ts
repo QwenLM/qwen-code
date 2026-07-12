@@ -236,7 +236,7 @@ export async function checkForExtensionUpdate(
           path.join(os.tmpdir(), 'extension-archive-update-'),
         );
         signal?.throwIfAborted();
-        await extractArchiveFile(installMetadata.source, tempDir);
+        await extractArchiveFile(installMetadata.source, tempDir, signal);
         signal?.throwIfAborted();
         const converted = await convertGeminiOrClaudeExtension(
           tempDir,
@@ -463,7 +463,9 @@ export async function downloadFromGitHubRelease(
     );
   }
 
-  await extractArchiveFile(downloadedAssetPath, destination);
+  signal?.throwIfAborted();
+  await extractArchiveFile(downloadedAssetPath, destination, signal);
+  signal?.throwIfAborted();
 
   await fs.promises.unlink(downloadedAssetPath);
   return {
@@ -506,28 +508,35 @@ export async function downloadFromArchiveUrl(
     );
   }
 
-  await extractArchiveFile(downloadedAssetPath, destination);
+  signal?.throwIfAborted();
+  await extractArchiveFile(downloadedAssetPath, destination, signal);
+  signal?.throwIfAborted();
   await fs.promises.unlink(downloadedAssetPath);
 }
 
 export async function extractArchiveFile(
   archivePath: string,
   destination: string,
+  signal?: AbortSignal,
 ): Promise<void> {
+  signal?.throwIfAborted();
   if (!isSupportedArchivePath(archivePath)) {
     throw new Error(
       `Unsupported archive file for extension install: ${redactUrlCredentials(archivePath)}`,
     );
   }
   try {
-    await extractFile(archivePath, destination);
+    await extractFile(archivePath, destination, signal);
   } catch (error) {
+    signal?.throwIfAborted();
     throw new Error(
       'Extension archive could not be extracted. Make sure it is a valid ' +
         `.zip or .tar.gz file. ${getErrorMessage(error)}`,
     );
   }
+  signal?.throwIfAborted();
   await flattenSingleExtensionDirectory(destination, archivePath);
+  signal?.throwIfAborted();
   assertExtractedArchiveContainsExtensionSource(destination);
 }
 
@@ -724,9 +733,15 @@ async function downloadFile(
   });
 }
 
-export async function extractFile(file: string, dest: string): Promise<void> {
+export async function extractFile(
+  file: string,
+  dest: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  signal?.throwIfAborted();
   if (file.endsWith('.tar.gz')) {
     await assertTarArchiveHasNoLinks(file);
+    signal?.throwIfAborted();
     await tar.x({
       file,
       cwd: dest,
@@ -745,6 +760,7 @@ export async function extractFile(file: string, dest: string): Promise<void> {
   } else {
     throw new Error(`Unsupported file extension for extraction: ${file}`);
   }
+  signal?.throwIfAborted();
 }
 
 function isZipSymlinkEntry(externalFileAttributes: number): boolean {
