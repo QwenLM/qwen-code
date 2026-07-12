@@ -109,11 +109,48 @@ describe('createChannelWorkerManager', () => {
     expect(test.reserveLease).toHaveBeenCalledTimes(1);
     expect(test.group.start).toHaveBeenCalledTimes(1);
     expect(test.group.reconcile).not.toHaveBeenCalled();
+    expect(test.onCommittedSelection).toHaveBeenCalledTimes(1);
+    expect(test.onCommittedSelection).toHaveBeenCalledWith(
+      selection,
+      workspaceGroups(selection),
+    );
     expect(test.manager.state()).toMatchObject({
       enabled: true,
       selection,
       transition: 'idle',
     });
+  });
+
+  it('starts the initial selection through the boot-time path', async () => {
+    const test = setup();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+
+    await test.manager.startInitial(selection);
+
+    expect(test.resolveGroups).toHaveBeenCalledWith(selection, 'initial');
+    expect(test.reserveLease).toHaveBeenCalledWith(selection);
+    expect(test.group.start).toHaveBeenCalledTimes(1);
+    expect(test.manager.state()).toMatchObject({ enabled: true, selection });
+  });
+
+  it('keeps the boot-time lease reserved when group construction fails', async () => {
+    const test = setup();
+    test.createGroup.mockImplementationOnce(() => {
+      throw new Error('group construction failed');
+    });
+
+    await expect(
+      test.manager.startInitial({ mode: 'names', names: ['telegram'] }),
+    ).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+      rolledBack: false,
+    });
+
+    expect(test.releaseLease).not.toHaveBeenCalled();
+    expect(test.manager.state()).toMatchObject({ enabled: true });
   });
 
   it('marks only the first concurrent enable as created', async () => {
@@ -213,6 +250,32 @@ describe('createChannelWorkerManager', () => {
       transition: 'idle',
     });
     expect(test.manager.state()).not.toHaveProperty('pendingSelection');
+  });
+
+  it('force-reconciles reload and returns the primary snapshot', async () => {
+    const primary = workerSnapshot();
+    const secondary = workerSnapshot({
+      workspaceId: 'secondary',
+      workspaceCwd: '/ws/secondary',
+      primary: false,
+    });
+    const group = fakeGroup({
+      snapshots: vi.fn(() => [secondary, primary]),
+    });
+    const test = setup(group);
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+    await test.manager.setSelection(selection);
+
+    await expect(test.manager.reload()).resolves.toEqual(primary);
+
+    expect(test.resolveGroups).toHaveBeenLastCalledWith(selection, 'reload');
+    expect(group.reconcile).toHaveBeenLastCalledWith(
+      workspaceGroups(selection),
+      { force: true, onRollingBack: expect.any(Function) },
+    );
   });
 
   it('keeps the old committed selection when reconcile rolls back', async () => {

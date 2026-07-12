@@ -2462,6 +2462,10 @@ export async function runQwenServe(
     if (channelControlDraining) throw daemonDrainingError();
     const manager =
       channelWorkerManager ?? (await channelWorkerManagerStarting);
+    if (channelControlDraining) {
+      await manager?.shutdown();
+      throw daemonDrainingError();
+    }
     if (!manager) {
       return { changed: false, state: getChannelWorkerControl() };
     }
@@ -2471,6 +2475,10 @@ export async function runQwenServe(
     if (channelControlDraining) throw daemonDrainingError();
     const manager =
       channelWorkerManager ?? (await channelWorkerManagerStarting);
+    if (channelControlDraining) {
+      await manager?.shutdown();
+      throw daemonDrainingError();
+    }
     if (!manager) {
       return { enabled: false, state: 'disabled' as const, channels: [] };
     }

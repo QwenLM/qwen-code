@@ -1938,12 +1938,14 @@ describe('createChannelWorkerSupervisor', () => {
   it('escalates pre-ready termination to SIGKILL when the worker ignores SIGTERM', async () => {
     vi.useFakeTimers();
     const child = new FakeChild(false);
+    const onLog = vi.fn();
     const supervisor = createChannelWorkerSupervisor({
       cliEntryPath: '/repo/dist/index.js',
       daemonUrl: 'http://127.0.0.1:4170',
       workspace: '/workspace',
       selection: { mode: 'names', names: ['telegram'] },
       spawnWorker: vi.fn(() => child),
+      onLog,
     });
 
     const started = supervisor.start();
@@ -1958,6 +1960,10 @@ describe('createChannelWorkerSupervisor', () => {
       enabled: true,
       state: 'failed',
       error: 'ipc setup failed',
+    });
+    expect(onLog).toHaveBeenCalledWith({
+      stream: 'stderr',
+      line: 'Channel worker did not exit after SIGKILL; automatic restart is disabled.',
     });
   });
 

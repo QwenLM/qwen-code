@@ -85,6 +85,18 @@ describe('stopCommand', () => {
     );
   });
 
+  it('reports when daemon-managed channels are already stopped', async () => {
+    mockStopChannelWorker.mockResolvedValueOnce({ changed: false });
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop({ 'daemon-url': 'http://daemon:9' });
+
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'Daemon-managed channels are already stopped.',
+    );
+    expect(mockReadServiceInfo).not.toHaveBeenCalled();
+  });
+
   it('reports remote stop failures without falling through to standalone mode', async () => {
     mockStopChannelWorker.mockRejectedValueOnce(new Error('stop failed'));
     vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);

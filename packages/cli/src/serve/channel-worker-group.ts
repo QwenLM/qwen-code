@@ -268,14 +268,6 @@ export function createChannelWorkerGroup(
     }
   };
 
-  const startEntries = async (
-    entriesToStart: readonly ChannelWorkerGroupEntry[],
-  ): Promise<void> => {
-    for (const entry of entriesToStart) {
-      await entry.supervisor.start();
-    }
-  };
-
   const stopEntriesBestEffort = async (
     entriesToStop: readonly ChannelWorkerGroupEntry[],
   ): Promise<void> => {
@@ -319,12 +311,17 @@ export function createChannelWorkerGroup(
   const restoreEntries = async (
     entriesToRestore: readonly ChannelWorkerGroupEntry[],
   ): Promise<{ rolledBack: boolean; rollbackError?: string }> => {
-    try {
-      await startEntries(entriesToRestore);
-      return { rolledBack: true };
-    } catch (error) {
-      return { rolledBack: false, rollbackError: errorMessage(error) };
+    let firstError: string | undefined;
+    for (const entry of entriesToRestore) {
+      try {
+        await entry.supervisor.start();
+      } catch (error) {
+        firstError ??= errorMessage(error);
+      }
     }
+    return firstError
+      ? { rolledBack: false, rollbackError: firstError }
+      : { rolledBack: true };
   };
 
   const routeEntry = (

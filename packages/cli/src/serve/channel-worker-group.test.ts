@@ -629,6 +629,55 @@ describe('createChannelWorkerGroup', () => {
     expect(group.snapshots()[0]!.workspaceCwd).toBe(PRIMARY);
   });
 
+  it('attempts to restore every stopped worker after a rollback failure', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const test = makeCreateSupervisor(() => snapshot({}));
+    const createSupervisor = (opts: CreateChannelWorkerSupervisorOptions) => {
+      const supervisor = test.createSupervisor(opts);
+      if (
+        opts.selection.mode === 'names' &&
+        opts.selection.names.includes('c')
+      ) {
+        supervisor.start.mockRejectedValueOnce(new Error('replacement failed'));
+      }
+      return supervisor;
+    };
+    const { recorded } = test;
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['b'] },
+        },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+    recorded[0]!.supervisor.start.mockRejectedValueOnce(
+      new Error('primary restore failed'),
+    );
+    await expect(
+      group.reconcile([
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['c'] } },
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['d'] },
+        },
+      ]),
+    ).rejects.toMatchObject({
+      rolledBack: false,
+      rollbackError: 'primary restore failed',
+    });
+    expect(recorded[0]!.supervisor.start).toHaveBeenCalledTimes(2);
+    expect(recorded[1]!.supervisor.start).toHaveBeenCalledTimes(2);
+  });
+
   it('does not start replacements after an unconfirmed old-worker stop', async () => {
     const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
     const { createSupervisor, recorded } = makeCreateSupervisor(() =>

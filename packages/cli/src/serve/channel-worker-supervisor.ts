@@ -781,6 +781,10 @@ export function createChannelWorkerSupervisor(
             startedChild.kill('SIGKILL');
             if (!(await killed) && child === startedChild && !exitObserved) {
               stopping = true;
+              notifyLog(opts.onLog, {
+                stream: 'stderr',
+                line: 'Channel worker did not exit after SIGKILL; automatic restart is disabled.',
+              });
               snapshot = {
                 ...snapshot,
                 state: 'failed',
