@@ -401,7 +401,7 @@ describe('extension management v2 REST', () => {
     mockExtensionManager();
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     vi.mocked(
-      h.primary.workspaceService.invalidateWorkspaceSkillsStatus,
+      h.secondary.workspaceService.invalidateWorkspaceSkillsStatus,
     ).mockImplementationOnce(() => {
       throw new Error('status invalidation failed');
     });
@@ -419,11 +419,14 @@ describe('extension management v2 REST', () => {
         status: 'succeeded_with_warnings',
         warnings: [
           expect.objectContaining({
-            code: 'post_commit_failed',
             error: expect.stringMatching(/status invalidation failed/),
+            workspaceId: h.secondary.workspaceId,
           }),
         ],
       });
+      expect(
+        h.primary.workspaceService.invalidateWorkspaceSkillsStatus,
+      ).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -434,7 +437,7 @@ describe('extension management v2 REST', () => {
     mockExtensionManager();
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     vi.mocked(
-      h.primary.workspaceService.invalidateWorkspaceSkillsStatus,
+      h.secondary.workspaceService.invalidateWorkspaceSkillsStatus,
     ).mockImplementationOnce(() => {
       throw new Error('status invalidation failed');
     });
@@ -451,9 +454,14 @@ describe('extension management v2 REST', () => {
         status: 'succeeded_with_warnings',
         result: { status: 'disabled', name: 'demo' },
       });
-      expect(h.primary.bridge.broadcastExtensionsChanged).toHaveBeenCalledWith(
+      expect(
+        h.secondary.bridge.broadcastExtensionsChanged,
+      ).toHaveBeenCalledWith(
         expect.objectContaining({ status: 'disabled', failed: 1 }),
       );
+      expect(
+        h.primary.bridge.broadcastExtensionsChanged,
+      ).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }

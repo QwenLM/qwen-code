@@ -464,7 +464,6 @@ export function createExtensionsController(
           });
           return;
         }
-        workspace.invalidateWorkspaceSkillsStatus();
         committedGeneration ??= (
           await extensionManager.getExtensionStoreSnapshot()
         ).generation;
@@ -473,7 +472,7 @@ export function createExtensionsController(
           phase: 'reconciling',
         });
         const refreshTargets = options.refreshRuntimes;
-        if (refreshTargets && refreshTargets.length > 0) {
+        if (refreshTargets) {
           const results = await Promise.all(
             refreshTargets.map(async (runtime) => {
               const startedAt = Date.now();
@@ -517,7 +516,7 @@ export function createExtensionsController(
               }
             } else {
               failed += 1;
-              const message = redactUrlCredentials(
+              const message = sanitizeDaemonMessage(
                 settled.reason instanceof Error
                   ? settled.reason.message
                   : String(settled.reason),
@@ -561,6 +560,7 @@ export function createExtensionsController(
           });
         } else {
           try {
+            workspace.invalidateWorkspaceSkillsStatus();
             const startedAt = Date.now();
             const result = await bridge.refreshExtensionsForAllSessions(
               bridgeMutationEvent(event),
