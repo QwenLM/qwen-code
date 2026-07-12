@@ -21,6 +21,7 @@ import {
 import type {
   DaemonSessionGroup,
   DaemonSessionGroupColor,
+  DaemonSessionGroupPresetColor,
   DaemonSessionSummary,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
@@ -50,6 +51,8 @@ const DIALOG_SESSION_LABEL_MAX_LENGTH = 96;
 const RECENT_SESSION_SECTION_ID = 'recent';
 const GROUP_MENU_WIDTH = 240;
 const GROUP_MENU_MARGIN = 8;
+const CUSTOM_GROUP_COLOR_OPTION = '__custom__';
+const DEFAULT_CUSTOM_GROUP_COLOR = '#416ef5';
 
 /**
  * Palette order for the quick color-grouping buckets. Mirrors core's
@@ -57,7 +60,7 @@ const GROUP_MENU_MARGIN = 8;
  * from core. Used both to order the color sections and as a fallback when the
  * daemon's color catalog has not loaded yet.
  */
-const SESSION_GROUP_COLORS: DaemonSessionGroupColor[] = [
+const SESSION_GROUP_COLORS: DaemonSessionGroupPresetColor[] = [
   'red',
   'orange',
   'yellow',
@@ -157,12 +160,26 @@ function getSessionCreatedTime(session: DaemonSessionSummary): number {
 }
 
 function getDefaultGroupColor(
-  colorOptions: DaemonSessionGroupColor[],
-): DaemonSessionGroupColor {
+  colorOptions: DaemonSessionGroupPresetColor[],
+): DaemonSessionGroupPresetColor {
   return colorOptions[0] ?? 'blue';
 }
 
-function getGroupColorClass(color: DaemonSessionGroupColor): string {
+function normalizeGroupColorInput(
+  value: string,
+): DaemonSessionGroupColor | undefined {
+  if (SESSION_GROUP_COLORS.includes(value as DaemonSessionGroupPresetColor)) {
+    return value as DaemonSessionGroupPresetColor;
+  }
+  if (/^#[0-9a-f]{6}$/i.test(value)) {
+    return value.toLowerCase() as DaemonSessionGroupColor;
+  }
+  return undefined;
+}
+
+function getGroupColorClass(
+  color: DaemonSessionGroupColor,
+): string | undefined {
   switch (color) {
     case 'red':
       return styles.groupColorRed;
@@ -177,8 +194,13 @@ function getGroupColorClass(color: DaemonSessionGroupColor): string {
     case 'purple':
       return styles.groupColorPurple;
   }
-  const exhaustive: never = color;
-  return exhaustive;
+  return undefined;
+}
+
+function getGroupColorStyle(
+  color: DaemonSessionGroupColor,
+): CSSProperties | undefined {
+  return color.startsWith('#') ? { backgroundColor: color } : undefined;
 }
 
 function clampSidebarWidth(width: number): number {
@@ -568,9 +590,9 @@ export function WebShellSidebar({
     anchorEl: HTMLElement;
   } | null>(null);
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
-  const [colorOptions, setColorOptions] = useState<DaemonSessionGroupColor[]>(
-    [],
-  );
+  const [colorOptions, setColorOptions] = useState<
+    DaemonSessionGroupPresetColor[]
+  >([]);
   const [groupBusy, setGroupBusy] = useState(false);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
@@ -1167,7 +1189,8 @@ export function WebShellSidebar({
   const saveGroupEditor = useCallback(() => {
     if (!groupEditor) return;
     const name = groupName.trim();
-    if (!name) return;
+    const color = normalizeGroupColorInput(groupColor);
+    if (!name || !color) return;
     void (async () => {
       setGroupBusy(true);
       try {
@@ -1175,11 +1198,11 @@ export function WebShellSidebar({
           groupEditor.mode === 'create'
             ? await workspaceActions.createSessionGroup({
                 name,
-                color: groupColor,
+                color,
               })
             : await workspaceActions.updateSessionGroup(groupEditor.group!.id, {
                 name,
-                color: groupColor,
+                color,
               });
         if (groupEditor.mode === 'create') {
           if (groupEditor.targetSession) {
@@ -1432,7 +1455,10 @@ export function WebShellSidebar({
   );
 
   const assignSessionColor = useCallback(
-    (session: DaemonSessionSummary, color: DaemonSessionGroupColor | null) => {
+    (
+      session: DaemonSessionSummary,
+      color: DaemonSessionGroupPresetColor | null,
+    ) => {
       const sessionId = session.sessionId;
       if (!organizationEnabled || busySessionIdsRef.current.has(sessionId)) {
         return;
@@ -1494,7 +1520,7 @@ export function WebShellSidebar({
     const searching = searchQuery.trim().length > 0;
     const validGroupIds = new Set(groups.map((group) => group.id));
     const sessionsByColor = new Map<
-      DaemonSessionGroupColor,
+      DaemonSessionGroupPresetColor,
       DaemonSessionSummary[]
     >();
     const sessionsByGroupId = new Map<string, DaemonSessionSummary[]>();
@@ -1669,7 +1695,14 @@ export function WebShellSidebar({
   const groupMenuUngroupedSelected =
     groupMenuSelectedGroupId === null && groupMenuSelectedColor === null;
   const deleteGroupCandidateLabel = deleteGroupCandidate?.name ?? '';
-  const canSaveGroup = groupName.trim().length > 0 && !groupBusy;
+  const normalizedGroupColor = normalizeGroupColorInput(groupColor);
+  const customGroupColor = !SESSION_GROUP_COLORS.includes(
+    groupColor as DaemonSessionGroupPresetColor,
+  );
+  const canSaveGroup =
+    groupName.trim().length > 0 &&
+    normalizedGroupColor !== undefined &&
+    !groupBusy;
   const groupEditorTitle =
     groupEditor?.mode === 'create'
       ? t('sidebar.groupCreate')
@@ -1677,7 +1710,7 @@ export function WebShellSidebar({
   const groupColorChoices =
     colorOptions.length > 0
       ? colorOptions
-      : (['blue'] as DaemonSessionGroupColor[]);
+      : (['blue'] as DaemonSessionGroupPresetColor[]);
 
   const renderSessionRow = useCallback(
     (
@@ -2013,6 +2046,7 @@ export function WebShellSidebar({
                     styles.sessionGroupDot,
                     getGroupColorClass(section.color),
                   )}
+                  style={getGroupColorStyle(section.color)}
                   aria-hidden="true"
                 />
               ) : null}
@@ -2362,6 +2396,7 @@ export function WebShellSidebar({
                       styles.groupMenuDot,
                       getGroupColorClass(group.color),
                     )}
+                    style={getGroupColorStyle(group.color)}
                   />
                   <span className={styles.groupMenuName}>{group.name}</span>
                   {selected && <span className={styles.groupMenuCheck}>✓</span>}
@@ -2449,18 +2484,63 @@ export function WebShellSidebar({
                 <span>{t('sidebar.groupColor')}</span>
                 <select
                   className={styles.dialogSelect}
-                  value={groupColor}
-                  onChange={(event) =>
-                    setGroupColor(event.target.value as DaemonSessionGroupColor)
+                  value={
+                    customGroupColor ? CUSTOM_GROUP_COLOR_OPTION : groupColor
                   }
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setGroupColor(
+                      value === CUSTOM_GROUP_COLOR_OPTION
+                        ? DEFAULT_CUSTOM_GROUP_COLOR
+                        : (value as DaemonSessionGroupPresetColor),
+                    );
+                  }}
                 >
                   {groupColorChoices.map((color) => (
                     <option key={color} value={color}>
                       {t(`sidebar.groupColor.${color}`)}
                     </option>
                   ))}
+                  <option value={CUSTOM_GROUP_COLOR_OPTION}>
+                    {t('sidebar.groupColor.custom')}
+                  </option>
                 </select>
               </label>
+              {customGroupColor && (
+                <div className={styles.groupCustomColorRow}>
+                  <input
+                    className={styles.groupColorPicker}
+                    type="color"
+                    value={normalizedGroupColor ?? DEFAULT_CUSTOM_GROUP_COLOR}
+                    aria-label={t('sidebar.groupColor.picker')}
+                    onChange={(event) =>
+                      setGroupColor(
+                        event.target.value.toLowerCase() as DaemonSessionGroupColor,
+                      )
+                    }
+                  />
+                  <label className={styles.groupHexField}>
+                    <span>{t('sidebar.groupColor.hex')}</span>
+                    <input
+                      className={styles.dialogInput}
+                      value={groupColor}
+                      maxLength={7}
+                      spellCheck={false}
+                      aria-invalid={normalizedGroupColor === undefined}
+                      onChange={(event) =>
+                        setGroupColor(
+                          event.target.value as DaemonSessionGroupColor,
+                        )
+                      }
+                    />
+                  </label>
+                  {normalizedGroupColor === undefined && (
+                    <span className={styles.groupColorError} role="alert">
+                      {t('sidebar.groupColor.invalid')}
+                    </span>
+                  )}
+                </div>
+              )}
               <div className={styles.confirmActions}>
                 <button
                   className={styles.secondaryButton}

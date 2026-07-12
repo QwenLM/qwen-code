@@ -1057,6 +1057,178 @@ describe('WebShellSidebar — session organization', () => {
     promptSpy.mockRestore();
   });
 
+  it('creates a named group with a custom Hex color', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.createSessionGroup.mockResolvedValue({
+      id: 'group-hex',
+      name: 'Custom',
+      color: '#12abef',
+      order: 0,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    });
+    mockActive.sessions = [
+      makeSession('550e8400-e29b-41d4-a716-446655440000', {
+        displayName: 'Review plan',
+      }),
+    ];
+
+    renderSidebar(false);
+    await act(async () => Promise.resolve());
+    click(
+      document.body.querySelector<HTMLButtonElement>('[aria-label="Group"]'),
+    );
+    click(
+      Array.from(
+        document.body.querySelectorAll<HTMLButtonElement>('button'),
+      ).find((button) => button.textContent?.includes('Create group')) ?? null,
+    );
+
+    const inputs = document.body.querySelectorAll<HTMLInputElement>('input');
+    const nameInput = Array.from(inputs).find(
+      (input) => input.maxLength === 64,
+    );
+    expect(nameInput).toBeDefined();
+    const setInputValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setInputValue?.call(nameInput, 'Custom');
+      nameInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    const colorSelect = Array.from(
+      document.body.querySelectorAll<HTMLSelectElement>('select'),
+    ).find((select) => select.value === 'red');
+    expect(colorSelect).toBeDefined();
+    const setSelectValue = Object.getOwnPropertyDescriptor(
+      HTMLSelectElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setSelectValue?.call(colorSelect, '__custom__');
+      colorSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    const hexInput = Array.from(
+      document.body.querySelectorAll<HTMLInputElement>('input'),
+    ).find((input) => input.maxLength === 7);
+    const picker = document.body.querySelector<HTMLInputElement>(
+      'input[type="color"]',
+    );
+    expect(hexInput).toBeDefined();
+    expect(picker).not.toBeNull();
+    const saveButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'save');
+    act(() => {
+      setInputValue?.call(hexInput, '12abef');
+      hexInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(saveButton?.disabled).toBe(true);
+    expect(
+      document.body.querySelector<HTMLInputElement>('input[type="color"]'),
+    ).not.toBeNull();
+    expect(
+      document.body.querySelector('[role="alert"]')?.textContent,
+    ).toContain('six-digit Hex color');
+
+    act(() => {
+      setInputValue?.call(picker, '#12abef');
+      picker!.dispatchEvent(new Event('input', { bubbles: true }));
+      picker!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(hexInput?.value).toBe('#12abef');
+    act(() => {
+      setInputValue?.call(hexInput, '#12ABEF');
+      hexInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    await clickAsync(saveButton ?? null);
+
+    expect(mockWorkspaceActions.createSessionGroup).toHaveBeenCalledWith({
+      name: 'Custom',
+      color: '#12abef',
+    });
+  });
+
+  it('edits an existing custom group and switches it back to a preset', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'group-hex',
+          name: 'Custom',
+          color: '#12abef',
+          order: 0,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    mockWorkspaceActions.updateSessionGroup.mockResolvedValue({
+      id: 'group-hex',
+      name: 'Custom',
+      color: 'green',
+      order: 0,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:01:00.000Z',
+    });
+    mockActive.sessions = [
+      makeSession('550e8400-e29b-41d4-a716-446655440000', {
+        displayName: 'Review plan',
+        groupId: 'group-hex',
+      }),
+    ];
+
+    renderSidebar(false);
+    await act(async () => Promise.resolve());
+    click(
+      document.body.querySelector<HTMLButtonElement>(
+        '[aria-label="Rename group"]',
+      ),
+    );
+
+    const colorSelect = Array.from(
+      document.body.querySelectorAll<HTMLSelectElement>('select'),
+    ).find((select) => select.value === '__custom__');
+    const hexInput = document.body.querySelector<HTMLInputElement>(
+      'input[maxlength="7"]',
+    );
+    expect(colorSelect).toBeDefined();
+    expect(hexInput?.value).toBe('#12abef');
+
+    const setSelectValue = Object.getOwnPropertyDescriptor(
+      HTMLSelectElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setSelectValue?.call(colorSelect, 'green');
+      colorSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(
+      document.body.querySelector<HTMLInputElement>('input[maxlength="7"]'),
+    ).toBeNull();
+
+    const saveButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'save');
+    await clickAsync(saveButton ?? null);
+
+    expect(mockWorkspaceActions.updateSessionGroup).toHaveBeenCalledWith(
+      'group-hex',
+      { name: 'Custom', color: 'green' },
+    );
+  });
+
   it('uses a themed group menu and assigns the selected group', async () => {
     mockConnection.capabilities = {
       qwenCodeVersion: '1.2.3',
@@ -1067,7 +1239,7 @@ describe('WebShellSidebar — session organization', () => {
         {
           id: 'group-1',
           name: 'Backend',
-          color: 'green',
+          color: '#12abef',
           order: 0,
           createdAt: '2026-07-04T00:00:00.000Z',
           updatedAt: '2026-07-04T00:00:00.000Z',
@@ -1129,6 +1301,9 @@ describe('WebShellSidebar — session organization', () => {
       menu!.querySelectorAll<HTMLButtonElement>('button'),
     ).find((button) => button.textContent?.includes('Backend'));
     expect(groupOption).not.toBeNull();
+    expect(
+      groupOption?.querySelector<HTMLElement>('span')?.style.backgroundColor,
+    ).toBe('rgb(18, 171, 239)');
     await act(async () => {
       groupOption!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });

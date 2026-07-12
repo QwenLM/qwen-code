@@ -974,6 +974,40 @@
   line-height: 20px;
 }
 
+.groupCustomColorRow {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 8px 10px;
+  align-items: end;
+}
+
+.groupColorPicker {
+  width: 44px;
+  height: 44px;
+  padding: 3px;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 8px;
+  background: var(--background);
+  cursor: pointer;
+}
+
+.groupHexField {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.groupColorError {
+  grid-column: 2;
+  color: var(--destructive, #dc2626);
+  font-size: 11px;
+  line-height: 16px;
+}
+
 .secondaryButton,
 .dangerButton {
   height: 28px;

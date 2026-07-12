@@ -17,6 +17,7 @@ import {
   runWithoutDebugLogSession,
   type ApprovalMode,
   type SessionGroupColor,
+  type SessionGroupPresetColor,
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
@@ -2074,7 +2075,7 @@ export function registerSessionRoutes(
           rawColor !== undefined &&
           rawColor !== null &&
           (typeof rawColor !== 'string' ||
-            !GROUP_COLOR_OPTIONS.includes(rawColor as SessionGroupColor))
+            !GROUP_COLOR_OPTIONS.includes(rawColor as SessionGroupPresetColor))
         ) {
           res.status(400).json({
             error: '`color` must be a supported color or null',
@@ -2092,7 +2093,7 @@ export function registerSessionRoutes(
             ? { groupId: rawGroupId as string | null }
             : {}),
           ...(rawColor !== undefined
-            ? { color: rawColor as SessionGroupColor | null }
+            ? { color: rawColor as SessionGroupPresetColor | null }
             : {}),
         });
         res.status(200).json({ sessionId, ...organization });

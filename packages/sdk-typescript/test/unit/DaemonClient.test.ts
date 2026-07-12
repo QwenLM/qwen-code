@@ -2457,7 +2457,7 @@ describe('DaemonClient', () => {
             group: {
               id: 'g-1',
               name: 'Frontend',
-              color: 'blue',
+              color: '#12abef',
               order: 0,
               createdAt: '2026-01-01T00:00:00.000Z',
               updatedAt: '2026-01-01T00:00:00.000Z',
@@ -2472,7 +2472,7 @@ describe('DaemonClient', () => {
             group: {
               id: 'g-1',
               name: 'UI',
-              color: 'green',
+              color: '#fedcba',
               order: 1,
               createdAt: '2026-01-01T00:00:00.000Z',
               updatedAt: '2026-01-02T00:00:00.000Z',
@@ -2496,11 +2496,11 @@ describe('DaemonClient', () => {
       const catalog = await client.listSessionGroups('/work/a');
       const group = await client.createSessionGroup('/work/a', {
         name: 'Frontend',
-        color: 'blue',
+        color: '#12abef',
       });
       const updated = await client.updateSessionGroup('/work/a', group.id, {
         name: 'UI',
-        color: 'green',
+        color: '#fedcba',
         order: 1,
       });
       const deleted = await client.deleteSessionGroup('/work/a', group.id);
@@ -2511,7 +2511,11 @@ describe('DaemonClient', () => {
 
       expect(catalog.colorOptions).toContain('purple');
       expect(group.id).toBe('g-1');
-      expect(updated).toMatchObject({ id: 'g-1', name: 'UI', color: 'green' });
+      expect(updated).toMatchObject({
+        id: 'g-1',
+        name: 'UI',
+        color: '#fedcba',
+      });
       expect(deleted).toEqual({ deleted: true });
       expect(organization).toEqual({
         sessionId: 's-1',
@@ -2522,7 +2526,7 @@ describe('DaemonClient', () => {
       expect(calls[1]?.method).toBe('POST');
       expect(JSON.parse(calls[1]!.body!)).toEqual({
         name: 'Frontend',
-        color: 'blue',
+        color: '#12abef',
       });
       expect(calls[2]?.url).toBe(
         'http://daemon/workspace/%2Fwork%2Fa/session-groups/g-1',
@@ -2530,7 +2534,7 @@ describe('DaemonClient', () => {
       expect(calls[2]?.method).toBe('PATCH');
       expect(JSON.parse(calls[2]!.body!)).toEqual({
         name: 'UI',
-        color: 'green',
+        color: '#fedcba',
         order: 1,
       });
       expect(calls[3]?.method).toBe('DELETE');

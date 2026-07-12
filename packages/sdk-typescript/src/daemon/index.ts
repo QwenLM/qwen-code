@@ -425,6 +425,8 @@ export type {
   DaemonSessionGroup,
   DaemonSessionGroupCatalog,
   DaemonSessionGroupColor,
+  DaemonSessionGroupHexColor,
+  DaemonSessionGroupPresetColor,
   DaemonSessionGroupFilter,
   DaemonSessionGroupInput,
   DaemonSessionGroupUpdate,
