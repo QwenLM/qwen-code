@@ -141,6 +141,27 @@ describe('createChannelWorkerManager', () => {
     await expect(second).resolves.toMatchObject({ created: false });
   });
 
+  it('reconciles an unhealthy worker when reapplying the same selection', async () => {
+    const group = fakeGroup({ isHealthy: vi.fn(() => false) });
+    const test = setup(group);
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+
+    await test.manager.setSelection(selection);
+    const recovered = await test.manager.setSelection(selection);
+
+    expect(group.reconcile).toHaveBeenCalledWith(workspaceGroups(selection), {
+      onRollingBack: expect.any(Function),
+    });
+    expect(recovered).toMatchObject({
+      changed: true,
+      replaced: false,
+      created: false,
+    });
+  });
+
   it('reports partial readiness without treating it as a failed enable', async () => {
     const group = fakeGroup({
       snapshots: () => [
@@ -469,5 +490,30 @@ describe('createChannelWorkerManager', () => {
     expect(test.group.killAllSync).toHaveBeenCalledTimes(1);
     expect(test.releaseLease).not.toHaveBeenCalled();
     expect(test.manager.state()).toMatchObject({ enabled: true });
+  });
+
+  it('does not create a worker after forced shutdown interrupts group resolution', async () => {
+    const test = setup();
+    let releaseGroups!: () => void;
+    test.resolveGroups.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseGroups = () =>
+            resolve(workspaceGroups({ mode: 'names', names: ['telegram'] }));
+        }),
+    );
+
+    const enabling = test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram'],
+    });
+    await vi.waitFor(() => expect(test.resolveGroups).toHaveBeenCalledTimes(1));
+    test.manager.killAllSync();
+    releaseGroups();
+
+    await expect(enabling).rejects.toMatchObject({ code: 'daemon_draining' });
+    expect(test.reserveLease).not.toHaveBeenCalled();
+    expect(test.createGroup).not.toHaveBeenCalled();
+    expect(test.group.start).not.toHaveBeenCalled();
   });
 });

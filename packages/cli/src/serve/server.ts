@@ -654,13 +654,22 @@ export function createServeApp(
         deps.getChannelWorkerControl !== undefined &&
         deps.setChannelWorkerSelection !== undefined &&
         deps.stopChannelWorker !== undefined,
-      channelReloadAvailable: () =>
-        deps.reloadChannelWorker !== undefined &&
-        (deps.getChannelWorkerControl?.().enabled ??
-          (deps
-            .getChannelWorkerSnapshots?.()
-            .some((worker) => worker.enabled) ||
-            deps.getChannelWorkerSnapshot?.().enabled)) === true,
+      channelReloadAvailable: () => {
+        if (deps.reloadChannelWorker === undefined) return false;
+        const control = deps.getChannelWorkerControl?.();
+        if (control) {
+          return (
+            control.enabled &&
+            control.selection !== null &&
+            control.workers.length > 0
+          );
+        }
+        return (
+          deps.getChannelWorkerSnapshots?.().some((worker) => worker.enabled) ||
+          deps.getChannelWorkerSnapshot?.().enabled ||
+          false
+        );
+      },
       sessionShellCommandEnabled,
       multiWorkspaceSessionsEnabled: () => workspaceRegistry.list().length > 1,
       persistentWorkspaceRegistrationAvailable:

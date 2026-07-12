@@ -148,6 +148,7 @@ export function createChannelWorkerManager(
   let group: ChannelWorkerGroup | undefined;
   let leaseReserved = opts.initialLeaseReserved === true;
   let draining = false;
+  let hardKilled = false;
   let lane: Promise<void> = Promise.resolve();
 
   const snapshot = (): ChannelWorkerControlState => ({
@@ -240,6 +241,7 @@ export function createChannelWorkerManager(
     selection: ServeChannelSelection,
     initial: boolean,
   ): Promise<ChannelWorkerSetResult> => {
+    if (hardKilled) throw drainingError();
     const enabling = !snapshot().enabled;
     const replacing = committedSelection !== undefined;
     const sameSelection = selectionsEqual(committedSelection, selection);
@@ -260,6 +262,7 @@ export function createChannelWorkerManager(
         selection,
         initial ? 'initial' : 'set',
       );
+      if (hardKilled) throw drainingError();
       reserve(selection);
     } catch (error) {
       setTransition('idle');
@@ -456,6 +459,7 @@ export function createChannelWorkerManager(
     },
     killAllSync() {
       draining = true;
+      hardKilled = true;
       group?.killAllSync();
       pendingSelection = undefined;
       transition = 'idle';

@@ -10320,6 +10320,36 @@ describe('createServeApp', () => {
       expect(capabilities.body.features).not.toContain('channel_reload');
     });
 
+    it('does not advertise reload for degraded manager states', async () => {
+      for (const state of [
+        {
+          enabled: true,
+          selection: null,
+          transition: 'idle',
+          workers: [],
+        },
+        {
+          enabled: true,
+          selection: { mode: 'names', names: ['telegram'] },
+          transition: 'idle',
+          workers: [],
+        },
+      ] satisfies ChannelWorkerControlState[]) {
+        const app = createServeApp(tokenOpts, undefined, {
+          bridge: fakeBridge(),
+          boundWorkspace: WS_BOUND,
+          getChannelWorkerControl: () => state,
+          setChannelWorkerSelection: vi.fn(),
+          stopChannelWorker: vi.fn(),
+          reloadChannelWorker: vi.fn(),
+        });
+
+        const capabilities = await auth(request(app).get('/capabilities'));
+        expect(capabilities.body.features).toContain('channel_control');
+        expect(capabilities.body.features).not.toContain('channel_reload');
+      }
+    });
+
     it('requires a configured token before any runtime channel mutation', async () => {
       const state = disabled();
       const setSelection = vi.fn();

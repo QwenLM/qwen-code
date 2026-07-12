@@ -32,7 +32,8 @@ primary-workspace-only in multi-workspace mode.
 the committed selection. Mutations use the strict bearer-token gate.
 
 The `channel_control` capability advertises the resource. `channel_reload`
-continues to advertise only while a selection is enabled.
+continues to advertise only while the manager has a committed, reloadable
+selection.
 
 ## Lifecycle
 
@@ -42,10 +43,12 @@ stopping workers. Unchanged workspace entries are retained. Changed and
 removed entries stop before replacements start, while the daemon keeps the
 global channel-service lease.
 
-If a replacement fails, newly started entries are stopped and the previous
-entries are restarted. A failure to observe child exit after SIGKILL is a hard
-stop failure: the supervisor retains the child reference, the manager retains
-the service lease, and no replacement is spawned.
+If a replacement fails, the manager attempts to stop newly started entries and
+restart the previous entries. Clients inspect `rolledBack`, `rollbackError`,
+and `state` because cleanup or restoration can also fail. A failure to observe
+child exit after SIGKILL is a hard stop failure: the supervisor retains the
+child reference, the manager retains the service lease, and no replacement is
+spawned.
 
 Worker callbacks carry a generation. Callbacks from replaced entries may log,
 but cannot update current pidfile or routing state. A successful commit swaps

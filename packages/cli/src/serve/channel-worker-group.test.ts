@@ -657,6 +657,42 @@ describe('createChannelWorkerGroup', () => {
     expect(recorded[1]!.supervisor.start).not.toHaveBeenCalled();
   });
 
+  it('force-kills a replacement that is still starting', async () => {
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+
+    const replacement = group.reconcile([
+      { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['c'] } },
+    ]);
+    let releaseStart!: () => void;
+    recorded[1]!.supervisor.start.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseStart = resolve;
+        }),
+    );
+    await vi.waitFor(() =>
+      expect(recorded[1]!.supervisor.start).toHaveBeenCalledTimes(1),
+    );
+
+    group.killAllSync();
+    expect(recorded[0]!.supervisor.killAllSync).toHaveBeenCalledTimes(1);
+    expect(recorded[1]!.supervisor.killAllSync).toHaveBeenCalledTimes(1);
+    releaseStart();
+    await expect(replacement).rejects.toMatchObject({ rolledBack: false });
+  });
+
   it('retains an unconfirmed replacement so a later stop can retry it', async () => {
     const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
     const { createSupervisor, recorded } = makeCreateSupervisor(() =>

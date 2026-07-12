@@ -490,14 +490,16 @@ failed.
 re-resolves workspace groups, and force-reconciles the committed selection.
 It returns `409 channel_worker_not_enabled` while disabled. The
 `channel_reload` capability is advertised dynamically only while the manager
-is enabled.
+has a committed, reloadable selection.
 
 Every enable, replace, reload, stop, and daemon shutdown enters one FIFO
 lifecycle lane. GET does not wait for that lane. Workspace groups whose ordered
-selection did not change remain online. Replacement failures stop newly
-started workers and restore the previous committed selection. The daemon keeps
-the channel-service PID lease throughout a transaction and does not release it
-until every relevant child exit is confirmed.
+selection did not change remain online. Replacement failures attempt to stop
+newly started workers and restore the previous committed selection. Clients
+must inspect `rolledBack`, `rollbackError`, and `state` because cleanup or
+restoration can also fail. The daemon keeps the channel-service PID lease
+throughout a transaction and does not release it until every relevant child
+exit is confirmed.
 
 Stable control errors are:
 

@@ -125,6 +125,7 @@ export function createChannelWorkerGroup(
 ): ChannelWorkerGroup {
   let generation = 0;
   let entries = new Map<string, ChannelWorkerGroupEntry>();
+  const pendingEntries = new Set<ChannelWorkerGroupEntry>();
   const pendingGenerations = new Map<string, number>();
   let reconciling: Promise<ChannelWorkerGroupReconcileResult> | undefined;
   let stopping = false;
@@ -401,6 +402,7 @@ export function createChannelWorkerGroup(
         for (const target of targets.values()) {
           const entry = createEntry(target);
           newEntries.push(entry);
+          pendingEntries.add(entry);
           pendingGenerations.set(entry.workspaceCwd, entry.generation);
         }
         if (oldAffected.length === 0 && newEntries.length === 0) {
@@ -425,8 +427,14 @@ export function createChannelWorkerGroup(
         const startedNew: ChannelWorkerGroupEntry[] = [];
         try {
           for (const entry of newEntries) {
+            if (stopping) {
+              throw new Error('Channel worker group stopped during reconcile.');
+            }
             startedNew.push(entry);
             await entry.supervisor.start();
+            if (stopping) {
+              throw new Error('Channel worker group stopped during reconcile.');
+            }
           }
         } catch (error) {
           reconcileOptions?.onRollingBack?.();
@@ -440,6 +448,11 @@ export function createChannelWorkerGroup(
               rollbackError: cleanup.error,
             });
           }
+          if (stopping) {
+            throw new ChannelWorkerReconcileError(errorMessage(error), {
+              rolledBack: false,
+            });
+          }
           const rollback = await restoreEntries(stoppedOld);
           throw new ChannelWorkerReconcileError(errorMessage(error), rollback);
         }
@@ -451,6 +464,7 @@ export function createChannelWorkerGroup(
         entries = committed;
         return { changed: true, workers: entrySnapshots() };
       })().finally(() => {
+        pendingEntries.clear();
         pendingGenerations.clear();
         reconciling = undefined;
       });
@@ -467,6 +481,9 @@ export function createChannelWorkerGroup(
     killAllSync() {
       stopping = true;
       for (const entry of entries.values()) {
+        entry.supervisor.killAllSync();
+      }
+      for (const entry of pendingEntries) {
         entry.supervisor.killAllSync();
       }
     },
