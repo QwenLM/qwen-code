@@ -5077,6 +5077,7 @@ export function App({
     selectedTheme === WebShellThemeId.Light
       ? styles.themeLight
       : styles.themeDark,
+    selectedTheme === WebShellThemeId.Dark ? 'dark' : undefined,
     externalClassName,
   ]
     .filter(Boolean)
