@@ -1369,7 +1369,7 @@ describe('WebShellSidebar — session organization', () => {
 
     const hexInput = Array.from(
       document.body.querySelectorAll<HTMLInputElement>('input'),
-    ).find((input) => input.maxLength === 9);
+    ).find((input) => input.maxLength === 7);
     const picker = document.body.querySelector<HTMLInputElement>(
       'input[type="color"]',
     );
@@ -1482,7 +1482,7 @@ describe('WebShellSidebar — session organization', () => {
       document.body.querySelectorAll<HTMLSelectElement>('select'),
     ).find((select) => select.value === '__custom__');
     const hexInput = document.body.querySelector<HTMLInputElement>(
-      'input[maxlength="9"]',
+      'input[maxlength="7"]',
     );
     expect(colorSelect).toBeDefined();
     expect(hexInput?.value).toBe('#12abef');
@@ -1496,7 +1496,7 @@ describe('WebShellSidebar — session organization', () => {
       colorSelect!.dispatchEvent(new Event('change', { bubbles: true }));
     });
     expect(
-      document.body.querySelector<HTMLInputElement>('input[maxlength="9"]'),
+      document.body.querySelector<HTMLInputElement>('input[maxlength="7"]'),
     ).toBeNull();
 
     const saveButton = Array.from(
@@ -1548,7 +1548,7 @@ describe('WebShellSidebar — session organization', () => {
     ).find((select) => select.value === '__custom__');
     expect(colorSelect).toBeDefined();
     expect(
-      document.body.querySelector<HTMLInputElement>('input[maxlength="9"]')
+      document.body.querySelector<HTMLInputElement>('input[maxlength="7"]')
         ?.value,
     ).toBe('#12abef');
 
@@ -1561,7 +1561,7 @@ describe('WebShellSidebar — session organization', () => {
       colorSelect!.dispatchEvent(new Event('change', { bubbles: true }));
     });
     expect(
-      document.body.querySelector<HTMLInputElement>('input[maxlength="9"]'),
+      document.body.querySelector<HTMLInputElement>('input[maxlength="7"]'),
     ).toBeNull();
 
     act(() => {
@@ -1569,7 +1569,7 @@ describe('WebShellSidebar — session organization', () => {
       colorSelect!.dispatchEvent(new Event('change', { bubbles: true }));
     });
     expect(
-      document.body.querySelector<HTMLInputElement>('input[maxlength="9"]')
+      document.body.querySelector<HTMLInputElement>('input[maxlength="7"]')
         ?.value,
     ).toBe('#12abef');
   });
@@ -1608,7 +1608,7 @@ describe('WebShellSidebar — session organization', () => {
     );
 
     const hexInput = document.body.querySelector<HTMLInputElement>(
-      'input[maxlength="9"]',
+      'input[maxlength="7"]',
     );
     expect(hexInput?.value).toBe('#12abef');
     const setInputValue = Object.getOwnPropertyDescriptor(
@@ -1623,7 +1623,7 @@ describe('WebShellSidebar — session organization', () => {
     // The value is '#'-prefixed instead of matching the 'blue' preset, so
     // the editor stays in Custom mode and flags the value as invalid.
     const stillHexInput = document.body.querySelector<HTMLInputElement>(
-      'input[maxlength="9"]',
+      'input[maxlength="7"]',
     );
     expect(stillHexInput?.value).toBe('#blue');
     expect(stillHexInput?.getAttribute('aria-invalid')).toBe('true');

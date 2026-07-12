@@ -3015,7 +3015,7 @@ export function WebShellSidebar({
                     <input
                       className={styles.dialogInput}
                       value={groupColor}
-                      maxLength={9}
+                      maxLength={7}
                       spellCheck={false}
                       aria-invalid={normalizedGroupColor === undefined}
                       onChange={(event) => {
