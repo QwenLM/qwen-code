@@ -122,6 +122,72 @@ describe('useComposerCore inline tags', () => {
     warn.mockRestore();
   });
 
+  it('uses a custom inline tooltip without a native title', async () => {
+    await mount({
+      composerInput: {
+        tags: [{ id: 'orders', label: 'Table', value: 'orders' }],
+        tagPlacement: 'inline',
+      },
+      renderComposerTagTooltip: () => 'Details',
+    });
+
+    const tooltip = document.body.querySelector('[role="tooltip"]');
+    expect(tooltip?.textContent).toBe('Details');
+    expect(tooltip?.parentElement?.getAttribute('title')).toBeNull();
+    expect(tooltip?.id).toBeTruthy();
+    expect(tooltip?.parentElement?.getAttribute('aria-describedby')).toBe(
+      tooltip?.id,
+    );
+  });
+
+  it('falls back to a native title when attaching an inline tooltip fails', async () => {
+    const error = new Error('append failed');
+    const appendChild = HTMLElement.prototype.appendChild;
+    let failingTooltip: HTMLElement | null = null;
+    let readFailingChipTitle: (() => string) | null = null;
+    let dispatchOnFailingChip: ((event: Event) => boolean) | null = null;
+    const appendChildSpy = vi
+      .spyOn(HTMLElement.prototype, 'appendChild')
+      .mockImplementation(function (child) {
+        if (
+          child instanceof HTMLElement &&
+          child.getAttribute('role') === 'tooltip'
+        ) {
+          failingTooltip = child;
+          readFailingChipTitle = () => this.title;
+          dispatchOnFailingChip = (event) => this.dispatchEvent(event);
+          throw error;
+        }
+        return appendChild.call(this, child);
+      });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {
+      expect(readFailingChipTitle?.()).toBe('Details');
+    });
+
+    try {
+      await mount({
+        composerInput: {
+          tags: [{ id: 'orders', label: 'Table', value: 'orders' }],
+          tagPlacement: 'inline',
+        },
+        renderComposerTagTooltip: () => 'Details',
+      });
+
+      expect(warn).toHaveBeenCalledWith(
+        '[WebShell] inline tag tooltip render failed',
+        error,
+      );
+      const chip = document.body.querySelector('[title="Details"]');
+      expect(chip).not.toBeNull();
+      expect(document.body.querySelector('[role="tooltip"]')).toBeNull();
+      dispatchOnFailingChip?.(new MouseEvent('mouseenter'));
+      expect(failingTooltip?.style.display).toBe('none');
+    } finally {
+      warn.mockRestore();
+      appendChildSpy.mockRestore();
+    }
+  });
+
   it('guards inline mask icon sources', async () => {
     await mount({
       composerInput: {
