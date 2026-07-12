@@ -48,6 +48,7 @@ describe('reviewCommand', () => {
       'resolve-anchors',
       'presubmit',
       'compose-review',
+      'submit',
       'cleanup',
     ]);
   });
