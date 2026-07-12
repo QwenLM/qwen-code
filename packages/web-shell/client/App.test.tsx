@@ -1943,6 +1943,59 @@ describe('App session callbacks', () => {
     }
   });
 
+  it('restores the split view when the screen grows back after a shrink', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('min-width')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+
+      // Shrinking below the breakpoint folds the split away...
+      await act(async () => {
+        large = false;
+        changeHandler?.({ matches: false });
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+
+      // ...and growing back past it restores the same split (a transient resize
+      // is lossless, not a permanent drop of the panes).
+      await act(async () => {
+        large = true;
+        changeHandler?.({ matches: true });
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
   it('auto-closes the Session Overview when the screen shrinks below the breakpoint', async () => {
     // Drive isLargeScreen through a controllable media query: open the panel on
     // a large screen, then flip below the breakpoint and confirm it closes.

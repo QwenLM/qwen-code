@@ -2065,27 +2065,48 @@ export function App({
       openSplitView(ids);
     }
   }, [externalSplitControlled, openSplitView]);
-  // If the viewport shrinks below the large-screen breakpoint, close the Session
-  // Overview panel and the split view — both are large-screen-only surfaces
-  // whose entry points are hidden on small screens, so leaving them up would
-  // strand the user in a view they can no longer re-enter.
-  // When a shrink closes the split, its panes unmount and take keyboard focus
-  // with them; flag the composer to be refocused once the chat is shown again.
+  // If the viewport shrinks below the large-screen breakpoint, fold away the
+  // Session Overview panel and the split view — both are large-screen-only
+  // surfaces whose entry points are hidden on small screens. The split is only
+  // folded, not discarded: growing back past the breakpoint restores it, so a
+  // transient resize is lossless. When a shrink folds the split, its panes
+  // unmount and take keyboard focus with them; flag the composer to be refocused
+  // once the chat is shown again.
   const focusComposerAfterSplitCloseRef = useRef(false);
+  // True while the split view is only *temporarily* folded away because the
+  // window is narrower than the large-screen breakpoint. Growing back past the
+  // breakpoint restores it, so a transient resize doesn't drop the user's panes.
+  const splitFoldedByShrinkRef = useRef(false);
   useEffect(() => {
-    if (!isLargeScreen && activePanel === 'sessions') {
+    if (isLargeScreen) {
+      // Grew back above the breakpoint: restore a split that a shrink folded
+      // away. Standalone/uncontrolled only — a controlled host owns its split
+      // lifecycle and re-opens it itself.
+      if (splitFoldedByShrinkRef.current) {
+        splitFoldedByShrinkRef.current = false;
+        if (!externalSplitControlled && splitSessionIdsRef.current.length > 0) {
+          setMainView((prev) => (prev === 'chat' ? 'split' : prev));
+        }
+      }
+      return;
+    }
+    if (activePanel === 'sessions') {
       setActivePanel(null);
     }
-    if (!isLargeScreen && mainView === 'split') {
+    if (mainView === 'split') {
       notifyControlledSplitClose();
       setMainView('chat');
       focusComposerAfterSplitCloseRef.current = true;
-      // If the chat we fall back to has no session of its own — the common case
-      // when the split was entered straight from the Session Overview or a
-      // `?split=a,b` link — land on the split's first pane instead of stranding
-      // the user on an empty "new chat". Best-effort: a load failure (e.g. a
-      // non-primary-workspace session the single connection can't own) just
-      // leaves the empty chat, i.e. the previous behavior.
+      // Remember to restore the split once the screen grows back, so a transient
+      // shrink is lossless rather than permanently dropping the panes.
+      if (!externalSplitControlled) {
+        splitFoldedByShrinkRef.current = true;
+      }
+      // Meanwhile give the folded-down chat a session instead of stranding the
+      // user on an empty new chat (the common case when the split came from the
+      // Session Overview or a `?split=a,b` link). Best-effort; a load failure
+      // (e.g. a non-primary-workspace session the single connection can't own)
+      // just leaves the empty chat.
       const firstPane = splitSessionIdsRef.current[0];
       if (
         firstPane &&
