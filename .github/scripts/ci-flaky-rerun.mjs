@@ -237,7 +237,7 @@ class GhClient {
         '--state',
         'open',
         '--search',
-        `updated:>=${activeSince}`,
+        `updated:>=${activeSince} status:failure`,
         '--json',
         'number,isDraft,baseRefName,headRefOid,updatedAt,statusCheckRollup',
         '--limit',

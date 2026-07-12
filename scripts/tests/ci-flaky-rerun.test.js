@@ -162,6 +162,10 @@ describe('ci flaky rerun patrol', () => {
     expect(script).toContain("'--limit',\n        '1000'");
   });
 
+  it('asks GitHub to prefilter PRs with failed checks', () => {
+    expect(script).toContain('`updated:>=${activeSince} status:failure`');
+  });
+
   it('can rank candidates before fetching comments', () => {
     expect(selectCandidateTargets([pr()], { now: NOW })).toMatchObject([
       {
