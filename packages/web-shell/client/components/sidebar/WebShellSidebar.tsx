@@ -342,19 +342,25 @@ function getDefaultGroupColor(
   return colorOptions[0] ?? 'blue';
 }
 
-function normalizeGroupColorInput(
+function normalizeHexColorInput(
   value: string,
-): DaemonSessionGroupColor | undefined {
+): DaemonSessionGroupHexColor | undefined {
   const normalized = value.trim();
-  if (
-    SESSION_GROUP_COLORS.includes(normalized as DaemonSessionGroupPresetColor)
-  ) {
-    return normalized as DaemonSessionGroupPresetColor;
-  }
   if (/^#[0-9a-f]{6}$/i.test(normalized)) {
     return normalized.toLowerCase() as DaemonSessionGroupHexColor;
   }
   return undefined;
+}
+
+function normalizeGroupColorInput(
+  value: string,
+  presets: readonly DaemonSessionGroupPresetColor[],
+): DaemonSessionGroupColor | undefined {
+  const normalized = value.trim();
+  if (presets.includes(normalized as DaemonSessionGroupPresetColor)) {
+    return normalized as DaemonSessionGroupPresetColor;
+  }
+  return normalizeHexColorInput(normalized);
 }
 
 function getGroupColorClass(
@@ -1645,11 +1651,8 @@ export function WebShellSidebar({
   const handleRenameGroup = useCallback((group: DaemonSessionGroup) => {
     setGroupName(group.name);
     setGroupColor(group.color);
-    const normalized = normalizeGroupColorInput(group.color);
     setLastValidCustomGroupColor(
-      normalized?.startsWith('#')
-        ? (normalized as DaemonSessionGroupHexColor)
-        : DEFAULT_CUSTOM_GROUP_COLOR,
+      normalizeHexColorInput(group.color) ?? DEFAULT_CUSTOM_GROUP_COLOR,
     );
     setGroupEditor({ mode: 'edit', group });
   }, []);
@@ -1665,7 +1668,10 @@ export function WebShellSidebar({
   const saveGroupEditor = useCallback(() => {
     if (!groupEditor) return;
     const name = groupName.trim();
-    const color = normalizeGroupColorInput(groupColor);
+    const color = normalizeGroupColorInput(
+      groupColor,
+      colorOptions.length > 0 ? colorOptions : SESSION_GROUP_COLORS,
+    );
     if (!name || !color) return;
     void (async () => {
       setGroupBusy(true);
@@ -1716,6 +1722,7 @@ export function WebShellSidebar({
     })();
   }, [
     bumpWorkspaceReload,
+    colorOptions,
     groupColor,
     groupEditor,
     groupName,
@@ -2171,8 +2178,15 @@ export function WebShellSidebar({
   const groupMenuUngroupedSelected =
     groupMenuSelectedGroupId === null && groupMenuSelectedColor === null;
   const deleteGroupCandidateLabel = deleteGroupCandidate?.name ?? '';
-  const normalizedGroupColor = normalizeGroupColorInput(groupColor);
-  const customGroupColor = !SESSION_GROUP_COLORS.includes(
+  const groupColorChoices =
+    colorOptions.length > 0
+      ? colorOptions
+      : (['blue'] as DaemonSessionGroupPresetColor[]);
+  const normalizedGroupColor = normalizeGroupColorInput(
+    groupColor,
+    groupColorChoices,
+  );
+  const customGroupColor = !groupColorChoices.includes(
     groupColor as DaemonSessionGroupPresetColor,
   );
   const canSaveGroup =
@@ -2183,10 +2197,6 @@ export function WebShellSidebar({
     groupEditor?.mode === 'create'
       ? t('sidebar.groupCreate')
       : t('sidebar.groupRename');
-  const groupColorChoices =
-    colorOptions.length > 0
-      ? colorOptions
-      : (['blue'] as DaemonSessionGroupPresetColor[]);
 
   const renderSessionRow = useCallback(
     (
@@ -3009,14 +3019,21 @@ export function WebShellSidebar({
                       spellCheck={false}
                       aria-invalid={normalizedGroupColor === undefined}
                       onChange={(event) => {
-                        const value = event.target
-                          .value as DaemonSessionGroupColor;
+                        // Auto-prefix '#' so pasted bare values validate and
+                        // free text can never collide with a preset name
+                        // (which would silently flip the select out of
+                        // Custom mode).
+                        const raw = event.target.value;
+                        const trimmed = raw.trim();
+                        const value = (
+                          trimmed && !trimmed.startsWith('#')
+                            ? `#${trimmed}`
+                            : raw
+                        ) as DaemonSessionGroupColor;
                         setGroupColor(value);
-                        const normalized = normalizeGroupColorInput(value);
-                        if (normalized?.startsWith('#')) {
-                          setLastValidCustomGroupColor(
-                            normalized as DaemonSessionGroupHexColor,
-                          );
+                        const normalized = normalizeHexColorInput(value);
+                        if (normalized) {
+                          setLastValidCustomGroupColor(normalized);
                         }
                       }}
                     />

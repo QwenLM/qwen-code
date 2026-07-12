@@ -1385,14 +1385,24 @@ describe('WebShellSidebar — session organization', () => {
     });
     expect(hexInput?.value).toBe('#12abef');
     act(() => {
-      setInputValue?.call(hexInput, '12abef');
+      setInputValue?.call(hexInput, '12ab');
       hexInput!.dispatchEvent(new Event('input', { bubbles: true }));
     });
+    // A bare value is auto-prefixed with '#'; four digits stay invalid.
+    expect(hexInput?.value).toBe('#12ab');
     expect(saveButton?.disabled).toBe(true);
     expect(picker?.value).toBe('#12abef');
     expect(
       document.body.querySelector('[role="alert"]')?.textContent,
     ).toContain('six-digit Hex color');
+
+    act(() => {
+      setInputValue?.call(hexInput, '12abef');
+      hexInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    // A bare six-digit value is auto-prefixed and becomes valid.
+    expect(hexInput?.value).toBe('#12abef');
+    expect(saveButton?.disabled).toBe(false);
 
     act(() => {
       setInputValue?.call(hexInput, ' #12ABEF ');
@@ -1498,6 +1508,132 @@ describe('WebShellSidebar — session organization', () => {
       'group-hex',
       { name: 'Custom', color: 'green' },
     );
+  });
+
+  it('keeps the entered custom Hex color when toggling to a preset and back', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'group-hex',
+          name: 'Custom',
+          color: '#12abef',
+          order: 0,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    mockActive.sessions = [
+      makeSession('550e8400-e29b-41d4-a716-446655440000', {
+        displayName: 'Review plan',
+        groupId: 'group-hex',
+      }),
+    ];
+
+    renderSidebar(false);
+    await act(async () => Promise.resolve());
+    click(
+      document.body.querySelector<HTMLButtonElement>(
+        '[aria-label="Rename group"]',
+      ),
+    );
+
+    const colorSelect = Array.from(
+      document.body.querySelectorAll<HTMLSelectElement>('select'),
+    ).find((select) => select.value === '__custom__');
+    expect(colorSelect).toBeDefined();
+    expect(
+      document.body.querySelector<HTMLInputElement>('input[maxlength="9"]')
+        ?.value,
+    ).toBe('#12abef');
+
+    const setSelectValue = Object.getOwnPropertyDescriptor(
+      HTMLSelectElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setSelectValue?.call(colorSelect, 'green');
+      colorSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(
+      document.body.querySelector<HTMLInputElement>('input[maxlength="9"]'),
+    ).toBeNull();
+
+    act(() => {
+      setSelectValue?.call(colorSelect, '__custom__');
+      colorSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(
+      document.body.querySelector<HTMLInputElement>('input[maxlength="9"]')
+        ?.value,
+    ).toBe('#12abef');
+  });
+
+  it('stays in Custom mode when a preset name is typed into the Hex field', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'group-hex',
+          name: 'Custom',
+          color: '#12abef',
+          order: 0,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    mockActive.sessions = [
+      makeSession('550e8400-e29b-41d4-a716-446655440000', {
+        displayName: 'Review plan',
+        groupId: 'group-hex',
+      }),
+    ];
+
+    renderSidebar(false);
+    await act(async () => Promise.resolve());
+    click(
+      document.body.querySelector<HTMLButtonElement>(
+        '[aria-label="Rename group"]',
+      ),
+    );
+
+    const hexInput = document.body.querySelector<HTMLInputElement>(
+      'input[maxlength="9"]',
+    );
+    expect(hexInput?.value).toBe('#12abef');
+    const setInputValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setInputValue?.call(hexInput, 'blue');
+      hexInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    // The value is '#'-prefixed instead of matching the 'blue' preset, so
+    // the editor stays in Custom mode and flags the value as invalid.
+    const stillHexInput = document.body.querySelector<HTMLInputElement>(
+      'input[maxlength="9"]',
+    );
+    expect(stillHexInput?.value).toBe('#blue');
+    expect(stillHexInput?.getAttribute('aria-invalid')).toBe('true');
+    expect(
+      document.body.querySelector('[role="alert"]')?.textContent,
+    ).toContain('six-digit Hex color');
+    const saveButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'save');
+    expect(saveButton?.disabled).toBe(true);
   });
 
   it('uses a themed group menu and assigns the selected group', async () => {
