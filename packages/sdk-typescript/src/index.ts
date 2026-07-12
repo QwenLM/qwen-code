@@ -144,6 +144,8 @@ export {
   type DaemonSessionGroup,
   type DaemonSessionGroupCatalog,
   type DaemonSessionGroupColor,
+  type DaemonSessionGroupHexColor,
+  type DaemonSessionGroupPresetColor,
   type DaemonSessionGroupFilter,
   type DaemonSessionGroupInput,
   type DaemonSessionGroupUpdate,
