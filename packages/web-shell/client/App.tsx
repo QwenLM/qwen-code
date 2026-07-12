@@ -126,6 +126,7 @@ import {
 } from './utils/copyCommand';
 import { isEditableTarget } from './utils/dom';
 import { getModelDisplayName } from './utils/modelDisplay';
+import { hasMultipleWorkspaces, workspaceBasename } from './utils/workspace';
 import { isVisibleComposerModel } from './utils/composerModels';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
@@ -5933,6 +5934,13 @@ export function App({
                           currentMode={currentMode}
                           currentModel={currentModel}
                           gitBranch={connection.gitBranch}
+                          workspaceName={
+                            hasMultipleWorkspaces(connection.capabilities) &&
+                            connection.workspaceCwd
+                              ? workspaceBasename(connection.workspaceCwd)
+                              : undefined
+                          }
+                          workspaceTitle={connection.workspaceCwd || undefined}
                           chatWidthMode={chatWidthMode}
                           showChatWidthToggle={!isChatEmptyState}
                           chatWidthToggleMin={chatWidthToggleMin}

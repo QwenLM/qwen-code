@@ -191,4 +191,21 @@ describe('ChatEditor workspace toolbar integration', () => {
       }).querySelector('[aria-label^="Workspace:"]'),
     ).toBeNull();
   });
+
+  it('renders the workspace chip before the git branch chip', () => {
+    const container = renderChatEditor({
+      gitBranch: 'main',
+      workspaceName: 'api',
+      workspaceTitle: '/work/api',
+      visibleToolbarActions: ['workspace', 'gitBranch'],
+    });
+    const ws = container.querySelector('[data-web-shell-workspace]');
+    const git = container.querySelector('[data-web-shell-git-branch]');
+    expect(ws).not.toBeNull();
+    expect(git).not.toBeNull();
+    // The workspace chip must precede the git-branch chip in document order.
+    expect(
+      ws!.compareDocumentPosition(git!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
 });

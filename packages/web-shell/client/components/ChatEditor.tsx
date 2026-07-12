@@ -1561,12 +1561,6 @@ export const ChatEditor = memo(
                   </div>
                 )}
                 <div className={styles.toolbarLeft}>
-                  {gitBranch && showToolbarAction('gitBranch') && (
-                    <GitBranchIndicator
-                      branch={gitBranch}
-                      ariaLabel={t('git.currentBranch', { branch: gitBranch })}
-                    />
-                  )}
                   {workspaceName && showToolbarAction('workspace') && (
                     <WorkspaceIndicator
                       name={workspaceName}
@@ -1574,6 +1568,12 @@ export const ChatEditor = memo(
                       ariaLabel={t('workspace.paneLabel', {
                         name: workspaceName,
                       })}
+                    />
+                  )}
+                  {gitBranch && showToolbarAction('gitBranch') && (
+                    <GitBranchIndicator
+                      branch={gitBranch}
+                      ariaLabel={t('git.currentBranch', { branch: gitBranch })}
                     />
                   )}
                   {showToolbarAction('approvalMode') && (
