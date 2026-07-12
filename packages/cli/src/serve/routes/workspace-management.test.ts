@@ -25,6 +25,7 @@ import {
   WorkspaceRegistrationStoreLimitError,
   type WorkspaceRegistrationStore,
 } from '../workspace-registration-store.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: vi.fn(),
@@ -527,6 +528,21 @@ describe('DELETE /workspaces/:workspace', () => {
     expect(staticResult.body.code).toBe('static_workspace_removal_forbidden');
   });
 
+  it('returns 501 when runtime removal is unavailable', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval: undefined,
+    });
+
+    const res = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+
+    expect(res.status).toBe(501);
+    expect(res.body.code).toBe('workspace_runtime_removal_unsupported');
+  });
+
   it('does not expose workspace counts for an unknown removal selector', async () => {
     const { app } = createApp({
       runtimeRemoval: createRemovalController(),
@@ -698,6 +714,9 @@ describe('DELETE /workspaces/:workspace', () => {
     vi.mocked(runtimeRemoval.disposeRuntime).mockRejectedValueOnce(
       new Error('bridge cleanup failed'),
     );
+    vi.mocked(writeStderrLine).mockImplementationOnce(() => {
+      throw new Error('stderr closed');
+    });
     const acpHandle = {
       beginWorkspaceDrain: vi.fn(),
       cancelWorkspaceDrain: vi.fn(),
@@ -1086,6 +1105,59 @@ describe('persistent workspace registrations', () => {
 
     expect(res.status).toBe(500);
     expect(res.body.code).toBe('workspace_registration_store_error');
+  });
+
+  it('serializes forget and runtime removal for the same workspace', async () => {
+    const registrationId = 'runtime-alias';
+    const runtime = makeRuntime(REAL_DIR, {
+      registrationIds: [registrationId],
+    });
+    let finishForget!: () => void;
+    const forgetting = new Promise<boolean>((resolve) => {
+      finishForget = () => resolve(true);
+    });
+    let finishRemoval!: () => void;
+    const removing = new Promise<number>((resolve) => {
+      finishRemoval = () => resolve(1);
+    });
+    const removeById = vi.fn().mockReturnValue(forgetting);
+    const removeByIds = vi.fn().mockReturnValue(removing);
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval: createRemovalController(),
+      workspaceRegistrationStore: {
+        removeById,
+        removeByIds,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const pendingForget = request(app).delete(
+      `/workspace-registrations/${registrationId}`,
+    );
+    const forgetResult = pendingForget.then((res) => res);
+    await vi.waitFor(() => expect(removeById).toHaveBeenCalledOnce());
+    const removalWhileForgetting = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+    expect(removalWhileForgetting.status).toBe(409);
+    expect(removalWhileForgetting.body.code).toBe(
+      'workspace_registration_in_progress',
+    );
+    finishForget();
+    expect((await forgetResult).status).toBe(200);
+
+    const pendingRemoval = request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+    const removalResult = pendingRemoval.then((res) => res);
+    await vi.waitFor(() => expect(removeByIds).toHaveBeenCalledOnce());
+    const forgetWhileRemoving = await request(app).delete(
+      `/workspace-registrations/${registrationId}`,
+    );
+    expect(forgetWhileRemoving.status).toBe(409);
+    expect(forgetWhileRemoving.body.code).toBe('workspace_removal_in_progress');
+    finishRemoval();
+    expect((await removalResult).status).toBe(200);
   });
 
   it('waits for an in-flight forget after sealing and rejects another one', async () => {

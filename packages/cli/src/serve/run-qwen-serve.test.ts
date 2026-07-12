@@ -611,6 +611,7 @@ describe('runQwenServe telemetry validation', () => {
         body: JSON.stringify({ cwd: secondary, persist: true }),
       });
       expect(readded.status).toBe(201);
+      expect(createBridge).toHaveBeenCalledTimes(3);
       let releaseRemoval!: (count: number) => void;
       removeByIds.mockImplementationOnce(
         () =>
@@ -715,10 +716,9 @@ describe('runQwenServe telemetry validation', () => {
       await expect(response.json()).resolves.toMatchObject({
         code: 'runtime_creation_failed',
       });
-      expect(failedBridge.shutdown).toHaveBeenCalledWith({
-        reason: 'workspace_removed',
-      });
+      expect(failedBridge.shutdown).toHaveBeenCalledWith();
       expect(failedBridge.killAllSync).toHaveBeenCalledOnce();
+      expect(primaryBridge.shutdown).not.toHaveBeenCalled();
     } finally {
       await handle.close();
     }

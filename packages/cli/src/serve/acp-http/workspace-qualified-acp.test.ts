@@ -805,6 +805,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     handle!.beginWorkspaceDrain('secondary-id');
     const draining = await postInitialize('/workspaces/secondary-id/acp');
     expect(draining.status).toBe(503);
+    expect(draining.headers.get('retry-after')).toBe('5');
     await expect(draining.json()).resolves.toMatchObject({
       code: 'workspace_draining',
     });

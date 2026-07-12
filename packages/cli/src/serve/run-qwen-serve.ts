@@ -3805,7 +3805,7 @@ export async function runQwenServe(
         });
       } catch (err) {
         wsSubSessionLauncher.stop();
-        await wsBridge.shutdown({ reason: 'workspace_removed' }).catch(() => {
+        await wsBridge.shutdown().catch(() => {
           try {
             wsBridge.killAllSync();
           } catch {
@@ -4941,7 +4941,9 @@ export async function runQwenServe(
                   'workspaceManagementHandle'
                 ] as { sealAndWait?: () => Promise<void> } | undefined;
                 await initialManagementWait;
-                await workspaceManagementHandle?.sealAndWait?.();
+                if (workspaceManagementHandle !== initiallyMountedManagement) {
+                  await workspaceManagementHandle?.sealAndWait?.();
+                }
                 // Stop the scheduled-task keepalive only after workspace
                 // management has sealed and every accepted operation settled.
                 const stopScheduledTaskKeepalive = appForCleanup?.locals?.[

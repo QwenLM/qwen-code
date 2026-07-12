@@ -548,6 +548,7 @@ export function mountAcpHttp(
   ): boolean => {
     if (rejectIfDisposed(res)) return true;
     if (!mount.draining) return false;
+    res.set('Retry-After', '5');
     res.status(503).json({
       error: 'Workspace runtime is being removed',
       code: 'workspace_draining',

@@ -83,10 +83,13 @@ export function registerWorkspaceManagementRoutes(
     getAcpHandle,
     runtimeRemoval,
   } = deps;
-  // Canonical cwds with a registration in flight, so two concurrent POSTs for
-  // the same directory can't both pass the duplicate check and both build
-  // runtime infrastructure before one add() throws.
-  const inFlight = new Map<string, 'addition' | 'promotion' | 'removal'>();
+  // Serialize runtime addition, persistence promotion/forget, and removal by
+  // canonical cwd so conflicting management mutations cannot cross their
+  // validation and persistence commit points concurrently.
+  const inFlight = new Map<
+    string,
+    'addition' | 'promotion' | 'removal' | 'forget'
+  >();
   let sealed = false;
   let activeOperations = 0;
   const idleWaiters = new Set<() => void>();
@@ -579,10 +582,17 @@ export function registerWorkspaceManagementRoutes(
         }
       };
       const convergeCommittedRemoval = async (): Promise<void> => {
+        const logCleanupFailure = (message: string): void => {
+          try {
+            writeStderrLine(message);
+          } catch {
+            // Cleanup must continue after the persistence commit point.
+          }
+        };
         try {
           getAcpHandle?.()?.commitWorkspaceRemoval(runtime.workspaceId);
         } catch (err) {
-          writeStderrLine(
+          logCleanupFailure(
             `qwen serve: failed to commit workspace ACP removal: ${
               err instanceof Error ? err.message : String(err)
             }`,
@@ -591,7 +601,7 @@ export function registerWorkspaceManagementRoutes(
         await runtimeRemoval
           .disposeRuntime(runtime, 'workspace_removed')
           .catch((err) => {
-            writeStderrLine(
+            logCleanupFailure(
               `qwen serve: workspace runtime cleanup failed: ${
                 err instanceof Error ? err.message : String(err)
               }`,
@@ -605,7 +615,7 @@ export function registerWorkspaceManagementRoutes(
         try {
           getAcpHandle?.()?.disposeWorkspace(runtime.workspaceId);
         } catch (err) {
-          writeStderrLine(
+          logCleanupFailure(
             `qwen serve: failed to dispose workspace ACP mount: ${
               err instanceof Error ? err.message : String(err)
             }`,
@@ -614,7 +624,7 @@ export function registerWorkspaceManagementRoutes(
         try {
           runtimeRemoval.completeDrain(runtime);
         } catch (err) {
-          writeStderrLine(
+          logCleanupFailure(
             `qwen serve: failed to complete workspace admission drain: ${
               err instanceof Error ? err.message : String(err)
             }`,
@@ -623,7 +633,7 @@ export function registerWorkspaceManagementRoutes(
         try {
           workspaceRegistry.completeDrain(runtime);
         } catch (err) {
-          writeStderrLine(
+          logCleanupFailure(
             `qwen serve: failed to complete workspace registry drain: ${
               err instanceof Error ? err.message : String(err)
             }`,
@@ -778,9 +788,33 @@ export function registerWorkspaceManagementRoutes(
         sendSealed(res);
         return;
       }
+      const registrationId = String(req.params['id']);
+      const runtime = workspaceRegistry
+        .listManaged()
+        .find(
+          (candidate) =>
+            workspaceRegistrationId(candidate.workspaceCwd) ===
+              registrationId ||
+            candidate.registrationIds?.includes(registrationId) === true,
+        );
+      const operationCwd = runtime?.workspaceCwd;
+      const operation = operationCwd ? inFlight.get(operationCwd) : undefined;
+      if (operation) {
+        res.status(409).json({
+          error:
+            operation === 'removal'
+              ? 'Workspace removal is in progress'
+              : 'Workspace registration is in progress',
+          code:
+            operation === 'removal'
+              ? 'workspace_removal_in_progress'
+              : 'workspace_registration_in_progress',
+        });
+        return;
+      }
+      if (operationCwd) inFlight.set(operationCwd, 'forget');
       operationStarted();
       try {
-        const registrationId = String(req.params['id']);
         const active = registrationIsActive(registrationId);
         const removed =
           await workspaceRegistrationStore.removeById(registrationId);
@@ -807,6 +841,7 @@ export function registerWorkspaceManagementRoutes(
           code: 'workspace_registration_store_error',
         });
       } finally {
+        if (operationCwd) inFlight.delete(operationCwd);
         operationFinished();
       }
     },
