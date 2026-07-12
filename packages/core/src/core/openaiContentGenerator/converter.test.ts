@@ -413,6 +413,41 @@ describe('OpenAIContentConverter', () => {
       expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
     });
 
+    it('preserves inline thinking-tag references after structured reasoning', () => {
+      const stream = withStreamParser(new StreamingToolCallParser());
+
+      const reasoning = converter.convertOpenAIChunkToGemini(
+        streamChunk('literal-think-reasoning', {
+          reasoning_content: 'The user is asking about response formats.',
+        }),
+        stream,
+      );
+      const content = converter.convertOpenAIChunkToGemini(
+        streamChunk('literal-think-content', {
+          content:
+            'In Qwen output, the `<think>` tag wraps hidden reasoning text.',
+        }),
+        stream,
+      );
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk('literal-think-finish', {}, 'stop'),
+        stream,
+      );
+
+      expect(reasoning.candidates?.[0]?.content?.parts).toEqual([
+        {
+          thought: true,
+          text: 'The user is asking about response formats.',
+        },
+      ]);
+      expect(content.candidates?.[0]?.content?.parts).toEqual([
+        {
+          text: 'In Qwen output, the `<think>` tag wraps hidden reasoning text.',
+        },
+      ]);
+      expect(finish.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+    });
+
     it('drops buffered thinking tags when a later tool call has no name', () => {
       const stream = withStreamParser(new StreamingToolCallParser());
 
@@ -470,36 +505,43 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
-    it('rejects raw thinking tags split across streamed deltas', () => {
-      const stream = withStreamParser(new StreamingToolCallParser());
-      converter.convertOpenAIChunkToGemini(
-        streamChunk('structured-reasoning-before-split-leak', {
-          reasoning_content: 'hidden reasoning',
-        }),
-        stream,
-      );
-
-      const firstLeak = converter.convertOpenAIChunkToGemini(
-        streamChunk('split-leak-start', {
-          content: '</thi',
-        }),
-        stream,
-      );
-      const secondLeak = converter.convertOpenAIChunkToGemini(
-        streamChunk('split-leak-end', {
-          content: 'nk> leaked visible reasoning',
-        }),
-        stream,
-      );
-      expect(firstLeak.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(secondLeak.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(() =>
+    it.each([
+      ['closing tag', '</thi', 'nk> leaked visible reasoning'],
+      [
+        'mixed-case tag with whitespace',
+        '<Thinking ',
+        '>leaked visible reasoning</Thinking >',
+      ],
+    ])(
+      'rejects a split %s across streamed deltas',
+      (_name, firstDelta, secondDelta) => {
+        const stream = withStreamParser(new StreamingToolCallParser());
         converter.convertOpenAIChunkToGemini(
-          streamChunk('split-leak-finish', {}, 'stop'),
+          streamChunk('structured-reasoning-before-split-leak', {
+            reasoning_content: 'hidden reasoning',
+          }),
           stream,
-        ),
-      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
-    });
+        );
+
+        const firstLeak = converter.convertOpenAIChunkToGemini(
+          streamChunk('split-leak-start', { content: firstDelta }),
+          stream,
+        );
+        const secondLeak = converter.convertOpenAIChunkToGemini(
+          streamChunk('split-leak-end', { content: secondDelta }),
+          stream,
+        );
+
+        expect(firstLeak.candidates?.[0]?.content?.parts).toEqual([]);
+        expect(secondLeak.candidates?.[0]?.content?.parts).toEqual([]);
+        expect(() =>
+          converter.convertOpenAIChunkToGemini(
+            streamChunk('split-leak-finish', {}, 'stop'),
+            stream,
+          ),
+        ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+      },
+    );
 
     it('rejects an incomplete thinking tag prefix when the stream finishes', () => {
       const stream = withStreamParser(new StreamingToolCallParser());

@@ -1088,12 +1088,11 @@ function hasThoughtPart(parts: Part[]): boolean {
 }
 
 const THINKING_TAG_PATTERN = /<\/?think(?:ing)?\b/i;
-const THINKING_TAG_STARTS = [
-  '<think',
-  '</think',
-  '<thinking',
-  '</thinking',
-] as const;
+const COMPLETE_THINKING_TAG_PATTERN = /<\/?think(?:ing)?\s*>/gi;
+const LEADING_THINKING_TAG_PATTERN = /^\s*<think(?:ing)?\s*>/i;
+const PARTIAL_SPACED_THINKING_TAG_PATTERN = /^<\/?think(?:ing)?\s+$/;
+const OPENING_THINKING_TAGS = ['<think>', '<thinking>'] as const;
+const CLOSING_THINKING_TAGS = ['</think>', '</thinking>'] as const;
 
 function getPartText(parts: Part[], visibleOnly = false): string {
   return parts
@@ -1105,21 +1104,45 @@ function getPartText(parts: Part[], visibleOnly = false): string {
     .join('');
 }
 
-function hasThinkingTagPart(parts: Part[], visibleOnly = false): boolean {
-  return THINKING_TAG_PATTERN.test(getPartText(parts, visibleOnly));
-}
+function hasVisibleThinkingTagLeakSignature(parts: Part[]): boolean {
+  const text = getPartText(parts, true);
+  const lowerText = text.toLowerCase();
+  const leadingText = lowerText.trimStart();
+  if (
+    LEADING_THINKING_TAG_PATTERN.test(text) ||
+    OPENING_THINKING_TAGS.some(
+      (tag) =>
+        leadingText.startsWith(tag) ||
+        (leadingText.length >= 2 && tag.startsWith(leadingText)),
+    ) ||
+    PARTIAL_SPACED_THINKING_TAG_PATTERN.test(leadingText)
+  ) {
+    return true;
+  }
 
-function endsWithThinkingTagPrefix(
-  parts: Part[],
-  visibleOnly = false,
-): boolean {
-  const text = getPartText(parts, visibleOnly).toLowerCase();
-  const tagStart = text.lastIndexOf('<');
+  let openTags = 0;
+  for (const match of text.matchAll(COMPLETE_THINKING_TAG_PATTERN)) {
+    if (match[0].startsWith('</')) {
+      if (openTags === 0) {
+        return true;
+      }
+      openTags--;
+    } else {
+      openTags++;
+    }
+  }
+
+  const tagStart = lowerText.lastIndexOf('<');
   if (tagStart < 0) {
     return false;
   }
-  const suffix = text.slice(tagStart);
-  return THINKING_TAG_STARTS.some((tag) => tag.startsWith(suffix));
+  const suffix = lowerText.slice(tagStart);
+  return (
+    suffix.length >= 3 &&
+    (CLOSING_THINKING_TAGS.some((tag) => tag.startsWith(suffix)) ||
+      (suffix.startsWith('</') &&
+        PARTIAL_SPACED_THINKING_TAG_PATTERN.test(suffix)))
+  );
 }
 
 /**
@@ -1410,16 +1433,18 @@ export function convertOpenAIChunkToGemini(
       ...(requestContext.pendingUntrustedResponseParts ?? []),
       ...parts,
     ];
-    const hasUntrustedProtocolText =
-      requestContext.hasStructuredReasoningContent &&
-      (hasThinkingTagPart(parts) ||
-        hasThinkingTagPart(pendingAndCurrentParts, true) ||
-        endsWithThinkingTagPrefix(pendingAndCurrentParts, true));
     const hasVisibleThinkingTagLeak =
       requestContext.hasStructuredReasoningContent &&
-      (hasThinkingTagPart(pendingAndCurrentParts, true) ||
-        (Boolean(choice.finish_reason) &&
-          endsWithThinkingTagPrefix(pendingAndCurrentParts, true)));
+      hasVisibleThinkingTagLeakSignature(pendingAndCurrentParts);
+    const hasUntrustedProtocolText =
+      requestContext.hasStructuredReasoningContent &&
+      (parts.some(
+        (part) =>
+          part.thought === true &&
+          typeof part.text === 'string' &&
+          THINKING_TAG_PATTERN.test(part.text),
+      ) ||
+        hasVisibleThinkingTagLeak);
     const toolCallWithoutName = toolCallParser.hasNamelessToolCall();
     const malformedNamelessToolCall =
       Boolean(choice.finish_reason) && toolCallWithoutName;
