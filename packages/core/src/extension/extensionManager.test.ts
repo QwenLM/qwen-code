@@ -350,6 +350,38 @@ describe('extension tests', () => {
       expect(fs.existsSync(cleanupPath)).toBe(false);
     });
 
+    it('surfaces committed runtime refresh warnings after install reloads', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'refresh-warning.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'refresh-warning');
+        },
+      );
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      vi.spyOn(manager, 'refreshTools').mockRejectedValueOnce(
+        new Error('runtime stale'),
+      );
+
+      await expect(
+        manager.installExtension(
+          { type: 'local', source: archivePath },
+          async () => {},
+        ),
+      ).rejects.toMatchObject({
+        code: 'extension_committed_with_warnings',
+        committed: true,
+        identity: { name: 'refresh-warning' },
+        warnings: [
+          {
+            code: 'extension_runtime_refresh_failed',
+            error: 'runtime stale',
+          },
+        ],
+      });
+    });
+
     it('records error telemetry when a prepared install commit fails', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'commit-failure.zip');
       fs.writeFileSync(archivePath, 'archive');
@@ -1738,6 +1770,48 @@ describe('extension tests', () => {
         ExtensionUpdateState.UPDATED_NEEDS_RESTART,
       );
       expect(manager.getLoadedExtensions()).toEqual([]);
+    });
+
+    it('reports a committed update runtime warning as needing restart', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'refresh-update.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+        installMetadata: {
+          type: 'local',
+          source: archivePath,
+          originSource: 'QwenCode',
+        },
+      });
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          fs.mkdirSync(destination, { recursive: true });
+          fs.writeFileSync(
+            path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+            JSON.stringify({ name: 'my-extension', version: '2.0.0' }),
+          );
+        },
+      );
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+      vi.spyOn(manager, 'refreshTools').mockRejectedValueOnce(
+        new Error('runtime stale'),
+      );
+      const callback = vi.fn();
+
+      await manager.updateExtension(
+        extension,
+        ExtensionUpdateState.UPDATE_AVAILABLE,
+        callback,
+      );
+
+      expect(callback).toHaveBeenLastCalledWith(
+        'my-extension',
+        ExtensionUpdateState.UPDATED_NEEDS_RESTART,
+      );
     });
 
     it('should end mutation lifecycle events when temp directory creation fails', async () => {

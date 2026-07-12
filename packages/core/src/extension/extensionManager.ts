@@ -179,16 +179,21 @@ export interface ExtensionUpdateInfo {
 export interface ExtensionCommittedWithWarningsError extends Error {
   code: 'extension_committed_with_warnings';
   committed: true;
+  identity: { id: string; name: string };
+  warnings: ReadonlyArray<{ code: string; error: string }>;
 }
 
 export function isExtensionCommittedWithWarningsError(
   error: unknown,
 ): error is ExtensionCommittedWithWarningsError {
+  const candidate = error as Partial<ExtensionCommittedWithWarningsError>;
   return (
     error instanceof Error &&
-    (error as Partial<ExtensionCommittedWithWarningsError>).code ===
-      'extension_committed_with_warnings' &&
-    (error as Partial<ExtensionCommittedWithWarningsError>).committed === true
+    candidate.code === 'extension_committed_with_warnings' &&
+    candidate.committed === true &&
+    typeof candidate.identity?.id === 'string' &&
+    typeof candidate.identity.name === 'string' &&
+    Array.isArray(candidate.warnings)
   );
 }
 
@@ -1356,20 +1361,24 @@ export class ExtensionManager {
           prepared,
           false,
         );
-        if (!committed.extension) {
+        const warnings = committed.warnings ?? [];
+        if (!committed.extension || warnings.length > 0) {
           const reloadWarning = committed.warnings?.find(
             (warning) => warning.code === 'extension_reload_failed',
           );
+          const firstWarning = reloadWarning ?? warnings[0];
           const error = new Error(
-            `Extension "${prepared.identity.name}" committed but could not be reloaded${
-              reloadWarning ? `: ${reloadWarning.error}` : '.'
+            `Extension "${prepared.identity.name}" committed with warnings${
+              firstWarning
+                ? `: ${firstWarning.code}: ${firstWarning.error}`
+                : '.'
             }`,
-            reloadWarning
-              ? { cause: new Error(reloadWarning.error) }
-              : undefined,
+            firstWarning ? { cause: new Error(firstWarning.error) } : undefined,
           ) as ExtensionCommittedWithWarningsError;
           error.code = 'extension_committed_with_warnings';
           error.committed = true;
+          error.identity = committed.identity;
+          error.warnings = warnings;
           throw error;
         }
         return committed.extension;
@@ -1813,7 +1822,17 @@ export class ExtensionManager {
         } catch (reloadError) {
           this.extensionCache?.delete(newExtensionName);
           this.applyStoreActivation(snapshot);
+          const warnings = [
+            {
+              code: 'extension_reload_failed',
+              error: getErrorMessage(reloadError),
+            },
+          ];
           await this.refreshTools().catch((error) => {
+            warnings.push({
+              code: 'extension_runtime_refresh_failed',
+              error: getErrorMessage(error),
+            });
             debugLogger.warn(
               `Extension "${newExtensionName}" was committed, but runtime refresh failed: ${getErrorMessage(error)}`,
             );
@@ -1824,6 +1843,8 @@ export class ExtensionManager {
           ) as ExtensionCommittedWithWarningsError;
           error.code = 'extension_committed_with_warnings';
           error.committed = true;
+          error.identity = { id: extensionId, name: newExtensionName };
+          error.warnings = warnings;
           throw error;
         }
 
@@ -2284,25 +2305,18 @@ export class ExtensionManager {
         prepared,
         false,
       );
-      if (!committed.extension) {
-        for (const warning of committed.warnings ?? []) {
-          debugLogger.warn(
-            `Update of "${extension.name}" warning: ${warning.code}: ${warning.error}`,
-          );
-        }
-        callback(extension.name, ExtensionUpdateState.UPDATED_NEEDS_RESTART);
-        return {
-          name: extension.name,
-          originalVersion,
-          updatedVersion: committed.version,
-        };
+      const warnings = committed.warnings ?? [];
+      for (const warning of warnings) {
+        debugLogger.warn(
+          `Update of "${extension.name}" warning: ${warning.code}: ${warning.error}`,
+        );
       }
-      const updatedVersion = committed.extension.version;
+      const updatedVersion = committed.extension?.version ?? committed.version;
       callback(
         extension.name,
-        enableExtensionReloading
-          ? ExtensionUpdateState.UPDATED
-          : ExtensionUpdateState.UPDATED_NEEDS_RESTART,
+        !committed.extension || warnings.length > 0 || !enableExtensionReloading
+          ? ExtensionUpdateState.UPDATED_NEEDS_RESTART
+          : ExtensionUpdateState.UPDATED,
       );
       return {
         name: extension.name,

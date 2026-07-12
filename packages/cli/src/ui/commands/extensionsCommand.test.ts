@@ -250,6 +250,8 @@ describe('extensionsCommand', () => {
           {
             code: 'extension_committed_with_warnings',
             committed: true,
+            identity: { id: 'test-extension', name: 'test-extension' },
+            warnings: [],
           },
         ),
       );

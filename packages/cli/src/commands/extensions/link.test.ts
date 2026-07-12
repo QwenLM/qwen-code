@@ -105,6 +105,8 @@ describe('handleLink', () => {
       Object.assign(new Error('Link committed but could not be reloaded.'), {
         code: 'extension_committed_with_warnings',
         committed: true,
+        identity: { id: 'linked-extension', name: 'linked-extension' },
+        warnings: [],
       }),
     );
 

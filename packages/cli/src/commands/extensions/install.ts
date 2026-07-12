@@ -39,6 +39,8 @@ function normalizeScope(scope: string | undefined): ExtensionScope {
 }
 
 export async function handleInstall(args: InstallArgs) {
+  const scope = normalizeScope(args.scope);
+  let extensionManager: ExtensionManager | undefined;
   try {
     const installMetadata = await parseInstallSource(args.source);
 
@@ -83,7 +85,7 @@ export async function handleInstall(args: InstallArgs) {
       ? () => Promise.resolve()
       : requestConsentOrFail.bind(null, requestConsentNonInteractive);
     const workspaceDir = process.cwd();
-    const extensionManager = new ExtensionManager({
+    extensionManager = new ExtensionManager({
       workspaceDir,
       locale: getCurrentLanguage(),
       isWorkspaceTrusted:
@@ -93,7 +95,6 @@ export async function handleInstall(args: InstallArgs) {
     });
     await extensionManager.refreshCache();
 
-    const scope = normalizeScope(args.scope);
     const extension = await extensionManager.installExtension(
       {
         ...installMetadata,
@@ -124,6 +125,9 @@ export async function handleInstall(args: InstallArgs) {
     );
   } catch (error) {
     if (isExtensionCommittedWithWarningsError(error)) {
+      if (args.scope && extensionManager) {
+        extensionManager.setExtensionScope(error.identity.name, scope);
+      }
       writeStderrLine(`Warning: ${getErrorMessage(error)}`);
       return;
     }

@@ -236,6 +236,14 @@ export const DiscoverTab = ({
             warnings.push(
               `${plugin.name}: ${redactUrlCredentials(getErrorMessage(error))}`,
             );
+            try {
+              extensionManager.setExtensionScope(error.identity.name, scope);
+            } catch (scopeError) {
+              debugLogger.error(
+                'Installed extension but failed to apply scope preference:',
+                scopeError,
+              );
+            }
             continue;
           }
           errors.push(

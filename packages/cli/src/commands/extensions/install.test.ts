@@ -312,14 +312,20 @@ describe('handleInstall', () => {
         {
           code: 'extension_committed_with_warnings',
           committed: true,
+          identity: { id: 'extension-id', name: 'scoped-extension' },
+          warnings: [],
         },
       ),
     );
 
-    await handleInstall({ source: 'git@some-url' });
+    await handleInstall({ source: 'git@some-url', scope: 'project' });
 
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       'Warning: Extension committed but could not be reloaded.',
+    );
+    expect(mockSetExtensionScope).toHaveBeenCalledWith(
+      'scoped-extension',
+      'project',
     );
     expect(processSpy).not.toHaveBeenCalled();
 
