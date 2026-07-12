@@ -28,10 +28,36 @@ function normalize(value) {
 }
 
 function completedAt(run) {
-  return run.completedAt ?? run.updatedAt ?? run.createdAt;
+  return (
+    run.completedAt ??
+    run.completed_at ??
+    run.updatedAt ??
+    run.updated_at ??
+    run.createdAt ??
+    run.created_at
+  );
 }
 
 function runTime(run) {
+  if (
+    ['queued', 'requested', 'waiting', 'pending', 'in_progress'].includes(
+      normalize(run.status),
+    )
+  ) {
+    return (
+      timeMs(
+        run.startedAt ??
+          run.started_at ??
+          run.runStartedAt ??
+          run.run_started_at ??
+          run.updatedAt ??
+          run.updated_at ??
+          run.createdAt ??
+          run.created_at ??
+          completedAt(run),
+      ) ?? 0
+    );
+  }
   return timeMs(completedAt(run)) ?? 0;
 }
 
@@ -55,9 +81,14 @@ function isPendingOrSuccessful(run) {
 
 function hasNewerReplacement(runs, failedRun) {
   const failedTime = runTime(failedRun);
+  const failedRunId = extractActionsRunId(failedRun);
   return runs.some((run) => {
     if (run === failedRun) return false;
     if (run.workflowName !== failedRun.workflowName) return false;
+    const runId = extractActionsRunId(run);
+    if (failedRunId !== null && runId !== null && runId === failedRunId) {
+      return false;
+    }
     if (runTime(run) < failedTime) return false;
     return isPendingOrSuccessful(run);
   });
@@ -156,6 +187,7 @@ export function selectMainTarget(runs, options) {
     .filter((run) => allowlisted.has(run.workflowName))
     .filter(isMainRef)
     .filter((run) => isStaleFailure(run, options.now, options.staleMinutes))
+    .filter((run) => !hasNewerReplacement(runs, run))
     .map(toMainTarget);
 
   return (
@@ -164,6 +196,17 @@ export function selectMainTarget(runs, options) {
       if (byTime !== 0) return byTime;
       return a.runId - b.runId;
     })[0] ?? null
+  );
+}
+
+export function hasLatestRelevantMainSuccess(target, runs, mainSha) {
+  const latest = runs
+    .filter((run) => run.workflowName === target.workflowName)
+    .filter((run) => run.headBranch === 'main')
+    .sort((a, b) => runTime(b) - runTime(a))[0];
+  return (
+    normalize(latest?.conclusion) === 'success' &&
+    (!mainSha || latest?.headSha === mainSha)
   );
 }
 
@@ -358,8 +401,13 @@ export class GhClient {
       'api',
       `repos/${this.repo}/actions/runs/${runId}/jobs`,
       '--paginate',
+      '--slurp',
     ]);
-    return parseJson(stdout, { jobs: [] }).jobs ?? [];
+    const pages = parseJson(stdout, []);
+    if (Array.isArray(pages)) {
+      return pages.flatMap((page) => page.jobs ?? []);
+    }
+    return pages.jobs ?? [];
   }
 
   async jobLog(jobId) {
@@ -391,14 +439,19 @@ export class GhClient {
   }
 
   async listIssueComments(issueNumber) {
-    return parseJson(
+    const pages = parseJson(
       await this.run([
         'api',
         `repos/${this.repo}/issues/${issueNumber}/comments`,
         '--paginate',
+        '--slurp',
       ]),
       [],
     );
+    if (Array.isArray(pages) && pages.every(Array.isArray)) {
+      return pages.flat();
+    }
+    return pages;
   }
 
   async postIssueComment(issueNumber, body) {
@@ -425,7 +478,28 @@ export class GhClient {
         'body',
         text,
         '--json',
-        'number,author,body,labels,assignees,linkedPullRequests,url',
+        'number,author,body,labels,assignees,url',
+        '--limit',
+        '10',
+      ]),
+      [],
+    );
+  }
+
+  async searchLinkedIssuesByBody(text) {
+    return parseJson(
+      await this.run([
+        'search',
+        'issues',
+        '--repo',
+        this.repo,
+        '--state',
+        'open',
+        '--match',
+        'body',
+        `${text} linked:pr`,
+        '--json',
+        'number',
         '--limit',
         '10',
       ]),
@@ -434,21 +508,20 @@ export class GhClient {
   }
 
   async createIssue({ title, body, labels }) {
-    return parseJson(
-      await this.run([
-        'issue',
-        'create',
-        '--repo',
-        this.repo,
-        '--title',
-        title,
-        '--body',
-        body,
-        '--label',
-        labels.join(','),
-      ]),
-      {},
-    );
+    const args = [
+      'api',
+      '-X',
+      'POST',
+      `repos/${this.repo}/issues`,
+      '-f',
+      `title=${title}`,
+      '-f',
+      `body=${body}`,
+    ];
+    for (const label of labels) {
+      args.push('-f', `labels[]=${label}`);
+    }
+    return parseJson(await this.run(args), {});
   }
 
   async commentIssue(issueNumber, body) {
@@ -466,6 +539,8 @@ export class GhClient {
   async listMainRuns() {
     const stdout = await this.run([
       'api',
+      '--method',
+      'GET',
       `repos/${this.repo}/actions/runs`,
       '-f',
       'branch=main',
@@ -549,6 +624,13 @@ export async function verifyBotIdentity(client, expectedLogin) {
   }
 }
 
+function escapePatrolMarkers(value) {
+  return String(value).replace(
+    /<!--\s*qwen-ci-patrol/gi,
+    '<!-- qwen-ci-patrol-escaped',
+  );
+}
+
 export function renderPrComment({
   target,
   decision,
@@ -556,16 +638,18 @@ export function renderPrComment({
   action,
   handledAt,
 }) {
-  const evidence = decision.evidence.map((item) => `- ${item}`).join('\n');
+  const evidence = decision.evidence
+    .map((item) => `- ${escapePatrolMarkers(item)}`)
+    .join('\n');
   return [
-    decision.reason_en,
+    escapePatrolMarkers(decision.reason_en),
     '',
     `Run: ${target.htmlUrl}`,
     evidence ? `\nEvidence:\n${evidence}` : '',
     '',
     '<details><summary>中文</summary>',
     '',
-    decision.reason_zh,
+    escapePatrolMarkers(decision.reason_zh),
     '',
     '</details>',
     '',
@@ -647,6 +731,51 @@ export function formatMainIssueMarker({ workflowId, headSha }) {
   return `<!-- qwen-ci-patrol-main v=1 workflow=${workflowId} head=${headSha} -->`;
 }
 
+function formatMainAttemptMarker({
+  workflowId,
+  headSha,
+  attempts,
+  action,
+  handledAt,
+}) {
+  return `<!-- qwen-ci-patrol-main-attempt v=1 workflow=${workflowId} head=${headSha} attempts=${attempts} action=${action} handled=${handledAt} -->`;
+}
+
+const MAIN_ATTEMPT_MARKER_RE =
+  /<!--\s*qwen-ci-patrol-main-attempt\s+([^>]+?)\s*-->/;
+
+function parseMainAttemptMarker(text) {
+  const match = MAIN_ATTEMPT_MARKER_RE.exec(text ?? '');
+  if (!match) return null;
+  const pairs = new Map();
+  for (const token of match[1].trim().split(/\s+/)) {
+    const index = token.indexOf('=');
+    if (index <= 0) return null;
+    pairs.set(token.slice(0, index), token.slice(index + 1));
+  }
+  const attempts = Number(pairs.get('attempts'));
+  if (pairs.get('v') !== '1') return null;
+  if (!Number.isInteger(attempts) || attempts < 1) return null;
+  return {
+    workflowId: pairs.get('workflow'),
+    headSha: pairs.get('head'),
+    attempts,
+  };
+}
+
+function nextMainAttempt(texts, target) {
+  const attempts = texts
+    .map(parseMainAttemptMarker)
+    .filter(Boolean)
+    .filter(
+      (marker) =>
+        marker.workflowId === String(target.workflowId) &&
+        marker.headSha === target.headSha,
+    )
+    .map((marker) => marker.attempts);
+  return Math.max(0, ...attempts) + 1;
+}
+
 export function findMainHandoffIssue(issues, options) {
   const marker = formatMainIssueMarker(options);
   return (
@@ -673,8 +802,10 @@ export function shouldDispatchAutofixIssue(issue) {
   return true;
 }
 
-function renderMainIssueBody({ target, decision }) {
-  const evidence = decision.evidence.map((item) => `- ${item}`).join('\n');
+function renderMainIssueBody({ target, decision, attempts, handledAt }) {
+  const evidence = decision.evidence
+    .map((item) => `- ${escapePatrolMarkers(item)}`)
+    .join('\n');
   return [
     'A post-merge testing workflow failed on `main` and was classified as actionable for Autofix.',
     '',
@@ -682,17 +813,24 @@ function renderMainIssueBody({ target, decision }) {
     `Run: ${target.htmlUrl}`,
     `Head SHA: ${target.headSha}`,
     '',
-    `Reason: ${decision.reason_en}`,
+    `Reason: ${escapePatrolMarkers(decision.reason_en)}`,
     '',
     '<details><summary>中文</summary>',
     '',
-    decision.reason_zh,
+    escapePatrolMarkers(decision.reason_zh),
     '',
     '</details>',
     '',
     evidence ? `Evidence:\n${evidence}` : '',
     '',
     formatMainIssueMarker(target),
+    formatMainAttemptMarker({
+      workflowId: target.workflowId,
+      headSha: target.headSha,
+      attempts,
+      action: 'issue',
+      handledAt,
+    }),
   ]
     .filter((part) => part !== '')
     .join('\n');
@@ -700,18 +838,43 @@ function renderMainIssueBody({ target, decision }) {
 
 export async function handoffMainFailure(client, options) {
   const marker = formatMainIssueMarker(options.target);
-  const issues = await client.searchIssuesByBody(
-    marker.replace(/^<!--\s*/, '').replace(/\s*-->$/, ''),
-  );
+  const markerText = marker.replace(/^<!--\s*/, '').replace(/\s*-->$/, '');
+  const issues = await client.searchIssuesByBody(markerText);
   const existing = findMainHandoffIssue(issues, {
     botLogin: options.botLogin,
     workflowId: options.target.workflowId,
     headSha: options.target.headSha,
   });
-  const body = renderMainIssueBody(options);
-
   let issue = existing;
   let created = false;
+  if (issue && !shouldDispatchAutofixIssue(issue)) {
+    return { number: issue.number, created: false, dispatched: false };
+  }
+  if (issue) {
+    const linkedIssues = await client.searchLinkedIssuesByBody(markerText);
+    if (linkedIssues.some((linked) => linked.number === issue.number)) {
+      issue = { ...issue, linkedPullRequests: [{}] };
+    }
+  }
+  if (issue && !shouldDispatchAutofixIssue(issue)) {
+    return { number: issue.number, created: false, dispatched: false };
+  }
+  let comments = [];
+  if (issue && shouldDispatchAutofixIssue(issue)) {
+    comments = await client.listIssueComments(issue.number);
+  }
+  const attempts = nextMainAttempt(
+    [issue?.body, ...comments.map((comment) => comment.body)].filter(Boolean),
+    options.target,
+  );
+  if (issue && attempts > (options.maxAttempts ?? 3)) {
+    return { number: issue.number, created: false, dispatched: false };
+  }
+  const body = renderMainIssueBody({
+    ...options,
+    attempts,
+    handledAt: new Date().toISOString(),
+  });
   if (issue) {
     await client.commentIssue(issue.number, body);
   } else {
@@ -770,6 +933,8 @@ function toMainRun(run) {
     status: run.status,
     conclusion: run.conclusion,
     completedAt: run.updated_at,
+    startedAt: run.run_started_at ?? run.created_at,
+    createdAt: run.created_at,
     htmlUrl: run.html_url,
     headSha: run.head_sha,
     headBranch: run.head_branch,
@@ -794,11 +959,10 @@ async function commandScanPr(args) {
   });
   if (target) {
     const mainRuns = (await client.listMainRuns()).map(toMainRun);
-    target.mainRelevantSuccess = mainRuns.some(
-      (run) =>
-        run.workflowName === target.workflowName &&
-        run.headBranch === 'main' &&
-        normalize(run.conclusion) === 'success',
+    target.mainRelevantSuccess = hasLatestRelevantMainSuccess(
+      target,
+      mainRuns,
+      args.get('main-sha'),
     );
     await writeTargetPayload({ client, target, workdir });
   }
@@ -853,6 +1017,7 @@ async function commandAct(args) {
       target,
       decision,
       dispatch: true,
+      maxAttempts: Number(args.get('max-attempts') ?? 3),
     });
     return;
   }

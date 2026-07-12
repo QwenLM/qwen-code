@@ -19,8 +19,10 @@ describe('qwen ci failure patrol workflow', () => {
     expect(workflow).not.toContain('pr_number:');
     expect(workflow).not.toContain('run_id:');
     expect(workflow).toContain("group: 'qwen-ci-failure-patrol'");
-    expect(workflow).toContain('cancel-in-progress: true');
-    expect(workflow).toContain("github.repository == 'QwenLM/qwen-code'");
+    expect(workflow).toContain('cancel-in-progress: false');
+    expect(workflow).toContain(
+      'if: "${{ github.repository == \'QwenLM/qwen-code\' }}"',
+    );
   });
 
   it('keeps write credentials out of the classifier step', () => {
@@ -43,9 +45,14 @@ describe('qwen ci failure patrol workflow', () => {
     expect(classifierStep).toContain(
       "OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'",
     );
+    expect(classifierStep).toContain(
+      "OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'",
+    );
     expect(classifierStep).toContain('--mode classify-ci-failure');
     expect(classifierStep).not.toContain('CI_DEV_BOT_PAT');
     expect(classifierStep).not.toContain('GH_TOKEN');
+    expect(workflow).not.toContain('qwen --version');
+    expect(workflow).not.toContain('npm run bundle');
     expect(actStep).toContain("GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'");
     expect(actStep).toContain('act');
   });
@@ -58,6 +65,7 @@ describe('qwen ci failure patrol workflow', () => {
     );
     expect(workflow).toContain("STALE_MINUTES: '30'");
     expect(workflow).toContain("MAX_ATTEMPTS: '3'");
+    expect(workflow).toContain('--main-sha "${{ github.sha }}"');
     expect(workflow).toContain(
       "ALLOWLISTED_MAIN_WORKFLOWS: 'E2E Tests,SDK Python'",
     );
@@ -65,7 +73,7 @@ describe('qwen ci failure patrol workflow', () => {
     expect(workflow).toContain('ci-failure.json');
     expect(workflow).toContain('ci-decision.json');
     expect(workflow).toContain(
-      "if: ${{ always() && (failure() || inputs.dry_run == 'true') }}",
+      'if: "${{ always() && (failure() || inputs.dry_run == \'true\') }}"',
     );
     expect(workflow).not.toContain('raw-log');
   });

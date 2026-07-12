@@ -971,31 +971,21 @@ describe('qwen-autofix workflow', () => {
 
       writeFileSync(join(dir, 'ci-failure.json'), '{"scope":"pr"}\n');
       expect(runClassifyCiFailure(dir, stub).stderr).toContain(
-        'ci-decision.json',
+        'OPENAI_API_KEY is required',
       );
       expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
-        'ci-decision.json',
+        'OPENAI_API_KEY is required',
       );
     });
   }, 10000);
 
-  it('accepts exactly one CI classifier decision output', () => {
-    withRunnerDir((dir) => {
-      writeFileSync(join(dir, 'ci-failure.json'), '{"scope":"pr"}\n');
-      const stub = writeWorkdirStub(dir, [
-        'writeFileSync(`${workdir}/ci-decision.json`, JSON.stringify({',
-        "  classification: 'other',",
-        "  confidence: 'low',",
-        "  reason_en: 'Insufficient evidence.',",
-        "  reason_zh: '证据不足。',",
-        "  evidence: ['failed job'],",
-        '}));',
-      ]);
+  it('runs the CI classifier through direct model JSON instead of qwen tools', () => {
+    const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
 
-      const result = runClassifyCiFailure(dir, stub);
-      expect(result.status).toBe(0);
-      expect(existsSync(join(dir, 'failure.md'))).toBe(false);
-    });
+    expect(runner).toContain("options.mode === 'classify-ci-failure'");
+    expect(runner).toContain('runCiFailureClassifier(options, prompt)');
+    expect(runner).toContain('/chat/completions');
+    expect(runner).toContain("response_format: { type: 'json_object' }");
   });
 
   it('allows non-package fixes after deterministic verification', () => {

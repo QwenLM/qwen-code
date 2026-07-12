@@ -19,7 +19,7 @@ permissions:
 
 concurrency:
   group: 'qwen-ci-failure-patrol'
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   ALLOWLISTED_MAIN_WORKFLOWS: 'E2E Tests,SDK Python'
@@ -30,7 +30,7 @@ env:
 jobs:
   route:
     name: 'Find stale CI failure'
-    if: ${{ github.repository == 'QwenLM/qwen-code' }}
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
     permissions:
       actions: 'read'
@@ -58,7 +58,8 @@ jobs:
           node .github/scripts/ci-failure-patrol.mjs scan-pr \
             --repo "${{ github.repository }}" \
             --workdir "${RUNNER_TEMP}/ci-failure-patrol" \
-            --stale-minutes "${STALE_MINUTES}"
+            --stale-minutes "${STALE_MINUTES}" \
+            --main-sha "${{ github.sha }}"
 
       - name: 'Scan main failures'
         id: 'scan-main'
@@ -81,7 +82,7 @@ jobs:
           fi
 
       - name: 'Upload route artifact'
-        if: ${{ steps.route.outputs.has_target == 'true' }}
+        if: "${{ steps.route.outputs.has_target == 'true' }}"
         uses: 'actions/upload-artifact@v4'
         with:
           name: 'ci-failure-patrol-route'
@@ -93,7 +94,7 @@ jobs:
   classify-act:
     name: 'Classify and handle CI failure'
     needs: 'route'
-    if: ${{ github.repository == 'QwenLM/qwen-code' && needs.route.outputs.has_target == 'true' }}
+    if: "${{ github.repository == 'QwenLM/qwen-code' && needs.route.outputs.has_target == 'true' }}"
     runs-on: 'ubuntu-latest'
     permissions:
       actions: 'write'
@@ -125,36 +126,11 @@ jobs:
             --repo "${{ github.repository }}" \
             --bot-login "${AUTOFIX_BOT}"
 
-      - name: 'Prepare Qwen Code CLI'
-        env:
-          QWEN_SKIP_PREPARE: '1'
-        run: |-
-          for attempt in 1 2 3; do
-            if npm ci --prefer-offline --no-audit --progress=false; then
-              break
-            fi
-            if [[ "${attempt}" == "3" ]]; then
-              exit 1
-            fi
-            sleep $((attempt * 15))
-          done
-          npm run build
-          npm run bundle
-          qwen_bin="${RUNNER_TEMP}/qwen-bin"
-          mkdir -p "${qwen_bin}"
-          cat > "${qwen_bin}/qwen" <<'EOF'
-          #!/usr/bin/env bash
-          exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"
-          EOF
-          chmod +x "${qwen_bin}/qwen"
-          echo "${qwen_bin}" >> "${GITHUB_PATH}"
-          PATH="${qwen_bin}:${PATH}"
-          qwen --version
-
       - name: 'Classify CI failure'
         env:
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
         run: |-
           if [[ -z "${OPENAI_API_KEY}" ]]; then
@@ -177,7 +153,7 @@ jobs:
             --dry-run "${{ inputs.dry_run || 'false' }}"
 
       - name: 'Upload patrol artifacts'
-        if: ${{ always() && (failure() || inputs.dry_run == 'true') }}
+        if: "${{ always() && (failure() || inputs.dry_run == 'true') }}"
         uses: 'actions/upload-artifact@v4'
         with:
           name: 'ci-failure-patrol'

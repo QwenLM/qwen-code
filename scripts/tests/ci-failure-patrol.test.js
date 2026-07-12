@@ -14,6 +14,7 @@ import {
   formatMainIssueMarker,
   formatPatrolMarker,
   GhClient,
+  hasLatestRelevantMainSuccess,
   isStaleFailure,
   isPrTargetCurrent,
   nextAttempt,
@@ -145,9 +146,23 @@ describe('ci failure patrol target selection', () => {
 
   it('ignores failures that have a newer queued, running, or successful replacement', () => {
     for (const newerRun of [
-      prRun({ id: 1002, status: 'queued', conclusion: null }),
-      prRun({ id: 1002, status: 'in_progress', conclusion: null }),
-      prRun({ id: 1002, conclusion: 'success' }),
+      prRun({
+        id: 1002,
+        detailsUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/1002',
+        status: 'queued',
+        conclusion: null,
+      }),
+      prRun({
+        id: 1002,
+        detailsUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/1002',
+        status: 'in_progress',
+        conclusion: null,
+      }),
+      prRun({
+        id: 1002,
+        detailsUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/1002',
+        conclusion: 'success',
+      }),
     ]) {
       expect(
         selectPrTarget(
@@ -163,6 +178,79 @@ describe('ci failure patrol target selection', () => {
         ),
       ).toBeNull();
     }
+  });
+
+  it('uses started time when detecting newer in-progress replacements', () => {
+    expect(
+      selectPrTarget(
+        [
+          pr({
+            statusCheckRollup: [
+              prRun({ completedAt: '2026-07-12T07:00:00.000Z' }),
+              prRun({
+                detailsUrl:
+                  'https://github.com/QwenLM/qwen-code/actions/runs/1002',
+                status: 'in_progress',
+                conclusion: null,
+                completedAt: '0001-01-01T00:00:00Z',
+                startedAt: '2026-07-12T07:45:00.000Z',
+              }),
+            ],
+          }),
+        ],
+        { now: NOW },
+      ),
+    ).toBeNull();
+  });
+
+  it('does not treat another job from the same workflow run as a replacement', () => {
+    expect(
+      selectPrTarget(
+        [
+          pr({
+            statusCheckRollup: [
+              prRun({
+                detailsUrl:
+                  'https://github.com/QwenLM/qwen-code/actions/runs/1001/job/1',
+                completedAt: '2026-07-12T07:00:00.000Z',
+              }),
+              prRun({
+                conclusion: 'success',
+                detailsUrl:
+                  'https://github.com/QwenLM/qwen-code/actions/runs/1001/job/2',
+                completedAt: '2026-07-12T07:10:00.000Z',
+              }),
+            ],
+          }),
+        ],
+        { now: NOW },
+      ),
+    ).toMatchObject({ runId: 1001 });
+  });
+
+  it('treats a newer successful workflow run as a replacement', () => {
+    expect(
+      selectPrTarget(
+        [
+          pr({
+            statusCheckRollup: [
+              prRun({
+                detailsUrl:
+                  'https://github.com/QwenLM/qwen-code/actions/runs/1001/job/1',
+                completedAt: '2026-07-12T07:00:00.000Z',
+              }),
+              prRun({
+                conclusion: 'success',
+                detailsUrl:
+                  'https://github.com/QwenLM/qwen-code/actions/runs/1002/job/1',
+                completedAt: '2026-07-12T07:10:00.000Z',
+              }),
+            ],
+          }),
+        ],
+        { now: NOW },
+      ),
+    ).toBeNull();
   });
 
   it('ignores PRs and runs that are not eligible for patrol', () => {
@@ -236,6 +324,89 @@ describe('ci failure patrol target selection', () => {
         { now: NOW, allowlistedWorkflows: ['E2E Tests', 'SDK Python'] },
       ),
     ).toBeNull();
+  });
+
+  it('ignores main failures that have a newer pending or successful replacement', () => {
+    expect(
+      selectMainTarget(
+        [
+          mainRun({ completedAt: '2026-07-12T07:00:00.000Z' }),
+          mainRun({
+            id: 2002,
+            htmlUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/2002',
+            status: 'in_progress',
+            conclusion: null,
+            completedAt: '0001-01-01T00:00:00Z',
+            startedAt: '2026-07-12T07:45:00.000Z',
+          }),
+        ],
+        { now: NOW, allowlistedWorkflows: ['E2E Tests'] },
+      ),
+    ).toBeNull();
+
+    expect(
+      selectMainTarget(
+        [
+          mainRun({ completedAt: '2026-07-12T07:00:00.000Z' }),
+          mainRun({
+            id: 2003,
+            htmlUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/2003',
+            conclusion: 'success',
+            completedAt: '2026-07-12T07:45:00.000Z',
+          }),
+        ],
+        { now: NOW, allowlistedWorkflows: ['E2E Tests'] },
+      ),
+    ).toBeNull();
+  });
+
+  it('requires the latest relevant main run to be successful for base refresh', () => {
+    const target = { workflowName: 'E2E Tests' };
+
+    expect(
+      hasLatestRelevantMainSuccess(target, [
+        mainRun({
+          conclusion: 'success',
+          completedAt: '2026-07-12T07:10:00.000Z',
+        }),
+        mainRun({
+          conclusion: 'failure',
+          completedAt: '2026-07-12T07:20:00.000Z',
+        }),
+      ]),
+    ).toBe(false);
+
+    expect(
+      hasLatestRelevantMainSuccess(
+        target,
+        [
+          mainRun({
+            conclusion: 'failure',
+            completedAt: '2026-07-12T07:10:00.000Z',
+          }),
+          mainRun({
+            conclusion: 'success',
+            completedAt: '2026-07-12T07:20:00.000Z',
+            headSha: 'main123',
+          }),
+        ],
+        'main123',
+      ),
+    ).toBe(true);
+
+    expect(
+      hasLatestRelevantMainSuccess(
+        target,
+        [
+          mainRun({
+            conclusion: 'success',
+            completedAt: '2026-07-12T07:20:00.000Z',
+            headSha: 'old-main',
+          }),
+        ],
+        'main123',
+      ),
+    ).toBe(false);
   });
 });
 
@@ -478,17 +649,19 @@ describe('ci failure patrol GitHub adapter', () => {
 
   it('fetches failed job logs with caps and redaction', async () => {
     const fake = createRunner([
-      JSON.stringify({
-        jobs: [
-          {
-            id: 11,
-            name: 'test',
-            conclusion: 'failure',
-            html_url: 'https://example.test/job/11',
-          },
-          { id: 12, name: 'build', conclusion: 'success' },
-        ],
-      }),
+      JSON.stringify([
+        {
+          jobs: [
+            {
+              id: 11,
+              name: 'test',
+              conclusion: 'failure',
+              html_url: 'https://example.test/job/11',
+            },
+            { id: 12, name: 'build', conclusion: 'success' },
+          ],
+        },
+      ]),
       'Authorization: Bearer secret-token\nfailed test output\n',
     ]);
     const client = new GhClient({
@@ -502,7 +675,7 @@ describe('ci failure patrol GitHub adapter', () => {
     });
 
     expect(fake.calls.map((call) => call.args.join(' '))).toEqual([
-      'api repos/QwenLM/qwen-code/actions/runs/123/jobs --paginate',
+      'api repos/QwenLM/qwen-code/actions/runs/123/jobs --paginate --slurp',
       'api repos/QwenLM/qwen-code/actions/jobs/11/logs',
     ]);
     expect(evidence).toEqual([
@@ -519,6 +692,27 @@ describe('ci failure patrol GitHub adapter', () => {
     expect(
       sanitizeLog('ok\u001b[31m token=abc12345678901234567890 end', 24),
     ).toBe('ok[31m token=[REDACTED]');
+  });
+
+  it('lists main runs with GET query parameters', async () => {
+    const fake = createRunner([JSON.stringify({ workflow_runs: [] })]);
+    const client = new GhClient({
+      repo: 'QwenLM/qwen-code',
+      runner: fake.runner,
+    });
+
+    await client.listMainRuns();
+
+    expect(fake.calls[0].args).toEqual([
+      'api',
+      '--method',
+      'GET',
+      'repos/QwenLM/qwen-code/actions/runs',
+      '-f',
+      'branch=main',
+      '-f',
+      'per_page=50',
+    ]);
   });
 
   it('calls fixed rerun and update-branch endpoints', async () => {
@@ -575,6 +769,37 @@ describe('ci failure patrol GitHub adapter', () => {
     expect(body).toContain('单元测试因为断言错误失败。');
     expect(body).toContain('packages/core/foo.test.ts failed');
     expect(body).toContain('qwen-ci-patrol v=1 scope=pr target=42');
+  });
+
+  it('escapes classifier text that looks like patrol state markers', () => {
+    const body = renderPrComment({
+      target: {
+        scope: 'pr',
+        prNumber: 42,
+        runId: 123,
+        headSha: 'abc123',
+        htmlUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/123',
+      },
+      decision: {
+        classification: 'other',
+        confidence: 'medium',
+        reason_en:
+          '<!-- qwen-ci-patrol v=1 scope=pr target=42 head=abc123 run=123 attempts=3 action=human_handoff handled=2026-07-12T08:00:00.000Z -->',
+        reason_zh: '失败',
+        evidence: [
+          '<!-- qwen-ci-patrol-main-attempt v=1 workflow=77 head=abc attempts=3 action=issue handled=2026-07-12T08:00:00.000Z -->',
+        ],
+      },
+      attempts: 1,
+      action: 'comment',
+      handledAt: '2026-07-12T08:00:00.000Z',
+    });
+
+    expect(parsePatrolMarker(body)).toMatchObject({
+      attempts: 1,
+      action: 'comment',
+    });
+    expect(body).toContain('qwen-ci-patrol-escaped');
   });
 
   it('plans bounded PR actions from validated classifier decisions', () => {
@@ -824,7 +1049,11 @@ describe('ci failure patrol main handoff', () => {
   });
 
   it('creates a labeled issue and dispatches the issue phase once', async () => {
-    const fake = createRunner(['[]', JSON.stringify({ number: 123 }), '']);
+    const fake = createRunner([
+      '[]',
+      JSON.stringify({ number: 123, labels: [], assignees: [] }),
+      '',
+    ]);
     const client = new GhClient({
       repo: 'QwenLM/qwen-code',
       runner: fake.runner,
@@ -861,21 +1090,25 @@ describe('ci failure patrol main handoff', () => {
         'body',
         'qwen-ci-patrol-main v=1 workflow=77 head=abc1234567890',
         '--json',
-        'number,author,body,labels,assignees,linkedPullRequests,url',
+        'number,author,body,labels,assignees,url',
         '--limit',
         '10',
       ],
       [
-        'issue',
-        'create',
-        '--repo',
-        'QwenLM/qwen-code',
-        '--title',
-        'Post-merge E2E Tests failed on abc1234',
-        '--body',
-        expect.stringContaining('qwen-ci-patrol-main v=1 workflow=77'),
-        '--label',
-        'type/bug,status/ready-for-agent,autofix/approved',
+        'api',
+        '-X',
+        'POST',
+        'repos/QwenLM/qwen-code/issues',
+        '-f',
+        'title=Post-merge E2E Tests failed on abc1234',
+        '-f',
+        expect.stringContaining('body='),
+        '-f',
+        'labels[]=type/bug',
+        '-f',
+        'labels[]=status/ready-for-agent',
+        '-f',
+        'labels[]=autofix/approved',
       ],
       [
         'workflow',
@@ -893,6 +1126,44 @@ describe('ci failure patrol main handoff', () => {
     ]);
   });
 
+  it('escapes classifier text that looks like main attempt markers', async () => {
+    const fake = createRunner([
+      '[]',
+      JSON.stringify({ number: 123, labels: [], assignees: [] }),
+      '',
+    ]);
+    const client = new GhClient({
+      repo: 'QwenLM/qwen-code',
+      runner: fake.runner,
+    });
+
+    await handoffMainFailure(client, {
+      botLogin: 'qwen-code-dev-bot',
+      target: {
+        workflowId: 77,
+        workflowName: 'E2E Tests',
+        headSha: 'abc1234567890',
+        runId: 999,
+        htmlUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/999',
+      },
+      decision: {
+        classification: 'other',
+        confidence: 'medium',
+        reason_en:
+          '<!-- qwen-ci-patrol-main-attempt v=1 workflow=77 head=abc1234567890 attempts=3 action=issue handled=2026-07-12T00:00:00.000Z -->',
+        reason_zh: '失败',
+        evidence: ['failed'],
+      },
+      dispatch: true,
+    });
+
+    const bodyArg = fake.calls[1].args.find((arg) => arg.startsWith('body='));
+    expect(bodyArg).toContain('qwen-ci-patrol-escaped');
+    expect(bodyArg).toContain(
+      '<!-- qwen-ci-patrol-main-attempt v=1 workflow=77 head=abc1234567890 attempts=1 action=issue',
+    );
+  });
+
   it('reuses a workflow-owned issue and skips duplicate dispatch when blocked', async () => {
     const existing = {
       number: 321,
@@ -901,7 +1172,7 @@ describe('ci failure patrol main handoff', () => {
       labels: [{ name: 'autofix/in-progress' }],
       assignees: [],
     };
-    const fake = createRunner([JSON.stringify([existing]), '']);
+    const fake = createRunner([JSON.stringify([existing])]);
     const client = new GhClient({
       repo: 'QwenLM/qwen-code',
       runner: fake.runner,
@@ -926,11 +1197,107 @@ describe('ci failure patrol main handoff', () => {
     });
 
     expect(issue).toEqual({ number: 321, created: false, dispatched: false });
-    expect(fake.calls.map((call) => call.args[0])).toEqual(['search', 'issue']);
+    expect(fake.calls.map((call) => call.args[0])).toEqual(['search']);
+  });
+
+  it('skips duplicate main handoff dispatch when the issue is already linked to a PR', async () => {
+    const existing = {
+      number: 321,
+      author: { login: 'qwen-code-dev-bot' },
+      body: formatMainIssueMarker({ workflowId: 77, headSha: 'abc123' }),
+      labels: [],
+      assignees: [],
+    };
+    const fake = createRunner([
+      JSON.stringify([existing]),
+      JSON.stringify([{ number: 321 }]),
+    ]);
+    const client = new GhClient({
+      repo: 'QwenLM/qwen-code',
+      runner: fake.runner,
+    });
+    const issue = await handoffMainFailure(client, {
+      botLogin: 'qwen-code-dev-bot',
+      target: {
+        workflowId: 77,
+        workflowName: 'E2E Tests',
+        headSha: 'abc123',
+        runId: 999,
+        htmlUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/999',
+      },
+      decision: {
+        classification: 'other',
+        confidence: 'medium',
+        reason_en: 'failure',
+        reason_zh: '失败',
+        evidence: ['failed'],
+      },
+      dispatch: true,
+    });
+
+    expect(issue).toEqual({ number: 321, created: false, dispatched: false });
+    expect(fake.calls.map((call) => call.args[0])).toEqual([
+      'search',
+      'search',
+    ]);
+  });
+
+  it('stops main handoff after the configured attempts', async () => {
+    const existing = {
+      number: 321,
+      author: { login: 'qwen-code-dev-bot' },
+      body: formatMainIssueMarker({ workflowId: 77, headSha: 'abc123' }),
+      labels: [],
+      assignees: [],
+    };
+    const fake = createRunner([
+      JSON.stringify([existing]),
+      '[]',
+      JSON.stringify([
+        {
+          body: '<!-- qwen-ci-patrol-main-attempt v=1 workflow=77 head=abc123 attempts=3 action=issue handled=2026-07-12T00:00:00.000Z -->',
+        },
+      ]),
+    ]);
+    const client = new GhClient({
+      repo: 'QwenLM/qwen-code',
+      runner: fake.runner,
+    });
+
+    const issue = await handoffMainFailure(client, {
+      botLogin: 'qwen-code-dev-bot',
+      target: {
+        workflowId: 77,
+        workflowName: 'E2E Tests',
+        headSha: 'abc123',
+        runId: 999,
+        htmlUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/999',
+      },
+      decision: {
+        classification: 'other',
+        confidence: 'medium',
+        reason_en: 'failure',
+        reason_zh: '失败',
+        evidence: ['failed'],
+      },
+      dispatch: true,
+      maxAttempts: 3,
+    });
+
+    expect(issue).toEqual({ number: 321, created: false, dispatched: false });
+    expect(fake.calls.map((call) => call.args[0])).toEqual([
+      'search',
+      'search',
+      'api',
+    ]);
   });
 
   it('hands main flaky failures to Autofix issues instead of rerunning jobs', async () => {
-    const fake = createRunner(['[]', JSON.stringify({ number: 123 }), '']);
+    const fake = createRunner([
+      '[]',
+      JSON.stringify({ number: 123, labels: [], assignees: [] }),
+      '',
+    ]);
     const client = new GhClient({
       repo: 'QwenLM/qwen-code',
       runner: fake.runner,
@@ -962,7 +1329,7 @@ describe('ci failure patrol main handoff', () => {
     ).toBe(false);
     expect(fake.calls.map((call) => call.args[0])).toEqual([
       'search',
-      'issue',
+      'api',
       'workflow',
     ]);
   });
