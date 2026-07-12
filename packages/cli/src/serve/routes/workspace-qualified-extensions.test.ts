@@ -144,7 +144,9 @@ function auth(pending: request.Test): request.Test {
     .set('X-Qwen-Client-Id', 'client-1');
 }
 
-function mockExtensionManager(): void {
+function mockExtensionManager(
+  installType: 'archive-url' | 'local' = 'archive-url',
+): void {
   const extension = {
     id: extensionId,
     name: 'demo',
@@ -153,8 +155,11 @@ function mockExtensionManager(): void {
     isActive: true,
     config: { name: 'demo', version: '1.0.0' },
     installMetadata: {
-      type: 'archive-url',
-      source: 'https://example.com/demo.zip',
+      type: installType,
+      source:
+        installType === 'archive-url'
+          ? 'https://example.com/demo.zip'
+          : '/extensions/demo.zip',
     },
     contextFiles: [],
   } as Extension;
@@ -674,6 +679,80 @@ describe('extension management v2 REST', () => {
         status: 'succeeded',
         result: { status: 'installed', name: 'demo' },
       });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('updates archive URL extensions through the global V2 route', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const prepared = {} as never;
+    const prepareUpdate = vi
+      .spyOn(ExtensionManager.prototype, 'prepareExtensionUpdate')
+      .mockResolvedValue({ upToDate: false, prepared });
+    const commitPrepared = vi
+      .spyOn(ExtensionManager.prototype, 'commitPreparedExtension')
+      .mockResolvedValue({
+        identity: { id: extensionId, name: 'demo' },
+        version: '2.0.0',
+        generation: 8,
+      } as never);
+    const disposePrepared = vi
+      .spyOn(ExtensionManager.prototype, 'disposePreparedExtension')
+      .mockResolvedValue();
+    try {
+      const started = await auth(
+        request(h.app).post(`/extensions/${extensionId}/update`),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded',
+        result: {
+          status: 'updated',
+          name: 'demo',
+          updated: true,
+          version: '2.0.0',
+        },
+      });
+      expect(prepareUpdate).toHaveBeenCalledWith({
+        extension: expect.objectContaining({
+          id: extensionId,
+          installMetadata: expect.objectContaining({ type: 'archive-url' }),
+        }),
+        signal: expect.any(AbortSignal),
+      });
+      expect(commitPrepared).toHaveBeenCalledWith(prepared);
+      expect(disposePrepared).toHaveBeenCalledWith(prepared);
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('still rejects non-updatable extensions through the global V2 route', async () => {
+    const h = await makeHarness();
+    mockExtensionManager('local');
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const prepareUpdate = vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionUpdate',
+    );
+    try {
+      const started = await auth(
+        request(h.app).post(`/extensions/${extensionId}/update`),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'failed',
+        error: 'Extension "demo" is not remotely updatable.',
+      });
+      expect(prepareUpdate).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
