@@ -46,13 +46,8 @@ export interface CumulativeUsage {
   apiTimeMs: number;
 }
 
-/**
- * Session context shared across all emitters.
- * Provides access to session state and configuration.
- */
-export interface SessionContext extends SessionUpdateSender {
+export interface SessionEmitterContext extends SessionUpdateSender {
   readonly sessionId: string;
-  readonly config: Config;
   /** Optional message rewrite middleware for ACP message transformation.
    *  Installed after history replay to avoid rewriting historical messages. */
   messageRewriter?: MessageRewriteMiddleware;
@@ -63,6 +58,19 @@ export interface SessionContext extends SessionUpdateSender {
    * can omit it.
    */
   readonly cumulativeUsage?: CumulativeUsage;
+}
+
+/**
+ * Session context shared by live emitters that may resolve runtime metadata.
+ */
+export interface SessionContext extends SessionEmitterContext {
+  readonly config: Config;
+}
+
+export function hasFullSessionContext(
+  context: SessionEmitterContext,
+): context is SessionContext {
+  return 'config' in context;
 }
 
 /**

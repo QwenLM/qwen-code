@@ -621,6 +621,69 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getShellDefaultTimeoutMs', () => {
+    it('returns undefined when unset', () => {
+      expect(new Config(baseParams).getShellDefaultTimeoutMs()).toBeUndefined();
+    });
+
+    it('passes through positive values', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          shellDefaultTimeoutMs: 300_000,
+        }).getShellDefaultTimeoutMs(),
+      ).toBe(300_000);
+    });
+
+    it('accepts 0 (disables the timeout — unlike the vision bridge)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          shellDefaultTimeoutMs: 0,
+        }).getShellDefaultTimeoutMs(),
+      ).toBe(0);
+    });
+
+    it('treats negative values as unset (schema validation is bypassed on load)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          shellDefaultTimeoutMs: -5000,
+        }).getShellDefaultTimeoutMs(),
+      ).toBeUndefined();
+    });
+
+    it('rejects values AbortSignal.timeout cannot take (fractional, over 2^31-1, non-finite)', () => {
+      // A hand-edited settings.json bypasses the schema and can reach
+      // AbortSignal.timeout, which would throw RangeError or degrade to a
+      // 1ms timer on these. Coerce to undefined → built-in default.
+      for (const bad of [
+        30_000.5,
+        2_147_483_648,
+        4_294_967_296,
+        1e300,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        expect(
+          new Config({
+            ...baseParams,
+            shellDefaultTimeoutMs: bad,
+          }).getShellDefaultTimeoutMs(),
+        ).toBeUndefined();
+      }
+    });
+
+    it('accepts the maximum supported integer timeout', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          shellDefaultTimeoutMs: 2_147_483_647,
+        }).getShellDefaultTimeoutMs(),
+      ).toBe(2_147_483_647);
+    });
+  });
+
   describe('getMaxSubagentDepth', () => {
     it('defaults to 5 when unset', () => {
       expect(new Config(baseParams).getMaxSubagentDepth()).toBe(5);

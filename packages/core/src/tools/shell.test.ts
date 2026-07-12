@@ -142,6 +142,7 @@ describe('ShellTool', () => {
       }),
       setApprovalMode: vi.fn(),
       getShouldUseNodePtyShell: vi.fn().mockReturnValue(false),
+      getShellDefaultTimeoutMs: vi.fn().mockReturnValue(undefined),
       getBackgroundShellRegistry: vi.fn().mockReturnValue({
         register: vi.fn(),
         get: vi.fn(),
@@ -2703,6 +2704,107 @@ describe('ShellTool', () => {
         resolveShellExecution({ output: 'all green', exitCode: 0 });
         const result = await promise;
         expect(result.llmContent).not.toContain('foreground command ran for');
+      });
+
+      describe('foreground timeout resolution (issue #5838)', () => {
+        // Precedence: per-call `timeout` param > `tools.shell.defaultTimeoutMs`
+        // setting > built-in DEFAULT_FOREGROUND_TIMEOUT_MS (120000). The
+        // resolved value is what `AbortSignal.timeout(...)` is armed with, so
+        // spying on that call pins the chosen timeout without waiting for it
+        // to fire.
+        const timeoutCfg = () =>
+          mockConfig as unknown as { getShellDefaultTimeoutMs: Mock };
+
+        it('uses the per-call timeout param over the configured default', async () => {
+          timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(300_000);
+          const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+          try {
+            const invocation = shellTool.build({
+              command: 'echo hi',
+              is_background: false,
+              timeout: 60_000,
+            });
+            const promise = invocation.execute(mockAbortSignal);
+            resolveShellExecution({ output: 'hi', exitCode: 0 });
+            await promise;
+            expect(timeoutSpy).toHaveBeenCalledWith(60_000);
+          } finally {
+            timeoutSpy.mockRestore();
+          }
+        });
+
+        it('falls back to the configured default when no per-call timeout is given', async () => {
+          timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(300_000);
+          const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+          try {
+            const invocation = shellTool.build({
+              command: 'echo hi',
+              is_background: false,
+            });
+            const promise = invocation.execute(mockAbortSignal);
+            resolveShellExecution({ output: 'hi', exitCode: 0 });
+            await promise;
+            expect(timeoutSpy).toHaveBeenCalledWith(300_000);
+          } finally {
+            timeoutSpy.mockRestore();
+          }
+        });
+
+        it('falls back to the built-in default when neither param nor setting is present', async () => {
+          timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(undefined);
+          const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+          try {
+            const invocation = shellTool.build({
+              command: 'echo hi',
+              is_background: false,
+            });
+            const promise = invocation.execute(mockAbortSignal);
+            resolveShellExecution({ output: 'hi', exitCode: 0 });
+            await promise;
+            // DEFAULT_FOREGROUND_TIMEOUT_MS
+            expect(timeoutSpy).toHaveBeenCalledWith(120_000);
+          } finally {
+            timeoutSpy.mockRestore();
+          }
+        });
+
+        it('disables the timeout when the configured default is 0', async () => {
+          timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(0);
+          const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+          try {
+            const invocation = shellTool.build({
+              command: 'echo hi',
+              is_background: false,
+            });
+            const promise = invocation.execute(mockAbortSignal);
+            resolveShellExecution({ output: 'hi', exitCode: 0 });
+            await promise;
+            // effectiveTimeout === 0 is falsy, so no timeout signal is armed.
+            expect(timeoutSpy).not.toHaveBeenCalled();
+          } finally {
+            timeoutSpy.mockRestore();
+          }
+        });
+
+        it('does not emit the spurious long-run hint when the timeout is disabled (0)', async () => {
+          // Regression guard: with the timeout disabled there is no
+          // "half the timeout" threshold. `longRunThresholdFor(0)` would
+          // return its 1000ms floor and fire the auto-bg hint on every
+          // foreground command running longer than ~1s. The disabled case
+          // must suppress the hint entirely.
+          timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(0);
+          const invocation = shellTool.build({
+            command: 'dev-server.sh',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          // Well past the 1000ms floor that would otherwise trip the hint.
+          await vi.advanceTimersByTimeAsync(120_000);
+          resolveShellExecution({ output: 'listening', exitCode: 0 });
+          const result = await promise;
+          expect(result.llmContent).not.toContain('foreground command ran for');
+          expect(result.llmContent).not.toContain('is_background: true');
+        });
       });
 
       it('threshold-scaling positive case: hint DOES fire at the scaled threshold', async () => {

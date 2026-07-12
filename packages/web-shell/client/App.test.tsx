@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
 
 type StreamingState = 'idle' | 'responding';
@@ -29,6 +30,7 @@ type ChatEditorTestProps = {
     text: string,
     images?: undefined,
     commitAccepted?: () => void,
+    metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
   ) => boolean | void;
   skills?: Array<{ name: string; description: string }>;
   isPreparing?: boolean;
@@ -107,6 +109,7 @@ const {
     },
     testState: {
       prompt: 'hello',
+      inputAnnotations: undefined as DaemonInputAnnotation[] | undefined,
       streamingState: 'idle' as StreamingState,
       blocks: [] as unknown[],
       latestChatEditorProps: null as ChatEditorTestProps | null,
@@ -210,8 +213,15 @@ vi.mock('./components/ChatEditor', async () => {
         {
           'data-testid': 'submit',
           'data-preparing': props.isPreparing ? 'true' : 'false',
-          onClick: () =>
-            props.onSubmit(testState.prompt, undefined, editorCommit),
+          onClick: () => {
+            if (testState.inputAnnotations) {
+              props.onSubmit(testState.prompt, undefined, editorCommit, {
+                inputAnnotations: testState.inputAnnotations,
+              });
+              return;
+            }
+            props.onSubmit(testState.prompt, undefined, editorCommit);
+          },
           type: 'button',
         },
         'submit',
@@ -647,6 +657,7 @@ beforeEach(() => {
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
   testState.prompt = 'hello';
+  testState.inputAnnotations = undefined;
   testState.streamingState = 'idle';
   testState.blocks = [];
   testState.latestChatEditorProps = null;
@@ -1032,6 +1043,7 @@ describe('App session callbacks', () => {
       'queued',
       undefined,
       undefined,
+      undefined,
     );
     expect(onSessionChange).toHaveBeenCalledWith({
       type: 'submit',
@@ -1076,6 +1088,35 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(editorCommit).not.toHaveBeenCalled();
     expect(editorClear).not.toHaveBeenCalled();
+  });
+
+  it('forwards input annotations for /plan prompts in active sessions', async () => {
+    const annotation: DaemonInputAnnotation = {
+      type: 'reference',
+      text: '@.husky/',
+      start: 0,
+      end: 8,
+      reference: {
+        id: '.husky/',
+        value: '.husky/',
+        serialized: '@.husky/',
+      },
+    };
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/plan @.husky/ explain';
+    testState.inputAnnotations = [annotation];
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('plan');
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '@.husky/ explain',
+      expect.objectContaining({
+        inputAnnotations: [annotation],
+      }),
+    );
   });
 
   it('dispatches turn_complete only for the session that was streaming', async () => {
@@ -1463,6 +1504,142 @@ describe('App session callbacks', () => {
     const panel = container.querySelector('[data-testid="inline-panel"]');
     expect(panel).not.toBeNull();
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
+  });
+
+  it('forces the compact session drawer from the external shell ref', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+
+    const drawer = container.querySelector(
+      '[data-sidebar-shell][role="dialog"]',
+    );
+    expect(drawer).not.toBeNull();
+    expect(drawer?.className).toContain('mobileDrawerForced');
+  });
+
+  it('returns a forced compact drawer to viewport control when the user dismisses it', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).toContain('mobileDrawerForced');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>(
+          '[data-sidebar-shell] > div[aria-hidden="true"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).not.toContain('mobileDrawerForced');
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).toBeNull();
+  });
+
+  it('returns to chat and clears the current page when the external shell opens the compact drawer', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionOverview();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+
+    await act(async () => {
+      shellRef.current?.openSplitView();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).not.toBeNull();
+  });
+
+  it('clears a forced compact drawer after crossing to a wide viewport', async () => {
+    let mobileChangeHandler:
+      | ((event: { matches: boolean }) => void)
+      | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes('min-width'),
+        media: query,
+        addEventListener: (
+          _type: string,
+          handler: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('max-width')) mobileChangeHandler = handler;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).toContain('mobileDrawerForced');
+
+    await act(async () => {
+      mobileChangeHandler?.({ matches: false });
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).not.toContain('mobileDrawerForced');
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).toBeNull();
+  });
+
+  it('lets a host hide the built-in compact sidebar toggle', async () => {
+    const { container } = renderApp({
+      sidebar: { enabled: true, showCompactToggle: false },
+    });
+    await flush();
+
+    expect(container.querySelector('[aria-label="Toggle menu"]')).toBeNull();
   });
 
   it('returns to the Session Overview when leaving the split view', async () => {

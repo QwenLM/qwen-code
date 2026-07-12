@@ -24,6 +24,7 @@ import type {
   ChannelWebhookConfig,
   ChannelWebhookTask,
 } from './ChannelWebhookTask.js';
+import { SessionRouter } from './SessionRouter.js';
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
@@ -4337,10 +4338,51 @@ describe('ChannelBase', () => {
       expect(secondPrompt).toContain('Be concise.');
     });
 
+    it('forgets instructions when policy-aware session death preserves a route', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'user', undefined, {
+        recoveryMode: 'lazy',
+      });
+      const ch = createChannel(
+        { instructions: 'Be concise.' },
+        { router, registerBridgeEvents: true },
+      );
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const sessionId = router.getSession('test-chan', 'user1', 'chat1');
+      expect(sessionId).toBeDefined();
+
+      (bridge as unknown as EventEmitter).emit('sessionDied', { sessionId });
+
+      expect(router.hasSession('test-chan', 'user1', 'chat1')).toBe(true);
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        sessionId,
+      );
+      await ch.handleInbound(envelope({ text: 'second' }));
+
+      const secondPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1]![1] as string;
+      expect(secondPrompt).toContain('Be concise.');
+    });
+
+    it('/status reports a dormant durable route as active', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'user', undefined, {
+        recoveryMode: 'lazy',
+      });
+      const ch = createChannel({}, { router, registerBridgeEvents: true });
+      await ch.handleInbound(envelope({ text: 'first' }));
+      (bridge as unknown as EventEmitter).emit('sessionDied', {
+        sessionId: 's-1',
+      });
+      ch.sent = [];
+
+      await ch.handleInbound(envelope({ text: '/status' }));
+
+      expect(ch.sent[0]!.text).toContain('Session: active');
+    });
+
     it('can register bridge events when a supplied router is channel-owned', () => {
       const router = {
         getTarget: vi.fn().mockReturnValue({ chatId: 'chat1' }),
-        removeSessionId: vi.fn(),
+        handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
       };
       const ch = createChannel({}, {
@@ -4361,13 +4403,13 @@ describe('ChannelBase', () => {
       });
 
       expect(ch.toolCalls).toEqual([{ chatId: 'chat1', event: toolCall }]);
-      expect(router.removeSessionId).toHaveBeenCalledWith('s-1');
+      expect(router.handleSessionDied).toHaveBeenCalledWith('s-1');
     });
 
     it('leaves supplied router bridge events to the gateway by default', () => {
       const router = {
         getTarget: vi.fn(),
-        removeSessionId: vi.fn(),
+        handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
@@ -4384,13 +4426,13 @@ describe('ChannelBase', () => {
       });
 
       expect(ch.toolCalls).toEqual([]);
-      expect(router.removeSessionId).not.toHaveBeenCalled();
+      expect(router.handleSessionDied).not.toHaveBeenCalled();
     });
 
     it('updates a supplied router bridge even when events are gateway-owned', () => {
       const router = {
         getTarget: vi.fn(),
-        removeSessionId: vi.fn(),
+        handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
@@ -4431,7 +4473,7 @@ describe('ChannelBase', () => {
       const newBridge = createBridge();
       const router = {
         getTarget: vi.fn().mockReturnValue({ chatId: 'chat1' }),
-        removeSessionId: vi.fn(),
+        handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
       };
       const ch = createChannel({}, {
@@ -4461,8 +4503,8 @@ describe('ChannelBase', () => {
       (newBridge as unknown as EventEmitter).emit('toolCall', toolCall);
 
       expect(router.setBridge).toHaveBeenCalledWith(newBridge);
-      expect(router.removeSessionId).toHaveBeenCalledTimes(1);
-      expect(router.removeSessionId).toHaveBeenCalledWith('new-session');
+      expect(router.handleSessionDied).toHaveBeenCalledTimes(1);
+      expect(router.handleSessionDied).toHaveBeenCalledWith('new-session');
       expect(ch.toolCalls).toEqual([{ chatId: 'chat1', event: toolCall }]);
     });
 

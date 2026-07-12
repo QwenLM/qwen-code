@@ -33,6 +33,14 @@ export interface DaemonWorkspaceCapability {
   trusted: boolean;
 }
 
+/** Current Git branch metadata returned from a workspace Git status route. */
+export interface DaemonWorkspaceGitStatus {
+  v: 1;
+  workspaceCwd: string;
+  /** Branch name, short detached-HEAD hash, or null outside a Git repository. */
+  branch: string | null;
+}
+
 /** Capabilities envelope returned from `GET /capabilities`. */
 export interface DaemonCapabilities {
   v: 1;
@@ -557,7 +565,7 @@ export interface DaemonSessionSummary {
   pinnedAt?: string;
   groupId?: string | null;
   /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
-  color?: DaemonSessionGroupColor | null;
+  color?: DaemonSessionGroupPresetColor | null;
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
@@ -589,13 +597,20 @@ export interface DaemonSessionTranscriptPage {
 
 export type DaemonSessionArchiveState = 'active' | 'archived';
 
-export type DaemonSessionGroupColor =
+export type DaemonSessionGroupPresetColor =
   | 'red'
   | 'orange'
   | 'yellow'
   | 'green'
   | 'blue'
   | 'purple';
+
+/** Shape hint only; the daemon validates exactly six Hex digits at runtime. */
+export type DaemonSessionGroupHexColor = `#${string}`;
+
+export type DaemonSessionGroupColor =
+  | DaemonSessionGroupPresetColor
+  | DaemonSessionGroupHexColor;
 
 export interface DaemonSessionGroup {
   id: string;
@@ -608,7 +623,7 @@ export interface DaemonSessionGroup {
 
 export interface DaemonSessionGroupCatalog {
   groups: DaemonSessionGroup[];
-  colorOptions: DaemonSessionGroupColor[];
+  colorOptions: DaemonSessionGroupPresetColor[];
 }
 
 export interface DaemonSessionGroupInput {
@@ -625,7 +640,7 @@ export interface DaemonSessionGroupUpdate {
 export interface DaemonSessionOrganizationUpdate {
   isPinned?: boolean;
   groupId?: string | null;
-  color?: DaemonSessionGroupColor | null;
+  color?: DaemonSessionGroupPresetColor | null;
 }
 
 export interface DaemonSessionOrganizationResult {
@@ -633,7 +648,7 @@ export interface DaemonSessionOrganizationResult {
   groupId: string | null;
   isPinned: boolean;
   pinnedAt?: string;
-  color?: DaemonSessionGroupColor | null;
+  color?: DaemonSessionGroupPresetColor | null;
   updatedAt: string;
 }
 

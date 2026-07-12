@@ -6,7 +6,7 @@
 
 import type {
   ApprovalMode,
-  SessionGroupColor,
+  SessionGroupPresetColor,
 } from '@qwen-code/qwen-code-core';
 import type {
   CancelNotification,
@@ -345,7 +345,7 @@ export interface BridgeSessionSummary {
   pinnedAt?: string;
   groupId?: string | null;
   /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
-  color?: SessionGroupColor | null;
+  color?: SessionGroupPresetColor | null;
 }
 
 export interface SessionMetadataUpdate {

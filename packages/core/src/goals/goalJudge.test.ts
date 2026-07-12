@@ -91,6 +91,32 @@ describe('judgeGoal', () => {
     expect(client.generateContent.mock.calls[0][3]).toBe('fast-judge');
   });
 
+  it('ignores thought parts when parsing the response', async () => {
+    const client = makeMockClient({});
+    client.generateContent.mockResolvedValue({
+      candidates: [
+        {
+          content: {
+            parts: [
+              { text: 'Return {"ok": false}.', thought: true },
+              null,
+              { text: '{"ok": true, "reason": "tests passing"}' },
+            ],
+          },
+        },
+      ],
+    });
+    const config = makeConfig({ client });
+
+    const verdict = await judgeGoal(config, {
+      condition: 'tests pass',
+      lastAssistantText: 'all green',
+      signal: new AbortController().signal,
+    });
+
+    expect(verdict).toMatchObject({ kind: 'met' });
+  });
+
   it('preserves the legacy result fields alongside the outcome kind', async () => {
     const client = makeMockClient({
       reply: '{"ok": false, "reason": "still running"}',
@@ -362,7 +388,10 @@ describe('judgeGoal', () => {
       Object.keys(generationConfig.responseSchema.properties).sort(),
     ).toEqual([...JUDGE_RESULT_SCHEMA_KEYS].sort());
     expect(generationConfig.responseSchema.additionalProperties).toBe(false);
-    expect(generationConfig.thinkingConfig).toEqual({ thinkingBudget: 0 });
+    expect(generationConfig.thinkingConfig).toEqual({
+      thinkingBudget: 0,
+      includeThoughts: false,
+    });
     expect(generationConfig.temperature).toBe(0);
   });
 

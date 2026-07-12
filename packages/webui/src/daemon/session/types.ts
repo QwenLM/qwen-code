@@ -12,6 +12,7 @@ import type {
   DaemonApprovalModeResult,
   DaemonAvailableCommand,
   DaemonForkSessionResult,
+  DaemonInputAnnotation,
   DaemonSessionBtwResult,
   DaemonMidTurnMessageResult,
   DaemonPendingPromptsResult,
@@ -58,6 +59,8 @@ export interface DaemonConnectionState {
    */
   clientId?: string;
   workspaceCwd?: string;
+  /** Current Git branch, short detached-HEAD hash, or undefined outside Git. */
+  gitBranch?: string;
   commands?: DaemonCommandInfo[];
   skills?: string[];
   models?: DaemonModelInfo[];
@@ -234,6 +237,7 @@ export interface DaemonCommandInfo {
 export interface SendPromptOptions {
   optimisticUserMessage?: boolean;
   images?: DaemonPromptImage[];
+  inputAnnotations?: DaemonInputAnnotation[];
   /**
    * When true, the daemon strips orphaned user entries from the chat
    * history before re-sending, and skips recording a duplicate user
@@ -333,8 +337,15 @@ export interface DaemonSessionActions {
    * `options.workspaceCwd` targets a specific registered workspace runtime for
    * this call only (multi-workspace daemons). Omit it to keep the provider's
    * active workspace / primary fallback.
+   *
+   * `options.approvalMode` seeds the session's approval mode in the create
+   * request itself, so the daemon applies it atomically at spawn instead of
+   * requiring a follow-up `setApprovalMode` call.
    */
-  createSession(options?: { workspaceCwd?: string }): Promise<DaemonSession>;
+  createSession(options?: {
+    workspaceCwd?: string;
+    approvalMode?: DaemonApprovalMode;
+  }): Promise<DaemonSession>;
   attachSession(): Promise<void>;
   clearSession(): Promise<void>;
   newSession(): Promise<void>;

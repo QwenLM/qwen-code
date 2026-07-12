@@ -313,6 +313,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_branch',
   'workspace_qualified_rest_core',
   'extension_management_v2',
+  'workspace_persisted_transcript',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -359,6 +360,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'session_branch' &&
       f !== 'workspace_qualified_rest_core' &&
       f !== 'extension_management_v2' &&
+      f !== 'workspace_persisted_transcript' &&
       f !== 'voice_transcribe',
   ),
   'workspace_settings',
@@ -394,6 +396,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'persistent_workspace_registration',
   'workspace_qualified_rest_core',
   'extension_management_v2',
+  'workspace_persisted_transcript',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
@@ -8252,8 +8255,9 @@ describe('createServeApp', () => {
         request(app).post(
           `/workspace/${encodeURIComponent(WS_BOUND)}/session-groups`,
         ),
-      ).send({ name: 'Frontend', color: 'blue' });
+      ).send({ name: 'Frontend', color: '#12ABEF' });
       expect(groupRes.status).toBe(201);
+      expect(groupRes.body.group.color).toBe('#12abef');
       const groupId = groupRes.body.group.id as string;
 
       const updateRes = await host(
@@ -8262,12 +8266,12 @@ describe('createServeApp', () => {
             WS_BOUND,
           )}/session-groups/${encodeURIComponent(groupId)}`,
         ),
-      ).send({ name: 'UI', color: 'purple', order: 4 });
+      ).send({ name: 'UI', color: '#FEDCBA', order: 4 });
       expect(updateRes.status).toBe(200);
       expect(updateRes.body.group).toMatchObject({
         id: groupId,
         name: 'UI',
-        color: 'purple',
+        color: '#fedcba',
         order: 4,
       });
 
@@ -8370,7 +8374,7 @@ describe('createServeApp', () => {
 
       const invalidColorBody = await host(
         request(app).patch(`/session/${sessionId}/organization`),
-      ).send({ color: 'pink' });
+      ).send({ color: '#12abef' });
       expect(invalidColorBody.status).toBe(400);
       expect(invalidColorBody.body).toMatchObject({
         code: 'invalid_session_organization',

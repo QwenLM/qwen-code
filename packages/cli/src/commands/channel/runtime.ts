@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { Storage } from '@qwen-code/qwen-code-core';
+import { hashDaemonWorkspace, Storage } from '@qwen-code/qwen-code-core';
 import type {
   SessionRouter,
   ChannelAgentBridge,
@@ -29,6 +29,16 @@ export interface ParsedChannel {
 
 export function sessionsPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'sessions.json');
+}
+
+export function daemonSessionRoutesPath(workspaceCwd: string): string {
+  return path.join(
+    Storage.getGlobalQwenDir(),
+    'channels',
+    'daemon',
+    hashDaemonWorkspace(workspaceCwd),
+    'routes.json',
+  );
 }
 
 export function channelLoopPath(): string {
@@ -228,14 +238,14 @@ export function registerSessionCleanup(
     const safeId = sanitizeLogText(event.sessionId, 128);
     const safeReason = event.reason ? sanitizeLogText(event.reason, 512) : '';
     writeStderrLine(
-      `[Channel] Session ${safeId} died${safeReason ? ` (${safeReason})` : ''}, removing routing state`,
+      `[Channel] Session ${safeId} died${safeReason ? ` (${safeReason})` : ''}, updating routing state`,
     );
     const target = router.getTarget(event.sessionId);
     const channel = target ? channels.get(target.channelName) : undefined;
     if (channel) {
       channel.onSessionDied(event.sessionId);
     } else {
-      router.removeSessionId(event.sessionId);
+      router.handleSessionDied(event.sessionId);
     }
   });
 }

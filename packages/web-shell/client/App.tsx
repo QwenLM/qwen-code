@@ -28,6 +28,7 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import { isDaemonTurnError } from '@qwen-code/sdk/daemon';
 import type {
+  DaemonInputAnnotation,
   DaemonTranscriptBlock,
   DaemonSessionTaskStatus,
   DaemonSessionArtifact,
@@ -99,7 +100,11 @@ import { ThemeDialog } from './components/dialogs/ThemeDialog';
 import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
-import { WebShellSidebar } from './components/sidebar/WebShellSidebar';
+import {
+  WebShellSidebar,
+  type WebShellSidebarBranding,
+  type WebShellSidebarFooterOptions,
+} from './components/sidebar/WebShellSidebar';
 import {
   getLocalCommands,
   localizeBuiltinDescriptions,
@@ -337,6 +342,7 @@ interface ActiveGoalStatus {
 interface SendPromptOptionsWithRetry {
   optimisticUserMessage?: boolean;
   images?: PromptImage[];
+  inputAnnotations?: DaemonInputAnnotation[];
   retry?: boolean;
   clearComposerOnPromptStart?: boolean;
   commitComposerAccepted?: ComposerSubmitCommit;
@@ -399,6 +405,12 @@ export interface BugReportInfo {
 export interface WebShellSidebarOptions {
   enabled?: boolean;
   defaultCollapsed?: boolean;
+  /** Whether to show WebShell's built-in compact drawer toggle. Defaults to true. */
+  showCompactToggle?: boolean;
+  /** Hide or replace the leading New Chat brand mark. */
+  branding?: false | WebShellSidebarBranding;
+  /** Hide the footer completely or select the built-in entries it exposes. */
+  footer?: false | WebShellSidebarFooterOptions;
 }
 
 export type SessionChangeEvent =
@@ -411,6 +423,8 @@ export interface WebShellApi {
   openSplitView: () => void;
   /** Open the Session Overview panel, matching the built-in sidebar button. */
   openSessionOverview: () => void;
+  /** Open the compact session drawer, matching the hamburger control. */
+  openSessionDrawer: () => void;
 }
 
 export interface WebShellProps {
@@ -577,18 +591,25 @@ const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'qwen-code-web-shell-sidebar-collapsed';
 
-function resolveSidebarOptions(
-  sidebar: WebShellProps['sidebar'],
-): Required<WebShellSidebarOptions> {
+function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
+  enabled: boolean;
+  defaultCollapsed: boolean;
+  showCompactToggle: boolean;
+  branding?: false | WebShellSidebarBranding;
+  footer?: false | WebShellSidebarFooterOptions;
+} {
   if (sidebar === true) {
-    return { enabled: true, defaultCollapsed: false };
+    return { enabled: true, defaultCollapsed: false, showCompactToggle: true };
   }
   if (!sidebar) {
-    return { enabled: false, defaultCollapsed: false };
+    return { enabled: false, defaultCollapsed: false, showCompactToggle: true };
   }
   return {
     enabled: sidebar.enabled ?? true,
     defaultCollapsed: sidebar.defaultCollapsed ?? false,
+    showCompactToggle: sidebar.showCompactToggle ?? true,
+    branding: sidebar.branding,
+    footer: sidebar.footer,
   };
 }
 
@@ -973,7 +994,11 @@ export function App({
     string | null
   >(null);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
-  const closeMobileDrawer = useCallback(() => setMobileDrawerOpen(false), []);
+  const [forceMobileDrawer, setForceMobileDrawer] = useState(false);
+  const closeMobileDrawer = useCallback(() => {
+    setMobileDrawerOpen(false);
+    setForceMobileDrawer(false);
+  }, []);
   // The Session Overview panel (mission control for managing many sessions at
   // once) is only offered on large screens; below that there is no room for it
   // to be useful.
@@ -982,11 +1007,11 @@ export function App({
   useEffect(() => {
     const mql = window.matchMedia('(max-width: 760px)');
     const handler = (e: MediaQueryListEvent) => {
-      if (!e.matches) setMobileDrawerOpen(false);
+      if (!e.matches) closeMobileDrawer();
     };
     mql.addEventListener('change', handler);
     return () => mql.removeEventListener('change', handler);
-  }, []);
+  }, [closeMobileDrawer]);
 
   useEffect(() => {
     if (!mobileDrawerOpen) return;
@@ -1039,12 +1064,12 @@ export function App({
   }, []);
   const customization = useMemo(
     () => ({
+      composerTagIcons,
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
       parseUserMessageContent,
       renderUserMessageContent,
-      composerTagIcons,
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
@@ -1061,12 +1086,12 @@ export function App({
       loadingPhrases,
     }),
     [
+      composerTagIcons,
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
       parseUserMessageContent,
       renderUserMessageContent,
-      composerTagIcons,
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
@@ -1997,6 +2022,12 @@ export function App({
     () => ({
       openSplitView: () => requestOpenSplitView(),
       openSessionOverview: () => openPanel('sessions'),
+      openSessionDrawer: () => {
+        setActivePanel(null);
+        setMainView('chat');
+        setForceMobileDrawer(true);
+        setMobileDrawerOpen(true);
+      },
     }),
     [openPanel, requestOpenSplitView],
   );
@@ -2362,6 +2393,7 @@ export function App({
       opts?: {
         optimisticUserMessage?: boolean;
         retry?: boolean;
+        inputAnnotations?: DaemonInputAnnotation[];
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
         onAdmitted?: () => void;
@@ -2419,6 +2451,7 @@ export function App({
       }
       const promptOptions: SendPromptOptionsWithRetry = {
         images,
+        inputAnnotations: opts?.inputAnnotations,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
         ...(opts?.onAdmitted ? { onAdmitted: opts.onAdmitted } : {}),
@@ -2540,6 +2573,7 @@ export function App({
       images?: PromptImage[],
       onComplete?: () => void,
       commitComposerAccepted?: ComposerSubmitCommit,
+      inputAnnotations?: DaemonInputAnnotation[],
     ) => {
       if (onSubmitBeforeRef.current) {
         onSubmitBeforeRef
@@ -2548,7 +2582,12 @@ export function App({
             prompt: text,
           })
           .then(() => {
-            const result = rawEnqueuePrompt(text, images, onComplete);
+            const result = rawEnqueuePrompt(
+              text,
+              images,
+              onComplete,
+              inputAnnotations,
+            );
             if (result !== false) {
               if (commitComposerAccepted) {
                 commitComposerAccepted();
@@ -2574,7 +2613,12 @@ export function App({
           });
         return false;
       }
-      const result = rawEnqueuePrompt(text, images, onComplete);
+      const result = rawEnqueuePrompt(
+        text,
+        images,
+        onComplete,
+        inputAnnotations,
+      );
       const sessionId = connectionRef.current.sessionId;
       if (sessionId && text.trim()) {
         dispatchSessionChangeRef.current?.({
@@ -3660,6 +3704,7 @@ export function App({
       text: string,
       images?: PromptImage[],
       commitComposerAccepted?: ComposerSubmitCommit,
+      metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
       if (connectionRef.current.loadingTranscript) {
         pushToast('warning', t('editor.sessionLoading'));
@@ -3678,7 +3723,11 @@ export function App({
         promptText: string,
         promptImages: PromptImage[] | undefined,
         errorMessage: string,
-        opts?: { optimisticUserMessage?: boolean; retry?: boolean },
+        opts?: {
+          optimisticUserMessage?: boolean;
+          retry?: boolean;
+          inputAnnotations?: DaemonInputAnnotation[];
+        },
       ) => {
         const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
         const clearComposerOnPromptStart =
@@ -3703,12 +3752,14 @@ export function App({
                 images,
                 undefined,
                 commitComposerAccepted,
+                metadata?.inputAnnotations,
               );
             }
             return submitPromptFromEditor(
               text,
               images,
               'Failed to send hidden slash command',
+              { inputAnnotations: metadata?.inputAnnotations },
             );
           }
           if (cmd === 'help') {
@@ -3888,12 +3939,14 @@ export function App({
                   images,
                   undefined,
                   commitComposerAccepted,
+                  metadata?.inputAnnotations,
                 );
               }
               return submitPromptFromEditor(
                 text,
                 images,
                 'Failed to send /model --fast',
+                { inputAnnotations: metadata?.inputAnnotations },
               );
             }
             if (modelArg === '--voice') {
@@ -3963,6 +4016,7 @@ export function App({
                   prompt,
                   images,
                   'Failed to send plan prompt',
+                  { inputAnnotations: metadata?.inputAnnotations },
                 );
               }
               return true;
@@ -3975,6 +4029,7 @@ export function App({
                 if (prompt) {
                   return sendPrompt(prompt, images, {
                     clearComposerOnPromptStart: true,
+                    inputAnnotations: metadata?.inputAnnotations,
                   }).catch((error: unknown) =>
                     reportError(error, 'Failed to send plan prompt'),
                   );
@@ -4063,12 +4118,14 @@ export function App({
                   images,
                   undefined,
                   commitComposerAccepted,
+                  metadata?.inputAnnotations,
                 );
               }
               return submitPromptFromEditor(
                 text,
                 images,
                 'Failed to send /skills command',
+                { inputAnnotations: metadata?.inputAnnotations },
               );
             } else {
               if (echoOrDeferLocalCommand(text, images)) return true;
@@ -4315,12 +4372,14 @@ export function App({
                   images,
                   undefined,
                   commitComposerAccepted,
+                  metadata?.inputAnnotations,
                 );
               }
               return submitPromptFromEditor(
                 text,
                 images,
                 'Failed to send /rename command',
+                { inputAnnotations: metadata?.inputAnnotations },
               );
             }
             const displayName = renameArg.displayName;
@@ -4510,9 +4569,17 @@ export function App({
         }
         // Forward slash commands as prompts
         if (promptBlocked) {
-          return enqueuePrompt(text, images, undefined, commitComposerAccepted);
+          return enqueuePrompt(
+            text,
+            images,
+            undefined,
+            commitComposerAccepted,
+            metadata?.inputAnnotations,
+          );
         }
-        return submitPromptFromEditor(text, images, 'Failed to send command');
+        return submitPromptFromEditor(text, images, 'Failed to send command', {
+          inputAnnotations: metadata?.inputAnnotations,
+        });
       } else if (text.startsWith('!')) {
         if (promptBlocked) {
           pushToast('error', t('queue.shellBlocked'));
@@ -4527,9 +4594,17 @@ export function App({
         return true;
       } else {
         if (promptBlocked) {
-          return enqueuePrompt(text, images, undefined, commitComposerAccepted);
+          return enqueuePrompt(
+            text,
+            images,
+            undefined,
+            commitComposerAccepted,
+            metadata?.inputAnnotations,
+          );
         }
-        return submitPromptFromEditor(text, images, 'Failed to send message');
+        return submitPromptFromEditor(text, images, 'Failed to send message', {
+          inputAnnotations: metadata?.inputAnnotations,
+        });
       }
     },
     [
@@ -4573,8 +4648,14 @@ export function App({
       text: string,
       images?: PromptImage[],
       commitComposerAccepted?: ComposerSubmitCommit,
+      metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
-      const accepted = handleSubmit(text, images, commitComposerAccepted);
+      const accepted = handleSubmit(
+        text,
+        images,
+        commitComposerAccepted,
+        metadata,
+      );
       if (accepted !== false) {
         resumeChatBottomFollow('smooth');
       }
@@ -5304,6 +5385,7 @@ export function App({
                 className={[
                   styles.mobileDrawer,
                   mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
+                  forceMobileDrawer ? styles.mobileDrawerForced : undefined,
                 ]
                   .filter(Boolean)
                   .join(' ')}
@@ -5351,6 +5433,8 @@ export function App({
                   sessionListReloadToken={sessionListReloadToken}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={setSelectedWorkspaceCwd}
+                  branding={sidebarOptions.branding}
+                  footer={sidebarOptions.footer}
                 />
               </div>
             )}
@@ -5367,6 +5451,7 @@ export function App({
                 .join(' ')}
             >
               {sidebarOptions.enabled &&
+                sidebarOptions.showCompactToggle &&
                 !activePanel &&
                 mainView === 'chat' && (
                   <button
@@ -5379,7 +5464,10 @@ export function App({
                     ]
                       .filter(Boolean)
                       .join(' ')}
-                    onClick={() => setMobileDrawerOpen((open) => !open)}
+                    onClick={() => {
+                      setForceMobileDrawer(false);
+                      setMobileDrawerOpen((open) => !open);
+                    }}
                     aria-label={t('sidebar.toggleMenu')}
                     aria-expanded={mobileDrawerOpen}
                   >
@@ -5880,6 +5968,7 @@ export function App({
                           onClearQueuedMessages={clearQueuedPrompts}
                           currentMode={currentMode}
                           currentModel={currentModel}
+                          gitBranch={connection.gitBranch}
                           chatWidthMode={chatWidthMode}
                           showChatWidthToggle={!isChatEmptyState}
                           chatWidthToggleMin={chatWidthToggleMin}

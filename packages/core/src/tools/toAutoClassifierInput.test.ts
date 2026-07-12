@@ -23,6 +23,7 @@ function minimalConfig(over: Partial<Record<string, unknown>> = {}): Config {
   return {
     getTargetDir: () => '/Users/test/project',
     getModelInvocableCommandsExecutor: () => undefined,
+    getShellDefaultTimeoutMs: () => undefined,
     ...over,
   } as unknown as Config;
 }
