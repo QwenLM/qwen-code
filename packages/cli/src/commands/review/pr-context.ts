@@ -94,6 +94,25 @@ function snippet(s: string | undefined, max = 240): string {
   return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1) + '…';
 }
 
+/** Cap a full review body; the cut names the review id so the tail stays fetchable. */
+const FULL_BODY_CAP = 8000;
+export function fullBody(s: string | undefined, id?: number): string {
+  const body = (s ?? '').trim();
+  if (body.length <= FULL_BODY_CAP) return body;
+  const ref =
+    id !== undefined
+      ? `gh api repos/{owner}/{repo}/pulls/{n}/reviews/${id}`
+      : 'the reviews API';
+  return `${body.slice(0, FULL_BODY_CAP)}\n\n_(truncated at ${FULL_BODY_CAP} chars — fetch ${ref} for the rest; a body read in part is \`cannot tell\`, not "no Critical in it")_`;
+}
+
+function quoteBlock(s: string): string {
+  return s
+    .split('\n')
+    .map((l) => `> ${l}`)
+    .join('\n');
+}
+
 /**
  * Walk a comment's `in_reply_to_id` chain up to the root. Defends against
  * cycles (which shouldn't happen on GitHub but cheap to handle).
@@ -159,7 +178,18 @@ export function buildMarkdown(
   const roots = inline.filter(
     (c) => c.in_reply_to_id === undefined || c.in_reply_to_id === null,
   );
-  const repliedRoots = roots.filter((c) => repliesByRoot.has(c.id));
+  const allRepliedRoots = roots.filter((c) => repliesByRoot.has(c.id));
+  // A reply alone does not retire a blocker — "I disagree" is a reply. Any
+  // replied thread whose root is a Critical finding is pulled out of
+  // "Already discussed" into its own mandatory re-check section. Matching
+  // on the marker is fail-safe in this direction: a third party embedding
+  // it can only ADD their thread to the re-check list, never hide one.
+  const repliedCriticalRoots = allRepliedRoots.filter((c) =>
+    (c.body ?? '').includes('[Critical]'),
+  );
+  const repliedRoots = allRepliedRoots.filter(
+    (c) => !(c.body ?? '').includes('[Critical]'),
+  );
   const openRoots = roots.filter((c) => !repliesByRoot.has(c.id));
 
   const parts: string[] = [];
@@ -202,13 +232,20 @@ export function buildMarkdown(
   if (meaningfulReviews.length > 0) {
     parts.push('## Review summaries (reviewer-level overall comments)');
     parts.push('');
+    parts.push(
+      '> Bodies are rendered in full: an unmappable or 422-relocated blocker lives ONLY here, and a truncated rendering once hid one from the re-check. A body cut at the cap names the review id to fetch for the rest.',
+    );
+    parts.push('');
     for (const r of meaningfulReviews) {
       const date = (r.submitted_at ?? '').slice(0, 10);
+      const idNote = r.id !== undefined ? ` (review ${r.id})` : '';
       parts.push(
-        `- **@${r.user?.login ?? '?'}** [${r.state ?? 'COMMENTED'}]${date ? ` ${date}` : ''}: ${snippet(r.body)}`,
+        `### @${r.user?.login ?? '?'} [${r.state ?? 'COMMENTED'}]${date ? ` ${date}` : ''}${idNote}`,
       );
+      parts.push('');
+      parts.push(quoteBlock(fullBody(r.body, r.id)));
+      parts.push('');
     }
-    parts.push('');
   }
 
   // Open threads come first. `read_file` stops at `truncateToolOutputThreshold`
@@ -228,6 +265,37 @@ export function buildMarkdown(
       );
     }
     parts.push('');
+  }
+
+  // Replied Criticals — rendered before the settled threads because the
+  // Step 6 re-check must rule on every one of them (still stands / fixed by
+  // this diff / cannot tell); a reply alone never settles a blocker.
+  if (repliedCriticalRoots.length > 0) {
+    parts.push(
+      '## Replied Criticals — a reply alone does NOT retire a blocker; the re-check must rule on each against the code',
+    );
+    parts.push('');
+    const sortedCrit = [...repliedCriticalRoots].sort((a, b) => {
+      const p = (a.path ?? '').localeCompare(b.path ?? '');
+      if (p !== 0) return p;
+      return (a.line ?? 0) - (b.line ?? 0);
+    });
+    for (const root of sortedCrit) {
+      const replies = repliesByRoot.get(root.id) ?? [];
+      parts.push(
+        `**\`${root.path ?? '?'}\`:${root.line ?? '?'}** — initiated by @${root.user?.login ?? '?'}`,
+      );
+      parts.push('');
+      parts.push(`> ${snippet(root.body, 1000)}`);
+      parts.push('');
+      if (replies.length > 0) {
+        parts.push('Replies (chronological):');
+        for (const r of replies) {
+          parts.push(`- **@${r.user?.login ?? '?'}**: ${snippet(r.body, 500)}`);
+        }
+        parts.push('');
+      }
+    }
   }
 
   // Already-discussed threads — render the full conversation so review
@@ -343,8 +411,24 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   const meaningfulReviewCount = reviews.filter((r) =>
     isReviewWorthShowing(r.body),
   ).length;
+  const repliedCriticalCount = (() => {
+    const byId = new Map<number, RawComment>();
+    for (const c of inline) byId.set(c.id, c);
+    const replied = new Set<number>();
+    for (const c of inline) {
+      if (c.in_reply_to_id !== undefined && c.in_reply_to_id !== null) {
+        replied.add(findRootId(c.in_reply_to_id, byId));
+      }
+    }
+    return inline.filter(
+      (c) =>
+        (c.in_reply_to_id === undefined || c.in_reply_to_id === null) &&
+        replied.has(c.id) &&
+        (c.body ?? '').includes('[Critical]'),
+    ).length;
+  })();
   writeStdoutLine(
-    `Wrote PR context to ${out} (${inline.length} inline, ${issue.length} issue comments, ${meaningfulReviewCount}/${reviews.length} review summaries)`,
+    `Wrote PR context to ${out} (${inline.length} inline, ${issue.length} issue comments, ${repliedCriticalCount} replied Critical(s), ${meaningfulReviewCount}/${reviews.length} review summaries — review bodies rendered in full)`,
   );
 
   // A reader that stops at the threshold loses the tail in silence: `read_file`

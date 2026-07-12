@@ -10,9 +10,20 @@
 
 import { execFileSync } from 'node:child_process';
 
-/** Run `gh` with args. Returns stdout, trimmed and CRLF-normalised. */
+/**
+ * Run `gh` with args. Returns stdout, trimmed and CRLF-normalised.
+ *
+ * `maxBuffer` is raised well past Node's 1 MiB default: paginated fetches
+ * on comment-heavy PRs routinely exceed it, and the resulting ENOBUFS kills
+ * the subcommand mid-review (observed twice on a 43-file PR whose comments
+ * crossed the megabyte). 64 MiB is far above any real PR payload while
+ * still bounding a runaway response.
+ */
 export function gh(...args: string[]): string {
-  return execFileSync('gh', args, { encoding: 'utf8' })
+  return execFileSync('gh', args, {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  })
     .replace(/\r\n/g, '\n')
     .trim();
 }

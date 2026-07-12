@@ -271,6 +271,8 @@ For same-repo reviews, results are saved as a Markdown file in your project's `.
 
 Reports include: timestamp, diff stats, build/test results, all findings with verification status, and the verdict.
 
+The deterministic halves of the pipeline — argument parsing (`qwen review parse-args`) and the event/body decision (`qwen review compose-review`) — are tested subcommands rather than prompt text, so `--effort` grammar, `--comment` forcing, verdict caps, and downgrade behavior are pinned by unit tests and cannot drift with the model.
+
 ## Cross-file Impact Analysis
 
 A dedicated cross-file tracer (Agent 1c) owns this walk end-to-end. When code changes modify exported functions, classes, or interfaces, it searches for all callers and checks compatibility:
