@@ -103,7 +103,9 @@ export function useBranchCommand(
       let prevSessionData: ResumedSessionData | undefined;
 
       try {
-        // 1. Flush outgoing recorder. Must happen BEFORE the parent snapshot
+        // 1. Flush outgoing recorder. A degraded source must not fork because
+        //    the visible, unpersisted tail would be silently missing.
+        //    It must happen BEFORE the parent snapshot
         //    so the snapshot captures `finalize()`'s trailing custom_title
         //    record — without that, a rollback restores the recorder with
         //    a stale `lastCompletedUuid` and the next user message attaches
