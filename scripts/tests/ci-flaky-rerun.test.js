@@ -58,6 +58,9 @@ function runner() {
     async currentHeadSha() {
       return 'abc123';
     },
+    async isCurrentFailure() {
+      return true;
+    },
     async behindBy() {
       return 1;
     },
@@ -187,6 +190,7 @@ describe('ci flaky rerun patrol', () => {
     });
 
     expect(client.calls).toEqual([
+      ['rerunFailedJobs', 123],
       [
         'comment',
         42,
@@ -194,11 +198,24 @@ describe('ci flaky rerun patrol', () => {
           'qwen-ci-flaky-rerun v=1 pr=42 head=abc123 run=123',
         ),
       ],
-      ['rerunFailedJobs', 123],
     ]);
   });
 
-  it('does not rerun when recording the handled marker fails', async () => {
+  it('does not act when the failed run is no longer current', async () => {
+    const client = runner();
+    client.isCurrentFailure = async () => false;
+
+    await actOnDecision(client, selectTarget([pr()], { now: NOW }), {
+      action: 'rerun',
+      confidence: 'high',
+      reason_en: 'The log shows a runner network timeout.',
+      reason_zh: '日志显示 runner 网络超时。',
+    });
+
+    expect(client.calls).toEqual([]);
+  });
+
+  it('records a marker only after rerunning failed jobs', async () => {
     const client = runner();
     client.comment = async () => {
       throw new Error('comment failed');
@@ -214,7 +231,7 @@ describe('ci flaky rerun patrol', () => {
       }),
     ).rejects.toThrow('comment failed');
 
-    expect(client.calls).toEqual([]);
+    expect(client.calls).toEqual([['rerunFailedJobs', 123]]);
   });
 
   it('updates a still-behind branch only for a high-confidence skill decision', async () => {
@@ -229,6 +246,7 @@ describe('ci flaky rerun patrol', () => {
     });
 
     expect(client.calls).toEqual([
+      ['updateBranch', 42, 'abc123'],
       [
         'comment',
         42,
@@ -236,7 +254,6 @@ describe('ci flaky rerun patrol', () => {
           'qwen-ci-flaky-rerun v=1 pr=42 head=abc123 run=123',
         ),
       ],
-      ['updateBranch', 42, 'abc123'],
     ]);
   });
 
@@ -346,6 +363,10 @@ describe('ci flaky rerun patrol', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('allows a bounded large job log before extracting the failure excerpt', () => {
+    expect(script).toContain('maxBuffer: 16 * 1024 * 1024');
   });
 
   it('sends only redacted failure lines to the skill', async () => {

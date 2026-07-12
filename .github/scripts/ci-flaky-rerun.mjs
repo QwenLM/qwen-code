@@ -156,8 +156,10 @@ export async function actOnDecision(client, target, decision) {
   if (decision?.confidence !== 'high') return;
   if (!['rerun', 'update_branch', 'comment'].includes(decision.action)) return;
   if ((await client.currentHeadSha(target.prNumber)) !== target.headSha) return;
+  if (!(await client.isCurrentFailure(target))) return;
 
   if (decision.action === 'rerun') {
+    await client.rerunFailedJobs(target.runId);
     await client.comment(
       target.prNumber,
       [
@@ -166,12 +168,12 @@ export async function actOnDecision(client, target, decision) {
         markerFor(target),
       ].join('\n'),
     );
-    await client.rerunFailedJobs(target.runId);
     return;
   }
 
   if (decision.action === 'update_branch') {
     if ((await client.behindBy(target.headSha)) <= 0) return;
+    await client.updateBranch(target.prNumber, target.headSha);
     await client.comment(
       target.prNumber,
       [
@@ -180,7 +182,6 @@ export async function actOnDecision(client, target, decision) {
         markerFor(target),
       ].join('\n'),
     );
-    await client.updateBranch(target.prNumber, target.headSha);
     return;
   }
 
@@ -217,6 +218,7 @@ class GhClient {
   async gh(args, options = {}) {
     const { stdout } = await execFile('gh', args, {
       encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
       ...options,
     });
     return stdout;
@@ -285,6 +287,20 @@ class GhClient {
         '.headRefOid',
       ])
     ).trim();
+  }
+
+  async isCurrentFailure(target) {
+    const run = JSON.parse(
+      await this.gh([
+        'api',
+        `repos/${this.repo}/actions/runs/${target.runId}`,
+      ]),
+    );
+    return (
+      run.status === 'completed' &&
+      run.conclusion === 'failure' &&
+      run.head_sha === target.headSha
+    );
   }
 
   async behindBy(headSha) {
