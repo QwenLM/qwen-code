@@ -42,8 +42,11 @@ export function removeModelFromProviders(
 ): RemoveModelResult {
   // The caller's baseUrl comes from the providers status, which sanitizes
   // credential-bearing URLs — so prefer an exact id+baseUrl match but fall back
-  // to a unique id-only match, which keeps deletion working when the sanitized
-  // baseUrl no longer equals the stored one.
+  // to an id-only match, which keeps deletion working when the sanitized baseUrl
+  // no longer equals the stored one. The fallback takes the FIRST id match in
+  // iteration order; if a provider has multiple models sharing an id and the
+  // baseUrl matches none exactly, that first one is removed (an uncommon config,
+  // and the exact-match branch above covers the normal case).
   let idOnly: { key: string; index: number } | undefined;
   for (const [key, models] of Object.entries(modelProviders)) {
     if (!Array.isArray(models)) continue;

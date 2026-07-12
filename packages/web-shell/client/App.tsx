@@ -4953,7 +4953,16 @@ export function App({
       setModelActionBusy(true);
       workspaceActions
         .deleteModel(target)
-        .then(() => providersState.reload())
+        .then(() => {
+          // A transient reload failure shouldn't surface as "delete failed" —
+          // the model was already removed. Just log it.
+          providersState.reload().catch((err: unknown) => {
+            console.warn(
+              '[web-shell] failed to reload providers after delete',
+              err,
+            );
+          });
+        })
         .catch((error: unknown) => {
           reportError(error, t('settings.models.deleteFailed'));
         })
@@ -5071,13 +5080,14 @@ export function App({
   };
 
   // Once every settings-launched model surface is closed (the model picker via
-  // modelDialogMode, or the fallbacks dialog), reset the persist scope so a
-  // later command-launched picker defaults back to workspace.
+  // modelDialogMode, the fallbacks dialog, or the Add Model / auth dialog),
+  // reset the persist scope so a later command-launched picker defaults back
+  // to workspace.
   useEffect(() => {
-    if (!modelDialogMode && !showFallbacksDialog) {
+    if (!modelDialogMode && !showFallbacksDialog && !showAuthDialog) {
       setModelSettingScope('workspace');
     }
-  }, [modelDialogMode, showFallbacksDialog]);
+  }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
 
   const commands = useMemo(() => {
     return localizeBuiltinDescriptions(

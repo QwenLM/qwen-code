@@ -149,3 +149,11 @@
   opacity: 0.5;
   cursor: default;
 }
+
+.addButton:focus-visible,
+.actionButton:focus-visible,
+.deleteButton:focus-visible,
+.confirmButton:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}

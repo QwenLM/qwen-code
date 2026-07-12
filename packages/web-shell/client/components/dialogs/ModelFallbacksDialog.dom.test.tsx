@@ -54,7 +54,7 @@ function renderDialog(overrides: Partial<ModelFallbacksDialogProps> = {}) {
 
 function options(container: HTMLElement): HTMLButtonElement[] {
   return Array.from(
-    container.querySelectorAll<HTMLButtonElement>('[role="option"]'),
+    container.querySelectorAll<HTMLButtonElement>('button[aria-pressed]'),
   );
 }
 

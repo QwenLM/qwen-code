@@ -70,7 +70,7 @@ describe('DELETE /workspace/models', () => {
         openai: [{ id: 'gpt-4o' }, { id: 'deepseek-v4' }],
       },
     });
-    const { app, persistSettings } = makeApp();
+    const { app, persistSettings, broadcastSettingsChanged } = makeApp();
 
     const res = await request(app)
       .delete('/workspace/models')
@@ -82,6 +82,12 @@ describe('DELETE /workspace/models', () => {
       clearedActiveModel: false,
     });
     expect(persistSettings).toHaveBeenCalledTimes(1);
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'modelProviders',
+      { openai: [{ id: 'deepseek-v4' }] },
+      'user',
+      undefined,
+    );
     const saved = readUserSettings();
     expect(saved['modelProviders']).toEqual({
       openai: [{ id: 'deepseek-v4' }],
@@ -119,6 +125,29 @@ describe('DELETE /workspace/models', () => {
     expect(persistSettings).not.toHaveBeenCalled();
   });
 
+  it('clears the active model by base id even when a baseUrl is pinned', async () => {
+    writeUserSettings({
+      modelProviders: {
+        openai: [{ id: 'gpt-4o', baseUrl: 'https://api.openai.com' }],
+      },
+      model: { name: 'gpt-4o', baseUrl: 'https://api.openai.com' },
+    });
+    const { app } = makeApp();
+
+    const res = await request(app).delete('/workspace/models').send({
+      authType: 'openai',
+      modelId: 'gpt-4o',
+      baseUrl: 'https://api.openai.com',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.clearedActiveModel).toBe(true);
+    const saved = readUserSettings();
+    const model = saved['model'] as { name?: string; baseUrl?: string };
+    expect(model.name).toBe('');
+    expect(model.baseUrl).toBe('');
+  });
+
   it('rejects a request missing modelId', async () => {
     writeUserSettings({ modelProviders: { openai: [{ id: 'gpt-4o' }] } });
     const { app, persistSettings } = makeApp();
@@ -130,5 +159,38 @@ describe('DELETE /workspace/models', () => {
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ code: 'invalid_model_id' });
     expect(persistSettings).not.toHaveBeenCalled();
+  });
+
+  const invalidCases: Array<[Record<string, unknown>, string]> = [
+    [{ modelId: 'gpt-4o' }, 'invalid_auth_type'],
+    [
+      { authType: 'openai', modelId: 'gpt-4o', baseUrl: 42 },
+      'invalid_base_url',
+    ],
+    [{ authType: 'a'.repeat(2000), modelId: 'gpt-4o' }, 'invalid_field'],
+  ];
+  it.each(invalidCases)('rejects invalid input (%o)', async (payload, code) => {
+    writeUserSettings({ modelProviders: { openai: [{ id: 'gpt-4o' }] } });
+    const { app, persistSettings } = makeApp();
+
+    const res = await request(app).delete('/workspace/models').send(payload);
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ code });
+    expect(persistSettings).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 when persistence fails', async () => {
+    writeUserSettings({ modelProviders: { openai: [{ id: 'gpt-4o' }] } });
+    const { app, persistSettings, broadcastSettingsChanged } = makeApp();
+    persistSettings.mockRejectedValueOnce(new Error('disk full'));
+
+    const res = await request(app)
+      .delete('/workspace/models')
+      .send({ authType: 'openai', modelId: 'gpt-4o' });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({ code: 'internal_error' });
+    expect(broadcastSettingsChanged).not.toHaveBeenCalled();
   });
 });

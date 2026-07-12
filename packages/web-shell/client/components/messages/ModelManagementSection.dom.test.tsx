@@ -120,13 +120,12 @@ describe('ModelManagementSection', () => {
 
   it('deletes a model after confirmation, passing base id + baseUrl', () => {
     const { container, props } = renderSection();
-    // GPT-4o is current so no delete confirm race; delete DeepSeek V4 instead.
-    // First Delete button belongs to GPT-4o (current), but current models keep
-    // their delete button; click DeepSeek's by finding the second one.
+    // GPT-4o and DeepSeek are deletable (not runtime); runtime-model is not.
+    // deletes[0] is GPT-4o (first in DOM order) — current models keep their
+    // Delete button, so deleting it is valid and is what this asserts.
     const deletes = Array.from(
       container.querySelectorAll<HTMLButtonElement>('button'),
     ).filter((b) => b.textContent?.trim() === 'Delete');
-    // GPT-4o and DeepSeek are deletable (not runtime); runtime-model is not.
     expect(deletes).toHaveLength(2);
     act(() => deletes[0]!.click());
     // Confirm now visible.
@@ -140,9 +139,19 @@ describe('ModelManagementSection', () => {
 
   it('does not offer delete for runtime models', () => {
     const { container } = renderSection();
-    // 3 models, runtime one excluded → only 2 delete buttons (asserted above);
-    // ensure the runtime model row rendered but has no Delete.
-    expect(container.textContent).toContain('Runtime Model');
+    // Scope to the runtime model's row (span.modelName → div.modelInfo →
+    // div.modelRow) and assert it offers "Set current" but not "Delete",
+    // rather than just checking the row rendered.
+    const nameEl = Array.from(container.querySelectorAll('span')).find(
+      (s) => s.textContent === 'Runtime Model',
+    );
+    expect(nameEl).toBeTruthy();
+    const row = nameEl!.parentElement!.parentElement!;
+    const labels = Array.from(row.querySelectorAll('button')).map((b) =>
+      b.textContent?.trim(),
+    );
+    expect(labels).not.toContain('Delete');
+    expect(labels).toContain('Set current');
   });
 
   it('triggers add', () => {

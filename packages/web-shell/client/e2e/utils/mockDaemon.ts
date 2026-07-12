@@ -527,6 +527,10 @@ async function handleDaemonRoute(
     });
     return;
   }
+  if (method === 'DELETE' && path === '/workspace/models') {
+    await json(route, { removed: true, clearedActiveModel: false });
+    return;
+  }
   if (method === 'GET' && path === '/workspace/tools') {
     await json(route, workspaceTools(scenario));
     return;
