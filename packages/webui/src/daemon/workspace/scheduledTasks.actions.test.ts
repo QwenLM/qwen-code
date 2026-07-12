@@ -105,4 +105,62 @@ describe('scheduled-tasks workspace actions', () => {
       makeActions().createScheduledTask({ cron: 'x', prompt: 'p' }),
     ).rejects.toThrow(/bad cron/);
   });
+
+  describe('workspace-qualified targeting', () => {
+    it('lists a named workspace via the qualified route', async () => {
+      fetchMock.mockResolvedValue(ok({ v: 1, tasks: [] }));
+      await makeActions().listScheduledTasks('ws-2');
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        '/workspaces/ws-2/scheduled-tasks',
+      );
+    });
+
+    it('creates in a named workspace via the qualified route', async () => {
+      fetchMock.mockResolvedValue(ok({ id: 'x' }));
+      await makeActions().createScheduledTask(
+        { cron: '0 9 * * *', prompt: 'p' },
+        'ws-2',
+      );
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        '/workspaces/ws-2/scheduled-tasks',
+      );
+      expect(initOf(fetchMock.mock.calls[0]).method).toBe('POST');
+    });
+
+    it('patches / runs / deletes a task in a named workspace', async () => {
+      fetchMock.mockResolvedValue(ok({ id: 'a' }));
+      await makeActions().updateScheduledTask('a', { enabled: false }, 'ws-2');
+      await makeActions().runScheduledTask('a', 'ws-2');
+      await makeActions().deleteScheduledTask('a', 'ws-2');
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        '/workspaces/ws-2/scheduled-tasks/a',
+      );
+      expect(fetchMock.mock.calls[1][0]).toBe(
+        '/workspaces/ws-2/scheduled-tasks/a/run',
+      );
+      expect(fetchMock.mock.calls[2][0]).toBe(
+        '/workspaces/ws-2/scheduled-tasks/a',
+      );
+    });
+
+    it('url-encodes both the workspace selector and the task id', async () => {
+      fetchMock.mockResolvedValue(ok({ id: 'a' }));
+      await makeActions().updateScheduledTask(
+        'a/b',
+        { enabled: false },
+        '/abs/path',
+      );
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        '/workspaces/%2Fabs%2Fpath/scheduled-tasks/a%2Fb',
+      );
+    });
+
+    it('falls back to the primary (unqualified) route when omitted', async () => {
+      fetchMock.mockResolvedValue(ok({ v: 1, tasks: [] }));
+      await makeActions().listScheduledTasks();
+      await makeActions().listScheduledTasks(undefined);
+      expect(fetchMock.mock.calls[0][0]).toBe('/scheduled-tasks');
+      expect(fetchMock.mock.calls[1][0]).toBe('/scheduled-tasks');
+    });
+  });
 });

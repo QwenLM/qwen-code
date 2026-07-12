@@ -687,6 +687,8 @@ const EN: Messages = {
   'scheduledTasks.chatStarter':
     'Help me set up a recurring scheduled task (keep it long-term). What I want: ',
   'scheduledTasks.name': 'Name',
+  'scheduledTasks.workspace': 'Workspace',
+  'scheduledTasks.workspacePrimaryTag': '(primary)',
   'scheduledTasks.taskId': 'Task ID',
   'scheduledTasks.schedule': 'Schedule',
   'scheduledTasks.type': 'Type',
@@ -2447,6 +2449,8 @@ const ZH: Messages = {
   'scheduledTasks.createViaChat': '通过聊天创建',
   'scheduledTasks.chatStarter': '帮我创建一个长期保留的定时任务，我想：',
   'scheduledTasks.name': '名称',
+  'scheduledTasks.workspace': '工作区',
+  'scheduledTasks.workspacePrimaryTag': '（主）',
   'scheduledTasks.taskId': '任务 ID',
   'scheduledTasks.schedule': '计划',
   'scheduledTasks.type': '类型',
