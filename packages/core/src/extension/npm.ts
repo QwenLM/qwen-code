@@ -279,6 +279,17 @@ function downloadNpmFileRedirect(
   const client = clientForUrl(url);
 
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
     signal?.throwIfAborted();
     const requestGeneration = ++context.requestGeneration;
     const req = client
@@ -296,7 +307,7 @@ function downloadNpmFileRedirect(
             } catch (error) {
               res.destroy();
               context.activeResponse = undefined;
-              reject(error);
+              fail(error);
               return;
             }
             const originalOrigin = new URL(url).origin;
@@ -311,17 +322,18 @@ function downloadNpmFileRedirect(
               redirectToken,
               signal,
             )
-              .then(resolve)
-              .catch(reject);
+              .then(finish)
+              .catch(fail);
             return;
           }
         }
         if (res.statusCode !== 200) {
-          return reject(
+          fail(
             new Error(
               `Failed to download npm tarball: status ${res.statusCode}`,
             ),
           );
+          return;
         }
         const file = fs.createWriteStream(dest);
         context.activeFile = file;
@@ -331,26 +343,27 @@ function downloadNpmFileRedirect(
           if (bytesWritten > NPM_ARCHIVE_DOWNLOAD_MAX_BYTES) {
             res.destroy();
             file.destroy();
-            reject(
+            fail(
               new Error(
                 `npm extension archive download exceeded maximum size of ${NPM_ARCHIVE_DOWNLOAD_MAX_BYTES} bytes`,
               ),
             );
+            return;
           }
         });
         res.on('error', (error) => {
           file.destroy();
-          reject(error);
+          fail(error);
         });
         file.on('error', (error) => {
           res.destroy();
-          reject(error);
+          fail(error);
         });
         res.pipe(file);
-        file.on('finish', () => file.close(() => resolve()));
+        file.on('finish', () => file.close(finish));
       })
       .on('error', (error) => {
-        reject(signal?.aborted ? signal.reason : error);
+        fail(signal?.aborted ? signal.reason : error);
       });
     if (requestGeneration === context.requestGeneration) {
       context.activeRequest = req;

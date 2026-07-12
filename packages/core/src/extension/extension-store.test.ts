@@ -1078,7 +1078,7 @@ describe('ExtensionStore', () => {
   });
 
   it.each(['destination', 'backup', 'staging', 'transaction-id'] as const)(
-    'fails closed for a journal with a hostile %s path',
+    'quarantines a journal with a hostile %s path',
     async (kind) => {
       const store = makeStore();
       const identity = { id: 'd5'.repeat(32), name: 'demo' };
@@ -1121,11 +1121,18 @@ describe('ExtensionStore', () => {
         }),
       );
 
-      await expect(store.readSnapshot()).rejects.toBeInstanceOf(
-        ExtensionStoreCorruptError,
-      );
+      await expect(store.readSnapshot()).resolves.toMatchObject({
+        generation: 0,
+      });
       expect(await fsp.readFile(sentinel, 'utf8')).toBe('preserve');
-      expect(fs.existsSync(journal)).toBe(true);
+      expect(fs.existsSync(journal)).toBe(false);
+      expect(
+        (await fsp.readdir(path.dirname(journal))).some(
+          (name) =>
+            name.startsWith(`${path.basename(journal)}.`) &&
+            name.endsWith('.corrupt'),
+        ),
+      ).toBe(true);
     },
   );
 

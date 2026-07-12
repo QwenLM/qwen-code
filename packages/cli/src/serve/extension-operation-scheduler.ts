@@ -37,7 +37,9 @@ export function createFifoTaskQueue(limit: number): FifoTaskQueue {
   const pump = (): void => {
     while (active < limit && queued.length > 0) {
       const item = queued.shift()!;
-      item.removeAbortListener?.();
+      const removeAbortListener = item.removeAbortListener;
+      item.removeAbortListener = undefined;
+      removeAbortListener?.();
       if (item.signal?.aborted) {
         item.reject(abortReason(item.signal));
         continue;

@@ -1097,10 +1097,7 @@ export class ExtensionStore {
     try {
       return await this.readJournalUnlocked(journalPath);
     } catch (error) {
-      if (
-        !(error instanceof ExtensionStoreCorruptError) ||
-        error instanceof UnsafeRecoveredJournalError
-      ) {
+      if (!(error instanceof ExtensionStoreCorruptError)) {
         throw error;
       }
       const quarantinePath = `${journalPath}.${crypto.randomUUID()}.corrupt`;
