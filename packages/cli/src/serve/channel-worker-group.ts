@@ -199,6 +199,12 @@ export function createChannelWorkerGroup(
                 entryGeneration
               ) {
                 opts.onReady!(withRuntimeMeta(snapshot));
+              } else {
+                opts.onLog?.({
+                  stream: 'stderr',
+                  line: `Ignored stale channel worker ready (generation=${entryGeneration}).`,
+                  workspaceCwd: runtime.workspaceCwd,
+                });
               }
             },
           }

@@ -295,8 +295,9 @@ describe('createChannelWorkerManager', () => {
     expect(test.releaseLease).not.toHaveBeenCalled();
   });
 
-  it('keeps stopped worker state available when lease release fails and retries', async () => {
-    const test = setup();
+  it('clears a confirmed-stopped group when lease release fails and retries', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
     await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
     test.releaseLease.mockImplementationOnce(() => {
       throw new Error('lease owner changed');
@@ -308,13 +309,35 @@ describe('createChannelWorkerManager', () => {
     expect(test.manager.state()).toMatchObject({
       enabled: true,
       selection: { mode: 'names', names: ['telegram'] },
+      workers: [],
     });
 
     await expect(test.manager.stopSelection()).resolves.toMatchObject({
       changed: true,
       state: { enabled: false },
     });
+    expect(group.stop).toHaveBeenCalledTimes(1);
     expect(test.releaseLease).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects webhook work after shutdown latches', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
+
+    await test.manager.shutdown();
+
+    await expect(
+      test.manager.enqueueWebhookTask({
+        channelName: 'telegram',
+        source: 'alerts',
+        eventType: 'failed',
+        targetRef: 'default',
+        title: 'Build failed',
+        payload: {},
+      }),
+    ).rejects.toMatchObject({ code: 'channel_worker_unavailable' });
+    expect(group.enqueueWebhookTask).not.toHaveBeenCalled();
   });
 
   it('serializes mutations and rejects queued work once shutdown latches', async () => {

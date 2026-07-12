@@ -14462,6 +14462,7 @@ describe('createServeApp', () => {
   describe('POST /channels/:channelName/webhooks/:source', () => {
     it('isolates webhook configs across workspace sources', async () => {
       const previousQwenHome = process.env['QWEN_HOME'];
+      const previousWebhookSecret = process.env['QWEN_SHARED_WEBHOOK_SECRET'];
       const tempHome = await fsp.mkdtemp(
         path.join(os.tmpdir(), 'qwen-channel-webhooks-multi-home-'),
       );
@@ -14473,9 +14474,9 @@ describe('createServeApp', () => {
       );
       try {
         process.env['QWEN_HOME'] = tempHome;
-        for (const [workspace, channel, secret] of [
-          [primary, 'primary-channel', 'primary-secret'],
-          [secondary, 'secondary-channel', 'secondary-secret'],
+        for (const [workspace, channel] of [
+          [primary, 'primary-channel'],
+          [secondary, 'secondary-channel'],
         ]) {
           const qwenDir = path.join(workspace, '.qwen');
           await fsp.mkdir(qwenDir);
@@ -14488,7 +14489,7 @@ describe('createServeApp', () => {
                   webhooks: {
                     sources: {
                       ci: {
-                        secret,
+                        secretEnv: 'QWEN_SHARED_WEBHOOK_SECRET',
                         targets: {
                           default: {
                             chatId: `${channel}-chat`,
@@ -14504,6 +14505,7 @@ describe('createServeApp', () => {
             'utf8',
           );
         }
+        process.env['QWEN_SHARED_WEBHOOK_SECRET'] = 'primary-secret';
         resetHomeEnvBootstrapForTesting();
 
         const enqueueChannelWebhookTask = vi.fn(async () => ({
@@ -14516,10 +14518,15 @@ describe('createServeApp', () => {
             bridge: fakeBridge(),
             enqueueChannelWebhookTask,
             channelWebhookConfigSources: [
-              { workspaceCwd: primary, channelNames: ['primary-channel'] },
+              {
+                workspaceCwd: primary,
+                channelNames: ['primary-channel'],
+                env: { QWEN_SHARED_WEBHOOK_SECRET: 'primary-secret' },
+              },
               {
                 workspaceCwd: secondary,
                 channelNames: ['secondary-channel'],
+                env: { QWEN_SHARED_WEBHOOK_SECRET: 'secondary-secret' },
               },
             ],
           },
@@ -14567,6 +14574,7 @@ describe('createServeApp', () => {
           fsp.rm(secondary, { recursive: true, force: true }),
         ]);
         restoreEnv('QWEN_HOME', previousQwenHome);
+        restoreEnv('QWEN_SHARED_WEBHOOK_SECRET', previousWebhookSecret);
         resetHomeEnvBootstrapForTesting();
       }
     });

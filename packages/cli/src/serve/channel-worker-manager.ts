@@ -364,13 +364,15 @@ export function createChannelWorkerManager(
         }
         setTransition('stopping');
         try {
-          if (group) await group.stop();
+          if (group) {
+            await group.stop();
+            group = undefined;
+          }
           release();
         } catch (error) {
           setTransition('idle');
           throw classifyFailure(error, 'channel_worker_stop_failed');
         }
-        group = undefined;
         commit(undefined, []);
         return { changed: hadState, state: snapshot() };
       });
@@ -416,11 +418,13 @@ export function createChannelWorkerManager(
     primarySnapshot: () => group?.primarySnapshot() ?? { ...DISABLED_SNAPSHOT },
     snapshots: () => group?.snapshots() ?? [],
     enqueueWebhookTask(task) {
-      if (!group) {
+      if (!group || draining) {
         return Promise.reject(
           new ChannelWebhookEnqueueError(
             'channel_worker_unavailable',
-            'Channel worker is not running.',
+            draining
+              ? 'Daemon is shutting down.'
+              : 'Channel worker is not running.',
           ),
         ) as ReturnType<ChannelWorkerGroup['enqueueWebhookTask']>;
       }
@@ -432,13 +436,15 @@ export function createChannelWorkerManager(
       return enqueue(async () => {
         if (group || leaseReserved) setTransition('stopping');
         try {
-          if (group) await group.stop();
+          if (group) {
+            await group.stop();
+            group = undefined;
+          }
           release();
         } catch (error) {
           setTransition('idle');
-          throw error;
+          throw classifyFailure(error, 'channel_worker_stop_failed');
         }
-        group = undefined;
         commit(undefined, []);
       });
     },

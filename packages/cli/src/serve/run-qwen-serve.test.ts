@@ -5206,6 +5206,8 @@ describe('runQwenServe channel worker supervisor', () => {
   });
 
   it('orchestrates and persists distinct workers for multiple workspaces', async () => {
+    const previousSharedSecret = process.env['QWEN_SHARED_WEBHOOK_SECRET'];
+    process.env['QWEN_SHARED_WEBHOOK_SECRET'] = 'primary-secret';
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-groups-')),
     );
@@ -5220,7 +5222,7 @@ describe('runQwenServe channel worker supervisor', () => {
       webhooks: {
         sources: {
           'github-ci': {
-            secret: 'secondary-secret',
+            secretEnv: 'QWEN_SHARED_WEBHOOK_SECRET',
             targets: {
               default: {
                 chatId: 'group-1',
@@ -5253,6 +5255,21 @@ describe('runQwenServe channel worker supervisor', () => {
           },
         } as unknown as ReturnType<typeof settingsRuntime.loadSettings>;
       },
+    );
+    vi.spyOn(environmentRuntime, 'buildRuntimeEnvironment').mockImplementation(
+      (_settings, workspace, baseEnv) => ({
+        effectiveEnv: Object.freeze({
+          ...baseEnv,
+          QWEN_SHARED_WEBHOOK_SECRET:
+            canonicalizeWorkspace(workspace ?? process.cwd()) === secondaryCwd
+              ? 'secondary-secret'
+              : 'primary-secret',
+        }),
+        overlayKeys: Object.freeze(['QWEN_SHARED_WEBHOOK_SECRET']),
+        envFilePaths: Object.freeze([]),
+        envFileReadFailed: false,
+        envFileReadFailures: Object.freeze([]),
+      }),
     );
     vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
       effective: { state: 'trusted' },
@@ -5337,6 +5354,20 @@ describe('runQwenServe channel worker supervisor', () => {
     );
 
     try {
+      const crossWorkspaceSecretResponse = await fetch(
+        `${handle.url}/channels/feishu/webhooks/github-ci`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-qwen-webhook-secret': 'primary-secret',
+          },
+          body: JSON.stringify({ eventType: 'check_failed' }),
+        },
+      );
+      expect(crossWorkspaceSecretResponse.status).toBe(401);
+      expect(supervisorFactory).not.toHaveBeenCalled();
+
       const webhookResponse = await fetch(
         `${handle.url}/channels/feishu/webhooks/github-ci`,
         {
@@ -5419,6 +5450,11 @@ describe('runQwenServe channel worker supervisor', () => {
       ).not.toHaveProperty('workerPid');
     } finally {
       await handle.close();
+      if (previousSharedSecret === undefined) {
+        delete process.env['QWEN_SHARED_WEBHOOK_SECRET'];
+      } else {
+        process.env['QWEN_SHARED_WEBHOOK_SECRET'] = previousSharedSecret;
+      }
     }
   });
 

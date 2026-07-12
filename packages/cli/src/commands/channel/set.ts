@@ -96,10 +96,19 @@ export const setCommand: CommandModule<unknown, SetArgs> = {
       names[0] === 'all'
         ? ({ mode: 'all' } as const)
         : ({ mode: 'names', names } as const);
+    let sdk: DaemonSdkLike;
     try {
-      const sdk = (await import(
-        '@qwen-code/sdk/daemon'
-      )) as unknown as DaemonSdkLike;
+      sdk = (await import('@qwen-code/sdk/daemon')) as unknown as DaemonSdkLike;
+    } catch (error) {
+      writeStderrLine(
+        `[Channel] Failed to load daemon SDK: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      process.exit(1);
+      return;
+    }
+    try {
       const client = new sdk.DaemonClient({
         baseUrl,
         ...(token ? { token } : {}),

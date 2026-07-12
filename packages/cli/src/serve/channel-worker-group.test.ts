@@ -795,10 +795,12 @@ describe('createChannelWorkerGroup', () => {
     await group.reconcile([
       { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['c'] } },
     ]);
+    recorded[0]!.onReady?.(snapshot({ state: 'running' }));
     recorded[0]!.onExit?.(snapshot({ state: 'exited' }));
 
     expect(onReady).not.toHaveBeenCalled();
     expect(onExit).not.toHaveBeenCalled();
+    expect(onLog).toHaveBeenCalledTimes(2);
     expect(onLog).toHaveBeenCalledWith(
       expect.objectContaining({
         workspaceCwd: PRIMARY,

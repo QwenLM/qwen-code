@@ -88,6 +88,7 @@ import type {
   WorkspaceRuntime,
 } from './workspace-registry.js';
 import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
+import type { ChannelWebhookConfigSource } from './server.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
@@ -1473,7 +1474,7 @@ function isChannelWebhookRequest(req: Request): boolean {
 }
 
 function createDeferredChannelWebhookAuth(
-  resolveWorkspace: (channelName: string) => string,
+  resolveSource: (channelName: string) => ChannelWebhookConfigSource,
   runtime: ChannelWebhookConfigRuntime,
   daemonLog: Pick<DaemonLogger, 'warn'>,
 ): RequestHandler {
@@ -1491,11 +1492,13 @@ function createDeferredChannelWebhookAuth(
       return;
     }
 
+    const configSource = resolveSource(channelName);
     const secret = readDeferredWebhookSecret(
       runtime,
-      resolveWorkspace(channelName),
+      configSource.workspaceCwd,
       channelName,
       source,
+      configSource.env,
     );
     if (!matchesWebhookSecret(req.get('x-qwen-webhook-secret'), secret)) {
       daemonLog.warn('deferred webhook auth failed', {
@@ -1527,6 +1530,7 @@ function readDeferredWebhookSecret(
   workspace: string,
   channelName: string,
   source: string,
+  env?: Readonly<Record<string, string | undefined>>,
 ): string | undefined {
   try {
     const rawConfig = runtime.loadChannelsConfig(workspace)[channelName];
@@ -1536,6 +1540,7 @@ function readDeferredWebhookSecret(
     return runtime.parseChannelWebhookConfig(
       channelName,
       rawConfig as Record<string, unknown>,
+      env,
     )?.sources[source]?.secret;
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
@@ -2379,23 +2384,40 @@ export async function runQwenServe(
   let channelWorkerManagerStarting: Promise<ChannelWorkerManager> | undefined;
   let channelControlDraining = false;
   let channelWorkspaceGroups: readonly ChannelWorkspaceGroup[] | undefined;
+  const channelWebhookEnvByWorkspace = new Map<
+    string,
+    Readonly<Record<string, string | undefined>>
+  >();
   let channelWebhookConfigVersion = 0;
   let refreshChannelWebhookConfigs: (() => void) | undefined;
   let ensureChannelWorkerManager:
     | (() => Promise<ChannelWorkerManager>)
     | undefined;
-  const getChannelWebhookConfigSources = () =>
-    (channelWorkspaceGroups ?? []).map((group) => ({
-      workspaceCwd: group.workspaceCwd,
-      ...(group.selection.mode === 'names'
-        ? { channelNames: group.selection.names }
-        : {}),
-    }));
-  const resolveChannelWebhookWorkspace = (channelName: string): string =>
+  const getChannelWebhookConfigSources = (): ChannelWebhookConfigSource[] => {
+    const app = runtimeApp ?? runtimeAppForCleanup;
+    const registry = app?.locals?.['workspaceRegistry'] as
+      | WorkspaceRegistry
+      | undefined;
+    return (channelWorkspaceGroups ?? []).map((group) => {
+      const env =
+        registry?.getByWorkspaceCwd(group.workspaceCwd)?.env.effectiveEnv ??
+        channelWebhookEnvByWorkspace.get(group.workspaceCwd);
+      return {
+        workspaceCwd: group.workspaceCwd,
+        ...(group.selection.mode === 'names'
+          ? { channelNames: group.selection.names }
+          : {}),
+        ...(env ? { env } : {}),
+      };
+    });
+  };
+  const resolveChannelWebhookConfigSource = (
+    channelName: string,
+  ): ChannelWebhookConfigSource =>
     getChannelWebhookConfigSources().find(
       (source) =>
         !source.channelNames || source.channelNames.includes(channelName),
-    )?.workspaceCwd ?? boundWorkspace;
+    ) ?? { workspaceCwd: boundWorkspace };
   let closeServerAfterChannelWorkerStartupFailure = false;
   let runtimeFailureListenerClose: Promise<void> | undefined;
   const getChannelWorkerSnapshot = (): ChannelWorkerSnapshot =>
@@ -3897,7 +3919,7 @@ export async function runQwenServe(
   });
   const deferredChannelWebhookAuth = deferRuntimeUntilFirstHealth
     ? createDeferredChannelWebhookAuth(
-        resolveChannelWebhookWorkspace,
+        resolveChannelWebhookConfigSource,
         await loadChannelWebhookConfigRuntime(),
         daemonLog,
       )
@@ -3960,14 +3982,12 @@ export async function runQwenServe(
     );
   }
 
-  const channelValidationSettingsRuntime =
-    opts.channelSelection && workspaceInputs.length > 1
-      ? await loadSettingsRuntimeModules()
-      : undefined;
+  const channelValidationSettingsRuntime = opts.channelSelection
+    ? await loadSettingsRuntimeModules()
+    : undefined;
   const resolveChannelWorkspaceGroupsAtListen = () => {
     if (
       !opts.channelSelection ||
-      workspaceInputs.length <= 1 ||
       !channelValidationSettingsRuntime ||
       !channelRuntime
     ) {
@@ -3977,11 +3997,34 @@ export async function runQwenServe(
       string,
       ReturnType<SettingsRuntime['loadSettings']>
     >();
+    if (workspaceInputs.length === 1) {
+      const workspace = workspaceInputs[0]!;
+      const settings = channelValidationSettingsRuntime.settings.loadSettings(
+        workspace.cwd,
+      );
+      channelWebhookEnvByWorkspace.set(
+        workspace.cwd,
+        channelValidationSettingsRuntime.environment.buildRuntimeEnvironment(
+          settings.merged,
+          workspace.cwd,
+          daemonRuntimeBaseEnv,
+        ).effectiveEnv,
+      );
+      return undefined;
+    }
     const workspaces = workspaceInputs.map((workspace, index) => {
       const settings = channelValidationSettingsRuntime.settings.loadSettings(
         workspace.cwd,
       );
       settingsByWorkspace.set(workspace.cwd, settings);
+      channelWebhookEnvByWorkspace.set(
+        workspace.cwd,
+        channelValidationSettingsRuntime.environment.buildRuntimeEnvironment(
+          settings.merged,
+          workspace.cwd,
+          daemonRuntimeBaseEnv,
+        ).effectiveEnv,
+      );
       const trusted =
         index === 0 && deps.trustedWorkspace !== undefined
           ? deps.trustedWorkspace

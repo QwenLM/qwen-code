@@ -264,6 +264,7 @@ function loadServeChannelWebhookConfigs(
               `[daemon] Skipping malformed webhook source "${webhookSource}" for channel "${channelName}": ${sourceMessage}`,
             );
           },
+          source.env,
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -299,6 +300,7 @@ function getRuntimeEffectiveEnv(
 export interface ChannelWebhookConfigSource {
   workspaceCwd: string;
   channelNames?: readonly string[];
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 export interface ServeAppDeps {
