@@ -236,6 +236,20 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(result.max_tokens).toBe(16384);
     });
 
+    it('should set the 128K output default for Claude Opus 4.8', () => {
+      const requestWithoutMaxTokens: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'vertex/claude-opus-4-8',
+        messages: [{ role: 'user', content: 'Hello' }],
+      };
+
+      const result = provider.buildRequest(
+        requestWithoutMaxTokens,
+        'prompt-id',
+      );
+
+      expect(result.max_tokens).toBe(128_000);
+    });
+
     it('should ignore malformed QWEN_CODE_MAX_OUTPUT_TOKENS values', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'gpt-4',

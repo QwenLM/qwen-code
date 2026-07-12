@@ -434,12 +434,17 @@ describe('parseChannelConfig', () => {
     expect(result.cwd).toBe(path.normalize(os.homedir()));
   });
 
-  it('resolves relative cwd against process.cwd', async () => {
-    const result = await parseChannelConfig('bot', {
-      type: 'bare',
-      cwd: 'relative/dir',
-    });
-    expect(result.cwd).toBe(path.resolve('relative/dir'));
+  it('resolves relative cwd against the default workspace', async () => {
+    const workspace = path.resolve('/workspace/project');
+    const result = await parseChannelConfig(
+      'bot',
+      {
+        type: 'bare',
+        cwd: 'relative/dir',
+      },
+      workspace,
+    );
+    expect(result.cwd).toBe(path.join(workspace, 'relative/dir'));
   });
 
   it('leaves absolute cwd unchanged', async () => {

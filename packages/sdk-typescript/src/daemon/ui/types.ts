@@ -96,8 +96,28 @@ export interface DaemonUiTextEvent extends DaemonUiEventBase {
   meta?: DaemonTextDeltaMeta;
 }
 
+export interface DaemonInputReference {
+  id: string;
+  kind?: string;
+  label?: string;
+  value?: string;
+  serialized?: string;
+  removable?: boolean;
+}
+
+export interface DaemonInputReferenceAnnotation {
+  type: 'reference';
+  start: number;
+  end: number;
+  text: string;
+  reference: DaemonInputReference;
+}
+
+export type DaemonInputAnnotation = DaemonInputReferenceAnnotation;
+
 export interface DaemonTextDeltaMeta extends Record<string, unknown> {
   qwenDiscreteMessage?: boolean;
+  inputAnnotations?: DaemonInputAnnotation[];
 }
 
 export interface DaemonUiUserImageEvent extends DaemonUiEventBase {
@@ -972,6 +992,7 @@ export interface DaemonTranscriptStore {
   appendLocalUserMessage(
     text: string,
     images?: Array<{ data: string; mimeType: string }>,
+    meta?: DaemonTextDeltaMeta,
   ): void;
   reset(seed?: Partial<DaemonTranscriptState>): void;
   /**

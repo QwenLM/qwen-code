@@ -63,41 +63,29 @@
   border-radius: 4px;
 }
 
+/* Trusted sessions use the sidebar's shared row with its own left indent;
+   read-only rows apply the same indent below. */
 .sessions {
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  padding-left: 18px;
+  gap: 4px;
 }
 
 .empty {
-  padding: 4px 8px;
-  font-size: 12px;
+  padding: 4px 8px 4px 26px;
+  font-size: 13px;
   color: var(--muted-foreground);
 }
 
-.sessionItem {
+.sessionItemReadOnly {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 6px;
-  width: 100%;
-  padding: 5px 8px;
-  border-radius: 6px;
-  border: none;
-  background: transparent;
-  color: var(--sidebar-foreground);
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.sessionItem:hover {
-  background: var(--sidebar-accent);
-}
-
-.sessionItemActive {
-  background: var(--sidebar-accent);
+  margin-left: 26px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  color: var(--muted-foreground);
+  cursor: default;
 }
 
 .sessionName {

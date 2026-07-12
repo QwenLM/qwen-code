@@ -164,7 +164,7 @@ describe('createDaemonSessionActions', () => {
 
     await actions.createSession({ workspaceCwd: '/ws/secondary' });
 
-    expect(createDetachedSession).toHaveBeenCalledWith('/ws/secondary');
+    expect(createDetachedSession).toHaveBeenCalledWith('/ws/secondary', {});
   });
 
   it('omits the workspaceCwd override on the detached branch by default', async () => {
@@ -177,7 +177,22 @@ describe('createDaemonSessionActions', () => {
 
     await actions.createSession();
 
-    expect(createDetachedSession).toHaveBeenCalledWith(undefined);
+    expect(createDetachedSession).toHaveBeenCalledWith(undefined, {});
+  });
+
+  it('forwards options.approvalMode to the detached create branch', async () => {
+    const nextSession = createMockSession('session-b');
+    const createDetachedSession = vi.fn(async () => nextSession);
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected' },
+      createDetachedSession,
+    });
+
+    await actions.createSession({ approvalMode: 'yolo' });
+
+    expect(createDetachedSession).toHaveBeenCalledWith(undefined, {
+      approvalMode: 'yolo',
+    });
   });
 
   it('merges options.workspaceCwd into the active session request', async () => {
@@ -193,6 +208,22 @@ describe('createDaemonSessionActions', () => {
 
     expect(existingSession.client.createOrAttachSession).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceCwd: '/ws/secondary' }),
+    );
+  });
+
+  it('folds options.approvalMode into the active session request', async () => {
+    const existingSession = createMockSession('session-a');
+    const nextSession = createMockSession('session-b');
+    existingSession.client.createOrAttachSession.mockResolvedValue(nextSession);
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session: existingSession,
+    });
+
+    await actions.createSession({ approvalMode: 'yolo' });
+
+    expect(existingSession.client.createOrAttachSession).toHaveBeenCalledWith(
+      expect.objectContaining({ approvalMode: 'yolo' }),
     );
   });
 
