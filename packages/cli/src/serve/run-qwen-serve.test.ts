@@ -3644,6 +3644,93 @@ describe('runQwenServe runtime startup failures', () => {
     );
   });
 
+  it('disposes a deferred runtime app that finishes after the shutdown wait', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-close-late-app-')),
+    );
+    let resolveTelemetry:
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
+    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
+      (resolve) => {
+        resolveTelemetry = resolve;
+      },
+    );
+    const resolveTelemetrySettings = vi
+      .spyOn(qwenCore, 'resolveTelemetrySettings')
+      .mockReturnValue(telemetryPromise);
+    const bridge = makeRuntimeBridge();
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+    const stopExtensionGenerationReconciler = vi.fn();
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
+      const runtimeApp = express();
+      runtimeApp.locals['stopExtensionGenerationReconciler'] =
+        stopExtensionGenerationReconciler;
+      return runtimeApp;
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    const healthRes = await fetch(`${handle.url}/health`);
+    expect(healthRes.status).toBe(200);
+    await vi.waitFor(
+      () => expect(resolveTelemetrySettings).toHaveBeenCalledTimes(1),
+      { timeout: 500 },
+    );
+
+    const nativeSetTimeout = globalThis.setTimeout;
+    let acceleratedRuntimeWait = false;
+    const setTimeoutSpy = vi
+      .spyOn(globalThis, 'setTimeout')
+      .mockImplementation(((
+        callback: (...args: unknown[]) => void,
+        delay?: number,
+        ...args: unknown[]
+      ) => {
+        if (!acceleratedRuntimeWait && delay === 5_000) {
+          acceleratedRuntimeWait = true;
+          return nativeSetTimeout(callback, 0, ...args);
+        }
+        return nativeSetTimeout(callback, delay, ...args);
+      }) as typeof setTimeout);
+    try {
+      await handle.close();
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+    expect(stopExtensionGenerationReconciler).not.toHaveBeenCalled();
+
+    resolveTelemetry?.({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+
+    await vi.waitFor(
+      () => expect(stopExtensionGenerationReconciler).toHaveBeenCalledOnce(),
+      { timeout: 1_000 },
+    );
+    expect(bridge.shutdown).toHaveBeenCalledOnce();
+    await expect(handle.runtimeReady).rejects.toThrow(
+      'Daemon runtime stopped before mounting.',
+    );
+  });
+
   it('does not retry deferred runtime after startup failure and later health probe', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-fail-once-')),
