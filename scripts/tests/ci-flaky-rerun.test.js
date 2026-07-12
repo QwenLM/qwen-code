@@ -64,6 +64,9 @@ function runner() {
     async behindBy() {
       return 1;
     },
+    async mainRunSucceeded() {
+      return true;
+    },
     async updateBranch(prNumber, headSha) {
       calls.push(['updateBranch', prNumber, headSha]);
     },
@@ -241,6 +244,7 @@ describe('ci flaky rerun patrol', () => {
     await actOnDecision(client, target, {
       action: 'update_branch',
       confidence: 'high',
+      mainRunId: 456,
       reason_en: 'This branch needs current main CI configuration.',
       reason_zh: '该分支需要同步 main 的 CI 配置。',
     });
@@ -255,6 +259,19 @@ describe('ci flaky rerun patrol', () => {
         ),
       ],
     ]);
+  });
+
+  it('does not update a branch without a verified successful main run', async () => {
+    const client = runner();
+
+    await actOnDecision(client, selectTarget([pr()], { now: NOW }), {
+      action: 'update_branch',
+      confidence: 'high',
+      reason_en: 'This branch needs current main CI configuration.',
+      reason_zh: '该分支需要同步 main 的 CI 配置。',
+    });
+
+    expect(client.calls).toEqual([]);
   });
 
   it('leaves a bilingual failure explanation when the skill requests a comment', async () => {

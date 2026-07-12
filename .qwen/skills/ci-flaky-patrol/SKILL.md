@@ -23,6 +23,7 @@ Write exactly `ci-flaky-decision.json`:
 {
   "action": "rerun",
   "confidence": "high",
+  "mainRunId": 123,
   "reason_en": "short evidence-based reason",
   "reason_zh": "简短、基于证据的中文说明"
 }
@@ -31,7 +32,7 @@ Write exactly `ci-flaky-decision.json`:
 Rules:
 
 - Use `rerun` only with concrete transient evidence: runner/network timeout, install/download transient failure, known flaky test wording, or infrastructure interruption.
-- Use `update_branch` only when `behindBy` is positive and the evidence indicates the branch needs current `main`; never choose it merely because a deterministic test, type, lint, assertion, or missing-file error occurred.
+- Use `update_branch` only when `behindBy` is positive, the evidence identifies a relevant fix on `main`, and `mainRunId` names a successful Actions run on `main`; never choose it merely because a deterministic test, type, lint, assertion, or missing-file error occurred.
 - Use `comment` for a deterministic PR failure. Explain the cause in English and Chinese; the driver folds the Chinese text.
 - Use `no_action` for ambiguous evidence or low confidence.
 - Use `confidence: "high"` only when the selected action is clearly safe.

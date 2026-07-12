@@ -173,6 +173,8 @@ export async function actOnDecision(client, target, decision) {
 
   if (decision.action === 'update_branch') {
     if ((await client.behindBy(target.headSha)) <= 0) return;
+    if (!Number.isSafeInteger(decision.mainRunId)) return;
+    if (!(await client.mainRunSucceeded(decision.mainRunId))) return;
     await client.updateBranch(target.prNumber, target.headSha);
     await client.comment(
       target.prNumber,
@@ -300,6 +302,17 @@ class GhClient {
       run.status === 'completed' &&
       run.conclusion === 'failure' &&
       run.head_sha === target.headSha
+    );
+  }
+
+  async mainRunSucceeded(runId) {
+    const run = JSON.parse(
+      await this.gh(['api', `repos/${this.repo}/actions/runs/${runId}`]),
+    );
+    return (
+      run.head_branch === 'main' &&
+      run.status === 'completed' &&
+      run.conclusion === 'success'
     );
   }
 
