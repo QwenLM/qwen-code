@@ -704,12 +704,12 @@ export class ExtensionStore {
     return await this.withLock(async () => {
       const snapshot =
         (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();
-      const policy = snapshot.extensions[identity.id] ?? {
-        name: identity.name,
-        defaultActivation: 'enabled' as const,
-        workspaceOverrides: {},
-        ...this.legacyRulesFor(identity.name),
-      };
+      const policy = snapshot.extensions[identity.id];
+      if (!policy) {
+        throw new ExtensionConflictError(
+          `Extension "${identity.name}" is not installed.`,
+        );
+      }
       if (policy.name !== identity.name) {
         throw new Error(
           `Extension id ${identity.id} belongs to "${policy.name}", not "${identity.name}".`,
@@ -721,20 +721,6 @@ export class ExtensionStore {
       await this.writeSnapshotUnlocked(snapshot);
       return snapshot;
     });
-  }
-
-  private legacyRulesFor(
-    extensionName: string,
-  ): Pick<ExtensionPolicy, 'legacyPathRules'> | Record<string, never> {
-    try {
-      const legacy = JSON.parse(
-        fs.readFileSync(this.enablementPath, 'utf8'),
-      ) as AllExtensionsEnablementConfig;
-      const rules = legacy[extensionName]?.overrides;
-      return rules?.length ? { legacyPathRules: [...rules] } : {};
-    } catch {
-      return {};
-    }
   }
 
   private emptySnapshot(): ExtensionStoreSnapshot {

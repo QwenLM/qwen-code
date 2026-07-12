@@ -617,6 +617,33 @@ describe('ExtensionStore', () => {
     );
   });
 
+  it('does not recreate activation policy after uninstall', async () => {
+    const store = makeStore();
+    const identity = { id: '97'.repeat(32), name: 'demo' };
+    const destination = path.join(extensionsDir, identity.name);
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'version'), 'one');
+    await store.commitArtifact({
+      operation: 'install',
+      identity,
+      stagingDirectory: staging,
+      destinationDirectory: destination,
+      initialActivation: { scope: 'user' },
+    });
+    await store.commitArtifact({
+      operation: 'uninstall',
+      identity,
+      destinationDirectory: destination,
+    });
+
+    await expect(
+      store.setDefaultActivation(identity, 'disabled'),
+    ).rejects.toMatchObject({ code: 'extension_conflict' });
+    await expect(store.readSnapshot()).resolves.toMatchObject({
+      extensions: {},
+    });
+  });
+
   it('rejects a stale prepared update without replacing the artifact', async () => {
     const store = makeStore();
     const identity = { id: '92'.repeat(32), name: 'demo' };
@@ -706,6 +733,7 @@ describe('ExtensionStore', () => {
   it('rejects install when the identity already exists in policy state', async () => {
     const store = makeStore();
     const identity = { id: '93'.repeat(32), name: 'existing-policy' };
+    await store.ensureInitialized([identity]);
     await store.setDefaultActivation(identity, 'disabled');
     const staging = await store.createStagingDirectory();
     await fsp.writeFile(path.join(staging, 'version'), 'new artifact');
