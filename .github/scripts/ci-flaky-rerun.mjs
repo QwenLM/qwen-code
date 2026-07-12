@@ -33,9 +33,9 @@ function jobIdFromUrl(url) {
   return match ? Number(match[1]) : null;
 }
 
-function markerFor(target, action) {
-  const count = (target.actionCount ?? 0) + 1;
-  return `<!-- ${MARKER} v=1 pr=${target.prNumber} head=${target.headSha} run=${target.runId} action=${action} count=${count} -->`;
+function markerFor(target, action, failureKey, count) {
+  const check = encodeURIComponent(target.workflowName);
+  return `<!-- ${MARKER} v=2 pr=${target.prNumber} head=${target.headSha} run=${target.runId} action=${action} key=${failureKey} check=${check} count=${count} -->`;
 }
 
 function markerComments(pr, options = {}) {
@@ -47,17 +47,12 @@ function markerComments(pr, options = {}) {
 }
 
 function alreadyHandled(pr, target, options) {
-  const prefix = `<!-- ${MARKER} v=1 pr=${target.prNumber} head=${target.headSha} run=${target.runId}`;
-  return markerComments(pr, options).some((comment) =>
-    String(comment.body ?? '').includes(prefix),
+  const pattern = new RegExp(
+    `<!-- ${MARKER} v=\\d+ pr=${target.prNumber} head=${target.headSha} run=${target.runId}(?: | )`,
   );
-}
-
-function actionCountForHead(pr, target, options) {
-  const prefix = `<!-- ${MARKER} v=1 pr=${target.prNumber} head=${target.headSha} `;
-  return markerComments(pr, options).filter((comment) =>
-    String(comment.body ?? '').includes(prefix),
-  ).length;
+  return markerComments(pr, options).some((comment) =>
+    pattern.test(String(comment.body ?? '')),
+  );
 }
 
 function isRecentlyActive(pr, now, activeDays) {
@@ -65,11 +60,40 @@ function isRecentlyActive(pr, now, activeDays) {
 }
 
 function canAct(pr, target, options) {
-  return (
-    !alreadyHandled(pr, target, options) &&
-    actionCountForHead(pr, target, options) <
-      (options.maxActions ?? MAX_ACTIONS_PER_HEAD)
+  return !alreadyHandled(pr, target, options);
+}
+
+function failureKey(decision) {
+  return /^[a-z0-9][a-z0-9._-]{0,79}$/.test(decision?.failureKey ?? '')
+    ? decision.failureKey
+    : 'unknown';
+}
+
+function stateMarkers(comments, prNumber) {
+  const marker = new RegExp(
+    `<!-- ${MARKER} v=2 pr=${prNumber} head=(\\S+) run=(\\d+) action=(\\S+) key=([a-z0-9._-]+) check=(\\S+) count=(\\d+) -->`,
   );
+  return comments
+    .filter((comment) =>
+      ['qwen-code-ci-bot', 'github-actions[bot]'].includes(
+        String(comment.author?.login ?? ''),
+      ),
+    )
+    .map((comment) => {
+      const match = marker.exec(String(comment.body ?? ''));
+      if (!match) return null;
+      return {
+        headSha: match[1],
+        runId: Number(match[2]),
+        action: match[3],
+        key: match[4],
+        check: decodeURIComponent(match[5]),
+        count: Number(match[6]),
+        createdAt: comment.createdAt,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => timeMs(a.createdAt) - timeMs(b.createdAt));
 }
 
 function redactLogLine(line) {
@@ -176,6 +200,10 @@ export async function actOnDecision(client, target, decision) {
   if (!['rerun', 'update_branch', 'comment'].includes(decision.action)) return;
   if ((await client.currentHeadSha(target.prNumber)) !== target.headSha) return;
   if (!(await client.isCurrentFailure(target))) return;
+  const key = failureKey(decision);
+  const actionCount = await client.failureActionCount(target.prNumber, key);
+  if (actionCount >= MAX_ACTIONS_PER_HEAD) return;
+  const nextTarget = { ...target, actionCount };
 
   if (decision.action === 'rerun') {
     await client.rerunFailedJobs(target.runId);
@@ -184,7 +212,7 @@ export async function actOnDecision(client, target, decision) {
       [
         `Rerunning failed jobs because this failure looks flaky: ${decision.reason_en}`,
         '',
-        markerFor(target, 'rerun'),
+        markerFor(nextTarget, 'rerun', key, actionCount + 1),
       ].join('\n'),
     );
     return;
@@ -200,7 +228,7 @@ export async function actOnDecision(client, target, decision) {
       [
         'Requesting an update from main because this failure needs current main.',
         '',
-        markerFor(target, 'update_branch'),
+        markerFor(nextTarget, 'update_branch', key, actionCount + 1),
       ].join('\n'),
     );
     return;
@@ -219,7 +247,7 @@ export async function actOnDecision(client, target, decision) {
         '',
         '</details>',
         '',
-        markerFor(target, 'comment'),
+        markerFor(nextTarget, 'comment', key, actionCount + 1),
       ].join('\n'),
     );
   }
@@ -240,21 +268,58 @@ export async function actOnDecisions(client, targets, decisions) {
   }
 }
 
+export async function resetSuccessfulFailures(client, prs) {
+  for (const pr of prs) {
+    const states = new Map();
+    for (const state of stateMarkers(await client.comments(pr.number), pr.number))
+      states.set(state.key, state);
+    for (const state of states.values()) {
+      if (state.count === 0) continue;
+      const run = (pr.statusCheckRollup ?? []).find(
+        (check) =>
+          check.name === state.check &&
+          check.conclusion === 'SUCCESS' &&
+          timeMs(check.completedAt) > timeMs(state.createdAt),
+      );
+      const target = run ? toTarget(pr, run) : null;
+      if (target)
+        await client.comment(
+          pr.number,
+          markerFor(target, 'reset', state.key, 0),
+        );
+    }
+  }
+}
+
 export async function writeSkillInput(client, target, workdir) {
   writeJson(workdir, 'ci-target.json', target);
   const log = target.jobId === null ? '' : await client.jobLog(target.jobId);
   writeFileSync(resolve(workdir, 'ci-log.txt'), skillLog(log));
 }
 
-export async function writeSkillInputs(client, targets, workdir) {
-  const candidates = await Promise.all(
-    targets.map(async (target) => ({
-      ...target,
-      log:
-        target.jobId === null ? '' : skillLog(await client.jobLog(target.jobId)),
-    })),
-  );
+export async function writeSkillInputs(
+  client,
+  targets,
+  workdir,
+  maxCandidates = Infinity,
+) {
+  const candidates = [];
+  for (const target of targets) {
+    try {
+      candidates.push({
+        ...target,
+        log:
+          target.jobId === null
+            ? ''
+            : skillLog(await client.jobLog(target.jobId)),
+      });
+      if (candidates.length >= maxCandidates) break;
+    } catch {
+      // Expired Actions logs cannot be classified safely; try the next PR.
+    }
+  }
   writeJson(workdir, 'ci-flaky-input.json', { candidates });
+  return candidates;
 }
 
 class GhClient {
@@ -307,6 +372,33 @@ class GhClient {
         'comments',
         '--jq',
         '.comments',
+      ]),
+    );
+  }
+
+  async failureActionCount(prNumber, key) {
+    return (
+      stateMarkers(await this.comments(prNumber), prNumber)
+        .filter((state) => state.key === key)
+        .at(-1)?.count ?? 0
+    );
+  }
+
+  async markerPrs() {
+    return JSON.parse(
+      await this.gh([
+        'pr',
+        'list',
+        '--repo',
+        this.repo,
+        '--state',
+        'open',
+        '--search',
+        `${MARKER} in:comments`,
+        '--json',
+        'number,headRefOid,statusCheckRollup',
+        '--limit',
+        '1000',
       ]),
     );
   }
@@ -442,14 +534,16 @@ async function scan(args) {
     targets.push({
       ...candidate,
       behindBy: await client.behindBy(candidate.headSha),
-      actionCount: actionCountForHead({ ...pr, comments }, candidate, options),
     });
-    if (targets.length >= maxCandidates) break;
   }
-  if (targets.length > 0)
-    await writeSkillInputs(client, targets, args.get('workdir'));
-  process.stdout.write(`target_found=${targets.length > 0 ? 'true' : 'false'}\n`);
-  process.stdout.write(`target_count=${targets.length}\n`);
+  const inputs = await writeSkillInputs(
+    client,
+    targets,
+    args.get('workdir'),
+    maxCandidates,
+  );
+  process.stdout.write(`target_found=${inputs.length > 0 ? 'true' : 'false'}\n`);
+  process.stdout.write(`target_count=${inputs.length}\n`);
 }
 
 async function act(args) {
@@ -463,11 +557,17 @@ async function act(args) {
   await actOnDecisions(new GhClient(args.get('repo')), candidates, decisions);
 }
 
+async function reset(args) {
+  const client = new GhClient(args.get('repo'));
+  await resetSuccessfulFailures(client, await client.markerPrs());
+}
+
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
   const args = argsMap(rest);
   if (command === 'scan') return scan(args);
   if (command === 'act') return act(args);
+  if (command === 'reset') return reset(args);
   throw new Error('command must be scan or act');
 }
 

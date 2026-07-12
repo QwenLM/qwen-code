@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   actOnDecision,
   actOnDecisions,
+  resetSuccessfulFailures,
   selectCandidateTargets,
   selectTarget,
   writeSkillInput,
@@ -69,6 +70,9 @@ function runner() {
     },
     async mainRunSucceeded() {
       return true;
+    },
+    async failureActionCount() {
+      return 0;
     },
     async updateBranch(prNumber, headSha) {
       calls.push(['updateBranch', prNumber, headSha]);
@@ -168,14 +172,14 @@ describe('ci flaky rerun patrol', () => {
     ).toBeNull();
   });
 
-  it('stops after three actions for the same PR head and resets on push', () => {
+  it('leaves PR-level failure limits to the action phase', () => {
     const priorActions = [120, 121, 122].map((runId) => ({
       body: `<!-- qwen-ci-flaky-rerun v=1 pr=42 head=abc123 run=${runId} -->`,
     }));
 
     expect(
       selectTarget([pr({ comments: priorActions })], { now: NOW }),
-    ).toBeNull();
+    ).toMatchObject({ headSha: 'abc123' });
     expect(
       selectTarget([pr({ headRefOid: 'new-head', comments: priorActions })], {
         now: NOW,
@@ -203,8 +207,9 @@ describe('ci flaky rerun patrol', () => {
     expect(script).toContain('const targets = []');
     expect(script).toContain('targets.push({');
     expect(script).toContain('DEFAULT_MAX_CANDIDATES_PER_RUN');
-    expect(script).toContain('if (targets.length >= maxCandidates) break;');
-    expect(script).toContain('await writeSkillInputs(client, targets,');
+    expect(script).toContain('maxCandidates = Infinity');
+    expect(script).toContain('if (candidates.length >= maxCandidates) break;');
+    expect(script).toContain('const inputs = await writeSkillInputs(');
     expect(script).not.toContain('target = {\n      ...candidate,');
   });
 
@@ -261,11 +266,79 @@ describe('ci flaky rerun patrol', () => {
         'comment',
         42,
         expect.stringContaining(
-          'qwen-ci-flaky-rerun v=1 pr=42 head=abc123 run=123',
+          'qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=123',
         ),
       ],
     ]);
-    expect(client.calls[1][2]).toContain('action=rerun count=1');
+    expect(client.calls[1][2]).toContain('action=rerun key=unknown');
+    expect(client.calls[1][2]).toContain('count=1');
+  });
+
+  it('counts matching failures across PR head changes', async () => {
+    const client = runner();
+    client.failureActionCount = async () => 2;
+    const target = selectTarget([pr()], { now: NOW });
+
+    await actOnDecision(client, target, {
+      action: 'rerun',
+      confidence: 'high',
+      failureKey: 'runner-network-timeout',
+      reason_en: 'The log shows a runner network timeout.',
+      reason_zh: '日志显示 runner 网络超时。',
+    });
+
+    expect(client.calls[1][2]).toContain('key=runner-network-timeout');
+    expect(client.calls[1][2]).toContain('count=3');
+  });
+
+  it('stops after three actions for the same PR failure key', async () => {
+    const client = runner();
+    client.failureActionCount = async () => 3;
+
+    await actOnDecision(client, selectTarget([pr()], { now: NOW }), {
+      action: 'rerun',
+      confidence: 'high',
+      failureKey: 'runner-network-timeout',
+      reason_en: 'The log shows a runner network timeout.',
+      reason_zh: '日志显示 runner 网络超时。',
+    });
+
+    expect(client.calls).toEqual([]);
+  });
+
+  it('resets a PR failure count after its matching check succeeds', async () => {
+    const client = runner();
+    const target = selectTarget([pr()], { now: NOW });
+    const marker =
+      '<!-- qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=120 action=rerun key=runner-network-timeout check=E2E%20Tests count=2 -->';
+    const resetPr = pr({
+      statusCheckRollup: [
+        run({
+          conclusion: 'SUCCESS',
+          completedAt: '2026-07-12T07:30:00.000Z',
+        }),
+      ],
+    });
+    client.comments = async () => [
+      {
+        body: marker,
+        createdAt: '2026-07-12T07:20:00.000Z',
+        author: { login: 'qwen-code-ci-bot' },
+      },
+    ];
+
+    await resetSuccessfulFailures(client, [resetPr]);
+
+    expect(client.calls).toEqual([
+      [
+        'comment',
+        42,
+        expect.stringContaining(
+          'key=runner-network-timeout check=E2E%20Tests count=0',
+        ),
+      ],
+    ]);
+    expect(client.calls[0][2]).toContain(`head=${target.headSha}`);
   });
 
   it('applies only decisions that match an input target', async () => {
@@ -367,7 +440,7 @@ describe('ci flaky rerun patrol', () => {
         'comment',
         42,
         expect.stringContaining(
-          'qwen-ci-flaky-rerun v=1 pr=42 head=abc123 run=123',
+          'qwen-ci-flaky-rerun v=2 pr=42 head=abc123 run=123',
         ),
       ],
     ]);
@@ -512,6 +585,40 @@ describe('ci flaky rerun patrol', () => {
           log: 'AssertionError: expected generated schema',
         },
       ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips an expired job log without abandoning the remaining batch', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-flaky-rerun-'));
+    const targets = [
+      selectTarget([pr()], { now: NOW }),
+      {
+        ...selectTarget([pr()], { now: NOW }),
+        prNumber: 43,
+        headSha: 'def456',
+        runId: 124,
+        jobId: 2,
+      },
+    ];
+    try {
+      await writeSkillInputs(
+        {
+          async jobLog(jobId) {
+            if (jobId === 1) throw new Error('HTTP 410');
+            return 'network timeout while downloading package';
+          },
+        },
+        targets,
+        dir,
+        1,
+      );
+
+      const input = JSON.parse(
+        readFileSync(join(dir, 'ci-flaky-input.json'), 'utf8'),
+      );
+      expect(input.candidates).toMatchObject([{ prNumber: 43, runId: 124 }]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

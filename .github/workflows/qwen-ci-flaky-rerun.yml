@@ -98,7 +98,7 @@ jobs:
   act:
     name: 'Apply validated PR CI action'
     needs: 'classify'
-    if: "${{ needs.classify.outputs.target_found == 'true' }}"
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
     permissions:
       actions: 'write'
@@ -116,13 +116,22 @@ jobs:
         with:
           node-version: '22'
 
+      - name: 'Reset successful failure state'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+        run: |-
+          node .github/scripts/ci-flaky-rerun.mjs reset \
+            --repo "${{ github.repository }}"
+
       - name: 'Download patrol decision'
+        if: "${{ needs.classify.outputs.target_found == 'true' }}"
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
           name: 'ci-flaky-patrol-decision'
           path: '${{ env.WORKDIR }}'
 
       - name: 'Act on PR failure decision'
+        if: "${{ needs.classify.outputs.target_found == 'true' }}"
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
         run: |-

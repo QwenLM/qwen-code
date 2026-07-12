@@ -41,6 +41,7 @@ describe('ci flaky rerun workflow', () => {
     expect(workflow).toContain('"sandbox": true');
     expect(workflow).toContain('input_sha');
     expect(workflow).toContain('node .github/scripts/ci-flaky-rerun.mjs act');
+    expect(workflow).toContain('node .github/scripts/ci-flaky-rerun.mjs reset');
     expect(workflow).toContain('actions/upload-artifact@');
     expect(workflow).toContain('actions/download-artifact@');
     expect(workflow).toContain("GITHUB_TOKEN: ''");
@@ -60,6 +61,7 @@ describe('ci flaky rerun workflow', () => {
     expect(skill).toContain('`rerun`');
     expect(skill).toContain('`update_branch`');
     expect(skill).toContain('`comment`');
+    expect(skill).toContain('`failureKey`');
     expect(skill).toContain('main-branch failures');
     expect(skill).toContain('Never rerun jobs, comment, update branches');
   });
