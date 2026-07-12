@@ -83,6 +83,32 @@ describe('parseGeneratedEntries', () => {
     );
   });
 
+  it('does not drop a PR bullet when GitHub omits the author phrase', () => {
+    const body = [
+      "## What's Changed",
+      `* feat(cli): parsed by @alice in ${PR(1)}`,
+      `* fix(core): changed format in ${PR(2)}`,
+      '',
+      '## New Contributors',
+      `* @newbie made their first contribution in ${PR(2)}`,
+    ].join('\n');
+
+    expect(parseGeneratedEntries(body)).toEqual([
+      {
+        number: 1,
+        title: 'feat(cli): parsed',
+        url: PR(1),
+        author: 'alice',
+      },
+      {
+        number: 2,
+        title: 'fix(core): changed format',
+        url: PR(2),
+        author: null,
+      },
+    ]);
+  });
+
   it('does not treat New Contributors bullets as change entries', () => {
     const body = [
       `* feat(cli): parsed by @alice in ${PR(1)}`,
@@ -117,8 +143,9 @@ describe('classifyChange', () => {
   it.each([
     ['type/feature-request', 'Features'],
     ['type/bug', 'Bug Fixes'],
-    ['performance', 'Performance'],
-    ['documentation', 'Documentation'],
+    ['category/performance', 'Performance'],
+    ['type/documentation', 'Documentation'],
+    ['scope/documentation', 'Documentation'],
   ])('uses an explicit %s label for prefixless titles', (label, expected) => {
     expect(classifyChange(entry(1, 'A clearer change title', [label]))).toBe(
       expected,
@@ -180,6 +207,9 @@ describe('validateSummaryBatch', () => {
     '<details>hidden content</details>',
     '[misleading link](https://example.com)',
     'Visit https://example.com for details.',
+    '@QwenLM/security should review this.',
+    'See #123 for the real details.',
+    '**Critical:** this looks important.',
   ])('rejects non-plain-text model output: %s', (summary) => {
     expect(() =>
       validateSummaryBatch([entry(1, 'feat: a')], {
@@ -233,6 +263,9 @@ describe('renderReleaseNotes', () => {
     expect(markdown).toContain('### Features');
     expect(markdown).toContain('### Bug Fixes');
     expect(markdown).toContain('### Documentation');
+    expect(markdown).toContain(
+      `Adds session search to the CLI. ([#1](${PR(1)})) by @alice`,
+    );
     for (const number of [1, 2, 3]) {
       expect(markdown.match(new RegExp(`\\[#${number}\\]`, 'g'))).toHaveLength(
         number < 3 ? 2 : 1,
@@ -465,8 +498,34 @@ describe('generateReleaseNotes', () => {
     });
 
     expect(result.markdown).toContain('### Features');
-    expect(result.markdown).toContain('feat(cli): add search');
+    expect(result.markdown).toContain(
+      `feat(cli): add search ([#1](${PR(1)})) by @alice`,
+    );
     expect(result.usedAi).toBe(false);
     expect(result.warnings).toEqual(['Model configuration is unavailable.']);
+  });
+
+  it('preserves GitHub new contributor credits in the final release notes', async () => {
+    const generatedBody = [
+      "## What's Changed",
+      `* feat(cli): add search by @alice in ${PR(1)}`,
+      '',
+      '## New Contributors',
+      `* @newbie made their first contribution in ${PR(1)}`,
+    ].join('\n');
+
+    const result = await generateReleaseNotes({
+      generatedBody,
+      metadata: [],
+      complete: null,
+      previousTag: 'v1.0.0',
+      tag: 'v1.1.0',
+      repo: 'QwenLM/qwen-code',
+    });
+
+    expect(result.markdown).toContain('## New Contributors');
+    expect(result.markdown).toContain(
+      `- @newbie made their first contribution in [#1](${PR(1)})`,
+    );
   });
 });

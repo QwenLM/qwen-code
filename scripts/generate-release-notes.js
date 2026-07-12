@@ -12,6 +12,10 @@ import { isMainModule, parseArgs } from './release-script-utils.js';
 
 const GENERATED_ENTRY_RE =
   /^[*-]\s+(.+)\s+by\s+@([A-Za-z0-9-]+(?:\[bot\])?)(?:\s+with\s+@[A-Za-z0-9-]+(?:\[bot\])?)*\s+in\s+(https?:\/\/\S+\/pull\/(\d+))\s*$/;
+const GENERATED_ENTRY_WITHOUT_AUTHOR_RE =
+  /^[*-]\s+(.+?)\s+in\s+(https?:\/\/\S+\/pull\/(\d+))\s*$/;
+const NEW_CONTRIBUTOR_RE =
+  /^[*-]\s+(@[A-Za-z0-9-]+(?:\[bot\])?)\s+made\s+their\s+first\s+contribution\s+in\s+(https?:\/\/\S+\/pull\/(\d+))\s*$/i;
 
 const CATEGORY_ORDER = [
   'Breaking Changes',
@@ -46,23 +50,45 @@ export function buildPullRequestQuery(numbers) {
 export function parseGeneratedEntries(body) {
   const entries = [];
   const sourceNumbers = [];
+  let section = 'changes';
   for (const line of (body || '').split(/\r?\n/)) {
-    if (/^[*-]\s+/.test(line) && /\sby\s+@[A-Za-z0-9-]/.test(line)) {
-      const links = [...line.matchAll(/\/pull\/(\d+)/g)];
-      if (links.length > 0) {
-        sourceNumbers.push(Number(links.at(-1)[1]));
-      }
-    }
-    const match = GENERATED_ENTRY_RE.exec(line);
-    if (!match) {
+    const heading = /^##\s+(.+?)\s*$/.exec(line);
+    if (heading) {
+      section =
+        heading[1].toLowerCase() === "what's changed" ? 'changes' : 'other';
       continue;
     }
-    entries.push({
-      number: Number(match[4]),
-      title: match[1].trim(),
-      url: match[3],
-      author: match[2],
-    });
+    if (section !== 'changes' || !/^[*-]\s+/.test(line)) {
+      continue;
+    }
+    const links = [...line.matchAll(/\/pull\/(\d+)/g)];
+    if (links.length === 0) {
+      continue;
+    }
+    sourceNumbers.push(Number(links.at(-1)[1]));
+
+    const match = GENERATED_ENTRY_RE.exec(line);
+    if (match) {
+      entries.push({
+        number: Number(match[4]),
+        title: match[1].trim(),
+        url: match[3],
+        author: match[2],
+      });
+      continue;
+    }
+    if (/\sby\s+@[A-Za-z0-9-]/.test(line)) {
+      continue;
+    }
+    const fallback = GENERATED_ENTRY_WITHOUT_AUTHOR_RE.exec(line);
+    if (fallback) {
+      entries.push({
+        number: Number(fallback[3]),
+        title: fallback[1].trim(),
+        url: fallback[2],
+        author: null,
+      });
+    }
   }
   if (
     entries.length !== sourceNumbers.length ||
@@ -73,6 +99,31 @@ export function parseGeneratedEntries(body) {
     );
   }
   return entries;
+}
+
+function parseNewContributors(body) {
+  const contributors = [];
+  let inNewContributors = false;
+  for (const line of (body || '').split(/\r?\n/)) {
+    const heading = /^##\s+(.+?)\s*$/.exec(line);
+    if (heading) {
+      inNewContributors = heading[1].toLowerCase() === 'new contributors';
+      continue;
+    }
+    if (!inNewContributors) {
+      continue;
+    }
+    const match = NEW_CONTRIBUTOR_RE.exec(line);
+    if (!match) {
+      continue;
+    }
+    contributors.push({
+      author: match[1],
+      url: match[2],
+      number: Number(match[3]),
+    });
+  }
+  return contributors;
 }
 
 export function classifyChange(entry) {
@@ -95,10 +146,17 @@ export function classifyChange(entry) {
   if (labels.includes('type/bug') || labels.includes('type/fix')) {
     return 'Bug Fixes';
   }
-  if (labels.includes('performance')) {
+  if (
+    labels.includes('category/performance') ||
+    labels.includes('performance')
+  ) {
     return 'Performance';
   }
-  if (labels.includes('documentation')) {
+  if (
+    labels.includes('type/documentation') ||
+    labels.includes('scope/documentation') ||
+    labels.includes('documentation')
+  ) {
     return 'Documentation';
   }
 
@@ -131,7 +189,10 @@ function validateModelText(value, label, maxLength) {
   if (
     /[<>]/.test(text) ||
     /\[[^\]]*\]\([^)]*\)/.test(text) ||
-    /https?:\/\//i.test(text)
+    /https?:\/\//i.test(text) ||
+    /(^|[^\w/])@[A-Za-z0-9-]+(?:\/[A-Za-z0-9_.-]+)?/.test(text) ||
+    /(^|[^\w])#\d+\b/.test(text) ||
+    /(\*\*|__|`)/.test(text)
   ) {
     throw new Error(`${label} must be plain text without links or HTML.`);
   }
@@ -403,6 +464,7 @@ export async function generateReleaseNotes({
       previousTag,
       tag,
       repo,
+      newContributors: parseNewContributors(generatedBody),
     }),
     usedAi:
       ai.highlights.length > 0 ||
@@ -428,6 +490,7 @@ export function renderReleaseNotes({
   previousTag,
   tag,
   repo,
+  newContributors = [],
 }) {
   const lines = ['<!-- qwen-release-notes:v1 -->', '', '## Highlights', ''];
   const entriesByNumber = new Map(
@@ -453,7 +516,7 @@ export function renderReleaseNotes({
   } else {
     for (const entry of breaking) {
       lines.push(
-        `- ${summaries.get(entry.number) || entry.title} ([#${entry.number}](${entry.url}))`,
+        renderChangeLine(entry, summaries.get(entry.number) || entry.title),
       );
     }
     lines.push('');
@@ -470,7 +533,17 @@ export function renderReleaseNotes({
     lines.push(`### ${category}`, '');
     for (const entry of categoryEntries) {
       lines.push(
-        `- ${summaries.get(entry.number) || entry.title} ([#${entry.number}](${entry.url}))`,
+        renderChangeLine(entry, summaries.get(entry.number) || entry.title),
+      );
+    }
+    lines.push('');
+  }
+
+  if (newContributors.length > 0) {
+    lines.push('## New Contributors', '');
+    for (const contributor of newContributors) {
+      lines.push(
+        `- ${contributor.author} made their first contribution in [#${contributor.number}](${contributor.url})`,
       );
     }
     lines.push('');
@@ -481,6 +554,11 @@ export function renderReleaseNotes({
     '',
   );
   return lines.join('\n');
+}
+
+function renderChangeLine(entry, text) {
+  const author = entry.author ? ` by @${entry.author}` : '';
+  return `- ${text} ([#${entry.number}](${entry.url}))${author}`;
 }
 
 function validateRepo(repo) {
