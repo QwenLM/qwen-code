@@ -30,9 +30,19 @@ You are an expert code reviewer. Your job is to review code changes and provide 
 
 Your goal here is to understand the scope of changes so you can dispatch agents effectively in Step 3.
 
-First, parse the `--comment` flag: split the arguments by whitespace, and if any token is exactly `--comment` (not a substring match — ignore tokens like `--commentary`), set the comment flag and remove that token from the argument list. If `--comment` is set but the review target is not a PR, warn the user: "Warning: `--comment` flag is ignored because the review target is not a PR." and continue without it.
+**Do not parse the arguments yourself — run the parser.** The flag grammar (`--comment`, `--effort <level>`, `--effort=<level>`) and the target disambiguation are deterministic, and three separate parsing bugs shipped while they lived here as prose. The tested implementation is a subcommand:
 
-Next, parse the `--effort` flag: `--effort <level>` or `--effort=<level>`, where `<level>` is `low`, `medium`, or `high`. Remove the flag and its value from the argument list. **If the flag token itself contains `=`, split it on the first `=`** — the left side is the flag name, the right side is the value, and no second token is consumed (`--effort=typo` warns and falls back to the default without touching anything else). Otherwise the value is the next token, and **only if** it is exactly `low`, `medium`, or `high`; if `--effort` is the last token, or the next token is anything else (`--effort 1234`, `--effort typo`, `--effort --comment`), treat the value as missing — warn and use the default. What happens to that invalid next token is decided by what it is, not by its position: identify the review target **first** (the first non-flag token that is a pure integer, a `/pull/` URL, or a file path — the disambiguation below). If the arguments already contain a target elsewhere, the invalid value token is a typo — **consume and discard it with the warning** (`/review 6711 --effort typo` reviews PR 6711 at the default effort; `typo` must not survive to be mistaken for a second target). Only when no other token can be the target and this token itself looks like one (`/review --effort 6711`) leave it in place to be parsed as the target; a following flag (`--effort --comment`) is of course never consumed. Defaults when the flag is absent: **high** for PR targets, **medium** for local-diff and file-path targets. Posting requires a verified review, so an **effective** `--comment` forces **high**: apply this override only after target disambiguation (below) has decided the target is a PR. A `--comment` that is being ignored because the target is not a PR must not change the effort either — `/review src/foo.ts --comment --effort low` runs at low with both warnings, not at a silently-forced high. When the override does apply and the user passed a lower effort, warn "`--comment` requires a verified review; running at high effort." and run high.
+```bash
+qwen review parse-args '<the raw argument string, in single quotes>'
+```
+
+It prints a JSON verdict; use it **verbatim**:
+
+- `target` — `{type: "pr-number", number}` | `{type: "pr-url", url, owner, repo, number}` | `{type: "file", path}` | `{type: "local"}`. A `pr-url` arrives with owner/repo/number already extracted; do not re-classify tokens by hand.
+- `effort` + `effortSource` — the resolved level after defaults (**high** for PR targets, **medium** for local/file) and the `--comment` override (an **effective** `--comment` forces `high`; an ignored one on a non-PR target changes nothing). Do not re-derive it.
+- `comment.requested` / `comment.effective` — `effective` is what gates Step 7; `requested && !effective` means the user asked on a non-PR target, and the warning for that is already in `warnings`.
+- `warnings` — surface every entry to the user, word for word.
+- `extraTokens` / `unknownFlags` — leftover input the parser refused to guess about; mention them to the user rather than silently dropping them.
 
 What each level runs:
 
@@ -42,21 +52,19 @@ What each level runs:
 
 At every effort level, the mechanics of obtaining the diff — worktree flow, diff capture, base resolution, chunk plan — are shared: the truncation and wrong-base traps this step exists for do not care how fast you want the answer. The _reviewed range_ can still differ: the incremental cache is a high-only feature, so a high re-review of a previously-reviewed PR may scope to `lastCommitSha..HEAD` while a low/medium pass (which never consults the cache) always reviews the full PR diff.
 
-To disambiguate the argument type: if the argument is a pure integer, treat it as a PR number. If it's a URL containing `/pull/`, extract the owner/repo/number from the URL. Then determine if the local repo can access this PR:
+The parser already classified the target, so there is nothing to disambiguate by hand. For a `pr-url` target, determine if the local repo can access this PR:
 
 1. Check if any git remote URL matches the URL's owner/repo: run `git remote -v` and look for a remote whose URL contains the owner/repo (e.g., `openjdk/jdk`). This handles forks — a local clone of `wenshao/jdk` with an `upstream` remote pointing to `openjdk/jdk` can still review `openjdk/jdk` PRs.
 2. If a matching remote is found, proceed with the **normal worktree flow** — use that remote name (instead of hardcoded `origin`) for `git fetch <remote> pull/<number>/head:qwen-review/pr-<number>`. In Step 7, use the owner/repo from the URL for posting comments.
 3. If **no remote matches**, use **lightweight mode**: run `gh pr diff <url>` to get the diff directly. Skip Step 2 (no local rules) and Step 8 (no local reports or cache). In Step 9, skip worktree removal (none was created) but still clean up temp files (`.qwen/tmp/qwen-review-{target}-*`). Also run `qwen review pr-context <number> <owner>/<repo> --out .qwen/tmp/qwen-review-pr-<number>-context.md` — it is pure GitHub API and works cross-repo. Agent 0 and Step 6's open-Critical re-check depend on it: a `Refs #123`-style target issue is only discoverable from the PR body, and open Critical threads only from the context file, so skipping it lets a wrong-root fix sail through blocker-free. If `pr-context` fails here (auth, network), warn and continue with the diff alone — but skip Agent 0 (it has nothing to work from) and treat every open-Critical re-check verdict as "cannot tell", which forbids an Approve. Carry this forward as the **context-unavailable** state: Step 7's invariant caps **every** `C=0` outcome of such a run at `COMMENT` with a diff-only body (both the would-be APPROVE and the Suggestion-only "no blockers" sentence), so a run that could not see the PR's existing discussion can post findings but never certify the absence of blockers. In Step 7, use the owner/repo from the URL. Inform the user: "Cross-repo review: running in lightweight mode (no build/test)."
 
-Otherwise (not a URL, not an integer), treat the argument as a file path.
+Based on the parsed `target.type`:
 
-Based on the remaining arguments:
-
-- **No arguments**: Review local uncommitted changes
+- **`local`**: Review local uncommitted changes
   - Run `git diff` and `git diff --staged` to get all changes
   - If both diffs are empty, inform the user there are no changes to review and stop here — do not proceed to the review agents
 
-- **PR number or same-repo URL** (e.g., `123` or a URL whose owner/repo matches the current repo — cross-repo URLs are handled by the lightweight mode above):
+- **`pr-number`, or `pr-url` with a matching remote** (cross-repo `pr-url`s are handled by the lightweight mode above):
 
   > ⚠️ **MANDATORY worktree flow.** Do NOT use `gh pr checkout`, `git checkout <branch>`, `git switch`, `git pull`, `git reset --hard`, or any other command that changes the user's current HEAD or working tree contents. The ONLY entry point is `qwen review fetch-pr` (below) — it isolates the PR into an ephemeral worktree so the user's local state is never touched. After it returns, every subsequent command in Steps 2-6 MUST operate inside the returned `worktreePath` (e.g. `cd <worktreePath>` first, or pass the path as a `--cwd` / explicit argument).
   - **Run `qwen review fetch-pr`** to set up the working state in one pass — it cleans any stale worktree, fetches the PR HEAD into `qwen-review/pr-<n>`, queries `gh pr view` for metadata, and creates an ephemeral worktree at `.qwen/tmp/review-pr-<n>`:
@@ -101,7 +109,7 @@ Based on the remaining arguments:
 
   - **Install dependencies in the worktree** (high effort only — needed for building and testing): run `npm ci` (or `yarn install --frozen-lockfile`, `pip install -e .`, etc.) inside `worktreePath`. If installation fails, log a warning and continue — build/test may fail but LLM review agents can still operate. At low/medium effort skip the install: nothing builds or runs tests there, and greps against worktree sources work without it.
 
-- **File path** (e.g., `src/foo.ts`):
+- **`file`** (e.g., `src/foo.ts`):
   - Run `git diff HEAD -- <file>` to get recent changes
   - If no diff, read the file and review its current state
 
