@@ -587,6 +587,113 @@ describe('createChannelWorkerGroup', () => {
     expect(recorded[2]!.supervisor.start).toHaveBeenCalledTimes(1);
   });
 
+  it('reports health for running, mixed, and empty worker groups', async () => {
+    const states = new Map([
+      [PRIMARY, 'running'],
+      [SECONDARY, 'running'],
+    ]);
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor } = makeCreateSupervisor((workspace) =>
+      snapshot({ state: states.get(workspace) as 'running' | 'failed' }),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['b'] },
+        },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+
+    expect(group.isHealthy()).toBe(true);
+    states.set(SECONDARY, 'failed');
+    expect(group.isHealthy()).toBe(false);
+    await group.reconcile([]);
+    expect(group.isHealthy()).toBe(false);
+  });
+
+  it('force-reconciles an unchanged healthy selection', async () => {
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const groups = [
+      {
+        workspaceCwd: PRIMARY,
+        selection: { mode: 'names' as const, names: ['a'] },
+      },
+    ];
+    const group = createChannelWorkerGroup({
+      groups,
+      registry,
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+
+    await expect(
+      group.reconcile(groups, { force: true }),
+    ).resolves.toMatchObject({
+      changed: true,
+    });
+    expect(recorded).toHaveLength(2);
+    expect(recorded[0]!.supervisor.stop).toHaveBeenCalledTimes(1);
+    expect(recorded[1]!.supervisor.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('coalesces concurrent reconciles onto the in-flight operation', async () => {
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
+    let releaseReplacement!: () => void;
+    const test = makeCreateSupervisor(() => snapshot({}));
+    const createSupervisor = (opts: CreateChannelWorkerSupervisorOptions) => {
+      const supervisor = test.createSupervisor(opts);
+      if (
+        opts.selection.mode === 'names' &&
+        opts.selection.names.includes('c')
+      ) {
+        supervisor.start.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              releaseReplacement = resolve;
+            }),
+        );
+      }
+      return supervisor;
+    };
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+
+    const first = group.reconcile([
+      { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['c'] } },
+    ]);
+    await vi.waitFor(() => expect(releaseReplacement).toBeTypeOf('function'));
+    const second = group.reconcile([
+      { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['d'] } },
+    ]);
+    releaseReplacement();
+
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    expect(test.recorded).toHaveLength(2);
+    expect(test.recorded[1]!.opts.selection).toEqual({
+      mode: 'names',
+      names: ['c'],
+    });
+  });
+
   it('stops failed new workers and restores stopped old workers', async () => {
     const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
     const recorded: RecordedSupervisor[] = [];

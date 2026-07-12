@@ -63,6 +63,7 @@ function setup(group = fakeGroup()) {
   const reserveLease = vi.fn();
   const releaseLease = vi.fn();
   const onCommittedSelection = vi.fn();
+  const onStateChange = vi.fn();
   const resolveGroups = vi.fn(async (selection: ServeChannelSelection) =>
     workspaceGroups(selection),
   );
@@ -73,6 +74,7 @@ function setup(group = fakeGroup()) {
     reserveLease,
     releaseLease,
     onCommittedSelection,
+    onStateChange,
   });
   return {
     manager,
@@ -82,6 +84,7 @@ function setup(group = fakeGroup()) {
     resolveGroups,
     createGroup,
     onCommittedSelection,
+    onStateChange,
   };
 }
 
@@ -113,6 +116,20 @@ describe('createChannelWorkerManager', () => {
     expect(test.onCommittedSelection).toHaveBeenCalledWith(
       selection,
       workspaceGroups(selection),
+    );
+    expect(test.onStateChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        enabled: false,
+        pendingSelection: selection,
+        transition: 'starting',
+      }),
+    );
+    expect(test.onStateChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        enabled: true,
+        selection,
+        transition: 'idle',
+      }),
     );
     expect(test.manager.state()).toMatchObject({
       enabled: true,
