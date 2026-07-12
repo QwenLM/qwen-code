@@ -88,7 +88,10 @@ import {
 } from './routes/workspace-trust.js';
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
-import { registerScheduledTasksRoutes } from './routes/scheduled-tasks.js';
+import {
+  registerScheduledTasksRoutes,
+  registerWorkspaceQualifiedScheduledTasksRoutes,
+} from './routes/scheduled-tasks.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
   startScheduledTaskKeepalive,
@@ -1320,6 +1323,17 @@ export function createServeApp(
     bridge: deps.manageScheduledTaskSessions ? bridge : undefined,
   });
 
+  // The same CRUD surface, workspace-qualified, so a multi-workspace Web Shell
+  // manages every registered project's schedule against that project's own cron
+  // file (and its own session bridge) rather than always the primary's. Each
+  // request resolves + trust-checks `:workspace` before any read/write.
+  registerWorkspaceQualifiedScheduledTasksRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    manageScheduledTaskSessions: deps.manageScheduledTaskSessions === true,
+  });
+
   // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
   // usage only; open GET like /daemon/status, with its own short TTL cache.
   registerUsageStatsRoutes(app);
@@ -1336,45 +1350,69 @@ export function createServeApp(
     // when a reaper is active.
     const idleTimeoutMs =
       opts.sessionIdleTimeoutMs ?? DEFAULT_SESSION_IDLE_TIMEOUT_MS;
-    const keepalive = startScheduledTaskKeepalive({
-      bridge,
-      boundWorkspace,
-      intervalMs: computeKeepaliveIntervalMs(idleTimeoutMs),
-    });
-    // Park the stop fn on `app.locals` (same pattern as `fsFactory` /
-    // `boundWorkspace` / `acpHandle` above) so the shutdown sequence in
-    // run-qwen-serve.ts can invoke it without threading it back through the
-    // createServeApp return type.
-    (
-      app.locals as { stopScheduledTaskKeepalive?: () => void }
-    ).stopScheduledTaskKeepalive = keepalive.stop;
+    const keepaliveIntervalMs = computeKeepaliveIntervalMs(idleTimeoutMs);
 
     // Rehydrate task-owned sessions on boot so their schedulers re-arm after a
     // restart (a bound task fires only in its own session, which nothing else
     // reloads). Fire-and-forget so it never delays the server coming up; a
     // no-op when there are no bound tasks. Deliberately not awaited.
-    void rehydrateScheduledTaskSessions({
-      bridge,
-      boundWorkspace,
-      onError: (sessionId, err) => {
+    const rehydrateWorkspace = (
+      taskBridge: AcpSessionBridge,
+      workspaceCwd: string,
+    ) => {
+      void rehydrateScheduledTaskSessions({
+        bridge: taskBridge,
+        boundWorkspace: workspaceCwd,
+        onError: (sessionId, err) => {
+          process.stderr.write(
+            `qwen serve: failed to rehydrate scheduled-task session ${sessionId}: ${
+              err instanceof Error ? err.message : String(err)
+            }\n`,
+          );
+        },
+        // Outer catch is defense-in-depth: rehydrateScheduledTaskSessions already
+        // catches readCronTasks failures and per-session load errors internally
+        // (returning { loaded, failed }), so this only guards an unexpected throw
+        // from the function entry itself. Log rather than swallow it — a silent
+        // failure here leaves every bound task dormant with no diagnostic.
+      }).catch((err) => {
         process.stderr.write(
-          `qwen serve: failed to rehydrate scheduled-task session ${sessionId}: ${
+          `qwen serve: unexpected scheduled-task rehydration failure: ${
             err instanceof Error ? err.message : String(err)
           }\n`,
         );
-      },
-      // Outer catch is defense-in-depth: rehydrateScheduledTaskSessions already
-      // catches readCronTasks failures and per-session load errors internally
-      // (returning { loaded, failed }), so this only guards an unexpected throw
-      // from the function entry itself. Log rather than swallow it — a silent
-      // failure here leaves every bound task dormant with no diagnostic.
-    }).catch((err) => {
-      process.stderr.write(
-        `qwen serve: unexpected scheduled-task rehydration failure: ${
-          err instanceof Error ? err.message : String(err)
-        }\n`,
-      );
+      });
+    };
+
+    // Every registered workspace gets its own keepalive + rehydration against
+    // its own cron file + bridge, so a bound task created through the
+    // workspace-qualified route fires (and survives a restart) exactly like a
+    // primary-workspace one — otherwise a secondary workspace's tasks would be
+    // written to disk but silently never revived. The registry is fully
+    // populated (primary + every `--workspace`) before createServeApp runs.
+    // A workspace ADDED at runtime (Phase 4 add-workspace) isn't looped here, so
+    // its bound-task sessions aren't kept resident for the rest of this process;
+    // once persisted it registers as a boot workspace and is covered on the next
+    // restart, which is when its rehydration matters most anyway.
+    const keepaliveStops = workspaceRegistry.list().map((runtime) => {
+      const keepalive = startScheduledTaskKeepalive({
+        bridge: runtime.bridge,
+        boundWorkspace: runtime.workspaceCwd,
+        intervalMs: keepaliveIntervalMs,
+      });
+      rehydrateWorkspace(runtime.bridge, runtime.workspaceCwd);
+      return keepalive.stop;
     });
+
+    // Park a combined stop fn on `app.locals` (same pattern as `fsFactory` /
+    // `boundWorkspace` / `acpHandle` above) so the shutdown sequence in
+    // run-qwen-serve.ts can invoke it without threading it back through the
+    // createServeApp return type. Stopping all is idempotent per keepalive.
+    (
+      app.locals as { stopScheduledTaskKeepalive?: () => void }
+    ).stopScheduledTaskKeepalive = () => {
+      for (const stop of keepaliveStops) stop();
+    };
   }
 
   registerPermissionRoutes(app, {
