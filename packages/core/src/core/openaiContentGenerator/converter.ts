@@ -1366,6 +1366,25 @@ export function convertOpenAIChunkToGemini(
       }
     }
 
+    const toolCallWithoutName = toolCallParser.hasNamelessToolCall();
+    const bufferingNamelessToolCall =
+      toolCallWithoutName && !requestContext.hasEmittedResponseParts;
+    const malformedNamelessToolCall =
+      Boolean(choice.finish_reason) &&
+      bufferingNamelessToolCall &&
+      toolCallWithoutName;
+
+    if (malformedNamelessToolCall) {
+      parts.length = 0;
+      requestContext.pendingNamelessToolCallParts = undefined;
+    } else if (bufferingNamelessToolCall) {
+      (requestContext.pendingNamelessToolCallParts ??= []).push(...parts);
+      parts.length = 0;
+    } else if (requestContext.pendingNamelessToolCallParts) {
+      parts.unshift(...requestContext.pendingNamelessToolCallParts);
+      requestContext.pendingNamelessToolCallParts = undefined;
+    }
+
     // Only emit function calls when streaming is complete (finish_reason is present)
     let toolCallsTruncated = false;
     if (choice.finish_reason) {
@@ -1393,8 +1412,11 @@ export function convertOpenAIChunkToGemini(
 
     // If tool call JSON was truncated, override to "length" so downstream
     // (turn.ts) correctly sets wasOutputTruncated=true.
-    const effectiveFinishReason =
-      toolCallsTruncated && choice.finish_reason !== 'length'
+    // Withhold the finish signal so the existing invalid-stream retry drops
+    // the buffered attempt instead of accepting a silently lost tool call.
+    const effectiveFinishReason = malformedNamelessToolCall
+      ? undefined
+      : toolCallsTruncated && choice.finish_reason !== 'length'
         ? 'length'
         : choice.finish_reason;
 
@@ -1412,6 +1434,7 @@ export function convertOpenAIChunkToGemini(
         effectiveFinishReason,
       );
     }
+    requestContext.hasEmittedResponseParts ||= parts.length > 0;
     response.candidates = [candidate];
   } else {
     response.candidates = [];

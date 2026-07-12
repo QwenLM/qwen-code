@@ -351,6 +351,47 @@ describe('OpenAIContentConverter', () => {
       expect(fn?.args).toEqual({});
       expect(fn?.id).toBe('call_noargs');
     });
+
+    it('discards a response whose tool call never provides a function name', () => {
+      const stream = withStreamParser(new StreamingToolCallParser());
+      const malformed = {
+        id: 'malformed-tool-call',
+        created: 1,
+        model: 'test',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              reasoning_content: 'failed reasoning',
+              content: 'failed visible content',
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_without_name',
+                  type: 'function',
+                  function: { arguments: '' },
+                },
+              ],
+            },
+            finish_reason: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+      const finish = {
+        id: 'malformed-tool-call-finish',
+        created: 2,
+        model: 'test',
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      expect(
+        converter.convertOpenAIChunkToGemini(malformed, stream).candidates?.[0]
+          ?.content?.parts,
+      ).toEqual([]);
+      const result = converter.convertOpenAIChunkToGemini(finish, stream);
+      expect(result.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(result.candidates?.[0]?.finishReason).toBeUndefined();
+    });
   });
 
   describe('convertGeminiRequestToOpenAI', () => {

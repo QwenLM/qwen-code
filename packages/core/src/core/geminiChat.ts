@@ -1065,164 +1065,6 @@ const PROTOCOL_TAG_PREFIXES = [
   '</summary',
 ] as const;
 
-const THINKING_TAGS = [
-  { text: '<thinking>', name: 'thinking', kind: 'open' },
-  { text: '</thinking>', name: 'thinking', kind: 'close' },
-  { text: '<thinking/>', name: 'thinking', kind: 'self' },
-  { text: '<thinking />', name: 'thinking', kind: 'self' },
-  { text: '<think>', name: 'think', kind: 'open' },
-  { text: '</think>', name: 'think', kind: 'close' },
-  { text: '<think/>', name: 'think', kind: 'self' },
-  { text: '<think />', name: 'think', kind: 'self' },
-] as const;
-
-const THINKING_TAG_LEADING_GUARD_LENGTH = 16;
-
-class ThinkingTagLeakDetector {
-  private buffer = '';
-  private held = '';
-  private openTag: 'think' | 'thinking' | undefined;
-  private invalid = false;
-  private clean = false;
-  private inspectedLength = 0;
-
-  accept(text: string, final = false): string {
-    if (this.invalid) return '';
-    if (this.clean) return text;
-    this.buffer += text;
-    const lower = this.buffer.toLowerCase();
-    const held: string[] = [];
-    let index = 0;
-
-    while (index < this.buffer.length) {
-      if (
-        !this.openTag &&
-        this.inspectedLength >= THINKING_TAG_LEADING_GUARD_LENGTH
-      ) {
-        this.held += held.join('');
-        this.buffer = this.buffer.slice(index);
-        return this.releaseAsLiteral();
-      }
-
-      const tag = THINKING_TAGS.find(({ text: value }) =>
-        lower.startsWith(value, index),
-      );
-      if (tag) {
-        const raw = this.buffer.slice(index, index + tag.text.length);
-        if (tag.kind === 'open') {
-          if (this.openTag) return this.markInvalid();
-          this.openTag = tag.name;
-        } else if (tag.kind === 'close') {
-          if (this.openTag !== tag.name) return this.markInvalid();
-          this.openTag = undefined;
-        }
-        held.push(raw);
-        index += tag.text.length;
-        this.inspectedLength += tag.text.length;
-        continue;
-      }
-
-      const remainingLength = this.buffer.length - index;
-      const partialTag = THINKING_TAGS.some(
-        ({ text: value }) =>
-          remainingLength < value.length &&
-          value.startsWith(lower.slice(index, index + value.length)),
-      );
-      if (partialTag) {
-        if (
-          final &&
-          (this.openTag ||
-            /^(?:<think|<thinking|<\/think|<\/thinking)/.test(
-              lower.slice(index),
-            ))
-        ) {
-          return this.markInvalid();
-        }
-        if (final) {
-          held.push(this.buffer.slice(index));
-          index = this.buffer.length;
-          break;
-        }
-        this.held += held.join('');
-        this.buffer = this.buffer.slice(index);
-        return '';
-      }
-
-      const nextTag = lower.indexOf('<', index + 1);
-      let end = nextTag === -1 ? this.buffer.length : nextTag;
-      if (!this.openTag) {
-        end = Math.min(
-          end,
-          index + THINKING_TAG_LEADING_GUARD_LENGTH - this.inspectedLength,
-        );
-      }
-      held.push(this.buffer.slice(index, end));
-      this.inspectedLength += end - index;
-      index = end;
-    }
-
-    this.held += held.join('');
-    this.buffer = '';
-    if (final && this.openTag) return this.markInvalid();
-    if (
-      final ||
-      (!this.openTag &&
-        this.inspectedLength >= THINKING_TAG_LEADING_GUARD_LENGTH)
-    ) {
-      return this.releaseAsLiteral();
-    }
-    return '';
-  }
-
-  finish(): string {
-    return this.accept('', true);
-  }
-
-  get leaked(): boolean {
-    return this.invalid;
-  }
-
-  get blockingOutput(): boolean {
-    return !this.clean && (this.hasPendingTag || this.held.length > 0);
-  }
-
-  get hasPendingTag(): boolean {
-    return this.invalid || this.openTag !== undefined || this.buffer.length > 0;
-  }
-
-  get active(): boolean {
-    return !this.invalid && !this.clean;
-  }
-
-  releaseAsLiteral(): string {
-    if (this.invalid) return '';
-    const text = this.held + this.buffer;
-    this.held = '';
-    this.buffer = '';
-    this.openTag = undefined;
-    this.clean = true;
-    return text;
-  }
-
-  takeGuardedOutput(): string {
-    if (this.hasPendingTag) return '';
-    const text = this.held;
-    this.held = '';
-    return text;
-  }
-
-  reject(): void {
-    this.markInvalid();
-  }
-
-  private markInvalid(): string {
-    this.invalid = true;
-    this.buffer = '';
-    this.held = '';
-    return '';
-  }
-}
-
 class LeadingProtocolTagLeakDetector {
   private state: 'detecting' | 'clean' | 'leaked' = 'detecting';
   private buffer = '';
@@ -3815,11 +3657,7 @@ export class GeminiChat {
     let hasToolCall = false;
     let hasFinishReason = false;
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
-    const thinkingTagDetector = new ThinkingTagLeakDetector();
     let protocolTextWasSuppressed = false;
-    let thinkingTagLeakDetected = false;
-    let thinkingTagDetectionEnabled = true;
-    const pendingThinkingTagParts: Part[] = [];
     // Captured if the upstream stream throws mid-iteration (typical on weak
     // networks: SSE drops between `content_block_stop` of a tool_use and the
     // terminal `message_stop`). We still build / record / push a partial
@@ -3850,86 +3688,9 @@ export class GeminiChat {
                 ? [rest]
                 : [];
             });
-            if (thinkingTagDetectionEnabled) {
-              const detectedParts: Part[] = [];
-              for (const part of content.parts) {
-                if (!thinkingTagDetectionEnabled) {
-                  detectedParts.push(part);
-                  continue;
-                }
-
-                if (typeof part.text === 'string' && !part.thought) {
-                  const text = thinkingTagDetector.accept(part.text);
-                  if (text) {
-                    detectedParts.push(...pendingThinkingTagParts);
-                    pendingThinkingTagParts.length = 0;
-                    detectedParts.push({ ...part, text });
-                  } else {
-                    const { text: _text, ...rest } = part;
-                    const hasMetadata = Object.entries(rest).some(
-                      ([key, value]) =>
-                        key !== 'thought' && value !== undefined,
-                    );
-                    if (hasMetadata && !thinkingTagDetector.leaked) {
-                      const literalText =
-                        thinkingTagDetector.releaseAsLiteral();
-                      detectedParts.push(...pendingThinkingTagParts);
-                      pendingThinkingTagParts.length = 0;
-                      detectedParts.push({
-                        ...part,
-                        text: literalText,
-                      });
-                      thinkingTagDetectionEnabled = false;
-                    } else if (hasMetadata) {
-                      detectedParts.push(rest);
-                    }
-                  }
-                  if (
-                    !thinkingTagDetector.active &&
-                    !thinkingTagDetector.leaked
-                  ) {
-                    thinkingTagDetectionEnabled = false;
-                  }
-                  continue;
-                }
-
-                if (part.functionCall) {
-                  if (thinkingTagDetector.hasPendingTag) {
-                    thinkingTagDetector.reject();
-                  } else {
-                    const text = thinkingTagDetector.takeGuardedOutput();
-                    if (text) detectedParts.push({ text });
-                  }
-                } else if (!part.thought) {
-                  const text = thinkingTagDetector.releaseAsLiteral();
-                  detectedParts.push(...pendingThinkingTagParts);
-                  pendingThinkingTagParts.length = 0;
-                  if (text) detectedParts.push({ text });
-                  thinkingTagDetectionEnabled = false;
-                }
-                detectedParts.push(part);
-              }
-
-              if (
-                detectedParts.some((part) => part.functionCall) &&
-                thinkingTagDetector.hasPendingTag
-              ) {
-                thinkingTagDetector.reject();
-              } else if (detectedParts.some((part) => part.functionCall)) {
-                const text = thinkingTagDetector.takeGuardedOutput();
-                if (text) detectedParts.push({ text });
-              }
-
-              if (thinkingTagDetector.hasPendingTag) {
-                pendingThinkingTagParts.push(
-                  ...detectedParts.filter((part) => part.thought),
-                );
-                content.parts = detectedParts.filter((part) => !part.thought);
-              } else {
-                content.parts = [...pendingThinkingTagParts, ...detectedParts];
-                pendingThinkingTagParts.length = 0;
-              }
-              thinkingTagLeakDetected ||= thinkingTagDetector.leaked;
+            if (candidate?.finishReason) {
+              const text = protocolTagDetector.finish();
+              if (text) content.parts.push({ text });
             }
             content.parts = normalizeModelToolCallIds(
               content.parts,
@@ -3944,29 +3705,6 @@ export class GeminiChat {
 
             // Collect all parts for recording
             allModelParts.push(...content.parts);
-          }
-          if (candidate?.finishReason) {
-            const protocolText = protocolTagDetector.finish();
-            const text = thinkingTagDetectionEnabled
-              ? thinkingTagDetector.accept(protocolText, true)
-              : protocolText;
-            if (!thinkingTagDetector.leaked && pendingThinkingTagParts.length) {
-              candidate.content ??= { role: 'model', parts: [] };
-              candidate.content.parts ??= [];
-              candidate.content.parts.push(...pendingThinkingTagParts);
-              allModelParts.push(...pendingThinkingTagParts);
-              pendingThinkingTagParts.length = 0;
-            }
-            if (text) {
-              const part = { text };
-              candidate.content ??= { role: 'model', parts: [] };
-              candidate.content.parts ??= [];
-              candidate.content.parts.push(part);
-              allModelParts.push(part);
-            }
-            if (thinkingTagDetectionEnabled) {
-              thinkingTagLeakDetected ||= thinkingTagDetector.leaked;
-            }
           }
         }
 
@@ -4044,36 +3782,7 @@ export class GeminiChat {
         }
 
         if (!protocolTextWasSuppressed || !protocolTagDetector.blockingOutput) {
-          if (
-            thinkingTagDetectionEnabled &&
-            thinkingTagDetector.blockingOutput
-          ) {
-            if (!thinkingTagDetector.leaked) {
-              const candidate = chunk.candidates?.[0];
-              const thoughtParts = candidate?.content?.parts?.filter(
-                (part) => part.thought,
-              );
-              if (candidate?.content && thoughtParts?.length) {
-                candidate.content.parts = thoughtParts;
-                syncFunctionCallsField(chunk, thoughtParts);
-                yield chunk;
-              }
-            }
-          } else {
-            yield chunk;
-            const committedParts = chunk.candidates?.[0]?.content?.parts ?? [];
-            if (
-              committedParts.some(
-                (part) =>
-                  !part.thought &&
-                  Object.keys(part).some(
-                    (key) => key !== 'thought' && key !== 'thoughtSignature',
-                  ),
-              )
-            ) {
-              thinkingTagDetectionEnabled = false;
-            }
-          }
+          yield chunk;
         }
       }
     } catch (e) {
@@ -4126,12 +3835,6 @@ export class GeminiChat {
     if (streamError === null && protocolTagDetector.leaked) {
       throw new InvalidStreamError(
         'Model response started with leaked protocol tags.',
-        'PROTOCOL_TAG_LEAK',
-      );
-    }
-    if (streamError === null && thinkingTagLeakDetected) {
-      throw new InvalidStreamError(
-        'Model response contained malformed thinking tags in visible content.',
         'PROTOCOL_TAG_LEAK',
       );
     }
