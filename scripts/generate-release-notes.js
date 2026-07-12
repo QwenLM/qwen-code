@@ -275,7 +275,10 @@ function compactEntry(entry) {
 
 function parseModelJson(value) {
   if (typeof value === 'string') {
-    return JSON.parse(value);
+    const stripped = value
+      .replace(/^\s*```(?:json)?\s*\n?/i, '')
+      .replace(/\n?\s*```\s*$/, '');
+    return JSON.parse(stripped);
   }
   return value;
 }
@@ -519,6 +522,9 @@ export function renderReleaseNotes({
 
   lines.push('## Complete Change List', '');
   for (const category of CATEGORY_ORDER) {
+    if (category === 'Breaking Changes') {
+      continue;
+    }
     const categoryEntries = entries.filter(
       (entry) => classifyChange(entry) === category,
     );
@@ -691,7 +697,11 @@ async function main() {
 
 if (isMainModule(import.meta.url)) {
   main().catch((error) => {
-    console.error(`ERROR: ${error.message}`);
+    console.error(
+      error.message.startsWith('ERROR: ')
+        ? error.message
+        : `ERROR: ${error.message}`,
+    );
     process.exitCode = 1;
   });
 }

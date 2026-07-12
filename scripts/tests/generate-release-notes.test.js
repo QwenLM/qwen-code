@@ -154,11 +154,13 @@ describe('renderReleaseNotes', () => {
       },
       entry(2, 'fix(core): preserve tool results'),
       entry(3, 'docs: explain session search'),
+      entry(4, 'refactor(core): remove legacy path', ['breaking-change']),
     ];
     const summaries = new Map([
       [1, 'Adds session search to the CLI.'],
       [2, 'Preserves tool results when history is repaired.'],
       [3, 'Documents session search.'],
+      [4, 'Removes a legacy compatibility path.'],
     ]);
 
     const markdown = renderReleaseNotes({
@@ -187,7 +189,7 @@ describe('renderReleaseNotes', () => {
     expect(markdown).toContain(
       `Adds session search to the CLI. ([#1](${PR(1)})) by @alice with @Copilot`,
     );
-    for (const number of [1, 2, 3]) {
+    for (const number of [1, 2, 3, 4]) {
       expect(markdown.match(new RegExp(`\\[#${number}\\]`, 'g'))).toHaveLength(
         number < 3 ? 2 : 1,
       );
@@ -209,16 +211,16 @@ describe('generateAiContent', () => {
     const complete = async (request) => {
       calls.push(request);
       if (request.kind === 'summaries') {
-        return JSON.stringify({
+        return `\`\`\`json\n${JSON.stringify({
           summaries: request.entries.map((item) => ({
             pr: item.number,
             summary: `User-facing summary for ${item.number}.`,
           })),
-        });
+        })}\n\`\`\``;
       }
-      return JSON.stringify({
+      return `\`\`\`json\n${JSON.stringify({
         highlights: [{ text: 'Session workflows are clearer.', prs: [1, 2] }],
-      });
+      })}\n\`\`\``;
     };
 
     const result = await generateAiContent(entries, complete, { batchSize: 2 });
@@ -508,6 +510,28 @@ describe('generateReleaseNotes', () => {
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not duplicate ERROR prefixes for argument failures', () => {
+    try {
+      execFileSync(
+        process.execPath,
+        [
+          'scripts/generate-release-notes.js',
+          '--repo=bad repo',
+          '--tag=v1.0.1',
+          '--previous-tag=v1.0.0',
+          '--dry-run',
+        ],
+        { encoding: 'utf8', stdio: 'pipe' },
+      );
+      throw new Error('expected command to fail');
+    } catch (error) {
+      expect(error.stderr).toContain(
+        'ERROR: Invalid repository "bad repo"; expected "owner/name".',
+      );
+      expect(error.stderr).not.toContain('ERROR: ERROR:');
     }
   });
 });
