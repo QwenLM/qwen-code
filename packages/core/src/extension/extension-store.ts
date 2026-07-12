@@ -101,6 +101,8 @@ export class ExtensionStoreBusyError extends Error {
   }
 }
 
+class UnsafeRecoveredJournalError extends ExtensionStoreCorruptError {}
+
 export class ExtensionConflictError extends Error {
   readonly code = 'extension_conflict';
 
@@ -944,7 +946,8 @@ export class ExtensionStore {
     for (const name of names) {
       if (!name.endsWith('.json')) continue;
       const journalPath = path.join(transactionsDir, name);
-      const journal = await this.readJournalUnlocked(journalPath);
+      const journal = await this.readRecoverableJournalUnlocked(journalPath);
+      if (!journal) continue;
       if (
         journal.phase === 'state_committed' ||
         (snapshot?.generation ?? -1) >= journal.targetGeneration
@@ -973,9 +976,10 @@ export class ExtensionStore {
       const committed: ExtensionTransactionJournal[] = [];
       for (const name of await fsp.readdir(transactionsDir)) {
         if (!name.endsWith('.json')) continue;
-        const journal = await this.readJournalUnlocked(
+        const journal = await this.readRecoverableJournalUnlocked(
           path.join(transactionsDir, name),
         );
+        if (!journal) continue;
         if (journal.phase === 'state_committed') committed.push(journal);
       }
       const latest = committed.sort(
@@ -1047,6 +1051,28 @@ export class ExtensionStore {
     }
   }
 
+  private async readRecoverableJournalUnlocked(
+    journalPath: string,
+  ): Promise<ExtensionTransactionJournal | undefined> {
+    try {
+      return await this.readJournalUnlocked(journalPath);
+    } catch (error) {
+      if (
+        !(error instanceof ExtensionStoreCorruptError) ||
+        error instanceof UnsafeRecoveredJournalError
+      ) {
+        throw error;
+      }
+      const quarantinePath = `${journalPath}.${crypto.randomUUID()}.corrupt`;
+      await renameWithRetry(journalPath, quarantinePath, 3, 50);
+      debugLogger.warn(
+        `Quarantined corrupt extension transaction journal at ${quarantinePath}:`,
+        error,
+      );
+      return undefined;
+    }
+  }
+
   private assertRecoveredJournalPaths(
     journal: ExtensionTransactionJournal,
     journalPath: string,
@@ -1067,7 +1093,7 @@ export class ExtensionStore {
         journal.stagingDirectory !== undefined) ||
       (journal.operation !== 'uninstall' && !journal.stagingDirectory)
     ) {
-      throw new ExtensionStoreCorruptError(
+      throw new UnsafeRecoveredJournalError(
         `Extension transaction ${journal.transactionId} contains unsafe paths.`,
       );
     }

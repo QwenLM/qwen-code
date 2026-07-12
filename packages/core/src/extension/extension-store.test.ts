@@ -924,6 +924,81 @@ describe('ExtensionStore', () => {
     expect(fs.existsSync(journal)).toBe(false);
   });
 
+  it('quarantines a corrupt journal without blocking store operations', async () => {
+    const store = makeStore();
+    const identity = { id: 'd4'.repeat(32), name: 'demo' };
+    await store.ensureInitialized([identity]);
+    const transactionsDir = path.join(storeDir, 'transactions');
+    const journal = path.join(transactionsDir, 'corrupt.json');
+    await fsp.writeFile(journal, '{not-json');
+
+    await expect(store.readSnapshot()).resolves.toMatchObject({
+      generation: 0,
+    });
+    await expect(
+      store.setDefaultActivation(identity, 'disabled'),
+    ).resolves.toMatchObject({ generation: 1 });
+
+    expect(fs.existsSync(journal)).toBe(false);
+    expect(
+      (await fsp.readdir(transactionsDir)).some(
+        (name) => name.startsWith('corrupt.json.') && name.endsWith('.corrupt'),
+      ),
+    ).toBe(true);
+  });
+
+  it.each(['destination', 'backup', 'staging', 'transaction-id'] as const)(
+    'fails closed for a journal with a hostile %s path',
+    async (kind) => {
+      const store = makeStore();
+      const identity = { id: 'd5'.repeat(32), name: 'demo' };
+      const initial = await store.ensureInitialized([identity]);
+      const targetSnapshot = structuredClone(initial);
+      targetSnapshot.generation = 1;
+      const transactionId = `hostile-${kind}`;
+      const outside = path.join(root, 'outside');
+      const sentinel = path.join(outside, 'sentinel');
+      await fsp.mkdir(outside);
+      await fsp.writeFile(sentinel, 'preserve');
+      const journal = path.join(
+        storeDir,
+        'transactions',
+        `${transactionId}.json`,
+      );
+      await fsp.writeFile(
+        journal,
+        JSON.stringify({
+          version: 1,
+          transactionId:
+            kind === 'transaction-id' ? 'different-id' : transactionId,
+          operation: 'update',
+          phase: 'artifact_swapped',
+          destinationDirectory:
+            kind === 'destination'
+              ? outside
+              : path.join(extensionsDir, identity.name),
+          stagingDirectory:
+            kind === 'staging'
+              ? outside
+              : path.join(storeDir, 'staging', transactionId),
+          backupDirectory:
+            kind === 'backup'
+              ? outside
+              : path.join(storeDir, 'rollback', transactionId),
+          previousGeneration: 0,
+          targetGeneration: 1,
+          targetSnapshot,
+        }),
+      );
+
+      await expect(store.readSnapshot()).rejects.toBeInstanceOf(
+        ExtensionStoreCorruptError,
+      );
+      expect(await fsp.readFile(sentinel, 'utf8')).toBe('preserve');
+      expect(fs.existsSync(journal)).toBe(true);
+    },
+  );
+
   it('recovers committed state from a journal when state.json is corrupt', async () => {
     const store = makeStore();
     const identity = { id: 'f1'.repeat(32), name: 'demo' };
