@@ -1728,7 +1728,7 @@ export class ExtensionManager {
             fs.existsSync(configHooksPath))
         ) {
           try {
-            await performVariableReplacement(stagingPath);
+            await performVariableReplacement(stagingPath, destinationPath);
           } catch (error) {
             debugLogger.error('Variable replacement failed', error);
           }

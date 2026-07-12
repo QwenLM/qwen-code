@@ -245,6 +245,47 @@ describe('extension tests', () => {
       ]);
     });
 
+    it('uses the installed path for Claude plugin root replacement', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'claude-ext.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          const pluginDirectory = path.join(destination, '.claude-plugin');
+          fs.mkdirSync(pluginDirectory, { recursive: true });
+          fs.writeFileSync(
+            path.join(pluginDirectory, 'plugin.json'),
+            JSON.stringify({ name: 'claude-ext', version: '1.0.0' }),
+          );
+          fs.mkdirSync(path.join(destination, 'hooks'));
+          fs.writeFileSync(
+            path.join(destination, 'README.md'),
+            '${CLAUDE_PLUGIN_ROOT}/scripts/setup.sh',
+          );
+        },
+      );
+      const manager = createExtensionManager();
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: {
+          type: 'local',
+          source: archivePath,
+        },
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
+      });
+
+      try {
+        await manager.commitPreparedExtension(prepared);
+        expect(
+          fs.readFileSync(
+            path.join(prepared.destinationDirectory, 'README.md'),
+            'utf8',
+          ),
+        ).toBe(path.join(prepared.destinationDirectory, 'scripts', 'setup.sh'));
+      } finally {
+        await manager.disposePreparedExtension(prepared);
+      }
+    });
+
     it('reports temp cleanup failure as a post-commit warning', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'cleanup-warning.zip');
       fs.writeFileSync(archivePath, 'archive');
