@@ -24,6 +24,11 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async () => {
       sessionProviderProps.push(props);
       return React.createElement(React.Fragment, null, children);
     },
+    useWorkspace: () => ({
+      capabilities: {
+        workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
+      },
+    }),
   };
 });
 vi.mock('./App', async () => {

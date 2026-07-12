@@ -152,6 +152,11 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useStreamingState: () => testState.streamingState,
   useTranscriptBlocks: () => testState.blocks,
   useTranscriptStore: () => mockStore,
+  useWorkspace: () => ({
+    capabilities: {
+      workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
+    },
+  }),
   useWorkspaceActions: () => mockWorkspaceActions,
   useWorkspaceEventSignals: () => ({
     artifactsVersion: 0,
@@ -2399,7 +2404,9 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     await act(async () => {
       await expect(run('do the thing', 'session-1')).resolves.toBeUndefined();
     });
-    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-1');
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-1', {
+      workspaceCwd: undefined,
+    });
   });
 
   it('supersedes an older pending bound run with a newer one', async () => {
