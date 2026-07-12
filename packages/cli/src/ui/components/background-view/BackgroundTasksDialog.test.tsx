@@ -117,7 +117,10 @@ interface Harness {
   probe: { current: ProbeHandle | null };
 }
 
-function setup(initial: readonly DialogEntry[]): Harness {
+function setup(
+  initial: readonly DialogEntry[],
+  availableTerminalHeight = 30,
+): Harness {
   const handlers: Array<(key: { name?: string; sequence?: string }) => void> =
     [];
   mockedUseKeypress.mockImplementation((cb, opts) => {
@@ -179,7 +182,7 @@ function setup(initial: readonly DialogEntry[]): Harness {
         <BackgroundTaskViewProvider config={config}>
           <Probe entriesSetter={setEntries} />
           <BackgroundTasksDialog
-            availableTerminalHeight={30}
+            availableTerminalHeight={availableTerminalHeight}
             terminalWidth={80}
           />
         </BackgroundTaskViewProvider>
@@ -1109,6 +1112,169 @@ describe('BackgroundTasksDialog', () => {
       const frame = h.lastFrame() ?? '';
       expect(frame).toContain('researcher');
       expect(frame).toContain('no longer running');
+    });
+  });
+
+  describe('subagent observability (issue #6569)', () => {
+    it('renders the newest activity in full across wrapped lines instead of truncating', () => {
+      // A command far wider than the 80-col harness terminal. The tail
+      // marker can only appear in the frame if the live row wraps instead
+      // of truncating to one line.
+      const longCommand = `git log --format='%H %s' --since='2 weeks ago' -- packages/core/src/agents packages/cli/src/ui/components/background-view END_OF_COMMAND`;
+      const running = entry({
+        recentActivities: [
+          { name: 'read_file', description: 'old-read.ts', at: 1 },
+          { name: 'run_shell_command', description: longCommand, at: 2 },
+        ],
+      });
+      const h = setup([running]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = (h.lastFrame() ?? '').replace(/\n\s*/g, ' ');
+      expect(frame).toContain('END_OF_COMMAND');
+    });
+
+    it('still truncates non-live activity rows to one line', () => {
+      const longOldCommand = `find . -name '*.ts' -not -path './node_modules/*' -exec grep -l 'subagent' {} + OLD_COMMAND_TAIL`;
+      const running = entry({
+        recentActivities: [
+          { name: 'run_shell_command', description: longOldCommand, at: 1 },
+          { name: 'read_file', description: 'src/index.ts', at: 2 },
+        ],
+      });
+      const h = setup([running]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = (h.lastFrame() ?? '').replace(/\n\s*/g, ' ');
+      expect(frame).not.toContain('OLD_COMMAND_TAIL');
+      expect(frame).toContain('src/index.ts');
+    });
+
+    it('shows the Transcript section with the JSONL trace path', () => {
+      const running = entry({ outputFile: '/tmp/subagents/agent-abc.jsonl' });
+      const h = setup([running]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = h.lastFrame() ?? '';
+      expect(frame).toContain('Transcript');
+      expect(frame).toContain('/tmp/subagents/agent-abc.jsonl');
+    });
+
+    it('renders up to 10 progress rows in the detail view', () => {
+      const activities = Array.from({ length: 12 }, (_, i) => ({
+        name: 'read_file',
+        description: `file-${i}.ts`,
+        at: i,
+      }));
+      const h = setup([entry({ recentActivities: activities })]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = h.lastFrame() ?? '';
+      expect(frame).not.toContain('file-1.ts');
+      expect(frame).toContain('file-2.ts');
+      expect(frame).toContain('file-11.ts');
+    });
+
+    it('shows all rows when the buffer holds exactly 10 activities', () => {
+      const activities = Array.from({ length: 10 }, (_, i) => ({
+        name: 'read_file',
+        description: `file-${i}.ts`,
+        at: i,
+      }));
+      const h = setup([entry({ recentActivities: activities })]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = h.lastFrame() ?? '';
+      expect(frame).toContain('file-0.ts');
+      expect(frame).toContain('file-9.ts');
+    });
+
+    it('drops only the oldest row at 11 activities', () => {
+      const activities = Array.from({ length: 11 }, (_, i) => ({
+        name: 'read_file',
+        description: `file-${i}.ts`,
+        at: i,
+      }));
+      const h = setup([entry({ recentActivities: activities })]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = h.lastFrame() ?? '';
+      expect(frame).not.toContain('file-0.ts');
+      expect(frame).toContain('file-1.ts');
+      expect(frame).toContain('file-10.ts');
+    });
+
+    it('omits the Progress section entirely when there are no activities', () => {
+      const h = setup([entry({ recentActivities: [] })]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = h.lastFrame() ?? '';
+      expect(frame).not.toContain('Progress');
+    });
+
+    it('keeps the live command visible in a short terminal by dropping older rows', () => {
+      // Regression: `MaxSizedBox` clips from the bottom, so a full 10-row
+      // history used to push the live command (and Transcript) off a short
+      // terminal — the opposite of what this view is for. The oldest rows
+      // must yield to the live row instead.
+      const activities = [
+        ...Array.from({ length: 9 }, (_, i) => ({
+          name: 'read_file',
+          description: `history-${i}.ts`,
+          at: i,
+        })),
+        {
+          name: 'run_shell_command',
+          description: 'git log --oneline LIVE_COMMAND_MARKER',
+          at: 9,
+        },
+      ];
+      const h = setup([entry({ recentActivities: activities })], 20);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = (h.lastFrame() ?? '').replace(/\n\s*/g, ' ');
+      // The live row survives...
+      expect(frame).toContain('LIVE_COMMAND_MARKER');
+      // ...at the cost of the oldest history row.
+      expect(frame).not.toContain('history-0.ts');
+    });
+
+    it('keeps the live row visible with a full 10-row history and no transcript (short terminal)', () => {
+      // The [Critical] reviewer scenario: maxHeight=14 (availableTerminalHeight
+      // 20 - 6 chrome), 10 activities, no outputFile/parent/children. The
+      // Progress spacer+header are budgeted, so the live row must still render.
+      const activities = [
+        ...Array.from({ length: 9 }, (_, i) => ({
+          name: 'read_file',
+          description: `hist-${i}.ts`,
+          at: i,
+        })),
+        {
+          name: 'run_shell_command',
+          description: 'git log ONLY_LIVE_ROW_MARKER',
+          at: 9,
+        },
+      ];
+      const h = setup(
+        [entry({ outputFile: '', recentActivities: activities })],
+        20,
+      );
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = (h.lastFrame() ?? '').replace(/\n\s*/g, ' ');
+      expect(frame).toContain('ONLY_LIVE_ROW_MARKER');
+    });
+
+    it('renders the full transcript path (wraps instead of truncating)', () => {
+      const longPath =
+        '/home/runner/.qwen/projects/some-workspace-slug/subagents/2f9c1a7b-1234-4a5b-8c9d-abcdef012345/agent-general-purpose-call-9.jsonl';
+      const running = entry({ outputFile: longPath });
+      const h = setup([running]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = (h.lastFrame() ?? '').replace(/\n\s*/g, '');
+      // The whole path is present (the tail is not clipped off).
+      expect(frame).toContain('agent-general-purpose-call-9.jsonl');
     });
   });
 });

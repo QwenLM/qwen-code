@@ -27,6 +27,7 @@ import {
 } from '../customization';
 import {
   useComposerCore,
+  type ComposerSubmitMetadata,
   type EditorHandle,
   type SlashMenuState,
   getComposerTagDisplay,
@@ -35,7 +36,7 @@ import {
 } from '../hooks/useComposerCore';
 import { AtMentionPanel } from './AtMentionPanel';
 import { cssUrlVar } from '../utils/cssUrlVar';
-import { getComposerTagIconUrl } from './composerTagIcons';
+import { getComposerTagIconUrl } from '../utils/composerTag';
 import { isSafeImageSrc } from './messages/Markdown';
 import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
@@ -69,6 +70,7 @@ interface ChatEditorProps {
     text: string,
     images?: import('../adapters/promptTypes').PromptImage[],
     commitAccepted?: import('../hooks/useComposerCore').ComposerSubmitCommit,
+    metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;

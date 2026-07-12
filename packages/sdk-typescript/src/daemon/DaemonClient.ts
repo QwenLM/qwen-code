@@ -1555,8 +1555,8 @@ export class DaemonClient {
   }
 
   /**
-   * Enumerate live sessions in the given workspace. Used by session-picker
-   * UIs. Returns an empty list (not 404) when the workspace has no sessions.
+   * Enumerate the session catalog for a workspace. Used by session-picker UIs.
+   * Returns an empty list (not 404) when the workspace has no sessions.
    */
   async listWorkspaceSessions(
     workspaceCwd: string,
@@ -3365,13 +3365,23 @@ export class DaemonClient {
 
   async addWorkspace(
     cwd: string,
-  ): Promise<{ id: string; cwd: string; primary: boolean; trusted: boolean }> {
+    options: { persist?: boolean } = {},
+  ): Promise<{
+    id: string;
+    cwd: string;
+    primary: boolean;
+    trusted: boolean;
+    persisted?: boolean;
+  }> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspaces`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ cwd }),
+        body: JSON.stringify({
+          cwd,
+          ...(options.persist ? { persist: true } : {}),
+        }),
       },
       async (res) => {
         if (!res.ok) {
@@ -3382,6 +3392,7 @@ export class DaemonClient {
           cwd: string;
           primary: boolean;
           trusted: boolean;
+          persisted?: boolean;
         };
       },
     );
@@ -3668,6 +3679,19 @@ export class WorkspaceDaemonClient {
       `/session-groups/${urlEncode(groupId)}`,
       'DELETE /workspaces/:workspace/session-groups/:groupId',
       { method: 'DELETE' },
+    );
+  }
+
+  updateSessionOrganization(
+    sessionId: string,
+    update: DaemonSessionOrganizationUpdate,
+    clientId?: string,
+  ): Promise<DaemonSessionOrganizationResult> {
+    return this.client.workspaceJsonRequest<DaemonSessionOrganizationResult>(
+      this.workspaceSelector,
+      `/session/${urlEncode(sessionId)}/organization`,
+      'PATCH /workspaces/:workspace/session/:id/organization',
+      { method: 'PATCH', body: update, clientId },
     );
   }
 

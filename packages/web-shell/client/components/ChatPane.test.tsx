@@ -17,7 +17,12 @@ let connectionState: any;
 let streamingStateValue: string;
 let pendingPermission: any;
 let latestOnSubmit:
-  | ((text: string, images?: unknown, commit?: () => void) => boolean)
+  | ((
+      text: string,
+      images?: unknown,
+      commit?: () => void,
+      metadata?: unknown,
+    ) => boolean)
   | undefined;
 let latestChatEditorProps: any;
 let latestFollowupAccept: ((suggestion: string) => void) | undefined;
@@ -351,6 +356,28 @@ describe('ChatPane', () => {
     });
   });
 
+  it('forwards composer annotations with an idle prompt', () => {
+    const inputAnnotations = [
+      {
+        start: 6,
+        end: 14,
+        text: '@.husky/',
+        type: 'file',
+        data: { path: '.husky/' },
+      },
+    ];
+    render();
+    act(() => {
+      latestOnSubmit!('check @.husky/', undefined, undefined, {
+        inputAnnotations,
+      });
+    });
+    expect(sendPrompt).toHaveBeenCalledWith('check @.husky/', {
+      inputAnnotations,
+      onAdmitted: expect.any(Function),
+    });
+  });
+
   it('queues a prompt while the pane is already running', () => {
     streamingStateValue = 'responding';
     render();
@@ -361,6 +388,32 @@ describe('ChatPane', () => {
     });
     expect(returned).toBe(true);
     expect(enqueuePrompt).toHaveBeenCalledWith('queued next', undefined);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('forwards composer annotations with a queued prompt', () => {
+    streamingStateValue = 'responding';
+    const inputAnnotations = [
+      {
+        start: 6,
+        end: 14,
+        text: '@.husky/',
+        type: 'file',
+        data: { path: '.husky/' },
+      },
+    ];
+    render();
+    act(() => {
+      latestOnSubmit!('queue @.husky/', undefined, undefined, {
+        inputAnnotations,
+      });
+    });
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      'queue @.husky/',
+      undefined,
+      undefined,
+      inputAnnotations,
+    );
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 
