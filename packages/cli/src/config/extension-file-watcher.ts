@@ -235,11 +235,12 @@ export class ExtensionFileWatcher {
     if (changedPath === path.resolve(this.storeStatePath)) {
       const generation = this.readStoreGeneration();
       if (generation !== undefined) {
-        this.observedStoreGeneration = generation;
+        this.markStoreGenerationChanged(generation, true);
+      } else {
+        this.refreshState.markExtensionsChanged(
+          'extension store generation changed',
+        );
       }
-      this.refreshState.markExtensionsChanged(
-        'extension store generation changed',
-      );
       return false;
     }
     if (this.staleFiles.has(changedPath)) {
@@ -383,12 +384,17 @@ export class ExtensionFileWatcher {
   private pollStoreGeneration(): void {
     const generation = this.readStoreGeneration();
     if (generation === undefined) return;
+    this.markStoreGenerationChanged(generation);
+  }
+
+  private markStoreGenerationChanged(generation: number, force = false): void {
     const previous = this.observedStoreGeneration;
-    this.observedStoreGeneration = generation;
-    if (previous === undefined || previous !== generation) {
-      this.refreshState.markExtensionsChanged(
-        'extension store generation changed',
-      );
+    if (!force && previous === generation) return;
+    const marked = this.refreshState.markExtensionsChanged(
+      'extension store generation changed',
+    );
+    if (marked || this.refreshState.needsExtensionRefresh()) {
+      this.observedStoreGeneration = generation;
     }
   }
 

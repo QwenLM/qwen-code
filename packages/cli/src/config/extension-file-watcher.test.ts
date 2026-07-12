@@ -6,9 +6,9 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as path from 'node:path';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config, ExtensionMutationEvent } from '@qwen-code/qwen-code-core';
 import { ExtensionFileWatcher } from './extension-file-watcher.js';
-import type { ExtensionRefreshState } from './extension-refresh-state.js';
+import { ExtensionRefreshState } from './extension-refresh-state.js';
 
 type EventHandler = (...args: unknown[]) => void;
 
@@ -74,7 +74,8 @@ function configWithExtensions(extensions: unknown[]): Config {
 function createRefreshState(): ExtensionRefreshState {
   return {
     markExtensionContentChanged: vi.fn(),
-    markExtensionsChanged: vi.fn(),
+    markExtensionsChanged: vi.fn().mockReturnValue(true),
+    needsExtensionRefresh: vi.fn().mockReturnValue(false),
     beginSuppression: vi.fn((onSettle?: () => void) => () => onSettle?.()),
   } as unknown as ExtensionRefreshState;
 }
@@ -184,6 +185,57 @@ describe('ExtensionFileWatcher', () => {
       expect(refreshState.markExtensionsChanged).toHaveBeenCalledWith(
         'extension store generation changed',
       );
+    } finally {
+      watcher.stopWatching();
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries a generation suppressed after an internal mutation', () => {
+    vi.useFakeTimers();
+    const refreshState = new ExtensionRefreshState();
+    let mutationListener: ((event: ExtensionMutationEvent) => void) | undefined;
+    const manager = {
+      addMutationListener: vi.fn(
+        (listener: (event: ExtensionMutationEvent) => void) => {
+          mutationListener = listener;
+          return vi.fn();
+        },
+      ),
+    };
+    const watcher = new ExtensionFileWatcher(
+      {
+        getExtensions: () => [],
+        getActiveExtensions: () => [],
+        getExtensionManager: () => manager,
+      } as unknown as Config,
+      extensionsDir,
+      refreshState,
+    );
+    try {
+      watcher.startWatching();
+      mutationListener?.({
+        id: 1,
+        phase: 'start',
+        operation: 'installExtension',
+      });
+      mutationListener?.({
+        id: 1,
+        phase: 'end',
+        operation: 'installExtension',
+      });
+      mockReadFileSync.mockReturnValue('{"generation":2}');
+
+      fireAllEvent(
+        mockWatchers.length - 1,
+        'change',
+        path.join(path.dirname(extensionsDir), 'extension-store', 'state.json'),
+      );
+      expect(refreshState.needsExtensionRefresh()).toBe(false);
+
+      vi.advanceTimersByTime(30_000);
+
+      expect(refreshState.needsExtensionRefresh()).toBe(true);
     } finally {
       watcher.stopWatching();
       vi.useRealTimers();
