@@ -1,0 +1,78 @@
+name: 'Qwen CI Flaky Rerun'
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  group: 'qwen-ci-flaky-rerun'
+  cancel-in-progress: false
+
+env:
+  STALE_MINUTES: '30'
+
+jobs:
+  rerun:
+    name: 'Rerun high-confidence flaky PR failures'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: 'ubuntu-latest'
+    permissions:
+      actions: 'write'
+      contents: 'read'
+      pull-requests: 'write'
+    steps:
+      - name: 'Checkout trusted main'
+        uses: 'actions/checkout@v4'
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@v4'
+        with:
+          node-version: '22'
+
+      - name: 'Scan stale PR failure'
+        id: 'scan'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+        run: |-
+          mkdir -p "${RUNNER_TEMP}/ci-flaky-rerun"
+          node .github/scripts/ci-flaky-rerun.mjs scan \
+            --repo "${{ github.repository }}" \
+            --workdir "${RUNNER_TEMP}/ci-flaky-rerun" \
+            --stale-minutes "${STALE_MINUTES}" | tee "${RUNNER_TEMP}/ci-flaky-rerun/scan.out"
+          cat "${RUNNER_TEMP}/ci-flaky-rerun/scan.out" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Classify with ci-flaky-patrol skill'
+        if: "${{ steps.scan.outputs.target_found == 'true' }}"
+        uses: 'QwenLM/qwen-code-action@6d08e91aa807257b9c8af60edb5bb6bb2d7d951f'
+        with:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          settings_json: |-
+            {
+              "coreTools": [
+                "read_file",
+                "write_file"
+              ],
+              "sandbox": false
+            }
+          prompt: |-
+            Use .qwen/skills/ci-flaky-patrol/SKILL.md.
+            Workdir: ${{ runner.temp }}/ci-flaky-rerun
+            Read ci-target.json and write ci-flaky-decision.json.
+
+      - name: 'Act on flaky decision'
+        if: "${{ steps.scan.outputs.target_found == 'true' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+        run: |-
+          test -s "${RUNNER_TEMP}/ci-flaky-rerun/ci-flaky-decision.json"
+          node .github/scripts/ci-flaky-rerun.mjs act \
+            --repo "${{ github.repository }}" \
+            --workdir "${RUNNER_TEMP}/ci-flaky-rerun"

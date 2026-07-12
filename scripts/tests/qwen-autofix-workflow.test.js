@@ -175,18 +175,6 @@ function runDevelopIssue(dir, stub) {
   ]);
 }
 
-function runClassifyCiFailure(dir, stub, extraArgs = []) {
-  return runAutofixRunner([
-    '--mode',
-    'classify-ci-failure',
-    '--workdir',
-    dir,
-    '--qwen-bin',
-    stub,
-    ...extraArgs,
-  ]);
-}
-
 describe('qwen-autofix workflow', () => {
   it('keeps ECS issue autofix limited to forced and ready-for-agent issues', () => {
     expect(workflow).toContain('autofixTier');
@@ -880,7 +868,7 @@ describe('qwen-autofix workflow', () => {
     const { stderr } = runAutofixRunner(['--mode', 'bogus', '--print-prompt']);
 
     expect(stderr).toContain(
-      '--mode must be one of: assess-candidates, develop-issue, address-review, classify-ci-failure',
+      '--mode must be one of: assess-candidates, develop-issue, address-review',
     );
   });
 
@@ -914,31 +902,6 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('builds a read-only CI failure classifier prompt', () => {
-    const stdout = execFileSync(
-      process.execPath,
-      [
-        autofixRunnerScriptPath,
-        '--mode',
-        'classify-ci-failure',
-        '--workdir',
-        '/tmp/ci-failure-patrol',
-        '--print-prompt',
-      ],
-      { encoding: 'utf8' },
-    );
-
-    expect(stdout).toContain('Mode: classify-ci-failure');
-    expect(stdout).toContain(
-      '/autofix classify-ci-failure --workdir /tmp/ci-failure-patrol',
-    );
-    expect(stdout).toContain('ci-failure.json');
-    expect(stdout).toContain('ci-decision.json');
-    expect(stdout).toContain('untrusted');
-    expect(stdout).toContain('Do not push, comment, create pull requests');
-    expect(stdout).toContain('never invoke GitHub');
-  });
-
   it('keeps autofix runner failure paths explicit', () => {
     withRunnerDir((dir) => {
       expect(runAutofixRunner(['--mode', 'develop-issue']).stderr).toContain(
@@ -960,33 +923,6 @@ describe('qwen-autofix workflow', () => {
       );
     });
   }, 10000);
-
-  it('requires CI classifier input and output files', () => {
-    withRunnerDir((dir) => {
-      const stub = writeQwenStub(dir);
-
-      expect(runClassifyCiFailure(dir, stub).stderr).toContain(
-        'ci-failure.json',
-      );
-
-      writeFileSync(join(dir, 'ci-failure.json'), '{"scope":"pr"}\n');
-      expect(runClassifyCiFailure(dir, stub).stderr).toContain(
-        'OPENAI_API_KEY is required',
-      );
-      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
-        'OPENAI_API_KEY is required',
-      );
-    });
-  }, 10000);
-
-  it('runs the CI classifier through direct model JSON instead of qwen tools', () => {
-    const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
-
-    expect(runner).toContain("options.mode === 'classify-ci-failure'");
-    expect(runner).toContain('runCiFailureClassifier(options, prompt)');
-    expect(runner).toContain('/chat/completions');
-    expect(runner).toContain("response_format: { type: 'json_object' }");
-  });
 
   it('allows non-package fixes after deterministic verification', () => {
     expect(verificationGateSteps).toHaveLength(2);
