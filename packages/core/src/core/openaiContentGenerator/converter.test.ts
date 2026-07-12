@@ -537,6 +537,33 @@ describe('OpenAIContentConverter', () => {
       expect(result.candidates?.[0]?.content?.parts).toEqual([]);
       expect(result.candidates?.[0]?.finishReason).toBeUndefined();
     });
+
+    it('drops tool calls from a structured reasoning tag leak attempt', () => {
+      const stream = withStreamParser(new StreamingToolCallParser());
+
+      const result = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'structured-reasoning-leak-with-tool-call',
+          {
+            reasoning_content: 'hidden reasoning',
+            content: '</think> leaked visible reasoning',
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_named',
+                type: 'function',
+                function: { name: 'run_shell_command', arguments: '{}' },
+              },
+            ],
+          },
+          'tool_calls',
+        ),
+        stream,
+      );
+
+      expect(result.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(result.candidates?.[0]?.finishReason).toBeUndefined();
+    });
   });
 
   describe('convertGeminiRequestToOpenAI', () => {

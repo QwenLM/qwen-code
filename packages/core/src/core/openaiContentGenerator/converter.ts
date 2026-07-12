@@ -1394,11 +1394,13 @@ export function convertOpenAIChunkToGemini(
       Boolean(choice.finish_reason) && toolCallWithoutName;
     const malformedThinkingTagLeak =
       Boolean(choice.finish_reason) && hasVisibleThinkingTagLeak;
+    const shouldDropMalformedAttempt =
+      malformedNamelessToolCall || malformedThinkingTagLeak;
     const shouldHoldUntrustedParts =
       toolCallWithoutName ||
       (!choice.finish_reason && hasUntrustedProtocolText);
 
-    if (malformedNamelessToolCall || malformedThinkingTagLeak) {
+    if (shouldDropMalformedAttempt) {
       parts.length = 0;
       requestContext.pendingUntrustedResponseParts = undefined;
     } else if (shouldHoldUntrustedParts) {
@@ -1411,7 +1413,7 @@ export function convertOpenAIChunkToGemini(
 
     // Only emit function calls when streaming is complete (finish_reason is present)
     let toolCallsTruncated = false;
-    if (choice.finish_reason) {
+    if (choice.finish_reason && !shouldDropMalformedAttempt) {
       // Detect truncation the provider may not report correctly.
       // Some providers (e.g. DashScope/Qwen) send "stop" or "tool_calls"
       // even when output was cut off mid-JSON due to max_tokens.
@@ -1439,7 +1441,7 @@ export function convertOpenAIChunkToGemini(
     // Withhold the finish signal so the existing invalid-stream retry drops
     // the buffered attempt instead of accepting a silently lost tool call.
     const effectiveFinishReason =
-      malformedNamelessToolCall || malformedThinkingTagLeak
+      shouldDropMalformedAttempt
       ? undefined
       : toolCallsTruncated && choice.finish_reason !== 'length'
         ? 'length'
