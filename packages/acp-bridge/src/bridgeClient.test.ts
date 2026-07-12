@@ -128,6 +128,36 @@ describe('BridgeClient — recording degradation ownership', () => {
     expect(foreignEntry.recordingDegraded).toBe(false);
     expect(publish).not.toHaveBeenCalled();
   });
+
+  it('keeps early recording buffers isolated between channel clients', async () => {
+    const sessionId = 'future-session-on-new-channel';
+    const noPermissionFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const staleClient = new BridgeClient(
+      (() => undefined) as never,
+      (() => undefined) as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    await staleClient.extNotification(
+      'qwen/notify/session/recording-degraded',
+      { v: 1, sessionId, reason: 'write_failed' },
+    );
+
+    const freshClient = makeClient();
+    const publish = vi.fn();
+    const freshEntry = {
+      sessionId,
+      events: { publish },
+      recordingDegraded: false,
+    };
+    freshClient.drainEarlyEvents(sessionId, freshEntry as never);
+
+    expect(freshEntry.recordingDegraded).toBe(false);
+    expect(publish).not.toHaveBeenCalled();
+  });
 });
 
 describe('BridgeClient — BridgeFileSystem injection seam (F1 step 5)', () => {

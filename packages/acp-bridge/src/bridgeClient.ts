@@ -887,11 +887,12 @@ export class BridgeClient implements Client {
   }
 
   /**
-   * Bounded early-event buffer. Frames are keyed by sessionId; each
-   * entry tracks its `expiresAt` for lazy TTL-based eviction in
-   * `bufferEarlyEvent`. Drained by `drainEarlyEvents` whenever the
-   * bridge registers a session with a matching id. See
-   * MAX_EARLY_EVENT_* constants for capacity bounds.
+   * Bounded early-event buffer. The map is scoped to this BridgeClient and
+   * therefore to one channel; a stale channel cannot seed a fresh channel's
+   * future session. Frames are keyed by sessionId; each entry tracks its
+   * `expiresAt` for lazy TTL-based eviction in `bufferEarlyEvent`. Drained by
+   * `drainEarlyEvents` whenever the bridge registers a session with a matching
+   * id. See MAX_EARLY_EVENT_* constants for capacity bounds.
    */
   private readonly earlyEvents = new Map<
     string,
