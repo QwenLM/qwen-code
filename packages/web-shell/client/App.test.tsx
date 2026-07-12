@@ -1523,7 +1523,7 @@ describe('App session callbacks', () => {
     expect(drawer?.className).toContain('mobileDrawerForced');
   });
 
-  it('returns a forced compact drawer to viewport control when the user toggles it', async () => {
+  it('returns a forced compact drawer to viewport control when the user dismisses it', async () => {
     const shellRef = createRef<WebShellApi>();
     const { container } = renderApp({ sidebar: true, shellRef });
     await flush();
@@ -1538,7 +1538,9 @@ describe('App session callbacks', () => {
 
     await act(async () => {
       container
-        .querySelector<HTMLButtonElement>('[aria-label="Toggle menu"]')
+        .querySelector<HTMLElement>(
+          '[data-sidebar-shell] > div[aria-hidden="true"]',
+        )
         ?.click();
       await Promise.resolve();
     });

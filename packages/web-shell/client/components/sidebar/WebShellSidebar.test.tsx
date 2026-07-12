@@ -793,6 +793,27 @@ describe('WebShellSidebar — version footer', () => {
     expect(container.querySelector('[role="menu"]')).toBeNull();
   });
 
+  it('returns focus to More when Escape closes its menu', () => {
+    setStoredSidebarWidth(260);
+    const { container } = renderSidebar(false, {
+      canOpenSessionsOverview: true,
+      canOpenSplitView: true,
+    });
+    const moreButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="More actions"]',
+    );
+    click(moreButton);
+    expect(container.querySelector('[role="menu"]')).not.toBeNull();
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+    expect(document.activeElement).toBe(moreButton);
+  });
+
   it('focuses and navigates the actionable items in More', async () => {
     setStoredSidebarWidth(220);
     const { container } = renderSidebar(false, {

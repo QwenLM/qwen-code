@@ -693,6 +693,10 @@ function SidebarFooterMenu({
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const closeMenu = useCallback(() => {
+    onClose();
+    anchorEl.focus();
+  }, [anchorEl, onClose]);
   useEffect(() => {
     const animationFrame = window.requestAnimationFrame(() => {
       ref.current
@@ -711,24 +715,24 @@ function SidebarFooterMenu({
       ) {
         return;
       }
-      onClose();
+      closeMenu();
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       event.stopPropagation();
-      onClose();
+      closeMenu();
     };
     document.addEventListener('pointerdown', closeOnOutsidePointer, true);
     document.addEventListener('keydown', closeOnEscape, true);
-    window.addEventListener('scroll', onClose, true);
-    window.addEventListener('resize', onClose);
+    window.addEventListener('scroll', closeMenu, true);
+    window.addEventListener('resize', closeMenu);
     return () => {
       document.removeEventListener('pointerdown', closeOnOutsidePointer, true);
       document.removeEventListener('keydown', closeOnEscape, true);
-      window.removeEventListener('scroll', onClose, true);
-      window.removeEventListener('resize', onClose);
+      window.removeEventListener('scroll', closeMenu, true);
+      window.removeEventListener('resize', closeMenu);
     };
-  }, [anchorEl, onClose]);
+  }, [anchorEl, closeMenu]);
 
   const handleKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -753,14 +757,14 @@ function SidebarFooterMenu({
         nextIndex = menuItems.length - 1;
       } else if (event.key === 'Escape') {
         event.preventDefault();
-        onClose();
+        closeMenu();
         return;
       }
       if (nextIndex === undefined) return;
       event.preventDefault();
       menuItems[nextIndex]?.focus();
     },
-    [onClose],
+    [closeMenu],
   );
 
   const anchor = anchorEl.getBoundingClientRect();
@@ -790,7 +794,7 @@ function SidebarFooterMenu({
             type="button"
             role="menuitem"
             onClick={() => {
-              onClose();
+              closeMenu();
               item.onSelect?.();
             }}
           >
