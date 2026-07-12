@@ -1097,6 +1097,64 @@ describe('CoreToolScheduler', () => {
     }
   });
 
+  it('shows the real target identity when a proxied call awaits confirmation', async () => {
+    const getConfirmationDetails = vi.fn().mockResolvedValue({
+      type: 'exec' as const,
+      title: 'Confirm cron_create',
+      command: 'create cron',
+      rootCommand: 'cron_create',
+      onConfirm: async () => {},
+    });
+    const execute = vi.fn();
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.CRON_CREATE,
+        new MockTool({
+          name: ToolNames.CRON_CREATE,
+          shouldDefer: true,
+          getDefaultPermission: async () => 'ask',
+          getConfirmationDetails,
+          execute,
+        }),
+      ],
+    ]);
+    const { scheduler, onToolCallsUpdate } = createSchedulerForLegacyToolTests({
+      toolsByName,
+      approvalMode: ApprovalMode.DEFAULT,
+      presentedProxySchemas: new Set([ToolNames.CRON_CREATE]),
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'proxy-confirm',
+        name: ToolNames.DEFERRED_TOOL_CALL,
+        args: {
+          name: ToolNames.CRON_CREATE,
+          arguments: { schedule: '0 9 * * *' },
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-proxy',
+      },
+      new AbortController().signal,
+    );
+
+    const latestCalls = onToolCallsUpdate.mock.calls.at(-1)?.[0] as ToolCall[];
+    const waitingCall = latestCalls.find(
+      (call): call is WaitingToolCall =>
+        call.request.callId === 'proxy-confirm' &&
+        call.status === 'awaiting_approval',
+    );
+    expect(waitingCall).toBeDefined();
+    expect(waitingCall?.request.name).toBe(ToolNames.CRON_CREATE);
+    expect(waitingCall?.request.args).toEqual({ schedule: '0 9 * * *' });
+    expect(waitingCall?.request.providerName).toBe(
+      ToolNames.DEFERRED_TOOL_CALL,
+    );
+    expect(waitingCall?.confirmationDetails.title).toBe('Confirm cron_create');
+    expect(getConfirmationDetails).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('commits deferred tool presentations only after successful completion callback', async () => {
     const presentedProxySchemas = new Set<string>();
     const toolsByName = new Map<string, MockTool>([

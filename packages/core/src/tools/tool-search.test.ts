@@ -470,6 +470,22 @@ describe('ToolSearchTool', () => {
     expect(registry.hasPresentedProxySchema('hidden')).toBe(false);
   });
 
+  it('keeps serialized declarations byte-identical after presenting a deferred tool', async () => {
+    registry.registerTool(new MockTool({ name: 'visible' }));
+    registry.registerTool(new MockTool({ name: 'hidden', shouldDefer: true }));
+
+    const before = JSON.stringify(registry.getFunctionDeclarations());
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'select:hidden' })
+      .execute(new AbortController().signal);
+
+    const after = JSON.stringify(registry.getFunctionDeclarations());
+    expect(result.deferredToolPresentations).toEqual(['hidden']);
+    expect(after).toBe(before);
+  });
+
   it('rejects empty query at build time via schema (minLength)', () => {
     // The schema now declares `query: { minLength: 1 }`, so an empty
     // string fails Ajv validation in `tool.build()` instead of being

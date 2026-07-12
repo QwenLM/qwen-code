@@ -214,6 +214,13 @@ args         = {...}
 所有面向模型的 response builder 使用 `providerName ?? name`。所有内部消费者使用
 `name` 和 `args`。
 
+Normalization 是跨执行入口共享的 core 语义，而不是 `CoreToolScheduler`
+的私有逻辑。主 scheduler 和 ACP/daemon `Session.runTool()` 都必须在工具查找、权限、
+hooks、telemetry 和执行之前调用同一个纯 helper。这样 ACP 独立执行路径不会把
+`deferred_tool_call` 当成真实工具执行，也不会绕过 presentation gate；同时所有返回给
+provider/model 的 function response 仍然使用 `providerName ?? name`，避免把隐藏
+target name 写回给 provider。
+
 ## 稳定的 Provider Tool
 
 主会话增加一个始终可见的 declaration：
@@ -329,6 +336,9 @@ sequenceDiagram
   `tool_search.execute()` 内修改 committed presentation state。
 - 只有当包含 schema 的成功结果已经 append 到 active chat history 后，才 commit
   presentation state。取消、结果投递失败或 history rollback 必须丢弃 pending metadata。
+- ACP/daemon 没有 core chat append 流程，因此它在成功构造并记录将返回给模型的
+  `tool_search` response 后提交 `deferredToolPresentations`。如果工具执行失败、被取消、
+  被 PostToolUse stop，或 response 没有返回给模型，则不能提交。
 - 移除 `setTools()` 以及它的 reveal/API-sync rollback。如果 result construction 或
   history commit 失败，不记录 fingerprint。
 - 明确告诉模型后续 turn 使用 `deferred_tool_call`。
@@ -524,9 +534,11 @@ functionResponse({ name: "deferred_tool_call", id: originalCallId, ... })
 | `packages/core/src/config/config.ts`                            | 仅在主 registry 且 `tool_search` 可用时注册 proxy；保持它不进入 `forSubAgent` registries。                                                                         |
 | `packages/core/src/tools/tool-registry.ts`                      | 将 committed proxy presentations 与 direct declaration visibility 分离，保留 `includeDeferred` 行为，保留 proxy name，并在工具生命周期变化时使 fingerprints 失效。 |
 | `packages/core/src/tools/tool-search.ts`                        | 返回 escaped schemas 和 pending presentation metadata，不调用 `setTools()`。                                                                                       |
+| `packages/core/src/core/deferred-tool-call-normalization.ts`    | 提供共享 normalization helper，统一 proxy envelope 校验、target 解析、presentation gate 和 provider-facing response name。                                         |
 | `packages/core/src/core/turn.ts`                                | 显式表示 provider identity 和 execution identity。                                                                                                                 |
-| `packages/core/src/core/coreToolScheduler.ts`                   | 在目标授权前 normalize proxy calls，执行真实目标，中心化 provider response naming，并转发 pending presentation metadata。                                          |
+| `packages/core/src/core/coreToolScheduler.ts`                   | 在目标授权前复用共享 helper normalize proxy calls，执行真实目标，中心化 provider response naming，并转发 pending presentation metadata。                           |
 | `packages/core/src/core/client.ts`                              | 在 history append 后 commit presentation metadata；处理 disabled search、compression、resume 和 clear。                                                            |
+| `packages/cli/src/acp-integration/session/Session.ts`           | 在 ACP 独立 `runTool()` 路径中复用共享 helper；成功返回 `tool_search` result 后提交 presentation；所有 function response name 使用 provider-facing name。          |
 | `packages/core/src/tools/enterPlanMode.ts` 和 `exitPlanMode.ts` | 移除动态 exit-tool reveal，并将 exit tool 保持在稳定 direct main-session surface 中。                                                                              |
 | `packages/core/src/agents/runtime/agent-core.ts`                | 保留 real-name agent filtering，并防御性拒绝 hallucinated proxy name。                                                                                             |
 | Provider converter tests                                        | 验证 Gemini、OpenAI 和 Anthropic 的 call/result pairing；如果 scheduler response normalization 完整，converter production code 不需要 proxy-specific routing。     |
@@ -536,12 +548,15 @@ functionResponse({ name: "deferred_tool_call", id: originalCallId, ... })
 1. 增加保留的主会话 `deferred_tool_call` declaration，并从 subagent registries 中省略它。
 2. 在 `ToolRegistry` 中拆分 proxy schema presentation 和 direct declaration visibility；保留 `includeDeferred` 行为。
 3. 更新 `tool_search`，使其返回 schemas 和 pending fingerprints，但不调用 `setTools()`；然后只在 active-history append 后 commit 它们。
-4. 在 `CoreToolScheduler` 的目标权限评估之前增加 provider/execution identities 和 proxy normalization。
+4. 在 core 增加共享 normalization helper，并让 `CoreToolScheduler` 和 ACP
+   `Session.runTool()` 都在目标权限评估之前复用它。
 5. 在每个 terminal path 中中心化 provider response naming。
-6. 让 `exit_plan_mode` 成为稳定的 direct main-session surface 的一部分，并移除它的动态 reveal/setTools 路径。
-7. 增加 `tool_search` disabled、subagent、compression、resume、clear 和 MCP lifecycle integration。
-8. 运行 provider conversion tests、scheduler tests、targeted integration tests、build 和 typecheck。
-9. Rollout 前收集 cache/quality A/B 报告。
+6. 在 core chat append 和 ACP 成功返回 response 的生命周期点提交
+   `deferredToolPresentations`。
+7. 让 `exit_plan_mode` 成为稳定的 direct main-session surface 的一部分，并移除它的动态 reveal/setTools 路径。
+8. 增加 `tool_search` disabled、subagent、compression、resume、clear 和 MCP lifecycle integration。
+9. 运行 provider conversion tests、scheduler tests、ACP targeted tests、build 和 typecheck。
+10. Rollout 前收集 cache/quality A/B 报告。
 
 ## 测试计划
 
@@ -570,11 +585,15 @@ functionResponse({ name: "deferred_tool_call", id: originalCallId, ... })
 - Success、validation error、permission denial、hook denial、cancellation、timeout 和 exception responses 使用 `deferred_tool_call` 加原始 provider call ID。
 - 工具产生的现有 `FunctionResponse` parts 会 normalize 到 provider name。
 - 并行的首次 `tool_search` 加 proxy invocation 被拒绝；后续 turn 成功。
+- ACP `Session.runTool()` 中的 success、soft error、throw error、normalization failure、
+  permission denial、duplicate/skip response 和 chat recording 都使用 provider-facing
+  function response name。
 
 ### 生命周期和兼容性
 
 - `enter_plan_mode` 不改变 declarations，且 `exit_plan_mode` 仍然可直接调用。
 - 禁用 `tool_search` 时直接暴露 deferred tools，并省略 proxy。
+- ACP 成功返回 `tool_search` result 后解锁 proxy；失败、取消、PostToolUse stop 或未返回给模型时不解锁。
 - Subagents 保留其 direct effective tool declarations。
 - 压缩在恢复 proxy eligibility 前恢复当前 schemas。
 - 新 proxy transcripts 和旧 direct-call transcripts 都可以正确 resume。
