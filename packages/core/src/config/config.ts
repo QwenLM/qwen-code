@@ -3872,8 +3872,15 @@ export class Config {
     oldDir: string,
     opts?: { skipProcessChdir?: boolean },
   ): Promise<void> {
-    this.chatRecordingService?.finalize();
-    await this.chatRecordingService?.flush();
+    try {
+      this.chatRecordingService?.finalize();
+      await this.chatRecordingService?.flush();
+    } catch (error) {
+      this.debugLogger.debug(
+        'Continuing session artifact migration after chat recording settle failed:',
+        error,
+      );
+    }
     await this.flushRuntimeStatusWrites();
     try {
       this.moveCurrentSessionArtifacts(oldStorage, newStorage);

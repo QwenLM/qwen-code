@@ -3886,6 +3886,37 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
+  it('relocateWorkingDirectory should continue after recording flush fails', async () => {
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const finalize = vi.fn();
+    const flush = vi.fn().mockRejectedValue(new Error('recording failed'));
+    const resetStoragePaths = vi.fn();
+    (
+      config as unknown as {
+        chatRecordingService: {
+          finalize: () => void;
+          flush: () => Promise<void>;
+          resetStoragePaths: () => void;
+        };
+      }
+    ).chatRecordingService = { finalize, flush, resetStoragePaths };
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    await expect(config.relocateWorkingDirectory(newDir)).resolves.toEqual({});
+
+    expect(finalize).toHaveBeenCalledOnce();
+    expect(flush).toHaveBeenCalledOnce();
+    expect(resetStoragePaths).toHaveBeenCalledOnce();
+    expect(config.getTargetDir()).toBe(newDir);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
   it('relocateWorkingDirectory should move current session artifacts to the new workspace', async () => {
     const config = new Config(baseParams);
     const sessionId = config.getSessionId();
