@@ -4,8 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { composeReview, type ComposeReviewInput } from './compose-review.js';
+import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  composeReview,
+  composeReviewCommand,
+  type ComposeReviewInput,
+  type ComposeReviewResult,
+} from './compose-review.js';
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: vi.fn(),
+}));
 
 const MODEL = 'test-model';
 const FOOTER = `_— ${MODEL} via Qwen Code /review_`;
@@ -134,6 +146,9 @@ describe('composeReview — 422 recovery (round-7 Critical #1 & round-6: verdict
     expect(r.body).toContain(
       '2 Suggestion-level finding(s) could not be anchored to the diff; see the terminal output.',
     );
+    // Nothing is inline — the body must not claim otherwise while the
+    // discarded sentence says the opposite (round-9: `s` included discarded).
+    expect(r.body).not.toContain('Suggestions are inline.');
     expect(r.event).not.toBe('APPROVE');
   });
 
@@ -169,6 +184,38 @@ describe('composeReview — presubmit downgrades', () => {
     expect(r.body).toContain(
       '⚠️ Downgraded from Approve to Comment: self-PR; CI still running.',
     );
+  });
+
+  it('a downgraded Approve never certifies "no blockers" in the same body (the downgrade names failing CI two clauses earlier)', () => {
+    const r = composeReview(
+      base({
+        presubmit: {
+          downgradeApprove: true,
+          downgradeReasons: ['CI failing'],
+        },
+      }),
+    );
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('Downgraded from Approve');
+    expect(r.body).toContain('Reviewed.');
+    expect(r.body).not.toContain('no blockers');
+    expect(r.body).not.toContain('LGTM');
+  });
+
+  it('downgradeRequestChanges on a clean RC (inline Criticals only) carries the sentence and no Critical block', () => {
+    const r = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['self-PR'],
+        },
+      }),
+    );
+    expect(r.event).toBe('COMMENT');
+    expect(r.downgraded).toBe(true);
+    expect(r.body).toContain('Downgraded from Request changes to Comment');
+    expect(r.body).not.toContain('**[Critical]**');
   });
 
   it('downgradeApprove on a Suggestion-only review changes nothing — the verdict was already Comment', () => {
@@ -288,5 +335,90 @@ describe('composeReview — RC carries every applicable disclosure (no clause sq
   it('a clean RC still submits an empty body', () => {
     const r = composeReview(base({ criticalsInline: 2 }));
     expect(r.body).toBe('');
+  });
+});
+
+describe('composeReview — not-reviewed entries that carry their own reason', () => {
+  it('renders the entry verbatim instead of appending the whiff sentence (Agent 0 issue-fetch failure)', () => {
+    const r = composeReview(
+      base({
+        unreviewedDimensions: [
+          'issue-fidelity — linked issue #123 could not be fetched',
+          'security',
+        ],
+      }),
+    );
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain(
+      'Not reviewed: security — the agent returned no evidence of its walk twice.',
+    );
+    expect(r.body).toContain(
+      'Not reviewed: issue-fidelity — linked issue #123 could not be fetched.',
+    );
+    // The self-explained entry must not be folded into the whiff sentence.
+    expect(r.body).not.toContain('issue-fidelity, security');
+  });
+});
+
+describe('composeReview — input validation (the producer is a model that omits inapplicable fields)', () => {
+  it('a body-Critical-only input with every count omitted is REQUEST_CHANGES (undefined + 1 = NaN once meant APPROVE)', () => {
+    const r = composeReview({
+      bodyCriticals: ['the only blocker'],
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('**[Critical]** the only blocker');
+  });
+
+  it('rejects negative, fractional, NaN, and non-number counts with the field name', () => {
+    expect(() =>
+      composeReview({ criticalsInline: -1, modelId: MODEL }),
+    ).toThrow(/criticalsInline/);
+    expect(() =>
+      composeReview({ criticalsInline: 1.5, modelId: MODEL }),
+    ).toThrow(/criticalsInline/);
+    expect(() =>
+      composeReview({ suggestionsDiscarded: Number.NaN, modelId: MODEL }),
+    ).toThrow(/suggestionsDiscarded/);
+    expect(() =>
+      composeReview({
+        suggestionsInline: '2' as unknown as number,
+        modelId: MODEL,
+      }),
+    ).toThrow(/suggestionsInline/);
+  });
+
+  it('rejects a non-array list field and a missing or blank modelId', () => {
+    expect(() =>
+      composeReview({
+        bodyCriticals: 'blocker' as unknown as string[],
+        modelId: MODEL,
+      }),
+    ).toThrow(/bodyCriticals/);
+    expect(() => composeReview({} as ComposeReviewInput)).toThrow(/modelId/);
+    expect(() => composeReview({ modelId: '  ' })).toThrow(/modelId/);
+  });
+});
+
+describe('composeReviewCommand handler (the CLI glue)', () => {
+  it('reads --input and writes the result JSON to --out', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'compose-review-test-'));
+    const inputPath = join(dir, 'compose.json');
+    const outPath = join(dir, 'nested', 'composed.json');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ suggestionsInline: 1, modelId: MODEL }),
+      'utf8',
+    );
+    (composeReviewCommand.handler as (argv: unknown) => void)({
+      input: inputPath,
+      out: outPath,
+    });
+    const written = JSON.parse(
+      readFileSync(outPath, 'utf8'),
+    ) as ComposeReviewResult;
+    expect(written.event).toBe('COMMENT');
+    expect(written.body).toContain('Suggestions are inline.');
+    expect(written.body.endsWith(FOOTER)).toBe(true);
   });
 });

@@ -34,7 +34,7 @@ export const reviewCommand: CommandModule = {
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: parse-args, fetch-pr, pr-context, load-rules, presubmit, compose-review, or cleanup.',
+        'Specify a subcommand: parse-args, fetch-pr, plan-diff, pr-context, load-rules, presubmit, compose-review, or cleanup.',
       )
       .version(false),
   handler: () => {

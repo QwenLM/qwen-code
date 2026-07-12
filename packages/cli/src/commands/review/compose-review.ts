@@ -27,10 +27,10 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
 export interface ComposeReviewInput {
-  /** Critical findings anchored as inline `comments` entries. */
-  criticalsInline: number;
-  /** Suggestion findings anchored as inline `comments` entries. */
-  suggestionsInline: number;
+  /** Critical findings anchored as inline `comments` entries. Omitted = 0. */
+  criticalsInline?: number;
+  /** Suggestion findings anchored as inline `comments` entries. Omitted = 0. */
+  suggestionsInline?: number;
   /**
    * Critical descriptions whose only copy lives in the review body — the
    * last-resort unmappable findings and 422-relocated ones. They count
@@ -48,7 +48,12 @@ export interface ComposeReviewInput {
   cannotTellCriticals?: string[];
   /** Uncoverable chunks, e.g. `"chunk 5 (src/big.min.js)"`. */
   uncoverableChunks?: string[];
-  /** Dimensions whose agent whiffed twice, e.g. `"security"`. */
+  /**
+   * Dimensions nobody reviewed. A bare name (`"security"`) means its agent
+   * whiffed twice and gets the standard explanation; an entry carrying its
+   * own reason after an em-dash (`"issue-fidelity — linked issue #123 could
+   * not be fetched"`) is rendered verbatim.
+   */
   unreviewedDimensions?: string[];
   /** Step 1's lightweight `pr-context` fetch failed. */
   contextUnavailable?: boolean;
@@ -78,22 +83,70 @@ function withMarker(line: string): string {
   return line.startsWith(CRITICAL_MARKER) ? line : `${CRITICAL_MARKER} ${line}`;
 }
 
+// The input arrives as JSON a model wrote, and the skill tells it to omit
+// fields that do not apply — so absence is normal and means zero/empty. What
+// must never pass is a PRESENT field of the wrong shape: `undefined + 1` is
+// NaN, and NaN fails both `c >= 1` and `s >= 1`, which once turned a
+// body-Critical-only input into an APPROVE that dropped the only blocker.
+function toCount(value: unknown, field: string): number {
+  if (value === undefined || value === null) return 0;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new TypeError(
+      `compose-review: ${field} must be a non-negative integer, got ${JSON.stringify(value)}`,
+    );
+  }
+  return value;
+}
+
+function toStringList(value: unknown, field: string): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
+    throw new TypeError(
+      `compose-review: ${field} must be an array of strings, got ${JSON.stringify(value)}`,
+    );
+  }
+  return value as string[];
+}
+
 export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
-  const bodyCriticals = input.bodyCriticals ?? [];
-  const suggestionsDiscarded = input.suggestionsDiscarded ?? 0;
-  const cannotTell = input.cannotTellCriticals ?? [];
-  const uncoverable = input.uncoverableChunks ?? [];
-  const unreviewed = input.unreviewedDimensions ?? [];
+  const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
+  const suggestionsInline = toCount(
+    input.suggestionsInline,
+    'suggestionsInline',
+  );
+  const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals');
+  const suggestionsDiscarded = toCount(
+    input.suggestionsDiscarded,
+    'suggestionsDiscarded',
+  );
+  const cannotTell = toStringList(
+    input.cannotTellCriticals,
+    'cannotTellCriticals',
+  );
+  const uncoverable = toStringList(
+    input.uncoverableChunks,
+    'uncoverableChunks',
+  );
+  const unreviewed = toStringList(
+    input.unreviewedDimensions,
+    'unreviewedDimensions',
+  );
   const contextUnavailable = input.contextUnavailable ?? false;
   const presubmit = input.presubmit ?? {};
+  const modelId: unknown = input.modelId;
+  if (typeof modelId !== 'string' || modelId.trim() === '') {
+    throw new TypeError(
+      'compose-review: modelId is required (the public footer names the reviewing model)',
+    );
+  }
 
   // `C` counts every Critical the review posts anywhere — inline or body.
   // `S` counts every *confirmed* Suggestion — anchored or discarded: the
   // verdict reflects the findings the review confirmed, not the ones that
   // anchored, so dropping every Suggestion's anchor must never upgrade the
   // event to APPROVE.
-  const c = input.criticalsInline + bodyCriticals.length;
-  const s = input.suggestionsInline + suggestionsDiscarded;
+  const c = criticalsInline + bodyCriticals.length;
+  const s = suggestionsInline + suggestionsDiscarded;
 
   const baseEvent: ReviewEvent =
     c >= 1 ? 'REQUEST_CHANGES' : s >= 1 ? 'COMMENT' : 'APPROVE';
@@ -124,7 +177,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     downgradedFrom = 'Request changes';
   }
 
-  const footer = `_— ${input.modelId} via Qwen Code /review_`;
+  const footer = `_— ${modelId} via Qwen Code /review_`;
   const finish = (text: string): string =>
     text === '' ? '' : `${text}\n\n${footer}`;
 
@@ -137,10 +190,18 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       `Not reviewed: ${uncoverable.join(', ')} — a line there exceeds the read limit.`,
     );
   }
-  if (unreviewed.length > 0) {
+  // Bare dimension names share the whiffed-agent explanation; an entry that
+  // brought its own reason (after an em-dash) must not have the whiff
+  // sentence appended to it — that would misstate why it went unreviewed.
+  const whiffedDimensions = unreviewed.filter((d) => !d.includes(' — '));
+  const explainedDimensions = unreviewed.filter((d) => d.includes(' — '));
+  if (whiffedDimensions.length > 0) {
     notReviewedParts.push(
-      `Not reviewed: ${unreviewed.join(', ')} — the agent returned no evidence of its walk twice.`,
+      `Not reviewed: ${whiffedDimensions.join(', ')} — the agent returned no evidence of its walk twice.`,
     );
+  }
+  for (const d of explainedDimensions) {
+    notReviewedParts.push(`Not reviewed: ${d}.`);
   }
 
   // Clause 5 — blockers the review could neither confirm nor clear. They
@@ -208,7 +269,11 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     clauses.push(contextUnavailableClause);
   } else {
     // 3. Opener — certifying only when the review can actually certify it.
+    // A downgraded event never certifies: the downgrade sentence names a
+    // reason (failing CI, self-PR) that sits in the same body, and
+    // "Downgraded: CI failing. Reviewed — no blockers." contradicts itself.
     const canCertify =
+      !downgraded &&
       c === 0 &&
       cannotTell.length === 0 &&
       uncoverable.length === 0 &&
@@ -216,8 +281,12 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     clauses.push(canCertify ? 'Reviewed — no blockers.' : 'Reviewed.');
   }
 
-  // 4. Suggestions clause.
-  if (s > 0) clauses.push('Suggestions are inline.');
+  // 4. Suggestions clause — keyed off the POSTED count, not `s`: an
+  //    all-discarded run has nothing inline, and claiming otherwise while
+  //    the discarded sentence says the opposite is the round-6 collision
+  //    this module exists to kill. (`s` stays right for the event — see
+  //    above.)
+  if (suggestionsInline > 0) clauses.push('Suggestions are inline.');
   if (suggestionsDiscarded > 0) {
     clauses.push(
       `${suggestionsDiscarded} Suggestion-level finding(s) could not be anchored to the diff; see the terminal output.`,

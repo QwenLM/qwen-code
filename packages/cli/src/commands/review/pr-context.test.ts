@@ -7,10 +7,13 @@
 import { describe, it, expect } from 'vitest';
 import {
   isLegacySuggestionSummary,
+  isReviewWorthShowing,
   SUMMARY_MARKER,
   truncatedHeadings,
   buildMarkdown,
+  classifyInlineThreads,
   fullBody,
+  fullCommentBody,
   type PrMetadata,
   type RawComment,
 } from './pr-context.js';
@@ -151,6 +154,42 @@ describe('fullBody', () => {
   });
 });
 
+describe('fullCommentBody', () => {
+  it('caps long comment bodies and names the comment id for the tail', () => {
+    const got = fullCommentBody('y'.repeat(9000), 314);
+    expect(got).toContain('truncated at 8000 chars');
+    expect(got).toContain('pulls/comments/314');
+    expect(got).toContain('cannot tell');
+  });
+});
+
+describe('isReviewWorthShowing', () => {
+  const FOOTER = '_— qwen3.7-max via Qwen Code /review_';
+
+  it('filters the exact canonical LGTM template, with or without the footer', () => {
+    expect(isReviewWorthShowing('No issues found. LGTM! ✅')).toBe(false);
+    expect(isReviewWorthShowing(`No issues found. LGTM! ✅\n\n${FOOTER}`)).toBe(
+      false,
+    );
+    expect(isReviewWorthShowing('')).toBe(false);
+    expect(isReviewWorthShowing(undefined)).toBe(false);
+  });
+
+  it('shows a body that OPENS with the template but carries more (a relocated blocker once hid behind a prefix match)', () => {
+    expect(
+      isReviewWorthShowing(
+        'No issues found. LGTM! ✅\n\n**[Critical]** relocated blocker: the cache is never invalidated',
+      ),
+    ).toBe(true);
+  });
+
+  it('shows ordinary review bodies', () => {
+    expect(isReviewWorthShowing('Downgraded from Approve: self-PR.')).toBe(
+      true,
+    );
+  });
+});
+
 describe('buildMarkdown — review bodies and replied Criticals', () => {
   const meta = {
     title: 'T',
@@ -223,5 +262,47 @@ describe('buildMarkdown — review bodies and replied Criticals', () => {
     // The Suggestion thread stays settled.
     expect(md.indexOf('**[Suggestion]** nit')).toBeGreaterThan(discussed);
     expect(md).toContain('a reply alone does NOT retire a blocker');
+  });
+
+  it('renders a replied-Critical root in full past the old 1000-char snippet cap, and a cut reply names its comment id', () => {
+    const inline = [
+      {
+        id: 11,
+        user: { login: 'rev' },
+        path: 'a.ts',
+        line: 3,
+        body: `**[Critical]** long claim ${'z'.repeat(3000)} THE-TAIL-SURVIVES`,
+      },
+      {
+        id: 12,
+        user: { login: 'author' },
+        in_reply_to_id: 11,
+        body: `pushback ${'w'.repeat(700)}`,
+      },
+    ];
+    const md = buildMarkdown('1', 'o/r', meta, inline, [], []);
+    // The root body is what the Step 6 re-check rules on; its tail (the
+    // failure scenario, the proposed fix) used to be silently dropped.
+    expect(md).toContain('THE-TAIL-SURVIVES');
+    expect(md).toContain('(comment 11)');
+    // The reply snippet is cut, and the cut names the fetch for the rest.
+    expect(md).toContain('pulls/comments/12');
+  });
+});
+
+describe('classifyInlineThreads', () => {
+  it('is the single walk both the markdown and the stdout count use', () => {
+    const inline: RawComment[] = [
+      { id: 1, user: { login: 'r' }, body: '**[Critical]** blocker' },
+      { id: 2, user: { login: 'a' }, in_reply_to_id: 1, body: 'reply' },
+      { id: 3, user: { login: 'r' }, body: '**[Suggestion]** nit' },
+      { id: 4, user: { login: 'a' }, in_reply_to_id: 3, body: 'done' },
+      { id: 5, user: { login: 'r' }, body: 'open question' },
+    ];
+    const t = classifyInlineThreads(inline);
+    expect(t.repliedCriticalRoots.map((c) => c.id)).toEqual([1]);
+    expect(t.repliedRoots.map((c) => c.id)).toEqual([3]);
+    expect(t.openRoots.map((c) => c.id)).toEqual([5]);
+    expect(t.repliesByRoot.get(1)!.map((c) => c.id)).toEqual([2]);
   });
 });

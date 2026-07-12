@@ -17,7 +17,7 @@
 // file path exists — stays with the caller.
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 
@@ -27,7 +27,9 @@ export type ReviewTarget =
   | { type: 'pr-number'; number: number }
   | {
       type: 'pr-url';
+      /** Canonicalized: lowercased scheme and host, query/fragment dropped. */
       url: string;
+      host: string;
       owner: string;
       repo: string;
       number: number;
@@ -55,7 +57,14 @@ export interface ParsedReviewArgs {
 
 const EFFORT_LEVELS: ReadonlySet<string> = new Set(['low', 'medium', 'high']);
 
-const PR_URL_RE = /^https?:\/\/[^/\s]+\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/;
+// The verdict's owner/repo/number are interpolated into `gh` commands by the
+// caller, so they must be established trustworthily, not merely extracted:
+// the scheme is case-insensitive, the number must END at the path segment
+// (`/pull/42oops` is not PR 42), and owner/repo are restricted to GitHub's
+// name charset — which as a side effect keeps shell metacharacters out of
+// every derived value.
+const PR_URL_RE =
+  /^(https?):\/\/([A-Za-z0-9.-]+(?::\d+)?)\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)(?=$|[/?#])/i;
 
 function isEffort(value: string): value is ReviewEffort {
   return EFFORT_LEVELS.has(value);
@@ -104,21 +113,31 @@ export function tokenizeArgs(raw: string): string[] {
   return tokens;
 }
 
-function classifyToken(token: string): ReviewTarget | null {
+/**
+ * `'invalid-url'` marks a token that looks like a URL but is not a valid PR
+ * URL. It must not fall through to the `file` classification — a target the
+ * user typed as a URL is never a file path, and guessing one would send the
+ * caller off to stat a nonsense path instead of surfacing the typo.
+ */
+function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
   if (isFlag(token)) return null;
   if (isPureInteger(token)) {
     return { type: 'pr-number', number: Number(token) };
   }
   const urlMatch = PR_URL_RE.exec(token);
   if (urlMatch) {
+    const [, scheme, host, owner, repo, num] = urlMatch;
+    const lowerHost = host.toLowerCase();
     return {
       type: 'pr-url',
-      url: token,
-      owner: urlMatch[1],
-      repo: urlMatch[2],
-      number: Number(urlMatch[3]),
+      url: `${scheme.toLowerCase()}://${lowerHost}/${owner}/${repo}/pull/${Number(num)}`,
+      host: lowerHost,
+      owner,
+      repo,
+      number: Number(num),
     };
   }
+  if (/^https?:\/\//i.test(token)) return 'invalid-url';
   return { type: 'file', path: token };
 }
 
@@ -129,6 +148,19 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
 
   let commentRequested = false;
   let explicitEffort: ReviewEffort | null = null;
+
+  // Warnings about a rejected `--effort` occurrence must state what effort
+  // is ACTUALLY in effect — which is not known until every occurrence is
+  // seen (a later valid one wins) and the `--comment` override has run. So
+  // rejected occurrences are recorded here and their warnings composed at
+  // the end; emitting "using the default effort" inline once told the user
+  // the default applied while an earlier valid `--effort low` stayed active.
+  type EffortIssue =
+    | { kind: 'invalid-eq'; value: string }
+    | { kind: 'missing' }
+    | { kind: 'discarded'; value: string }
+    | { kind: 'kept-as-target'; value: string };
+  const effortIssues: EffortIssue[] = [];
 
   // First pass: pull out flags (and each `--effort`'s value token, when the
   // spaced form legitimately consumes one). Non-flag tokens are kept in
@@ -156,9 +188,7 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
         if (isEffort(value)) {
           explicitEffort = value;
         } else {
-          warnings.push(
-            `Invalid --effort value ${JSON.stringify(value)}; using the default effort.`,
-          );
+          effortIssues.push({ kind: 'invalid-eq', value });
         }
         continue;
       }
@@ -171,7 +201,7 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
       if (next === undefined || isFlag(next)) {
         // Flag-final, or followed by another flag: the value is simply
         // missing. Never consume a flag as a value.
-        warnings.push('--effort requires a value; using the default effort.');
+        effortIssues.push({ kind: 'missing' });
         continue;
       }
       // Spaced form with an invalid non-flag value. Whether `next` is a
@@ -198,27 +228,42 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
   const targetTokens: string[] = [];
   for (const k of kept) {
     if (k.fromInvalidEffortValue && hasOtherCandidate) {
-      warnings.push(
-        `Invalid --effort value ${JSON.stringify(k.token)} discarded; using the default effort.`,
-      );
+      effortIssues.push({ kind: 'discarded', value: k.token });
       continue;
     }
     if (k.fromInvalidEffortValue) {
-      warnings.push(
-        `Invalid --effort value ${JSON.stringify(k.token)}; treating it as the review target and using the default effort.`,
-      );
+      effortIssues.push({ kind: 'kept-as-target', value: k.token });
     }
     targetTokens.push(k.token);
   }
 
-  const target: ReviewTarget =
-    targetTokens.length === 0
-      ? { type: 'local' }
-      : (classifyToken(targetTokens[0]) ?? { type: 'local' });
-  const extraTokens = targetTokens.slice(1);
-  if (extraTokens.length > 0) {
+  // Pick the first classifiable target token. A token that looks like a URL
+  // but is not a valid PR URL is refused, not guessed at: it goes into
+  // `extraTokens` with its own warning instead of becoming the target.
+  let target: ReviewTarget = { type: 'local' };
+  let targetAssigned = false;
+  const extraTokens: string[] = [];
+  const trailingExtras: string[] = [];
+  for (const tok of targetTokens) {
+    if (targetAssigned) {
+      extraTokens.push(tok);
+      trailingExtras.push(tok);
+      continue;
+    }
+    const classified = classifyToken(tok);
+    if (classified === 'invalid-url') {
+      warnings.push(
+        `Unrecognized URL ${JSON.stringify(tok)} — not a GitHub PR URL (expected …/pull/<number>); refusing to guess a target from it.`,
+      );
+      extraTokens.push(tok);
+      continue;
+    }
+    target = classified ?? { type: 'local' };
+    targetAssigned = true;
+  }
+  if (trailingExtras.length > 0) {
     warnings.push(
-      `Ignoring extra argument(s): ${extraTokens.map((t) => JSON.stringify(t)).join(', ')}.`,
+      `Ignoring extra argument(s): ${trailingExtras.map((t) => JSON.stringify(t)).join(', ')}.`,
     );
   }
 
@@ -250,6 +295,39 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
     );
   }
 
+  // Now the resolution is final; compose the deferred effort warnings so
+  // each states what is actually in effect.
+  const resolution =
+    effortSource === 'explicit'
+      ? `--effort ${effort} (the last valid occurrence) is in effect`
+      : effortSource === 'forced-by-comment'
+        ? '`--comment` forces high effort'
+        : 'using the default effort';
+  for (const issue of effortIssues) {
+    switch (issue.kind) {
+      case 'invalid-eq':
+        warnings.push(
+          `Invalid --effort value ${JSON.stringify(issue.value)}; ${resolution}.`,
+        );
+        break;
+      case 'missing':
+        warnings.push(`--effort requires a value; ${resolution}.`);
+        break;
+      case 'discarded':
+        warnings.push(
+          `Invalid --effort value ${JSON.stringify(issue.value)} discarded; ${resolution}.`,
+        );
+        break;
+      case 'kept-as-target':
+        warnings.push(
+          `Invalid --effort value ${JSON.stringify(issue.value)}; treating it as the review target — ${resolution}.`,
+        );
+        break;
+      default:
+        break;
+    }
+  }
+
   return {
     target,
     effort,
@@ -263,27 +341,50 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
 
 interface ParseArgsCliArgs {
   raw: string | undefined;
+  stdin: boolean | undefined;
   out: string | undefined;
 }
 
 export const parseArgsCommand: CommandModule = {
   command: 'parse-args [raw]',
   describe:
-    'Parse the /review skill argument string (--comment, --effort, target disambiguation) and emit the verdict as JSON',
+    'Parse the /review skill argument string (--comment, --effort, target disambiguation) and emit the verdict as JSON; pass the string on stdin via --stdin (a positional that begins with a dash never reaches this handler — yargs rejects it as an unknown flag)',
   builder: (yargs) =>
     yargs
       .positional('raw', {
         type: 'string',
         describe:
-          'The raw argument string, passed as a single (quoted) argument; omit for a no-argument local review',
+          'The raw argument string as a single (quoted) argument — only safe when it cannot begin with a dash or contain quotes; otherwise use --stdin',
+      })
+      .option('stdin', {
+        type: 'boolean',
+        describe:
+          'Read the raw argument string from stdin (one trailing newline is stripped). Immune to flag-first strings and shell quoting; this is the form the /review skill uses.',
       })
       .option('out', {
         type: 'string',
         describe: 'Also write the JSON verdict to this path',
       }),
   handler: (argv) => {
-    const { raw, out } = argv as unknown as ParseArgsCliArgs;
-    const parsed = parseReviewArgs(raw ?? '');
+    const { raw, stdin, out } = argv as unknown as ParseArgsCliArgs;
+    if (stdin && raw !== undefined) {
+      throw new Error(
+        'parse-args: pass the raw string either as the positional argument or on --stdin, not both',
+      );
+    }
+    // Tokens after a `--` separator never bind to the [raw] positional —
+    // they stay in argv._ — so `parse-args -- '--effort low'` used to
+    // return a silently wrong local/default verdict. Refuse instead.
+    const unbound = (argv['_'] as unknown[]).slice(1);
+    if (unbound.length > 0) {
+      throw new Error(
+        `parse-args: unexpected extra argument(s) ${JSON.stringify(unbound)} — a raw string that begins with a flag must be passed via --stdin (heredoc), not after --`,
+      );
+    }
+    const rawStr = stdin
+      ? readFileSync(0, 'utf8').replace(/\r?\n$/, '')
+      : (raw ?? '');
+    const parsed = parseReviewArgs(rawStr);
     const json = JSON.stringify(parsed, null, 2);
     if (out) {
       mkdirSync(dirname(out), { recursive: true });

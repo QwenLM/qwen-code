@@ -94,16 +94,49 @@ function snippet(s: string | undefined, max = 240): string {
   return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1) + '…';
 }
 
-/** Cap a full review body; the cut names the review id so the tail stays fetchable. */
+/** Cap a body; the cut names the exact fetch for the tail, so a truncated
+ * read is visible and recoverable instead of silently ruling on a prefix. */
 const FULL_BODY_CAP = 8000;
-export function fullBody(s: string | undefined, id?: number): string {
+function capBody(s: string | undefined, ref: string): string {
   const body = (s ?? '').trim();
   if (body.length <= FULL_BODY_CAP) return body;
-  const ref =
+  return `${body.slice(0, FULL_BODY_CAP)}\n\n_(truncated at ${FULL_BODY_CAP} chars — fetch ${ref} for the rest; a body read in part is \`cannot tell\`, not "no Critical in it")_`;
+}
+
+/** Cap a full review body; the cut names the review id so the tail stays fetchable. */
+export function fullBody(s: string | undefined, id?: number): string {
+  return capBody(
+    s,
     id !== undefined
       ? `gh api repos/{owner}/{repo}/pulls/{n}/reviews/${id}`
-      : 'the reviews API';
-  return `${body.slice(0, FULL_BODY_CAP)}\n\n_(truncated at ${FULL_BODY_CAP} chars — fetch ${ref} for the rest; a body read in part is \`cannot tell\`, not "no Critical in it")_`;
+      : 'the reviews API',
+  );
+}
+
+/** Cap a full inline-comment body; the cut names the comment id. */
+export function fullCommentBody(s: string | undefined, id?: number): string {
+  return capBody(
+    s,
+    id !== undefined
+      ? `gh api repos/{owner}/{repo}/pulls/comments/${id}`
+      : 'the pull-request comments API',
+  );
+}
+
+/**
+ * One-line snippet that, when it cuts, names the comment id for the rest —
+ * a bare `…` marks a cut nobody can act on, and the fail-closed "a body you
+ * could not read whole is `cannot tell`" rule can only fire when the reader
+ * can see there was a cut and knows how to complete it.
+ */
+function snippetWithRef(
+  s: string | undefined,
+  max: number,
+  id: number,
+): string {
+  const oneLine = (s ?? '').replace(/\s+/g, ' ').trim();
+  if (oneLine.length <= max) return oneLine;
+  return `${oneLine.slice(0, max - 1)}… _(truncated — fetch gh api repos/{owner}/{repo}/pulls/comments/${id} for the rest)_`;
 }
 
 function quoteBlock(s: string): string {
@@ -132,28 +165,46 @@ function findRootId(startId: number, byId: Map<number, RawComment>): number {
 }
 
 /**
+ * The exact "no issues found, LGTM" template the qwen-review pipeline
+ * auto-emits, optionally followed by its model footer — and NOTHING else.
+ * Anchored to the end of the body on purpose: a legacy malformed review can
+ * OPEN with the LGTM line and carry a relocated `**[Critical]**` blocker
+ * below it, and a prefix match dropped exactly that body from the context
+ * file, letting the re-check approve past the blocker.
+ */
+const CANONICAL_LGTM_RE =
+  /^No issues found\.?\s*LGTM!?\s*(?:✅\s*)?(?:_— [^\n]{0,200} via Qwen Code \/review_\s*)?$/i;
+
+/**
  * Should this review-level summary be shown to agents?
  *
  * Filters out empty bodies (`COMMENTED` reviews submitted alongside inline
  * comments often have body=""), and the canonical "no issues found, LGTM"
  * template the qwen-review pipeline auto-emits — those carry no review
- * content beyond their state, which the agent doesn't need re-told.
+ * content beyond their state, which the agent doesn't need re-told. Only
+ * the whole-body template is filtered; any body with more in it is shown.
  */
-function isReviewWorthShowing(body: string | undefined): boolean {
+export function isReviewWorthShowing(body: string | undefined): boolean {
   const trimmed = (body ?? '').trim();
   if (trimmed.length === 0) return false;
-  if (/^No issues found\.?\s*LGTM/i.test(trimmed)) return false;
+  if (CANONICAL_LGTM_RE.test(trimmed)) return false;
   return true;
 }
 
-export function buildMarkdown(
-  prNumber: string,
-  ownerRepo: string,
-  meta: PrMetadata,
-  inline: RawComment[],
-  issue: RawComment[],
-  reviews: RawReview[],
-): string {
+export interface InlineThreads {
+  openRoots: RawComment[];
+  repliedCriticalRoots: RawComment[];
+  repliedRoots: RawComment[];
+  repliesByRoot: Map<number, RawComment[]>;
+}
+
+/**
+ * Group the flat inline-comment list into threads and classify each root.
+ * The single copy of this walk: `buildMarkdown` renders from it and the
+ * stdout summary counts from it, so the reported count can never diverge
+ * from what the file contains.
+ */
+export function classifyInlineThreads(inline: RawComment[]): InlineThreads {
   // Build a map id → comment, and group replies by root id, so each
   // already-discussed thread can be rendered with the reviewer's original
   // concern + the chronological reply chain. This is what tells review
@@ -184,6 +235,9 @@ export function buildMarkdown(
   // "Already discussed" into its own mandatory re-check section. Matching
   // on the marker is fail-safe in this direction: a third party embedding
   // it can only ADD their thread to the re-check list, never hide one.
+  // (It is a floor, not a ceiling: a blocker phrased WITHOUT the marker
+  // settles into "Already discussed", which is why Step 6's semantic
+  // re-check scans that section too.)
   const repliedCriticalRoots = allRepliedRoots.filter((c) =>
     (c.body ?? '').includes('[Critical]'),
   );
@@ -191,6 +245,20 @@ export function buildMarkdown(
     (c) => !(c.body ?? '').includes('[Critical]'),
   );
   const openRoots = roots.filter((c) => !repliesByRoot.has(c.id));
+
+  return { openRoots, repliedCriticalRoots, repliedRoots, repliesByRoot };
+}
+
+export function buildMarkdown(
+  prNumber: string,
+  ownerRepo: string,
+  meta: PrMetadata,
+  inline: RawComment[],
+  issue: RawComment[],
+  reviews: RawReview[],
+): string {
+  const { openRoots, repliedCriticalRoots, repliedRoots, repliesByRoot } =
+    classifyInlineThreads(inline);
 
   const parts: string[] = [];
 
@@ -269,10 +337,19 @@ export function buildMarkdown(
 
   // Replied Criticals — rendered before the settled threads because the
   // Step 6 re-check must rule on every one of them (still stands / fixed by
-  // this diff / cannot tell); a reply alone never settles a blocker.
+  // this diff / cannot tell); a reply alone never settles a blocker. Root
+  // bodies are rendered in full (same treatment as review summaries): the
+  // re-check rules on the claim's failure scenario and proposed fix, which
+  // is exactly the tail a 1 000-char snippet silently dropped — and a cut
+  // nobody can see also means the fail-closed "a body read in part is
+  // `cannot tell`" rule can never fire.
   if (repliedCriticalRoots.length > 0) {
     parts.push(
       '## Replied Criticals — a reply alone does NOT retire a blocker; the re-check must rule on each against the code',
+    );
+    parts.push('');
+    parts.push(
+      '> Root bodies are rendered in full; a body cut at the cap names its comment id to fetch. Replies are one-line snippets that name their comment id when cut.',
     );
     parts.push('');
     const sortedCrit = [...repliedCriticalRoots].sort((a, b) => {
@@ -283,15 +360,17 @@ export function buildMarkdown(
     for (const root of sortedCrit) {
       const replies = repliesByRoot.get(root.id) ?? [];
       parts.push(
-        `**\`${root.path ?? '?'}\`:${root.line ?? '?'}** — initiated by @${root.user?.login ?? '?'}`,
+        `**\`${root.path ?? '?'}\`:${root.line ?? '?'}** — initiated by @${root.user?.login ?? '?'} (comment ${root.id})`,
       );
       parts.push('');
-      parts.push(`> ${snippet(root.body, 1000)}`);
+      parts.push(quoteBlock(fullCommentBody(root.body, root.id)));
       parts.push('');
       if (replies.length > 0) {
         parts.push('Replies (chronological):');
         for (const r of replies) {
-          parts.push(`- **@${r.user?.login ?? '?'}**: ${snippet(r.body, 500)}`);
+          parts.push(
+            `- **@${r.user?.login ?? '?'}**: ${snippetWithRef(r.body, 500, r.id)}`,
+          );
         }
         parts.push('');
       }
@@ -411,24 +490,12 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   const meaningfulReviewCount = reviews.filter((r) =>
     isReviewWorthShowing(r.body),
   ).length;
-  const repliedCriticalCount = (() => {
-    const byId = new Map<number, RawComment>();
-    for (const c of inline) byId.set(c.id, c);
-    const replied = new Set<number>();
-    for (const c of inline) {
-      if (c.in_reply_to_id !== undefined && c.in_reply_to_id !== null) {
-        replied.add(findRootId(c.in_reply_to_id, byId));
-      }
-    }
-    return inline.filter(
-      (c) =>
-        (c.in_reply_to_id === undefined || c.in_reply_to_id === null) &&
-        replied.has(c.id) &&
-        (c.body ?? '').includes('[Critical]'),
-    ).length;
-  })();
+  // Same walk buildMarkdown just rendered from — never a re-implementation,
+  // so this count cannot silently diverge from the file's contents.
+  const repliedCriticalCount =
+    classifyInlineThreads(inline).repliedCriticalRoots.length;
   writeStdoutLine(
-    `Wrote PR context to ${out} (${inline.length} inline, ${issue.length} issue comments, ${repliedCriticalCount} replied Critical(s), ${meaningfulReviewCount}/${reviews.length} review summaries — review bodies rendered in full)`,
+    `Wrote PR context to ${out} (${inline.length} inline, ${issue.length} issue comments, ${repliedCriticalCount} replied Critical(s), ${meaningfulReviewCount}/${reviews.length} review summaries — review bodies and replied-Critical roots rendered in full)`,
   );
 
   // A reader that stops at the threshold loses the tail in silence: `read_file`
